@@ -19,6 +19,7 @@ pub mod lookup;
 pub mod mfa;
 pub mod notifications;
 pub mod oidc;
+pub mod personal_input;
 pub mod project_documents;
 pub mod project_views;
 pub mod projects;

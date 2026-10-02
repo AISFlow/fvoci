@@ -71,12 +71,24 @@ export function documentTaskProjectsQuery(workspaceId: string, documentId: strin
 export async function createTaskFromDocument(
   workspaceId: string,
   documentId: string,
-  body: { projectId: string; requestId: string; title: string },
+  body: {
+    projectId: string;
+    requestId: string;
+    title: string;
+    anchor?: string;
+    selfAssign?: boolean;
+  },
 ) {
   return ensureOk(
     await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/tasks", {
       params: { path: { workspace_id: workspaceId, document_id: documentId } },
-      body: { projectId: body.projectId, requestId: body.requestId, task: { title: body.title } },
+      body: {
+        projectId: body.projectId,
+        requestId: body.requestId,
+        anchor: body.anchor,
+        selfAssign: body.selfAssign,
+        task: { title: body.title },
+      },
     }),
   );
 }
@@ -85,7 +97,7 @@ export async function createOriginProject(workspaceId: string, key: string, name
   return ensureOk(
     await api.POST("/api/v1/workspaces/{workspace_id}/projects", {
       params: { path: { workspace_id: workspaceId } },
-      body: { key: key.trim().toUpperCase(), name: name.trim(), visibility: "workspace" },
+      body: { key: key.trim().toUpperCase(), name: name.trim(), visibility: "private" },
     }),
   );
 }

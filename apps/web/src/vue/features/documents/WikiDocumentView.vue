@@ -16,7 +16,13 @@ import {
   shallowRef,
   watch,
 } from "vue";
-import { onBeforeRouteLeave, onBeforeRouteUpdate, RouterLink, useRouter } from "vue-router";
+import {
+  onBeforeRouteLeave,
+  onBeforeRouteUpdate,
+  RouterLink,
+  useRoute,
+  useRouter,
+} from "vue-router";
 import { bindBlockPresence, isBlockPresenceAwareness } from "@/features/documents/block-presence";
 import { collabBadge, collabRefusalNote } from "@/features/documents/collab-badge";
 import { collabUserOf, setTitleEditing } from "@/features/documents/collab-model";
@@ -48,6 +54,7 @@ import DocumentAiMenu from "./DocumentAiMenu.vue";
 import DocumentExportMenu from "./DocumentExportMenu.vue";
 import DocumentTagsBar from "./DocumentTagsBar.vue";
 import OriginPanel from "./OriginPanel.vue";
+import { sourceBlockSelection } from "../capture/source-block";
 import RevisionPanel from "./RevisionPanel.vue";
 import ShareDialog from "./ShareDialog.vue";
 import StarToggle from "./StarToggle.vue";
@@ -72,6 +79,7 @@ const ICON_MAX = 50;
 
 const queryClient = useQueryClient();
 const router = useRouter();
+const route = useRoute();
 const me = useQuery(meQuery);
 const metaQuery = useQuery(() => documentMetaQuery(props.workspaceId, props.documentId));
 const ancestors = useQuery(() => ancestorsQuery(props.workspaceId, props.documentId));
@@ -559,6 +567,27 @@ function trash(): void {
   trashDoc.mutate(captureOperation());
 }
 
+watch(
+  [() => ready.value, () => route.hash],
+  ([isReady, hash]) => {
+    if (!isReady || !hash.startsWith("#block=")) return;
+    try {
+      const id = decodeURIComponent(hash.slice(7));
+      nextTick(() => {
+        flashBlock(id);
+        document
+          .querySelector<HTMLElement>(`.fvoci-editor [data-id="${CSS.escape(id)}"]`)
+          ?.scrollIntoView({ block: "center" });
+      }).catch(() => {
+        /* An unavailable block keeps the document-level fallback. */
+      });
+    } catch {
+      /* Invalid anchor has document-level fallback. */
+    }
+  },
+  { immediate: true },
+);
+
 function flashBlock(id: string): void {
   const element = document.querySelector<HTMLElement>(
     `.fvoci-editor [data-id="${CSS.escape(id)}"]`,
@@ -822,7 +851,13 @@ function flashBlock(id: string): void {
             : t('ai.document.loading')
       "
     />
-    <OriginPanel :workspace-id="workspaceId" :slug="slug" :document-id="documentId" />
+    <OriginPanel
+      :workspace-id="workspaceId"
+      :slug="slug"
+      :document-id="documentId"
+      :source-selection="() => sourceBlockSelection(editor)"
+      :wait-for-save="canPersist ? persistBody : undefined"
+    />
     <CommentPanel
       v-if="me.data.value"
       kind="document"

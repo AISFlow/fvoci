@@ -2,6 +2,9 @@
 // routes, parent candidates, workspace task/status lists and workflow
 // statuses; merged into the main document by `spec_json`.
 
+use crate::api::personal_input_dto::{
+    PersonalInputBody, PersonalInputIntent, PersonalInputOutput, PersonalInputSource,
+};
 use utoipa::OpenApi;
 
 use crate::api::documents_dto::PatchBlockInput;
@@ -26,6 +29,7 @@ use crate::api::tasks_dto::{
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        create_personal_input,
         list_time_entries,
         create_time_entry,
         time_entries_rollup,
@@ -52,6 +56,10 @@ use crate::api::tasks_dto::{
         list_document_task_origins,
     ),
     components(schemas(
+        PersonalInputBody,
+        PersonalInputSource,
+        PersonalInputIntent,
+        PersonalInputOutput,
         StatusCreateBody,
         StatusPatchBody,
         TaskCloneOutput,
@@ -525,3 +533,20 @@ fn list_document_task_origins() {}
     )
 )]
 fn create_document_task() {}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/personal-input",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(("workspace_id" = String, description = "Own personal workspace id")),
+    request_body = PersonalInputBody,
+    responses(
+        (status = 201, description = "Ordinary document and optional self-assigned task; exact retry returns the same UUIDs", body = PersonalInputOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Session required", body = ProblemResponse),
+        (status = 404, description = "Not own personal workspace or target unavailable", body = ProblemResponse),
+        (status = 409, description = "Command key reused with changed payload", body = ProblemResponse),
+    )
+)]
+fn create_personal_input() {}

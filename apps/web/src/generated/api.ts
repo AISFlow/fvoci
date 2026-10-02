@@ -2408,6 +2408,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/personal-input": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["create_personal_input"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/projects": {
         parameters: {
             query?: never;
@@ -4576,6 +4592,7 @@ export interface components {
             projectId: string;
             /** Format: uuid */
             requestId: string;
+            selfAssign?: boolean;
             task: components["schemas"]["CreateTaskBody"];
         };
         DocumentTaskCreateOutput: {
@@ -5196,6 +5213,30 @@ export interface components {
         PatchWorkspaceBody: {
             name: string;
         };
+        PersonalInputBody: {
+            intent: components["schemas"]["PersonalInputIntent"];
+            /** Format: uuid */
+            projectId?: string | null;
+            /** Format: uuid */
+            requestId: string;
+            source?: components["schemas"]["PersonalInputSource"] | null;
+            title: string;
+        };
+        /** @enum {string} */
+        PersonalInputIntent: "quick" | "note" | "task";
+        PersonalInputOutput: {
+            documentDisplayId: string;
+            documentId: string;
+            projectId?: string | null;
+            replayed: boolean;
+            taskDisplayId?: string | null;
+            taskId?: string | null;
+        };
+        PersonalInputSource: {
+            anchor?: string | null;
+            /** Format: uuid */
+            documentId: string;
+        };
         ProblemResponse: {
             code: string;
             params?: unknown;
@@ -5724,6 +5765,7 @@ export interface components {
             id: string;
             key: string;
             name: string;
+            visibility: string;
         };
         TaskProjectPickerResponse: {
             canCreateProject: boolean;
@@ -15940,6 +15982,69 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    create_personal_input: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Own personal workspace id */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PersonalInputBody"];
+            };
+        };
+        responses: {
+            /** @description Ordinary document and optional self-assigned task; exact retry returns the same UUIDs */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonalInputOutput"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Session required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not own personal workspace or target unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Command key reused with changed payload */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

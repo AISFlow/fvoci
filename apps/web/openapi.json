@@ -13861,6 +13861,92 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/personal-input": {
+      "post": {
+        "tags": [
+          "documents"
+        ],
+        "operationId": "create_personal_input",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Own personal workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonalInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Ordinary document and optional self-assigned task; exact retry returns the same UUIDs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalInputOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Session required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not own personal workspace or target unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Command key reused with changed payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/projects": {
       "get": {
         "tags": [
@@ -26583,6 +26669,9 @@
             "type": "string",
             "format": "uuid"
           },
+          "selfAssign": {
+            "type": "boolean"
+          },
           "task": {
             "$ref": "#/components/schemas/CreateTaskBody"
           }
@@ -28851,6 +28940,108 @@
         },
         "additionalProperties": false
       },
+      "PersonalInputBody": {
+        "type": "object",
+        "required": [
+          "requestId",
+          "intent",
+          "title"
+        ],
+        "properties": {
+          "intent": {
+            "$ref": "#/components/schemas/PersonalInputIntent"
+          },
+          "projectId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PersonalInputSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PersonalInputIntent": {
+        "type": "string",
+        "enum": [
+          "quick",
+          "note",
+          "task"
+        ]
+      },
+      "PersonalInputOutput": {
+        "type": "object",
+        "required": [
+          "documentId",
+          "documentDisplayId",
+          "replayed"
+        ],
+        "properties": {
+          "documentDisplayId": {
+            "type": "string"
+          },
+          "documentId": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "taskDisplayId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "taskId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PersonalInputSource": {
+        "type": "object",
+        "required": [
+          "documentId"
+        ],
+        "properties": {
+          "anchor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "documentId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
       "ProblemResponse": {
         "type": "object",
         "required": [
@@ -30866,7 +31057,8 @@
         "required": [
           "id",
           "name",
-          "key"
+          "key",
+          "visibility"
         ],
         "properties": {
           "id": {
@@ -30876,6 +31068,9 @@
             "type": "string"
           },
           "name": {
+            "type": "string"
+          },
+          "visibility": {
             "type": "string"
           }
         }

@@ -27,8 +27,11 @@ import {
   sourceDraftAuthRetiredKey,
   type SourceDraftAuthScope,
 } from "../composables/useSourceDraftGuard";
+import { projectsQuery } from "@/features/projects/queries";
+import { useTaskStreams } from "../composables/useTaskStream";
 import LegalNav from "../features/shell/LegalNav.vue";
 import NotificationBell from "../features/shell/NotificationBell.vue";
+import PersonalInputDialog from "../features/capture/PersonalInputDialog.vue";
 import SearchPalette from "../features/shell/SearchPalette.vue";
 import { useLogout } from "../features/shell/useLogout";
 import { usePushSessionRebind } from "../features/shell/usePushSessionRebind";
@@ -49,6 +52,11 @@ const props = withDefaults(
 
 const router = useRouter();
 const workspaces = useQuery(workspacesQuery);
+const projects = useQuery(() => projectsQuery(props.workspaceId));
+useTaskStreams(
+  () => props.workspaceId,
+  () => projects.data.value?.items.map((project) => project.id) ?? [],
+);
 const items = computed(() => workspaces.data.value?.items ?? []);
 // Nuxt UI Dashboard template, fixed 57e8a76e: layouts/default.vue menu
 // and pages/index.vue panel/header slots, connected to the existing FVOCI paths.
@@ -168,6 +176,7 @@ function onSwitch(event: Event): void {
                 data-slot="workspace-name"
                 >{{ workspaceName }}</span
               >
+              <PersonalInputDialog :workspace-id="workspaceId" />
               <SearchPalette :slug="slug" :workspace-id="workspaceId" />
               <NotificationBell :slug="slug" :workspace-id="workspaceId" />
               <AppLink to="/settings/account" class="underline underline-offset-2">

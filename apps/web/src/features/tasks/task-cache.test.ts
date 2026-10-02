@@ -302,3 +302,118 @@ for (const [name, invalidate] of invalidations) {
     }
   });
 }
+
+await test("mounted MyTasks/preview/search/both origins/real backlink refresh while unrelated sentinels and next page survive", async () => {
+  const key = ["workspace-tasks", WS, "assigned-me"] as const;
+  const { client, observer, gets, pages, unsubscribe } = mountList(key);
+  const unsubscribes: (() => void)[] = [];
+  const counts = new Map<string, number>();
+  const task = "task-connected",
+    source = "source-connected";
+  const related = [
+    ["preview", [...key, "preview", 8], { items: [{ id: task, title: "committed" }] }],
+    [
+      "search",
+      ["search", WS, "context", "all", "", "", "lexical"],
+      { items: [{ id: task, type: "task", title: "committed" }] },
+    ],
+    [
+      "document origin",
+      ["task-origins", WS, source, null],
+      { items: [{ taskId: task, documentId: source }] },
+    ],
+    [
+      "task origin",
+      ["task-origins", WS, task, null],
+      { items: [{ taskId: task, documentId: source }] },
+    ],
+    [
+      "body backlink",
+      ["backlinks", "task", WS, task],
+      { items: [{ id: source, type: "document", title: "source" }] },
+    ],
+  ] as const;
+  const sentinels = [
+    ["foreign workspace", ["workspace-tasks", "foreign-ws", "assigned-me"]],
+    ["sibling project search", ["search", WS, "context", "all", "sibling-project", "", "lexical"]],
+    ["document-only search", ["search", WS, "context", "document", "", "", "lexical"]],
+    ["unrelated origin", ["task-origins", WS, "unrelated-document", null]],
+    ["unrelated backlink", ["backlinks", "task", WS, "unrelated-task"]],
+  ] as const;
+  try {
+    gets[0].resolve({ items: ["first"], nextCursor: "c1" });
+    await flush();
+    for (const [name, queryKey, data] of related) {
+      const mounted = new QueryObserver(client, {
+        queryKey,
+        queryFn: () => {
+          counts.set(name, (counts.get(name) ?? 0) + 1);
+          return Promise.resolve(data);
+        },
+        staleTime: Infinity,
+      });
+      unsubscribes.push(mounted.subscribe(() => {}));
+    }
+    for (const [name, queryKey] of sentinels) {
+      const mounted = new QueryObserver(client, {
+        queryKey,
+        queryFn: () => {
+          counts.set(name, (counts.get(name) ?? 0) + 1);
+          return Promise.resolve({ items: [], sentinel: name });
+        },
+        staleTime: Infinity,
+      });
+      unsubscribes.push(mounted.subscribe(() => {}));
+    }
+    await flush();
+    // Prechecked controls use unique outer binding, preventing the foundation
+    // N1 shadowed-sentinel error. Keep each object identity and request count.
+    const sentinelStates = sentinels.map(([name, key]) => ({
+      name,
+      key,
+      state: client.getQueryState(key),
+      query: client.getQueryCache().find({ queryKey: key }),
+      data: client.getQueryData(key),
+    }));
+    for (const control of sentinelStates) assert.equal(counts.get(control.name), 1, control.name);
+    for (const [name] of related) assert.equal(counts.get(name), 1, name);
+    const next = observer.fetchNextPage();
+    await flush();
+    assert.equal(gets[1].cursor, "c1");
+    const refresh = invalidateTaskCaches(client, WS, PROJECT, task, source);
+    await flush();
+    assert.equal(gets.length, 2, "in-flight next page is not cancelled");
+    gets[1].resolve({ items: ["next"], nextCursor: null });
+    await flush();
+    assert.deepEqual(
+      pages().map((page) => page.items),
+      [["first"], ["next"]],
+    );
+    gets[2].resolve({ items: ["new-first"], nextCursor: "c1" });
+    await flush();
+    gets[3].resolve({ items: ["new-next"], nextCursor: null });
+    await Promise.all([next, refresh]);
+    await flush();
+    assert.deepEqual(
+      pages().map((page) => page.items),
+      [["new-first"], ["new-next"]],
+    );
+    for (const [name] of related) assert.equal(counts.get(name), 2, name);
+    for (const control of sentinelStates) {
+      assert.equal(counts.get(control.name), 1, control.name);
+      assert.equal(client.getQueryState(control.key), control.state, control.name);
+      assert.equal(
+        client.getQueryCache().find({ queryKey: control.key }),
+        control.query,
+        control.name,
+      );
+      assert.equal(client.getQueryData(control.key), control.data, control.name);
+    }
+  } finally {
+    unsubscribe();
+    unsubscribes.forEach((stop) => {
+      stop();
+    });
+    client.clear();
+  }
+});

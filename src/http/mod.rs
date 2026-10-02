@@ -169,6 +169,7 @@ pub fn router_with_observability(
         .merge(routes::oidc::router(identity.clone()))
         .merge(routes::account::router())
         .merge(routes::workspaces::router())
+        .merge(routes::personal_input::router())
         .merge(routes::invitations::router())
         .merge(routes::projects::router())
         .merge(routes::project_documents::router())
