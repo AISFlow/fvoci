@@ -932,6 +932,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/me/task-timer/legacy-release": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["legacy_release"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me/task-timer/stop": {
         parameters: {
             query?: never;
@@ -3608,6 +3624,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["personal_history"];
+        put?: never;
+        post: operations["personal_manual"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/records/{record_id}/correct": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["personal_correction"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["personal_summary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/trash": {
         parameters: {
             query?: never;
@@ -4928,6 +4992,23 @@ export interface components {
             name: string;
             projectId: string;
         };
+        LegacyReleaseBody: {
+            /** Format: uuid */
+            expectedActorId: string;
+            /** Format: uuid */
+            expectedSessionId: string;
+            /** Format: uuid */
+            requestId: string;
+            /** Format: uuid */
+            timeEntryId: string;
+        };
+        LegacyReleaseOutput: {
+            released: boolean;
+            /** Format: date-time */
+            serverNow: string;
+            /** Format: uuid */
+            timeEntryId: string;
+        };
         LegalDocumentOutput: {
             bodyHtml: string;
             /** Format: date-time */
@@ -5880,6 +5961,31 @@ export interface components {
             title: string;
             workspaceId: string;
         };
+        TimeCorrectionBody: {
+            /** Format: date-time */
+            endedAt: string;
+            /** Format: uuid */
+            expectedActorId: string;
+            /** Format: date-time */
+            expectedEndedAt?: string | null;
+            expectedNote?: string | null;
+            /** Format: int64 */
+            expectedRevision: number;
+            /** Format: uuid */
+            expectedSessionId: string;
+            /**
+             * Format: date-time
+             * @description Original range as seen by this form; null end means a legacy open row.
+             */
+            expectedStartedAt: string;
+            kind: components["schemas"]["TimeRecordKind"];
+            note?: string | null;
+            reason: string;
+            /** Format: uuid */
+            requestId: string;
+            /** Format: date-time */
+            startedAt: string;
+        };
         /**
          * @description Source `timeEntryCreateInput`: UTC ISO timestamps, `endedAt` after
          *     `startedAt`, note up to 2000 characters.
@@ -5911,6 +6017,27 @@ export interface components {
             /** Format: int64 */
             totalSeconds: number;
         };
+        TimeRecord: {
+            /** Format: date-time */
+            endedAt: string | null;
+            /** Format: uuid */
+            id: string;
+            kind: components["schemas"]["TimeRecordKind"];
+            note: string | null;
+            reservedLegacy: boolean;
+            /** Format: int64 */
+            revision: number;
+            /** Format: uuid */
+            runId: string | null;
+            /** Format: date-time */
+            startedAt: string;
+        };
+        /**
+         * @description Own task history includes unresolved manual rows explicitly, never guesses
+         *     their end. Projected timer rows occur once as canonical segments.
+         * @enum {string}
+         */
+        TimeRecordKind: "manual" | "segment";
         TimerCleanupBody: {
             /** Format: uuid */
             expectedActorId: string;
@@ -5949,8 +6076,39 @@ export interface components {
             /** Format: int32 */
             version: number;
         };
+        TimerDayTotal: {
+            /** Format: date */
+            date: string;
+            /** Format: int64 */
+            milliseconds: number;
+        };
+        TimerHistory: {
+            items: components["schemas"]["TimeRecord"][];
+            nextCursor: string | null;
+            /** Format: date-time */
+            serverNow: string;
+        };
+        TimerManualBody: {
+            /** Format: date-time */
+            endedAt: string;
+            /** Format: uuid */
+            expectedActorId: string;
+            /** Format: uuid */
+            expectedSessionId: string;
+            note?: string | null;
+            reason: string;
+            /** Format: uuid */
+            requestId: string;
+            /** Format: date-time */
+            startedAt: string;
+        };
         /** @enum {string} */
         TimerOperation: "start" | "pause" | "resume" | "stop";
+        TimerRecordOutput: {
+            record: components["schemas"]["TimeRecord"];
+            /** Format: date-time */
+            serverNow: string;
+        };
         TimerRunOutput: {
             /**
              * Format: int64
@@ -5974,6 +6132,16 @@ export interface components {
         };
         /** @enum {string} */
         TimerStatus: "running" | "paused" | "stopped";
+        TimerSummary: {
+            days: components["schemas"]["TimerDayTotal"][];
+            /** Format: date-time */
+            serverNow: string;
+            timeZone: string;
+            /** Format: int64 */
+            totalMilliseconds: number;
+            unfinished: boolean;
+            unresolvedManual: boolean;
+        };
         TokenBody: {
             token: string;
         };
@@ -9322,6 +9490,53 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OwnerTimerState"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    legacy_release: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LegacyReleaseBody"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyReleaseOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
             401: {
@@ -21582,6 +21797,274 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    personal_history: {
+        parameters: {
+            query: {
+                expectedActorId?: string;
+                expectedSessionId?: string;
+                from: string;
+                to: string;
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimerHistory"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    personal_manual: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TimerManualBody"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimerRecordOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    personal_correction: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                task_id: string;
+                record_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TimeCorrectionBody"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimerRecordOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    personal_summary: {
+        parameters: {
+            query: {
+                expectedActorId?: string;
+                expectedSessionId?: string;
+                from: string;
+                to: string;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimerSummary"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
