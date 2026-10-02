@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { FvociEditor } from "@fvoci/editor/vue";
+import { FvociEditor, type TiptapEditor } from "@fvoci/editor/vue";
 import { onBeforeRouteLeave, onBeforeRouteUpdate } from "vue-router";
 import "@fvoci/editor/styles.css";
 import { t } from "@fvoci/i18n";
@@ -104,10 +104,12 @@ onScopeDispose(() => {
   persistLifecycle.value++;
 });
 
+const richEditor = shallowRef<TiptapEditor | null>(null);
 const sourceEditor = shallowRef<InstanceType<typeof FvociEditor> | null>(null);
 const sourceDraftDialogId = computed(() => `source-draft-leave-${props.taskId}`);
 const {
   open: sourceLeaveOpen,
+  authRetired: sourceAuthRetired,
   draft: sourceDraft,
   receive: onSourceDraft,
   requestLeave,
@@ -116,12 +118,11 @@ const {
 } = useSourceDraftGuard({
   scope: () => persistLifecycle.value,
   identity: () =>
-    `${props.workspaceId}:${props.taskId}:${me.data.value?.userId ?? ""}:${me.data.value?.sessionId ?? ""}:${String(props.session?.generation ?? "")}`,
+    `${props.workspaceId}:${props.taskId}:${me.data.value?.userId ?? ""}:${me.data.value?.sessionId ?? ""}`,
   authorized: () =>
     !!me.data.value?.userId &&
     !!me.data.value.sessionId &&
-    !!props.session &&
-    props.session.status !== "unauthorized" &&
+    props.session?.status !== "unauthorized" &&
     !(me.error.value instanceof ProblemError && me.error.value.status === 401),
   editor: () => sourceEditor.value,
 });
@@ -132,6 +133,9 @@ onBeforeRouteUpdate((to, from) => (to.path === from.path ? true : requestLeave()
  * the same live resource/actor/provider generation; ACK snapshots may replace. */
 function readSaveSession() {
   return props.session;
+}
+function readAuthRetired() {
+  return sourceAuthRetired.value;
 }
 function readSaveActor() {
   return me.data.value;
@@ -144,6 +148,8 @@ const readonlyCommittedBody = useReadonlyCommittedBody(() => {
     workspaceId: props.workspaceId,
     targetId: props.taskId,
     kind: "task",
+    schema: richEditor.value?.schema ?? null,
+    projectId: null,
     actorId: actor.userId,
     credentialId: actor.sessionId,
     lifetime: persistLifecycle.value,
@@ -154,7 +160,9 @@ const readonlyCommittedBody = useReadonlyCommittedBody(() => {
     synced: current.synced,
     pending: current.pending,
     allowed:
-      readOnly.value && !(me.error.value instanceof ProblemError && me.error.value.status === 401),
+      readOnly.value &&
+      !sourceAuthRetired.value &&
+      !(me.error.value instanceof ProblemError && me.error.value.status === 401),
   };
 });
 async function waitForEditorSave(): Promise<boolean> {
@@ -163,7 +171,14 @@ async function waitForEditorSave(): Promise<boolean> {
   const target = `${props.workspaceId}:${props.taskId}`;
   const actor = me.data.value?.userId;
   const credential = me.data.value?.sessionId;
-  if (!before || before.status !== "connected" || !before.synced || !actor) return false;
+  if (
+    !before ||
+    before.status !== "connected" ||
+    !before.synced ||
+    !actor ||
+    sourceAuthRetired.value
+  )
+    return false;
   try {
     const readonly = readOnly.value;
     const committedRead = readonly ? await readonlyCommittedBody() : false;
@@ -184,6 +199,7 @@ async function waitForEditorSave(): Promise<boolean> {
       current.generation === before.generation &&
       (readonly ? committedRead : current.durableSaved) &&
       !current.pending &&
+      !readAuthRetired() &&
       !(me.error.value instanceof ProblemError && me.error.value.status === 401)
     );
   } catch {
@@ -269,6 +285,7 @@ async function persistBody(): Promise<void> {
         :entity-resolver="entityResolver"
         :url-embed="UrlEmbed"
         @source-dirty="onSourceDraft"
+        @ready="richEditor = $event"
       >
         <template #toolbar="{ editor: live }">
           <TemplateToolbar :editor="live" mode="fixed" />
