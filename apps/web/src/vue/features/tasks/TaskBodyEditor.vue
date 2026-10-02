@@ -66,7 +66,7 @@ const UrlEmbed: FunctionalComponent<{ url: string }> = markRaw((embed: { url: st
 UrlEmbed.props = ["url"];
 
 const me = useQuery(meQuery);
-let persistLifecycle = 0;
+const persistLifecycle = ref(0);
 watch(
   [
     () => props.workspaceId,
@@ -81,33 +81,72 @@ watch(
     readOnly,
   ],
   () => {
-    persistLifecycle++;
+    persistLifecycle.value++;
     persisting.value = false;
     persistError.value = null;
   },
   { flush: "sync" },
 );
 onScopeDispose(() => {
-  persistLifecycle++;
+  persistLifecycle.value++;
 });
+
+/** W3 copy/mode barrier uses the existing matched persist owner, then checks
+ * the same live resource/actor/provider generation; ACK snapshots may replace. */
+function readSaveSession() {
+  return props.session;
+}
+function readSaveActor() {
+  return me.data.value;
+}
+async function waitForEditorSave(): Promise<boolean> {
+  const before = readSaveSession();
+  const lifetime = persistLifecycle.value;
+  const target = `${props.workspaceId}:${props.taskId}`;
+  const actor = me.data.value?.userId;
+  const credential = me.data.value?.sessionId;
+  if (!before || before.status !== "connected" || !before.synced || !actor) return false;
+  try {
+    if (!readOnly.value) await persistBody();
+    const current = readSaveSession();
+    const currentActor = readSaveActor();
+    return (
+      lifetime === persistLifecycle.value &&
+      target === `${props.workspaceId}:${props.taskId}` &&
+      actor === currentActor?.userId &&
+      credential === currentActor.sessionId &&
+      !!current &&
+      current.status === "connected" &&
+      current.synced &&
+      current.doc === before.doc &&
+      current.provider === before.provider &&
+      current.generation === before.generation &&
+      current.durableSaved &&
+      !current.pending &&
+      !(me.error.value instanceof ProblemError && me.error.value.status === 401)
+    );
+  } catch {
+    return false;
+  }
+}
 
 async function persistBody(): Promise<void> {
   const current = props.session;
   if (!current || !canPersist.value) throw new Error("collab persist unavailable");
-  const lifetime = persistLifecycle;
+  const lifetime = persistLifecycle.value;
   persistError.value = null;
   persisting.value = true;
   try {
     await current.persistNow();
-    if (lifetime !== persistLifecycle) throw new Error("collab persist scope retired");
+    if (lifetime !== persistLifecycle.value) throw new Error("collab persist scope retired");
   } catch (error) {
-    if (lifetime === persistLifecycle) {
+    if (lifetime === persistLifecycle.value) {
       const timedOut = error instanceof Error && error.message.includes("timed out");
       persistError.value = timedOut ? t("collab timeout — retry") : t("collab unavailable");
     }
     throw error;
   } finally {
-    if (lifetime === persistLifecycle) persisting.value = false;
+    if (lifetime === persistLifecycle.value) persisting.value = false;
   }
 }
 </script>
@@ -156,6 +195,8 @@ async function persistBody(): Promise<void> {
     >
       <FvociEditor
         :key="session.generation"
+        :mode-scope="persistLifecycle"
+        :wait-for-save="waitForEditorSave"
         :ydoc="session.doc"
         :provider="session.provider"
         :user="collabUser"
