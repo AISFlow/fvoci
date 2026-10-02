@@ -603,3 +603,230 @@ test("three actual editor hosts retain draft on Cancel, discard only on explicit
   await expect(page).toHaveURL(/\/login$/);
   expect(nativeDialogs).toEqual([]);
 });
+
+test("51 real origins recover a missed hint without detail and preserve an in-flight next page", async ({
+  page,
+}, testInfo) => {
+  await setup(page);
+  const personal = workspaceSchema.parse(
+    await (await page.request.post("/api/v1/me/personal-workspace")).json(),
+  );
+  const input = `/api/v1/workspaces/${personal.id}/personal-input`;
+  const noteResponse = await page.request.post(input, {
+    data: { requestId: crypto.randomUUID(), intent: "note", title: "Paged origin recovery source" },
+  });
+  expect(noteResponse.status()).toBe(201);
+  const note = resultSchema.parse(await noteResponse.json());
+  const rows: z.infer<typeof resultSchema>[] = [];
+  for (let start = 0; start < 51; start += 3) {
+    const group = await Promise.all(
+      Array.from({ length: Math.min(3, 51 - start) }, async (_, index) => {
+        const response = await page.request.post(input, {
+          data: {
+            requestId: crypto.randomUUID(),
+            intent: "task",
+            title: `Paged relation ${String(start + index)}`,
+            source: { documentId: note.documentId },
+          },
+        });
+        expect(response.status()).toBe(201);
+        return resultSchema.parse(await response.json());
+      }),
+    );
+    rows.push(...group);
+  }
+  expect(new Set(rows.map((row) => row.taskId)).size).toBe(51);
+  const listPath = `/api/v1/workspaces/${personal.id}/documents/${note.documentId}/task-origins`;
+  const pagedSchema = originSchema.extend({
+    nextCursor: z.string().nullable(),
+    items: z.array(
+      z.object({
+        taskId: z.string().uuid(),
+        documentId: z.string().uuid(),
+        taskTitle: z.string(),
+        anchor: z.string().nullable(),
+      }),
+    ),
+  });
+  const first = pagedSchema.parse(await (await page.request.get(`${listPath}?limit=50`)).json());
+  expect(first.count).toBe(51);
+  expect(first.items).toHaveLength(50);
+  expect(first.nextCursor).toBeTruthy();
+  if (!first.nextCursor) throw new Error("missing genuine next-page cursor");
+  const after = first.nextCursor;
+  const next = pagedSchema.parse(
+    await (await page.request.get(`${listPath}?limit=50&after=${after}`)).json(),
+  );
+  expect(next.count).toBe(51);
+  expect(next.items).toHaveLength(1);
+  const firstTask = first.items[0],
+    nextTask = next.items[0];
+  if (!firstTask || !nextTask) throw new Error("missing real paged rows");
+  // Observe genuine native events without replacing their data or handlers.
+  await page.addInitScript(() => {
+    const observed = window as typeof window & { __w2Hints: string[] };
+    observed.__w2Hints = [];
+    const Native = window.EventSource;
+    window.EventSource = class extends Native {
+      constructor(url: string | URL, options?: EventSourceInit) {
+        super(url, options);
+        this.addEventListener("task", (event) => {
+          if (event instanceof MessageEvent && typeof event.data === "string")
+            observed.__w2Hints.push(event.data);
+        });
+      }
+    };
+  });
+  const detailReads: string[] = [];
+  page.on("request", (request) => {
+    if (
+      request.method() === "GET" &&
+      /\/tasks\/[0-9a-f-]{36}$/.test(new URL(request.url()).pathname)
+    )
+      detailReads.push(request.url());
+  });
+  let refused = true,
+    refusedCount = 0;
+  await page.route("**/projects/*/stream", (route) => {
+    if (refused) {
+      refusedCount++;
+      return route.fulfill({ status: 503, body: "transport unavailable" });
+    }
+    return route.continue();
+  });
+  await page.goto(`/w/${personal.slug}/${note.documentDisplayId}`);
+  const panel = page.getByRole("region", { name: "연결 태스크" });
+  await expect(panel.getByRole("heading")).toHaveText("연결 태스크 (51)");
+  const mounted = await panel.elementHandle();
+  await panel.getByRole("button", { name: "다음 연결 보기", exact: true }).click();
+  await expect(panel.getByRole("link")).toHaveCount(1);
+  await expect(panel.getByRole("link")).toContainText(nextTask.taskTitle);
+  await expect.poll(() => refusedCount).toBeGreaterThan(0);
+  expect(detailReads).toEqual([]);
+  const taskPath = (id: string) => `/api/v1/workspaces/${personal.id}/tasks/${id}`;
+  const renamed = "Peer rename while stream refused";
+  const rename = await page.request.patch(taskPath(nextTask.taskId), { data: { title: renamed } });
+  expect(rename.status()).toBe(200);
+  expect(taskSchema.parse(await rename.json()).title).toBe(renamed);
+  expect(
+    committed(
+      personal.id,
+      `SELECT to_jsonb(title) FROM fvoci.tasks WHERE workspace_id='${personal.id}' AND id='${nextTask.taskId}'`,
+    ),
+  ).toBe(renamed);
+  await expect(panel.getByRole("link")).toContainText(nextTask.taskTitle);
+  const opened = page.waitForResponse(
+    (response) => response.url().endsWith("/stream") && response.status() === 200,
+  );
+  const recovered = page.waitForResponse(
+    async (response) =>
+      new URL(response.url()).pathname === listPath &&
+      new URL(response.url()).searchParams.get("after") === after &&
+      response.status() === 200 &&
+      pagedSchema
+        .parse(await response.json())
+        .items.some((row) => row.taskId === nextTask.taskId && row.taskTitle === renamed),
+  );
+  refused = false;
+  await opened;
+  await recovered;
+  await expect(panel.getByRole("link")).toContainText(renamed);
+  expect(await mounted.evaluate((element) => element.isConnected)).toBe(true);
+  expect(detailReads).toEqual([]);
+  await panel.screenshot({ path: testInfo.outputPath("origins-missed-hint-recovered.png") });
+  await panel.getByRole("button", { name: "처음 연결 보기", exact: true }).click();
+  await expect(panel.getByRole("link")).toHaveCount(50);
+  const hintSeen = async (id: string) => {
+    const values = await page.evaluate(
+      () => (window as typeof window & { __w2Hints: string[] }).__w2Hints,
+    );
+    return values.some(
+      (raw) => z.object({ taskId: z.string() }).parse(JSON.parse(raw)).taskId === id,
+    );
+  };
+  const firstRename = "First-page peer rename before load-more";
+  expect(
+    (
+      await page.request.patch(taskPath(firstTask.taskId), { data: { title: firstRename } })
+    ).status(),
+  ).toBe(200);
+  await expect.poll(() => hintSeen(firstTask.taskId)).toBe(true);
+  await expect(panel.getByRole("link", { name: new RegExp(firstRename) })).toBeVisible();
+  let release: () => void = () => {
+    throw new Error("unbound held real response");
+  };
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let resolveHeld: (value: z.infer<typeof pagedSchema>) => void = () => {
+    throw new Error("unbound observed response");
+  };
+  const held = new Promise<z.infer<typeof pagedSchema>>((resolve) => {
+    resolveHeld = resolve;
+  });
+  let holdOnce = true;
+  await page.route(`**/documents/${note.documentId}/task-origins?*`, async (route) => {
+    if (!holdOnce || new URL(route.request().url()).searchParams.get("after") !== after)
+      return route.continue();
+    holdOnce = false;
+    const response = await route.fetch();
+    expect(response.status()).toBe(200);
+    resolveHeld(pagedSchema.parse(await response.json()));
+    await gate;
+    await route.fulfill({ response });
+  });
+  try {
+    await panel.getByRole("button", { name: "다음 연결 보기", exact: true }).click();
+    const original = await held;
+    expect(original.count).toBe(51);
+    expect(original.items).toHaveLength(1);
+    await expect(panel.getByRole("link")).toContainText(renamed);
+    const refreshed = page.waitForResponse(
+      async (response) =>
+        new URL(response.url()).pathname === listPath &&
+        new URL(response.url()).searchParams.get("after") === after &&
+        response.status() === 200 &&
+        pagedSchema.parse(await response.json()).count === 50,
+    );
+    // Clear observer evidence so a real deletion hint, not the earlier rename,
+    // establishes the in-flight serialization barrier before releasing old200.
+    await page.evaluate(() => {
+      (window as typeof window & { __w2Hints: string[] }).__w2Hints = [];
+    });
+    const removed = await page.request.post(`${taskPath(firstTask.taskId)}/trash`);
+    expect(removed.status()).toBe(200);
+    expect(
+      committed(
+        personal.id,
+        `SELECT to_jsonb(deleted_at IS NOT NULL) FROM fvoci.tasks WHERE workspace_id='${personal.id}' AND id='${firstTask.taskId}'`,
+      ),
+    ).toBe(true);
+    await expect.poll(() => hintSeen(firstTask.taskId)).toBe(true);
+    await expect(panel.getByRole("heading")).toHaveText("연결 태스크 (51)");
+    release();
+    await refreshed;
+    await expect(panel.getByRole("heading")).toHaveText("연결 태스크 (50)");
+    await expect(panel.getByRole("link")).toContainText(renamed);
+    await panel.screenshot({ path: testInfo.outputPath("origins-next-page-after-delete.png") });
+    await panel.getByRole("button", { name: "처음 연결 보기", exact: true }).click();
+    await expect(panel.getByRole("heading")).toHaveText("연결 태스크 (50)");
+    await expect(panel.getByRole("link", { name: new RegExp(firstRename) })).toHaveCount(0);
+    expect(await mounted.evaluate((element) => element.isConnected)).toBe(true);
+    expect(detailReads).toEqual([]);
+    await testInfo.attach("actual-origin-recovery", {
+      body: JSON.stringify({
+        source: note.documentId,
+        firstTask: firstTask.taskId,
+        nextTask: nextTask.taskId,
+        cursor: after,
+        oldCount: original.count,
+        newCount: 50,
+        refusedCount,
+        detailReads,
+      }),
+      contentType: "application/json",
+    });
+  } finally {
+    release();
+  }
+});
