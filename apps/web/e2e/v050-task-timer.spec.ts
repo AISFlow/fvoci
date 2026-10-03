@@ -76,7 +76,15 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
         { mode: 0o600 },
       );
     };
+    const preparationVariable = (name: string) =>
+      name !== "DATABASE_APP_URL" &&
+      (/DATABASE/i.test(name) ||
+        /^(PG|POSTGRES_)/.test(name) ||
+        name === "FVOCI_MIGRATION_URL" ||
+        /^(FVOCI_E2E_|FVOCI_TEST_|FVOCI_W5_)/.test(name));
+    const removedNativeNames = Object.keys(process.env).filter(preparationVariable).sort();
     const runtimeNames = Object.keys(process.env)
+      .filter((name) => !preparationVariable(name))
       .filter((name) =>
         /^(DATABASE_APP_URL$|PASSWORD_PEPPER_|ENCRYPTION_|FVOCI_|SMTP_|RUST_LOG$|MEILI_)/.test(
           name,
@@ -131,7 +139,20 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
         "utf8",
       ).split("\0");
       expect(launcherArguments).toContain(path.resolve("../../scripts/web-e2e-inner.sh"));
-      const inherited = { ...process.env };
+      const inherited = Object.fromEntries(
+        Object.entries(process.env).filter(([name]) => !preparationVariable(name)),
+      );
+      expect(Object.keys(inherited).filter(preparationVariable)).toEqual([]);
+      for (const name of [
+        "DATABASE_URL",
+        "FVOCI_MIGRATION_URL",
+        "FVOCI_E2E_ADMIN_DATABASE_URL",
+        "TEST_DATABASE_URL",
+      ])
+        expect(inherited[name]).toBeUndefined();
+      // Owner URL remains only in the diagnostic test process; native receives
+      // the same app credential and runtime inputs, with no preparation secrets.
+      expect(process.env.FVOCI_E2E_ADMIN_DATABASE_URL).toBeTruthy();
       expect(runtimeHash(inherited)).toBe(inheritedHash);
       expect(inherited.FVOCI_BIND).toBe("127.0.0.1:0");
       expect(inherited.DATABASE_URL).toBeUndefined();
@@ -176,20 +197,38 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
       child.stdin.end();
       let nativeOutput = "";
       const ready = new Promise<string>((resolve, reject) => {
-        child.once("error", reject);
-        child.once("exit", (code, signal) => {
-          reject(new Error(`native exited before readiness: ${String(code)}/${String(signal)}`));
-        });
+        let settled = false;
+        const removeReadinessListeners = () => {
+          child.off("error", nativeError);
+          child.off("exit", nativeExited);
+        };
+        const nativeError = (error: Error) => {
+          if (settled) return;
+          settled = true;
+          removeReadinessListeners();
+          reject(error);
+        };
+        const nativeExited = (code: number | null, signal: NodeJS.Signals | null) =>
+          nativeError(
+            new Error(`native exited before readiness: ${String(code)}/${String(signal)}`),
+          );
+        child.once("error", nativeError);
+        child.once("exit", nativeExited);
         const nativeOutputReceived = (chunk: Buffer) => {
           const text = chunk.toString("utf8");
           appendFileSync(log, text);
           nativeOutput += text;
           const origin = nativeOutput
             .split("\n")
+            .slice(0, -1)
             .find((line) => line.includes("fvoci-server listening on "))
             ?.split("fvoci-server listening on ")[1]
             ?.trim();
-          if (origin) resolve(origin);
+          if (origin && !settled) {
+            settled = true;
+            removeReadinessListeners();
+            resolve(origin);
+          }
         };
         // main.rs announces readiness on stderr; capture both real native streams.
         child.stdout.on("data", nativeOutputReceived);
@@ -245,8 +284,12 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
         originalLauncherSurvives: true,
         sameDatabaseStorageAndSecurityNames: runtimeNames,
         sameDatabaseStorageAndSecurityHash: inheritedHash,
+        removedNativeEnvironmentNames: removedNativeNames,
+        forbiddenNativeVariableNamesAbsent: true,
+        originalLauncherCredentialBoundary:
+          "NOT PROVEN: original shared launcher inherited owner diagnostics; fixture children omit these, app-role witness alone does not prove original absence",
         exportedInputBasis:
-          "same unchanged inner.sh exports inherited by browser runner and both native spawns; original /proc/environ intentionally unavailable",
+          "identical inner.sh runtime input subset including app credential, filtered preparation/owner variables for fixture spawns; original /proc/environ intentionally unavailable",
         originalLauncherSourceSha256: createHash("sha256")
           .update(readFileSync(original.launcher))
           .digest("hex"),
