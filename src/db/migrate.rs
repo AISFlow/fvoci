@@ -747,6 +747,10 @@ mod tests {
             48,
             "b7f943996e9cc9918c90ceb780db285708a31c165368064cd17eb0a5f14ed787",
         ),
+        (
+            49,
+            "ea1cc0783489ce6866a46c6b1363e5bfd89e76f026f27d0ca7615b02c2ece219",
+        ),
     ];
 
     #[test]

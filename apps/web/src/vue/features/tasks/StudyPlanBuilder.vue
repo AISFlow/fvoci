@@ -394,8 +394,8 @@ async function createPlan() {
     >
     <form class="mt-4 flex min-w-0 flex-col gap-4" @submit.prevent="createPlan">
       <div class="flex flex-wrap items-end gap-2">
-        <label :for="`${id}-purpose`" class="flex min-w-0 flex-col gap-1 text-sm"
-          >계획 틀
+        <div class="flex min-w-0 flex-col gap-1 text-sm">
+          <label :for="`${id}-purpose`">계획 틀</label>
           <select
             :id="`${id}-purpose`"
             v-model="purpose"
@@ -405,7 +405,7 @@ async function createPlan() {
               preset.label
             }}</option></select
           >
-        </label>
+        </div>
         <UButton
           type="button"
           size="sm"
@@ -473,11 +473,8 @@ async function createPlan() {
         class="break-keep text-sm text-error"
         >{{ loadErrorMessage(notesTargets.error.value ?? materialTargets.error.value) }}</p
       >
-      <label
-        v-if="notesId && materialId"
-        :for="`${id}-project`"
-        class="flex min-w-0 flex-col gap-1 text-sm"
-        >저장할 프로젝트
+      <div v-if="notesId && materialId" class="flex min-w-0 flex-col gap-1 text-sm">
+        <label :for="`${id}-project`">저장할 프로젝트</label>
         <select
           :id="`${id}-project`"
           v-model="projectId"
@@ -488,7 +485,7 @@ async function createPlan() {
             >{{ project.key }} · {{ project.name }}</option
           ></select
         >
-      </label>
+      </div>
       <fieldset
         v-for="(step, index) in steps"
         :key="index"

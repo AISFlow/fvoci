@@ -1199,8 +1199,32 @@ async function ownerCompletion(
     .toContain(runId);
 }
 
-async function ordinaryTimerTask(page: import("@playwright/test").Page, key: string) {
-  await timerWorkspace(page);
+async function ordinaryTimerTask(
+  page: import("@playwright/test").Page,
+  key: string,
+  independentBootstrap = false,
+) {
+  if (independentBootstrap) {
+    await page.goto("/");
+    await expect(
+      page
+        .getByRole("button", { name: "시작하기" })
+        .or(page.getByRole("button", { name: "로그인", exact: true })),
+    ).toBeVisible();
+    if (await page.getByRole("button", { name: "시작하기" }).count()) {
+      await timerWorkspace(page);
+    } else {
+      // The group intentionally retains the real login limiter. Only new cases
+      // use independent bootstrap accounts; their actual task writer stays a
+      // normal member, and the existing nine flows keep their exact fixtures.
+      const bootstrap = `timer-bootstrap-${key.toLowerCase()}@example.com`;
+      createE2eUser(bootstrap, credentials.password, "측정 준비 작성자", {
+        workspaceSlug: "w5timer",
+        membershipRole: "member",
+      });
+      await login(page, bootstrap, credentials.password);
+    }
+  } else await timerWorkspace(page);
   const slug = `w5-${key.toLowerCase()}-timer`;
   const createdWorkspace = await page.request.post("/api/v1/workspaces", {
     data: { name: "독립 측정 검증", slug },
@@ -1802,7 +1826,7 @@ test("ordinary research plan persists document origins explicit minutes and fres
   page,
   browser,
 }, testInfo) => {
-  const fixture = await ordinaryTimerTask(page, "TPLAN");
+  const fixture = await ordinaryTimerTask(page, "TPLAN", true);
   const documents = [];
   for (const title of ["연구 목표·노트", "읽을 자료"]) {
     const response = await page.request.post(
@@ -2034,7 +2058,7 @@ test("task widget retires a held R1 command when a genuine current R2 read arriv
   page,
   browser,
 }, testInfo) => {
-  const fixture = await ordinaryTimerTask(page, "TMAIN");
+  const fixture = await ordinaryTimerTask(page, "TMAIN", true);
   const run1 = await startPausedTimer(
     page,
     fixture.timerUrl,
