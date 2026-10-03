@@ -2392,6 +2392,54 @@ export interface paths {
         patch: operations["patch_member"];
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/native-archive/jobs/{job_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["status_native"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/native-archive/preflight": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["preflight_native"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/native-archive/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["restore_native"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/notification-prefs": {
         parameters: {
             query?: never;
@@ -2498,6 +2546,38 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["create_personal_input"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/personal-transfers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["transfer_personal_item"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/personal-transfers/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["preview_personal_transfer"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3110,6 +3190,22 @@ export interface paths {
         options?: never;
         head?: never;
         patch: operations["update_milestone"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/projects/{project_id}/native-archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["export_native"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/workspaces/{workspace_id}/projects/{project_id}/restore": {
@@ -3960,6 +4056,70 @@ export interface paths {
         patch: operations["update_status"];
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/zotero": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list"];
+        put?: never;
+        post: operations["connect"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/zotero/libraries/{connector_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["read"];
+        put?: never;
+        post?: never;
+        delete: operations["disconnect"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/zotero/libraries/{connector_id}/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["sync"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/zotero/references/{reference_id}/links": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["link"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -4267,6 +4427,18 @@ export interface components {
         BacklinkListResponse: {
             items: components["schemas"]["BacklinkItemResponse"][];
         };
+        Bibliography: {
+            creators: components["schemas"]["Creator"][];
+            fields: {
+                [key: string]: string;
+            };
+            itemType: string;
+            relations?: {
+                [key: string]: string[];
+            };
+            tags: components["schemas"]["Tag"][];
+            title: string;
+        };
         /** @description `GET …/body?format=md` (source `documentBodyMdOutput`). */
         BodyMdResponse: {
             contentMd: string;
@@ -4562,6 +4734,31 @@ export interface components {
         CompleteAttachmentUploadBody: {
             parts: components["schemas"]["AttachmentCompletePartBody"][];
         };
+        ConnectBody: {
+            apiKey: string;
+            libraryType: components["schemas"]["LibraryType"];
+            /** @description Verified against every imported alternate URL. User names differ from IDs. */
+            libraryUrl: string;
+            remoteLibraryId: string;
+        };
+        ConnectorListOutput: {
+            connectors: components["schemas"]["ConnectorOutput"][];
+        };
+        ConnectorOutput: {
+            /** Format: int32 */
+            committedPages: number;
+            completedVersion: string;
+            generation: string;
+            /** Format: uuid */
+            id: string;
+            libraryType: components["schemas"]["LibraryType"];
+            libraryUrl: string;
+            progressVersion?: string | null;
+            reconciliationRequired: boolean;
+            remoteLibraryId: string;
+            retryAt?: string | null;
+            state: string;
+        };
         /** @description Items are non-strict objects in the source (extra keys are ignored). */
         ConsentItemBody: {
             kind: string;
@@ -4662,6 +4859,12 @@ export interface components {
         CreateWorkspaceBody: {
             name: string;
             slug: string;
+        };
+        Creator: {
+            creatorType: string;
+            firstName?: string | null;
+            lastName?: string | null;
+            name?: string | null;
         };
         DashboardProjectOutput: {
             id: string;
@@ -5123,6 +5326,29 @@ export interface components {
         LegalVersionsResponse: {
             versions: components["schemas"]["LegalVersionMetaOutput"][];
         };
+        LibraryOutput: {
+            collections: components["schemas"]["ZoteroCollectionOutput"][];
+            connector: components["schemas"]["ConnectorOutput"];
+            references: components["schemas"]["ReferenceOutput"][];
+        };
+        /** @enum {string} */
+        LibraryType: "user" | "group";
+        LinkBody: {
+            anchor?: string | null;
+            /** Format: uuid */
+            documentId?: string | null;
+            expectedVersion: string;
+            /** Format: uuid */
+            taskId?: string | null;
+        };
+        LinkOutput: {
+            anchor?: string | null;
+            displayId: string;
+            /** Format: uuid */
+            documentId?: string | null;
+            /** Format: uuid */
+            taskId?: string | null;
+        };
         LoginBody: {
             email: string;
             password: string;
@@ -5253,6 +5479,47 @@ export interface components {
             expectedStatusId?: string | null;
             /** Format: uuid */
             statusId: string;
+        };
+        NativeJobOutput: {
+            archiveHash: string;
+            diagnostic?: string | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            projectId?: string | null;
+            status: string;
+        };
+        NativePreflightBody: {
+            archiveBase64: string;
+        };
+        NativePreflightOutput: {
+            archiveHash: string;
+            attachmentCount: number;
+            complete: boolean;
+            /** Format: uuid */
+            destinationActorId: string;
+            /** Format: uuid */
+            destinationWorkspaceId: string;
+            diagnostics: string[];
+            documentCount: number;
+            preservedContentIds: boolean;
+            /** Format: uuid */
+            projectId: string;
+            projectName: string;
+            requiresCollisionFreeInstallation: boolean;
+            revisionCount: number;
+            /** Format: uuid */
+            sourceWorkspaceId: string;
+            taskCount: number;
+        };
+        NativeRestoreBody: {
+            archiveBase64: string;
+            archiveHash: string;
+            confirm: boolean;
+            /** Format: uuid */
+            destinationActorId: string;
+            /** Format: uuid */
+            requestId: string;
         };
         NotificationItemOutput: {
             actorFamilyName: string | null;
@@ -5461,6 +5728,84 @@ export interface components {
             /** Format: uuid */
             documentId: string;
         };
+        /** @enum {string} */
+        PersonalTransferAction: "copy" | "move";
+        /**
+         * @description Why an authorized transfer cannot run yet. Sent as the problem's
+         *     `params.code` with `personal_transfer_incomplete`; the title is only a
+         *     diagnostic. Each value is a known unsupported model, never a quiet subset.
+         * @enum {string}
+         */
+        PersonalTransferBlocker: "native_history" | "outgoing_reference" | "incoming_reference" | "file" | "hierarchy" | "assignee" | "dependent_graph" | "wip_reservation" | "inventory_budget" | "block_identity" | "body_encoding" | "native_state_missing";
+        PersonalTransferBody: {
+            confirmed: boolean;
+            previewDigest: string;
+            /** Format: uuid */
+            requestId: string;
+            selection: components["schemas"]["PersonalTransferSelection"];
+        };
+        /**
+         * @description `params.code` of `personal_transfer_conflict`.
+         * @enum {string}
+         */
+        PersonalTransferConflict: "command_changed" | "preview_stale";
+        /** @description One observed part of the disclosure graph and what the command does to it. */
+        PersonalTransferDisposition: {
+            /** Format: int32 */
+            count: number;
+            item: components["schemas"]["PersonalTransferItem"];
+            outcome: components["schemas"]["PersonalTransferOutcome"];
+        };
+        /** @enum {string} */
+        PersonalTransferItem: "document" | "task" | "activity" | "history" | "attachment";
+        /** @enum {string} */
+        PersonalTransferOutcome: "moved" | "copied_new_id" | "retained_private" | "not_included";
+        PersonalTransferOutput: {
+            /** Format: uuid */
+            documentId: string;
+            /** Format: int32 */
+            documentNumber: number;
+            /** Format: uuid */
+            projectId: string;
+            replayed: boolean;
+            /** Format: uuid */
+            taskId?: string | null;
+            /** Format: int32 */
+            taskNumber?: number | null;
+            /** Format: uuid */
+            workspaceId: string;
+        };
+        PersonalTransferPreview: {
+            /** Format: int32 */
+            activityCount: number;
+            /** Format: int32 */
+            attachmentCount: number;
+            digest: string;
+            dispositions: components["schemas"]["PersonalTransferDisposition"][];
+            documentTitle: string;
+            projectName: string;
+            projectVisibility: string;
+            sourceRetained: boolean;
+            taskTitle?: string | null;
+            workspaceName: string;
+        };
+        PersonalTransferSelection: {
+            action: components["schemas"]["PersonalTransferAction"];
+            /** Format: uuid */
+            destinationProjectId: string;
+            /** Format: uuid */
+            destinationStatusId?: string | null;
+            /** Format: uuid */
+            destinationWorkspaceId: string;
+            /** Format: uuid */
+            documentId: string;
+            /** Format: int32 */
+            expectedDocumentVersion: number;
+            /** Format: int32 */
+            expectedTaskVersion?: number | null;
+            /** Format: uuid */
+            taskId?: string | null;
+        };
         ProblemResponse: {
             code: string;
             params?: unknown;
@@ -5630,6 +5975,21 @@ export interface components {
         };
         RecentListResponse: {
             items: components["schemas"]["RecentItemOutput"][];
+        };
+        ReferenceOutput: {
+            availability: string;
+            bibliography: components["schemas"]["Bibliography"];
+            collectionKeys: string[];
+            /** Format: uuid */
+            connectorId: string;
+            documentDisplayId: string;
+            /** Format: uuid */
+            id: string;
+            itemKey: string;
+            links: components["schemas"]["LinkOutput"][];
+            localVersion: string;
+            remoteVersion: string;
+            returnUrl: string;
         };
         ResumeAttachmentUploadResponse: {
             attachmentId: string;
@@ -5910,6 +6270,11 @@ export interface components {
             projectKey: string;
             /** Format: uuid */
             taskId: string;
+        };
+        Tag: {
+            tag: string;
+            /** Format: int32 */
+            type?: number;
         };
         TaskChildOutput: {
             id: string;
@@ -6475,6 +6840,13 @@ export interface components {
             /** Format: int32 */
             wipLimit: number | null;
             workflowId: string;
+        };
+        ZoteroCollectionOutput: {
+            availability: string;
+            key: string;
+            name: string;
+            parentKey?: string | null;
+            remoteVersion: string;
         };
     };
     responses: never;
@@ -16278,6 +16650,120 @@ export interface operations {
             };
         };
     };
+    status_native: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NativeJobOutput"];
+                };
+            };
+            /** @description Denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Generic content collision */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    preflight_native: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NativePreflightBody"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NativePreflightOutput"];
+                };
+            };
+            /** @description Target conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid, incomplete or unsupported archive */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    restore_native: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NativeRestoreBody"];
+            };
+        };
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NativeJobOutput"];
+                };
+            };
+            /** @description Target or command conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid, incomplete or unsupported archive */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     get_notification_prefs: {
         parameters: {
             query?: never;
@@ -16821,6 +17307,168 @@ export interface operations {
             };
             /** @description Command key reused with changed payload */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    transfer_personal_item: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Owner's personal source workspace */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PersonalTransferBody"];
+            };
+        };
+        responses: {
+            /** @description Committed copy or move, or currently authorized command replay */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonalTransferOutput"];
+                };
+            };
+            /** @description Explicit confirmation and valid command required */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Session required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Transfer authority required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Source or destination unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description personal_transfer_conflict (params.code PersonalTransferConflict) or personal_transfer_incomplete (params.code PersonalTransferBlocker) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Transient transfer failure; no successful receipt */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    preview_personal_transfer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Owner's personal source workspace */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PersonalTransferSelection"];
+            };
+        };
+        responses: {
+            /** @description Authorized disclosure preview without writes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonalTransferPreview"];
+                };
+            };
+            /** @description Invalid selection */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Session required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Transfer authority required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Source or destination unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description personal_transfer_conflict (params.code PersonalTransferConflict) or personal_transfer_incomplete (params.code PersonalTransferBlocker) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Transient transfer failure */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -19895,6 +20543,46 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ProblemResponse"];
                 };
+            };
+        };
+    };
+    export_native: {
+        parameters: {
+            query?: {
+                /** @description Selected own Zotero connector; repeat the key for each (at most 8, distinct) */
+                zoteroConnector?: string[];
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Persisted complete native archive */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/zip": string;
+                };
+            };
+            /** @description Denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Incomplete or unsupported archive */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -23563,6 +24251,360 @@ export interface operations {
             };
             /** @description project_archived */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorListOutput"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    connect: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConnectBody"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    read: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                connector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LibraryOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    disconnect: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                connector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    sync: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                connector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LibraryOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    link: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                reference_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LinkBody"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LibraryOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -13642,6 +13642,152 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/native-archive/jobs/{job_id}": {
+      "get": {
+        "tags": [],
+        "operationId": "status_native",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeJobOutput"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Denied"
+          },
+          "409": {
+            "description": "Generic content collision"
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/native-archive/preflight": {
+      "post": {
+        "tags": [],
+        "operationId": "preflight_native",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativePreflightBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativePreflightOutput"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Target conflict"
+          },
+          "422": {
+            "description": "Invalid, incomplete or unsupported archive"
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/native-archive/restore": {
+      "post": {
+        "tags": [],
+        "operationId": "restore_native",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeRestoreBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeJobOutput"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Target or command conflict"
+          },
+          "422": {
+            "description": "Invalid, incomplete or unsupported archive"
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/notification-prefs": {
       "get": {
         "tags": [
@@ -14414,6 +14560,220 @@
           },
           "409": {
             "description": "Command key reused with changed payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/personal-transfers": {
+      "post": {
+        "tags": [
+          "personal-transfers"
+        ],
+        "operationId": "transfer_personal_item",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Owner's personal source workspace",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonalTransferBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Committed copy or move, or currently authorized command replay",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalTransferOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Explicit confirmation and valid command required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Session required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Transfer authority required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Source or destination unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "personal_transfer_conflict (params.code PersonalTransferConflict) or personal_transfer_incomplete (params.code PersonalTransferBlocker)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Transient transfer failure; no successful receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/personal-transfers/preview": {
+      "post": {
+        "tags": [
+          "personal-transfers"
+        ],
+        "operationId": "preview_personal_transfer",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Owner's personal source workspace",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonalTransferSelection"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Authorized disclosure preview without writes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalTransferPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid selection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Session required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Transfer authority required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Source or destination unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "personal_transfer_conflict (params.code PersonalTransferConflict) or personal_transfer_incomplete (params.code PersonalTransferBlocker)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Transient transfer failure",
             "content": {
               "application/json": {
                 "schema": {
@@ -19294,6 +19654,71 @@
                 }
               }
             }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/projects/{project_id}/native-archive": {
+      "get": {
+        "tags": [],
+        "operationId": "export_native",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "zoteroConnector",
+            "in": "query",
+            "description": "Selected own Zotero connector; repeat the key for each (at most 8, distinct)",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "maxItems": 8
+            },
+            "style": "form",
+            "explode": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persisted complete native archive",
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Denied"
+          },
+          "422": {
+            "description": "Incomplete or unsupported archive"
           }
         },
         "security": [
@@ -25080,6 +25505,501 @@
           }
         ]
       }
+    },
+    "/api/v1/workspaces/{workspace_id}/zotero": {
+      "get": {
+        "tags": [
+          "zotero"
+        ],
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorListOutput"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "zotero"
+        ],
+        "operationId": "connect",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/zotero/libraries/{connector_id}": {
+      "get": {
+        "tags": [
+          "zotero"
+        ],
+        "operationId": "read",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "zotero"
+        ],
+        "operationId": "disconnect",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/zotero/libraries/{connector_id}/sync": {
+      "post": {
+        "tags": [
+          "zotero"
+        ],
+        "operationId": "sync",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/zotero/references/{reference_id}/links": {
+      "post": {
+        "tags": [
+          "zotero"
+        ],
+        "operationId": "link",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "reference_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -26189,6 +27109,58 @@
             }
           }
         }
+      },
+      "Bibliography": {
+        "type": "object",
+        "required": [
+          "itemType",
+          "title",
+          "fields",
+          "creators",
+          "tags"
+        ],
+        "properties": {
+          "creators": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Creator"
+            }
+          },
+          "fields": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "itemType": {
+            "type": "string"
+          },
+          "relations": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Tag"
+            }
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "BodyMdResponse": {
         "type": "object",
@@ -27352,6 +28324,102 @@
         },
         "additionalProperties": false
       },
+      "ConnectBody": {
+        "type": "object",
+        "required": [
+          "libraryType",
+          "remoteLibraryId",
+          "apiKey",
+          "libraryUrl"
+        ],
+        "properties": {
+          "apiKey": {
+            "type": "string"
+          },
+          "libraryType": {
+            "$ref": "#/components/schemas/LibraryType"
+          },
+          "libraryUrl": {
+            "type": "string",
+            "description": "Verified against every imported alternate URL. User names differ from IDs."
+          },
+          "remoteLibraryId": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConnectorListOutput": {
+        "type": "object",
+        "required": [
+          "connectors"
+        ],
+        "properties": {
+          "connectors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConnectorOutput"
+            }
+          }
+        }
+      },
+      "ConnectorOutput": {
+        "type": "object",
+        "required": [
+          "id",
+          "libraryType",
+          "remoteLibraryId",
+          "libraryUrl",
+          "state",
+          "generation",
+          "completedVersion",
+          "committedPages",
+          "reconciliationRequired"
+        ],
+        "properties": {
+          "committedPages": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "completedVersion": {
+            "type": "string"
+          },
+          "generation": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "libraryType": {
+            "$ref": "#/components/schemas/LibraryType"
+          },
+          "libraryUrl": {
+            "type": "string"
+          },
+          "progressVersion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reconciliationRequired": {
+            "type": "boolean"
+          },
+          "remoteLibraryId": {
+            "type": "string"
+          },
+          "retryAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string"
+          }
+        }
+      },
       "ConsentItemBody": {
         "type": "object",
         "description": "Items are non-strict objects in the source (extra keys are ignored).",
@@ -27711,6 +28779,36 @@
           },
           "slug": {
             "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Creator": {
+        "type": "object",
+        "required": [
+          "creatorType"
+        ],
+        "properties": {
+          "creatorType": {
+            "type": "string"
+          },
+          "firstName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false
@@ -29347,6 +30445,101 @@
           }
         }
       },
+      "LibraryOutput": {
+        "type": "object",
+        "required": [
+          "connector",
+          "references",
+          "collections"
+        ],
+        "properties": {
+          "collections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ZoteroCollectionOutput"
+            }
+          },
+          "connector": {
+            "$ref": "#/components/schemas/ConnectorOutput"
+          },
+          "references": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReferenceOutput"
+            }
+          }
+        }
+      },
+      "LibraryType": {
+        "type": "string",
+        "enum": [
+          "user",
+          "group"
+        ]
+      },
+      "LinkBody": {
+        "type": "object",
+        "required": [
+          "expectedVersion"
+        ],
+        "properties": {
+          "anchor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "documentId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "expectedVersion": {
+            "type": "string"
+          },
+          "taskId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
+      "LinkOutput": {
+        "type": "object",
+        "required": [
+          "displayId"
+        ],
+        "properties": {
+          "anchor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "displayId": {
+            "type": "string"
+          },
+          "documentId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "taskId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
       "LoginBody": {
         "type": "object",
         "required": [
@@ -29842,6 +31035,155 @@
             "format": "uuid"
           },
           "statusId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
+      "NativeJobOutput": {
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "archiveHash"
+        ],
+        "properties": {
+          "archiveHash": {
+            "type": "string"
+          },
+          "diagnostic": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "NativePreflightBody": {
+        "type": "object",
+        "required": [
+          "archiveBase64"
+        ],
+        "properties": {
+          "archiveBase64": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "NativePreflightOutput": {
+        "type": "object",
+        "required": [
+          "archiveHash",
+          "sourceWorkspaceId",
+          "destinationWorkspaceId",
+          "destinationActorId",
+          "projectId",
+          "projectName",
+          "documentCount",
+          "taskCount",
+          "attachmentCount",
+          "revisionCount",
+          "complete",
+          "diagnostics",
+          "preservedContentIds",
+          "requiresCollisionFreeInstallation"
+        ],
+        "properties": {
+          "archiveHash": {
+            "type": "string"
+          },
+          "attachmentCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "complete": {
+            "type": "boolean"
+          },
+          "destinationActorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "destinationWorkspaceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "diagnostics": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "documentCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "preservedContentIds": {
+            "type": "boolean"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectName": {
+            "type": "string"
+          },
+          "requiresCollisionFreeInstallation": {
+            "type": "boolean"
+          },
+          "revisionCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sourceWorkspaceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "taskCount": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "NativeRestoreBody": {
+        "type": "object",
+        "required": [
+          "archiveBase64",
+          "archiveHash",
+          "requestId",
+          "destinationActorId",
+          "confirm"
+        ],
+        "properties": {
+          "archiveBase64": {
+            "type": "string"
+          },
+          "archiveHash": {
+            "type": "string"
+          },
+          "confirm": {
+            "type": "boolean"
+          },
+          "destinationActorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "requestId": {
             "type": "string",
             "format": "uuid"
           }
@@ -30632,6 +31974,259 @@
         },
         "additionalProperties": false
       },
+      "PersonalTransferAction": {
+        "type": "string",
+        "enum": [
+          "copy",
+          "move"
+        ]
+      },
+      "PersonalTransferBlocker": {
+        "type": "string",
+        "description": "Why an authorized transfer cannot run yet. Sent as the problem's\n`params.code` with `personal_transfer_incomplete`; the title is only a\ndiagnostic. Each value is a known unsupported model, never a quiet subset.",
+        "enum": [
+          "native_history",
+          "outgoing_reference",
+          "incoming_reference",
+          "file",
+          "hierarchy",
+          "assignee",
+          "dependent_graph",
+          "wip_reservation",
+          "inventory_budget",
+          "block_identity",
+          "body_encoding",
+          "native_state_missing"
+        ]
+      },
+      "PersonalTransferBody": {
+        "type": "object",
+        "required": [
+          "requestId",
+          "selection",
+          "previewDigest",
+          "confirmed"
+        ],
+        "properties": {
+          "confirmed": {
+            "type": "boolean"
+          },
+          "previewDigest": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "selection": {
+            "$ref": "#/components/schemas/PersonalTransferSelection"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PersonalTransferConflict": {
+        "type": "string",
+        "description": "`params.code` of `personal_transfer_conflict`.",
+        "enum": [
+          "command_changed",
+          "preview_stale"
+        ]
+      },
+      "PersonalTransferDisposition": {
+        "type": "object",
+        "description": "One observed part of the disclosure graph and what the command does to it.",
+        "required": [
+          "item",
+          "outcome",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "item": {
+            "$ref": "#/components/schemas/PersonalTransferItem"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/PersonalTransferOutcome"
+          }
+        }
+      },
+      "PersonalTransferItem": {
+        "type": "string",
+        "enum": [
+          "document",
+          "task",
+          "activity",
+          "history",
+          "attachment"
+        ]
+      },
+      "PersonalTransferOutcome": {
+        "type": "string",
+        "enum": [
+          "moved",
+          "copied_new_id",
+          "retained_private",
+          "not_included"
+        ]
+      },
+      "PersonalTransferOutput": {
+        "type": "object",
+        "required": [
+          "workspaceId",
+          "projectId",
+          "documentId",
+          "documentNumber",
+          "replayed"
+        ],
+        "properties": {
+          "documentId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "documentNumber": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "taskId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "taskNumber": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "PersonalTransferPreview": {
+        "type": "object",
+        "required": [
+          "digest",
+          "documentTitle",
+          "workspaceName",
+          "projectName",
+          "projectVisibility",
+          "sourceRetained",
+          "attachmentCount",
+          "activityCount",
+          "dispositions"
+        ],
+        "properties": {
+          "activityCount": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "attachmentCount": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "digest": {
+            "type": "string"
+          },
+          "dispositions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PersonalTransferDisposition"
+            }
+          },
+          "documentTitle": {
+            "type": "string"
+          },
+          "projectName": {
+            "type": "string"
+          },
+          "projectVisibility": {
+            "type": "string"
+          },
+          "sourceRetained": {
+            "type": "boolean"
+          },
+          "taskTitle": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspaceName": {
+            "type": "string"
+          }
+        }
+      },
+      "PersonalTransferSelection": {
+        "type": "object",
+        "required": [
+          "action",
+          "documentId",
+          "expectedDocumentVersion",
+          "destinationWorkspaceId",
+          "destinationProjectId"
+        ],
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/PersonalTransferAction"
+          },
+          "destinationProjectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "destinationStatusId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "destinationWorkspaceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "documentId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expectedDocumentVersion": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "expectedTaskVersion": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "taskId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
       "ProblemResponse": {
         "type": "object",
         "required": [
@@ -31250,6 +32845,65 @@
             "items": {
               "$ref": "#/components/schemas/RecentItemOutput"
             }
+          }
+        }
+      },
+      "ReferenceOutput": {
+        "type": "object",
+        "required": [
+          "id",
+          "documentDisplayId",
+          "connectorId",
+          "itemKey",
+          "remoteVersion",
+          "localVersion",
+          "bibliography",
+          "returnUrl",
+          "availability",
+          "collectionKeys",
+          "links"
+        ],
+        "properties": {
+          "availability": {
+            "type": "string"
+          },
+          "bibliography": {
+            "$ref": "#/components/schemas/Bibliography"
+          },
+          "collectionKeys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "connectorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "documentDisplayId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "itemKey": {
+            "type": "string"
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinkOutput"
+            }
+          },
+          "localVersion": {
+            "type": "string"
+          },
+          "remoteVersion": {
+            "type": "string"
+          },
+          "returnUrl": {
+            "type": "string"
           }
         }
       },
@@ -32271,6 +33925,22 @@
             "format": "uuid"
           }
         }
+      },
+      "Tag": {
+        "type": "object",
+        "required": [
+          "tag"
+        ],
+        "properties": {
+          "tag": {
+            "type": "string"
+          },
+          "type": {
+            "type": "integer",
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false
       },
       "TaskChildOutput": {
         "type": "object",
@@ -34308,6 +35978,35 @@
             "format": "int32"
           },
           "workflowId": {
+            "type": "string"
+          }
+        }
+      },
+      "ZoteroCollectionOutput": {
+        "type": "object",
+        "required": [
+          "key",
+          "remoteVersion",
+          "name",
+          "availability"
+        ],
+        "properties": {
+          "availability": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parentKey": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remoteVersion": {
             "type": "string"
           }
         }
