@@ -1445,6 +1445,9 @@ mod task_timer {
         assert_eq!(continuation["params"]["code"], "timer_history_changed");
     }
 
+    // Keep the privileged snapshot scope and actual app request/expected status
+    // explicit so every denied or replayed command proves unchanged full effects.
+    #[allow(clippy::too_many_arguments)]
     async fn timer_no_effect_request(
         fixture: &TimerFixture,
         admin: &sqlx::PgPool,
