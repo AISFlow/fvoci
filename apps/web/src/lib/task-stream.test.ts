@@ -2,17 +2,25 @@ import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import { installMockEventSource, MockEventSource } from "../../test/mock-event-source.ts";
 import { resetSharedEventSourcePoolForTests } from "./shared-event-source.ts";
-import { subscribeTaskStream, type TaskStreamHint } from "./task-stream.ts";
+import {
+  resetWorkspaceTaskStreamWatchersForTests,
+  subscribeTaskStream,
+  subscribeWorkspaceTaskStream,
+  type TaskStreamHint,
+  type WorkspaceTaskStreamHint,
+} from "./task-stream.ts";
 
 test.beforeEach(() => {
   installMockEventSource();
   resetSharedEventSourcePoolForTests();
+  resetWorkspaceTaskStreamWatchersForTests();
   mock.method(Math, "random", () => 1);
   mock.timers.enable({ apis: ["setTimeout"] });
 });
 
 test.afterEach(() => {
   resetSharedEventSourcePoolForTests();
+  resetWorkspaceTaskStreamWatchersForTests();
   mock.timers.reset();
   mock.restoreAll();
 });
@@ -116,4 +124,77 @@ await test("untrusted task hints require nonempty string identifiers and verbs",
   sub.close();
   source.message("task", JSON.stringify({ taskId: "t2", verb: "task.updated" }));
   assert.equal(hints.length, 2, "a closed scope cannot deliver a late hint");
+});
+
+await test("one workspace task stream: every connect resyncs the subscription's projects and hints carry their project", () => {
+  const resyncs: (readonly string[])[] = [];
+  const hints: WorkspaceTaskStreamHint[] = [];
+  const sub = subscribeWorkspaceTaskStream("ws", ["a", "b", "a"], {
+    onResync: (projects) => resyncs.push(projects),
+    onTask: (hint) => hints.push(hint),
+  });
+  const first = MockEventSource.latest();
+  assert.equal(first.url, "/api/v1/workspaces/ws/task-stream");
+  assert.deepEqual(resyncs, [], "a connecting source resyncs on its open, not at subscribe");
+  first.connect();
+  assert.deepEqual(resyncs, [["a", "b"]]);
+
+  for (const body of [
+    { taskId: "t1", verb: "task.updated" },
+    { taskId: "t1", verb: "task.updated", projectId: "" },
+    { taskId: "t1", verb: "task.updated", projectId: 7 },
+  ])
+    first.message("task", JSON.stringify(body));
+  first.message("task", JSON.stringify({ taskId: "t1", verb: "task.updated", projectId: "b" }));
+  assert.deepEqual(hints, [{ taskId: "t1", verb: "task.updated", projectId: "b" }]);
+
+  // Refused (429 at the stream cap): the reopened connection resyncs again.
+  first.fail(MockEventSource.CLOSED);
+  mock.timers.tick(1_000);
+  const reopened = MockEventSource.latest();
+  assert.notEqual(reopened, first);
+  reopened.connect();
+  assert.deepEqual(resyncs, [
+    ["a", "b"],
+    ["a", "b"],
+  ]);
+  sub.close();
+  assert.equal(reopened.closed, true);
+});
+
+await test("projects of a tab share one workspace socket; only a newly watched project resyncs on an open connection", () => {
+  const shell: (readonly string[])[] = [];
+  const page: (readonly string[])[] = [];
+  const stale: (readonly string[])[] = [];
+  const shellSub = subscribeWorkspaceTaskStream("ws", ["a", "b"], {
+    onResync: (projects) => shell.push(projects),
+    onTask: () => {},
+  });
+  MockEventSource.latest().connect();
+  // A page of a project the shell already watches: hints were never dropped.
+  const pageSub = subscribeWorkspaceTaskStream("ws", ["a"], {
+    onResync: (projects) => page.push(projects),
+    onTask: () => {},
+  });
+  // A project the shell's list lacks: hints since the open went nowhere.
+  const staleSub = subscribeWorkspaceTaskStream("ws", ["a", "c"], {
+    onResync: (projects) => stale.push(projects),
+    onTask: () => {},
+  });
+  assert.equal(MockEventSource.instances.length, 1, "one socket for every subscription");
+  assert.deepEqual(page, []);
+  assert.deepEqual(stale, [["c"]]);
+
+  // c stops being watched, then is watched again on the same open socket.
+  staleSub.close();
+  const again: (readonly string[])[] = [];
+  const againSub = subscribeWorkspaceTaskStream("ws", ["c"], {
+    onResync: (projects) => again.push(projects),
+    onTask: () => {},
+  });
+  assert.deepEqual(again, [["c"]]);
+  assert.deepEqual(shell, [["a", "b"]]);
+
+  for (const sub of [shellSub, pageSub, againSub]) sub.close();
+  assert.equal(MockEventSource.latest().closed, true);
 });
