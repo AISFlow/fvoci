@@ -5381,7 +5381,7 @@ async fn native_archive_post053_command_only_guard_refuses_full_and_omitted_hist
             .fetch_all(&fx.admin)
             .await
             .unwrap();
-    assert_eq!(versions, (1..=53).collect::<Vec<_>>());
+    assert_eq!(versions, (1..=54).collect::<Vec<_>>());
     let run = archive.graph.timer_runs[0].id;
     let task = archive.graph.timer_runs[0].task_id;
     let historical: Value = sqlx::query_scalar(
@@ -5898,7 +5898,7 @@ async fn native_archive_retained_guard_refuses_each_typed_branch_and_passes_unre
 #[tokio::test]
 async fn native_archive_retained_guard_cost_is_measured() {
     use fvoci_server::db::native_archive::RETAINED_PROVENANCE_SQL;
-    let harness = TestDb::bootstrap().await;
+    let harness = TestDb::bootstrap_through(53).await;
     let fx = fixture(&harness).await;
     let other =
         project_harness::add_workspace_user(&fx.admin, fx.workspace_id, "member", "cost-other")
@@ -5919,6 +5919,10 @@ async fn native_archive_retained_guard_cost_is_measured() {
         let fx = &fx;
         async move {
             let mut tx = fx.pool.begin().await.unwrap();
+            sqlx::query("ANALYZE fvoci.task_timer_audit")
+                .execute(&fx.admin)
+                .await
+                .unwrap();
             fvoci_server::db::context::set_tenant(&mut tx, fx.workspace_id)
                 .await
                 .unwrap();
@@ -5955,7 +5959,8 @@ async fn native_archive_retained_guard_cost_is_measured() {
             fn nodes(v: &Value, out: &mut Vec<Value>) {
                 if v.get("Relation Name") == Some(&json!("task_timer_audit")) {
                     out.push(json!({"node":v["Node Type"],"actualRows":v["Actual Rows"],"loops":v["Actual Loops"],
-                        "removedByFilter":v["Rows Removed by Filter"],"sharedHit":v["Shared Hit Blocks"],"sharedRead":v["Shared Read Blocks"]}));
+                        "removedByFilter":v["Rows Removed by Filter"],"sharedHit":v["Shared Hit Blocks"],"sharedRead":v["Shared Read Blocks"],
+                        "indexName":v["Index Name"],"indexCondition":v["Index Cond"],"recheckCondition":v["Recheck Cond"]}));
                 }
                 for child in v
                     .get("Plans")
@@ -5968,14 +5973,104 @@ async fn native_archive_retained_guard_cost_is_measured() {
             }
             let mut audit = Vec::new();
             nodes(&plan[0]["Plan"], &mut audit);
+            println!("W8-GUARD-RAW-PLAN {}", json!({"label":label,"plan":plan}));
             println!(
                 "W7-GUARD-COST {}",
                 json!({"label":label,"executionMs":plan[0]["Execution Time"],"auditNodes":audit})
             );
             assert!(!audit.is_empty(), "{label}: {plan}");
+            if label == "actor 20000, other 20000" {
+                fn actor_index(v: &Value) -> bool {
+                    (v["Index Name"] == "task_timer_audit_user_id_idx"
+                        && v["Index Cond"]
+                            .as_str()
+                            .is_some_and(|s| s.contains("user_id")))
+                        || v.get("Plans")
+                            .and_then(Value::as_array)
+                            .is_some_and(|children| children.iter().any(actor_index))
+                }
+                assert!(actor_index(&plan[0]["Plan"]), "40k mixed audit: {plan}");
+                assert!(
+                    audit.iter().any(|a| a["removedByFilter"] == 20_000),
+                    "20k own rows filtered; foreign tuples excluded: {audit:?}"
+                );
+            }
         }
     };
     fill(fx.user_id, 2048).await;
+    // Current populated 053 -> 054: the only change is the scalar index.
+    // Immutable timer history and every data table retain their fingerprints;
+    // FK, RLS/policy, trigger and app-role grant catalogs remain identical.
+    let role: String = sqlx::query_scalar("SELECT current_user")
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    let security_sql = "SELECT jsonb_build_object(
+        'fks',(SELECT jsonb_agg(jsonb_build_object('table',conrelid::regclass::text,'name',conname,'def',pg_get_constraintdef(oid)) ORDER BY conrelid,conname) FROM pg_constraint WHERE connamespace='fvoci'::regnamespace AND contype='f'),
+        'policies',(SELECT jsonb_agg(to_jsonb(p) ORDER BY tablename,policyname) FROM pg_policies p WHERE schemaname='fvoci'),
+        'triggers',(SELECT jsonb_agg(jsonb_build_object('table',tgrelid::regclass::text,'name',tgname,'def',pg_get_triggerdef(oid)) ORDER BY tgrelid,tgname) FROM pg_trigger WHERE NOT tgisinternal AND tgrelid IN(SELECT oid FROM pg_class WHERE relnamespace='fvoci'::regnamespace)),
+        'grants',(SELECT jsonb_agg(to_jsonb(g) ORDER BY table_name,privilege_type) FROM information_schema.role_table_grants g WHERE table_schema='fvoci' AND grantee=$1),
+        'rls',(SELECT jsonb_agg(jsonb_build_object('table',relname,'rls',relrowsecurity,'force',relforcerowsecurity,'owner',pg_get_userbyid(relowner)) ORDER BY relname) FROM pg_class WHERE relnamespace='fvoci'::regnamespace AND relkind='r'))";
+    let before_security: Value = sqlx::query_scalar(security_sql)
+        .bind(&role)
+        .fetch_one(&fx.admin)
+        .await
+        .unwrap();
+    let before_data = restore_database_effects(&fx.admin).await;
+    let before_history = timer_graph(&fx.admin, fx.user_id).await;
+    let before_versions: Vec<i32> =
+        sqlx::query_scalar("SELECT version FROM fvoci.schema_migrations ORDER BY version")
+            .fetch_all(&fx.admin)
+            .await
+            .unwrap();
+    assert_eq!(before_versions, (1..=53).collect::<Vec<_>>());
+    let absent: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_class WHERE relnamespace='fvoci'::regnamespace AND relname='task_timer_audit_user_id_idx'")
+        .fetch_one(&fx.admin).await.unwrap();
+    assert_eq!(absent, 0);
+    fvoci_server::db::migrate::run_migrations(&harness.admin_url)
+        .await
+        .unwrap();
+    fvoci_server::db::migrate::assert_schema_current(&fx.admin)
+        .await
+        .unwrap();
+    fvoci_server::db::migrate::assert_app_role(&fx.pool)
+        .await
+        .unwrap();
+    let after_security: Value = sqlx::query_scalar(security_sql)
+        .bind(&role)
+        .fetch_one(&fx.admin)
+        .await
+        .unwrap();
+    assert_eq!(after_security, before_security);
+    let without_versions = |rows: Vec<(String, i64, String)>| {
+        rows.into_iter()
+            .filter(|row| row.0 != "schema_migrations")
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        without_versions(restore_database_effects(&fx.admin).await),
+        without_versions(before_data)
+    );
+    assert_eq!(timer_graph(&fx.admin, fx.user_id).await, before_history);
+    let versions: Vec<i32> =
+        sqlx::query_scalar("SELECT version FROM fvoci.schema_migrations ORDER BY version")
+            .fetch_all(&fx.admin)
+            .await
+            .unwrap();
+    assert_eq!(versions, (1..=54).collect::<Vec<_>>());
+    let index: Value = sqlx::query_scalar("SELECT jsonb_build_object('valid',i.indisvalid,'ready',i.indisready,'unique',i.indisunique,'keys',i.indnkeyatts,
+        'attributes',(SELECT jsonb_agg(a.attname ORDER BY k.ord) FROM unnest(i.indkey) WITH ORDINALITY k(attnum,ord) JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum),
+        'noPredicate',i.indpred IS NULL,'noExpression',i.indexprs IS NULL)
+        FROM pg_index i WHERE i.indexrelid='fvoci.task_timer_audit_user_id_idx'::regclass AND i.indrelid='fvoci.task_timer_audit'::regclass")
+        .fetch_one(&fx.admin).await.unwrap();
+    assert_eq!(
+        index,
+        json!({"valid":true,"ready":true,"unique":false,"keys":1,"attributes":["user_id"],"noPredicate":true,"noExpression":true})
+    );
+    println!(
+        "W8-CURRENT-054-CATALOG {}",
+        json!({"index":index,"role":role,"versions":versions,"securityUnchanged":true,"historyUnchanged":true})
+    );
     measure("actor 2048, other 0").await;
     fill(fx.user_id, 20_000 - 2048).await;
     measure("actor 20000, other 0").await;
