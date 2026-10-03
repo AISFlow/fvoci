@@ -2366,3 +2366,186 @@ test("a late task-widget R1 response cannot clear a genuine pending R2 resume", 
     await context.close();
   }
 });
+
+test("owner releases opaque legacy reservations after task permission loss without rewriting history", async ({
+  page,
+  browser,
+}, testInfo) => {
+  const fixture = await permissionFixture(page, "TLEGACY", "member");
+  const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  try {
+    const person = await context.newPage();
+    await login(person, fixture.email, credentials.password);
+    const identity = identityShape.parse(
+      await (await person.request.get("/api/v1/auth/me")).json(),
+    );
+    expect(
+      z
+        .object({ isInstanceAdmin: z.literal(false) })
+        .parse(await (await person.request.get("/api/v1/auth/me")).json()).isInstanceAdmin,
+    ).toBe(false);
+    const membersUrl = `/api/v1/workspaces/${fixture.workspaceId}/projects/${fixture.project.id}/members`;
+    const granted = await page.request.post(membersUrl, {
+      data: { userId: identity.userId, role: "member" },
+    });
+    expect(granted.ok(), await granted.text()).toBe(true);
+    const created = await page.request.post(
+      `/api/v1/workspaces/${fixture.workspaceId}/projects/${fixture.project.id}/tasks`,
+      { data: { title: "접근 회수된 기존 기록의 숨겨진 제목" } },
+    );
+    expect(created.status(), await created.text()).toBe(201);
+    const task = taskShape.parse(await created.json());
+    const timerUrl = `/api/v1/workspaces/${fixture.workspaceId}/tasks/${task.id}/timer`;
+    const entryResponse = await person.request.post(
+      `/api/v1/workspaces/${fixture.workspaceId}/tasks/${task.id}/time-entries`,
+      {
+        data: {
+          startedAt: "2026-09-29T01:02:03.123456Z",
+          endedAt: null,
+          note: "기존 비공개 미종료 메모",
+        },
+      },
+    );
+    expect(entryResponse.status(), await entryResponse.text()).toBe(201);
+    const entry = z.object({ id: z.string() }).parse(await entryResponse.json());
+    const originalRaw = diagnosticSql(
+      `SELECT to_jsonb(e) FROM fvoci.time_entries e WHERE e.id='${entry.id}'`,
+    );
+    const nextSlug = `legacy-next-${crypto.randomUUID().slice(0, 8)}`;
+    const nextWorkspaceResponse = await page.request.post("/api/v1/workspaces", {
+      data: { name: "다음 작업 공간", slug: nextSlug },
+    });
+    expect(nextWorkspaceResponse.status(), await nextWorkspaceResponse.text()).toBe(201);
+    const nextWorkspace = z.object({ id: z.string() }).parse(await nextWorkspaceResponse.json());
+    createE2eUser(fixture.email, credentials.password, "권한 검사", {
+      workspaceSlug: nextSlug,
+      membershipRole: "member",
+    });
+    const nextProjectResponse = await page.request.post(
+      `/api/v1/workspaces/${nextWorkspace.id}/projects`,
+      {
+        data: { key: "NEXT", name: "다음 정상 작업", visibility: "workspace" },
+      },
+    );
+    expect(nextProjectResponse.status(), await nextProjectResponse.text()).toBe(201);
+    const nextProject = z.object({ id: z.string() }).parse(await nextProjectResponse.json());
+    const nextTaskResponse = await page.request.post(
+      `/api/v1/workspaces/${nextWorkspace.id}/projects/${nextProject.id}/tasks`,
+      { data: { title: "제한 해제 뒤 새 측정" } },
+    );
+    expect(nextTaskResponse.status(), await nextTaskResponse.text()).toBe(201);
+    const nextTask = taskShape.parse(await nextTaskResponse.json());
+    const assigned = await page.request.patch(
+      `/api/v1/workspaces/${nextWorkspace.id}/tasks/${nextTask.id}`,
+      { data: { assigneeIds: [identity.userId] } },
+    );
+    expect(assigned.ok(), await assigned.text()).toBe(true);
+    const nextTimerUrl = `/api/v1/workspaces/${nextWorkspace.id}/tasks/${nextTask.id}/timer`;
+    const revoke = await page.request.delete(`${membersUrl}/${identity.userId}`);
+    expect(revoke.ok(), await revoke.text()).toBe(true);
+    expect((await person.request.get(timerUrl)).status()).toBe(404);
+    const blocked = await person.request.post(nextTimerUrl, {
+      data: {
+        expectedActorId: identity.userId,
+        expectedSessionId: identity.sessionId,
+        requestId: crypto.randomUUID(),
+        operation: "start",
+        expectedVersion: 0,
+        runId: null,
+        note: null,
+      },
+    });
+    expect(blocked.status(), await blocked.text()).toBe(409);
+    const ownerShape = z.object({
+      runId: z.null(),
+      visibleRun: z.null(),
+      legacyOpenIds: z.array(z.string()),
+    });
+    const state = ownerShape.parse(
+      await (await person.request.get("/api/v1/me/task-timer")).json(),
+    );
+    expect(state.legacyOpenIds).toEqual([entry.id]);
+    await person.goto(`/w/${nextSlug}/my-tasks`);
+    const visible = person.waitForResponse(
+      async (response) =>
+        new URL(response.url()).pathname === "/api/v1/me/task-timer" &&
+        response.status() === 200 &&
+        ownerShape.parse(await response.json()).legacyOpenIds.includes(entry.id),
+    );
+    await person.bringToFront();
+    await visible;
+    await testInfo.attach("legacy-only-native-owner-original-precondition", {
+      body: JSON.stringify({
+        actor: identity.userId,
+        entryId: entry.id,
+        originalRaw: JSON.parse(originalRaw) as unknown,
+        hiddenTask404: true,
+        otherWorkspaceStart409: true,
+        canonicalOwner: state,
+      }),
+      contentType: "application/json",
+    });
+    const owner = person.getByTestId("timer-legacy-owner");
+    // Literal original negative: the global owner must offer opaque cleanup
+    // even when there is no modern run and the legacy task is inaccessible.
+    await expect(owner).toBeVisible();
+    await expect(owner).not.toContainText("접근 회수된 기존 기록의 숨겨진 제목");
+    await expect(owner).not.toContainText("기존 비공개 미종료 메모");
+    const releaseResult = person.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/v1/me/task-timer/legacy-release" &&
+        response.request().method() === "POST",
+    );
+    await owner.getByRole("button", { name: "미종료 기록의 측정 제한 해제", exact: true }).click();
+    const released = await releaseResult;
+    expect(released.status(), await released.text()).toBe(200);
+    const command = z
+      .object({
+        expectedActorId: z.string(),
+        expectedSessionId: z.string(),
+        requestId: z.string(),
+        timeEntryId: z.string(),
+      })
+      .parse(released.request().postDataJSON());
+    expect(command).toMatchObject({
+      expectedActorId: identity.userId,
+      expectedSessionId: identity.sessionId,
+      timeEntryId: entry.id,
+    });
+    await expect(owner).toHaveCount(0);
+    expect(
+      diagnosticSql(`SELECT to_jsonb(e) FROM fvoci.time_entries e WHERE e.id='${entry.id}'`),
+    ).toBe(originalRaw);
+    expect(
+      diagnosticSql(
+        `SELECT count(*) FROM fvoci.task_timer_audit WHERE user_id='${identity.userId}' AND time_entry_id='${entry.id}' AND verb='legacy.release' AND reason='explicit_release_original_range_unresolved'`,
+      ),
+    ).toBe("1");
+    const beforeReplay = timerDatabaseEffects(identity.userId, task.id);
+    const replay = await person.request.post("/api/v1/me/task-timer/legacy-release", {
+      data: command,
+    });
+    expect(replay.status(), await replay.text()).toBe(200);
+    expect(await replay.json()).toEqual(await released.json());
+    const changed = await person.request.post("/api/v1/me/task-timer/legacy-release", {
+      data: { ...command, timeEntryId: nextTask.id },
+    });
+    expect(changed.status(), await changed.text()).toBe(409);
+    expect(timerDatabaseEffects(identity.userId, task.id)).toBe(beforeReplay);
+    await person.reload();
+    expect(
+      ownerShape.parse(await (await person.request.get("/api/v1/me/task-timer")).json())
+        .legacyOpenIds,
+    ).toEqual([]);
+    const next = person.getByTestId(`task-stopwatch-${nextTask.id}`);
+    await next.getByTestId("timer-start").click();
+    await expect(next.getByTestId("timer-state")).toHaveText("측정 중");
+    await next.getByTestId("timer-stop").click();
+    await expect(next.getByTestId("timer-start")).toBeEnabled();
+    expect(
+      diagnosticSql(`SELECT to_jsonb(e) FROM fvoci.time_entries e WHERE e.id='${entry.id}'`),
+    ).toBe(originalRaw);
+  } finally {
+    await context.close();
+  }
+});
