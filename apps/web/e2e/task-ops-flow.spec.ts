@@ -116,17 +116,19 @@ test("time entries, clone and permanent delete from the task detail", async ({ p
 
   const entries = page.getByTestId("task-time-entries");
   await entries.getByRole("button", { name: "기록 추가" }).click();
-  await entries.getByLabel("시작").fill("2026-09-01T09:00");
-  await entries.getByLabel("종료").fill("2026-09-01T10:30");
+  await entries.getByLabel("시작", { exact: true }).fill("2026-09-01T09:00");
+  await entries.getByLabel("종료", { exact: true }).fill("2026-09-01T10:30");
   await entries.getByLabel("메모").fill("리뷰");
+  await entries.getByLabel("기록·수정 사유", { exact: true }).fill("기존 시간 기록 검증");
   await entries.getByRole("button", { name: "기록 추가" }).click();
   await expect(page.getByTestId("task-time-total")).toHaveText("합계 1시간 30분");
   await expect(entries.getByText(/리뷰/)).toBeVisible();
 
   // A reversed range is refused before any request.
   await entries.getByRole("button", { name: "기록 추가" }).click();
-  await entries.getByLabel("시작").fill("2026-09-02T10:00");
-  await entries.getByLabel("종료").fill("2026-09-02T09:00");
+  await entries.getByLabel("시작", { exact: true }).fill("2026-09-02T10:00");
+  await entries.getByLabel("종료", { exact: true }).fill("2026-09-02T09:00");
+  await entries.getByLabel("기록·수정 사유", { exact: true }).fill("역순 범위 검증");
   await entries.getByRole("button", { name: "기록 추가" }).click();
   await expect(entries.getByRole("alert")).toHaveText("종료가 시작보다 뒤여야 합니다.");
   await entries.getByRole("button", { name: "취소" }).click();

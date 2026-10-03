@@ -176,6 +176,28 @@ const showParent = computed(() => draftType.value !== "epic");
 const hierarchyDirty = computed(
   () => draftType.value !== props.task.type || draftParentId.value !== props.task.parentId,
 );
+const metadataDraftState = computed(() => {
+  const sameIds = (a: readonly string[], b: readonly string[]) =>
+    a.length === b.length && a.every((id) => b.includes(id));
+  const dirty = Object.freeze({
+    title: titleDraft.value !== props.task.title,
+    dueDate: dueDateDraft.value !== (props.task.dueDate ?? ""),
+    hierarchy: hierarchyDirty.value,
+    assignees: !sameIds(draftAssigneeIds.value, props.task.assigneeIds),
+    labels: !sameIds(draftLabelIds.value, props.task.labelIds),
+  });
+  return Object.freeze({
+    workspaceId: props.workspaceId,
+    taskId: props.task.id,
+    actorId: props.currentUserId,
+    dirty,
+    hasUnsavedMetadata: Object.values(dirty).some(Boolean),
+    pending: props.pending || props.archivePending || props.trashPending,
+    expectedDates: Object.freeze({ ...dueDateSnapshot.value }),
+  });
+});
+defineExpose({ getMetadataDraftState: () => metadataDraftState.value });
+
 const dependencies = computed(() => props.task.dependencies);
 const parentCurrentTitle = computed(() => {
   const parent = props.task.parent;

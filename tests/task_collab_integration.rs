@@ -1682,3 +1682,6 @@ async fn task_session_revision_skips_when_task_trashed_under_lock() {
     )
     .await;
 }
+
+#[path = "task_collab_integration/personal_input.rs"]
+mod personal_input;

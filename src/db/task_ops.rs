@@ -15,7 +15,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{
-    begin_read, lock_membership_users, recheck_session, session_is_live, set_tenant,
+    begin_read, lock_membership_users, recheck_session, session_is_live, set_self_user, set_tenant,
 };
 use crate::db::documents::document_permission;
 use crate::db::projects::{
@@ -183,17 +183,43 @@ pub async fn list_time_entries(
     .bind(task_id)
     .fetch_all(&mut *tx)
     .await?;
+    let mut items: Vec<_> = rows
+        .into_iter()
+        .map(|row| time_entry_row(workspace_id, row))
+        .collect();
+    crate::db::task_timer::apply_self_corrections(
+        &mut tx,
+        workspace_id,
+        task_id,
+        actor_user_id,
+        &mut items,
+    )
+    .await?;
     tx.commit().await?;
-    let can_create = task.permission.at_least(ProjectPermission::Edit)
+    let can_create = time_entry_can_create(&task);
+    Ok(Ok(TimeEntryList { items, can_create }))
+}
+
+fn time_entry_can_create(task: &ViewableTask) -> bool {
+    task.permission.at_least(ProjectPermission::Edit)
         && task.project.status != "archived"
-        && task.archived_at.is_none();
-    Ok(Ok(TimeEntryList {
-        items: rows
-            .into_iter()
-            .map(|row| time_entry_row(workspace_id, row))
-            .collect(),
-        can_create,
-    }))
+        && task.archived_at.is_none()
+}
+
+/// Presentation capability from the existing time-entry read gate, in the
+/// caller's current tenant/actor/session read snapshot. Writers still recheck.
+pub(crate) async fn time_entry_capability_in(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    task_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<bool, ProjectDbError>, sqlx::Error> {
+    Ok(
+        viewable_task(tx, workspace_id, actor_user_id, session_id, task_id)
+            .await?
+            .map(|task| time_entry_can_create(&task)),
+    )
 }
 
 pub async fn create_time_entry(
@@ -225,6 +251,16 @@ pub async fn create_time_entry(
     {
         tx.rollback().await?;
         return Ok(Err(err));
+    }
+    // The actor-wide stopwatch/legacy policy is checked under the same
+    // membership and credential locks as the old task writer. Closed/manual
+    // entries retain the existing behavior and history.
+    set_self_user(&mut tx, actor_user_id).await?;
+    if input.ended_at.is_none()
+        && crate::db::task_timer::person_has_unfinished(&mut tx, actor_user_id).await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::OpenTimeEntryExists));
     }
     // The one-open-entry-per-actor index is partial, so an open entry that
     // already exists leaves this statement without a row instead of aborting.

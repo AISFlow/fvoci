@@ -19,6 +19,8 @@ import {
   type ProcMember,
 } from "../e2e-pending/collab-restart";
 
+import { createRustReadinessReader } from "../e2e-pending/tb-a-readiness";
+
 // The normal E2E group supplies native binaries and an isolated app-role DB.
 // Own a Rust process with the actual dev public origin; never rewrite Origin.
 const webRoot = path.resolve(import.meta.dirname, "..");
@@ -112,18 +114,20 @@ const test = base.extend<object, { devRuntime: DevRuntime }>({
               const timer = setTimeout(() => {
                 reject(new Error("Rust startup deadline"));
               }, 30_000);
-              let output = "";
-              const capture = (bytes: Buffer) => {
+              const readiness = createRustReadinessReader((url) => {
+                clearTimeout(timer);
+                resolve(url);
+              });
+              const capture = (stream: "stdout" | "stderr", bytes: Buffer) => {
                 appendFileSync(logPath, bytes);
-                output = (output + bytes.toString()).slice(-8192);
-                const url = output.match(/fvoci-server listening on (http:\/\/[^\s]+)/)?.[1];
-                if (url) {
-                  clearTimeout(timer);
-                  resolve(url);
-                }
+                readiness(stream, bytes);
               };
-              child?.stdout?.on("data", capture);
-              child?.stderr?.on("data", capture);
+              child?.stdout?.on("data", (bytes: Buffer) => {
+                capture("stdout", bytes);
+              });
+              child?.stderr?.on("data", (bytes: Buffer) => {
+                capture("stderr", bytes);
+              });
               child?.once("error", (error) => {
                 clearTimeout(timer);
                 reject(error);

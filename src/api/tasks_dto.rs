@@ -173,6 +173,8 @@ pub struct StatusPatchBody {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct DocumentTaskCreateBody {
+    #[serde(default)]
+    pub self_assign: bool,
     pub project_id: Uuid,
     pub request_id: Uuid,
     #[serde(default)]
@@ -217,6 +219,7 @@ pub struct TaskProjectOutput {
     pub id: String,
     pub name: String,
     pub key: String,
+    pub visibility: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

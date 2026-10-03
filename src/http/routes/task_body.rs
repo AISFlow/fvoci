@@ -310,7 +310,7 @@ async fn patch_task_block(
 // ---------------------------------------------------------------------------
 // task origins
 
-fn map_origin_error(err: TaskOriginDbError) -> TaskApiError {
+pub(crate) fn map_origin_error(err: TaskOriginDbError) -> TaskApiError {
     match err {
         TaskOriginDbError::NotFound | TaskOriginDbError::Forbidden => {
             AppError::from_code(ProblemCode::NotFound).into()
@@ -374,11 +374,15 @@ async fn create_task_from_document(
     )
     .await?;
     require_extra_scope(&auth, ApiTokenScope::TasksWrite)?;
+    let mut normalized = normalized_task_input(&task);
+    if input.self_assign {
+        normalized["selfAssign"] = Value::Bool(true);
+    }
     let request_hash = origin_request_hash(
         auth.user_id,
         input.project_id,
         input.anchor.as_deref(),
-        &normalized_task_input(&task),
+        &normalized,
     );
     let ip = peer_ip(peer.ip());
     let outcome = create_document_task(
@@ -390,6 +394,7 @@ async fn create_task_from_document(
             document_id,
             project_id: input.project_id,
             request_id: input.request_id,
+            self_assign: input.self_assign,
             anchor: input.anchor.as_deref(),
             request_hash: &request_hash,
             task: CreateTaskInput {
@@ -459,6 +464,7 @@ async fn document_task_projects(
                 id: item.id.to_string(),
                 name: item.name,
                 key: item.key,
+                visibility: item.visibility,
             })
             .collect(),
         suggested_id: picker.suggested_id.map(|id| id.to_string()),

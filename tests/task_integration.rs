@@ -6462,3 +6462,6 @@ async fn task_list_and_layout_unknown_time_zone_falls_back_to_utc() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+#[path = "task_integration/workspace_task_stream.rs"]
+mod workspace_task_stream;

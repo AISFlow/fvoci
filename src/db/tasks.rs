@@ -290,7 +290,7 @@ pub(crate) async fn copy_task_assignees_and_labels(
     Ok(())
 }
 
-async fn replace_task_assignees(
+pub(crate) async fn replace_task_assignees(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,

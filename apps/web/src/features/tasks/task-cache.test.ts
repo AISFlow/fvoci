@@ -302,3 +302,325 @@ for (const [name, invalidate] of invalidations) {
     }
   });
 }
+
+await test("mounted MyTasks/preview/search/both origins/real backlink refresh while unrelated sentinels and next page survive", async () => {
+  const key = ["workspace-tasks", WS, "assigned-me"] as const;
+  const { client, observer, gets, pages, unsubscribe } = mountList(key);
+  const unsubscribes: (() => void)[] = [];
+  const counts = new Map<string, number>();
+  const task = "task-connected",
+    source = "source-connected";
+  const related = [
+    ["preview", [...key, "preview", 8], { items: [{ id: task, title: "committed" }] }],
+    [
+      "search",
+      ["search", WS, "context", "all", "", "", "lexical"],
+      { items: [{ id: task, type: "task", title: "committed" }] },
+    ],
+    [
+      "document origin",
+      ["task-origins", WS, source, null],
+      { items: [{ taskId: task, documentId: source }] },
+    ],
+    [
+      "task origin",
+      ["task-origins", WS, task, null],
+      { items: [{ taskId: task, documentId: source }] },
+    ],
+    [
+      "body backlink",
+      ["backlinks", "task", WS, task],
+      { items: [{ id: source, type: "document", title: "source" }] },
+    ],
+  ] as const;
+  const sentinels = [
+    ["foreign workspace", ["workspace-tasks", "foreign-ws", "assigned-me"]],
+    ["sibling project search", ["search", WS, "context", "all", "sibling-project", "", "lexical"]],
+    ["document-only search", ["search", WS, "context", "document", "", "", "lexical"]],
+    ["unrelated origin", ["task-origins", WS, "unrelated-document", null]],
+    ["unrelated backlink", ["backlinks", "task", WS, "unrelated-task"]],
+  ] as const;
+  try {
+    gets[0].resolve({ items: ["first"], nextCursor: "c1" });
+    await flush();
+    for (const [name, queryKey, data] of related) {
+      const mounted = new QueryObserver(client, {
+        queryKey,
+        queryFn: () => {
+          counts.set(name, (counts.get(name) ?? 0) + 1);
+          return Promise.resolve(data);
+        },
+        staleTime: Infinity,
+      });
+      unsubscribes.push(mounted.subscribe(() => {}));
+    }
+    for (const [name, queryKey] of sentinels) {
+      const mounted = new QueryObserver(client, {
+        queryKey,
+        queryFn: () => {
+          counts.set(name, (counts.get(name) ?? 0) + 1);
+          return Promise.resolve({ items: [], sentinel: name });
+        },
+        staleTime: Infinity,
+      });
+      unsubscribes.push(mounted.subscribe(() => {}));
+    }
+    await flush();
+    // Prechecked controls use unique outer binding, preventing the foundation
+    // N1 shadowed-sentinel error. Keep each object identity and request count.
+    const sentinelStates = sentinels.map(([name, key]) => ({
+      name,
+      key,
+      state: client.getQueryState(key),
+      query: client.getQueryCache().find({ queryKey: key }),
+      data: client.getQueryData(key),
+    }));
+    for (const control of sentinelStates) assert.equal(counts.get(control.name), 1, control.name);
+    for (const [name] of related) assert.equal(counts.get(name), 1, name);
+    const next = observer.fetchNextPage();
+    await flush();
+    assert.equal(gets[1].cursor, "c1");
+    const refresh = invalidateTaskCaches(client, WS, PROJECT, task, source);
+    await flush();
+    assert.equal(gets.length, 2, "in-flight next page is not cancelled");
+    gets[1].resolve({ items: ["next"], nextCursor: null });
+    await flush();
+    assert.deepEqual(
+      pages().map((page) => page.items),
+      [["first"], ["next"]],
+    );
+    gets[2].resolve({ items: ["new-first"], nextCursor: "c1" });
+    await flush();
+    gets[3].resolve({ items: ["new-next"], nextCursor: null });
+    await Promise.all([next, refresh]);
+    await flush();
+    assert.deepEqual(
+      pages().map((page) => page.items),
+      [["new-first"], ["new-next"]],
+    );
+    for (const [name] of related) assert.equal(counts.get(name), 2, name);
+    for (const control of sentinelStates) {
+      assert.equal(counts.get(control.name), 1, control.name);
+      assert.equal(client.getQueryState(control.key), control.state, control.name);
+      assert.equal(
+        client.getQueryCache().find({ queryKey: control.key }),
+        control.query,
+        control.name,
+      );
+      assert.equal(client.getQueryData(control.key), control.data, control.name);
+    }
+  } finally {
+    unsubscribe();
+    unsubscribes.forEach((stop) => {
+      stop();
+    });
+    client.clear();
+  }
+});
+
+await test("task hint refreshes every origin page/count for the affected target and preserves an in-flight next page", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  });
+  const source = "paged-source",
+    task = "paged-task";
+  const counts = new Map<string, number>();
+  const pageReads: ((value: {
+    items: { taskId: string; taskTitle: string }[];
+    count: number;
+  }) => void)[] = [];
+  let changed = false;
+  const specs = [
+    { name: "first", key: ["task-origins", WS, source, null] },
+    { name: "next", key: ["task-origins", WS, source, "cursor-1"] },
+    { name: "unrelated", key: ["task-origins", WS, "unrelated-source", null] },
+    { name: "foreign", key: ["task-origins", "foreign-ws", source, null] },
+  ];
+  const stops = specs.map(({ name, key }) =>
+    new QueryObserver(client, {
+      queryKey: key,
+      queryFn: () => {
+        counts.set(name, (counts.get(name) ?? 0) + 1);
+        if (name === "next")
+          return new Promise<{ items: { taskId: string; taskTitle: string }[]; count: number }>(
+            (resolve) => pageReads.push(resolve),
+          );
+        return Promise.resolve({
+          items: [
+            {
+              taskId: name === "first" ? task : "other-task",
+              documentId: key[2],
+              taskTitle: changed ? "new" : "old",
+            },
+          ],
+          count: changed ? 3 : 2,
+        });
+      },
+    }).subscribe(() => {}),
+  );
+  try {
+    await flush();
+    for (const item of specs) assert.equal(counts.get(item.name), 1, item.name);
+    const controls = specs
+      .filter(({ name }) => name === "unrelated" || name === "foreign")
+      .map(({ name, key }) => ({
+        name,
+        key,
+        state: client.getQueryState(key),
+        query: client.getQueryCache().find({ queryKey: key }),
+        data: client.getQueryData(key),
+      }));
+    for (const control of controls) {
+      assert.ok(control.state);
+      assert.ok(control.query);
+      assert.ok(control.data);
+    }
+    changed = true;
+    const refresh = invalidateTaskCaches(client, WS, PROJECT, task);
+    await flush();
+    assert.equal(pageReads.length, 1, "running next page is not cancelled");
+    pageReads[0]({ items: [{ taskId: "other-task", taskTitle: "old" }], count: 2 });
+    await flush();
+    assert.equal(
+      pageReads.length,
+      2,
+      "every affected target page gets a fresh count even without matching task on this page",
+    );
+    assert.equal(
+      client.getQueryData<{ count: number }>(specs[1].key)?.count,
+      2,
+      "the completed next page remains visible during its fresh read",
+    );
+    pageReads[1]({ items: [{ taskId: "other-task", taskTitle: "new" }], count: 3 });
+    await refresh;
+    assert.equal(client.getQueryData<{ count: number }>(specs[0].key)?.count, 3);
+    assert.equal(client.getQueryData<{ count: number }>(specs[1].key)?.count, 3);
+    assert.equal(counts.get("first"), 2);
+    assert.equal(counts.get("next"), 2);
+    for (const control of controls) {
+      assert.equal(counts.get(control.name), 1, control.name);
+      assert.equal(client.getQueryState(control.key), control.state, control.name);
+      assert.equal(
+        client.getQueryCache().find({ queryKey: control.key }),
+        control.query,
+        control.name,
+      );
+      assert.equal(client.getQueryData(control.key), control.data, control.name);
+    }
+  } finally {
+    stops.forEach((stop) => {
+      stop();
+    });
+    client.clear();
+  }
+});
+
+for (const recovery of ["authorized resync", "unmapped task hint"] as const) {
+  await test(`${recovery} refreshes origin pages and empty sources without any retained detail, preserving known sibling and foreign scopes`, async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    const counts = new Map<string, number>();
+    let changed = false;
+    client.setQueryData(["task", WS, "known-sibling"], {
+      id: "known-sibling",
+      projectId: "sibling-project",
+    });
+    const specs = [
+      {
+        name: "first",
+        key: ["task-origins", WS, "source-without-detail", null],
+        kind: "document",
+        refresh: true,
+      },
+      {
+        name: "next",
+        key: ["task-origins", WS, "source-without-detail", "cursor-1"],
+        kind: "document",
+        refresh: true,
+      },
+      {
+        name: "empty",
+        key: ["task-origins", WS, "unknown-empty-source", null],
+        kind: "document",
+        refresh: true,
+      },
+      {
+        name: "sibling",
+        key: ["task-origins", WS, "known-sibling", null],
+        kind: "task",
+        refresh: false,
+      },
+      {
+        name: "foreign",
+        key: ["task-origins", "foreign-ws", "source-without-detail", null],
+        kind: "document",
+        refresh: false,
+      },
+      {
+        name: "mytasks",
+        key: ["workspace-tasks", WS, "assigned-me"],
+        kind: "tasks",
+        refresh: true,
+      },
+    ];
+    const stops = specs.map(({ name, key, kind }) =>
+      new QueryObserver(client, {
+        queryKey: key,
+        meta: { originTargetKind: kind },
+        queryFn: () => {
+          counts.set(name, (counts.get(name) ?? 0) + 1);
+          return Promise.resolve({
+            items:
+              name === "empty" && !changed
+                ? []
+                : [{ taskId: "missed-task", taskTitle: changed ? "new title" : "old title" }],
+            count: changed ? 3 : name === "empty" ? 0 : 2,
+          });
+        },
+      }).subscribe(() => {}),
+    );
+    try {
+      await flush();
+      assert.equal(client.getQueryData(["task", WS, "missed-task"]), undefined);
+      for (const item of specs) assert.equal(counts.get(item.name), 1, item.name);
+      const controls = specs
+        .filter((item) => !item.refresh)
+        .map(({ name, key }) => ({
+          name,
+          key,
+          state: client.getQueryState(key),
+          query: client.getQueryCache().find({ queryKey: key }),
+          data: client.getQueryData(key),
+        }));
+      for (const control of controls) {
+        assert.ok(control.state);
+        assert.ok(control.query);
+        assert.ok(control.data);
+      }
+      changed = true;
+      if (recovery === "authorized resync") invalidateTaskStreamResyncCaches(client, WS, PROJECT);
+      else await invalidateTaskCaches(client, WS, PROJECT, "new-unmapped-task");
+      await flush();
+      for (const item of specs.filter((item) => item.refresh)) {
+        assert.equal(counts.get(item.name), 2, item.name);
+        assert.equal(client.getQueryData<{ count: number }>(item.key)?.count, 3, item.name);
+      }
+      for (const control of controls) {
+        assert.equal(counts.get(control.name), 1, control.name);
+        assert.equal(client.getQueryState(control.key), control.state, control.name);
+        assert.equal(
+          client.getQueryCache().find({ queryKey: control.key }),
+          control.query,
+          control.name,
+        );
+        assert.equal(client.getQueryData(control.key), control.data, control.name);
+      }
+    } finally {
+      stops.forEach((stop) => {
+        stop();
+      });
+      client.clear();
+    }
+  });
+}

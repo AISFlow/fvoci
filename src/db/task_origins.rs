@@ -2,26 +2,26 @@
 //! `apps/server/src/domains/documents/task-origins.ts`).
 //!
 //! `POST documents/{id}/tasks` creates the task and its `task_origins` row in one
-//! transaction. Requests for one document are serialised by a transaction
-//! advisory lock on the document id instead of the source's document row lock:
-//! the task insert locks the target project, and project document mutations lock
-//! project → document, so a document row lock taken first could deadlock with
-//! them. The unique `(workspace_id, document_id, request_id)` key still decides
-//! replays.
+//! transaction. The actor membership/session fence and tenant tree lock precede
+//! the per-document command lock. Source/target project rows are locked in UUID
+//! order, followed by the source document row; authorization is rechecked at
+//! that serialization point for fresh creates AND replay. The unique command
+//! key decides replay and the payload hash preserves old omitted/false intent.
 
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{
-    lock_key_from_uuid, lock_membership_users, recheck_session, session_is_live, set_tenant,
+    lock_key_from_uuid, lock_membership_users, lock_tree, recheck_session, session_is_live,
+    set_tenant,
 };
 use crate::db::documents::document_permission;
 use crate::db::group_grants::group_members_join_sql;
 use crate::db::projects::{
     lock_project, project_permission, project_permission_by_id, visible_project_sql, ProjectDbError,
 };
-use crate::db::tasks::{create_task_tx, CreateTaskInput};
+use crate::db::tasks::{create_task_tx, replace_task_assignees, CreateTaskInput};
 use crate::db::workspace::{membership_role, workspace_is_live, WorkspaceRole};
 use crate::projects::ProjectPermission;
 
@@ -75,6 +75,7 @@ pub struct TaskProject {
     pub id: Uuid,
     pub name: String,
     pub key: String,
+    pub visibility: String,
 }
 
 pub struct TaskProjectPicker {
@@ -114,7 +115,7 @@ pub async fn task_projects(
     let editable = editable_project_sql("p", 2, 3);
     let picker_sql = format!(
         r#"
-        SELECT p.id, p.name, p.key
+        SELECT p.id, p.name, p.key, p.visibility
         FROM fvoci.projects p
         WHERE p.workspace_id = $1
           AND p.deleted_at IS NULL
@@ -123,7 +124,7 @@ pub async fn task_projects(
         ORDER BY p.updated_at DESC, p.id ASC
         "#
     );
-    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(&picker_sql)
+    let rows: Vec<(Uuid, String, String, String)> = sqlx::query_as(&picker_sql)
         .bind(workspace_id)
         .bind(guest)
         .bind(actor_user_id)
@@ -131,7 +132,12 @@ pub async fn task_projects(
         .await?;
     let items = rows
         .into_iter()
-        .map(|(id, name, key)| TaskProject { id, name, key })
+        .map(|(id, name, key, visibility)| TaskProject {
+            id,
+            name,
+            key,
+            visibility,
+        })
         .collect::<Vec<_>>();
     let suggested_id = source_project_id
         .filter(|id| items.iter().any(|item| item.id == *id))
@@ -168,7 +174,7 @@ pub fn origin_request_hash(
 
 /// View permission on a live wiki or project document (a trashed document or
 /// project yields `None`).
-async fn document_view_permission(
+pub(crate) async fn document_view_permission(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
@@ -197,7 +203,7 @@ async fn document_view_permission(
 }
 
 /// View permission on a live task in a live project.
-async fn task_view_permission(
+pub(crate) async fn task_view_permission(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
@@ -227,6 +233,7 @@ pub struct DocumentTaskRequest<'a> {
     pub anchor: Option<&'a str>,
     pub request_hash: &'a str,
     pub task: CreateTaskInput<'a>,
+    pub self_assign: bool,
 }
 
 /// Source `createDocumentTask`: `view` on the document, `edit` on the target
@@ -264,7 +271,7 @@ pub async fn create_document_task(
     }
 }
 
-async fn create_document_task_tx(
+pub(crate) async fn create_document_task_tx(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
@@ -280,6 +287,7 @@ async fn create_document_task_tx(
     if !workspace_is_live(tx, workspace_id).await? {
         return Ok(Err(TaskOriginDbError::NotFound));
     }
+    lock_tree(tx, workspace_id).await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
         .bind(TASK_ORIGIN_LOCK_NAMESPACE)
         .bind(lock_key_from_uuid(request.document_id))
@@ -290,15 +298,48 @@ async fn create_document_task_tx(
     if !document_permission.at_least(ProjectPermission::View) {
         return Ok(Err(TaskOriginDbError::NotFound));
     }
-    // The source checks current Edit before looking up a requestId. Hold the
-    // same project write lock used by create_task_tx so a grant revocation
-    // cannot slip between this check and a replay response.
+    // Read affiliation before locking projects, then lock every project in UUID
+    // order and the source row last. Reciprocal origins cannot invert project
+    // locks; moves/trash and source grant/visibility writes serialize here.
+    let source_project: Option<(Option<Uuid>,)> = sqlx::query_as(
+        "SELECT project_id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL",
+    ).bind(workspace_id).bind(request.document_id).fetch_optional(&mut **tx).await?;
+    let Some((source_project,)) = source_project else {
+        return Ok(Err(TaskOriginDbError::NotFound));
+    };
+    let mut project_ids = vec![request.project_id];
+    if let Some(source) = source_project {
+        project_ids.push(source);
+    }
+    project_ids.sort_unstable();
+    project_ids.dedup();
+    for id in project_ids {
+        if lock_project(tx, workspace_id, id).await?.is_none() {
+            return Ok(Err(TaskOriginDbError::NotFound));
+        }
+    }
+    let current_source: Option<(Option<Uuid>,)> = sqlx::query_as(
+        "SELECT project_id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL FOR SHARE",
+    ).bind(workspace_id).bind(request.document_id).fetch_optional(&mut **tx).await?;
+    if current_source != Some((source_project,))
+        || !document_view_permission(tx, workspace_id, actor_user_id, request.document_id)
+            .await?
+            .at_least(ProjectPermission::View)
+    {
+        return Ok(Err(TaskOriginDbError::NotFound));
+    }
     let Some(project) = lock_project(tx, workspace_id, request.project_id).await? else {
         return Ok(Err(TaskOriginDbError::NotFound));
     };
     if !project_permission(tx, workspace_id, actor_user_id, &project)
         .await?
         .at_least(ProjectPermission::Edit)
+    {
+        return Ok(Err(TaskOriginDbError::NotFound));
+    }
+    if request.self_assign
+        && !crate::db::personal_input::owns_personal_workspace(tx, workspace_id, actor_user_id)
+            .await?
     {
         return Ok(Err(TaskOriginDbError::NotFound));
     }
@@ -339,6 +380,21 @@ async fn create_document_task_tx(
         Ok(task) => task,
         Err(err) => return Ok(Err(TaskOriginDbError::Task(err))),
     };
+    if request.self_assign {
+        if let Err(err) = replace_task_assignees(
+            tx,
+            workspace_id,
+            actor_user_id,
+            request.project_id,
+            task.id,
+            &[actor_user_id],
+            client_ip,
+        )
+        .await?
+        {
+            return Ok(Err(TaskOriginDbError::Task(err)));
+        }
+    }
     sqlx::query(
         r#"
         INSERT INTO fvoci.task_origins (

@@ -2,7 +2,7 @@
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, ref, watch } from "vue";
+import { computed, onScopeDispose, ref, useId, watch } from "vue";
 import {
   createOriginProject,
   createTaskFromDocument,
@@ -11,7 +11,19 @@ import {
   taskOriginsQuery,
 } from "@/features/collections/origin-api";
 import { originCreateSurface } from "@/features/collections/origin-create-surface";
-import { itemPath } from "@/lib/href";
+import NativeModal from "../../components/NativeModal.vue";
+import { ProblemError } from "@/lib/api";
+import { meQuery, workspacesQuery } from "@/lib/queries";
+import { invalidateTaskCaches } from "@/features/tasks/task-cache";
+import { originHref } from "../capture/source-block";
+import {
+  forgetCommand,
+  inputScope,
+  recoverCommand,
+  rememberCommand,
+  type PendingInputCommand,
+} from "../capture/capture-command";
+import { createPersonalInput } from "../capture/personal-input-api";
 
 // Tasks this document started, or the documents a task came from
 // (features/collections/origin-panel.tsx). Create-task lives on the document
@@ -22,12 +34,32 @@ const props = defineProps<{
   documentId?: string;
   taskId?: string;
   hideWhenEmpty?: boolean;
+  sourceSelection?: () => { anchor: string; title: string } | null;
+  waitForSave?: () => Promise<void>;
 }>();
 const queryClient = useQueryClient();
+const me = useQuery(meQuery);
+const workspaces = useQuery(workspacesQuery);
+const personal = computed(
+  () =>
+    workspaces.data.value?.items.some(
+      (item) => item.id === props.workspaceId && item.kind === "personal",
+    ) ?? false,
+);
+const anchor = ref<string>();
+const pendingCommand = ref<PendingInputCommand | null>(null);
+const scope = inputScope();
+const confirmOpen = ref(false);
+const confirmId = useId();
+const namespace = (ws: string, document: string) => `origin:${ws}:${document}`;
+const selectionError = ref<string>();
+onScopeDispose(() => {
+  scope.retire();
+});
 const after = ref<string | null>(null);
 const projectId = ref("");
 const title = ref("");
-const requestId = ref(crypto.randomUUID());
+const requestId = ref<string>(crypto.randomUUID());
 const projectName = ref("");
 const projectKey = ref("");
 
@@ -60,48 +92,120 @@ watch(
   { immediate: true },
 );
 
+type Operation = {
+  command: PendingInputCommand;
+  captured: ReturnType<typeof scope.capture>;
+  personal: boolean;
+  save?: () => Promise<void>;
+};
 const createTask = useMutation({
-  mutationFn: () => {
-    const documentId = props.documentId;
-    if (!documentId) throw new Error("Document origin task requires a document ID");
-    return createTaskFromDocument(props.workspaceId, documentId, {
-      projectId: projectId.value,
-      requestId: requestId.value,
-      title: title.value.trim(),
+  mutationFn: async (operation: Operation) => {
+    if (!scope.sameActor(operation.captured)) throw new Error(t("capture.unavailable"));
+    const { command } = operation;
+    const document = command.body.source?.documentId;
+    const project = command.body.projectId;
+    if (!document || (!project && !operation.personal)) throw new Error(t("capture.unavailable"));
+    if (command.body.source?.anchor && !operation.save) throw new Error(t("collab unavailable"));
+    rememberCommand(window.sessionStorage, command, namespace(command.workspaceId, document));
+    await operation.save?.();
+    if (!scope.sameActor(operation.captured)) throw new Error(t("capture.unavailable"));
+    if (operation.personal) return createPersonalInput(command.workspaceId, command.body);
+    if (!project) throw new Error(t("capture.unavailable"));
+    const result = await createTaskFromDocument(command.workspaceId, document, {
+      projectId: project,
+      requestId: command.body.requestId,
+      title: command.body.title,
+      anchor: command.body.source?.anchor ?? undefined,
     });
+    return { ...result, projectId: project };
   },
-  onSuccess: async () => {
+  onSuccess: async (saved, operation) => {
+    if (!scope.sameActor(operation.captured) || !saved.taskId) return;
+    const { command } = operation;
+    const document = command.body.source?.documentId;
+    forgetCommand(window.sessionStorage, command, namespace(command.workspaceId, document ?? ""));
+    await invalidateTaskCaches(
+      queryClient,
+      command.workspaceId,
+      saved.projectId ?? command.body.projectId ?? "",
+      saved.taskId,
+      document,
+    );
+    if (!scope.current(operation.captured)) return;
     after.value = null;
     title.value = "";
+    anchor.value = undefined;
+    pendingCommand.value = null;
     requestId.value = crypto.randomUUID();
-    await queryClient.invalidateQueries({
-      queryKey: ["task-origins", props.workspaceId, props.documentId],
-    });
-    await queryClient.invalidateQueries({ queryKey: ["tasks", props.workspaceId] });
   },
 });
+watch(
+  [
+    () => props.workspaceId,
+    () => props.documentId,
+    () => props.taskId,
+    () => me.data.value?.userId ?? "",
+    () => me.data.value?.sessionId ?? "",
+    () => me.error.value instanceof ProblemError && me.error.value.status === 401,
+  ],
+  ([ws, document, task, actor, credential, retired]) => {
+    scope.bind(retired ? "" : actor, `${ws}:${document ?? task ?? ""}`, credential);
+    title.value = "";
+    anchor.value = undefined;
+    after.value = null;
+    confirmOpen.value = false;
+    selectionError.value = undefined;
+    pendingCommand.value =
+      document && actor
+        ? recoverCommand(window.sessionStorage, actor, namespace(ws, document))
+        : null;
+    if (pendingCommand.value) {
+      title.value = pendingCommand.value.body.title;
+      projectId.value = pendingCommand.value.body.projectId ?? "";
+      anchor.value = pendingCommand.value.body.source?.anchor ?? undefined;
+      requestId.value = pendingCommand.value.body.requestId;
+    } else requestId.value = crypto.randomUUID();
+  },
+  { immediate: true, flush: "sync" },
+);
 
 const createProject = useMutation({
-  mutationFn: () => createOriginProject(props.workspaceId, projectKey.value, projectName.value),
-  onSuccess: async (project) => {
-    projectId.value = project.id;
-    requestId.value = crypto.randomUUID();
-    projectName.value = "";
-    projectKey.value = "";
-    await queryClient.invalidateQueries({
-      queryKey: ["task-projects", props.workspaceId, props.documentId],
-    });
-    await queryClient.invalidateQueries({ queryKey: ["projects", props.workspaceId] });
+  mutationFn: (operation: {
+    workspaceId: string;
+    documentId?: string;
+    key: string;
+    name: string;
+    captured: ReturnType<typeof scope.capture>;
+  }) => {
+    if (!scope.sameActor(operation.captured)) throw new Error(t("capture.unavailable"));
+    return createOriginProject(operation.workspaceId, operation.key, operation.name);
+  },
+  onSuccess: async (project, operation) => {
+    if (!scope.sameActor(operation.captured)) return;
+    await Promise.all([
+      queryClient.invalidateQueries({
+        queryKey: ["task-projects", operation.workspaceId, operation.documentId],
+      }),
+      queryClient.invalidateQueries({ queryKey: ["projects", operation.workspaceId] }),
+    ]);
+    if (scope.current(operation.captured)) {
+      projectId.value = project.id;
+      requestId.value = crypto.randomUUID();
+      projectName.value = "";
+      projectKey.value = "";
+    }
   },
 });
 
 const surface = computed(() =>
-  originCreateSurface({
-    isLoading: projects.isLoading.value,
-    isError: projects.isError.value,
-    itemCount: projects.data.value?.items.length,
-    canCreateProject: projects.data.value?.canCreateProject,
-  }),
+  personal.value
+    ? "create-task"
+    : originCreateSurface({
+        isLoading: projects.isLoading.value,
+        isError: projects.isError.value,
+        itemCount: projects.data.value?.items.length,
+        canCreateProject: projects.data.value?.canCreateProject,
+      }),
 );
 
 function preventImeSubmit(event: KeyboardEvent): void {
@@ -120,11 +224,74 @@ function onTitleInput(event: Event): void {
 }
 
 function submitTask(): void {
-  if (projectId.value && title.value.trim()) createTask.mutate();
+  if ((!personal.value && !projectId.value) || !title.value.trim() || createTask.isPending.value)
+    return;
+  if (!personal.value) {
+    confirmOpen.value = true;
+    return;
+  }
+  dispatchTask();
+}
+function dispatchTask(): void {
+  const actor = me.data.value?.userId;
+  const captured = scope.capture();
+  if (!actor || captured.actor !== actor || !props.documentId) return;
+  const command = pendingCommand.value ?? {
+    actorId: actor,
+    workspaceId: props.workspaceId,
+    body: {
+      requestId: requestId.value,
+      intent: "task" as const,
+      title: title.value.trim(),
+      projectId: projectId.value || undefined,
+      source: { documentId: props.documentId, anchor: anchor.value },
+    },
+  };
+  pendingCommand.value = command;
+  confirmOpen.value = false;
+  createTask.mutate({
+    command,
+    captured,
+    personal: personal.value,
+    save: props.waitForSave,
+  });
+}
+function fromBlock(): void {
+  const selected = props.sourceSelection?.();
+  if (!selected) {
+    selectionError.value = t("capture.blockMissing");
+    return;
+  }
+  selectionError.value = undefined;
+  title.value = selected.title;
+  anchor.value = selected.anchor;
+  requestId.value = crypto.randomUUID();
+}
+function abandonCommand(): void {
+  if (
+    !pendingCommand.value ||
+    createTask.isPending.value ||
+    !window.confirm(t("capture.abandonConfirm"))
+  )
+    return;
+  forgetCommand(
+    window.sessionStorage,
+    pendingCommand.value,
+    namespace(props.workspaceId, props.documentId ?? ""),
+  );
+  pendingCommand.value = null;
+  requestId.value = crypto.randomUUID();
 }
 
 function submitProject(): void {
-  if (projectName.value.trim() && projectKey.value.trim()) createProject.mutate();
+  if (projectName.value.trim() && projectKey.value.trim())
+    createProject.mutate({
+      workspaceId: props.workspaceId,
+      documentId: props.documentId,
+      key: projectKey.value,
+      name: projectName.value,
+      captured: scope.capture(),
+    });
 }
 
 const fieldClass = "h-10 rounded-md border border-default bg-default px-2";
@@ -142,10 +309,16 @@ const fieldClass = "h-10 rounded-md border border-default bg-default px-2";
       originErrorText(origins.error.value, t("collection.origins.error"))
     }}</p>
     <a
-      v-for="item in origins.data.value?.items ?? []"
+      v-for="item in origins.isError.value ? [] : (origins.data.value?.items ?? [])"
       :key="item.taskId"
       class="text-sm underline"
-      :href="itemPath(slug, documentId ? item.taskDisplayId : item.documentDisplayId)"
+      :href="
+        originHref(
+          slug,
+          documentId ? item.taskDisplayId : item.documentDisplayId,
+          documentId ? null : item.anchor,
+        )
+      "
     >
       {{
         documentId
@@ -168,7 +341,38 @@ const fieldClass = "h-10 rounded-md border border-default bg-default px-2";
     >
       {{ t("collection.origins.next") }}
     </UButton>
+    <UButton
+      color="neutral"
+      variant="outline"
+      class="w-fit"
+      @click="
+        origins.refetch();
+        projects.refetch();
+      "
+      >{{ t("capture.recover") }}</UButton
+    >
     <div v-if="documentId" class="flex flex-col gap-3">
+      <UButton
+        v-if="sourceSelection"
+        color="neutral"
+        variant="outline"
+        class="w-fit"
+        :disabled="!!pendingCommand || createTask.isPending.value"
+        @click="fromBlock"
+        >{{ t("capture.fromBlock") }}</UButton
+      >
+      <p v-if="selectionError" role="alert">{{ selectionError }}</p>
+      <p v-if="anchor" class="text-sm">{{ t("capture.sourceBlock") }}: {{ anchor }}</p>
+      <p v-if="personal">{{ t("capture.selfAssigned") }}</p>
+      <p v-if="pendingCommand" role="status">{{ t("capture.unknown") }}</p>
+      <UButton
+        v-if="pendingCommand"
+        color="neutral"
+        variant="ghost"
+        :disabled="createTask.isPending.value"
+        @click="abandonCommand"
+        >{{ t("capture.abandon") }}</UButton
+      >
       <p v-if="surface === 'loading'" role="status">{{
         t("collection.taskCreation.projectsLoading")
       }}</p>
@@ -189,8 +393,10 @@ const fieldClass = "h-10 rounded-md border border-default bg-default px-2";
             :id="`origin-project-${documentId}`"
             :class="fieldClass"
             :value="projectId"
+            :disabled="!!pendingCommand || createTask.isPending.value"
             @change="onProjectChange"
           >
+            <option v-if="personal" value="">{{ t("capture.defaultProject") }}</option>
             <option
               v-for="project in projects.data.value.items"
               :key="project.id"
@@ -208,12 +414,13 @@ const fieldClass = "h-10 rounded-md border border-default bg-default px-2";
             :id="`origin-title-${documentId}`"
             :class="fieldClass"
             :value="title"
+            :disabled="!!pendingCommand || createTask.isPending.value"
             @input="onTitleInput"
           />
         </div>
         <UButton
           type="submit"
-          :disabled="!projectId || !title.trim() || createTask.isPending.value"
+          :disabled="(!personal && !projectId) || !title.trim() || createTask.isPending.value"
         >
           {{ t("collection.createTask") }}
         </UButton>
@@ -260,5 +467,30 @@ const fieldClass = "h-10 rounded-md border border-default bg-default px-2";
         {{ originErrorText(createProject.error.value, t("collection.taskCreation.projectError")) }}
       </p>
     </div>
+    <NativeModal
+      :id="confirmId"
+      :open="confirmOpen"
+      :labelled-by="`${confirmId}-title`"
+      dialog-class="mx-auto mt-[15vh] w-[min(32rem,calc(100%-2rem))] rounded-lg border border-default bg-default p-4 text-default backdrop:bg-black/30"
+      @close="confirmOpen = false"
+    >
+      <div class="flex flex-col gap-4 break-keep">
+        <h2 :id="`${confirmId}-title`" class="text-xl">{{ t("capture.teamConfirm") }}</h2>
+        <p>{{ projects.data.value?.items.find((item) => item.id === projectId)?.name }}</p>
+        <p>{{
+          projects.data.value?.items.find((item) => item.id === projectId)?.visibility ===
+          "workspace"
+            ? t("capture.scopeWorkspace")
+            : t("capture.scopePrivate")
+        }}</p>
+        <p class="text-base leading-relaxed">{{ t("capture.teamWarning") }}</p>
+        <div class="flex flex-wrap gap-2">
+          <UButton @click="dispatchTask">{{ t("capture.confirmCreate") }}</UButton>
+          <UButton color="neutral" variant="outline" @click="confirmOpen = false">{{
+            t("capture.cancel")
+          }}</UButton>
+        </div>
+      </div>
+    </NativeModal>
   </section>
 </template>

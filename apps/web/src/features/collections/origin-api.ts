@@ -15,41 +15,44 @@ export function taskOriginsQuery(
   after: string | null,
 ) {
   const { documentId, taskId } = target;
-  return queryOptions({
-    queryKey: ["task-origins", workspaceId, documentId ?? taskId, after] as const,
-    enabled: Boolean(workspaceId && (documentId || taskId)),
-    retry: false,
-    queryFn: async () => {
-      if (!documentId && !taskId) throw new Error("origin target is missing");
-      return documentId
-        ? ensureOk(
-            await api.GET(
-              "/api/v1/workspaces/{workspace_id}/documents/{document_id}/task-origins",
-              {
+  return {
+    ...queryOptions({
+      queryKey: ["task-origins", workspaceId, documentId ?? taskId, after] as const,
+      enabled: Boolean(workspaceId && (documentId || taskId)),
+      retry: false,
+      queryFn: async () => {
+        if (!documentId && !taskId) throw new Error("origin target is missing");
+        return documentId
+          ? ensureOk(
+              await api.GET(
+                "/api/v1/workspaces/{workspace_id}/documents/{document_id}/task-origins",
+                {
+                  params: {
+                    path: { workspace_id: workspaceId, document_id: documentId },
+                    query: { after: after ?? undefined, limit: 50 },
+                  },
+                },
+              ),
+            )
+          : ensureOk(
+              await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/origin", {
                 params: {
-                  path: { workspace_id: workspaceId, document_id: documentId },
+                  path: {
+                    workspace_id: workspaceId,
+                    task_id:
+                      taskId ??
+                      (() => {
+                        throw new Error("task target is missing");
+                      })(),
+                  },
                   query: { after: after ?? undefined, limit: 50 },
                 },
-              },
-            ),
-          )
-        : ensureOk(
-            await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/origin", {
-              params: {
-                path: {
-                  workspace_id: workspaceId,
-                  task_id:
-                    taskId ??
-                    (() => {
-                      throw new Error("task target is missing");
-                    })(),
-                },
-                query: { after: after ?? undefined, limit: 50 },
-              },
-            }),
-          );
-    },
-  });
+              }),
+            );
+      },
+    }),
+    meta: { originTargetKind: documentId ? "document" : "task" },
+  };
 }
 
 export function documentTaskProjectsQuery(workspaceId: string, documentId: string | undefined) {
@@ -71,12 +74,24 @@ export function documentTaskProjectsQuery(workspaceId: string, documentId: strin
 export async function createTaskFromDocument(
   workspaceId: string,
   documentId: string,
-  body: { projectId: string; requestId: string; title: string },
+  body: {
+    projectId: string;
+    requestId: string;
+    title: string;
+    anchor?: string;
+    selfAssign?: boolean;
+  },
 ) {
   return ensureOk(
     await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/tasks", {
       params: { path: { workspace_id: workspaceId, document_id: documentId } },
-      body: { projectId: body.projectId, requestId: body.requestId, task: { title: body.title } },
+      body: {
+        projectId: body.projectId,
+        requestId: body.requestId,
+        anchor: body.anchor,
+        selfAssign: body.selfAssign,
+        task: { title: body.title },
+      },
     }),
   );
 }
@@ -85,7 +100,7 @@ export async function createOriginProject(workspaceId: string, key: string, name
   return ensureOk(
     await api.POST("/api/v1/workspaces/{workspace_id}/projects", {
       params: { path: { workspace_id: workspaceId } },
-      body: { key: key.trim().toUpperCase(), name: name.trim(), visibility: "workspace" },
+      body: { key: key.trim().toUpperCase(), name: name.trim(), visibility: "private" },
     }),
   );
 }

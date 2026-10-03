@@ -1,6 +1,8 @@
 pub mod collections_dto;
 pub mod documents_dto;
 pub mod dto;
+pub mod personal_input_dto;
+pub mod task_timer;
 pub mod tasks_dto;
 
 #[cfg(feature = "api-schema")]

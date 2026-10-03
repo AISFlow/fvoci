@@ -419,10 +419,10 @@ test("task list uses server statusCounts and paginates without duplicate rows", 
   const serverCount = firstPage.statusCounts.find((row) => row.statusId === backlog.id)?.count;
   expect(serverCount).toBe(created);
 
-  // Hold the project stream until "load more" is in flight, and the second page
+  // Hold the pooled workspace task stream until "load more" is in flight, and the second page
   // until the stream has opened, so the stream's `open` resync lands while the
   // page loads: the order that dropped the requested page in CI.
-  const streamPath = `/api/v1/workspaces/${id}/projects/${project.id}/stream`;
+  const streamPath = `/api/v1/workspaces/${id}/task-stream`;
   const { promise: loadMoreInFlight, resolve: loadMoreSent } = deferred();
   await page.route(
     (url) => url.pathname === streamPath,
@@ -438,10 +438,13 @@ test("task list uses server statusCounts and paginates without duplicate rows", 
       if (secondPageHeld) return route.continue();
       secondPageHeld = true;
       const streamOpened = page.waitForResponse(
-        (response) => new URL(response.url()).pathname === streamPath,
+        (response) =>
+          new URL(response.url()).pathname === streamPath && response.request().method() === "GET",
       );
       loadMoreSent();
-      await streamOpened;
+      const streamResponse = await streamOpened;
+      expect(streamResponse.status()).toBe(200);
+      expect(streamResponse.headers()["content-type"] ?? "").toContain("text/event-stream");
       await route.continue();
     },
   );

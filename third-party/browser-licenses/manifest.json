@@ -11,6 +11,10 @@
     "file": "supplements/is-emoji-supported-0.0.5-LICENSE.md",
     "source": "https://raw.githubusercontent.com/koala-interactive/is-emoji-supported/4afc4ca0a4ff406ef885287a0bfcb2906b965a9d/LICENSE.md"
   },
+  "launder@1.7.1": {
+    "file": "supplements/launder-1.7.1-LICENSE",
+    "source": "https://raw.githubusercontent.com/apostrophecms/apostrophe/e9b0ab0849a5dfea0f75335fbdf99b5c6bf9e4b3/packages/apostrophe/LICENSE.md"
+  },
   "qrcode-generator@1.4.4": {
     "file": "supplements/qrcode-generator-1.4.4-LICENSE",
     "source": "https://raw.githubusercontent.com/kazuhikoarase/qrcode-generator/9bd2163ddc1628d1ec8ff22ea288a747275ef442/LICENSE"
@@ -18,6 +22,10 @@
   "react-remove-scroll-bar@2.3.8": {
     "file": "supplements/react-remove-scroll-bar-2.3.8-LICENSE",
     "source": "https://raw.githubusercontent.com/theKashey/react-remove-scroll-bar/8ca9ba5ea52de03308fe8ced94f7b159a44d28ff/LICENSE"
+  },
+  "remark-math@6.0.0": {
+    "file": "supplements/remark-math-6.0.0-LICENSE",
+    "source": "https://raw.githubusercontent.com/remarkjs/remark-math/d5d0660b150810a535bbb07eac6cc96a4510aa24/license"
   },
   "saxes@6.0.0": {
     "file": "supplements/saxes-6.0.0-LICENSE",

@@ -8,6 +8,7 @@ import { runArchiveWithBodyPersist } from "@/features/tasks/task-archive-persist
 import type { LabelItem, MilestoneItem, TaskDetail, TaskListItem } from "@/features/tasks/queries";
 import { collabUserOf } from "@/features/documents/collab-model";
 import type { MemberOutput } from "@/lib/contracts";
+import { ProblemError } from "@/lib/api";
 import { projectTasksPath } from "@/lib/href";
 import { meQuery } from "@/lib/queries";
 import { useCollabRoom, collabRoomName } from "../../collab/useCollabRoom";
@@ -22,6 +23,7 @@ import TaskBacklinks from "./TaskBacklinks.vue";
 import TaskBodyEditor from "./TaskBodyEditor.vue";
 import TaskDetailForm from "./TaskDetailForm.vue";
 import TaskTimeEntries from "./TaskTimeEntries.vue";
+import TaskStopwatch from "./TaskStopwatch.vue";
 import "@/features/projects/projects.css";
 
 const props = defineProps<{
@@ -77,7 +79,26 @@ const collabUser = computed(() => {
   const data = me.data.value;
   return data ? collabUserOf(data.userId, formatPersonName(data, data.locale)) : null;
 });
-const room = useCollabRoom(collabRoomName(props.workspaceId, "task", props.task.id), collabUser);
+const room = useCollabRoom(
+  collabRoomName(props.workspaceId, "task", props.task.id),
+  collabUser,
+  () => {
+    const actor = me.data.value;
+    if (
+      !actor ||
+      (me.error.value instanceof ProblemError && [401, 403].includes(me.error.value.status))
+    )
+      return null;
+    return {
+      roomName: collabRoomName(props.workspaceId, "task", props.task.id),
+      actorId: actor.userId,
+      sessionId: actor.sessionId,
+      writable: me.isError.value
+        ? null
+        : props.canEdit && !props.readOnly && props.task.archivedAt == null,
+    };
+  },
+);
 const session = room.session;
 
 const archivePersisting = ref(false);
@@ -220,6 +241,12 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :workspace-id="workspaceId"
       :task-id="task.id"
       :members="members"
+      :read-only="metadataReadOnly"
+    />
+    <TaskStopwatch
+      :workspace-id="workspaceId"
+      :task-id="task.id"
+      :estimate="task.estimate"
       :read-only="metadataReadOnly"
     />
     <TaskActivityPanel

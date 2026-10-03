@@ -28,6 +28,9 @@ if ((${#LABEL_SPECS[@]} >= 1)); then
 fi
 
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-web-e2e.XXXXXX")"
+# Keep default timer screenshots/proofs in the group's retained output tree;
+# an explicit caller namespace remains unchanged outside runtime cleanup.
+export FVOCI_W5_EVIDENCE_DIR="${FVOCI_W5_EVIDENCE_DIR:-$RUN_DIR/playwright-output/w5-evidence}"
 SERVER_LOG="$RUN_DIR/server.log"
 PEPPER='{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
 # Host netlink address/link events (only `ip monitor` writes this file, so its
