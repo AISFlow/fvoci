@@ -3263,10 +3263,15 @@ test("an estimate A-B-A target change cannot clear the current native mutation p
     );
   const created = await page.request.post(
     `/api/v1/workspaces/${fixture.workspaceId}/projects/${project.projectId}/tasks`,
-    { data: { title: "변경하지 않을 다른 예상 시간 대상", assigneeIds: [fixture.actor.userId] } },
+    { data: { title: "변경하지 않을 다른 예상 시간 대상" } },
   );
   expect(created.status(), await created.text()).toBe(201);
   const other = taskShape.parse(await created.json());
+  const assigned = await page.request.patch(
+    `/api/v1/workspaces/${fixture.workspaceId}/tasks/${other.id}`,
+    { data: { assigneeIds: [fixture.actor.userId] } },
+  );
+  expect(assigned.ok(), await assigned.text()).toBe(true);
   const otherRaw = diagnosticSql(`SELECT to_jsonb(t) FROM fvoci.tasks t WHERE id='${other.id}'`);
   await page.goto(`/w/${fixture.slug}/my-tasks`);
   await observePlanningCompletion(page);
