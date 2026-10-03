@@ -4801,9 +4801,10 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
   const beforeDraftHistory = await history();
   const draftRequests: string[] = [];
   page.on("request", (request) => {
+    const pathname = new URL(request.url()).pathname;
     if (
-      request.url().startsWith(new URL(base + "/revisions/", page.url()).href) &&
-      /restore(?:-preview)?$/.test(request.url())
+      (request.method() === "POST" && pathname === base + "/revisions") ||
+      (pathname.startsWith(base + "/revisions/") && /restore(?:-preview)?$/.test(pathname))
     )
       draftRequests.push(request.url());
   });
@@ -4820,8 +4821,14 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
     expect(draftRequests).toHaveLength(0);
     expect(await body()).toEqual(beforeDraftBody);
     expect(await history()).toEqual(beforeDraftHistory);
-    await cdp.send("Input.insertText", { text: "공동 연구 현재 본문" });
+    const dirtyDraft = "공동 연구 현재 본문 · 보류 중인 초안";
+    await cdp.send("Input.insertText", { text: dirtyDraft });
+    await expect(field).toHaveValue(dirtyDraft);
     await expect(restoreButton).toBeDisabled();
+    await expect(page.getByTestId("revision-save")).toBeDisabled();
+    expect(draftRequests).toHaveLength(0);
+    expect(await body()).toEqual(beforeDraftBody);
+    expect(await history()).toEqual(beforeDraftHistory);
     await page.getByRole("button", { name: "적용", exact: true }).click();
   } finally {
     await cdp.detach();
