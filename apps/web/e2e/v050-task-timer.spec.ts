@@ -4961,6 +4961,8 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
   let heldBody: z.infer<typeof commandShape> | undefined;
   const estimateRoute = (url: URL) => url.pathname === timerUrl + "/estimate";
   let heldContinuation: Promise<void> | undefined;
+  let primaryFailure: { error: unknown } | undefined;
+  const cleanupFailures: unknown[] = [];
   await page.route(estimateRoute, async (route) => {
     if (route.request().method() !== "POST") return route.continue();
     heldContinuation = (async () => {
@@ -5090,9 +5092,32 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
       }),
       contentType: "application/json",
     });
+  } catch (error) {
+    primaryFailure = { error };
   } finally {
     release();
-    await heldContinuation;
-    await page.unroute(estimateRoute);
+    try {
+      await heldContinuation;
+    } catch (error) {
+      cleanupFailures.push(error);
+    }
+    try {
+      await page.unroute(estimateRoute);
+    } catch (error) {
+      cleanupFailures.push(error);
+    }
+    if (cleanupFailures.length) {
+      testInfo.annotations.push({
+        type: "estimate-route-cleanup-error",
+        description: cleanupFailures
+          .map((error) =>
+            error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+          )
+          .join("\n"),
+      });
+    }
   }
+  if (primaryFailure) throw primaryFailure.error;
+  if (cleanupFailures.length)
+    throw new AggregateError(cleanupFailures, "held estimate route cleanup failed");
 });
