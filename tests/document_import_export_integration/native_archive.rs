@@ -5312,6 +5312,66 @@ fn restore_storage_effects(root: &std::path::Path) -> Vec<(std::path::PathBuf, S
     effects
 }
 
+/// Literal publisher graph plus allocator, job/result and event rows. The
+/// all-table digest separately covers every other table without logging secrets.
+async fn restore_publication_graph(admin: &sqlx::PgPool) -> Value {
+    let tables = [
+        "workspaces",
+        "projects",
+        "project_members",
+        "documents",
+        "tasks",
+        "collections",
+        "collection_items",
+        "workflows",
+        "statuses",
+        "milestones",
+        "task_assignees",
+        "task_dependencies",
+        "views",
+        "labels",
+        "task_labels",
+        "task_origins",
+        "task_activity",
+        "comments",
+        "document_states",
+        "task_states",
+        "document_collab_updates",
+        "task_collab_updates",
+        "document_collab_op_receipts",
+        "task_collab_op_receipts",
+        "revisions",
+        "attachments",
+        "attachment_object_cleanups",
+        "zotero_connectors",
+        "zotero_collections",
+        "zotero_references",
+        "zotero_memberships",
+        "zotero_links",
+        "time_entries",
+        "task_timer_runs",
+        "task_timer_segments",
+        "task_timer_legacy_open",
+        "task_timer_commands",
+        "task_timer_audit",
+        "personal_input_commands",
+        "import_jobs",
+        "events",
+    ];
+    let mut graph = serde_json::Map::new();
+    for table in tables {
+        let rows: Value = sqlx::query_scalar(&format!(
+            "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb)
+             FROM fvoci.{table} t"
+        ))
+        .fetch_one(admin)
+        .await
+        .unwrap();
+        graph.insert(table.into(), rows);
+    }
+    Value::Object(graph)
+}
+
 #[tokio::test]
 async fn native_archive_post053_command_only_guard_refuses_full_and_omitted_history() {
     use fvoci_server::db::native_archive::{publish, NativeDbError};
@@ -5431,6 +5491,7 @@ async fn native_archive_post053_command_only_guard_refuses_full_and_omitted_hist
             assert!(before_timer["audit"].as_array().unwrap().is_empty());
             let (target, _, claim) = claimed_restore(&inst, fx.user_id, &cookie).await;
             let before_db = restore_database_effects(&inst.admin).await;
+            let before_graph = restore_publication_graph(&inst.admin).await;
             let before_storage = restore_storage_effects(&inst.storage_root());
             let result = publish(
                 &inst.pool,
@@ -5469,6 +5530,11 @@ async fn native_archive_post053_command_only_guard_refuses_full_and_omitted_hist
                     "{history_label}: all rows/jobs/events unchanged"
                 );
                 assert_eq!(
+                    restore_publication_graph(&inst.admin).await,
+                    before_graph,
+                    "{history_label}: literal publication graph/jobs/events unchanged"
+                );
+                assert_eq!(
                     restore_storage_effects(&inst.storage_root()),
                     before_storage,
                     "{history_label}: owned storage unchanged"
@@ -5490,6 +5556,101 @@ async fn native_archive_post053_command_only_guard_refuses_full_and_omitted_hist
             db.cleanup().await;
             std::fs::remove_dir_all(storage).unwrap();
         }
+    }
+    let storage = fx.storage_root();
+    fx.pool.close().await;
+    fx.admin.close().await;
+    harness.cleanup().await;
+    std::fs::remove_dir_all(storage).unwrap();
+}
+
+#[tokio::test]
+async fn native_archive_retained_task_guard_blocks_timeless_before_early_return() {
+    use fvoci_server::db::native_archive::{publish, NativeDbError};
+    let (harness, fx, mut timeless) = timed_archive().await;
+    let task = timeless.graph.timer_runs[0].task_id;
+    let g = &mut timeless.graph;
+    (
+        g.time_entries,
+        g.timer_runs,
+        g.timer_segments,
+        g.timer_legacy_open,
+        g.timer_commands,
+        g.timer_audit,
+    ) = (vec![], vec![], vec![], vec![], vec![], vec![]);
+    timeless.validate().unwrap();
+    assert!(timeless.graph.tasks.iter().any(|t| t.id == task));
+    // All time arrays are empty: without the retained selected-task guard
+    // this publication would take the no-time early return and commit.
+    for (label, foreign, unrelated) in [
+        ("selected task", false, false),
+        ("foreign actor", true, false),
+        ("unrelated task", false, true),
+    ] {
+        let db = TestDb::bootstrap().await;
+        let inst = fixture(&db).await;
+        let cookie = same_person(&inst, fx.user_id).await;
+        let owner = if foreign {
+            project_harness::add_workspace_user(
+                &inst.admin,
+                inst.workspace_id,
+                "member",
+                "timeless-other",
+            )
+            .await
+            .user_id
+        } else {
+            fx.user_id
+        };
+        let retained_task = if unrelated { Uuid::now_v7() } else { task };
+        as_actor(&inst.pool, inst.workspace_id, owner,
+            "INSERT INTO fvoci.task_timer_audit(id,user_id,request_id,workspace_id,task_id,time_entry_id,verb,before_value,after_value,reason)
+             SELECT gen_random_uuid(),(b->>0)::uuid,gen_random_uuid(),NULL,(b->>1)::uuid,NULL,'retained','{}'::jsonb,'{}'::jsonb,'남은 기록' FROM (SELECT $1::jsonb AS b) q",
+            vec![json!(owner), json!(retained_task)]).await;
+        let (target, _, claim) = claimed_restore(&inst, fx.user_id, &cookie).await;
+        let before_db = restore_database_effects(&inst.admin).await;
+        let before_graph = restore_publication_graph(&inst.admin).await;
+        let before_timer = timer_graph(&inst.admin, owner).await;
+        let before_storage = restore_storage_effects(&inst.storage_root());
+        let result = publish(
+            &inst.pool,
+            &claim,
+            &timeless,
+            &std::collections::BTreeMap::new(),
+            &inst.settings.quota,
+        )
+        .await;
+        if foreign || unrelated {
+            result.unwrap_or_else(|e| panic!("{label}: {e:?}"));
+            let projects: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM fvoci.projects WHERE workspace_id=$1")
+                    .bind(target)
+                    .fetch_one(&inst.admin)
+                    .await
+                    .unwrap();
+            assert_eq!(projects, 1, "{label}");
+            let history = timer_graph(&inst.admin, owner).await;
+            assert_eq!(history["audit"], before_timer["audit"]);
+            assert_eq!(history["commands"], before_timer["commands"]);
+            assert!(history["runs"].as_array().unwrap().is_empty());
+        } else {
+            assert!(
+                matches!(result, Err(NativeDbError::Conflict)),
+                "{label}: {result:?}"
+            );
+            assert_eq!(restore_database_effects(&inst.admin).await, before_db);
+            assert_eq!(restore_publication_graph(&inst.admin).await, before_graph);
+            assert_eq!(timer_graph(&inst.admin, owner).await, before_timer);
+            assert_eq!(
+                restore_storage_effects(&inst.storage_root()),
+                before_storage
+            );
+        }
+        let storage = inst.storage_root();
+        inst.pool.close().await;
+        inst.admin.close().await;
+        db.cleanup().await;
+        std::fs::remove_dir_all(storage).unwrap();
     }
     let storage = fx.storage_root();
     fx.pool.close().await;
