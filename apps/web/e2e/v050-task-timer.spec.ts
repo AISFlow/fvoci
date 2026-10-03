@@ -2566,8 +2566,12 @@ test("a late legacy release cannot clear a genuine successor release pending", a
 }, testInfo) => {
   const fixture = await ordinaryTimerTask(page, "TLEGSTALE", true);
   const entriesUrl = `/api/v1/workspaces/${fixture.workspaceId}/tasks/${fixture.task.id}/time-entries`;
-  const createLegacy = async (client: import("@playwright/test").Page, note: string) => {
-    const response = await client.request.post(entriesUrl, {
+  const createLegacy = async (
+    client: import("@playwright/test").Page,
+    note: string,
+    target = entriesUrl,
+  ) => {
+    const response = await client.request.post(target, {
       data: { startedAt: "2026-09-29T01:02:03.123Z", note },
     });
     expect(response.status(), await response.text()).toBe(201);
@@ -2712,6 +2716,35 @@ test("a late legacy release cannot clear a genuine successor release pending", a
         JSON.parse((await page.getByTestId("legacy-delivery-witness").textContent()) ?? "null"),
       );
   try {
+    // Releasing the global reservation preserves the old raw open entry and
+    // its immutable workspace-local unique index. Prepare the successor in
+    // another ordinary workspace instead of changing that historical row.
+    const setupEmail = "timer-legacy-successor-setup@example.com";
+    createE2eUser(setupEmail, credentials.password, "후속 작업 공간 준비", {
+      workspaceSlug: fixture.slug,
+      membershipRole: "member",
+    });
+    expect(
+      diagnosticSql(
+        `UPDATE fvoci.users SET is_instance_admin=true WHERE email='${setupEmail}' AND NOT is_instance_admin RETURNING id`,
+      ),
+    ).toMatch(/^[0-9a-f-]{36}$/);
+    const preparation = await context.newPage();
+    await login(preparation, setupEmail, credentials.password);
+    const nextWorkspaceResponse = await preparation.request.post("/api/v1/workspaces", {
+      data: { name: "후속 미종료 기록 검증", slug: "w5-legacy-successor" },
+    });
+    expect(nextWorkspaceResponse.status(), await nextWorkspaceResponse.text()).toBe(201);
+    const nextWorkspace = z.object({ id: z.string() }).parse(await nextWorkspaceResponse.json());
+    expect(nextWorkspace.id).not.toBe(fixture.workspaceId);
+    const invitation = await preparation.request.post(
+      `/api/v1/workspaces/${nextWorkspace.id}/invitations`,
+      { data: { email: fixture.email, role: "member" } },
+    );
+    expect(invitation.status(), await invitation.text()).toBe(201);
+    const acceptUrl = z.object({ acceptUrl: z.string() }).parse(await invitation.json()).acceptUrl;
+    const token = new URL(acceptUrl).pathname.split("/invite/")[1];
+    if (!token) throw new Error("successor workspace invitation token missing");
     await button.click();
     await first.commit;
     const fresh = await context.newPage();
@@ -2721,9 +2754,37 @@ test("a late legacy release cannot clear a genuine successor release pending", a
     );
     expect(freshActor.userId).toBe(fixture.actor.userId);
     expect(freshActor.sessionId).not.toBe(fixture.actor.sessionId);
-    const secondEntry = await createLegacy(fresh, "후속 미종료 기록 보존");
+    const accepted = await fresh.request.post(`/api/v1/invitations/${token}/accept`, {
+      data: { password: credentials.password },
+    });
+    expect(accepted.status(), await accepted.text()).toBe(200);
+    const acceptedActorResponse: unknown = await (
+      await fresh.request.get("/api/v1/auth/me")
+    ).json();
+    expect(identityShape.parse(acceptedActorResponse).userId).toBe(fixture.actor.userId);
+    z.object({ isInstanceAdmin: z.literal(false) }).parse(acceptedActorResponse);
+    const nextProjectResponse = await fresh.request.post(
+      `/api/v1/workspaces/${nextWorkspace.id}/projects`,
+      { data: { key: "TLEGNEXT", name: "일반 후속 작업", visibility: "workspace" } },
+    );
+    expect(nextProjectResponse.status(), await nextProjectResponse.text()).toBe(201);
+    const nextProject = z.object({ id: z.string() }).parse(await nextProjectResponse.json());
+    const nextTaskResponse = await fresh.request.post(
+      `/api/v1/workspaces/${nextWorkspace.id}/projects/${nextProject.id}/tasks`,
+      { data: { title: "다른 작업 공간의 실제 후속 미종료 기록" } },
+    );
+    expect(nextTaskResponse.status(), await nextTaskResponse.text()).toBe(201);
+    const nextTask = taskShape.parse(await nextTaskResponse.json());
+    const secondEntry = await createLegacy(
+      fresh,
+      "후속 미종료 기록 보존",
+      `/api/v1/workspaces/${nextWorkspace.id}/tasks/${nextTask.id}/time-entries`,
+    );
     expect(secondEntry).not.toBe(firstEntry);
     const secondRaw = rawEntry(secondEntry);
+    const successorTaskRaw = () =>
+      diagnosticSql(`SELECT to_jsonb(t) FROM fvoci.tasks t WHERE t.id='${nextTask.id}'`);
+    const originalSuccessorTask = successorTaskRaw();
     await page.bringToFront();
     await expect.poll(async () => (await observations()).canonical).toEqual([secondEntry]);
     await expect(button).toBeEnabled();
@@ -2765,6 +2826,7 @@ test("a late legacy release cannot clear a genuine successor release pending", a
     expect(timerDatabaseEffects(fixture.actor.userId, fixture.task.id)).toBe(beforeDelivery);
     expect(rawEntry(firstEntry)).toBe(firstRaw);
     expect(rawEntry(secondEntry)).toBe(secondRaw);
+    expect(successorTaskRaw()).toBe(originalSuccessorTask);
     await testInfo.attach("legacy-successor-pending-old-completion-native", {
       body: JSON.stringify({
         firstEntry,
@@ -2790,6 +2852,7 @@ test("a late legacy release cannot clear a genuine successor release pending", a
     ).toBe("2");
     expect(rawEntry(firstEntry)).toBe(firstRaw);
     expect(rawEntry(secondEntry)).toBe(secondRaw);
+    expect(successorTaskRaw()).toBe(originalSuccessorTask);
   } finally {
     for (const command of held) command.release();
     releaseOwner();
