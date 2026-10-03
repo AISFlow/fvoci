@@ -150,6 +150,48 @@ record!(CollectionItem {
     id: Uuid, collection_id: Uuid, document_id: Option<Uuid>, task_id: Option<Uuid>,
     version: i32, created_at: String, updated_at: String
 });
+// Person-made collection state (migration 028): fields, options, the one
+// value row of an item's field in its type's table, and collection views.
+record!(CollectionField {
+    id: Uuid, collection_id: Uuid, key: String, name: String, description: Option<String>,
+    r#type: String, sort_key: String, version: i32, deleted_at: Option<String>,
+    created_at: String, updated_at: String
+});
+record!(CollectionOption {
+    id: Uuid, collection_id: Uuid, field_id: Uuid, key: String, label: String,
+    sort_key: String, deleted_at: Option<String>
+});
+record!(CollectionValue {
+    collection_id: Uuid, item_id: Uuid, field_id: Uuid, field_type: String,
+    value_text: Option<String>, value_number: Option<String>, value_date: Option<String>,
+    value_ts: Option<String>, value_bool: Option<bool>
+});
+record!(CollectionChoice {
+    collection_id: Uuid,
+    item_id: Uuid,
+    field_id: Uuid,
+    field_type: String,
+    option_id: Uuid
+});
+record!(CollectionPerson {
+    collection_id: Uuid,
+    item_id: Uuid,
+    field_id: Uuid,
+    field_type: String,
+    user_id: Uuid
+});
+record!(CollectionView {
+    id: Uuid,
+    collection_id: Uuid,
+    owner_id: Uuid,
+    visibility: String,
+    name: String,
+    r#type: String,
+    config: Value,
+    version: i32,
+    created_at: String,
+    updated_at: String
+});
 // Owner-private Zotero mirror (migration 051), the five portable tables.
 // Only canonical columns travel: the connector's operational sync state is
 // reset on restore and its sealed credential (zotero_credentials) is never
@@ -248,6 +290,9 @@ record!(Graph {
     origins: Vec<Origin>, activity: Vec<Activity>, comments: Vec<Comment>,
     states: Vec<NativeState>, revisions: Vec<Revision>, attachments: Vec<Attachment>,
     collections: Vec<Collection>, collection_items: Vec<CollectionItem>,
+    collection_fields: Vec<CollectionField>, collection_options: Vec<CollectionOption>,
+    collection_values: Vec<CollectionValue>, collection_choices: Vec<CollectionChoice>,
+    collection_people: Vec<CollectionPerson>, collection_views: Vec<CollectionView>,
     zotero_connectors: Vec<ZoteroConnector>, zotero_references: Vec<ZoteroReference>,
     zotero_collections: Vec<ZoteroCollection>, zotero_memberships: Vec<ZoteroMembership>,
     zotero_links: Vec<ZoteroLink>, personal_input_commands: Vec<PersonalInputCommand>,
@@ -685,35 +730,7 @@ impl Archive {
                 return Err(ArchiveError::Invalid("missing creation activity".into()));
             }
         }
-        // Only the untouched trigger baseline is representable: exactly one
-        // live version-1 task collection named like the project, and exactly
-        // one version-1 item per captured task. Anything else is refused.
-        let [collection] = g.collections.as_slice() else {
-            return Err(ArchiveError::Unsupported("collections".into()));
-        };
-        validate_dates(collection)?;
-        if collection.project_id != Some(g.project.id)
-            || collection.kind != "task"
-            || collection.deleted_at.is_some()
-            || collection.version != 1
-            || collection.name != g.project.name
-            || g.collection_items.len() != tasks.len()
-        {
-            return Err(ArchiveError::Unsupported("collections".into()));
-        }
-        let mut item_tasks = BTreeSet::new();
-        for item in &g.collection_items {
-            validate_dates(item)?;
-            if item.collection_id != collection.id
-                || item.document_id.is_some()
-                || item.version != 1
-                || !item
-                    .task_id
-                    .is_some_and(|t| tasks.contains(&t) && item_tasks.insert(t))
-            {
-                return Err(ArchiveError::Unsupported("collections".into()));
-            }
-        }
+        validate_collections(g, &docs, &tasks, &statuses, &labels, &milestones)?;
         let mut expected = BTreeSet::new();
         let mut state_ids = BTreeSet::new();
         for s in &g.states {
@@ -914,22 +931,295 @@ fn restore_metadata_is_valid(r: &Revision, state_tail: Option<i64>) -> bool {
 
 /// 034/048 task time: rows of the single source actor on archived tasks, the
 /// tables' own CHECK/uniqueness rules, and every relation inside the archive.
+/// The project's collections (028): its one trigger-made task collection,
+/// with its real name/version (the project's name at creation; a later
+/// project rename does not change it), plus live document collections of the
+/// project. Every task is an item of the task collection; document items are
+/// archived project documents. Fields, options, values, choices, people and
+/// collection views follow the collection writers' rules (crate::collections
+/// limits and value shapes, one value row of an item's field in its type's
+/// table, at most one choice of a select and one person of a user field,
+/// canonical numbers and view configs). Person-scoped rows of another person
+/// are the typed "collection people" / "collection views" refusals; deleted
+/// or extra task collections the typed "collections" refusal. These are the
+/// current single-author slice, not product exclusions.
+fn validate_collections(
+    g: &Graph,
+    docs: &BTreeSet<Uuid>,
+    tasks: &BTreeSet<Uuid>,
+    statuses: &BTreeSet<Uuid>,
+    labels: &BTreeSet<Uuid>,
+    milestones: &BTreeSet<Uuid>,
+) -> Result<(), ArchiveError> {
+    use crate::collections::{FieldType, FIELDS_PER_COLLECTION_MAX, FIELD_DESCRIPTION_MAX};
+    let invalid = || ArchiveError::Invalid("collections".into());
+    let unsupported = || ArchiveError::Unsupported("collections".into());
+    let name_ok = |name: &str| {
+        crate::collections::parse_name(&Value::String(name.to_owned()))
+            .ok()
+            .as_deref()
+            == Some(name)
+    };
+    let mut kinds = BTreeMap::new();
+    for c in &g.collections {
+        validate_dates(c)?;
+        if c.project_id != Some(g.project.id) || c.deleted_at.is_some() {
+            return Err(unsupported());
+        }
+        // The task collection's name is the project's name at creation (the
+        // 028 trigger copies it): the project name contract; a document
+        // collection's name is the collection writer's.
+        let named = match c.kind.as_str() {
+            "task" => crate::projects::name_is_valid(&c.name),
+            _ => name_ok(&c.name),
+        };
+        if !matches!(c.kind.as_str(), "task" | "document")
+            || c.version < 1
+            || !named
+            || kinds.insert(c.id, c.kind.as_str()).is_some()
+        {
+            return Err(invalid());
+        }
+    }
+    if kinds.values().filter(|k| **k == "task").count() != 1 {
+        return Err(unsupported());
+    }
+    let mut items = BTreeMap::new();
+    let mut item_tasks = BTreeSet::new();
+    let mut item_docs = BTreeSet::new();
+    for item in &g.collection_items {
+        validate_dates(item)?;
+        let target_ok = match (
+            kinds.get(&item.collection_id),
+            item.document_id,
+            item.task_id,
+        ) {
+            (Some(&"task"), None, Some(t)) => tasks.contains(&t) && item_tasks.insert(t),
+            (Some(&"document"), Some(d), None) => {
+                docs.contains(&d)
+                    && g.documents
+                        .iter()
+                        .any(|x| x.id == d && x.project_id == Some(g.project.id))
+                    && item_docs.insert(d)
+            }
+            _ => false,
+        };
+        if !target_ok || item.version < 1 || items.insert(item.id, item.collection_id).is_some() {
+            return Err(invalid());
+        }
+    }
+    if item_tasks.len() != tasks.len() {
+        return Err(unsupported());
+    }
+    let mut fields = BTreeMap::new();
+    let mut keys = BTreeSet::new();
+    for f in &g.collection_fields {
+        validate_dates(f)?;
+        let field_type = FieldType::parse(&f.r#type).ok_or_else(invalid)?;
+        if !kinds.contains_key(&f.collection_id)
+            || !crate::collections::field_key_is_valid(&f.key)
+            || !keys.insert((f.collection_id, f.key.as_str()))
+            || !name_ok(&f.name)
+            || f.description
+                .as_ref()
+                .is_some_and(|d| d.encode_utf16().count() > FIELD_DESCRIPTION_MAX)
+            || f.sort_key.is_empty()
+            || f.version < 1
+            || fields.insert(f.id, (f.collection_id, field_type)).is_some()
+        {
+            return Err(invalid());
+        }
+    }
+    for id in kinds.keys() {
+        if fields.values().filter(|(c, _)| c == id).count() > FIELDS_PER_COLLECTION_MAX {
+            return Err(invalid());
+        }
+    }
+    // The field writers' catalog cap counts archived options too (a patch
+    // must list every existing option): a larger catalog is not current data
+    // and would leave the restored field uneditable.
+    for id in fields.keys() {
+        if g.collection_options
+            .iter()
+            .filter(|o| o.field_id == *id)
+            .count()
+            > crate::collections::PATCH_OPTIONS_MAX
+        {
+            return Err(invalid());
+        }
+    }
+    let mut options = BTreeMap::new();
+    let mut option_keys = BTreeSet::new();
+    for o in &g.collection_options {
+        validate_dates(o)?;
+        if !fields
+            .get(&o.field_id)
+            .is_some_and(|(c, t)| *c == o.collection_id && t.has_options())
+            || !option_keys.insert((o.field_id, o.key.as_str()))
+            || o.key.is_empty()
+            || !name_ok(&o.label)
+            || o.sort_key.is_empty()
+            || options.insert(o.id, o.field_id).is_some()
+        {
+            return Err(invalid());
+        }
+    }
+    // One (item, field) uses one table; the row's collection/type match.
+    let mut cells = BTreeMap::new();
+    let mut cell = |collection: Uuid, item: Uuid, field: Uuid, field_type: &str, table: u8| {
+        let Some((field_collection, declared)) = fields.get(&field) else {
+            return Err(invalid());
+        };
+        if *field_collection != collection
+            || items.get(&item) != Some(&collection)
+            || declared.as_str() != field_type
+        {
+            return Err(invalid());
+        }
+        match cells.insert((item, field), table) {
+            Some(previous) if previous != table => Err(invalid()),
+            _ => Ok(*declared),
+        }
+    };
+    let mut scalar_cells = BTreeSet::new();
+    for v in &g.collection_values {
+        let field_type = cell(v.collection_id, v.item_id, v.field_id, &v.field_type, 0)?;
+        let present = [
+            v.value_text.is_some(),
+            v.value_number.is_some(),
+            v.value_date.is_some(),
+            v.value_ts.is_some(),
+            v.value_bool.is_some(),
+        ];
+        let shape_ok = present.iter().filter(|p| **p).count() == 1
+            && match field_type {
+                FieldType::Text | FieldType::Paragraph => v.value_text.as_ref().is_some_and(|t| {
+                    t.encode_utf16().count() <= crate::collections::VALUE_TEXT_MAX
+                }),
+                // numeric::text as captured: a plain finite decimal.
+                FieldType::Number => v.value_number.as_ref().is_some_and(|n| {
+                    let digits = n.strip_prefix('-').unwrap_or(n);
+                    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, "0"));
+                    !whole.is_empty()
+                        && !fraction.is_empty()
+                        && whole
+                            .bytes()
+                            .chain(fraction.bytes())
+                            .all(|b| b.is_ascii_digit())
+                        && n.parse::<f64>().is_ok_and(f64::is_finite)
+                }),
+                FieldType::Date => v
+                    .value_date
+                    .as_deref()
+                    .is_some_and(|d| crate::tasks::parse_iso_date(d).is_some()),
+                FieldType::Datetime => v
+                    .value_ts
+                    .as_deref()
+                    .is_some_and(|d| chrono::DateTime::parse_from_rfc3339(d).is_ok()),
+                FieldType::Checkbox => v.value_bool.is_some(),
+                _ => false,
+            };
+        if !shape_ok || !scalar_cells.insert((v.item_id, v.field_id)) {
+            return Err(invalid());
+        }
+    }
+    let mut choices = BTreeMap::<(Uuid, Uuid), BTreeSet<Uuid>>::new();
+    for c in &g.collection_choices {
+        let field_type = cell(c.collection_id, c.item_id, c.field_id, &c.field_type, 1)?;
+        let chosen = choices.entry((c.item_id, c.field_id)).or_default();
+        if !field_type.has_options()
+            || options.get(&c.option_id) != Some(&c.field_id)
+            || !chosen.insert(c.option_id)
+            || (field_type == FieldType::Select && chosen.len() > 1)
+            || chosen.len() > crate::collections::VALUE_OPTIONS_MAX
+        {
+            return Err(invalid());
+        }
+    }
+    let mut people = BTreeMap::<(Uuid, Uuid), usize>::new();
+    for p in &g.collection_people {
+        let field_type = cell(p.collection_id, p.item_id, p.field_id, &p.field_type, 2)?;
+        if !field_type.is_people() {
+            return Err(invalid());
+        }
+        if p.user_id != g.source_actor_id {
+            return Err(ArchiveError::Unsupported("collection people".into()));
+        }
+        let count = people.entry((p.item_id, p.field_id)).or_default();
+        *count += 1;
+        if *count > 1 {
+            // Only the single source actor may appear, once per cell.
+            return Err(invalid());
+        }
+    }
+    let mut views = BTreeSet::new();
+    for v in &g.collection_views {
+        validate_dates(v)?;
+        if v.owner_id != g.source_actor_id {
+            return Err(ArchiveError::Unsupported("collection views".into()));
+        }
+        let config = crate::collections::parse_query_config(&v.config).map_err(|_| invalid())?;
+        // The writer checks group/date fields at write time; a later field
+        // deletion leaves the stored view as it is, so any deletion state.
+        let live = |id: Uuid, accept: &dyn Fn(FieldType) -> bool| {
+            g.collection_fields.iter().any(|f| {
+                f.id == id
+                    && f.collection_id == v.collection_id
+                    && FieldType::parse(&f.r#type).is_some_and(accept)
+            })
+        };
+        let task_collection = kinds.get(&v.collection_id) == Some(&"task");
+        let group_ok = match config.group_by {
+            None => true,
+            Some(crate::collections::GroupBy::Status) => task_collection,
+            Some(crate::collections::GroupBy::Field(id)) => live(id, &|t| t == FieldType::Select),
+        };
+        let date_ok = match config.date_by {
+            None => true,
+            Some(crate::collections::DateBy::Due | crate::collections::DateBy::Start) => {
+                task_collection
+            }
+            Some(crate::collections::DateBy::Field(id)) => {
+                live(id, &|t| matches!(t, FieldType::Date | FieldType::Datetime))
+            }
+        };
+        if !kinds.contains_key(&v.collection_id)
+            || !matches!(v.visibility.as_str(), "private" | "shared")
+            || crate::collections::CollectionViewType::parse(&v.r#type).is_none()
+            || !name_ok(&v.name)
+            || v.config.to_string().len() > 262_144
+            || config.to_json() != v.config
+            || v.version < 1
+            || !group_ok
+            || !date_ok
+            || !views.insert(v.id)
+        {
+            return Err(invalid());
+        }
+        check_view_query(
+            &config.query,
+            g,
+            statuses,
+            labels,
+            milestones,
+            Some(v.collection_id),
+            !task_collection,
+        )?;
+    }
+    Ok(())
+}
+
 /// Saved project views are owner-private: only the source actor's own views
 /// travel (another person's view is the typed "views" refusal). Each keeps
 /// the writer's shape: project, type, trimmed name, size, and the canonical
-/// config the writer stores (view_query_to_json of its parse). Filter
-/// references stay inside the archive: status, label and milestone are
-/// archived ones, the assignee is "me" or the source actor (remapped on
-/// restore); collection-field filters and sorts need the refused collection
-/// fields, and a reference to a deleted row has nothing to point at - both
-/// are the typed "view references" refusal.
+/// config the writer stores (view_query_to_json of its parse); its query is
+/// checked by check_view_query against the project's task collection.
 fn validate_views(
     g: &Graph,
     statuses: &BTreeSet<Uuid>,
     labels: &BTreeSet<Uuid>,
     milestones: &BTreeSet<Uuid>,
 ) -> Result<(), ArchiveError> {
-    use crate::tasks::list_query::{AssigneeFilter, SortField};
     let invalid = || ArchiveError::Invalid("views".into());
     let mut ids = BTreeSet::new();
     for v in &g.views {
@@ -951,33 +1241,188 @@ fn validate_views(
         {
             return Err(invalid());
         }
-        let f = &query.filters;
-        if f.status_id.is_some_and(|id| !statuses.contains(&id))
-            || f.label_id.is_some_and(|id| !labels.contains(&id))
-            || f.milestone_id.is_some_and(|id| !milestones.contains(&id))
-            || matches!(f.assignee_id, Some(AssigneeFilter::User(id)) if id != g.source_actor_id)
-            || !f.custom.is_empty()
-            || query
-                .sort
-                .iter()
-                .any(|s| matches!(s.field, SortField::Field(_)))
-        {
-            return Err(ArchiveError::Unsupported("view references".into()));
-        }
+        // A project view's custom fields are the project's task collection's.
+        let task_collection = g
+            .collections
+            .iter()
+            .find(|c| c.kind == "task")
+            .map(|c| c.id);
+        check_view_query(
+            &query,
+            g,
+            statuses,
+            labels,
+            milestones,
+            task_collection,
+            false,
+        )?;
     }
     Ok(())
 }
 
-/// The restored copy of a validated view config: an assignee filter naming
-/// the source actor names the destination actor.
-pub fn mapped_view_config(config: &Value, source: Uuid, destination: Uuid) -> Value {
-    let mut config = config.clone();
-    if let Some(assignee) = config.pointer_mut("/filters/assigneeId") {
-        if *assignee == Value::String(source.to_string()) {
-            *assignee = Value::String(destination.to_string());
+/// A stored view query as db::view_query::compile_view_query accepts it at
+/// write time. Writer shape (Invalid "view query"): no task-only filter or
+/// sort on a document collection; a custom equals value of the field type's
+/// form (option/people UUID text, number, checkbox bool, ISO date, RFC 3339
+/// datetime, text); field sorts only on scalar (value column) fields.
+/// References (typed "view references" when outside this archive): status,
+/// milestone and label of this project; assignee "me" or the source actor;
+/// custom fields and sort fields of the query's own collection - in any
+/// deletion state, since a later field/option deletion leaves stored views
+/// as they are; an option equals value an option of that field; a people
+/// equals value the source actor (remapped on restore).
+fn check_view_query(
+    query: &crate::tasks::list_query::ViewQuery,
+    g: &Graph,
+    statuses: &BTreeSet<Uuid>,
+    labels: &BTreeSet<Uuid>,
+    milestones: &BTreeSet<Uuid>,
+    collection: Option<Uuid>,
+    document_kind: bool,
+) -> Result<(), ArchiveError> {
+    use crate::collections::FieldType;
+    use crate::tasks::list_query::{AssigneeFilter, CustomOperator, CustomValue, SortField};
+    let invalid = || ArchiveError::Invalid("view query".into());
+    let outside = || ArchiveError::Unsupported("view references".into());
+    let f = &query.filters;
+    if document_kind
+        && (f.task_type.is_some()
+            || f.status_id.is_some()
+            || f.assignee_id.is_some()
+            || f.priority.is_some()
+            || f.label_id.is_some()
+            || f.milestone_id.is_some()
+            || f.open_only
+            || f.due_before.is_some()
+            || query.sort.iter().any(|s| {
+                matches!(
+                    s.field,
+                    SortField::Priority | SortField::Due | SortField::Status
+                )
+            }))
+    {
+        return Err(invalid());
+    }
+    let field_type = |id: Uuid| {
+        g.collection_fields
+            .iter()
+            .find(|f| f.id == id && Some(f.collection_id) == collection)
+            .and_then(|f| FieldType::parse(&f.r#type))
+    };
+    // db::view_query's parse_uuid_text: exactly the 36-character hyphenated
+    // form (either case); compact or braced spellings are not written.
+    let uuid_text = |raw: &str| {
+        (raw.len() == 36)
+            .then(|| Uuid::parse_str(raw).ok())
+            .flatten()
+            .ok_or_else(invalid)
+    };
+    for c in &f.custom {
+        let kind = field_type(c.field_id).ok_or_else(outside)?;
+        match (&c.operator, kind) {
+            (CustomOperator::Empty, _) => {}
+            (CustomOperator::Equals(CustomValue::Text(raw)), k) if k.has_options() => {
+                let option = uuid_text(raw)?;
+                if !g
+                    .collection_options
+                    .iter()
+                    .any(|o| o.id == option && o.field_id == c.field_id)
+                {
+                    return Err(outside());
+                }
+            }
+            (CustomOperator::Equals(CustomValue::Text(raw)), k) if k.is_people() => {
+                if uuid_text(raw)? != g.source_actor_id {
+                    return Err(outside());
+                }
+            }
+            (CustomOperator::Equals(CustomValue::Number(_)), FieldType::Number)
+            | (CustomOperator::Equals(CustomValue::Bool(_)), FieldType::Checkbox) => {}
+            (CustomOperator::Equals(CustomValue::Text(raw)), FieldType::Date)
+                if crate::tasks::parse_iso_date(raw).is_some() => {}
+            (CustomOperator::Equals(CustomValue::Text(raw)), FieldType::Datetime)
+                if crate::tasks::parse_iso_datetime(raw).is_some() => {}
+            (
+                CustomOperator::Equals(CustomValue::Text(_)),
+                FieldType::Text | FieldType::Paragraph,
+            ) => {}
+            _ => return Err(invalid()),
         }
     }
-    config
+    for s in &query.sort {
+        if let SortField::Field(id) = s.field {
+            let kind = field_type(id).ok_or_else(outside)?;
+            if crate::db::view_query::value_column(kind.as_str()).is_none() {
+                return Err(invalid());
+            }
+        }
+    }
+    if f.status_id.is_some_and(|id| !statuses.contains(&id))
+        || f.label_id.is_some_and(|id| !labels.contains(&id))
+        || f.milestone_id.is_some_and(|id| !milestones.contains(&id))
+        || matches!(f.assignee_id, Some(AssigneeFilter::User(id)) if id != g.source_actor_id)
+    {
+        return Err(outside());
+    }
+    Ok(())
+}
+
+/// The restored copy of a validated view query: the assignee filter naming
+/// the source actor and a people-field custom value whose UUID (any spelling
+/// the writer accepted) is the source actor name the destination actor.
+/// Text, option and every other value stay byte-for-byte as stored.
+fn mapped_view_query(
+    query: &crate::tasks::list_query::ViewQuery,
+    people: &dyn Fn(Uuid) -> bool,
+    source: Uuid,
+    destination: Uuid,
+) -> crate::tasks::list_query::ViewQuery {
+    use crate::tasks::list_query::{AssigneeFilter, CustomOperator, CustomValue};
+    let mut query = query.clone();
+    if query.filters.assignee_id == Some(AssigneeFilter::User(source)) {
+        query.filters.assignee_id = Some(AssigneeFilter::User(destination));
+    }
+    for c in &mut query.filters.custom {
+        if !people(c.field_id) {
+            continue;
+        }
+        if let CustomOperator::Equals(CustomValue::Text(raw)) = &mut c.operator {
+            if Uuid::parse_str(raw).is_ok_and(|id| id == source) {
+                *raw = destination.to_string();
+            }
+        }
+    }
+    query
+}
+
+/// A project view config (a view query) as restored; see mapped_view_query.
+pub fn mapped_project_view_config(
+    config: &Value,
+    people: &dyn Fn(Uuid) -> bool,
+    source: Uuid,
+    destination: Uuid,
+) -> Value {
+    use crate::tasks::list_query::{parse_view_query_value, view_query_to_json};
+    match parse_view_query_value(config) {
+        Ok(query) => view_query_to_json(&mapped_view_query(&query, people, source, destination)),
+        Err(_) => config.clone(),
+    }
+}
+
+/// A collection view config ({query, groupBy, dateBy}) as restored.
+pub fn mapped_collection_view_config(
+    config: &Value,
+    people: &dyn Fn(Uuid) -> bool,
+    source: Uuid,
+    destination: Uuid,
+) -> Value {
+    match crate::collections::parse_query_config(config) {
+        Ok(mut parsed) => {
+            parsed.query = mapped_view_query(&parsed.query, people, source, destination);
+            parsed.to_json()
+        }
+        Err(_) => config.clone(),
+    }
 }
 
 /// Task dependencies stay inside the archived tasks with the writer's rules:
@@ -1987,7 +2432,7 @@ pub(crate) mod tests {
         let at = "2026-10-02T00:00:00Z";
         let body = json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":"literal-anchor"},"content":[{"type":"text","text":"한글 🧪","marks":[{"type":"bold"}]}]}]});
         let state = |kind: &str, id: &str| json!({"target_kind":kind,"target_id":id,"state_entry":format!("native/{kind}/{id}/state.v1"),"encoding":1,"snapshot_cutoff_seq":0,"tail_seq":0,"compacted_at":null,"created_at":at,"updated_at":at,"updates":[],"receipts":[]});
-        let graph=serde_json::from_value(json!({
+        let mut graph = json!({
             "source_workspace_id":"30000000-0000-4000-8000-000000000001","source_actor_id":actor,"captured_at":at,
             "project":{"id":project,"key":"ARCH","name":"원본 프로젝트 🧪","description":null,"icon":null,"visibility":"private","root_document_id":doc,"status":"active","next_number":3,"created_by":actor,"created_at":at,"updated_at":at,"deleted_at":null},
             "workflows":[{"id":workflow,"project_id":project,"created_at":at,"updated_at":at}],
@@ -2009,11 +2454,36 @@ pub(crate) mod tests {
                     {"field":"statusId","from":{"id":status,"label":"진행 전"},"to":{"id":status,"label":null}}],"created_at":at}],
             "states":[state("document",doc),state("task",task)],"revisions":[],"attachments":[],
             "collections":[{"id":"10000000-0000-4000-8000-000000000007","project_id":project,"kind":"task","name":"원본 프로젝트 🧪","version":1,"deleted_at":null,"created_at":at,"updated_at":at}],
-            "collection_items":[{"id":"10000000-0000-4000-8000-000000000008","collection_id":"10000000-0000-4000-8000-000000000007","document_id":null,"task_id":task,"version":1,"created_at":at,"updated_at":at}],
-            "zotero_connectors":[],"zotero_references":[],"zotero_collections":[],"zotero_memberships":[],"zotero_links":[],
-            "personal_input_commands":[],"time_entries":[],"timer_runs":[],"timer_segments":[],
-            "timer_legacy_open":[],"timer_commands":[],"timer_audit":[],"milestones":[],"dependencies":[],"views":[]
-        })).unwrap();
+            "collection_items":[{"id":"10000000-0000-4000-8000-000000000008","collection_id":"10000000-0000-4000-8000-000000000007","document_id":null,"task_id":task,"version":1,"created_at":at,"updated_at":at}]
+        });
+        // Empty model arrays outside the literal (one json! of the whole graph
+        // exceeds the macro recursion limit).
+        for key in [
+            "zotero_connectors",
+            "zotero_references",
+            "zotero_collections",
+            "zotero_memberships",
+            "zotero_links",
+            "personal_input_commands",
+            "time_entries",
+            "timer_runs",
+            "timer_segments",
+            "timer_legacy_open",
+            "timer_commands",
+            "timer_audit",
+            "milestones",
+            "dependencies",
+            "views",
+            "collection_fields",
+            "collection_options",
+            "collection_values",
+            "collection_choices",
+            "collection_people",
+            "collection_views",
+        ] {
+            graph[key] = json!([]);
+        }
+        let graph = serde_json::from_value(graph).unwrap();
         let entries = [
             (format!("native/document/{doc}/state.v1"), encode(&[0, 0])),
             (format!("native/task/{task}/state.v1"), encode(&[0, 0])),
@@ -2966,6 +3436,343 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn native_archive_policy_collections_follow_the_writers() {
+        let id = |n: u128| Uuid::from_u128(0x7600_0000_0000_4000_8000_0000_0000_0000 + n);
+        let fixture = || {
+            let mut archive = policy_fixture();
+            let g = &mut archive.graph;
+            let (actor, collection, item) = (
+                g.source_actor_id,
+                g.collections[0].id,
+                g.collection_items[0].id,
+            );
+            let at = "2026-10-02T00:00:00Z";
+            let field = |n: u128, key: &str, kind: &str| {
+                json!({"id":id(n),"collection_id":collection,"key":key,
+                "name":format!("필드 {n}"),"description":null,"type":kind,"sort_key":format!("{n:03}"),"version":1,
+                "deleted_at":null,"created_at":at,"updated_at":at})
+            };
+            // A project rename: the collection keeps its original name.
+            g.collections[0].name = "처음 이름".into();
+            g.collections[0].version = 1;
+            g.collection_items[0].version = 4;
+            g.collection_fields = serde_json::from_value(json!([
+                field(1, "stage", "select"),
+                field(2, "score", "number"),
+                field(3, "owner", "user"),
+                field(4, "memo", "paragraph"),
+                field(5, "due_on", "date")
+            ]))
+            .unwrap();
+            g.collection_options = serde_json::from_value(json!([
+                {"id":id(11),"collection_id":collection,"field_id":id(1),"key":"o_1","label":"준비","sort_key":"000","deleted_at":null},
+                {"id":id(12),"collection_id":collection,"field_id":id(1),"key":"o_2","label":"보관됨","sort_key":"001","deleted_at":at}])).unwrap();
+            g.collection_values = serde_json::from_value(json!([
+                {"collection_id":collection,"item_id":item,"field_id":id(2),"field_type":"number","value_text":null,"value_number":"1.5","value_date":null,"value_ts":null,"value_bool":null},
+                {"collection_id":collection,"item_id":item,"field_id":id(4),"field_type":"paragraph","value_text":"메모 🧪","value_number":null,"value_date":null,"value_ts":null,"value_bool":null}])).unwrap();
+            // An archived option may stay chosen.
+            g.collection_choices = serde_json::from_value(json!([{"collection_id":collection,"item_id":item,"field_id":id(1),"field_type":"select","option_id":id(12)}])).unwrap();
+            g.collection_people = serde_json::from_value(json!([{"collection_id":collection,"item_id":item,"field_id":id(3),"field_type":"user","user_id":actor}])).unwrap();
+            g.collection_views = serde_json::from_value(json!([{"id":id(21),"collection_id":collection,"owner_id":actor,"visibility":"shared",
+                "name":"보드","type":"board","config":{"query":{"filters":{},"sort":[]},"groupBy":id(1).to_string(),"dateBy":id(5).to_string()},
+                "version":2,"created_at":at,"updated_at":at}])).unwrap();
+            archive
+        };
+        fixture().validate().unwrap();
+        let fails = |edit: fn(&mut Archive)| {
+            let mut archive = fixture();
+            edit(&mut archive);
+            archive.validate().err()
+        };
+        let invalid =
+            |edit: fn(&mut Archive)| matches!(fails(edit), Some(ArchiveError::Invalid(_)));
+        let unsupported = |edit: fn(&mut Archive), reason: &str| matches!(fails(edit), Some(ArchiveError::Unsupported(m)) if m == reason);
+        // Collections: deleted / missing task collection refused typed.
+        assert!(unsupported(
+            |a| a.graph.collections[0].deleted_at = Some("2026-10-02T00:00:00Z".into()),
+            "collections"
+        ));
+        assert!(unsupported(
+            |a| a.graph.collections[0].kind = "document".into(),
+            "collections"
+        ));
+        // The task collection keeps the project name contract (trim only to
+        // check): a leading space is a valid raw name, a blank one is not.
+        let mut archive = fixture();
+        archive.graph.collections[0].name = " 이름".into();
+        archive.validate().unwrap();
+        assert!(invalid(|a| a.graph.collections[0].name = "   ".into()));
+        assert!(invalid(|a| a.graph.collection_items[0].version = 0));
+        // Fields: key, name, description, type, unique key, collection.
+        assert!(invalid(
+            |a| a.graph.collection_fields[0].key = "Stage".into()
+        ));
+        assert!(invalid(
+            |a| a.graph.collection_fields[1].key = "stage".into()
+        ));
+        assert!(invalid(
+            |a| a.graph.collection_fields[0].name = String::new()
+        ));
+        assert!(invalid(
+            |a| a.graph.collection_fields[0].description = Some("가".repeat(2001))
+        ));
+        assert!(invalid(
+            |a| a.graph.collection_fields[0].r#type = "formula".into()
+        ));
+        assert!(invalid(
+            |a| a.graph.collection_fields[0].collection_id = Uuid::nil()
+        ));
+        // Options only on choice fields, unique key.
+        assert!(invalid(|a| a.graph.collection_options[0].field_id =
+            Uuid::from_u128(0x7600_0000_0000_4000_8000_0000_0000_0002)));
+        assert!(invalid(|a| a.graph.collection_options[1].key = "o_1".into()));
+        // Values: type/table match, canonical number, one row per cell.
+        assert!(invalid(
+            |a| a.graph.collection_values[0].value_number = Some("1e3".into())
+        ));
+        assert!(invalid(
+            |a| a.graph.collection_values[0].value_number = Some(".5".into())
+        ));
+        assert!(invalid(
+            |a| a.graph.collection_values[0].value_number = Some("NaN".into())
+        ));
+        assert!(invalid(
+            |a| a.graph.collection_values[0].field_type = "text".into()
+        ));
+        assert!(invalid(
+            |a| a.graph.collection_values[1].value_text = Some("x".repeat(10_001))
+        ));
+        assert!(invalid(|a| {
+            a.graph.collection_values[0].value_bool = Some(true);
+        }));
+        assert!(invalid(|a| {
+            let copy = a.graph.collection_values[0].clone();
+            a.graph.collection_values.push(copy);
+        }));
+        assert!(invalid(
+            |a| a.graph.collection_values[0].item_id = Uuid::nil()
+        ));
+        // Choices: an option of the field, at most one for select.
+        assert!(invalid(
+            |a| a.graph.collection_choices[0].option_id = Uuid::nil()
+        ));
+        assert!(invalid(|a| {
+            let mut second = a.graph.collection_choices[0].clone();
+            second.option_id = Uuid::from_u128(0x7600_0000_0000_4000_8000_0000_0000_000b);
+            a.graph.collection_choices.push(second);
+        }));
+        // A cell uses one table only.
+        assert!(invalid(|a| {
+            let mut choice = a.graph.collection_choices[0].clone();
+            choice.field_id = Uuid::from_u128(0x7600_0000_0000_4000_8000_0000_0000_0002);
+            choice.field_type = "number".into();
+            a.graph.collection_choices.push(choice);
+        }));
+        // People: the source actor only (typed), on people fields.
+        assert!(unsupported(
+            |a| a.graph.collection_people[0].user_id = Uuid::nil(),
+            "collection people"
+        ));
+        assert!(invalid(
+            |a| a.graph.collection_people[0].field_type = "select".into()
+        ));
+        // Views: owner (typed), visibility, type, canonical config, live fields.
+        assert!(unsupported(
+            |a| a.graph.collection_views[0].owner_id = Uuid::nil(),
+            "collection views"
+        ));
+        assert!(invalid(
+            |a| a.graph.collection_views[0].visibility = "public".into()
+        ));
+        assert!(invalid(
+            |a| a.graph.collection_views[0].r#type = "list".into()
+        ));
+        assert!(invalid(
+            |a| a.graph.collection_views[0].config["extra"] = json!(1)
+        ));
+        assert!(invalid(
+            |a| a.graph.collection_views[0].config["groupBy"] =
+                json!(Uuid::from_u128(0x7600_0000_0000_4000_8000_0000_0000_0002).to_string())
+        ));
+        assert!(unsupported(
+            |a| a.graph.collection_views[0].config["query"]["filters"]["statusId"] =
+                json!(Uuid::nil().to_string()),
+            "view references"
+        ));
+        // Option catalog cap (PATCH_OPTIONS_MAX, archived options included).
+        let with_options = |total: u128| {
+            let mut archive = fixture();
+            let template = archive.graph.collection_options[1].clone();
+            for n in 2..total {
+                let mut option = template.clone();
+                (option.id, option.key) = (id(1000 + n), format!("o_{}", n + 1));
+                archive.graph.collection_options.push(option);
+            }
+            archive.validate()
+        };
+        with_options(200).unwrap();
+        assert!(matches!(with_options(201), Err(ArchiveError::Invalid(_))));
+        // Names: the task collection follows the project name contract (200
+        // chars, the 028 trigger copies the project's name), not the 100
+        // UTF-16 collection writer limit.
+        let mut archive = fixture();
+        archive.graph.collections[0].name = "가".repeat(101);
+        archive.validate().unwrap();
+        assert!(invalid(|a| a.graph.collections[0].name = "가".repeat(201)));
+        // UTF-16 limits (the writer's limited_string): astral characters
+        // count twice.
+        let mut archive = fixture();
+        archive.graph.collection_values[1].value_text = Some("😀".repeat(5000));
+        archive.graph.collection_fields[0].description = Some("😀".repeat(1000));
+        archive.validate().unwrap();
+        assert!(invalid(
+            |a| a.graph.collection_values[1].value_text = Some("😀".repeat(5001))
+        ));
+        assert!(invalid(
+            |a| a.graph.collection_fields[0].description = Some("😀".repeat(1001))
+        ));
+        // A numeric text with a scale the writer did not choose is still a
+        // plain finite decimal.
+        let mut archive = fixture();
+        archive.graph.collection_values[0].value_number = Some("-1.50".into());
+        archive.validate().unwrap();
+        // A view whose date field was deleted later stays valid as stored.
+        let mut archive = fixture();
+        archive.graph.collection_fields[4].deleted_at = Some("2026-10-02T00:00:00Z".into());
+        archive.validate().unwrap();
+        // Query references: custom option/people values and field sorts on
+        // this collection's fields (an archived option included), the source
+        // actor (remapped); outside ones are typed refusals.
+        let with_query = |filters: Value, sort: Value| {
+            let mut archive = fixture();
+            archive.graph.collection_views[0].config["query"] =
+                json!({"filters":filters,"sort":sort});
+            archive.validate()
+        };
+        let stage = id(1).to_string();
+        let archived_option = id(12).to_string();
+        let owner = id(3).to_string();
+        let actor = fixture().graph.source_actor_id.to_string();
+        with_query(
+            json!({"custom":[{"fieldId":stage,"operator":"equals","value":archived_option},{"fieldId":owner,"operator":"equals","value":actor}]}),
+            json!([{"field":id(2).to_string(),"direction":"desc"}]),
+        )
+        .unwrap();
+        for (filters, sort) in [
+            (
+                json!({"custom":[{"fieldId":stage,"operator":"equals","value":Uuid::nil().to_string()}]}),
+                json!([]),
+            ),
+            (
+                json!({"custom":[{"fieldId":owner,"operator":"equals","value":Uuid::nil().to_string()}]}),
+                json!([]),
+            ),
+            (
+                json!({"custom":[{"fieldId":Uuid::nil().to_string(),"operator":"empty"}]}),
+                json!([]),
+            ),
+            (
+                json!({}),
+                json!([{"field":Uuid::nil().to_string(),"direction":"asc"}]),
+            ),
+        ] {
+            assert!(
+                matches!(with_query(filters.clone(), sort.clone()), Err(ArchiveError::Unsupported(m)) if m == "view references"),
+                "{filters} {sort}"
+            );
+        }
+        // Typed mapping: the assignee and a people value (also in the
+        // uppercase spelling the writer accepts) are remapped; a text field
+        // whose literal text is the source id, and an option value, are not.
+        let memo = id(4).to_string();
+        let upper = actor.to_uppercase();
+        let config = json!({"query":{"filters":{"assigneeId":actor,"custom":[
+            {"fieldId":owner,"operator":"equals","value":upper},
+            {"fieldId":memo,"operator":"equals","value":actor},
+            {"fieldId":stage,"operator":"equals","value":archived_option}]},"sort":[]},"groupBy":null,"dateBy":null});
+        let mut archive = fixture();
+        archive.graph.collection_views[0].config = config.clone();
+        archive.validate().unwrap();
+        let people = |field: Uuid| field == id(3);
+        let destination = Uuid::from_u128(42).to_string();
+        let mapped = mapped_collection_view_config(
+            &config,
+            &people,
+            fixture().graph.source_actor_id,
+            Uuid::from_u128(42),
+        );
+        assert_eq!(mapped["query"]["filters"]["assigneeId"], json!(destination));
+        assert_eq!(
+            mapped["query"]["filters"]["custom"][0]["value"],
+            json!(destination)
+        );
+        assert_eq!(
+            mapped["query"]["filters"]["custom"][1]["value"],
+            json!(actor)
+        );
+        assert_eq!(
+            mapped["query"]["filters"]["custom"][2]["value"],
+            json!(archived_option)
+        );
+        // Option/people values use the writer's 36-character UUID text only.
+        let compact_option = archived_option.replace('-', "");
+        let compact_actor = actor.replace('-', "");
+        for filters in [
+            json!({"custom":[{"fieldId":stage,"operator":"equals","value":compact_option}]}),
+            json!({"custom":[{"fieldId":owner,"operator":"equals","value":compact_actor}]}),
+            json!({"custom":[{"fieldId":owner,"operator":"equals","value":format!("{{{actor}}}")}]}),
+        ] {
+            assert!(
+                matches!(
+                    with_query(filters.clone(), json!([])),
+                    Err(ArchiveError::Invalid(_))
+                ),
+                "{filters}"
+            );
+        }
+        // Writer shapes: a number field equals text, a sort on an option
+        // field, a task filter on a document collection are Invalid.
+        for (filters, sort) in [
+            (
+                json!({"custom":[{"fieldId":id(2).to_string(),"operator":"equals","value":"1.5"}]}),
+                json!([]),
+            ),
+            (
+                json!({"custom":[{"fieldId":id(5).to_string(),"operator":"equals","value":3}]}),
+                json!([]),
+            ),
+            (
+                json!({"custom":[{"fieldId":stage,"operator":"equals","value":"not-a-uuid"}]}),
+                json!([]),
+            ),
+            (json!({}), json!([{"field":stage,"direction":"asc"}])),
+        ] {
+            assert!(
+                matches!(
+                    with_query(filters.clone(), sort.clone()),
+                    Err(ArchiveError::Invalid(_))
+                ),
+                "{filters} {sort}"
+            );
+        }
+        let mut documents = fixture();
+        let mut collection = documents.graph.collections[0].clone();
+        (collection.id, collection.kind, collection.name) =
+            (id(31), "document".into(), "자료".into());
+        documents.graph.collections.push(collection);
+        let mut view = documents.graph.collection_views[0].clone();
+        (view.id, view.collection_id, view.r#type) = (id(32), id(31), "table".into());
+        view.config =
+            json!({"query":{"filters":{"openOnly":true},"sort":[]},"groupBy":null,"dateBy":null});
+        documents.graph.collection_views.push(view);
+        assert!(matches!(documents.validate(), Err(ArchiveError::Invalid(m)) if m == "view query"));
+        // A soft-deleted field keeps its values (history), when no view uses it.
+        let mut archive = fixture();
+        archive.graph.collection_fields[1].deleted_at = Some("2026-10-02T00:00:00Z".into());
+        archive.validate().unwrap();
+    }
+
+    #[test]
     fn native_archive_policy_saved_views_stay_owner_private_and_in_closure() {
         let fixture = || {
             let mut archive = policy_fixture();
@@ -3043,12 +3850,19 @@ pub(crate) mod tests {
         archive.validate().unwrap();
         let (source, destination) = (archive.graph.source_actor_id, Uuid::from_u128(42));
         let config = fixture().graph.views[0].config.clone();
+        let no_people = |_: Uuid| false;
         assert_eq!(
-            mapped_view_config(&config, source, destination)["filters"]["assigneeId"],
+            mapped_project_view_config(&config, &no_people, source, destination)["filters"]
+                ["assigneeId"],
             json!(destination.to_string())
         );
         assert_eq!(
-            mapped_view_config(&archive.graph.views[0].config, source, destination),
+            mapped_project_view_config(
+                &archive.graph.views[0].config,
+                &no_people,
+                source,
+                destination
+            ),
             archive.graph.views[0].config
         );
     }

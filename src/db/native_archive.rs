@@ -208,6 +208,9 @@ struct Scope {
     workspace: Uuid,
     actor: Uuid,
     connectors: Vec<Uuid>,
+    /// Graph JSON bytes admitted so far by `rows`, across every graph array:
+    /// the 16 MiB graph budget is cumulative and charged before each fetch.
+    graph_bytes: std::sync::atomic::AtomicI64,
 }
 
 /// Selected documents: the project's, plus the Zotero wiki closure.
@@ -246,9 +249,16 @@ async fn rows<T: DeserializeOwned>(
     .bind(&scope.connectors)
     .fetch_one(&mut **tx)
     .await?;
-    if count > MAX_ENTRIES as i64 || bytes > MAX_GRAPH_BYTES as i64 {
+    let admitted = scope
+        .graph_bytes
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .saturating_add(bytes);
+    if count > MAX_ENTRIES as i64 || bytes < 0 || admitted > MAX_GRAPH_BYTES as i64 {
         return Err(ArchiveError::Limit.into());
     }
+    scope
+        .graph_bytes
+        .store(admitted, std::sync::atomic::Ordering::Relaxed);
     let values: Vec<Value> = sqlx::query_scalar(sql)
         .bind(scope.project)
         .bind(&scope.wiki)
@@ -286,6 +296,7 @@ pub async fn capture(
         workspace,
         actor,
         connectors: selection.zotero_connectors.to_vec(),
+        graph_bytes: std::sync::atomic::AtomicI64::new(0),
     };
     scope.wiki = wiki_closure(&mut tx, &scope).await?;
     capture_payload_budget(&mut tx, &scope).await?;
@@ -312,6 +323,15 @@ pub async fn capture(
     let activity = rows(&mut tx, "SELECT to_jsonb(a)-'workspace_id' FROM fvoci.task_activity a JOIN fvoci.tasks t ON t.id=a.task_id WHERE t.project_id=$1 ORDER BY a.id LIMIT 10001", &scope).await?;
     let collections = rows(&mut tx, "SELECT to_jsonb(c)-'workspace_id' FROM fvoci.collections c WHERE c.project_id=$1 ORDER BY c.id LIMIT 10001", &scope).await?;
     let collection_items = rows(&mut tx, "SELECT to_jsonb(i)-'workspace_id' FROM fvoci.collection_items i JOIN fvoci.collections c ON c.id=i.collection_id WHERE c.project_id=$1 ORDER BY i.id LIMIT 10001", &scope).await?;
+    // Person-made collection state of the project's collections; numbers as
+    // their exact numeric text. Person-scoped rows of another person are read
+    // so validation refuses them, never leaves them behind.
+    let collection_fields = rows(&mut tx, "SELECT to_jsonb(f)-'workspace_id' FROM fvoci.collection_fields f WHERE f.collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1) ORDER BY f.id LIMIT 10001", &scope).await?;
+    let collection_options = rows(&mut tx, "SELECT to_jsonb(o)-'workspace_id' FROM fvoci.collection_options o WHERE o.collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1) ORDER BY o.id LIMIT 10001", &scope).await?;
+    let collection_values = rows(&mut tx, "SELECT (to_jsonb(v)-'workspace_id'-'value_number')||jsonb_build_object('value_number',v.value_number::text) FROM fvoci.collection_values v WHERE v.collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1) ORDER BY v.item_id,v.field_id LIMIT 10001", &scope).await?;
+    let collection_choices = rows(&mut tx, "SELECT to_jsonb(x)-'workspace_id' FROM fvoci.collection_choices x WHERE x.collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1) ORDER BY x.item_id,x.field_id,x.option_id LIMIT 10001", &scope).await?;
+    let collection_people = rows(&mut tx, "SELECT to_jsonb(x)-'workspace_id' FROM fvoci.collection_people x WHERE x.collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1) ORDER BY x.item_id,x.field_id,x.user_id LIMIT 10001", &scope).await?;
+    let collection_views = rows(&mut tx, "SELECT to_jsonb(v)-'workspace_id' FROM fvoci.collection_views v WHERE v.collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1) ORDER BY v.id LIMIT 10001", &scope).await?;
     let mut entries = BTreeMap::new();
     let mut states = Vec::new();
     for (kind, table, parent) in [
@@ -498,6 +518,12 @@ pub async fn capture(
                 attachments,
                 collections,
                 collection_items,
+                collection_fields,
+                collection_options,
+                collection_values,
+                collection_choices,
+                collection_people,
+                collection_views,
                 zotero_connectors,
                 zotero_references,
                 zotero_collections,
@@ -630,21 +656,18 @@ async fn reject_unsupported(
                 OR (v.target_kind='task' AND v.target_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1) AND NOT EXISTS(SELECT 1 FROM fvoci.task_states s WHERE s.task_id=v.target_id))))"),
         ("document tags", "SELECT EXISTS(SELECT 1 FROM fvoci.document_tag_assignments WHERE document_id IN {DOCS})"),
         // Migration028 triggers give every project one task collection and every
-        // task one item of it. That baseline is captured as typed records with
-        // its original IDs/timestamps and reconciled into the destination's
-        // trigger rows on publish. Anything a person added or changed is not
-        // yet serialized and stays an explicit refusal.
+        // task one item of it; person-made fields/values/views of the
+        // project's collections are typed records. Still refused here: a
+        // deleted or missing/extra task collection, an item whose target is
+        // outside the project, or a collection outside the project (a
+        // workspace collection) holding an archived document or task.
         ("collections", "SELECT (SELECT count(*) FROM fvoci.collections WHERE project_id=$1 AND kind='task') <> 1
-            OR EXISTS(SELECT 1 FROM fvoci.collections c WHERE c.project_id=$1 AND (c.kind <> 'task' OR c.deleted_at IS NOT NULL OR c.version <> 1 OR c.name IS DISTINCT FROM (SELECT name FROM fvoci.projects WHERE id=$1)))
-            OR EXISTS(SELECT 1 FROM fvoci.collection_items i JOIN fvoci.collections c ON c.id=i.collection_id WHERE c.project_id=$1 AND (i.task_id IS NULL OR i.version <> 1 OR NOT EXISTS(SELECT 1 FROM fvoci.tasks t WHERE t.id=i.task_id AND t.project_id=$1)))
-            OR (SELECT count(*) FROM fvoci.collection_items i JOIN fvoci.collections c ON c.id=i.collection_id WHERE c.project_id=$1) <> (SELECT count(*) FROM fvoci.tasks WHERE project_id=$1)
-            OR EXISTS(SELECT 1 FROM fvoci.collection_items i JOIN fvoci.collections c ON c.id=i.collection_id WHERE (c.project_id IS DISTINCT FROM $1) AND (i.document_id IN {DOCS} OR i.task_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1)))
-            OR EXISTS(SELECT 1 FROM fvoci.collection_fields WHERE collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1))
-            OR EXISTS(SELECT 1 FROM fvoci.collection_options WHERE collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1))
-            OR EXISTS(SELECT 1 FROM fvoci.collection_values WHERE collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1))
-            OR EXISTS(SELECT 1 FROM fvoci.collection_choices WHERE collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1))
-            OR EXISTS(SELECT 1 FROM fvoci.collection_people WHERE collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1))
-            OR EXISTS(SELECT 1 FROM fvoci.collection_views WHERE collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1))"),
+            OR EXISTS(SELECT 1 FROM fvoci.collections c WHERE c.project_id=$1 AND c.deleted_at IS NOT NULL)
+            OR EXISTS(SELECT 1 FROM fvoci.collection_items i JOIN fvoci.collections c ON c.id=i.collection_id WHERE c.project_id=$1 AND NOT (
+                (i.task_id IS NOT NULL AND EXISTS(SELECT 1 FROM fvoci.tasks t WHERE t.id=i.task_id AND t.project_id=$1))
+                OR (i.document_id IS NOT NULL AND i.document_id IN {DOCS} AND EXISTS(SELECT 1 FROM fvoci.documents d WHERE d.id=i.document_id AND d.project_id=$1))))
+            OR (SELECT count(*) FROM fvoci.collection_items i JOIN fvoci.collections c ON c.id=i.collection_id WHERE c.project_id=$1 AND i.task_id IS NOT NULL) <> (SELECT count(*) FROM fvoci.tasks WHERE project_id=$1)
+            OR EXISTS(SELECT 1 FROM fvoci.collection_items i JOIN fvoci.collections c ON c.id=i.collection_id WHERE (c.project_id IS DISTINCT FROM $1) AND (i.document_id IN {DOCS} OR i.task_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1)))"),
         // Receipts touching the selection travel retired; one by another actor
         // or with any target outside the selection cannot.
         ("personal input commands", "SELECT EXISTS(SELECT 1 FROM fvoci.personal_input_commands WHERE (project_id=$1 OR document_id IN {DOCS} OR task_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1))
@@ -1181,7 +1204,7 @@ pub async fn publish(
     // The destination's project trigger created a fresh baseline collection in
     // this transaction; give it the archived identity and timestamps. A global
     // UUID collision fails the whole graph like every other content ID.
-    for c in &g.collections {
+    for c in g.collections.iter().filter(|c| c.kind == "task") {
         let changed = sqlx::query("UPDATE fvoci.collections SET id=$3, name=$4, version=$5, created_at=$6::timestamptz, updated_at=$7::timestamptz WHERE workspace_id=$1 AND project_id=$2 AND kind='task'")
             .bind(workspace).bind(g.project.id).bind(c.id).bind(&c.name).bind(c.version)
             .bind(&c.created_at).bind(&c.updated_at).execute(&mut *tx).await?;
@@ -1225,8 +1248,20 @@ pub async fn publish(
         insert_record(&mut tx, "tasks", mapped(row, workspace, actor)?).await?;
         inserted.insert(row.id);
     }
-    // Each task insert's trigger created one fresh item; restore its identity.
-    for item in &g.collection_items {
+    // Document collections of the project, then their items (the documents
+    // are inserted above); each task insert's trigger created one fresh item
+    // of the task collection, whose identity is restored.
+    for c in g.collections.iter().filter(|c| c.kind != "task") {
+        insert_record(&mut tx, "collections", mapped(c, workspace, actor)?).await?;
+    }
+    for item in g
+        .collection_items
+        .iter()
+        .filter(|i| i.document_id.is_some())
+    {
+        insert_record(&mut tx, "collection_items", mapped(item, workspace, actor)?).await?;
+    }
+    for item in g.collection_items.iter().filter(|i| i.task_id.is_some()) {
         let changed = sqlx::query("UPDATE fvoci.collection_items SET id=$4, version=$5, created_at=$6::timestamptz, updated_at=$7::timestamptz WHERE workspace_id=$1 AND collection_id=$2 AND task_id=$3")
             .bind(workspace).bind(item.collection_id).bind(item.task_id).bind(item.id).bind(item.version)
             .bind(&item.created_at).bind(&item.updated_at).execute(&mut *tx).await?;
@@ -1235,6 +1270,53 @@ pub async fn publish(
                 ArchiveError::Invalid("baseline collection item reconciliation".into()).into(),
             );
         }
+    }
+    for row in &g.collection_fields {
+        insert_record(&mut tx, "collection_fields", mapped(row, workspace, actor)?).await?;
+    }
+    for row in &g.collection_options {
+        insert_record(
+            &mut tx,
+            "collection_options",
+            mapped(row, workspace, actor)?,
+        )
+        .await?;
+    }
+    for row in &g.collection_values {
+        insert_record(&mut tx, "collection_values", mapped(row, workspace, actor)?).await?;
+    }
+    for row in &g.collection_choices {
+        insert_record(
+            &mut tx,
+            "collection_choices",
+            mapped(row, workspace, actor)?,
+        )
+        .await?;
+    }
+    for row in &g.collection_people {
+        insert_record(&mut tx, "collection_people", mapped(row, workspace, actor)?).await?;
+    }
+    // People fields by collection, for typed view-query mapping.
+    let people_of = |collection: Option<Uuid>| {
+        let fields: std::collections::BTreeSet<Uuid> = g
+            .collection_fields
+            .iter()
+            .filter(|f| {
+                Some(f.collection_id) == collection
+                    && crate::collections::FieldType::parse(&f.r#type)
+                        .is_some_and(|t| t.is_people())
+            })
+            .map(|f| f.id)
+            .collect();
+        move |field: Uuid| fields.contains(&field)
+    };
+    for row in &g.collection_views {
+        let mut value = mapped(row, workspace, actor)?;
+        value["owner_id"] = json!(actor);
+        let people = people_of(Some(row.collection_id));
+        value["config"] =
+            mapped_collection_view_config(&row.config, &people, g.source_actor_id, actor);
+        insert_record(&mut tx, "collection_views", value).await?;
     }
     sqlx::query("UPDATE fvoci.projects SET root_document_id=$3 WHERE workspace_id=$1 AND id=$2")
         .bind(workspace)
@@ -1250,9 +1332,16 @@ pub async fn publish(
     for row in &g.dependencies {
         insert_record(&mut tx, "task_dependencies", mapped(row, workspace, actor)?).await?;
     }
+    let task_people = people_of(
+        g.collections
+            .iter()
+            .find(|c| c.kind == "task")
+            .map(|c| c.id),
+    );
     for row in &g.views {
         let mut value = mapped(row, workspace, actor)?;
-        value["config"] = mapped_view_config(&row.config, g.source_actor_id, actor);
+        value["config"] =
+            mapped_project_view_config(&row.config, &task_people, g.source_actor_id, actor);
         insert_record(&mut tx, "views", value).await?;
     }
     for row in &g.labels {

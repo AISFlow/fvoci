@@ -266,7 +266,7 @@ fn structural_archive(ids: &StructuralIds) -> fvoci_server::native_archive::Arch
         "state_entry":format!("native/{kind}/{id}/state.v1"),"encoding":1,"snapshot_cutoff_seq":0,
         "tail_seq":0,"compacted_at":null,"created_at":at,"updated_at":at,"updates":[],"receipts":[]})
     };
-    serde_json::from_value(json!({
+    let mut archive = json!({
         "graph": {
             "source_workspace_id":"30000000-0000-4000-8000-000000000001","source_actor_id":source_actor,
             "captured_at":at,
@@ -296,15 +296,41 @@ fn structural_archive(ids: &StructuralIds) -> fvoci_server::native_archive::Arch
                 "version":1,"deleted_at":null,"created_at":"2026-10-02T00:00:01Z","updated_at":"2026-10-02T00:00:02Z"}],
             "collection_items":[{"id":ids.item,"collection_id":ids.collection,"document_id":null,"task_id":task,
                 "version":1,"created_at":"2026-10-02T00:00:03Z","updated_at":"2026-10-02T00:00:04Z"}],
-            "zotero_connectors":[],"zotero_references":[],"zotero_collections":[],"zotero_memberships":[],"zotero_links":[],"personal_input_commands":[],"time_entries":[],"timer_runs":[],"timer_segments":[],"timer_legacy_open":[],"timer_commands":[],"timer_audit":[],"milestones":[],"dependencies":[],"views":[],
             "native_inventory":null
         },
         "entries": {
             format!("native/document/{document}/state.v1"): encode(&[0, 0]),
             format!("native/task/{task}/state.v1"): encode(&[0, 0])
         }
-    }))
-    .expect("structural archive literal")
+    });
+    // The empty model arrays are added outside the literal (one json! of the
+    // whole graph exceeds the macro recursion limit).
+    for key in [
+        "zotero_connectors",
+        "zotero_references",
+        "zotero_collections",
+        "zotero_memberships",
+        "zotero_links",
+        "personal_input_commands",
+        "time_entries",
+        "timer_runs",
+        "timer_segments",
+        "timer_legacy_open",
+        "timer_commands",
+        "timer_audit",
+        "milestones",
+        "dependencies",
+        "views",
+        "collection_fields",
+        "collection_options",
+        "collection_values",
+        "collection_choices",
+        "collection_people",
+        "collection_views",
+    ] {
+        archive["graph"][key] = json!([]);
+    }
+    serde_json::from_value(archive).expect("structural archive literal")
 }
 
 /// Ordinary personal workspace through the product route, then one durable
@@ -640,7 +666,7 @@ async fn native_publish_refuses_expired_lease_and_revoked_session_without_effect
 }
 
 #[tokio::test]
-async fn native_capture_accepts_trigger_baseline_collection_and_refuses_person_changes() {
+async fn native_capture_accepts_baseline_and_person_collection_state_and_refuses_deleted() {
     use fvoci_server::db::native_archive::{capture, NativeDbError};
     use fvoci_server::native_archive::ArchiveError;
     let harness = TestDb::bootstrap().await;
@@ -706,7 +732,8 @@ async fn native_capture_accepts_trigger_baseline_collection_and_refuses_person_c
         ),
         (1, source_collection, source_items)
     );
-    // A person-added field on that same collection is not yet serialized.
+    // A person-added field on that same collection is a typed record now
+    // (previously the "collections" refusal).
     let (status, collection) = json_request(
         fx.app.clone(),
         "GET",
@@ -732,16 +759,26 @@ async fn native_capture_accepts_trigger_baseline_collection_and_refuses_person_c
     )
     .await;
     assert!(status.is_success(), "{status} {field}");
-    assert!(refused(
-        capture(
-            &fx.pool,
-            fx.workspace_id,
-            fx.user_id,
-            session,
-            &project_only(baseline)
-        )
-        .await
-    ));
+    let with_field = capture(
+        &fx.pool,
+        fx.workspace_id,
+        fx.user_id,
+        session,
+        &project_only(baseline),
+    )
+    .await
+    .expect("a person-added field is captured");
+    assert_eq!(
+        with_field
+            .archive
+            .graph
+            .collection_fields
+            .iter()
+            .map(|f| f.id.to_string())
+            .collect::<Vec<_>>(),
+        vec![field["id"].as_str().unwrap().to_owned()]
+    );
+    with_field.archive.validate().unwrap();
     // An additional person-created document collection in the project.
     let extra = make("DOCC").await;
     let (status, created) = json_request(
@@ -753,18 +790,24 @@ async fn native_capture_accepts_trigger_baseline_collection_and_refuses_person_c
     )
     .await;
     assert!(status.is_success(), "{status} {created}");
-    assert!(refused(
-        capture(
-            &fx.pool,
-            fx.workspace_id,
-            fx.user_id,
-            session,
-            &project_only(extra)
-        )
-        .await
-    ));
-    // Renaming the project leaves the baseline collection's original name; the
-    // first adapter does not yet serialize that name, so it refuses explicitly.
+    let with_documents = capture(
+        &fx.pool,
+        fx.workspace_id,
+        fx.user_id,
+        session,
+        &project_only(extra),
+    )
+    .await
+    .expect("a project document collection is captured");
+    assert!(with_documents
+        .archive
+        .graph
+        .collections
+        .iter()
+        .any(|c| c.id.to_string() == created["id"].as_str().unwrap() && c.kind == "document"));
+    with_documents.archive.validate().unwrap();
+    // Renaming the project leaves the baseline collection's original name,
+    // which is now carried as captured (previously a false refusal).
     let renamed = make("RENM").await;
     let (status, patched) = json_request(
         fx.app.clone(),
@@ -775,16 +818,18 @@ async fn native_capture_accepts_trigger_baseline_collection_and_refuses_person_c
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{patched}");
-    assert!(refused(
-        capture(
-            &fx.pool,
-            fx.workspace_id,
-            fx.user_id,
-            session,
-            &project_only(renamed)
-        )
-        .await
-    ));
+    capture(
+        &fx.pool,
+        fx.workspace_id,
+        fx.user_id,
+        session,
+        &project_only(renamed),
+    )
+    .await
+    .expect("a renamed project is captured")
+    .archive
+    .validate()
+    .unwrap();
     // A deleted baseline collection row is also person-changed state.
     let deleted = make("DELC").await;
     sqlx::query("UPDATE fvoci.collections SET deleted_at = now() WHERE project_id = $1")
@@ -6111,6 +6156,828 @@ async fn native_archive_retained_guard_cost_is_measured() {
     measure("actor 20000, other 0").await;
     fill(other.user_id, 20_000).await;
     measure("actor 20000, other 20000").await;
+
+    let storage = fx.storage_root();
+    fx.pool.close().await;
+    fx.admin.close().await;
+    harness.cleanup().await;
+    std::fs::remove_dir_all(storage).unwrap();
+}
+
+#[tokio::test]
+async fn native_archive_carries_the_collection_of_a_renamed_project() {
+    use fvoci_server::db::native_archive::{capture, publish};
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let session = project_harness::session_id_for_user(&fx.admin, fx.user_id).await;
+    let ws = fx.workspace_id;
+    let project =
+        project_harness::create_project(fx.app.clone(), &fx.cookie, ws, "RNM", "private").await;
+    let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+    let (status, task) = json_request(
+        fx.app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/tasks"),
+        Some(json!({"title":"이름 바뀐 프로젝트의 태스크"})),
+        Some(&fx.cookie),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {task}");
+    // An ordinary rename: the 028 trigger-made task collection keeps the name
+    // the project had when it was created.
+    let (status, patched) = json_request(
+        fx.app.clone(),
+        "PATCH",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}"),
+        Some(json!({"name":"바뀐 이름 🙂"})),
+        Some(&fx.cookie),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {patched}");
+    let source: (Uuid, String, i32) =
+        sqlx::query_as("SELECT id, name, version FROM fvoci.collections WHERE project_id=$1")
+            .bind(project_id)
+            .fetch_one(&fx.admin)
+            .await
+            .unwrap();
+    assert_ne!(
+        source.1, "바뀐 이름 🙂",
+        "the collection keeps its original name"
+    );
+    let captured = capture(&fx.pool, ws, fx.user_id, session, &project_only(project_id))
+        .await
+        .expect("a renamed project is capturable");
+    captured.archive.validate().expect("and valid");
+    let destination_db = TestDb::bootstrap().await;
+    let dst = fixture(&destination_db).await;
+    let (destination, _, claim) = claimed_restore(&dst, dst.user_id, &dst.cookie).await;
+    publish(
+        &dst.pool,
+        &claim,
+        &captured.archive,
+        &std::collections::BTreeMap::new(),
+        &dst.settings.quota,
+    )
+    .await
+    .expect("and restorable");
+    let restored: (Uuid, String, i32) = sqlx::query_as(
+        "SELECT id, name, version FROM fvoci.collections WHERE workspace_id=$1 AND project_id=$2",
+    )
+    .bind(destination)
+    .bind(project_id)
+    .fetch_one(&dst.admin)
+    .await
+    .unwrap();
+    assert_eq!(restored, source);
+
+    let storages = [fx.storage_root(), dst.storage_root()];
+    fx.pool.close().await;
+    fx.admin.close().await;
+    dst.pool.close().await;
+    dst.admin.close().await;
+    harness.cleanup().await;
+    destination_db.cleanup().await;
+    for storage in storages {
+        std::fs::remove_dir_all(storage).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_archive_restores_person_made_collections_for_a_fresh_client() {
+    use fvoci_server::db::native_archive::{capture, publish};
+    use fvoci_server::native_archive::ArchiveError;
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let session = project_harness::session_id_for_user(&fx.admin, fx.user_id).await;
+    let ws = fx.workspace_id;
+    let call = |app: axum::Router,
+                method: &'static str,
+                path: String,
+                body: Option<Value>,
+                cookie: String| async move {
+        let (status, reply) = json_request(app, method, &path, body, Some(&cookie)).await;
+        assert!(status.is_success(), "{method} {path}: {status} {reply}");
+        reply
+    };
+    let project =
+        project_harness::create_project(fx.app.clone(), &fx.cookie, ws, "COL", "private").await;
+    let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+    let w = format!("/api/v1/workspaces/{ws}");
+    let task = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/projects/{project_id}/tasks"),
+        Some(json!({"title":"필드 대상 🧪"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let task_id = task["id"].as_str().unwrap().to_owned();
+    // The task is assigned to its author (the assignee filter below matches).
+    call(
+        fx.app.clone(),
+        "PATCH",
+        format!("{w}/tasks/{task_id}"),
+        Some(json!({"assigneeIds":[fx.user_id]})),
+        fx.cookie.clone(),
+    )
+    .await;
+    // An ordinary project rename (the collection keeps its first name).
+    call(
+        fx.app.clone(),
+        "PATCH",
+        format!("{w}/projects/{project_id}"),
+        Some(json!({"name":"바뀐 컬렉션 프로젝트"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let collection = call(
+        fx.app.clone(),
+        "GET",
+        format!("{w}/projects/{project_id}/collection"),
+        None,
+        fx.cookie.clone(),
+    )
+    .await;
+    let cid = collection["id"].as_str().unwrap().to_owned();
+    let field =
+        |name: &str, kind: &str, options: Value| json!({"name":name,"type":kind,"options":options});
+    let mut fields = std::collections::BTreeMap::new();
+    for (name, kind, options) in [
+        ("단계", "select", json!(["준비", "진행", "완료"])),
+        ("태그", "multi_select", json!(["가", "나"])),
+        ("점검", "checkboxes", json!(["하나", "둘"])),
+        ("라벨", "labels", json!(["빨강"])),
+        ("점수", "number", json!([])),
+        ("마감일", "date", json!([])),
+        ("시각", "datetime", json!([])),
+        ("확인", "checkbox", json!([])),
+        ("요약", "text", json!([])),
+        ("메모", "paragraph", json!([])),
+        ("담당", "user", json!([])),
+        ("폐기 필드", "text", json!([])),
+    ] {
+        let created = call(
+            fx.app.clone(),
+            "POST",
+            format!("{w}/collections/{cid}/fields"),
+            Some(field(name, kind, options)),
+            fx.cookie.clone(),
+        )
+        .await;
+        fields.insert(name, created);
+    }
+    // Field patch: rename, relabel, add an option.
+    let stage = fields["단계"].clone();
+    let opts = stage["options"].as_array().unwrap().clone();
+    call(
+        fx.app.clone(),
+        "PATCH",
+        format!(
+            "{w}/collections/{cid}/fields/{}",
+            stage["id"].as_str().unwrap()
+        ),
+        Some(
+            json!({"expectedVersion":stage["version"],"name":"진행 단계","options":[
+            {"id":opts[0]["id"],"label":"준비"},{"id":opts[1]["id"],"label":"진행 중"},
+            {"id":opts[2]["id"],"label":"완료","deleted":false},{"label":"보류"}]}),
+        ),
+        fx.cookie.clone(),
+    )
+    .await;
+    let item = call(
+        fx.app.clone(),
+        "GET",
+        format!("{w}/tasks/{task_id}/collection-item"),
+        None,
+        fx.cookie.clone(),
+    )
+    .await;
+    let item_id = item["item"]["id"].as_str().unwrap().to_owned();
+    let mut version = item["item"]["version"].as_i64().unwrap();
+    let put = |field: &Value, value: Value, version: i64| json!({"fieldId":field["id"],"expectedVersion":version,"expectedFieldVersion":field["version"],"value":value});
+    let refreshed = |name: &str, list: &Value| {
+        list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    let listed = call(
+        fx.app.clone(),
+        "GET",
+        format!("{w}/collections/{cid}/fields"),
+        None,
+        fx.cookie.clone(),
+    )
+    .await;
+    let stage = refreshed("진행 단계", &listed);
+    let archived_option = stage["options"][2]["id"].clone();
+    // A text value whose literal text contains the source person and
+    // workspace ids: plain text, never an identity reference.
+    let literal = format!("요약 🧪 {} {}", fx.user_id, ws);
+    for (name, value) in [
+        ("진행 단계", json!({"options":[archived_option]})),
+        (
+            "태그",
+            json!({"options":[fields["태그"]["options"][0]["id"], fields["태그"]["options"][1]["id"]]}),
+        ),
+        (
+            "점검",
+            json!({"options":[fields["점검"]["options"][1]["id"]]}),
+        ),
+        (
+            "라벨",
+            json!({"options":[fields["라벨"]["options"][0]["id"]]}),
+        ),
+        ("점수", json!({"number":2.75})),
+        ("마감일", json!({"date":"2026-10-31"})),
+        ("시각", json!({"datetime":"2026-10-03T09:30:00.000Z"})),
+        ("확인", json!({"checkbox":true})),
+        ("요약", json!({"text":literal})),
+        ("메모", json!({"text":"여러 줄\n메모"})),
+        ("담당", json!({"users":[fx.user_id]})),
+        ("폐기 필드", json!({"text":"남는 값"})),
+    ] {
+        let f = refreshed(name, &listed);
+        let reply = call(
+            fx.app.clone(),
+            "PUT",
+            format!("{w}/collections/{cid}/items/{item_id}/values"),
+            Some(put(&f, value, version)),
+            fx.cookie.clone(),
+        )
+        .await;
+        version = reply["version"].as_i64().unwrap();
+    }
+    // Archive the chosen option afterwards (it stays chosen), soft-delete a field.
+    let listed = call(
+        fx.app.clone(),
+        "GET",
+        format!("{w}/collections/{cid}/fields"),
+        None,
+        fx.cookie.clone(),
+    )
+    .await;
+    let stage = refreshed("진행 단계", &listed);
+    let options: Vec<Value> = stage["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| json!({"id":o["id"],"label":o["label"],"deleted":o["id"] == archived_option}))
+        .collect();
+    call(
+        fx.app.clone(),
+        "PATCH",
+        format!(
+            "{w}/collections/{cid}/fields/{}",
+            stage["id"].as_str().unwrap()
+        ),
+        Some(json!({"expectedVersion":stage["version"],"options":options})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let gone = refreshed("폐기 필드", &listed);
+    call(
+        fx.app.clone(),
+        "PATCH",
+        format!(
+            "{w}/collections/{cid}/fields/{}",
+            gone["id"].as_str().unwrap()
+        ),
+        Some(json!({"expectedVersion":gone["version"],"deleted":true})),
+        fx.cookie.clone(),
+    )
+    .await;
+    // Views: a shared board grouped by the select field; a private calendar
+    // whose query names the source person (assignee, and a people value in
+    // the uppercase spelling the writer accepts), an option value, a text
+    // value equal to the source person's id (plain text) and a field sort.
+    let due = refreshed("마감일", &listed);
+    let owner_field = refreshed("담당", &listed);
+    let tag = refreshed("태그", &listed);
+    let summary = refreshed("요약", &listed);
+    let board = call(fx.app.clone(), "POST", format!("{w}/collections/{cid}/views"), Some(json!({"name":"단계 보드","type":"board","visibility":"shared",
+        "config":{"query":{"filters":{"openOnly":true},"sort":[{"field":"due","direction":"asc"}]},"groupBy":stage["id"],"dateBy":null}})), fx.cookie.clone()).await;
+    let calendar_query = json!({"filters":{"assigneeId":fx.user_id.to_string(),"custom":[
+        {"fieldId":tag["id"],"operator":"equals","value":tag["options"][0]["id"]},
+        {"fieldId":owner_field["id"],"operator":"equals","value":fx.user_id.to_string().to_uppercase()},
+        {"fieldId":summary["id"],"operator":"equals","value":literal}]},
+        "sort":[{"field":refreshed("점수", &listed)["id"],"direction":"desc"}]});
+    let calendar = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/collections/{cid}/views"),
+        Some(
+            json!({"name":"내 달력","type":"calendar","visibility":"private",
+        "config":{"query":calendar_query,"groupBy":null,"dateBy":due["id"]}}),
+        ),
+        fx.cookie.clone(),
+    )
+    .await;
+    // A project document collection with the project's root document.
+    let root: Uuid = sqlx::query_scalar("SELECT root_document_id FROM fvoci.projects WHERE id=$1")
+        .bind(project_id)
+        .fetch_one(&fx.admin)
+        .await
+        .unwrap();
+    let docs = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/collections"),
+        Some(json!({"name":"자료","kind":"document","projectId":project_id})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let did = docs["id"].as_str().unwrap().to_owned();
+    let doc_field = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/collections/{did}/fields"),
+        Some(field("출처", "text", json!([]))),
+        fx.cookie.clone(),
+    )
+    .await;
+    let doc_item = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/collections/{did}/items"),
+        Some(json!({"documentId":root})),
+        fx.cookie.clone(),
+    )
+    .await;
+    call(
+        fx.app.clone(),
+        "PUT",
+        format!(
+            "{w}/collections/{did}/items/{}/values",
+            doc_item["id"].as_str().unwrap()
+        ),
+        Some(put(
+            &doc_field,
+            json!({"text":"원문"}),
+            doc_item["version"].as_i64().unwrap(),
+        )),
+        fx.cookie.clone(),
+    )
+    .await;
+
+    // Reads through the ordinary routes: fields, default-query items, views,
+    // and the saved calendar query itself.
+    let default_query =
+        json!({"config":{"query":{"filters":{},"sort":[]},"groupBy":null,"dateBy":null}});
+    let read = |app: axum::Router, w: String, cookie: String, saved: Value| {
+        let (cid, did, default_query) = (cid.clone(), did.clone(), default_query.clone());
+        async move {
+            let mut out = Vec::new();
+            for c in [&cid, &did] {
+                out.push(
+                    call(
+                        app.clone(),
+                        "GET",
+                        format!("{w}/collections/{c}/fields"),
+                        None,
+                        cookie.clone(),
+                    )
+                    .await,
+                );
+                out.push(
+                    call(
+                        app.clone(),
+                        "POST",
+                        format!("{w}/collections/{c}/query"),
+                        Some(default_query.clone()),
+                        cookie.clone(),
+                    )
+                    .await["items"]
+                        .clone(),
+                );
+                out.push(
+                    call(
+                        app.clone(),
+                        "GET",
+                        format!("{w}/collections/{c}/views"),
+                        None,
+                        cookie.clone(),
+                    )
+                    .await,
+                );
+            }
+            out.push(
+                call(
+                    app.clone(),
+                    "POST",
+                    format!("{w}/collections/{cid}/query"),
+                    Some(json!({"config":{"query":saved["query"],"groupBy":null,"dateBy":null}})),
+                    cookie.clone(),
+                )
+                .await["items"]
+                    .clone(),
+            );
+            out
+        }
+    };
+    let source_reads = read(
+        fx.app.clone(),
+        w.clone(),
+        fx.cookie.clone(),
+        calendar["config"].clone(),
+    )
+    .await;
+    assert_eq!(
+        source_reads[6].as_array().unwrap().len(),
+        1,
+        "the saved calendar query matches the task"
+    );
+
+    let captured = capture(&fx.pool, ws, fx.user_id, session, &project_only(project_id))
+        .await
+        .expect("person-made collections are captured");
+    let g = &captured.archive.graph;
+    assert_eq!(
+        (
+            g.collections.len(),
+            g.collection_fields.len(),
+            g.collection_views.len()
+        ),
+        (2, 13, 2)
+    );
+    assert!(g.collection_fields.iter().any(|f| f.deleted_at.is_some()));
+    assert!(g.collection_options.iter().any(|o| o.deleted_at.is_some()));
+    assert_eq!(g.collection_people.len(), 1);
+    captured
+        .archive
+        .validate()
+        .expect("the archive policy accepts the collections");
+
+    let destination_db = TestDb::bootstrap().await;
+    let dst = fixture(&destination_db).await;
+    let (destination, _, claim) = claimed_restore(&dst, dst.user_id, &dst.cookie).await;
+    publish(
+        &dst.pool,
+        &claim,
+        &captured.archive,
+        &std::collections::BTreeMap::new(),
+        &dst.settings.quota,
+    )
+    .await
+    .expect("collections restore");
+    let dw = format!("/api/v1/workspaces/{destination}");
+    // Independent oracle: the source reads with only the known typed person
+    // references changed (view owner, the people value of the user field,
+    // the assignee and the people custom value of the saved query); every
+    // text literal (including the one containing the ids) stays as stored.
+    let (src, dst_id) = (fx.user_id, dst.user_id);
+    let people_field = owner_field["id"].clone();
+    let map_items = |items: &Value| {
+        let mut items = items.clone();
+        for item in items.as_array_mut().unwrap() {
+            if let Some(users) = item["values"]
+                .get_mut(people_field.as_str().unwrap())
+                .and_then(|v| v.get_mut("users"))
+            {
+                for user in users.as_array_mut().unwrap() {
+                    if *user == json!(src) {
+                        *user = json!(dst_id);
+                    }
+                }
+            }
+        }
+        items
+    };
+    let map_views = |views: &Value| {
+        let mut views = views.clone();
+        for view in views["items"].as_array_mut().unwrap() {
+            if view["ownerId"] == json!(src) {
+                view["ownerId"] = json!(dst_id);
+            }
+            let filters = &mut view["config"]["query"]["filters"];
+            if filters.get("assigneeId") == Some(&json!(src.to_string())) {
+                filters["assigneeId"] = json!(dst_id.to_string());
+            }
+            for custom in filters
+                .get_mut("custom")
+                .and_then(Value::as_array_mut)
+                .into_iter()
+                .flatten()
+            {
+                if custom["fieldId"] == people_field
+                    && custom["value"] == json!(src.to_string().to_uppercase())
+                {
+                    custom["value"] = json!(dst_id.to_string());
+                }
+            }
+        }
+        views
+    };
+    let expected = vec![
+        source_reads[0].clone(),
+        map_items(&source_reads[1]),
+        map_views(&source_reads[2]),
+        source_reads[3].clone(),
+        map_items(&source_reads[4]),
+        map_views(&source_reads[5]),
+        map_items(&source_reads[6]),
+    ];
+    let restored_calendar =
+        map_views(&json!({"items":[calendar.clone()]}))["items"][0]["config"].clone();
+    let restored_reads = read(
+        dst.app.clone(),
+        dw.clone(),
+        dst.cookie.clone(),
+        restored_calendar,
+    )
+    .await;
+    assert_eq!(restored_reads, expected);
+    let summary_value = &restored_reads[1][0]["values"][summary["id"].as_str().unwrap()];
+    assert_eq!(
+        summary_value,
+        &json!({"text":literal}),
+        "the literal text keeps the source ids"
+    );
+    // The writers continue from the restored versions.
+    let listed = call(
+        dst.app.clone(),
+        "GET",
+        format!("{dw}/collections/{cid}/fields"),
+        None,
+        dst.cookie.clone(),
+    )
+    .await;
+    let score = refreshed("점수", &listed);
+    let reply = call(
+        dst.app.clone(),
+        "PUT",
+        format!("{dw}/collections/{cid}/items/{item_id}/values"),
+        Some(put(&score, json!({"number":3}), version)),
+        dst.cookie.clone(),
+    )
+    .await;
+    assert_eq!(reply["version"].as_i64(), Some(version + 1));
+    let restored_board = call(
+        dst.app.clone(),
+        "GET",
+        format!("{dw}/collections/{cid}/views"),
+        None,
+        dst.cookie.clone(),
+    )
+    .await["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["id"] == board["id"])
+        .unwrap()
+        .clone();
+    call(dst.app.clone(), "PATCH", format!("{dw}/collections/{cid}/views/{}", board["id"].as_str().unwrap()),
+        Some(json!({"name":"복원된 보드","type":"board","visibility":"shared","config":restored_board["config"],"expectedVersion":restored_board["version"]})), dst.cookie.clone()).await;
+
+    // Another person in a user field and another person's private view are
+    // typed refusals of this single-author slice (the view row is a labeled
+    // admin fixture writer: the other member cannot open the private project).
+    let other =
+        project_harness::add_workspace_user(&fx.admin, ws, "member", "collection-other").await;
+    let item_now = call(
+        fx.app.clone(),
+        "GET",
+        format!("{w}/tasks/{task_id}/collection-item"),
+        None,
+        fx.cookie.clone(),
+    )
+    .await;
+    call(
+        fx.app.clone(),
+        "PUT",
+        format!("{w}/collections/{cid}/items/{item_id}/values"),
+        Some(put(
+            &owner_field,
+            json!({"users":[other.user_id]}),
+            item_now["item"]["version"].as_i64().unwrap(),
+        )),
+        fx.cookie.clone(),
+    )
+    .await;
+    let refused = capture(&fx.pool, ws, fx.user_id, session, &project_only(project_id))
+        .await
+        .unwrap()
+        .archive
+        .validate();
+    assert!(
+        matches!(&refused, Err(ArchiveError::Unsupported(m)) if m == "collection people"),
+        "{refused:?}"
+    );
+    let item_now = call(
+        fx.app.clone(),
+        "GET",
+        format!("{w}/tasks/{task_id}/collection-item"),
+        None,
+        fx.cookie.clone(),
+    )
+    .await;
+    call(
+        fx.app.clone(),
+        "PUT",
+        format!("{w}/collections/{cid}/items/{item_id}/values"),
+        Some(put(
+            &owner_field,
+            json!({"users":[fx.user_id]}),
+            item_now["item"]["version"].as_i64().unwrap(),
+        )),
+        fx.cookie.clone(),
+    )
+    .await;
+    sqlx::query("INSERT INTO fvoci.collection_views (id, workspace_id, collection_id, owner_id, visibility, name, type, config) VALUES ($1,$2,$3,$4,'private','남의 보기','table','{\"query\":{\"filters\":{},\"sort\":[]},\"groupBy\":null,\"dateBy\":null}')")
+        .bind(Uuid::now_v7()).bind(ws).bind(Uuid::parse_str(&cid).unwrap()).bind(other.user_id)
+        .execute(&fx.admin).await.unwrap();
+    let refused = capture(&fx.pool, ws, fx.user_id, session, &project_only(project_id))
+        .await
+        .unwrap()
+        .archive
+        .validate();
+    assert!(
+        matches!(&refused, Err(ArchiveError::Unsupported(m)) if m == "collection views"),
+        "{refused:?}"
+    );
+
+    let storages = [fx.storage_root(), dst.storage_root()];
+    fx.pool.close().await;
+    fx.admin.close().await;
+    dst.pool.close().await;
+    dst.admin.close().await;
+    harness.cleanup().await;
+    destination_db.cleanup().await;
+    for storage in storages {
+        std::fs::remove_dir_all(storage).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_archive_carries_a_long_project_named_task_collection() {
+    use fvoci_server::db::native_archive::{capture, publish};
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let session = project_harness::session_id_for_user(&fx.admin, fx.user_id).await;
+    let ws = fx.workspace_id;
+    // The project writer accepts 200 characters and the 028 trigger copies the
+    // project's name into its task collection: 101 characters exceed the
+    // collection writer's 100 UTF-16 limit but are a valid current name.
+    let long = "가".repeat(101);
+    let (status, project) = json_request(
+        fx.app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/projects"),
+        Some(json!({"key":"LNG","name":long,"visibility":"private"})),
+        Some(&fx.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{project}");
+    let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+    let (status, task) = json_request(
+        fx.app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/tasks"),
+        Some(json!({"title":"긴 이름"})),
+        Some(&fx.cookie),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {task}");
+    let (status, renamed) = json_request(
+        fx.app.clone(),
+        "PATCH",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}"),
+        Some(json!({"name":"나".repeat(150)})),
+        Some(&fx.cookie),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {renamed}");
+    let name: String = sqlx::query_scalar("SELECT name FROM fvoci.collections WHERE project_id=$1")
+        .bind(project_id)
+        .fetch_one(&fx.admin)
+        .await
+        .unwrap();
+    assert_eq!(name, long);
+    let captured = capture(&fx.pool, ws, fx.user_id, session, &project_only(project_id))
+        .await
+        .expect("a long project name is capturable");
+    captured.archive.validate().expect("and valid");
+    let destination_db = TestDb::bootstrap().await;
+    let dst = fixture(&destination_db).await;
+    let (destination, _, claim) = claimed_restore(&dst, dst.user_id, &dst.cookie).await;
+    publish(
+        &dst.pool,
+        &claim,
+        &captured.archive,
+        &std::collections::BTreeMap::new(),
+        &dst.settings.quota,
+    )
+    .await
+    .expect("and restorable");
+    let restored: String = sqlx::query_scalar(
+        "SELECT name FROM fvoci.collections WHERE workspace_id=$1 AND project_id=$2",
+    )
+    .bind(destination)
+    .bind(project_id)
+    .fetch_one(&dst.admin)
+    .await
+    .unwrap();
+    assert_eq!(restored, long);
+
+    let storages = [fx.storage_root(), dst.storage_root()];
+    fx.pool.close().await;
+    fx.admin.close().await;
+    dst.pool.close().await;
+    dst.admin.close().await;
+    harness.cleanup().await;
+    destination_db.cleanup().await;
+    for storage in storages {
+        std::fs::remove_dir_all(storage).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_archive_capture_graph_budget_is_cumulative_and_row_bounded() {
+    use fvoci_server::db::native_archive::{capture, NativeDbError};
+    use fvoci_server::native_archive::ArchiveError;
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let session = project_harness::session_id_for_user(&fx.admin, fx.user_id).await;
+    let ws = fx.workspace_id;
+    let project_with_task = |key: &'static str| {
+        let (app, cookie) = (fx.app.clone(), fx.cookie.clone());
+        async move {
+            let project =
+                project_harness::create_project(app.clone(), &cookie, ws, key, "private").await;
+            let id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+            let (status, task) = json_request(
+                app,
+                "POST",
+                &format!("/api/v1/workspaces/{ws}/projects/{id}/tasks"),
+                Some(json!({"title":"예산"})),
+                Some(&cookie),
+            )
+            .await;
+            assert!(status.is_success(), "{status} {task}");
+            id
+        }
+    };
+    let collection_of = |project: Uuid| {
+        let admin = fx.admin.clone();
+        async move {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM fvoci.collections WHERE project_id=$1 AND kind='task'",
+            )
+            .bind(project)
+            .fetch_one(&admin)
+            .await
+            .unwrap()
+        }
+    };
+    let limited = |r: &Result<_, NativeDbError>| {
+        matches!(r, Err(NativeDbError::Archive(ArchiveError::Limit)))
+    };
+    // Cumulative: the task array and the collection value array are each
+    // below the 16 MiB graph budget, together above it (labeled admin fixture
+    // writer: sizes no ordinary writer reaches in one request).
+    let big = project_with_task("BIG").await;
+    let collection = collection_of(big).await;
+    sqlx::query("UPDATE fvoci.tasks SET text = repeat('가', 3000000) WHERE project_id=$1")
+        .bind(big)
+        .execute(&fx.admin)
+        .await
+        .unwrap();
+    let field = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.collection_fields (id, workspace_id, collection_id, key, name, type, sort_key) VALUES ($1,$2,$3,'memo','메모','paragraph','000')")
+        .bind(field).bind(ws).bind(collection).execute(&fx.admin).await.unwrap();
+    sqlx::query("INSERT INTO fvoci.collection_values (workspace_id, collection_id, item_id, field_id, field_type, value_text)
+                 SELECT $1, $2, i.id, $3, 'paragraph', repeat('나', 2800000) FROM fvoci.collection_items i WHERE i.collection_id=$2")
+        .bind(ws).bind(collection).bind(field).execute(&fx.admin).await.unwrap();
+    let (task_bytes, value_bytes): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT sum(octet_length((to_jsonb(t)-'workspace_id')::text)) FROM fvoci.tasks t WHERE t.project_id=$1)::bigint,
+                (SELECT sum(octet_length((to_jsonb(v)-'workspace_id')::text)) FROM fvoci.collection_values v WHERE v.collection_id=$2)::bigint",
+    )
+    .bind(big)
+    .bind(collection)
+    .fetch_one(&fx.admin)
+    .await
+    .unwrap();
+    let budget = 16 * 1024 * 1024;
+    assert!(
+        task_bytes < budget && value_bytes < budget && task_bytes + value_bytes > budget,
+        "{task_bytes} {value_bytes}"
+    );
+    let result = capture(&fx.pool, ws, fx.user_id, session, &project_only(big)).await;
+    assert!(limited(&result), "cumulative: {:?}", result.err());
+    // Rows: a 10001st row of one array is a Limit, never a truncation.
+    let many = project_with_task("ROW").await;
+    let collection = collection_of(many).await;
+    let field = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.collection_fields (id, workspace_id, collection_id, key, name, type, sort_key) VALUES ($1,$2,$3,'stage','단계','select','000')")
+        .bind(field).bind(ws).bind(collection).execute(&fx.admin).await.unwrap();
+    sqlx::query("INSERT INTO fvoci.collection_options (id, workspace_id, collection_id, field_id, key, label, sort_key)
+                 SELECT gen_random_uuid(), $1, $2, $3, 'o_' || n, 'o' || n, lpad(n::text, 5, '0') FROM generate_series(1, 10001) n")
+        .bind(ws).bind(collection).bind(field).execute(&fx.admin).await.unwrap();
+    let result = capture(&fx.pool, ws, fx.user_id, session, &project_only(many)).await;
+    assert!(limited(&result), "rows: {:?}", result.err());
 
     let storage = fx.storage_root();
     fx.pool.close().await;

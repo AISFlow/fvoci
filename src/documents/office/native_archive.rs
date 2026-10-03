@@ -41,6 +41,9 @@ const MODELS: &[&str] = &[
     "milestone",
     "task-dependency",
     "project-view",
+    "collection-field",
+    "collection-value",
+    "collection-view",
 ];
 const POLICY: &str = "preserve-content-ids-fresh-private-workspace";
 

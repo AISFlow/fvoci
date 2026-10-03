@@ -41,6 +41,8 @@ const LOG_REASONS: &[&str] = &[
     "child graph result",
     "child input",
     "child output",
+    "collection people",
+    "collection views",
     "collections",
     "comments",
     "confirmation hash",
@@ -111,6 +113,7 @@ const LOG_REASONS: &[&str] = &[
     "task time",
     "time entries",
     "truncated file",
+    "view query",
     "view references",
     "views",
 ];
