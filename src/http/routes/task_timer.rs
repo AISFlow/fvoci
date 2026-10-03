@@ -11,20 +11,27 @@ use axum::{
 use axum_extra::extract::CookieJar;
 use uuid::Uuid;
 
+use crate::api::dto::CreateTaskBody;
 use crate::api::task_timer::{
-    LegacyReleaseBody, LegacyReleaseOutput, OwnerTimerState, TaskTimerState, TimeCorrectionBody,
+    LegacyReleaseBody, LegacyReleaseOutput, OwnerTimerState, StudyPlanTaskBody,
+    StudyPlanTaskOutput, TaskEstimate, TaskEstimateCommandBody, TaskTimerState, TimeCorrectionBody,
     TimerCleanupBody, TimerCommandBody, TimerCommandOutput, TimerContextQuery, TimerHistory,
     TimerHistoryQuery, TimerManualBody, TimerRecordOutput, TimerSummary, TimerSummaryQuery,
 };
-use crate::auth::scopes::ApiTokenScope;
+use crate::api::tasks_dto::{TaskProjectOutput, TaskProjectPickerResponse};
+use crate::auth::scopes::{grants_api_token_scope, ApiTokenScope};
+use crate::db::task_origins::{origin_request_hash, task_projects, TASK_ORIGIN_ANCHOR_MAX_CHARS};
 use crate::db::task_timer::{self, TimerDbError};
+use crate::db::tasks::CreateTaskInput;
 use crate::error::{AppError, ProblemCode};
+use crate::http::routes::task_body::{map_origin_error, normalized_task_input};
 use crate::http::routes::tasks::{internal, map_task_db_error, TaskApiError};
 use crate::http::{
     authz::{require_request_auth, Access},
     guard::check_origin,
     state::AppState,
 };
+use crate::tasks::{priority_is_valid, task_type_is_valid, title_is_valid};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -33,6 +40,14 @@ pub fn router() -> Router<AppState> {
             get(state).post(command),
         )
         .route("/api/v1/me/task-timer", get(owner))
+        .route(
+            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/study-plan/task",
+            get(plan_targets).post(create_plan_task),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/estimate",
+            post(set_estimate),
+        )
         .route("/api/v1/me/task-timer/stop", post(cleanup))
         .route("/api/v1/me/task-timer/legacy-release", post(release_legacy))
         .route(
@@ -49,9 +64,162 @@ pub fn router() -> Router<AppState> {
         )
 }
 
+async fn plan_targets(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace, document)): Path<(Uuid, Uuid)>,
+    query: Result<Query<TimerContextQuery>, QueryRejection>,
+) -> Result<Json<TaskProjectPickerResponse>, TaskApiError> {
+    let auth = require_request_auth(
+        &app,
+        &headers,
+        &jar,
+        Access::Scope(ApiTokenScope::DocumentsRead),
+        Some(workspace),
+    )
+    .await?;
+    let Query(query) = query.map_err(|_| AppError::from_code(ProblemCode::InvalidInput))?;
+    captured_context(
+        query.expected_actor_id,
+        query.expected_session_id,
+        auth.user_id,
+        auth.credential_id,
+    )?;
+    let picker = task_projects(
+        &app.auth.db.pool,
+        workspace,
+        auth.user_id,
+        auth.credential_id,
+        document,
+    )
+    .await
+    .map_err(internal)?
+    .map_err(map_origin_error)?;
+    Ok(Json(TaskProjectPickerResponse {
+        items: picker
+            .items
+            .into_iter()
+            .map(|item| TaskProjectOutput {
+                id: item.id.to_string(),
+                name: item.name,
+                key: item.key,
+                visibility: item.visibility,
+            })
+            .collect(),
+        suggested_id: picker.suggested_id.map(|id| id.to_string()),
+        can_create_project: picker.can_create_project,
+    }))
+}
+
+async fn create_plan_task(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace, document)): Path<(Uuid, Uuid)>,
+    body: Result<Json<StudyPlanTaskBody>, JsonRejection>,
+) -> Result<Json<StudyPlanTaskOutput>, TaskApiError> {
+    check_origin(&headers, &app.public_origin)?;
+    let Json(body) = body.map_err(AppError::from)?;
+    let task: CreateTaskBody = serde_json::from_value(body.task.clone())
+        .map_err(|_| AppError::from_code(ProblemCode::InvalidInput))?;
+    if !title_is_valid(&task.title)
+        || !task_type_is_valid(&task.task_type)
+        || !priority_is_valid(&task.priority)
+        || body
+            .anchor
+            .as_deref()
+            .is_some_and(|anchor| anchor.chars().count() > TASK_ORIGIN_ANCHOR_MAX_CHARS)
+    {
+        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+    }
+    let auth = require_request_auth(
+        &app,
+        &headers,
+        &jar,
+        Access::Scope(ApiTokenScope::DocumentsWrite),
+        Some(workspace),
+    )
+    .await?;
+    if auth
+        .token_scopes
+        .as_deref()
+        .is_some_and(|scopes| !grants_api_token_scope(scopes, ApiTokenScope::TasksWrite))
+    {
+        return Err(AppError::from_code(ProblemCode::NotFound).into());
+    }
+    // Only this new operation adds the minute binding. The existing ordinary
+    // normalizer and source-origin hashes keep their exact old contract.
+    let semantic = serde_json::json!({"operation":"study-plan-task-v1",
+        "task":normalized_task_input(&task), "selfAssign":body.self_assign,
+        "estimateMinutes":body.minutes});
+    let digest = origin_request_hash(
+        auth.user_id,
+        body.project_id,
+        body.anchor.as_deref(),
+        &semantic,
+    );
+    task_timer::create_plan_task(
+        &app.auth.db.pool,
+        workspace,
+        document,
+        auth.user_id,
+        auth.credential_id,
+        &body,
+        CreateTaskInput {
+            title: &task.title,
+            task_type: &task.task_type,
+            priority: &task.priority,
+            status_id: task.status_id,
+            start_date: task.start_date,
+            due_date: task.due_date,
+            parent_id: task.parent_id,
+            milestone_id: task.milestone_id,
+            recurrence: task.recurrence.clone(),
+        },
+        &digest,
+    )
+    .await
+    .map_err(internal)?
+    .map(Json)
+    .map_err(error)
+}
+
+async fn set_estimate(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace, task)): Path<(Uuid, Uuid)>,
+    body: Result<Json<TaskEstimateCommandBody>, JsonRejection>,
+) -> Result<Json<TaskEstimate>, TaskApiError> {
+    check_origin(&headers, &app.public_origin)?;
+    let Json(body) = body.map_err(AppError::from)?;
+    let auth = require_request_auth(
+        &app,
+        &headers,
+        &jar,
+        Access::Scope(ApiTokenScope::TasksWrite),
+        Some(workspace),
+    )
+    .await?;
+    task_timer::set_estimate(
+        &app.auth.db.pool,
+        workspace,
+        task,
+        auth.user_id,
+        auth.credential_id,
+        &body,
+    )
+    .await
+    .map_err(internal)?
+    .map(Json)
+    .map_err(error)
+}
+
 fn error(err: TimerDbError) -> TaskApiError {
     match err {
         TimerDbError::Project(err) => map_task_db_error(err),
+        TimerDbError::Origin(err) => map_origin_error(err),
         TimerDbError::InvalidInput => AppError::from_code(ProblemCode::InvalidInput).into(),
         TimerDbError::Conflict(reason) => {
             let mut err = AppError::from_code(ProblemCode::Conflict);

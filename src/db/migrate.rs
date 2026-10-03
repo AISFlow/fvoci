@@ -97,6 +97,7 @@ const MIGRATIONS: &[(&str, i32)] = &[
         45,
     ),
     (include_str!("../../migrations/048_task_timers.sql"), 48),
+    (include_str!("../../migrations/049_task_estimate_unit.sql"), 49),
 ];
 
 pub(crate) const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;

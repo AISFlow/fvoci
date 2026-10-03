@@ -8,7 +8,8 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::api::task_timer::{
-    LegacyReleaseBody, LegacyReleaseOutput, OwnerTimerState, TaskTimerState, TimeCorrectionBody,
+    LegacyReleaseBody, LegacyReleaseOutput, OwnerTimerState, StudyPlanTaskBody,
+    StudyPlanTaskOutput, TaskEstimate, TaskEstimateCommandBody, TaskTimerState, TimeCorrectionBody,
     TimeRecord, TimeRecordKind, TimerCleanupBody, TimerCommandBody, TimerCommandOutput,
     TimerDayTotal, TimerHistory, TimerHistoryQuery, TimerManualBody, TimerRecordOutput,
     TimerRunOutput, TimerSummary, TimerSummaryQuery,
@@ -17,7 +18,12 @@ use crate::db::context::{
     begin_read, lock_membership_users, recheck_session, session_is_live, set_self_user, set_tenant,
 };
 use crate::db::projects::{load_live_project, project_permission, ProjectDbError};
-use crate::db::tasks::{record_task_event_and_audit, require_task_write_access, TaskChangeRecord};
+use crate::db::task_origins::{
+    create_document_task_tx, DocumentTaskOutcome, DocumentTaskRequest, TaskOriginDbError,
+};
+use crate::db::tasks::{
+    record_task_event_and_audit, require_task_write_access, CreateTaskInput, TaskChangeRecord,
+};
 use crate::db::workspace::workspace_is_live;
 use crate::projects::ProjectPermission;
 use crate::task_timer::{transition, TimerOperation, TimerStatus};
@@ -25,6 +31,7 @@ use crate::task_timer::{transition, TimerOperation, TimerStatus};
 #[derive(Debug)]
 pub enum TimerDbError {
     Project(ProjectDbError),
+    Origin(TaskOriginDbError),
     Conflict(&'static str),
     InvalidInput,
 }
@@ -169,7 +176,209 @@ async fn state_in(
         legacy_open: legacy_open(tx, actor).await?,
         can_control,
         actual_milliseconds: actual,
+        estimate: estimate_in(tx, workspace, task).await?,
     })
+}
+
+async fn estimate_in(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace: Uuid,
+    task: Uuid,
+) -> Result<TaskEstimate, sqlx::Error> {
+    let (value, unit, updated_at): (Option<String>, Option<String>, DateTime<Utc>) =
+        sqlx::query_as("SELECT estimate::text, estimate_unit, updated_at FROM fvoci.tasks WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL")
+            .bind(workspace).bind(task).fetch_one(&mut **tx).await?;
+    Ok(TaskEstimate {
+        value,
+        unit,
+        updated_at,
+    })
+}
+
+/// Uses the same actor/credential/project/task writer fence as ordinary task
+/// metadata. Authorized replay returns the committed snapshot without applying
+/// the estimate again, including after a subsequent metadata edit.
+pub async fn set_estimate(
+    pool: &PgPool,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    session: Uuid,
+    body: &TaskEstimateCommandBody,
+) -> DbResult<TaskEstimate> {
+    if body.expected_actor_id != actor {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
+    if body.minutes.is_some_and(|minutes| minutes < 0)
+        || !note_reason_valid(&None, &body.reason)
+        || body
+            .expected
+            .unit
+            .as_deref()
+            .is_some_and(|unit| unit != "minutes")
+    {
+        return Ok(Err(TimerDbError::InvalidInput));
+    }
+    let mut tx = pool.begin().await?;
+    if let Err(err) = write_allowed(&mut tx, workspace, task, actor, session).await? {
+        return Ok(Err(err));
+    }
+    let digest = hash("estimate.minutes", Some(workspace), Some(task), body)?;
+    match replay(&mut tx, actor, body.request_id, &digest).await? {
+        Err(err) => return Ok(Err(err)),
+        Ok(Some(value)) => {
+            return Ok(Ok(serde_json::from_value(value)
+                .map_err(|err| sqlx::Error::Protocol(err.to_string()))?))
+        }
+        Ok(None) => {}
+    }
+    if body.expected_session_id != session {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
+    let before = estimate_in(&mut tx, workspace, task).await?;
+    if before != body.expected {
+        return Ok(Err(TimerDbError::Conflict("estimate_changed")));
+    }
+    let output = persist_estimate(
+        &mut tx,
+        workspace,
+        task,
+        actor,
+        body.request_id,
+        before,
+        body.minutes,
+        body.reason.trim(),
+    )
+    .await?;
+    let value =
+        serde_json::to_value(&output).map_err(|err| sqlx::Error::Protocol(err.to_string()))?;
+    receipt(&mut tx, actor, body.request_id, &digest, None, &value).await?;
+    tx.commit().await?;
+    Ok(Ok(output))
+}
+
+/// Shared only by the two real estimate consumers, inside their already
+/// authorized/locked transaction. This does not acquire a different fence.
+async fn persist_estimate(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    request: Uuid,
+    before: TaskEstimate,
+    minutes: Option<i32>,
+    reason: &str,
+) -> Result<TaskEstimate, sqlx::Error> {
+    sqlx::query("UPDATE fvoci.tasks SET estimate=$3::integer::numeric, estimate_unit=CASE WHEN $3::integer IS NULL THEN NULL ELSE 'minutes' END, updated_at=clock_timestamp() WHERE workspace_id=$1 AND id=$2")
+        .bind(workspace).bind(task).bind(minutes).execute(&mut **tx).await?;
+    let output = estimate_in(tx, workspace, task).await?;
+    let value =
+        serde_json::to_value(&output).map_err(|err| sqlx::Error::Protocol(err.to_string()))?;
+    audit(
+        tx,
+        actor,
+        request,
+        Some(workspace),
+        Some(task),
+        None,
+        "task.estimate.minutes",
+        serde_json::to_value(before).map_err(|err| sqlx::Error::Protocol(err.to_string()))?,
+        value.clone(),
+        reason,
+    )
+    .await?;
+    record_task_event_and_audit(
+        tx,
+        TaskChangeRecord {
+            workspace_id: workspace,
+            actor_user_id: actor,
+            verb: "task.updated",
+            target_type: "task",
+            target_id: task,
+            payload: json!({"taskId":task,"estimate":output.value,"estimateUnit":output.unit}),
+            client_ip: None,
+        },
+    )
+    .await?;
+    Ok(output)
+}
+
+pub async fn create_plan_task(
+    pool: &PgPool,
+    workspace: Uuid,
+    document: Uuid,
+    actor: Uuid,
+    session: Uuid,
+    body: &StudyPlanTaskBody,
+    task: CreateTaskInput<'_>,
+    request_hash: &str,
+) -> DbResult<StudyPlanTaskOutput> {
+    if body.expected_actor_id != actor {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
+    if body.minutes.is_some_and(|minutes| minutes < 0) {
+        return Ok(Err(TimerDbError::InvalidInput));
+    }
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace).await?;
+    set_self_user(&mut tx, actor).await?;
+    let outcome = match create_document_task_tx(
+        &mut tx,
+        workspace,
+        actor,
+        session,
+        DocumentTaskRequest {
+            document_id: document,
+            project_id: body.project_id,
+            request_id: body.request_id,
+            self_assign: body.self_assign,
+            anchor: body.anchor.as_deref(),
+            request_hash,
+            task,
+        },
+        None,
+        "web",
+    )
+    .await?
+    {
+        Ok(outcome) => outcome,
+        Err(err) => return Ok(Err(TimerDbError::Origin(err))),
+    };
+    if let DocumentTaskOutcome::Created(task_id) = &outcome {
+        if body.expected_session_id != session {
+            // Existing origin creator owns the locks/auth/dedupe. A new stale
+            // captured command must roll back task, numbering and origin too.
+            tx.rollback().await?;
+            return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+        }
+        if let Some(minutes) = body.minutes {
+            let before = estimate_in(&mut tx, workspace, *task_id).await?;
+            persist_estimate(
+                &mut tx,
+                workspace,
+                *task_id,
+                actor,
+                body.request_id,
+                before,
+                Some(minutes),
+                "plan_explicit_minutes",
+            )
+            .await?;
+        }
+    }
+    let task_id = outcome.task_id();
+    // The existing origin transaction checks current task/source/target ACL
+    // before replay. Return its current ordinary locator within that fence;
+    // the browser does not need an uncaptured metadata read after success.
+    let (number, project_key): (i32, String) = sqlx::query_as("SELECT t.number,p.key FROM fvoci.tasks t JOIN fvoci.projects p ON p.workspace_id=t.workspace_id AND p.id=t.project_id WHERE t.workspace_id=$1 AND t.id=$2 AND t.deleted_at IS NULL")
+        .bind(workspace).bind(task_id).fetch_one(&mut *tx).await?;
+    let output = StudyPlanTaskOutput {
+        task_id,
+        number,
+        project_key,
+    };
+    tx.commit().await?;
+    Ok(Ok(output))
 }
 
 pub async fn task_state(

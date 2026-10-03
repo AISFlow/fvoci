@@ -55,6 +55,74 @@ pub struct TaskTimerState {
     /// Current existing time-entry Edit/archive capability, in this snapshot.
     pub can_control: bool,
     pub actual_milliseconds: i64,
+    pub estimate: TaskEstimate,
+}
+
+/// Raw database timestamp preserves microseconds for compare-and-set; the
+/// ordinary task DTO's millisecond timestamp is not an estimate write token.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskEstimate {
+    #[serde(deserialize_with = "required_nullable")]
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub value: Option<String>,
+    #[serde(deserialize_with = "required_nullable")]
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub unit: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskEstimateCommandBody {
+    pub expected_actor_id: Uuid,
+    pub expected_session_id: Uuid,
+    pub request_id: Uuid,
+    pub expected: TaskEstimate,
+    /// Null explicitly clears both the value and the unit.
+    #[serde(deserialize_with = "required_nullable")]
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub minutes: Option<i32>,
+    pub reason: String,
+}
+
+// Serde's default Option accepts omission. These CAS fields deliberately
+// require a present key while retaining an explicit JSON null value.
+fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+/// Creates one ordinary task linked to an existing material/notes document.
+/// The planner keeps goal/reading steps as ordinary task hierarchy and origins.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct StudyPlanTaskBody {
+    pub expected_actor_id: Uuid,
+    pub expected_session_id: Uuid,
+    pub project_id: Uuid,
+    pub request_id: Uuid,
+    #[serde(default)]
+    pub self_assign: bool,
+    pub anchor: Option<String>,
+    pub minutes: Option<i32>,
+    #[cfg_attr(feature = "api-schema", schema(value_type = crate::api::dto::CreateTaskBody))]
+    pub task: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct StudyPlanTaskOutput {
+    pub task_id: Uuid,
+    pub number: i32,
+    pub project_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,6 +319,9 @@ mod schema {
         paths(
             task_state,
             task_command,
+            task_estimate,
+            study_plan_task,
+            study_plan_targets,
             owner_state,
             owner_cleanup,
             personal_history,
@@ -266,6 +337,10 @@ mod schema {
             TimerCommandOutput,
             TimerRunOutput,
             TaskTimerState,
+            TaskEstimate,
+            TaskEstimateCommandBody,
+            StudyPlanTaskBody,
+            StudyPlanTaskOutput,
             OwnerTimerState,
             TimerCleanupBody,
             TimeRecordKind,
@@ -291,6 +366,18 @@ mod schema {
         params(("workspace_id"=Uuid,Path),("task_id"=Uuid,Path)), request_body=TimerCommandBody,
         responses((status=200,body=TimerCommandOutput),(status=400,body=ProblemResponse),(status=401,body=ProblemResponse),(status=404,body=ProblemResponse),(status=409,body=ProblemResponse)))]
     fn task_command() {}
+    #[utoipa::path(post, path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/estimate", tag="tasks", security(("fvoci_session"=[])),
+        params(("workspace_id"=Uuid,Path),("task_id"=Uuid,Path)), request_body=TaskEstimateCommandBody,
+        responses((status=200,body=TaskEstimate),(status=400,body=ProblemResponse),(status=401,body=ProblemResponse),(status=403,body=ProblemResponse),(status=404,body=ProblemResponse),(status=409,body=ProblemResponse)))]
+    fn task_estimate() {}
+    #[utoipa::path(post, path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/study-plan/task", tag="tasks", security(("fvoci_session"=[])),
+        params(("workspace_id"=Uuid,Path),("document_id"=Uuid,Path)), request_body=StudyPlanTaskBody,
+        responses((status=200,body=StudyPlanTaskOutput),(status=400,body=ProblemResponse),(status=401,body=ProblemResponse),(status=403,body=ProblemResponse),(status=404,body=ProblemResponse),(status=409,body=ProblemResponse)))]
+    fn study_plan_task() {}
+    #[utoipa::path(get, path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/study-plan/task", tag="tasks", security(("fvoci_session"=[])),
+        params(("workspace_id"=Uuid,Path),("document_id"=Uuid,Path),("expectedActorId"=Option<Uuid>,Query),("expectedSessionId"=Option<Uuid>,Query)),
+        responses((status=200,body=crate::api::tasks_dto::TaskProjectPickerResponse),(status=400,body=ProblemResponse),(status=401,body=ProblemResponse),(status=404,body=ProblemResponse),(status=409,body=ProblemResponse)))]
+    fn study_plan_targets() {}
     #[utoipa::path(get, path="/api/v1/me/task-timer", tag="tasks", security(("fvoci_session"=[])),
         params(("expectedActorId"=Option<Uuid>,Query),("expectedSessionId"=Option<Uuid>,Query)),
         responses((status=200,body=OwnerTimerState),(status=401,body=ProblemResponse),(status=409,body=ProblemResponse)))]
