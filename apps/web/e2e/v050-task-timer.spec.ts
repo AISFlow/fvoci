@@ -92,6 +92,13 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
       let code = owned.child.exitCode;
       let signal = owned.child.signalCode;
       if (!unexpectedExit) {
+        const stat = readFileSync(`/proc/${String(owned.witness.pid)}/stat`, "utf8");
+        expect(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]).toBe(
+          owned.witness.procStartTicks,
+        );
+        expect(
+          readFileSync(`/proc/${String(owned.witness.pid)}/cmdline`, "utf8").split("\0")[0],
+        ).toBe(owned.witness.configuredBin);
         const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
           (resolve) => {
             owned.child.once("exit", (exitCode, exitSignal) => {
@@ -140,6 +147,13 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
         expect(exit.signal).toBeNull();
         stopped = exit;
       } else {
+        const originalStat = readFileSync(`/proc/${String(before.pid)}/stat`, "utf8");
+        expect(originalStat.slice(originalStat.lastIndexOf(")") + 2).split(" ")[19]).toBe(
+          before.procStartTicks,
+        );
+        expect(readFileSync(`/proc/${String(before.pid)}/cmdline`, "utf8").split("\0")[0]).toBe(
+          configuredBin,
+        );
         process.kill(before.pid, "SIGTERM");
         await expect.poll(() => existsSync(`/proc/${String(before.pid)}`)).toBe(false);
         stopped = {
@@ -247,6 +261,35 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
       await use(restart);
     } catch (error) {
       fixtureError = error;
+    }
+    // Persist the actual test outcome before any child/cleanup assertion can fail.
+    const beforeCleanupOutcome = {
+      status: testInfo.status,
+      expectedStatus: testInfo.expectedStatus,
+      errors: testInfo.errors.map(({ message }) => ({ message })),
+      fixtureFailure:
+        fixtureError instanceof Error
+          ? { name: fixtureError.name, message: fixtureError.message }
+          : fixtureError === undefined
+            ? null
+            : { type: typeof fixtureError },
+      transitions,
+      ownedProcesses,
+      phase: "before cleanup assertions",
+    };
+    writeFileSync(
+      path.join(resultDir, "w5-native-restart-before-cleanup-outcome.json"),
+      JSON.stringify(beforeCleanupOutcome, null, 2),
+      { mode: 0o600 },
+    );
+    const outcomeEvidence = process.env.FVOCI_W5_EVIDENCE_DIR;
+    if (outcomeEvidence) {
+      mkdirSync(outcomeEvidence, { recursive: true });
+      writeFileSync(
+        path.join(outcomeEvidence, "native-restart-before-cleanup-outcome.json"),
+        JSON.stringify(beforeCleanupOutcome, null, 2),
+        { mode: 0o600 },
+      );
     }
     let navigationError: unknown;
     if (current) {
