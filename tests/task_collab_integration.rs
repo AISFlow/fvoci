@@ -814,14 +814,15 @@ async fn task_revisions_create_list_get_restore_through_room() {
 
         let (status, list) = session_call(addr, Method::GET, &task_path(s, f.task_id, "/revisions?limit=20"), &viewer.session_token, None).await;
         assert_eq!(status, StatusCode::OK, "{list}");
-        assert_eq!(list["items"].as_array().unwrap().len(), 2, "restore adds history while preserving its source");
-        assert_eq!(list["items"][0]["restoredFromId"], revision_id.as_str());
+        assert_eq!(list["items"].as_array().unwrap().len(), 1, "unchanged manual capture dedupes before any restore");
+        assert!(list["items"][0]["restoredFromId"].is_null());
         assert_eq!(list["items"][0]["targetKind"], "task");
         assert_eq!(list["items"][0]["reason"], "manual");
         let (status, detail) = session_call(addr, Method::GET, &task_path(s, f.task_id, &format!("/revisions/{revision_id}")), &viewer.session_token, None).await;
         assert_eq!(status, StatusCode::OK, "{detail}");
         assert!(detail["contentJson"].to_string().contains("첫 버전"));
         assert!(detail["ySnapshot"].as_str().is_some());
+        let source_detail = detail.clone();
 
         // Viewer cannot create or restore; a document path cannot read a task revision.
         let (status, _) = session_call(addr, Method::POST, &task_path(s, f.task_id, "/revisions"), &viewer.session_token, None).await;
@@ -885,9 +886,17 @@ async fn task_revisions_create_list_get_restore_through_room() {
         assert_eq!(status, StatusCode::OK, "{list}");
         assert_eq!(list["items"].as_array().unwrap().len(), 2, "restore adds history while preserving its source");
         assert_eq!(list["items"][0]["restoredFromId"], revision_id.as_str());
+        assert_eq!(list["items"][0]["id"], restored["revisionId"]);
+        assert_ne!(restored["revisionId"], revision_id.as_str());
+        assert_eq!(list["items"][0]["createdBy"], s.user_id.to_string());
+        assert_eq!(list["items"][0]["reason"], "restore");
+        let restored_at = chrono::DateTime::parse_from_rfc3339(list["items"][0]["createdAt"].as_str().unwrap()).unwrap();
+        assert!(restored_at <= chrono::Utc::now());
+        assert!(restored_at > chrono::Utc::now() - chrono::Duration::minutes(1));
         let (status, detail) = call(addr, Method::GET, &task_path(s, f.task_id, &format!("/revisions/{revision_id}")), Cred::Bearer(&reader), None).await;
         assert_eq!(status, StatusCode::OK, "{detail}");
         assert_eq!(detail["id"], revision_id.as_str());
+        assert_eq!(detail, source_detail, "restore preserves all old source metadata/content/snapshot");
         let (status, _) = call(addr, Method::POST, &task_path(s, f.task_id, "/revisions"), Cred::Bearer(&reader), None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _) = call(addr, Method::POST, &task_path(s, f.task_id, &format!("/revisions/{revision_id}/restore")), Cred::Bearer(&reader), Some(json!({"correlationId": Uuid::now_v7(), "expectedTailSeq": "0"}))).await;

@@ -4057,6 +4057,7 @@ impl RoomActor {
                 .map(|result| result.map(|append| (append, None)))
         };
 
+        let mut own_receipt_verified = false;
         let (committed, restored_revision_id) = match append {
             Ok(Ok(result)) => result,
             Ok(Err(CollabDbError::StaleWriter)) => {
@@ -4086,13 +4087,19 @@ impl RoomActor {
                     )
                     .await
                 {
-                    Some(result) => (result, capture.as_ref().map(|capture| capture.revision_id)),
+                    Some(result) => {
+                        // Reconciliation verified our operation UUID, actor,
+                        // length and digest. These are the exact committed bytes,
+                        // unlike a correlation replay found before this append.
+                        own_receipt_verified = true;
+                        (result, capture.as_ref().map(|capture| capture.revision_id))
+                    }
                     None => return Err(ForwardWriteError::Unavailable),
                 }
             }
         };
 
-        if restore.is_some() {
+        if restore.is_some() && !own_receipt_verified {
             if let AppendCollabResult::DuplicateAck { seq } = committed {
                 // A concurrently recovered replay already owns its exact payload.
                 // Reload durable bytes; do not broadcast our speculative payload.
@@ -4142,6 +4149,26 @@ impl RoomActor {
         }
         let y_protocol = encode_sync_payload(SyncStep::Update, &payload);
         self.broadcast_update(&y_protocol).await;
+        if own_receipt_verified {
+            if let Some(intent) = restore {
+                // Receipt verification permits durable convergence under the
+                // existing room read policy. It is not current write permission:
+                // a demoted/revoked actor must not receive restore success.
+                let recovered = lookup_restored_revision(
+                    &self.pool,
+                    self.workspace_id,
+                    actor_user_id,
+                    session_id,
+                    intent,
+                )
+                .await
+                .map_err(|_| ForwardWriteError::Unavailable)?
+                .map_err(|_| ForwardWriteError::Rejected)?;
+                if recovered.map(|value| value.revision_id) != restored_revision_id {
+                    return Err(ForwardWriteError::Unavailable);
+                }
+            }
+        }
         Ok((Some(seq), restored_revision_id))
     }
 

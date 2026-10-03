@@ -274,6 +274,37 @@ function localProjection(block: Block, types: ReadonlySet<string>): unknown {
   }
   return canonical(project(block.node, true));
 }
+function residual(block: Block, types: ReadonlySet<string>): unknown {
+  const out: { path: number[]; fields: unknown; marks?: unknown[] }[] = [];
+  function walk(n: Node, path: number[], top: boolean): void {
+    if (!top && (types.has(n.type) || n.type === "attachment")) return;
+    const extra = Object.fromEntries(
+      Object.entries(n).filter(
+        ([key]) => !["type", "attrs", "marks", "text", "content"].includes(key),
+      ),
+    );
+    const marks = (Array.isArray(n.marks) ? n.marks : []).map((mark) => {
+      const m = record(mark);
+      return m
+        ? Object.fromEntries(Object.entries(m).filter(([key]) => !["type", "attrs"].includes(key)))
+        : {};
+    });
+    if (Object.keys(extra).length || marks.some((mark) => Object.keys(mark).length))
+      out.push({
+        path,
+        fields: canonical(extra),
+        ...(marks.some((mark) => Object.keys(mark).length)
+          ? { marks: canonical(marks) as unknown[] }
+          : {}),
+      });
+    children(n).forEach((child, index) => {
+      const parsed = node(child);
+      if (parsed) walk(parsed, [...path, index], false);
+    });
+  }
+  walk(block.node, [], true);
+  return out;
+}
 function fields(block: Block, types: ReadonlySet<string>): Record<RevisionChangeKind, unknown[]> {
   const out: Record<RevisionChangeKind, unknown[]> = {
     added: [],
@@ -382,6 +413,21 @@ export function compareRevisionProjections(
       }
     return map;
   }
+  const rootFields = (value: unknown) =>
+    canonical(
+      Object.fromEntries(Object.entries(record(value) ?? {}).filter(([key]) => key !== "content")),
+    );
+  const rootBefore = rootFields(before.contentJson),
+    rootAfter = rootFields(after.contentJson);
+  if (!same(rootBefore, rootAfter))
+    result.changes.push({
+      key: "root:attributes",
+      kind: "attributes",
+      identity: "position",
+      before: { path: [], type: "doc", blockId: null, text: "", content: rootBefore },
+      after: { path: [], type: "doc", blockId: null, text: "", content: rootAfter },
+      values: { before: rootBefore, after: rootAfter },
+    });
   const leftIds = byId(left),
     rightIds = byId(right);
   const pairs = new Map<Block, { before: Block; identity: RevisionChange["identity"] }>();
@@ -483,7 +529,14 @@ export function compareRevisionProjections(
     }
     // Preserve unsupported/unknown field changes rather than silently claiming
     // equal content from the named categories alone.
-    if (!reported)
+    const oldResidual = residual(beforeBlock, types),
+      newResidual = residual(afterBlock, types);
+    if (!same(oldResidual, newResidual))
+      add("attributes", beforeBlock, afterBlock, pair.identity, {
+        before: oldResidual,
+        after: newResidual,
+      });
+    else if (!reported)
       add("attributes", beforeBlock, afterBlock, pair.identity, {
         before: localProjection(beforeBlock, types),
         after: localProjection(afterBlock, types),

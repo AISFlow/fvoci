@@ -1444,6 +1444,21 @@ async fn append_collab_update_in_tx(
     let commit_started = Instant::now();
     tx.commit().await?;
     timings.commit_us = commit_started.elapsed().as_micros() as u64;
+    #[cfg(feature = "db-tests")]
+    if restore.is_some() {
+        let barrier = RESTORE_COMMIT_AMBIGUITY
+            .lock()
+            .await
+            .remove(&(workspace_id, document_id));
+        if let Some((reached, proceed)) = barrier {
+            let _ = reached.send(());
+            let _ = proceed.await;
+            return Err(sqlx::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "fixture restore committed; reply lost",
+            )));
+        }
+    }
     Ok((
         Ok((
             AppendCollabResult::Committed { seq },
@@ -1870,6 +1885,34 @@ pub async fn load_collab_readonly_kind(
     let load = state_row_to_load(state, tail);
     tx.commit().await?;
     Ok(Ok(load))
+}
+
+/// One-shot, per-fixture fault after a real restore commit. No production hook.
+#[cfg(feature = "db-tests")]
+type RestoreCommitBarrier = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+#[cfg(feature = "db-tests")]
+static RESTORE_COMMIT_AMBIGUITY: std::sync::LazyLock<
+    tokio::sync::Mutex<std::collections::HashMap<(Uuid, Uuid), RestoreCommitBarrier>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
+#[cfg(feature = "db-tests")]
+pub async fn arm_restore_committed_ambiguity(
+    workspace_id: Uuid,
+    document_id: Uuid,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+    assert!(RESTORE_COMMIT_AMBIGUITY
+        .lock()
+        .await
+        .insert((workspace_id, document_id), (reached_tx, proceed_rx))
+        .is_none());
+    (reached_rx, proceed_tx)
 }
 
 /// Documents whose persisted-bytes estimate fails while armed. Keyed by document so a

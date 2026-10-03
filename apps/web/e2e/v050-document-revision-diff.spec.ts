@@ -167,6 +167,9 @@ SET LOCAL app.tenant_id = '${workspace}';
 SELECT jsonb_build_object('role',current_user,'superuser',r.rolsuper,'bypassRls',r.rolbypassrls,
 'notOwner',pg_get_userbyid(c.relowner) <> current_user,'forced',c.relforcerowsecurity,'rlsActive',row_security_active(c.oid),
 'body',(SELECT content_json FROM fvoci.documents WHERE workspace_id='${workspace}' AND id='${document}'),
+'tail',(SELECT tail_seq::text FROM fvoci.document_states WHERE workspace_id='${workspace}' AND document_id='${document}'),
+'updates',(SELECT count(*) FROM fvoci.document_collab_updates WHERE workspace_id='${workspace}' AND document_id='${document}'),
+'receipts',(SELECT count(*) FROM fvoci.document_collab_op_receipts WHERE workspace_id='${workspace}' AND document_id='${document}'),
 'history',(SELECT jsonb_agg(jsonb_build_object('id',id,'reason',reason,'source',restored_from_id,'actor',created_by,'at',created_at,'base',restore_base_tail_seq::text,'committed',restore_committed_tail_seq::text) ORDER BY created_at,id) FROM fvoci.revisions WHERE workspace_id='${workspace}' AND target_kind='document' AND target_id='${document}'))
 FROM pg_roles r JOIN pg_class c ON c.oid='fvoci.revisions'::regclass WHERE r.rolname=current_user;
 ROLLBACK;`,
@@ -185,6 +188,39 @@ ROLLBACK;`,
     rlsActive: true,
   });
   return witness;
+}
+
+function literalRestoredMeaning(body: TiptapNode, fileId: unknown, reference: string): void {
+  const blocks = body.content ?? [];
+  expect(blocks.slice(0, 3).map((node) => node.attrs?.id)).toEqual([
+    "w4-intro",
+    "w4-move",
+    "w4-removed",
+  ]);
+  expect(blocks[0]?.content?.[0]?.text).toBe("한국어 공부 계획");
+  expect(blocks[1]?.content?.[0]?.text).toBe("옮길 문단");
+  expect(blocks[2]?.content?.[0]?.text).toBe("삭제할 문단");
+  expect(blocks.some((node) => node.attrs?.id === "w4-added")).toBe(false);
+  const table = blocks.find((node) => node.attrs?.id === "w4-table");
+  expect(table?.content).toHaveLength(1);
+  expect(table?.content?.[0]?.content).toHaveLength(1);
+  expect(table?.content?.[0]?.content?.[0]?.content?.[0]?.attrs?.id).toBe("w4-cell");
+  expect(table?.content?.[0]?.content?.[0]?.content?.[0]?.content?.[0]?.text).toBe("30분");
+  expect(
+    blocks.find((node) => node.attrs?.id === "w4-checklist")?.content?.[0]?.attrs?.checked,
+  ).toBe(false);
+  expect(
+    blocks
+      .find((node) => node.attrs?.id === "w4-link")
+      ?.content?.[0]?.marks?.find((mark) => mark.type === "link")?.attrs?.href,
+  ).toBe("https://example.com/old");
+  expect(
+    blocks.find((node) => node.attrs?.id === "w4-reference")?.content?.[0]?.attrs,
+  ).toMatchObject({ entity: "document", id: reference, label: "원본 참조" });
+  expect(blocks.at(-1)?.content?.[0]?.text).toBe("과거 ID 없는 문단");
+  expect(blocks.filter((node) => node.type === "attachment").map((node) => node.attrs?.id)).toEqual(
+    [fileId],
+  );
 }
 
 async function frozenPair(page: Page, before: string, after: string): Promise<void> {
@@ -262,20 +298,44 @@ test("literal Korean semantic pair navigates, previews a conflict, restores new 
     expect((await created).status()).toBe(201);
     const after = (await (await created).json()) as { id: string };
     await frozenPair(a.page, source.id, after.id);
-    for (const kind of [
-      "added",
-      "removed",
-      "moved",
-      "text",
-      "checkbox",
+    // Literal expectations are declared independently of comparison output.
+    const point = async (kind: string, blockId: string | null, old: string[], next: string[]) => {
+      let button = a.page.locator(`.revision-diff__changes [data-change-kind="${kind}"]`);
+      if (blockId) button = button.filter({ hasText: blockId });
+      await button.first().click();
+      const change = a.page.getByTestId("revision-change");
+      await expect(change).toHaveAttribute("data-before-revision", source.id);
+      await expect(change).toHaveAttribute("data-after-revision", after.id);
+      await expect(change).toHaveAttribute("data-change-kind", kind);
+      for (const value of old) await expect(change.locator("section").nth(0)).toContainText(value);
+      for (const value of next) await expect(change.locator("section").nth(1)).toContainText(value);
+    };
+    await point("added", "w4-added", [], ["추가한 문단"]);
+    await point("removed", "w4-removed", ["삭제할 문단"], []);
+    await point("moved", "w4-move", ["옮길 문단"], ["옮길 문단"]);
+    await expect(a.page.getByTestId("revision-change")).toContainText("2 → 1");
+    await point("text", "w4-intro", ["한국어 공부 계획"], ["한국어 연구 계획"]);
+    await point("checkbox", "w4-check", ["체크되지 않음"], ["체크됨"]);
+    await point(
       "table",
-      "link",
+      "w4-table",
+      ["30분", "tableRow", "tableCell"],
+      ["45분", "20분", '"path":[1]', "tableRow", "tableCell"],
+    );
+    await point("text", "w4-cell", ["30분"], ["45분"]);
+    await point("link", "w4-link", ["https://example.com/old"], ["https://example.com/new"]);
+    await point(
       "attachment",
+      null,
+      [String(firstFile.attrs?.id), "원본 자료.txt"],
+      [String(secondFile.attrs?.id), "새 자료.txt"],
+    );
+    await point(
       "reference",
-    ])
-      await expect(
-        a.page.locator(`.revision-diff__changes [data-change-kind="${kind}"]`).first(),
-      ).toBeVisible();
+      "w4-reference",
+      [referenced.id, "원본 참조"],
+      [referenced.id, "새 참조"],
+    );
     await expect(a.page.getByTestId("revision-diff")).toContainText("ID");
     await a.page.getByTestId("revision-change-next").click();
     await expect(a.page.getByTestId("revision-change")).toHaveAttribute(
@@ -313,11 +373,15 @@ test("literal Korean semantic pair navigates, previews a conflict, restores new 
     await peer.keyboard.type(" 동료 최신 변경");
     await peer.getByRole("button", { name: "저장", exact: true }).click();
     await expect(peer.locator('[data-collab-persisted="true"]')).toBeVisible();
+    const beforeConflict = restrictedWitness(ws, doc.id);
     const conflict = a.page.waitForResponse((response) =>
       response.url().endsWith(`/revisions/${source.id}/restore`),
     );
     await a.page.getByTestId("revision-restore-confirm").click();
     expect((await conflict).status()).toBe(409);
+    const afterConflict = restrictedWitness(ws, doc.id);
+    for (const key of ["body", "history", "tail", "updates", "receipts"])
+      expect(afterConflict[key], `409 must not mutate ${key}`).toEqual(beforeConflict[key]);
     await expect(a.page.getByTestId("revision-restore-confirm")).toBeDisabled();
     await a.page.getByTestId("revision-restore-refresh").click();
     await expect(a.page.getByTestId("revision-restore-current")).toContainText("동료 최신 변경");
@@ -351,6 +415,30 @@ test("literal Korean semantic pair navigates, previews a conflict, restores new 
     // Historical idless nodes may acquire IDs in the live editor. Check the
     // literal meaning and existing identities; never normalize away known IDs.
     const restoredBody = firstReadback.body as TiptapNode;
+    literalRestoredMeaning(restoredBody, firstFile.attrs?.id, referenced.id);
+    const sqlHistory = firstReadback.history as {
+      id: string;
+      reason: string;
+      source: string | null;
+      actor: string | null;
+      at: string;
+      base: string | null;
+      committed: string | null;
+    }[];
+    expect(sqlHistory).toHaveLength(3);
+    const sqlRestored = sqlHistory.find((row) => row.id === restored.revisionId);
+    expect(sqlRestored).toMatchObject({
+      reason: "restore",
+      source: source.id,
+      actor: me.userId,
+      base: afterConflict.tail,
+    });
+    expect(BigInt(sqlRestored?.committed ?? "-1")).toBe(BigInt(afterConflict.tail as string) + 1n);
+    expect(firstReadback.tail).toBe(sqlRestored?.committed);
+    expect(Date.parse(sqlRestored?.at ?? "")).toBe(Date.parse(newDetail.createdAt));
+    expect(sqlHistory.filter((row) => row.id !== restored.revisionId)).toEqual(
+      afterConflict.history,
+    );
     expect(
       restoredBody.content?.find((node) => node.attrs?.id === "w4-intro")?.content?.[0]?.text,
     ).toBe("한국어 공부 계획");
@@ -373,6 +461,7 @@ test("literal Korean semantic pair navigates, previews a conflict, restores new 
       await openDoc(fresh, doc.path);
       await expect(editorOf(fresh)).toContainText("공부 계획");
       const body = await savedBody(fresh.request, ws, doc.id);
+      literalRestoredMeaning(body, firstFile.attrs?.id, referenced.id);
       expect(body.content?.find((node) => node.attrs?.id === "w4-intro")?.content?.[0]?.text).toBe(
         "한국어 공부 계획",
       );

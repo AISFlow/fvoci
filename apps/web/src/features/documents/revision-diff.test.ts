@@ -302,3 +302,49 @@ await test("unknown attributes are observable and excessive attribute nesting/cy
     ["invalid-content"],
   );
 });
+
+await test("root metadata and residual unknown fields remain observable alongside named changes", () => {
+  const old = { ...paragraph("p", "이전 글"), futurePolicy: { disclosure: "이전 정책" } };
+  const next = { ...paragraph("p", "다음 글"), futurePolicy: { disclosure: "다음 정책" } };
+  const a = {
+    ...projection("A", [old]),
+    contentJson: { type: "doc", revisionPolicy: "원본", content: [old] },
+  };
+  const b = {
+    ...projection("B", [next]),
+    contentJson: { type: "doc", revisionPolicy: "변경", content: [next] },
+  };
+  const diff = compareRevisionProjections(a, b, blockTypes);
+  assert.ok(
+    diff.changes.some(
+      (change) =>
+        change.kind === "text" &&
+        change.before?.text === "이전 글" &&
+        change.after?.text === "다음 글",
+    ),
+  );
+  assert.ok(
+    diff.changes.some(
+      (change) =>
+        change.kind === "attributes" &&
+        change.before?.type === "doc" &&
+        JSON.stringify(change.values?.before).includes("원본") &&
+        JSON.stringify(change.values?.after).includes("변경"),
+    ),
+  );
+  const residual = diff.changes.find(
+    (change) => change.kind === "attributes" && change.after?.blockId === "p",
+  );
+  assert.deepEqual(residual?.values, {
+    before: [{ path: [], fields: { futurePolicy: { disclosure: "이전 정책" } } }],
+    after: [{ path: [], fields: { futurePolicy: { disclosure: "다음 정책" } } }],
+  });
+  assert.equal(
+    compareRevisionProjections(
+      { ...a, contentJson: { type: "doc", attrs: { policy: "private" }, content: [] } },
+      { ...b, contentJson: { type: "doc", attrs: { policy: "shared" }, content: [] } },
+      blockTypes,
+    ).changes[0]?.kind,
+    "attributes",
+  );
+});

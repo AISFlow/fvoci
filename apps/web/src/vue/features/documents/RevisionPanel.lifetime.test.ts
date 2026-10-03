@@ -117,7 +117,7 @@ function harness() {
   const app = renderer.createApp({
     setup() {
       const javascript = new Bun.Transpiler({ loader: "ts" }).transformSync(
-        `(() => {${source}\nreturn {save,restore,showPreview,notice,preview,pendingRestoreId,
+        `(() => {${source}\nreturn {save,restore,showPreview,notice,preview,pendingRestoreId,changeValues,
           beginRestore,cancelRestore,restorePreview,restorePreviewPending,restorePending,restorable,
           compareSelected,beforeId,afterId,comparison,comparisonBodies,changeIndex,moveChange,queryKey,
           confirmRestore: typeof confirmRestore === 'function' ? confirmRestore : () => restore.mutate(pendingRestoreId.value)};})()`,
@@ -509,4 +509,72 @@ await test("reordered comparison freezes the same literal before/after pair thro
   } finally {
     h.stop();
   }
+});
+
+await test("SFC value previews expose empty table structure and added/removed resource identity safely", () => {
+  const h = harness();
+  const diff = compareRevisionProjections(
+    {
+      id: "before",
+      targetKind: "document",
+      targetId: "d",
+      contentJson: {
+        type: "doc",
+        content: [
+          {
+            type: "table",
+            attrs: { id: "t" },
+            content: [{ type: "tableRow", content: [{ type: "tableCell", content: [] }] }],
+          },
+        ],
+      },
+    },
+    {
+      id: "after",
+      targetKind: "document",
+      targetId: "d",
+      contentJson: {
+        type: "doc",
+        content: [
+          {
+            type: "table",
+            attrs: { id: "t" },
+            content: [
+              {
+                type: "tableRow",
+                content: [
+                  { type: "tableCell", content: [] },
+                  { type: "tableCell", content: [] },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    },
+    UNIQUE_ID_NODE_TYPES,
+  );
+  const table = diff.changes.find((change) => change.kind === "table");
+  assert.ok(table);
+  assert.match(String(h.call("changeValues", table, "before")), /tableCell/);
+  assert.match(String(h.call("changeValues", table, "after")), /"tableCell","tableCell"/);
+  for (const kind of ["added", "removed"] as const) {
+    const side = kind === "added" ? "after" : "before";
+    const change = {
+      key: kind,
+      kind,
+      identity: "unmatched",
+      before: null,
+      after: null,
+      [side]: {
+        path: [0],
+        type: "attachment",
+        blockId: null,
+        text: "same.txt",
+        content: { type: "attachment", attrs: { id: "literal-resource-uuid", name: "same.txt" } },
+      },
+    };
+    assert.match(String(h.call("changeValues", change, side)), /literal-resource-uuid/);
+  }
+  h.stop();
 });

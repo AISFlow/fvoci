@@ -281,13 +281,17 @@ function blockPosition(block: RevisionBlockView | null): string {
   return block?.path.map((index) => String(index + 1)).join(" › ") ?? "";
 }
 function changeValues(change: RevisionChange, side: "before" | "after"): string {
-  const values = change.values?.[side];
+  // Added/removed blocks also carry resource IDs, marks and empty structure.
+  // Text interpolation keeps historical values inert; never v-html.
+  const values =
+    change.values?.[side] ??
+    (["added", "removed"].includes(change.kind) ? change[side]?.content : undefined);
   if (change.kind === "checkbox")
     return Array.isArray(values) && values[0] === true
       ? t("version.diff.checked")
       : t("version.diff.unchecked");
   if (!Array.isArray(values)) return values === undefined ? "" : JSON.stringify(values);
-  if (change.kind === "text" || change.kind === "table" || change.kind === "structure") return "";
+  if (change.kind === "text") return "";
   return values
     .map((value) => {
       if (!value || typeof value !== "object") return String(value);
