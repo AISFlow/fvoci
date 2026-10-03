@@ -1257,10 +1257,15 @@ test("Calendar commit refreshes retained detail and Gantt before 30s even when s
     const month = new Date().toISOString().slice(0, 7);
     const f = await fixture(page, "TCC", { startDate: `${month}-05`, dueDate: `${month}-07` });
     // Transport fault only; every task mutation/read still reaches real Rust/DB.
-    await page.route("**/projects/*/stream", (route) =>
+    const streamPath = `${f.base}/task-stream`;
+    await page.route(`**${streamPath}`, (route) =>
       route.fulfill({ status: 503, body: "transport unavailable" }),
     );
+    const refusedStream = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === streamPath && response.status() === 503,
+    );
     await page.goto(`/w/${admin.workspaceSlug}/${f.displayId}`);
+    await refusedStream;
     await expect(page.getByTestId("task-edit-due-date")).toHaveValue(`${month}-07`);
     const mountedAt = await page.evaluate(() => performance.timeOrigin);
     const started = Date.now();
@@ -1332,20 +1337,30 @@ test("authorized stream reopen requeries a mounted detail after missed peer meta
   const page = signed.page;
   try {
     const f = await fixture(page, "TRC", { dueDate: "2027-03-13" });
+    const streamPath = `${f.base}/task-stream`;
     let refused = true;
-    await page.route("**/projects/*/stream", (route) =>
+    await page.route(`**${streamPath}`, (route) =>
       refused ? route.fulfill({ status: 503, body: "transport unavailable" }) : route.continue(),
+    );
+    const refusedStream = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === streamPath && response.status() === 503,
     );
     await page.goto(`/w/${admin.workspaceSlug}/${f.displayId}`);
     await expect(page.getByTestId("task-edit-due-date")).toHaveValue("2027-03-13");
+    await refusedStream;
     const response = await page.request.patch(f.endpoint, {
       data: { title: "Peer rename", dueDate: "2027-03-15" },
     });
     expect(response.status()).toBe(200);
     const committed = taskSchema.parse(await response.json());
-    const opened = page.waitForResponse((r) => r.url().endsWith("/stream") && r.status() === 200);
+    await expect(page.getByTestId("task-edit-due-date")).toHaveValue("2027-03-13");
+    await expect(page.getByTestId("task-edit-title")).toHaveValue(f.task.title);
+    const opened = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === streamPath && response.status() === 200,
+    );
     refused = false;
-    await opened;
+    const reopened = await opened;
+    expect(reopened.headers()["content-type"]).toContain("text/event-stream");
     await expect(page.getByTestId("task-edit-due-date")).toHaveValue(committed.dueDate ?? "");
     await expect(page.getByTestId("task-edit-title")).toHaveValue("Peer rename");
     expect(datesOf(await f.stored())).toEqual(datesOf(committed));

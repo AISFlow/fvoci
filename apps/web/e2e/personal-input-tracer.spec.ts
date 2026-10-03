@@ -723,16 +723,21 @@ test("51 real origins recover a missed hint without detail and preserve an in-fl
     )
       detailReads.push(request.url());
   });
+  const streamPath = `/api/v1/workspaces/${personal.id}/task-stream`;
   let refused = true,
     refusedCount = 0;
-  await page.route("**/projects/*/stream", (route) => {
+  await page.route(`**${streamPath}`, (route) => {
     if (refused) {
       refusedCount++;
       return route.fulfill({ status: 503, body: "transport unavailable" });
     }
     return route.continue();
   });
+  const refusedStream = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === streamPath && response.status() === 503,
+  );
   await page.goto(`/w/${personal.slug}/${note.documentDisplayId}`);
+  await refusedStream;
   const panel = page.getByRole("region", { name: "연결 태스크" });
   await expect(panel.getByRole("heading")).toHaveText("연결 태스크 (51)");
   const mounted = await panel.elementHandle();
@@ -757,7 +762,7 @@ test("51 real origins recover a missed hint without detail and preserve an in-fl
   ).toBe(renamed);
   await expect(panel.getByRole("link")).toContainText(nextTask.taskTitle);
   const opened = page.waitForResponse(
-    (response) => response.url().endsWith("/stream") && response.status() === 200,
+    (response) => new URL(response.url()).pathname === streamPath && response.status() === 200,
   );
   const recovered = page.waitForResponse(
     async (response) =>
@@ -769,7 +774,8 @@ test("51 real origins recover a missed hint without detail and preserve an in-fl
         .items.some((row) => row.taskId === nextTask.taskId && row.taskTitle === renamed),
   );
   refused = false;
-  await opened;
+  const reopened = await opened;
+  expect(reopened.headers()["content-type"]).toContain("text/event-stream");
   await recovered;
   await expect(panel.getByRole("link")).toContainText(renamed);
   expect(await mounted.evaluate((element) => element.isConnected)).toBe(true);
