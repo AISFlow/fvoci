@@ -6017,6 +6017,12 @@ async fn native_archive_retained_guard_cost_is_measured() {
         .await
         .unwrap();
     let before_data = restore_database_effects(&fx.admin).await;
+    let migration_metadata_sql =
+        "SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM fvoci.schema_migrations m";
+    let before_migration_metadata: Value = sqlx::query_scalar(migration_metadata_sql)
+        .fetch_one(&fx.admin)
+        .await
+        .unwrap();
     let before_history = timer_graph(&fx.admin, fx.user_id).await;
     let before_versions: Vec<i32> =
         sqlx::query_scalar("SELECT version FROM fvoci.schema_migrations ORDER BY version")
@@ -6047,9 +6053,10 @@ async fn native_archive_retained_guard_cost_is_measured() {
             .filter(|row| row.0 != "schema_migrations")
             .collect::<Vec<_>>()
     };
+    let after_data = restore_database_effects(&fx.admin).await;
     assert_eq!(
-        without_versions(restore_database_effects(&fx.admin).await),
-        without_versions(before_data)
+        without_versions(after_data.clone()),
+        without_versions(before_data.clone())
     );
     assert_eq!(timer_graph(&fx.admin, fx.user_id).await, before_history);
     let versions: Vec<i32> =
@@ -6066,6 +6073,34 @@ async fn native_archive_retained_guard_cost_is_measured() {
     assert_eq!(
         index,
         json!({"valid":true,"ready":true,"unique":false,"keys":1,"attributes":["user_id"],"noPredicate":true,"noExpression":true})
+    );
+    let after_migration_metadata: Value = sqlx::query_scalar(migration_metadata_sql)
+        .fetch_one(&fx.admin)
+        .await
+        .unwrap();
+    // schema_migrations stores versions/timestamps, not SQL checksums. Pair the
+    // actual database rows with source bytes from this frozen runner input.
+    use sha2::{Digest, Sha256};
+    let mut source_checksums: Vec<Value> = std::fs::read_dir(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"),
+    )
+    .unwrap()
+    .map(|entry| entry.unwrap().path())
+    .filter(|path| path.extension().is_some_and(|extension| extension == "sql"))
+    .map(|path| {
+        let file = path.file_name().unwrap().to_str().unwrap();
+        let version: i32 = file.split('_').next().unwrap().parse().unwrap();
+        json!({"version":version,"file":file,"sha256":format!("{:x}",Sha256::digest(std::fs::read(&path).unwrap()))})
+    })
+    .collect();
+    source_checksums.sort_by_key(|row| row["version"].as_i64().unwrap());
+    assert_eq!(source_checksums.len(), 54);
+    println!(
+        "W8-CURRENT-054-FULL-SCHEMA {}",
+        json!({"beforeSecurity":before_security,"afterSecurity":after_security,
+            "beforeDataFingerprints":before_data,"afterDataFingerprints":after_data,
+            "beforeMigrationRows":before_migration_metadata,"afterMigrationRows":after_migration_metadata,
+            "frozenSourceChecksums":source_checksums,"databaseStoresChecksums":false})
     );
     println!(
         "W8-CURRENT-054-CATALOG {}",
