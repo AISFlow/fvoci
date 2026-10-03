@@ -67,6 +67,15 @@ type RestartedTimerServer = {
 const restartedTimerServers = new WeakMap<Page, RestartedTimerServer>();
 type TimerRestart = () => Promise<string>;
 const test = base.extend<{ restartTimerServer: TimerRestart }>({
+  page: async ({ page }, use) => {
+    try {
+      await use(page);
+    } finally {
+      // The owned page/context fixture must finish body observations before
+      // Playwright destroys its response identifiers during teardown.
+      if (loadedEntrypoints.has(page)) await drainLoadedEntrypoints(page);
+    }
+  },
   restartTimerServer: async ({ page }, use, testInfo) => {
     const transitions: Array<Record<string, unknown>> = [];
     const restartSnapshots: Array<Record<string, unknown>> = [];
@@ -722,7 +731,7 @@ function assertEntrypointEvidence(evidence: EntrypointEvidence) {
   expect(evidence.browserLoadedSha256, evidence.path).toBe(evidence.ownStaticSha256);
   expect(evidence.servedSha256, evidence.path).toBe(evidence.ownStaticSha256);
 }
-async function verifyLoadedEntrypoints(page: Page, native: TimerNative[]) {
+async function drainLoadedEntrypoints(page: Page) {
   const entrypoints = loadedEntrypoints.get(page);
   if (!entrypoints) throw new Error("browser entrypoint capture missing");
   if (entrypoints.errors.length) throw entrypoints.errors[0]?.error;
@@ -736,6 +745,15 @@ async function verifyLoadedEntrypoints(page: Page, native: TimerNative[]) {
     assertEntrypointEvidence(loaded);
     assets.push(loaded);
   }
+  // Events may fail while an earlier body's promise is being awaited. They
+  // remain hard failures even when the completed records themselves are valid.
+  if (entrypoints.errors.length) throw entrypoints.errors[0]?.error;
+  return assets;
+}
+async function verifyLoadedEntrypoints(page: Page, native: TimerNative[]) {
+  const entrypoints = loadedEntrypoints.get(page);
+  if (!entrypoints) throw new Error("browser entrypoint capture missing");
+  const assets = await drainLoadedEntrypoints(page);
   expect(native).toHaveLength(1);
   const current = native[0];
   if (!current) throw new Error("current native generation missing");
@@ -766,6 +784,21 @@ test.beforeEach(async ({ page }) => {
   const responses = new Map<string, Promise<EntrypointCapture>>();
   const errors: Array<{ url: string; error: unknown }> = [];
   loadedEntrypoints.set(page, { paths, responses, errors });
+  const goto = page.goto.bind(page);
+  page.goto = async (...args) => {
+    await drainLoadedEntrypoints(page);
+    return goto(...args);
+  };
+  const reload = page.reload.bind(page);
+  page.reload = async (...args) => {
+    await drainLoadedEntrypoints(page);
+    return reload(...args);
+  };
+  const close = page.close.bind(page);
+  page.close = async (...args) => {
+    await drainLoadedEntrypoints(page);
+    return close(...args);
+  };
   page.on("response", (response) => {
     const pathname = new URL(response.url()).pathname;
     if (
@@ -778,16 +811,26 @@ test.beforeEach(async ({ page }) => {
         expect(response.frame()).toBe(page.mainFrame());
         const documentUrl = response.frame().url();
         const pageUrl = page.url();
-        const { native } = captureTimerNative(page);
-        expect(native).toHaveLength(1);
-        const witness = native[0];
-        if (!witness) throw new Error("browser response native generation missing");
-        const key = `${nativeGeneration(witness)}:${pathname}`;
+        const owned = restartedTimerServers.get(page)?.witness;
+        // The original wrapper is immutable for this page's test namespace;
+        // each physical replacement has an explicit PID/startTicks witness.
+        const generation = owned
+          ? nativeGeneration(owned)
+          : `initial-wrapper:${new URL(url).origin}`;
+        const key = `${generation}:${pathname}`;
         if (responses.has(key)) return;
+        // Enroll CDP's real body read immediately. Native hashing/proc reads
+        // must wait until these bytes are safe from an auth/navigation reload.
+        const browserBody = response.body();
         // Independent HTTP bytes are read at capture, before this server can
         // stop. Keep every generation's first browser response, never overwrite.
         const capture = async (): Promise<EntrypointEvidence> => {
-          const body = await response.body();
+          const body = await browserBody;
+          const { native } = captureTimerNative(page);
+          expect(native).toHaveLength(1);
+          const witness = native[0];
+          if (!witness) throw new Error("browser response native generation missing");
+          if (owned) expect(nativeGeneration(witness)).toBe(nativeGeneration(owned));
           const served = await page.request.get(url);
           expect(served.ok(), url).toBe(true);
           const evidence = {
