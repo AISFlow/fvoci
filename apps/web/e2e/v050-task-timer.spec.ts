@@ -1,16 +1,30 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
-import { expect, test, type Route } from "@playwright/test";
+import { expect, test as base, type Page, type Route } from "@playwright/test";
 import { z } from "zod";
 import { createE2eUser, login } from "./helpers";
 import { isoToDatetimeLocalInTimeZone } from "../src/lib/datetime";
 
 const credentials = { email: "timer@example.com", password: "supersecret1" };
 const identityShape = z.object({ userId: z.string(), sessionId: z.string() });
-const workspaces = z.object({ items: z.array(z.object({ id: z.string(), slug: z.string() })) });
-const taskShape = z.object({ id: z.string(), number: z.number(), statusId: z.string() });
+const workspaces = z.object({
+  items: z.array(z.object({ id: z.string(), slug: z.string() })),
+});
+const taskShape = z.object({
+  id: z.string(),
+  number: z.number(),
+  statusId: z.string(),
+});
 const timerShape = z.object({
   run: z
     .object({
@@ -25,6 +39,255 @@ const timerShape = z.object({
   canControl: z.boolean(),
 });
 
+type TimerNative = {
+  pid: number;
+  parentPid: number;
+  launcher: string;
+  configuredBin: string;
+  knownFileSha256: string;
+  listeningOrigin: string;
+  procExeIdentity: string;
+  supervision?: "direct Playwright fixture child";
+};
+type RestartedTimerServer = {
+  child: ChildProcessWithoutNullStreams;
+  witness: TimerNative;
+  original: TimerNative;
+  log: string;
+};
+const restartedTimerServers = new WeakMap<Page, RestartedTimerServer>();
+type TimerRestart = () => Promise<string>;
+const test = base.extend<{ restartTimerServer: TimerRestart }>({
+  restartTimerServer: async ({ page }, use, testInfo) => {
+    const transitions: Array<Record<string, unknown>> = [];
+    const resultDir = process.env.FVOCI_E2E_RESULT_DIR;
+    if (!resultDir) throw new Error("owned restart result namespace missing");
+    const ownedProcesses: Array<{
+      witness: TimerNative;
+      exit?: { exitCode: number | null; signal: NodeJS.Signals | null; unexpectedExit: boolean };
+    }> = [];
+    const ownershipPath = path.join(resultDir, "w5-native-restart-owned-processes.json");
+    const persistOwnership = () => {
+      writeFileSync(
+        ownershipPath,
+        JSON.stringify({ originalNamespace: resultDir, ownedProcesses }, null, 2),
+        { mode: 0o600 },
+      );
+    };
+    const runtimeNames = Object.keys(process.env)
+      .filter((name) =>
+        /^(DATABASE_APP_URL$|PASSWORD_PEPPER_|ENCRYPTION_|FVOCI_|SMTP_|RUST_LOG$|MEILI_)/.test(
+          name,
+        ),
+      )
+      .sort();
+    const runtimeHash = (env: NodeJS.ProcessEnv) =>
+      createHash("sha256")
+        .update(JSON.stringify(runtimeNames.map((name) => [name, env[name]])))
+        .digest("hex");
+    const inheritedHash = runtimeHash(process.env);
+    const exitChild = async (owned: RestartedTimerServer) => {
+      const unexpectedExit = owned.child.exitCode !== null || owned.child.signalCode !== null;
+      let code = owned.child.exitCode;
+      let signal = owned.child.signalCode;
+      if (!unexpectedExit) {
+        const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+          (resolve) => {
+            owned.child.once("exit", (exitCode, exitSignal) => {
+              resolve({ code: exitCode, signal: exitSignal });
+            });
+          },
+        );
+        expect(owned.child.kill("SIGTERM")).toBe(true);
+        ({ code, signal } = await exited);
+      }
+      const record = ownedProcesses.find((process) => process.witness.pid === owned.witness.pid);
+      if (!record) throw new Error("restart ownership record missing");
+      record.exit = { exitCode: code, signal, unexpectedExit };
+      persistOwnership();
+      const procAbsent = !existsSync(`/proc/${String(owned.witness.pid)}`);
+      expect(procAbsent).toBe(true);
+      return { pid: owned.witness.pid, exitCode: code, signal, unexpectedExit, procAbsent };
+    };
+    let current: RestartedTimerServer | undefined;
+    const restart: TimerRestart = async () => {
+      const { native, configuredBin, binaryHash } = captureTimerNative(page);
+      expect(native).toHaveLength(1);
+      const before = native[0];
+      if (!before) throw new Error("verified original native witness missing");
+      const original = current?.original ?? before;
+      const launcherArguments = readFileSync(
+        `/proc/${String(original.parentPid)}/cmdline`,
+        "utf8",
+      ).split("\0");
+      expect(launcherArguments).toContain(path.resolve("../../scripts/web-e2e-inner.sh"));
+      const inherited = { ...process.env };
+      expect(runtimeHash(inherited)).toBe(inheritedHash);
+      expect(inherited.FVOCI_BIND).toBe("127.0.0.1:0");
+      expect(inherited.DATABASE_URL).toBeUndefined();
+      expect(inherited.DATABASE_APP_URL).toBeTruthy();
+      const beforeRaw = timerDatabaseEffectsForRestart();
+      // Leave the app before SIGTERM, closing its real SSE/collaboration transports.
+      // The paused/running database rows are never changed by this fixture.
+      await page.goto("about:blank");
+      let stopped: Record<string, unknown>;
+      if (current) {
+        const exit = await exitChild(current);
+        expect(exit.unexpectedExit).toBe(false);
+        expect(exit.exitCode).toBe(0);
+        expect(exit.signal).toBeNull();
+        stopped = exit;
+      } else {
+        process.kill(before.pid, "SIGTERM");
+        await expect.poll(() => existsSync(`/proc/${String(before.pid)}`)).toBe(false);
+        stopped = {
+          pid: before.pid,
+          signalSent: "SIGTERM",
+          procAbsent: true,
+          exitCode: "NOTCAPTURED: original server is the surviving launcher's child",
+        };
+      }
+      // The original shell is still the owner of this SAME database/storage group.
+      process.kill(original.parentPid, 0);
+      expect(
+        readFileSync(`/proc/${String(original.parentPid)}/cmdline`, "utf8").split("\0"),
+      ).toContain(original.launcher);
+      expect(timerDatabaseEffectsForRestart()).toBe(beforeRaw);
+      const log = path.join(resultDir, `timer-restart-${String(transitions.length + 1)}.log`);
+      writeFileSync(log, "", { mode: 0o600, flag: "wx" });
+      const child = spawn(configuredBin, [], { env: inherited, stdio: "pipe" });
+      child.stdin.end();
+      let stdout = "";
+      const ready = new Promise<string>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", (code, signal) => {
+          reject(new Error(`native exited before readiness: ${String(code)}/${String(signal)}`));
+        });
+        child.stdout.on("data", (chunk: Buffer) => {
+          const text = chunk.toString("utf8");
+          appendFileSync(log, text);
+          stdout += text;
+          const origin = stdout
+            .split("\n")
+            .find((line) => line.includes("fvoci-server listening on "))
+            ?.split("fvoci-server listening on ")[1]
+            ?.trim();
+          if (origin) resolve(origin);
+        });
+        child.stderr.on("data", (chunk: Buffer) => {
+          appendFileSync(log, chunk);
+        });
+      });
+      if (!child.pid) throw new Error("spawned native PID unavailable");
+      // Save ownership immediately so cancellation/readiness failure also cleans this child.
+      current = {
+        child,
+        original,
+        log,
+        witness: {
+          pid: child.pid,
+          parentPid: process.pid,
+          launcher: "Playwright restartTimerServer fixture",
+          configuredBin,
+          knownFileSha256: binaryHash,
+          listeningOrigin: "PENDING",
+          procExeIdentity: "NOTCAPTURED: intentional nondumpability",
+          supervision: "direct Playwright fixture child",
+        },
+      };
+      restartedTimerServers.set(page, current);
+      ownedProcesses.push({ witness: current.witness });
+      persistOwnership();
+      const origin = await ready;
+      current.witness.listeningOrigin = origin;
+      persistOwnership();
+      expect(new URL(origin).hostname).toBe("127.0.0.1");
+      expect(origin).not.toBe(before.listeningOrigin);
+      expect(current.witness.pid).not.toBe(before.pid);
+      expect(createHash("sha256").update(readFileSync(configuredBin)).digest("hex")).toBe(
+        binaryHash,
+      );
+      const setup = await page.request.get(`${origin}/api/v1/setup`);
+      expect(setup.status(), await setup.text()).toBe(200);
+      expect(runtimeHash(inherited)).toBe(inheritedHash);
+      expect(timerDatabaseEffectsForRestart()).toBe(beforeRaw);
+      transitions.push({
+        phase: before.supervision
+          ? "measured same-database restart"
+          : "process ownership preparation",
+        before,
+        stopped,
+        after: current.witness,
+        originalLauncherSurvives: true,
+        sameDatabaseStorageAndSecurityNames: runtimeNames,
+        sameDatabaseStorageAndSecurityHash: inheritedHash,
+        exportedInputBasis:
+          "same unchanged inner.sh exports inherited by browser runner and both native spawns; original /proc/environ intentionally unavailable",
+        originalLauncherSourceSha256: createHash("sha256")
+          .update(readFileSync(original.launcher))
+          .digest("hex"),
+        nativeFeaturesBasis:
+          "identical executable bytes across generations; actual build flags/fingerprints belong the batch build receipt",
+        samePersistedRows: true,
+      });
+      await page.goto(origin);
+      return origin;
+    };
+    let fixtureError: unknown;
+    try {
+      await use(restart);
+    } catch (error) {
+      fixtureError = error;
+    }
+    let navigationError: unknown;
+    if (current) {
+      try {
+        if (!page.isClosed()) await page.goto("about:blank");
+      } catch (error) {
+        navigationError = error;
+      }
+      const finalExit = await exitChild(current);
+      restartedTimerServers.delete(page);
+      const proof = {
+        transitions,
+        ownedProcesses,
+        finalExit,
+        diagnosticDatabase: diagnosticDatabase(),
+      };
+      const target = testInfo.outputPath("native-same-db-restart-process-proof.json");
+      writeFileSync(target, JSON.stringify(proof, null, 2));
+      await testInfo.attach("native-same-db-restart-process-proof", {
+        path: target,
+        contentType: "application/json",
+      });
+      const evidence = process.env.FVOCI_W5_EVIDENCE_DIR;
+      if (evidence)
+        writeFileSync(
+          path.join(evidence, "native-same-db-restart-process-proof.json"),
+          JSON.stringify(proof, null, 2),
+        );
+      expect(finalExit.unexpectedExit).toBe(false);
+      expect(finalExit.exitCode).toBe(0);
+      expect(finalExit.signal).toBeNull();
+    }
+    if (fixtureError !== undefined || navigationError !== undefined)
+      throw new AggregateError(
+        [fixtureError, navigationError].filter((error) => error !== undefined),
+        "timer restart fixture or teardown failed",
+      );
+  },
+});
+
+function timerDatabaseEffectsForRestart() {
+  return diagnosticSql(`SELECT jsonb_build_object(
+    'runs',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM fvoci.task_timer_runs t),
+    'segments',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM fvoci.task_timer_segments t),
+    'commands',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY user_id,request_id),'[]'::jsonb) FROM fvoci.task_timer_commands t),
+    'audit',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM fvoci.task_timer_audit t),
+    'legacy',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY time_entry_id),'[]'::jsonb) FROM fvoci.task_timer_legacy_open t),
+    'entries',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM fvoci.time_entries t))`);
+}
+
 // Test-only invoker witness inside this group's isolated database. No product
 // policy is modified and no credential or task content enters diagnostics.
 function diagnosticDatabase() {
@@ -32,7 +295,11 @@ function diagnosticDatabase() {
   const admin = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
   const app = process.env.DATABASE_APP_URL;
   if (!container || !admin || !app) throw new Error("isolated timer diagnostic database missing");
-  return { container, database: new URL(admin).pathname.slice(1), role: new URL(app).username };
+  return {
+    container,
+    database: new URL(admin).pathname.slice(1),
+    role: new URL(app).username,
+  };
 }
 function diagnosticSql(sql: string): string {
   const { container, database } = diagnosticDatabase();
@@ -73,43 +340,38 @@ const witnessRows = z.array(
     ),
   }),
 );
-test.beforeAll(() => {
-  const { role } = diagnosticDatabase();
-  if (!/^[a-zA-Z0-9_]+$/.test(role)) throw new Error("unexpected isolated role identifier");
-  diagnosticSql(`
-    CREATE TABLE IF NOT EXISTS public.w5_timer_runtime_proof (id uuid PRIMARY KEY, value jsonb NOT NULL);
-    GRANT INSERT ON public.w5_timer_runtime_proof TO "${role}";
-    CREATE OR REPLACE FUNCTION public.w5_timer_runtime_witness() RETURNS trigger
-      LANGUAGE plpgsql SECURITY INVOKER SET search_path='' AS $$
-    BEGIN
-      INSERT INTO public.w5_timer_runtime_proof(id,value)
-      SELECT NEW.id,jsonb_build_object('pid',pg_backend_pid(),'role',current_user,'actor',public.app_self_user_id(),
-        'tenant',nullif(current_setting('app.tenant_id',true),''),'system',nullif(current_setting('app.system_ctx',true),''),
-        'tables',(SELECT jsonb_agg(jsonb_build_object('name',c.relname,'superuser',r.rolsuper,'bypass',r.rolbypassrls,
-          'nonowner',c.relowner<>r.oid,'force',c.relforcerowsecurity,'active',row_security_active(c.oid)) ORDER BY c.relname)
-          FROM pg_roles r CROSS JOIN pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-          WHERE r.rolname=current_user AND n.nspname='fvoci' AND c.relname IN
-          ('time_entries','task_timer_runs','task_timer_segments','task_timer_legacy_open','task_timer_commands','task_timer_audit')));
-      RETURN NEW;
-    END; $$;
-    DROP TRIGGER IF EXISTS w5_timer_runtime_witness ON fvoci.task_timer_audit;
-    CREATE TRIGGER w5_timer_runtime_witness AFTER INSERT ON fvoci.task_timer_audit
-      FOR EACH ROW EXECUTE FUNCTION public.w5_timer_runtime_witness();
-  `);
-});
-test.afterEach(async ({ page }, testInfo) => {
-  const rows = witnessRows.parse(
-    JSON.parse(
-      diagnosticSql(
-        "SELECT COALESCE(jsonb_agg(value ORDER BY id),'[]'::jsonb) FROM public.w5_timer_runtime_proof",
-      ),
-    ),
-  );
+function captureTimerNative(page: Page) {
   const serverBin = process.env.FVOCI_E2E_SERVER_BIN;
   if (!serverBin) throw new Error("own server binary missing");
   const configuredBin = realpathSync(serverBin);
   const binaryHash = createHash("sha256").update(readFileSync(configuredBin)).digest("hex");
-  const native = [];
+  const native: TimerNative[] = [];
+  const owned = restartedTimerServers.get(page);
+  if (owned) {
+    expect(owned.child.pid).toBe(owned.witness.pid);
+    expect(owned.child.exitCode).toBeNull();
+    expect(owned.child.signalCode).toBeNull();
+    const argv = readFileSync(`/proc/${String(owned.witness.pid)}/cmdline`, "utf8").split("\0");
+    expect(argv[0]).toBe(configuredBin);
+    const stat = readFileSync(`/proc/${String(owned.witness.pid)}/stat`, "utf8");
+    const parent = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+    expect(parent).toBe(process.pid);
+    expect(owned.witness.parentPid).toBe(process.pid);
+    expect(owned.witness.configuredBin).toBe(configuredBin);
+    expect(owned.witness.knownFileSha256).toBe(binaryHash);
+    const origin = readFileSync(owned.log, "utf8")
+      .split("\n")
+      .find((line) => line.includes("fvoci-server listening on "))
+      ?.split("fvoci-server listening on ")[1]
+      ?.trim();
+    expect(origin).toBe(owned.witness.listeningOrigin);
+    expect(origin).toBe(new URL(page.url()).origin);
+    process.kill(owned.original.parentPid, 0);
+    expect(
+      readFileSync(`/proc/${String(owned.original.parentPid)}/cmdline`, "utf8").split("\0"),
+    ).toContain(owned.original.launcher);
+    native.push({ ...owned.witness });
+  }
   for (const entry of readdirSync("/proc")) {
     if (!/^\d+$/.test(entry)) continue;
     try {
@@ -164,6 +426,42 @@ test.afterEach(async ({ page }, testInfo) => {
     }
   }
   expect(createHash("sha256").update(readFileSync(configuredBin)).digest("hex")).toBe(binaryHash);
+  return { native, configuredBin, binaryHash };
+}
+
+test.beforeAll(() => {
+  const { role } = diagnosticDatabase();
+  if (!/^[a-zA-Z0-9_]+$/.test(role)) throw new Error("unexpected isolated role identifier");
+  diagnosticSql(`
+    CREATE TABLE IF NOT EXISTS public.w5_timer_runtime_proof (id uuid PRIMARY KEY, value jsonb NOT NULL);
+    GRANT INSERT ON public.w5_timer_runtime_proof TO "${role}";
+    CREATE OR REPLACE FUNCTION public.w5_timer_runtime_witness() RETURNS trigger
+      LANGUAGE plpgsql SECURITY INVOKER SET search_path='' AS $$
+    BEGIN
+      INSERT INTO public.w5_timer_runtime_proof(id,value)
+      SELECT NEW.id,jsonb_build_object('pid',pg_backend_pid(),'role',current_user,'actor',public.app_self_user_id(),
+        'tenant',nullif(current_setting('app.tenant_id',true),''),'system',nullif(current_setting('app.system_ctx',true),''),
+        'tables',(SELECT jsonb_agg(jsonb_build_object('name',c.relname,'superuser',r.rolsuper,'bypass',r.rolbypassrls,
+          'nonowner',c.relowner<>r.oid,'force',c.relforcerowsecurity,'active',row_security_active(c.oid)) ORDER BY c.relname)
+          FROM pg_roles r CROSS JOIN pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+          WHERE r.rolname=current_user AND n.nspname='fvoci' AND c.relname IN
+          ('time_entries','task_timer_runs','task_timer_segments','task_timer_legacy_open','task_timer_commands','task_timer_audit')));
+      RETURN NEW;
+    END; $$;
+    DROP TRIGGER IF EXISTS w5_timer_runtime_witness ON fvoci.task_timer_audit;
+    CREATE TRIGGER w5_timer_runtime_witness AFTER INSERT ON fvoci.task_timer_audit
+      FOR EACH ROW EXECUTE FUNCTION public.w5_timer_runtime_witness();
+  `);
+});
+test.afterEach(async ({ page }, testInfo) => {
+  const rows = witnessRows.parse(
+    JSON.parse(
+      diagnosticSql(
+        "SELECT COALESCE(jsonb_agg(value ORDER BY id),'[]'::jsonb) FROM public.w5_timer_runtime_proof",
+      ),
+    ),
+  );
+  const { native } = captureTimerNative(page);
   const scripts = await page
     .locator('script[src*="/assets/"]')
     .evaluateAll((elements) =>
@@ -174,7 +472,7 @@ test.afterEach(async ({ page }, testInfo) => {
   const assets = [];
   for (const src of scripts) {
     const pathname = new URL(src, page.url()).pathname;
-    const response = await page.request.get(pathname);
+    const response = await page.request.get(new URL(pathname, page.url()).toString());
     expect(response.ok(), pathname).toBe(true);
     const served = createHash("sha256")
       .update(await response.body())
@@ -185,7 +483,11 @@ test.afterEach(async ({ page }, testInfo) => {
       .update(readFileSync(path.join(staticDir, pathname)))
       .digest("hex");
     expect(served, pathname).toBe(copied);
-    assets.push({ path: pathname, servedSha256: served, ownStaticSha256: copied });
+    assets.push({
+      path: pathname,
+      servedSha256: served,
+      ownStaticSha256: copied,
+    });
   }
   const { container, database, role } = diagnosticDatabase();
   const proof = {
@@ -200,7 +502,10 @@ test.afterEach(async ({ page }, testInfo) => {
   };
   const target = testInfo.outputPath("timer-runtime-proof.json");
   writeFileSync(target, JSON.stringify(proof, null, 2));
-  await testInfo.attach("timer-runtime-proof", { path: target, contentType: "application/json" });
+  await testInfo.attach("timer-runtime-proof", {
+    path: target,
+    contentType: "application/json",
+  });
   const evidenceDir = process.env.FVOCI_W5_EVIDENCE_DIR;
   if (evidenceDir) {
     mkdirSync(evidenceDir, { recursive: true });
@@ -3370,5 +3675,117 @@ test("an estimate A-B-A target change cannot clear the current native mutation p
     });
   } finally {
     for (const command of held) command.release();
+  }
+});
+
+// Keep this last: it replaces only this isolated group's supervised native.
+test("native same-database restart preserves paused and running anchors for genuine new clients", async ({
+  page,
+  browser,
+  restartTimerServer,
+}, testInfo) => {
+  const fixture = await ordinaryTimerTask(page, "TRESTART", true);
+  // Preparation takes ownership of the group's process without rewriting data.
+  // Both measured restart exits below belong to our fixture-owned children.
+  const initialOrigin = await restartTimerServer();
+  await page.goto(`${initialOrigin}${fixture.detail}`);
+  const widget = page.getByTestId(`task-stopwatch-${fixture.task.id}`);
+  await expect(widget.getByTestId("timer-start")).toBeEnabled();
+  await widget.getByTestId("timer-start").click();
+  await expect(widget.getByTestId("timer-state")).toHaveText("측정 중");
+  await widget.getByTestId("timer-pause").click();
+  await expect(widget.getByTestId("timer-state")).toHaveText("일시정지");
+  const paused = timerShape.parse(
+    await (await page.request.get(`${initialOrigin}${fixture.timerUrl}`)).json(),
+  );
+  expect(paused.run?.status).toBe("paused");
+  expect(paused.run?.elapsedMilliseconds).toBeGreaterThan(0);
+  const pausedOrigin = await restartTimerServer();
+  const firstContext = await browser.newContext({ baseURL: pausedOrigin });
+  let resumed: z.infer<typeof timerShape> | undefined;
+  try {
+    const fresh = await firstContext.newPage();
+    await login(fresh, fixture.email, credentials.password);
+    const actor = identityShape.parse(await (await fresh.request.get("/api/v1/auth/me")).json());
+    expect(actor.userId).toBe(fixture.actor.userId);
+    expect(actor.sessionId).not.toBe(fixture.actor.sessionId);
+    await fresh.goto(`/w/${fixture.slug}/my-tasks`);
+    const current = fresh.getByTestId(`task-stopwatch-${fixture.task.id}`);
+    await expect(current.getByTestId("timer-state")).toHaveText("일시정지");
+    expect(timerShape.parse(await (await fresh.request.get(fixture.timerUrl)).json()).run).toEqual(
+      paused.run,
+    );
+    await current.getByTestId("timer-resume").click();
+    await expect(current.getByTestId("timer-state")).toHaveText("측정 중");
+    resumed = timerShape.parse(await (await fresh.request.get(fixture.timerUrl)).json());
+    expect(resumed.run?.id).toBe(paused.run?.id);
+    expect(resumed.run?.runningSince).toBeTruthy();
+    expect(resumed.run?.version).toBe((paused.run?.version ?? 0) + 1);
+  } finally {
+    await firstContext.close();
+  }
+  if (!resumed.run) throw new Error("actual resumed server anchor missing");
+  const runningOrigin = await restartTimerServer();
+  const secondContext = await browser.newContext({ baseURL: runningOrigin });
+  try {
+    const fresh = await secondContext.newPage();
+    await login(fresh, fixture.email, credentials.password);
+    await fresh.goto(fixture.detail);
+    const current = fresh.getByTestId(`task-stopwatch-${fixture.task.id}`);
+    await expect(current.getByTestId("timer-state")).toHaveText("측정 중");
+    const running = timerShape.parse(await (await fresh.request.get(fixture.timerUrl)).json());
+    expect(running.run?.id).toBe(resumed.run.id);
+    expect(running.run?.runningSince).toBe(resumed.run.runningSince);
+    expect(running.run?.version).toBe(resumed.run.version);
+    expect(running.run?.elapsedMilliseconds).toBeGreaterThan(resumed.run.elapsedMilliseconds);
+    await current.getByTestId("timer-stop").click();
+    await expect(current.getByTestId("timer-start")).toBeEnabled();
+    const stopped = timerShape.parse(await (await fresh.request.get(fixture.timerUrl)).json());
+    expect(stopped.run).toBeNull();
+    expect(stopped.actualMilliseconds).toBeGreaterThan(running.run?.elapsedMilliseconds ?? 0);
+    const task = taskShape.parse(
+      await (
+        await fresh.request.get(
+          `/api/v1/workspaces/${fixture.workspaceId}/tasks/${fixture.task.id}`,
+        )
+      ).json(),
+    );
+    expect(task.statusId).toBe(fixture.task.statusId);
+    expect(
+      diagnosticSql(
+        `SELECT count(*) FROM fvoci.task_timer_runs WHERE user_id='${fixture.actor.userId}'`,
+      ),
+    ).toBe("1");
+    expect(
+      diagnosticSql(
+        `SELECT count(*) FROM fvoci.task_timer_segments WHERE user_id='${fixture.actor.userId}'`,
+      ),
+    ).toBe("2");
+    expect(
+      diagnosticSql(
+        `SELECT count(*) FROM fvoci.time_entries WHERE user_id='${fixture.actor.userId}' AND task_id='${fixture.task.id}' AND ended_at IS NOT NULL`,
+      ),
+    ).toBe("2");
+    await testInfo.attach("native-same-db-persisted-run-new-clients", {
+      body: JSON.stringify({
+        initialOrigin,
+        pausedOrigin,
+        runningOrigin,
+        runId: resumed.run.id,
+        pausedElapsed: paused.run?.elapsedMilliseconds,
+        samePausedElapsedAfterRestart: true,
+        sameResumedAnchorAfterRestart: true,
+        runningElapsedAfterRestart: running.run?.elapsedMilliseconds,
+        finalActual: stopped.actualMilliseconds,
+        actualFreshLogins: 2,
+        measuredPhysicalRestarts: 2,
+        taskStatusUnchanged: true,
+        runCount: 1,
+        segmentAndClosedEntryCount: 2,
+      }),
+      contentType: "application/json",
+    });
+  } finally {
+    await secondContext.close();
   }
 });
