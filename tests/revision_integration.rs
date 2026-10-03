@@ -252,6 +252,147 @@ async fn revision_fingerprint(
     result
 }
 
+type RevisionHistoryRows = Vec<(Value, Vec<u8>)>;
+
+async fn capture_history_contract(
+    wiki: &WikiDocFixture,
+) -> (RevisionHistoryRows, CapturedRevision, i64) {
+    let mut tx = revision_read_context(&wiki.session.pool, wiki.session.workspace_id).await;
+    let rows = sqlx::query_as("SELECT to_jsonb(r), r.y_snapshot FROM fvoci.revisions r WHERE workspace_id=$1 AND target_kind='document' AND target_id=$2 ORDER BY created_at,id")
+        .bind(wiki.session.workspace_id).bind(wiki.document_id).fetch_all(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    let load = fvoci_server::db::collab::load_collab_readonly_kind(
+        &wiki.session.pool,
+        CollabKind::Document,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let captured = capture_revision_offline(
+        fvoci_server::collab::config::require_collab_engine_for_tests(),
+        collab_engine::Limits::for_tests(),
+        load.snapshot,
+        load.tail.iter().map(|row| row.payload.clone()).collect(),
+    )
+    .unwrap();
+    (rows, captured, load.tail_seq)
+}
+
+async fn assert_restore_history_contract(
+    wiki: &WikiDocFixture,
+    before: &RevisionHistoryRows,
+    base: &CapturedRevision,
+    source_id: &str,
+    restored_id: Option<&str>,
+    actor: Uuid,
+    request: &Value,
+) -> RevisionHistoryRows {
+    let mut tx = revision_read_context(&wiki.session.pool, wiki.session.workspace_id).await;
+    let after: RevisionHistoryRows = sqlx::query_as("SELECT to_jsonb(r), r.y_snapshot FROM fvoci.revisions r WHERE workspace_id=$1 AND target_kind='document' AND target_id=$2 ORDER BY created_at,id")
+        .bind(wiki.session.workspace_id).bind(wiki.document_id).fetch_all(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    for old in before {
+        assert_eq!(after.iter().find(|row| row.0["id"] == old.0["id"]), Some(old),
+            "every complete old row, content, IDs, source metadata and snapshot bytes remain immutable");
+    }
+    let manuals = after
+        .iter()
+        .filter(|row| row.0["reason"] == "manual")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        manuals.len(),
+        1,
+        "exact original manual count; automatic history is never promoted"
+    );
+    assert_eq!(manuals[0].0["id"], source_id);
+    assert_eq!(manuals[0].0["created_by"], wiki.session.user_id.to_string());
+    let restored = after
+        .iter()
+        .filter(|row| {
+            row.0["reason"] == "restore" && !before.iter().any(|old| old.0["id"] == row.0["id"])
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        restored.len(),
+        1,
+        "exactly ONE new restore, independently of allowed automatic history"
+    );
+    let metadata = &restored[0].0;
+    let source_at =
+        chrono::DateTime::parse_from_rfc3339(manuals[0].0["created_at"].as_str().unwrap()).unwrap();
+    let restored_at =
+        chrono::DateTime::parse_from_rfc3339(metadata["created_at"].as_str().unwrap()).unwrap();
+    assert!(
+        restored_at >= source_at && restored_at <= Utc::now(),
+        "new restore records an actual time after its preserved source"
+    );
+    if let Some(id) = restored_id {
+        assert_eq!(metadata["id"], id);
+    }
+    assert_ne!(metadata["id"], source_id);
+    assert_eq!(metadata["restored_from_id"], source_id);
+    assert_eq!(metadata["created_by"], actor.to_string());
+    assert_eq!(metadata["restore_correlation_id"], request["correlationId"]);
+    let tail = request["expectedTailSeq"]
+        .as_str()
+        .unwrap()
+        .parse::<i64>()
+        .unwrap();
+    assert_eq!(metadata["restore_base_tail_seq"], tail);
+    assert_eq!(metadata["restore_committed_tail_seq"], tail + 1);
+    assert_eq!(
+        metadata["content_json"], manuals[0].0["content_json"],
+        "restored known IDs/resources/content match the manual source"
+    );
+    for (row, bytes) in &after {
+        if row["reason"] == "session" {
+            let captured_at =
+                chrono::DateTime::parse_from_rfc3339(row["created_at"].as_str().unwrap()).unwrap();
+            assert!(
+                captured_at >= source_at && captured_at <= Utc::now(),
+                "automatic pre-restore capture retains actual system timestamp"
+            );
+            assert_eq!(
+                row["created_by"],
+                Value::Null,
+                "automatic system session actor is NULL (#308)"
+            );
+            assert_eq!(row["workspace_id"], wiki.session.workspace_id.to_string());
+            assert_eq!(row["target_kind"], "document");
+            assert_eq!(row["target_id"], wiki.document_id.to_string());
+            for field in [
+                "restored_from_id",
+                "restore_correlation_id",
+                "restore_base_tail_seq",
+                "restore_committed_tail_seq",
+            ] {
+                assert_eq!(
+                    row[field],
+                    Value::Null,
+                    "automatic row cannot masquerade as restore provenance"
+                );
+            }
+            assert_eq!(
+                row["content_json"], base.content_json,
+                "automatic row represents the actual pre-restore durable tail"
+            );
+            assert!(fvoci_server::collab::revision::revision_snapshots_equal_offline(
+                fvoci_server::collab::config::require_collab_engine_for_tests(), collab_engine::Limits::for_tests(), bytes, &base.y_snapshot).unwrap(),
+                "automatic snapshot semantically equals the independently captured pre-restore tail");
+        } else {
+            assert!(
+                row["reason"] == "manual" || row["reason"] == "restore",
+                "no unexpected history classification"
+            );
+        }
+    }
+    after
+}
+
 type RevisionPeerSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -521,7 +662,11 @@ async fn create_list_restore_with_live_room() {
             &revision_path(&wiki, &format!("/{}/restore-preview", Uuid::now_v7())),
             &wiki.session.session_token, None).await;
         assert_eq!(wrong_source_status, reqwest::StatusCode::NOT_FOUND);
+        let (history_before, history_base, history_tail) = capture_history_contract(&wiki).await;
         let restore_body = preview_restore_body(addr, &revision_path(&wiki, &format!("/{revision_id}/restore")), &wiki.session.session_token).await;
+        assert_eq!(restore_body["expectedTailSeq"], history_tail.to_string());
+        assert!(history_base.content_json.to_string().contains("후속편집한글"));
+
         let (status, restored) = http_json(
             addr,
             reqwest::Method::POST,
@@ -536,10 +681,15 @@ async fn create_list_restore_with_live_room() {
         assert_ne!(new_revision_id, revision_id, "restore records new history");
         let after_updates = count_updates(&wiki.session.pool, wiki.session.workspace_id, wiki.document_id).await;
         assert_eq!(after_updates, before_updates + 1);
+        let history_first_restore = assert_restore_history_contract(&wiki, &history_before, &history_base, &revision_id,
+            Some(new_revision_id), wiki.session.user_id, &restore_body).await;
         let (status, replay) = http_json(addr, reqwest::Method::POST, &restore_path,
             &wiki.session.session_token, Some(restore_body.clone())).await;
         assert_eq!(status, reqwest::StatusCode::OK, "{replay}");
         assert_eq!(replay["revisionId"], new_revision_id, "response-loss retry recovers exact committed restore");
+        assert_eq!(assert_restore_history_contract(&wiki, &history_before, &history_base, &revision_id,
+            Some(new_revision_id), wiki.session.user_id, &restore_body).await, history_first_restore, "same correlation retry adds ZERO rows or changes");
+
         assert_eq!(count_updates(&wiki.session.pool, wiki.session.workspace_id, wiki.document_id).await, after_updates);
         let mut changed_replay = restore_body.clone();
         changed_replay["expectedTailSeq"] = json!("0");
@@ -568,7 +718,7 @@ async fn create_list_restore_with_live_room() {
         let (status, history) = http_json(addr, reqwest::Method::GET,
             &revision_path(&wiki, ""), &wiki.session.session_token, None).await;
         assert_eq!(status, reqwest::StatusCode::OK);
-        assert_eq!(history["items"].as_array().unwrap().len(), 2, "one source and one restore, no replay duplicates");
+        assert_eq!(history["items"].as_array().unwrap().len(), history_first_restore.len(), "API and full restricted-role history agree");
 
 
         let body = support::get_document_body(
@@ -936,12 +1086,19 @@ async fn restore_committed_ambiguous_receipt_converges() {
         .await
         .unwrap()
         .unwrap();
+        let (history_before, history_base, history_tail) = capture_history_contract(&wiki).await;
         let restore_body = preview_restore_body(
             addr,
             &revision_path(&wiki, &format!("/{revision_id}/restore")),
             &wiki.session.session_token,
         )
         .await;
+        assert_eq!(restore_body["expectedTailSeq"], history_tail.to_string());
+        assert!(history_base
+            .content_json
+            .to_string()
+            .contains("후속편집한글"));
+
         let (reached, proceed) = fvoci_server::db::collab::arm_restore_committed_ambiguity(
             wiki.session.workspace_id,
             wiki.document_id,
@@ -1015,6 +1172,16 @@ async fn restore_committed_ambiguous_receipt_converges() {
                 "peer cannot retain replaced followup: {body}"
             );
         }
+        let history_first_restore = assert_restore_history_contract(
+            &wiki,
+            &history_before,
+            &history_base,
+            &revision_id,
+            body["revisionId"].as_str(),
+            wiki.session.user_id,
+            &restore_body,
+        )
+        .await;
         let (status, replay) = http_json(
             addr,
             reqwest::Method::POST,
@@ -1035,8 +1202,21 @@ async fn restore_committed_ambiguous_receipt_converges() {
         .await;
         assert_eq!(
             history["items"].as_array().unwrap().len(),
-            2,
-            "one source and one ambiguous restore, retry adds no history"
+            history_first_restore.len()
+        );
+        assert_eq!(
+            assert_restore_history_contract(
+                &wiki,
+                &history_before,
+                &history_base,
+                &revision_id,
+                body["revisionId"].as_str(),
+                wiki.session.user_id,
+                &restore_body
+            )
+            .await,
+            history_first_restore,
+            "same correlation retry adds ZERO rows or changes"
         );
         let mut edited = revision_peer_projection(&mut editor_doc);
         let text = edited["content"][0]["content"][0]["text"]
@@ -1312,12 +1492,20 @@ async fn restore_committed_ambiguity_rechecks_removed_actor() {
                 wiki.document_id,
             )
             .await;
+            let (history_before, history_base, history_tail) =
+                capture_history_contract(&wiki).await;
             let restore_body = preview_restore_body(
                 addr,
                 &revision_path(&wiki, &format!("/{revision_id}/restore")),
                 &member.session_token,
             )
             .await;
+            assert_eq!(restore_body["expectedTailSeq"], history_tail.to_string());
+            assert!(history_base
+                .content_json
+                .to_string()
+                .contains("후속편집한글"));
+
             let (reached, proceed) = fvoci_server::db::collab::arm_restore_committed_ambiguity(
                 wiki.session.workspace_id,
                 wiki.document_id,
@@ -1333,7 +1521,7 @@ async fn restore_committed_ambiguity_rechecks_removed_actor() {
                         reqwest::Method::POST,
                         &path,
                         &token,
-                        Some(restore_body),
+                        Some(restore_body.clone()),
                     )
                     .await
                 }
@@ -1373,7 +1561,7 @@ async fn restore_committed_ambiguity_rechecks_removed_actor() {
                 reqwest::Method::POST,
                 &revision_path(&wiki, &format!("/{revision_id}/restore")),
                 &member.session_token,
-                Some(restore_body),
+                Some(restore_body.clone()),
             )
             .await;
             assert_eq!(
@@ -1389,7 +1577,20 @@ async fn restore_committed_ambiguity_rechecks_removed_actor() {
                 None,
             )
             .await;
-            assert_eq!(history["items"].as_array().unwrap().len(), 2);
+            let history_after = assert_restore_history_contract(
+                &wiki,
+                &history_before,
+                &history_base,
+                &revision_id,
+                None,
+                member.user_id,
+                &restore_body,
+            )
+            .await;
+            assert_eq!(
+                history["items"].as_array().unwrap().len(),
+                history_after.len()
+            );
             let restored = history["items"]
                 .as_array()
                 .unwrap()
@@ -1518,12 +1719,20 @@ async fn restore_committed_ambiguity_rechecks_read_only_actor() {
                 wiki.document_id,
             )
             .await;
+            let (history_before, history_base, history_tail) =
+                capture_history_contract(&wiki).await;
             let restore_body = preview_restore_body(
                 addr,
                 &format!("{revision_base}/{revision_id}/restore"),
                 &member.session_token,
             )
             .await;
+            assert_eq!(restore_body["expectedTailSeq"], history_tail.to_string());
+            assert!(history_base
+                .content_json
+                .to_string()
+                .contains("후속편집한글"));
+
             let (reached, proceed) = fvoci_server::db::collab::arm_restore_committed_ambiguity(
                 wiki.session.workspace_id,
                 wiki.document_id,
@@ -1539,7 +1748,7 @@ async fn restore_committed_ambiguity_rechecks_read_only_actor() {
                         reqwest::Method::POST,
                         &path,
                         &token,
-                        Some(restore_body),
+                        Some(restore_body.clone()),
                     )
                     .await
                 }
@@ -1609,7 +1818,7 @@ async fn restore_committed_ambiguity_rechecks_read_only_actor() {
                 reqwest::Method::POST,
                 &format!("{revision_base}/{revision_id}/restore"),
                 &member.session_token,
-                Some(restore_body),
+                Some(restore_body.clone()),
             )
             .await;
             assert_eq!(
@@ -1625,7 +1834,20 @@ async fn restore_committed_ambiguity_rechecks_read_only_actor() {
                 None,
             )
             .await;
-            assert_eq!(history["items"].as_array().unwrap().len(), 2);
+            let history_after = assert_restore_history_contract(
+                &wiki,
+                &history_before,
+                &history_base,
+                &revision_id,
+                None,
+                member.user_id,
+                &restore_body,
+            )
+            .await;
+            assert_eq!(
+                history["items"].as_array().unwrap().len(),
+                history_after.len()
+            );
             let restored = history["items"]
                 .as_array()
                 .unwrap()
