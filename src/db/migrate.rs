@@ -97,7 +97,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
         45,
     ),
     (include_str!("../../migrations/048_task_timers.sql"), 48),
-    (include_str!("../../migrations/049_task_estimate_unit.sql"), 49),
+    (
+        include_str!("../../migrations/049_task_estimate_unit.sql"),
+        49,
+    ),
     (
         include_str!("../../migrations/050_revision_restore_metadata.sql"),
         50,
