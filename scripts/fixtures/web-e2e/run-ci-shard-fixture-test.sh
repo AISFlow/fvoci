@@ -243,4 +243,54 @@ for selection, expected_count in [("--grep-invert", 1), ("--grep", 2)]:
     assert len(result.stdout.splitlines()) == expected_count, (selection, result.stdout)
 PYTHON
 
+# Use the actual export statement: each independently allocated run supplies
+# its own default beneath retained Playwright output; explicit paths survive.
+evidence_export="$FIXTURE_ROOT/scripts/evidence-export-fixture.sh"
+sed -n '/^export FVOCI_W5_EVIDENCE_DIR=/p' "$ROOT/scripts/web-e2e-run-group.sh" >"$evidence_export"
+[[ "$(wc -l <"$evidence_export")" -eq 1 ]]
+python3 - "$evidence_export" "$FIXTURE_ROOT" <<'PYTHON'
+import os, pathlib, subprocess, sys
+statement, root = sys.argv[1:]
+script = 'RUN_DIR="$1"; source "$2"; printf "%s" "$FVOCI_W5_EVIDENCE_DIR"'
+clean = dict(os.environ)
+clean.pop("FVOCI_W5_EVIDENCE_DIR", None)
+for run in ["run-first", "run-second"]:
+    directory = str(pathlib.Path(root, run))
+    result = subprocess.run(["bash", "-c", script, "fixture", directory, statement], env=clean, text=True, capture_output=True, check=True)
+    assert result.stdout == directory + "/playwright-output/w5-evidence", result.stdout
+explicit = str(pathlib.Path(root, "caller-owned evidence"))
+env = dict(clean, FVOCI_W5_EVIDENCE_DIR=explicit)
+result = subprocess.run(["bash", "-c", script, "fixture", root + "/run-third", statement], env=env, text=True, capture_output=True, check=True)
+assert result.stdout == explicit, result.stdout
+empty = dict(clean, FVOCI_W5_EVIDENCE_DIR="")
+result = subprocess.run(["bash", "-c", script, "fixture", root + "/run-empty", statement], env=empty, text=True, capture_output=True, check=True)
+assert result.stdout == root + "/run-empty/playwright-output/w5-evidence"
+PYTHON
+
+# The real retention function must copy default proof/screenshot files before
+# the owning runtime directory is removed, using no DB or browser.
+retention_fixture="$FIXTURE_ROOT/scripts/evidence-retention-fixture.sh"
+sed -n '/^retain_failure_artifacts() {/,/^}/p' "$ROOT/scripts/web-e2e-run-group.sh" >"$retention_fixture"
+python3 - "$retention_fixture" "$FIXTURE_ROOT" <<'PYTHON'
+import os, pathlib, subprocess, sys
+function, root = sys.argv[1:]
+root = pathlib.Path(root)
+run = root / "run-retention"
+evidence = run / "playwright-output" / "w5-evidence"
+evidence.mkdir(parents=True)
+files = {"native-proof.json": b'{"fixture":true}', "zoom200.png": b"fixture screenshot bytes"}
+for name, value in files.items():
+    (evidence / name).write_bytes(value)
+temporary = root / "retained-tmp"
+temporary.mkdir()
+output = root / "retention-github-output"
+env = dict(os.environ, RUN_DIR=str(run), SERVER_LOG=str(run / "missing-server.log"), NET_MONITOR_LOG=str(run / "missing-net.log"), NET_MARKS_LOG=str(run / "missing-marks.log"), GROUP_LABEL="timer-evidence-fixture", TMPDIR=str(temporary), GITHUB_OUTPUT=str(output))
+script = 'source "$1"; retain_failure_artifacts; rm -rf "$RUN_DIR"'
+subprocess.run(["bash", "-eu", "-c", script, "fixture", function], env=env, check=True, capture_output=True)
+retained = next(line.split("=", 1)[1] for line in output.read_text().splitlines() if line.startswith("failure-artifacts="))
+assert not run.exists()
+for name, value in files.items():
+    assert (pathlib.Path(retained) / "playwright-output" / "w5-evidence" / name).read_bytes() == value
+PYTHON
+
 echo "run-ci-shard-fixture-test: ok"

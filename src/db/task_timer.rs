@@ -304,6 +304,9 @@ async fn persist_estimate(
     Ok(output)
 }
 
+// Keep the authorized actor/session/locator and ordinary normalized task/hash
+// explicit at this thin adapter to the existing document-task writer.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_plan_task(
     pool: &PgPool,
     workspace: Uuid,
