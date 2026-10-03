@@ -176,4 +176,71 @@ if (
   exit 1
 fi
 
+# Exercise the actual timer dispatch prefix with only its downstream runtime
+# stubbed; no DB/browser allocation or alternate production mode is introduced.
+timer_dispatch="$FIXTURE_ROOT/scripts/timer-dispatch-fixture.sh"
+sed '/^RUN_DIR=/,$d' "$ROOT/scripts/web-e2e-run-group.sh" >"$timer_dispatch"
+cat >>"$timer_dispatch" <<'STUB'
+bash "$ROOT/scripts/web-e2e-run-group.sh" "$@"
+STUB
+cat >"$FIXTURE_ROOT/scripts/web-e2e-run-group.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@"
+for arg in "$@"; do
+  if [[ "$arg" == "${FVOCI_TEST_TIMER_FAIL_FILTER:-unset}" ]]; then
+    exit 7
+  fi
+done
+STUB
+
+run_timer_dispatch() {
+  ROOT="$FIXTURE_ROOT" CARGO_TARGET_DIR="$FIXTURE_ROOT/target" bash "$timer_dispatch" "$@"
+}
+
+timer_log="$FIXTURE_ROOT/timer-dispatch.jsonl"
+run_timer_dispatch --workers=1 e2e/v050-task-timer.spec.ts --retries=0 --trace=on >"$timer_log"
+python3 - "$timer_log" <<'PYTHON'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+original = ["--workers=1", "e2e/v050-task-timer.spec.ts", "--retries=0", "--trace=on"]
+assert len(rows) == 2, rows
+assert rows[0][:-2] == rows[1][:-2] == original, rows
+assert rows[0][-2] == "--grep-invert" and rows[1][-2] == "--grep", rows
+assert rows[0][-1] == rows[1][-1] and not rows[0][-1].startswith("^"), rows
+PYTHON
+
+# Existing explicit filters, mixed specs, shard/list/pending selection and
+# option ordering pass through once with every original argument unchanged.
+python3 - "$timer_dispatch" "$FIXTURE_ROOT" <<'PYTHON'
+import json, os, subprocess, sys
+script, root = sys.argv[1:]
+env = dict(os.environ, ROOT=root, CARGO_TARGET_DIR=root + "/target")
+cases = [
+    ["v050-task-timer.spec.ts", "--grep", "literal owner title", "--workers=1"],
+    ["--grep=literal owner title", "e2e/v050-task-timer.spec.ts"],
+    ["v050-task-timer.spec.ts", "--grep-invert", "literal owner title"],
+    ["v050-task-timer.spec.ts", "--grep-invert=literal owner title"],
+    ["v050-task-timer.spec.ts", "-g", "literal owner title"],
+    ["v050-task-timer.spec.ts", "-gliteral owner title"],
+    ["v050-task-timer.spec.ts", "--shard=1/2"],
+    ["v050-task-timer.spec.ts", "--list"],
+    ["v050-task-timer.spec.ts", "other-flow.spec.ts"],
+    ["other-flow.spec.ts", "--workers=1"],
+    [],
+]
+for args in cases:
+    result = subprocess.run(["bash", script, *args], env=env, text=True, capture_output=True, check=True)
+    assert [json.loads(line) for line in result.stdout.splitlines()] == [args], (args, result.stdout)
+pending = dict(env, FVOCI_E2E_PENDING="1")
+args = ["v050-task-timer.spec.ts", "--workers=1"]
+result = subprocess.run(["bash", script, *args], env=pending, text=True, capture_output=True, check=True)
+assert [json.loads(line) for line in result.stdout.splitlines()] == [args]
+for selection, expected_count in [("--grep-invert", 1), ("--grep", 2)]:
+    failing = dict(env, FVOCI_TEST_TIMER_FAIL_FILTER=selection)
+    result = subprocess.run(["bash", script, "v050-task-timer.spec.ts"], env=failing, text=True, capture_output=True)
+    assert result.returncode == 7, (selection, result.returncode, result.stderr)
+    assert len(result.stdout.splitlines()) == expected_count, (selection, result.stdout)
+PYTHON
+
 echo "run-ci-shard-fixture-test: ok"

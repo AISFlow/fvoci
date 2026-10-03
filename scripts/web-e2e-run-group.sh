@@ -5,6 +5,30 @@ set -euo pipefail
 : "${ROOT:?ROOT is required}"
 : "${CARGO_TARGET_DIR:?CARGO_TARGET_DIR is required}"
 
+# The timer's full suite exceeds the ordinary login budget in one fresh app.
+# Keep its original cases and newer controls in complementary fresh groups.
+# Explicit selection keeps the caller's arguments and runtime scope intact.
+TIMER_SPEC_COUNT=0
+TIMER_OTHER_SPEC=false
+TIMER_EXPLICIT_SELECTION=false
+for arg in "$@"; do
+  case "$arg" in
+    v050-task-timer.spec.ts|e2e/v050-task-timer.spec.ts)
+      TIMER_SPEC_COUNT=$((TIMER_SPEC_COUNT + 1))
+      ;;
+    *.spec.ts) TIMER_OTHER_SPEC=true ;;
+    --grep|--grep=*|--grep-invert|--grep-invert=*|-g|-g?*|--shard|--shard=*|--list|--)
+      TIMER_EXPLICIT_SELECTION=true
+      ;;
+  esac
+done
+if ((TIMER_SPEC_COUNT == 1)) && [[ "$TIMER_OTHER_SPEC" == false && "$TIMER_EXPLICIT_SELECTION" == false && "${FVOCI_E2E_PENDING:-}" != 1 ]]; then
+  TIMER_NEW_CONTROL_FILTER='ordinary research plan persists|task widget retires|a late task-widget R1|owner releases opaque legacy reservations|a late legacy release'
+  bash "$ROOT/scripts/web-e2e-run-group.sh" "$@" --grep-invert "$TIMER_NEW_CONTROL_FILTER"
+  bash "$ROOT/scripts/web-e2e-run-group.sh" "$@" --grep "$TIMER_NEW_CONTROL_FILTER"
+  exit 0
+fi
+
 # The label names the spec arguments; Playwright options (arguments that
 # start with "-", such as --config=... after the spec; give option values in
 # the same argument) are passed on but not named.
