@@ -1382,10 +1382,55 @@ test("mounted personal manual correction keeps a conflicting draft and fresh-cli
     });
     await page.setViewportSize({ width: 1280, height: 900 });
     await row.getByRole("button", { name: "기록 수정", exact: true }).click();
+    for (const zoom of [100, 200]) {
+      await page.setViewportSize({ width: 320, height: 900 });
+      await page.evaluate((percent) => {
+        document.documentElement.style.fontSize = `${String(percent)}%`;
+      }, zoom);
+      await panel.scrollIntoViewIfNeeded();
+      await expect
+        .poll(() => panel.evaluate((element) => element.scrollWidth <= element.clientWidth))
+        .toBe(true);
+      await page.screenshot({
+        path: path.join(evidence, `manual-personal-open-320-text-${String(zoom)}.png`),
+        fullPage: true,
+      });
+    }
+    await page.evaluate(() => {
+      document.documentElement.style.fontSize = "";
+    });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    // Native datetime-local controls contain multiple keyboard segments. Move
+    // with real Tab events, accepting only that input or the intended next
+    // field; unrelated focus and a trap retain the literal failing oracle.
+    const nativeTabs = async (currentLabel: string, nextLabel: string) => {
+      const currentId = await panel.getByLabel(currentLabel, { exact: true }).getAttribute("id");
+      const nextId = await panel.getByLabel(nextLabel, { exact: true }).getAttribute("id");
+      if (!currentId || !nextId || currentId === nextId)
+        throw new Error("native keyboard fields require distinct associated IDs");
+      const focusPath: { step: number; activeId: string | null }[] = [];
+      try {
+        const initial = await page.evaluate(() => document.activeElement?.id ?? null);
+        focusPath.push({ step: 0, activeId: initial });
+        expect(initial).toBe(currentId);
+        for (let step = 1; step <= 12; step++) {
+          await page.keyboard.press("Tab");
+          const activeId = await page.evaluate(() => document.activeElement?.id ?? null);
+          focusPath.push({ step, activeId });
+          expect([currentId, nextId]).toContain(activeId);
+          if (activeId === nextId) break;
+        }
+      } finally {
+        await testInfo.attach(`manual-native-keyboard-${currentId}`, {
+          body: JSON.stringify({ currentLabel, nextLabel, currentId, nextId, focusPath }),
+          contentType: "application/json",
+        });
+      }
+    };
     await panel.getByLabel("시작", { exact: true }).focus();
-    await page.keyboard.press("Tab");
+    await nativeTabs("시작", "종료");
     await expect(panel.getByLabel("종료", { exact: true })).toBeFocused();
-    await page.keyboard.press("Tab");
+    await nativeTabs("종료", "메모");
     await expect(panel.getByLabel("메모", { exact: true })).toBeFocused();
     await page.keyboard.press("Tab");
     await expect(panel.getByLabel("기록·수정 사유", { exact: true })).toBeFocused();
