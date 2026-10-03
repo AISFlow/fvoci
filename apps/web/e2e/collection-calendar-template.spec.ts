@@ -344,7 +344,12 @@ test("online fields transport failure keeps the Calendar draft while visible ret
 });
 
 function fieldsErrorLocator(page: Page) {
-  return page.locator('section[data-testid="collection-calendar"] > [role="alert"]');
+  // CollectionContents renders the cached-fields error immediately before its
+  // toolbar. Rows can independently fail offline and render another direct alert;
+  // target the fields retry owner without hiding or conflating those two errors.
+  return page.locator(
+    'section[data-testid="collection-calendar"] > [role="alert"]:has(+ .collection-toolbar)',
+  );
 }
 
 async function offlineCalendarScenario(

@@ -277,6 +277,9 @@ async fn receipt(
     Ok(())
 }
 
+// Keep the immutable audit row's identity, nullable locators and before/after
+// values explicit, in the same order as its SQL columns and binds.
+#[allow(clippy::too_many_arguments)]
 async fn audit(
     tx: &mut Transaction<'_, Postgres>,
     actor: Uuid,

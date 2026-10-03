@@ -148,7 +148,8 @@ test("peer task create invalidates task list in another tab", async ({ browser }
   const viewerTab = await ownerContext.newPage();
   const streamWait = viewerTab.waitForResponse(
     (res) =>
-      res.url().includes(`/projects/${projectId}/stream`) && res.request().method() === "GET",
+      new URL(res.url()).pathname === `/api/v1/workspaces/${wsId}/task-stream` &&
+      res.request().method() === "GET",
     { timeout: 30_000 },
   );
   await viewerTab.goto(`/w/${owner.workspaceSlug}/TSR/tasks`);

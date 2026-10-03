@@ -2151,6 +2151,34 @@ async fn migration_001_002_database_upgrades_to_003() {
         .connect(&harness.admin_url)
         .await
         .unwrap();
+    // This isolated fixture removes 003's objects from the current schema.
+    // Remove all later 048 timer objects explicitly before its self policies'
+    // function dependency; replay 048 afterwards rather than leaving it applied
+    // with missing policies. Keep the original time_entries and actor rows.
+    sqlx::query("DROP TRIGGER task_timer_legacy_tracking ON fvoci.time_entries")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION fvoci.track_legacy_time_entry()")
+        .execute(&admin)
+        .await
+        .unwrap();
+    for table in [
+        "task_timer_segments",
+        "task_timer_commands",
+        "task_timer_legacy_open",
+        "task_timer_audit",
+        "task_timer_runs",
+    ] {
+        sqlx::query(&format!("DROP TABLE fvoci.{table}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+    }
+    sqlx::query("DELETE FROM fvoci.schema_migrations WHERE version = 48")
+        .execute(&admin)
+        .await
+        .unwrap();
     sqlx::query("DROP POLICY IF EXISTS memberships_select_self ON fvoci.memberships")
         .execute(&admin)
         .await
@@ -2195,6 +2223,16 @@ async fn migration_001_002_database_upgrades_to_003() {
         .execute(&admin)
         .await
         .unwrap();
+    let removed: (bool,) = sqlx::query_as(
+        "SELECT to_regprocedure('public.app_self_user_id()') IS NULL
+         AND to_regprocedure('fvoci.track_legacy_time_entry()') IS NULL
+         AND NOT EXISTS (SELECT 1 FROM pg_tables
+                         WHERE schemaname = 'fvoci' AND tablename LIKE 'task_timer_%')",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(removed.0, "legacy fixture actually removes the new objects");
     migrate::run_migrations(&harness.admin_url)
         .await
         .expect("upgrade to 003");
@@ -2226,6 +2264,16 @@ async fn migration_001_002_database_upgrades_to_003() {
         versions.0,
         fvoci_server::db::migrate::compiled_migration_count() as i64
     );
+    let timer_policies: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM pg_policies
+         WHERE schemaname = 'fvoci' AND policyname = 'self_timer'
+         AND tablename IN ('task_timer_runs', 'task_timer_segments',
+                           'task_timer_legacy_open', 'task_timer_commands', 'task_timer_audit')",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(timer_policies.0, 5, "048 restores every timer self policy");
     reapply_app_grants(&harness.admin_url, &harness.role_name).await;
     let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
     let mut tx = app_pool.begin().await.unwrap();
