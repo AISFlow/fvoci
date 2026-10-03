@@ -1797,3 +1797,329 @@ test("a late R1 response cannot clear the genuine pending stop of canonical R2",
     await context.close();
   }
 });
+
+test("ordinary research plan persists document origins explicit minutes and fresh-client stopwatch", async ({
+  page,
+  browser,
+}, testInfo) => {
+  const fixture = await ordinaryTimerTask(page, "TPLAN");
+  const documents = [];
+  for (const title of ["연구 목표·노트", "읽을 자료"]) {
+    const response = await page.request.post(
+      `/api/v1/workspaces/${fixture.workspaceId}/documents`,
+      {
+        data: { parentId: null, title },
+      },
+    );
+    expect(response.status(), await response.text()).toBe(201);
+    documents.push(z.object({ id: z.string(), number: z.number() }).parse(await response.json()));
+  }
+  const [notes, material] = documents;
+  if (!notes || !material) throw new Error("missing ordinary plan source documents");
+  await page.goto(`/w/${fixture.slug}/my-tasks`);
+  const planner = page.getByTestId("study-plan-builder");
+  await planner.getByText("학습·연구·업무 계획 만들기", { exact: true }).click();
+  await planner.getByLabel("계획 틀", { exact: true }).selectOption("research");
+  await planner.getByRole("button", { name: "틀 적용", exact: true }).click();
+  await planner.getByLabel("목표", { exact: true }).fill("자료를 읽고 가설을 검토하기");
+  await planner.getByLabel("목표 예상 시간(분, 선택)", { exact: true }).fill("0");
+  await planner
+    .getByLabel("목표·연구 노트 문서 링크", { exact: true })
+    .fill(`WIKI-${String(notes.number)}`);
+  await planner
+    .getByLabel("읽을 자료 문서 링크", { exact: true })
+    .fill(`WIKI-${String(material.number)}`);
+  await planner.getByRole("button", { name: "연결할 문서 확인", exact: true }).click();
+  const destination = planner.getByLabel("저장할 프로젝트", { exact: true });
+  await expect(destination.locator("option", { hasText: "TPLAN" })).toHaveCount(1);
+  const project = z
+    .object({ projectId: z.string() })
+    .parse(
+      await (
+        await page.request.get(`/api/v1/workspaces/${fixture.workspaceId}/tasks/${fixture.task.id}`)
+      ).json(),
+    );
+  await destination.selectOption(project.projectId);
+  await planner.getByLabel("단계 이름", { exact: true }).nth(0).fill("자료 읽기");
+  await planner.getByLabel("단계 예상 시간(분, 선택)", { exact: true }).nth(0).fill("30");
+  await planner.getByLabel("단계 예상 시간(분, 선택)", { exact: true }).nth(1).fill("20");
+  await planner.getByLabel("단계 예상 시간(분, 선택)", { exact: true }).nth(2).fill("10");
+  const accepted: Array<{ taskId: string; number: number; projectKey: string; document: string }> =
+    [];
+  page.on("response", async (response) => {
+    const pathname = new URL(response.url()).pathname;
+    if (
+      response.request().method() !== "POST" ||
+      !pathname.endsWith("/study-plan/task") ||
+      response.status() !== 200
+    )
+      return;
+    const result = z
+      .object({ taskId: z.string(), number: z.number(), projectKey: z.string() })
+      .parse(await response.json());
+    accepted.push({ ...result, document: pathname.split("/").at(-3) ?? "" });
+  });
+  await planner.getByRole("button", { name: "계획 저장", exact: true }).click();
+  await expect(planner.getByRole("status")).toContainText("4개 저장됨");
+  await expect.poll(() => accepted.length).toBe(4);
+  const [goal, reading] = accepted;
+  if (!goal || !reading) throw new Error("missing real ordinary plan receipts");
+  expect(goal.document).toBe(notes.id);
+  expect(accepted.slice(1).map((row) => row.document)).toEqual([
+    material.id,
+    material.id,
+    material.id,
+  ]);
+  for (const row of accepted) {
+    expect(/^[0-9a-f-]{36}$/.test(row.taskId)).toBe(true);
+    const raw = z
+      .object({ id: z.string(), type: z.string(), parentId: z.string().nullable() })
+      .parse(
+        await (
+          await page.request.get(`/api/v1/workspaces/${fixture.workspaceId}/tasks/${row.taskId}`)
+        ).json(),
+      );
+    expect(raw.id).toBe(row.taskId);
+    expect(raw.type).toBe(row === goal ? "epic" : "task");
+    expect(raw.parentId).toBe(row === goal ? null : goal.taskId);
+  }
+  const rawOrigins = diagnosticSql(
+    `SELECT jsonb_agg(jsonb_build_object('task',t.id,'document',o.document_id,'estimate',t.estimate,'unit',t.estimate_unit) ORDER BY t.number) FROM fvoci.tasks t JOIN fvoci.task_origins o ON o.workspace_id=t.workspace_id AND o.task_id=t.id WHERE t.workspace_id='${fixture.workspaceId}'`,
+  );
+  const origins = z
+    .array(
+      z.object({ task: z.string(), document: z.string(), estimate: z.number(), unit: z.string() }),
+    )
+    .parse(JSON.parse(rawOrigins));
+  expect(origins.map((row) => row.task)).toEqual(accepted.map((row) => row.taskId));
+  expect(origins.map((row) => row.estimate)).toEqual([0, 30, 20, 10]);
+  expect(origins.every((row) => row.unit === "minutes")).toBe(true);
+  const widget = planner.getByTestId(`task-stopwatch-${reading.taskId}`);
+  await expect(widget.getByTestId("timer-estimate")).toHaveText("예상 30분");
+  await widget.getByTestId("timer-start").click();
+  await expect(widget.getByTestId("timer-state")).toHaveText("측정 중");
+  const timerUrl = `/api/v1/workspaces/${fixture.workspaceId}/tasks/${reading.taskId}/timer`;
+  const committed = timerShape.parse(await (await page.request.get(timerUrl)).json());
+  const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  try {
+    const fresh = await context.newPage();
+    await login(fresh, fixture.email, credentials.password);
+    await fresh.goto(`/w/${fixture.slug}/${reading.projectKey}-${String(reading.number)}`);
+    const current = fresh.getByTestId(`task-stopwatch-${reading.taskId}`);
+    await expect(current.getByTestId("timer-state")).toHaveText("측정 중");
+    expect(timerShape.parse(await (await fresh.request.get(timerUrl)).json()).run?.id).toBe(
+      committed.run?.id,
+    );
+    const beforeTask = taskShape.parse(
+      await (
+        await fresh.request.get(`/api/v1/workspaces/${fixture.workspaceId}/tasks/${reading.taskId}`)
+      ).json(),
+    );
+    await current.getByTestId("timer-pause").click();
+    await expect(current.getByTestId("timer-state")).toHaveText("일시정지");
+    const paused = timerShape.parse(await (await fresh.request.get(timerUrl)).json());
+    await fresh.reload();
+    await expect(current.getByTestId("timer-state")).toHaveText("일시정지");
+    expect(
+      timerShape.parse(await (await fresh.request.get(timerUrl)).json()).run?.elapsedMilliseconds,
+    ).toBe(paused.run?.elapsedMilliseconds);
+    await current.getByTestId("timer-resume").click();
+    await expect(current.getByTestId("timer-state")).toHaveText("측정 중");
+    await current.getByTestId("timer-stop").click();
+    await expect(current.getByTestId("timer-start")).toBeEnabled();
+    const stopped = timerShape.parse(await (await fresh.request.get(timerUrl)).json());
+    expect(stopped.run).toBeNull();
+    expect(stopped.actualMilliseconds).toBeGreaterThan(0);
+    expect(
+      taskShape.parse(
+        await (
+          await fresh.request.get(
+            `/api/v1/workspaces/${fixture.workspaceId}/tasks/${reading.taskId}`,
+          )
+        ).json(),
+      ).statusId,
+    ).toBe(beforeTask.statusId);
+    const editor = current.getByTestId("task-estimate-editor");
+    await editor.getByText("예상 시간 설정", { exact: true }).click();
+    await editor.getByLabel("예상 시간(분)", { exact: true }).fill("45");
+    await editor.getByLabel("예상 시간 변경 사유", { exact: true }).fill("자료 분량을 다시 확인함");
+    await editor.getByRole("button", { name: "예상 시간 저장", exact: true }).click();
+    await expect(current.getByTestId("timer-estimate")).toHaveText("예상 45분");
+    expect(
+      diagnosticSql(
+        `SELECT reason FROM fvoci.task_timer_audit WHERE user_id='${fixture.actor.userId}' AND task_id='${reading.taskId}' AND verb='task.estimate.minutes' ORDER BY created_at DESC LIMIT 1`,
+      ),
+    ).toBe("자료 분량을 다시 확인함");
+    await fresh.reload();
+    await expect(current.getByTestId("timer-estimate")).toHaveText("예상 45분");
+    await testInfo.attach("ordinary-plan-native-model", {
+      body: JSON.stringify({
+        accepted,
+        origins,
+        runId: committed.run?.id,
+        pausedElapsed: paused.run?.elapsedMilliseconds,
+        stoppedActual: stopped.actualMilliseconds,
+        statusUnchanged: true,
+      }),
+      contentType: "application/json",
+    });
+  } finally {
+    await context.close();
+  }
+  for (const percent of [100, 200]) {
+    await page.setViewportSize({ width: 320, height: 900 });
+    await page.evaluate((value) => {
+      document.documentElement.style.fontSize = `${String(value)}%`;
+    }, percent);
+    await expect
+      .poll(() => planner.evaluate((element) => element.scrollWidth <= element.clientWidth + 1))
+      .toBe(true);
+    await planner.screenshot({
+      path: testInfo.outputPath(`planner-320-text-${String(percent)}.png`),
+    });
+  }
+});
+
+// A real response.json completion witness: it observes delivery after native
+// fetch/Vue continuations without injecting a DTO, query cache or command.
+async function observeTaskTimerRead(page: import("@playwright/test").Page, pathname: string) {
+  await page.evaluate((pathname) => {
+    const witness = document.createElement("script");
+    witness.type = "application/json";
+    witness.dataset.testid = "task-timer-read-witness";
+    document.body.append(witness);
+    const completed: string[] = [];
+    witness.textContent = JSON.stringify(completed);
+    const nativeFetch = globalThis.fetch.bind(globalThis);
+    globalThis.fetch = async (input, init) => {
+      const method = input instanceof Request ? input.method : (init?.method ?? "GET");
+      const url = input instanceof Request ? input.url : String(input);
+      const response = await nativeFetch(input, init);
+      if (
+        method !== "GET" ||
+        new URL(url, location.href).pathname !== pathname ||
+        response.status !== 200
+      )
+        return response;
+      const nativeJson = response.json.bind(response);
+      response.json = async () => {
+        const result: unknown = await nativeJson();
+        if (
+          typeof result === "object" &&
+          result !== null &&
+          "run" in result &&
+          typeof result.run === "object" &&
+          result.run !== null &&
+          "id" in result.run &&
+          typeof result.run.id === "string"
+        ) {
+          const runId = result.run.id;
+          const delivery = new MessageChannel();
+          delivery.port1.onmessage = () => {
+            completed.push(runId);
+            witness.textContent = JSON.stringify(completed);
+            delivery.port1.close();
+            delivery.port2.close();
+          };
+          delivery.port2.postMessage(runId);
+        }
+        return result;
+      };
+      return response;
+    };
+  }, pathname);
+}
+
+test("task widget retires a held R1 command when a genuine current R2 read arrives", async ({
+  page,
+  browser,
+}, testInfo) => {
+  const fixture = await ordinaryTimerTask(page, "TMAIN");
+  const run1 = await startPausedTimer(
+    page,
+    fixture.timerUrl,
+    fixture.actor,
+    "First task widget command",
+  );
+  await page.goto(fixture.detail);
+  const widget = page.getByTestId(`task-stopwatch-${fixture.task.id}`);
+  const stop = widget.getByTestId("timer-stop");
+  await expect(stop).toBeEnabled();
+  await observeTaskTimerRead(page, fixture.timerUrl);
+  let release = () => {};
+  let committed = () => {};
+  const delivery = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const commit = new Promise<void>((resolve) => {
+    committed = resolve;
+  });
+  await page.route(
+    (url) => url.pathname === fixture.timerUrl,
+    async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      const body = z
+        .object({ runId: z.string(), operation: z.string() })
+        .parse(route.request().postDataJSON());
+      expect(body.runId).toBe(run1.runId);
+      expect(body.operation).toBe("stop");
+      const response = await route.fetch();
+      expect(response.status(), await response.text()).toBe(200);
+      committed();
+      await delivery;
+      if (!page.isClosed()) await route.fulfill({ response });
+    },
+  );
+  const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  try {
+    await stop.click();
+    await commit;
+    const fresh = await context.newPage();
+    await login(fresh, fixture.email, credentials.password);
+    const identity = identityShape.parse(await (await fresh.request.get("/api/v1/auth/me")).json());
+    const run2 = await startPausedTimer(
+      fresh,
+      fixture.timerUrl,
+      identity,
+      "Second task widget command",
+    );
+    expect(run2.runId).not.toBe(run1.runId);
+    const successor = page.waitForResponse(
+      async (response) =>
+        new URL(response.url()).pathname === fixture.timerUrl &&
+        response.request().method() === "GET" &&
+        response.status() === 200 &&
+        timerShape.parse(await response.json()).run?.id === run2.runId,
+    );
+    await page.bringToFront();
+    await successor;
+    await expect
+      .poll(async () =>
+        z
+          .array(z.string())
+          .parse(
+            JSON.parse((await page.getByTestId("task-timer-read-witness").textContent()) ?? "null"),
+          ),
+      )
+      .toContain(run2.runId);
+    const beforeDelivery = timerDatabaseEffects(identity.userId, fixture.task.id);
+    await testInfo.attach("main-widget-genuine-successor-before-late-delivery", {
+      body: JSON.stringify({
+        run1,
+        run2,
+        realReadConsumed: true,
+        r1DeliveryHeld: true,
+        databaseEffects: JSON.parse(beforeDelivery) as unknown,
+      }),
+      contentType: "application/json",
+    });
+    // Original negative oracle: canonical R2 must be usable before R1 arrives.
+    await expect(widget.getByTestId("timer-resume")).toBeEnabled();
+    expect(timerDatabaseEffects(identity.userId, fixture.task.id)).toBe(beforeDelivery);
+    release();
+    await expect(widget.getByTestId("timer-resume")).toBeEnabled();
+  } finally {
+    release();
+    await context.close();
+  }
+});

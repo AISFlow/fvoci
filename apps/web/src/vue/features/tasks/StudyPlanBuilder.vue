@@ -48,8 +48,8 @@ const projects = computed(() => {
     !materialTargets.data.value
   )
     return [];
-  const materialProjects = new Set(materialTargets.data.value?.items.map((project) => project.id));
-  return notesTargets.data.value?.items.filter((project) => materialProjects.has(project.id)) ?? [];
+  const materialProjects = new Set(materialTargets.data.value.items.map((project) => project.id));
+  return notesTargets.data.value.items.filter((project) => materialProjects.has(project.id));
 });
 const pending = ref(false);
 const resolving = ref(false);
