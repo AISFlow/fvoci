@@ -149,6 +149,19 @@ watch(
   },
   { flush: "sync" },
 );
+// Canonical reads retire the old command immediately. Its late response must
+// neither disable the successor nor clear a command already pending for it.
+watch(
+  [() => visibleState.value?.run?.id, () => visibleState.value?.run?.version],
+  () => {
+    generation++;
+    command = undefined;
+    error.value = null;
+    retryable.value = false;
+    pending.value = false;
+  },
+  { flush: "sync" },
+);
 
 const receivedAt = ref(performance.now());
 const tick = ref(receivedAt.value);
@@ -213,7 +226,9 @@ function current(capture: Capture): boolean {
     capture.actor === actor.value &&
     capture.credential === credential.value &&
     capture.workspace === props.workspaceId &&
-    capture.task === props.taskId
+    capture.task === props.taskId &&
+    capture.body.runId === (run.value?.id ?? null) &&
+    capture.body.expectedVersion === (run.value?.version ?? 0)
   );
 }
 

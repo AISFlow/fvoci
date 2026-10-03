@@ -2162,3 +2162,207 @@ test("task widget retires a held R1 command when a genuine current R2 read arriv
     await context.close();
   }
 });
+
+async function observeTaskTimerCompletion(
+  page: import("@playwright/test").Page,
+  pathname: string,
+): Promise<void> {
+  await page.evaluate((pathname) => {
+    const witness = document.createElement("script");
+    witness.type = "application/json";
+    witness.dataset.testid = "task-timer-command-witness";
+    document.body.append(witness);
+    const requested: string[] = [];
+    const completed: string[] = [];
+    const publish = () => {
+      witness.textContent = JSON.stringify({ requested, completed });
+    };
+    publish();
+    const nativeFetch = globalThis.fetch.bind(globalThis);
+    globalThis.fetch = async (input, init) => {
+      const method = input instanceof Request ? input.method : (init?.method ?? "GET");
+      const url = input instanceof Request ? input.url : String(input);
+      if (method !== "POST" || new URL(url, location.href).pathname !== pathname)
+        return nativeFetch(input, init);
+      let body: unknown;
+      if (input instanceof Request) body = await input.clone().json();
+      else {
+        const requestBody = init?.body;
+        if (typeof requestBody !== "string")
+          throw new Error("task timer request witness requires the actual JSON request");
+        body = JSON.parse(requestBody);
+      }
+      if (
+        typeof body !== "object" ||
+        body === null ||
+        !("runId" in body) ||
+        typeof body.runId !== "string"
+      )
+        throw new Error("task timer request witness requires the actual run identity");
+      const runId = body.runId;
+      requested.push(runId);
+      publish();
+      const response = await nativeFetch(input, init);
+      const nativeJson = response.json.bind(response);
+      response.json = async () => {
+        const result: unknown = await nativeJson();
+        const delivery = new MessageChannel();
+        delivery.port1.onmessage = () => {
+          completed.push(runId);
+          publish();
+          delivery.port1.close();
+          delivery.port2.close();
+        };
+        delivery.port2.postMessage(runId);
+        return result;
+      };
+      return response;
+    };
+  }, pathname);
+}
+
+test("a late task-widget R1 response cannot clear a genuine pending R2 resume", async ({
+  page,
+  browser,
+}, testInfo) => {
+  const fixture = await ordinaryTimerTask(page, "TPENDMAIN", true);
+  const run1 = await startPausedTimer(page, fixture.timerUrl, fixture.actor, "First held widget");
+  await page.goto(fixture.detail);
+  const widget = page.getByTestId(`task-stopwatch-${fixture.task.id}`);
+  await expect(widget.getByTestId("timer-stop")).toBeEnabled();
+  await observeTaskTimerCompletion(page, fixture.timerUrl);
+  await observeTaskTimerRead(page, fixture.timerUrl);
+  const held = [0, 1].map(() => {
+    let release = () => {};
+    let committed = () => {};
+    const delivery = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const commit = new Promise<void>((resolve) => {
+      committed = resolve;
+    });
+    const operation: {
+      delivery: Promise<void>;
+      commit: Promise<void>;
+      release: () => void;
+      committed: () => void;
+      body: unknown;
+    } = { delivery, commit, release, committed, body: undefined };
+    return operation;
+  });
+  const [first, second] = held;
+  if (!first || !second) throw new Error("missing widget held responses");
+  let index = 0;
+  let releaseRead = () => {};
+  const readDelivery = new Promise<void>((resolve) => {
+    releaseRead = resolve;
+  });
+  await page.route(
+    (url) => url.pathname === fixture.timerUrl,
+    async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      const operation = held[index++];
+      if (!operation) throw new Error("unexpected third widget command");
+      operation.body = route.request().postDataJSON();
+      const response = await route.fetch();
+      expect(response.status(), await response.text()).toBe(200);
+      operation.committed();
+      await operation.delivery;
+      if (!page.isClosed()) await route.fulfill({ response });
+    },
+  );
+  const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  try {
+    await widget.getByTestId("timer-stop").click();
+    await first.commit;
+    expect(
+      z.object({ runId: z.string(), operation: z.literal("stop") }).parse(first.body).runId,
+    ).toBe(run1.runId);
+    const fresh = await context.newPage();
+    await login(fresh, fixture.email, credentials.password);
+    const identity = identityShape.parse(await (await fresh.request.get("/api/v1/auth/me")).json());
+    const run2 = await startPausedTimer(fresh, fixture.timerUrl, identity, "Second held widget");
+    expect(run2.runId).not.toBe(run1.runId);
+    await page.bringToFront();
+    await expect
+      .poll(async () =>
+        z
+          .array(z.string())
+          .parse(
+            JSON.parse((await page.getByTestId("task-timer-read-witness").textContent()) ?? "null"),
+          ),
+      )
+      .toContain(run2.runId);
+    const resume = widget.getByTestId("timer-resume");
+    await expect(resume).toBeEnabled();
+    // Keep the already-consumed real R2 snapshot until its pending response;
+    // later real GETs are held, never replaced with a fabricated DTO.
+    await page.route(
+      (url) => url.pathname === fixture.timerUrl,
+      async (route) => {
+        if (route.request().method() !== "GET") return route.fallback();
+        const response = await route.fetch();
+        await readDelivery;
+        if (!page.isClosed()) await route.fulfill({ response });
+      },
+    );
+    await resume.click();
+    await second.commit;
+    expect(
+      z.object({ runId: z.string(), operation: z.literal("resume") }).parse(second.body).runId,
+    ).toBe(run2.runId);
+    const beforeDelivery = timerDatabaseEffects(identity.userId, fixture.task.id);
+    await expect(resume).toBeDisabled();
+    first.release();
+    await expect
+      .poll(
+        async () =>
+          z
+            .object({ completed: z.array(z.string()) })
+            .parse(
+              JSON.parse(
+                (await page.getByTestId("task-timer-command-witness").textContent()) ?? "null",
+              ),
+            ).completed,
+      )
+      .toContain(run1.runId);
+    await expect(resume).toBeDisabled();
+    await resume.evaluate((element) => {
+      if (!(element instanceof HTMLButtonElement)) throw new Error("resume is not a native button");
+      element.click();
+    });
+    expect(
+      z
+        .object({ requested: z.array(z.string()) })
+        .parse(
+          JSON.parse(
+            (await page.getByTestId("task-timer-command-witness").textContent()) ?? "null",
+          ),
+        ).requested,
+    ).toEqual([run1.runId, run2.runId]);
+    expect(index).toBe(2);
+    expect(timerDatabaseEffects(identity.userId, fixture.task.id)).toBe(beforeDelivery);
+    await testInfo.attach("main-widget-old-completion-current-pending", {
+      body: JSON.stringify({
+        run1,
+        run2,
+        originalConsumed: true,
+        currentPending: true,
+        requests: 2,
+        databaseEffects: JSON.parse(beforeDelivery) as unknown,
+      }),
+      contentType: "application/json",
+    });
+    second.release();
+    releaseRead();
+    await expect(widget.getByTestId("timer-state")).toHaveText("측정 중");
+    await expect(widget.getByTestId("timer-pause")).toBeEnabled();
+    expect(timerShape.parse(await (await fresh.request.get(fixture.timerUrl)).json()).run?.id).toBe(
+      run2.runId,
+    );
+  } finally {
+    for (const operation of held) operation.release();
+    releaseRead();
+    await context.close();
+  }
+});
