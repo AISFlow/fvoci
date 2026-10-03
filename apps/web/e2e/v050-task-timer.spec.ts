@@ -47,6 +47,7 @@ type TimerNative = {
   knownFileSha256: string;
   listeningOrigin: string;
   procExeIdentity: string;
+  procStartTicks: string;
   supervision?: "direct Playwright fixture child";
 };
 type RestartedTimerServer = {
@@ -115,6 +116,7 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
       expect(native).toHaveLength(1);
       const before = native[0];
       if (!before) throw new Error("verified original native witness missing");
+      expect(before.procStartTicks).toMatch(/^\d+$/);
       const original = current?.original ?? before;
       const launcherArguments = readFileSync(
         `/proc/${String(original.parentPid)}/cmdline`,
@@ -192,11 +194,18 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
           knownFileSha256: binaryHash,
           listeningOrigin: "PENDING",
           procExeIdentity: "NOTCAPTURED: intentional nondumpability",
+          procStartTicks: "PENDING",
           supervision: "direct Playwright fixture child",
         },
       };
       restartedTimerServers.set(page, current);
       ownedProcesses.push({ witness: current.witness });
+      persistOwnership();
+      const childStat = readFileSync(`/proc/${String(child.pid)}/stat`, "utf8");
+      const childStartTicks = childStat.slice(childStat.lastIndexOf(")") + 2).split(" ")[19];
+      if (!childStartTicks || !/^\d+$/.test(childStartTicks))
+        throw new Error("actual owned child start ticks missing");
+      current.witness.procStartTicks = childStartTicks;
       persistOwnership();
       const origin = await ready;
       current.witness.listeningOrigin = origin;
@@ -356,6 +365,7 @@ function captureTimerNative(page: Page) {
     const stat = readFileSync(`/proc/${String(owned.witness.pid)}/stat`, "utf8");
     const parent = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
     expect(parent).toBe(process.pid);
+    expect(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]).toBe(owned.witness.procStartTicks);
     expect(owned.witness.parentPid).toBe(process.pid);
     expect(owned.witness.configuredBin).toBe(configuredBin);
     expect(owned.witness.knownFileSha256).toBe(binaryHash);
@@ -420,6 +430,7 @@ function captureTimerNative(page: Page) {
         knownFileSha256: binaryHash,
         listeningOrigin: origin,
         procExeIdentity: "NOTCAPTURED: intentional nondumpability",
+        procStartTicks: stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? "MISSING",
       });
     } catch {
       /* Processes can disappear between directory read and inspection. */
