@@ -2686,6 +2686,7 @@ test("a late legacy release cannot clear a genuine successor release pending", a
   const [first, second] = held;
   if (!first || !second) throw new Error("missing two actual release gates");
   const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  const preparationContext = await browser.newContext({ baseURL: new URL(page.url()).origin });
   let releaseOwner = () => {};
   const ownerDelivery = new Promise<void>((resolve) => {
     releaseOwner = resolve;
@@ -2729,7 +2730,7 @@ test("a late legacy release cannot clear a genuine successor release pending", a
         `UPDATE fvoci.users SET is_instance_admin=true WHERE email='${setupEmail}' AND NOT is_instance_admin RETURNING id`,
       ),
     ).toMatch(/^[0-9a-f-]{36}$/);
-    const preparation = await context.newPage();
+    const preparation = await preparationContext.newPage();
     await login(preparation, setupEmail, credentials.password);
     const nextWorkspaceResponse = await preparation.request.post("/api/v1/workspaces", {
       data: { name: "후속 미종료 기록 검증", slug: "w5-legacy-successor" },
@@ -2856,6 +2857,7 @@ test("a late legacy release cannot clear a genuine successor release pending", a
   } finally {
     for (const command of held) command.release();
     releaseOwner();
+    await preparationContext.close();
     await context.close();
   }
 });
