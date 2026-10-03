@@ -280,6 +280,28 @@ fn revision_path(wiki: &WikiDocFixture, extra: &str) -> String {
     )
 }
 
+/// Obtain a coherent server preview before arming any existing append barrier.
+async fn preview_restore_body(
+    addr: std::net::SocketAddr,
+    path: &str,
+    token: &str,
+) -> serde_json::Value {
+    let (status, preview) = http_json(
+        addr,
+        reqwest::Method::GET,
+        &format!("{path}-preview"),
+        token,
+        None,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{preview}");
+    assert!(
+        preview["currentTailSeq"].is_string(),
+        "opaque committed sequence {preview}"
+    );
+    serde_json::json!({"correlationId": Uuid::now_v7(), "expectedTailSeq": preview["currentTailSeq"]})
+}
+
 #[tokio::test]
 async fn create_list_restore_with_live_room() {
     run_test("create_list_restore_with_live_room", async {
@@ -329,16 +351,94 @@ async fn create_list_restore_with_live_room() {
         )
         .await;
 
+        let restore_path = revision_path(&wiki, &format!("/{revision_id}/restore"));
+        let (_, source_before) = http_json(addr, reqwest::Method::GET,
+            &revision_path(&wiki, &format!("/{revision_id}")), &wiki.session.session_token, None).await;
+        let source_fingerprint: (Vec<u8>, Value) = sqlx::query_as(
+            "SELECT y_snapshot, content_json FROM fvoci.revisions WHERE workspace_id = $1 AND id = $2",
+        ).bind(wiki.session.workspace_id).bind(Uuid::parse_str(&revision_id).unwrap())
+            .fetch_one(&wiki.session.pool).await.unwrap();
+        let (status, other_document) = http_json(addr, reqwest::Method::POST,
+            &format!("/api/v1/workspaces/{}/documents", wiki.session.workspace_id),
+            &wiki.session.session_token, Some(json!({"parentId": null, "title": "other restore target"}))).await;
+        assert_eq!(status, reqwest::StatusCode::CREATED, "{other_document}");
+        let other_id = other_document["id"].as_str().unwrap();
+        let (status, _) = http_json(addr, reqwest::Method::GET,
+            &format!("/api/v1/workspaces/{}/documents/{other_id}/revisions/{revision_id}/restore-preview", wiki.session.workspace_id),
+            &wiki.session.session_token, None).await;
+        assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "same workspace wrong document cannot preview source");
+        let (status, _) = http_json(addr, reqwest::Method::POST,
+            &format!("/api/v1/workspaces/{}/documents/{other_id}/revisions/{revision_id}/restore", wiki.session.workspace_id),
+            &wiki.session.session_token, Some(json!({"correlationId": Uuid::now_v7(), "expectedTailSeq": "0"}))).await;
+        assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "wrong document cannot restore source");
+        let (status, _) = http_json(addr, reqwest::Method::GET,
+            &format!("/api/v1/workspaces/{}/tasks/{}/revisions/{revision_id}/restore-preview", wiki.session.workspace_id, wiki.document_id),
+            &wiki.session.session_token, None).await;
+        assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "task/document namespaces remain distinct");
+        let (status, _) = http_json(addr, reqwest::Method::GET,
+            &format!("/api/v1/workspaces/{}/documents/{}/revisions/{revision_id}/restore-preview", Uuid::now_v7(), wiki.document_id),
+            &wiki.session.session_token, None).await;
+        assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "foreign workspace cannot preview source");
+        let before_updates = count_updates(&wiki.session.pool, wiki.session.workspace_id, wiki.document_id).await;
+        let (missing_version_status, _) = http_json(addr, reqwest::Method::POST, &restore_path,
+            &wiki.session.session_token, Some(json!({"correlationId": Uuid::now_v7()}))).await;
+        assert_eq!(missing_version_status, reqwest::StatusCode::BAD_REQUEST, "restore cannot bypass preview version");
+        let (wrong_source_status, _) = http_json(addr, reqwest::Method::GET,
+            &revision_path(&wiki, &format!("/{}/restore-preview", Uuid::now_v7())),
+            &wiki.session.session_token, None).await;
+        assert_eq!(wrong_source_status, reqwest::StatusCode::NOT_FOUND);
+        let restore_body = preview_restore_body(addr, &revision_path(&wiki, &format!("/{revision_id}/restore")), &wiki.session.session_token).await;
         let (status, restored) = http_json(
             addr,
             reqwest::Method::POST,
             &revision_path(&wiki, &format!("/{revision_id}/restore")),
             &wiki.session.session_token,
-            Some(serde_json::json!({})),
+            Some(restore_body.clone()),
         )
         .await;
         assert_eq!(status, reqwest::StatusCode::OK, "{restored}");
         assert_eq!(restored["restored"], true);
+        let new_revision_id = restored["revisionId"].as_str().expect("new revision ID");
+        assert_ne!(new_revision_id, revision_id, "restore records new history");
+        let after_updates = count_updates(&wiki.session.pool, wiki.session.workspace_id, wiki.document_id).await;
+        assert_eq!(after_updates, before_updates + 1);
+        let (status, replay) = http_json(addr, reqwest::Method::POST, &restore_path,
+            &wiki.session.session_token, Some(restore_body.clone())).await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{replay}");
+        assert_eq!(replay["revisionId"], new_revision_id, "response-loss retry recovers exact committed restore");
+        assert_eq!(count_updates(&wiki.session.pool, wiki.session.workspace_id, wiki.document_id).await, after_updates);
+        let mut changed_replay = restore_body.clone();
+        changed_replay["expectedTailSeq"] = json!("0");
+        let (status, _) = http_json(addr, reqwest::Method::POST, &restore_path,
+            &wiki.session.session_token, Some(changed_replay)).await;
+        assert_eq!(status, reqwest::StatusCode::CONFLICT, "correlation cannot authorize different input");
+        let mut stale_preview = restore_body.clone();
+        stale_preview["correlationId"] = json!(Uuid::now_v7());
+        let (status, _) = http_json(addr, reqwest::Method::POST, &restore_path,
+            &wiki.session.session_token, Some(stale_preview)).await;
+        assert_eq!(status, reqwest::StatusCode::CONFLICT, "a committed peer/version change invalidates the preview");
+        assert_eq!(count_updates(&wiki.session.pool, wiki.session.workspace_id, wiki.document_id).await, after_updates,
+            "conflicts must not append");
+        let (status, new_revision) = http_json(addr, reqwest::Method::GET,
+            &revision_path(&wiki, &format!("/{new_revision_id}")), &wiki.session.session_token, None).await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{new_revision}");
+        assert_eq!(new_revision["reason"], "restore");
+        assert_eq!(new_revision["restoredFromId"], revision_id);
+        assert_eq!(new_revision["createdBy"], wiki.session.user_id.to_string());
+        let created_at = chrono::DateTime::parse_from_rfc3339(new_revision["createdAt"].as_str().unwrap()).unwrap();
+        assert!(created_at <= Utc::now());
+        assert!(created_at > Utc::now() - ChronoDuration::minutes(1));
+        assert_eq!(new_revision["contentJson"], source_before["contentJson"], "content IDs/resources survive restore");
+        let retained: (Vec<u8>, Value) = sqlx::query_as(
+            "SELECT y_snapshot, content_json FROM fvoci.revisions WHERE workspace_id = $1 AND id = $2",
+        ).bind(wiki.session.workspace_id).bind(Uuid::parse_str(&revision_id).unwrap())
+            .fetch_one(&wiki.session.pool).await.unwrap();
+        assert_eq!(retained, source_fingerprint, "old source history bytes are immutable");
+        let (status, history) = http_json(addr, reqwest::Method::GET,
+            &revision_path(&wiki, ""), &wiki.session.session_token, None).await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        assert_eq!(history["items"].as_array().unwrap().len(), 2, "one source and one restore, no replay duplicates");
+
 
         let body = support::get_document_body(
             addr,
@@ -412,12 +512,18 @@ async fn create_and_restore_without_live_room() {
             .execute_idle_evict_if_eligible((wiki.session.workspace_id, wiki.document_id))
             .await;
 
+        let restore_body = preview_restore_body(
+            addr,
+            &revision_path(&wiki, &format!("/{revision_id}/restore")),
+            &wiki.session.session_token,
+        )
+        .await;
         let (status, restored) = http_json(
             addr,
             reqwest::Method::POST,
             &revision_path(&wiki, &format!("/{revision_id}/restore")),
             &wiki.session.session_token,
-            Some(serde_json::json!({})),
+            Some(restore_body),
         )
         .await;
         assert_eq!(status, reqwest::StatusCode::OK, "{restored}");
@@ -540,6 +646,12 @@ async fn restore_concurrent_peer_update_converges() {
         auth_and_join(&mut editor, &key, 9).await;
         complete_sync_handshake(&mut editor, &key).await;
 
+        let restore_body = preview_restore_body(
+            addr,
+            &revision_path(&wiki, &format!("/{revision_id}/restore")),
+            &wiki.session.session_token,
+        )
+        .await;
         let (reached, proceed) = arm_append_revoke_barrier(wiki.document_id).await;
         let restore = tokio::spawn({
             let token = wiki.session.session_token.clone();
@@ -550,7 +662,7 @@ async fn restore_concurrent_peer_update_converges() {
                     reqwest::Method::POST,
                     &path,
                     &token,
-                    Some(serde_json::json!({})),
+                    Some(restore_body),
                 )
                 .await
             }
@@ -689,6 +801,12 @@ async fn restore_rejects_when_permission_revoked_before_apply() {
                 wiki.document_id,
             )
             .await;
+            let restore_body = preview_restore_body(
+                addr,
+                &revision_path(&wiki, &format!("/{revision_id}/restore")),
+                &member.session_token,
+            )
+            .await;
             let (reached, proceed) = arm_append_revoke_barrier(wiki.document_id).await;
             let restore = tokio::spawn({
                 let token = member.session_token.clone();
@@ -699,7 +817,7 @@ async fn restore_rejects_when_permission_revoked_before_apply() {
                         reqwest::Method::POST,
                         &path,
                         &token,
-                        Some(serde_json::json!({})),
+                        Some(restore_body),
                     )
                     .await
                 }
@@ -768,12 +886,18 @@ async fn restart_after_restore_serves_restored_content() {
             &engine_fixture("followup_edit.v1"),
         )
         .await;
+        let restore_body = preview_restore_body(
+            addr,
+            &revision_path(&wiki, &format!("/{revision_id}/restore")),
+            &wiki.session.session_token,
+        )
+        .await;
         let (status, restored) = http_json(
             addr,
             reqwest::Method::POST,
             &revision_path(&wiki, &format!("/{revision_id}/restore")),
             &wiki.session.session_token,
-            Some(serde_json::json!({})),
+            Some(restore_body),
         )
         .await;
         assert_eq!(status, reqwest::StatusCode::OK, "{restored}");
@@ -879,6 +1003,12 @@ async fn restore_timeout_before_append_is_504_and_nothing_persisted() {
                 wiki.document_id,
             )
             .await;
+            let restore_body = preview_restore_body(
+                addr,
+                &revision_path(&wiki, &format!("/{revision_id}/restore")),
+                &wiki.session.session_token,
+            )
+            .await;
             let (reached, proceed) = arm_append_revoke_barrier(wiki.document_id).await;
             let restore = tokio::spawn({
                 let token = wiki.session.session_token.clone();
@@ -889,7 +1019,7 @@ async fn restore_timeout_before_append_is_504_and_nothing_persisted() {
                         reqwest::Method::POST,
                         &path,
                         &token,
-                        Some(serde_json::json!({})),
+                        Some(restore_body),
                     )
                     .await
                 }

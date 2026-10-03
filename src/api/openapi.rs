@@ -53,15 +53,16 @@ use crate::api::dto::{
     PublicBrandingOutput, PublicSettingsValues, PushSubscriptionBody, PushSubscriptionKeysBody,
     PutAttachmentPartResponse, RecentItemOutput, RecentListResponse,
     ResumeAttachmentUploadResponse, RevisionCreateResponse, RevisionDetailResponse,
-    RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody, RevisionRestoreResponse,
-    SearchItemOutput, SearchListResponse, SearchSnippetPiece, SessionUserOutput, SetupBody,
-    SetupResponse, SetupStatusResponse, ShareCreateBody, ShareLinkCreatedOutput,
-    ShareLinkListResponse, ShareLinkOutput, SharePublicMetaOutput, SortDocumentBody,
-    StarCreateBody, StarItemOutput, StarListResponse, StartImportBody, TaskChildOutput,
-    TaskChildProgressOutput, TaskDependencyListResponse, TaskDependencyOutput, TaskListResponse,
-    TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse, TrashListResponse,
-    TreeResponse, WorkflowOutput, WorkspaceConsentsResponse, WorkspaceListItemResponse,
-    WorkspaceListResponse, WorkspaceMemberConsentsOutput, WorkspaceMetaResponse,
+    RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody,
+    RevisionRestorePreviewResponse, RevisionRestoreResponse, SearchItemOutput, SearchListResponse,
+    SearchSnippetPiece, SessionUserOutput, SetupBody, SetupResponse, SetupStatusResponse,
+    ShareCreateBody, ShareLinkCreatedOutput, ShareLinkListResponse, ShareLinkOutput,
+    SharePublicMetaOutput, SortDocumentBody, StarCreateBody, StarItemOutput, StarListResponse,
+    StartImportBody, TaskChildOutput, TaskChildProgressOutput, TaskDependencyListResponse,
+    TaskDependencyOutput, TaskListResponse, TaskMetaOutput, TaskOutput, TaskParentOutput,
+    TrashItemResponse, TrashListResponse, TreeResponse, WorkflowOutput, WorkspaceConsentsResponse,
+    WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMemberConsentsOutput,
+    WorkspaceMetaResponse,
 };
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
@@ -246,7 +247,7 @@ impl Modify for CookieSecurityAddon {
         export_project_pptx,
         start_import,
         get_import_status,
-    create_revision, list_revisions, get_revision, restore_revision, create_project_document_revision, list_project_document_revisions, get_project_document_revision, restore_project_document_revision, move_document, sort_document, trash_document, restore_document, list_trash,
+    create_revision, list_revisions, get_revision, preview_restore_revision, restore_revision, create_project_document_revision, list_project_document_revisions, get_project_document_revision, preview_restore_project_document_revision, restore_project_document_revision, move_document, sort_document, trash_document, restore_document, list_trash,
         create_attachment_upload,
         put_attachment_part,
         resume_attachment_upload,
@@ -497,7 +498,7 @@ impl Modify for CookieSecurityAddon {
             BodyResponse,
             StartImportBody,
             ImportJobResponse,
-            RevisionCreateResponse, RevisionMetaResponse, RevisionListResponse, RevisionDetailResponse, RevisionRestoreBody, RevisionRestoreResponse, MoveDocumentBody, SortDocumentBody, TrashListResponse, TrashItemResponse,
+            RevisionCreateResponse, RevisionMetaResponse, RevisionListResponse, RevisionDetailResponse, RevisionRestoreBody, RevisionRestoreResponse, RevisionRestorePreviewResponse, MoveDocumentBody, SortDocumentBody, TrashListResponse, TrashItemResponse,
             CreateAttachmentUploadBody,
             CreateAttachmentUploadResponse,
             AttachmentPartUrlResponse,
@@ -5452,3 +5453,46 @@ fn create_template_path() {}
     )
 )]
 fn apply_template_path() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/restore-preview",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+        ("revision_id" = String, description = "Revision id"),
+    ),
+    responses(
+        (status = 200, description = "Immutable source and current body with a coherent opaque tail", body = RevisionRestorePreviewResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Target or revision unavailable or not editable", body = ProblemResponse),
+        (status = 409, description = "Archived target", body = ProblemResponse),
+        (status = 503, description = "Collaboration unavailable", body = ProblemResponse),
+        (status = 504, description = "Collaboration timeout", body = ProblemResponse),
+    )
+)]
+fn preview_restore_revision() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/revisions/{revision_id}/restore-preview",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+        ("revision_id" = String, description = "Revision id"),
+    ),
+    responses(
+        (status = 200, description = "Immutable source and current body with a coherent opaque tail", body = RevisionRestorePreviewResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Target or revision unavailable or not editable", body = ProblemResponse),
+        (status = 409, description = "Archived target", body = ProblemResponse),
+        (status = 503, description = "Collaboration unavailable", body = ProblemResponse),
+        (status = 504, description = "Collaboration timeout", body = ProblemResponse),
+    )
+)]
+fn preview_restore_project_document_revision() {}

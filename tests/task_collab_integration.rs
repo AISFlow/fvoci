@@ -814,7 +814,8 @@ async fn task_revisions_create_list_get_restore_through_room() {
 
         let (status, list) = session_call(addr, Method::GET, &task_path(s, f.task_id, "/revisions?limit=20"), &viewer.session_token, None).await;
         assert_eq!(status, StatusCode::OK, "{list}");
-        assert_eq!(list["items"].as_array().unwrap().len(), 1);
+        assert_eq!(list["items"].as_array().unwrap().len(), 2, "restore adds history while preserving its source");
+        assert_eq!(list["items"][0]["restoredFromId"], revision_id.as_str());
         assert_eq!(list["items"][0]["targetKind"], "task");
         assert_eq!(list["items"][0]["reason"], "manual");
         let (status, detail) = session_call(addr, Method::GET, &task_path(s, f.task_id, &format!("/revisions/{revision_id}")), &viewer.session_token, None).await;
@@ -825,7 +826,7 @@ async fn task_revisions_create_list_get_restore_through_room() {
         // Viewer cannot create or restore; a document path cannot read a task revision.
         let (status, _) = session_call(addr, Method::POST, &task_path(s, f.task_id, "/revisions"), &viewer.session_token, None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        let (status, _) = session_call(addr, Method::POST, &task_path(s, f.task_id, &format!("/revisions/{revision_id}/restore")), &viewer.session_token, Some(json!({}))).await;
+        let (status, _) = session_call(addr, Method::POST, &task_path(s, f.task_id, &format!("/revisions/{revision_id}/restore")), &viewer.session_token, Some(json!({"correlationId": Uuid::now_v7(), "expectedTailSeq": "0"}))).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _) = session_call(
             addr,
@@ -853,12 +854,16 @@ async fn task_revisions_create_list_get_restore_through_room() {
         assert!(wait_for_sync_update(&mut observer, Duration::from_secs(8)).await);
         let admin = admin_pool(&run.harness).await;
         wait_task_content_contains(&admin, ws_id, f.task_id, "둘째 버전").await;
+        let (preview_status, preview) = session_call(addr, Method::GET,
+            &task_path(s, f.task_id, &format!("/revisions/{revision_id}/restore-preview")), &s.session_token, None).await;
+        assert_eq!(preview_status, StatusCode::OK, "{preview}");
+        let restore_body = json!({"correlationId": Uuid::now_v7(), "expectedTailSeq": preview["currentTailSeq"]});
         let (status, restored) = session_call(
             addr,
             Method::POST,
             &task_path(s, f.task_id, &format!("/revisions/{revision_id}/restore")),
             &s.session_token,
-            Some(json!({"correlationId": Uuid::now_v7()})),
+            Some(restore_body.clone()),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{restored}");
@@ -878,13 +883,14 @@ async fn task_revisions_create_list_get_restore_through_room() {
         let wrong = insert_pat(&run.harness, ws_id, s.user_id, &["documents.read"]).await;
         let (status, list) = call(addr, Method::GET, &task_path(s, f.task_id, "/revisions"), Cred::Bearer(&reader), None).await;
         assert_eq!(status, StatusCode::OK, "{list}");
-        assert_eq!(list["items"].as_array().unwrap().len(), 1);
+        assert_eq!(list["items"].as_array().unwrap().len(), 2, "restore adds history while preserving its source");
+        assert_eq!(list["items"][0]["restoredFromId"], revision_id.as_str());
         let (status, detail) = call(addr, Method::GET, &task_path(s, f.task_id, &format!("/revisions/{revision_id}")), Cred::Bearer(&reader), None).await;
         assert_eq!(status, StatusCode::OK, "{detail}");
         assert_eq!(detail["id"], revision_id.as_str());
         let (status, _) = call(addr, Method::POST, &task_path(s, f.task_id, "/revisions"), Cred::Bearer(&reader), None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        let (status, _) = call(addr, Method::POST, &task_path(s, f.task_id, &format!("/revisions/{revision_id}/restore")), Cred::Bearer(&reader), Some(json!({}))).await;
+        let (status, _) = call(addr, Method::POST, &task_path(s, f.task_id, &format!("/revisions/{revision_id}/restore")), Cred::Bearer(&reader), Some(json!({"correlationId": Uuid::now_v7(), "expectedTailSeq": "0"}))).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _) = call(addr, Method::GET, &task_path(s, f.task_id, "/revisions"), Cred::Bearer(&wrong), None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
@@ -902,7 +908,11 @@ async fn task_revisions_create_list_get_restore_through_room() {
         let (status, pat_created) = call(addr, Method::POST, &task_path(s, f.task_id, "/revisions"), Cred::Bearer(&writer), None).await;
         assert_eq!(status, StatusCode::CREATED, "{pat_created}");
         assert_ne!(pat_created["id"], revision_id.as_str());
-        let (status, restored) = call(addr, Method::POST, &task_path(s, f.task_id, &format!("/revisions/{revision_id}/restore")), Cred::Bearer(&writer), Some(json!({}))).await;
+        let (preview_status, preview) = call(addr, Method::GET,
+            &task_path(s, f.task_id, &format!("/revisions/{revision_id}/restore-preview")), Cred::Bearer(&writer), None).await;
+        assert_eq!(preview_status, StatusCode::OK, "{preview}");
+        let pat_restore_body = json!({"correlationId": Uuid::now_v7(), "expectedTailSeq": preview["currentTailSeq"]});
+        let (status, restored) = call(addr, Method::POST, &task_path(s, f.task_id, &format!("/revisions/{revision_id}/restore")), Cred::Bearer(&writer), Some(pat_restore_body)).await;
         assert_eq!(status, StatusCode::OK, "{restored}");
         assert_eq!(restored["restored"], true);
         let (content, _, _) = wait_task_content_contains(&admin, ws_id, f.task_id, "첫 버전").await;
@@ -920,7 +930,7 @@ async fn task_revisions_create_list_get_restore_through_room() {
         let (status, problem) = session_call(addr, Method::POST, &task_path(s, f.task_id, "/revisions"), &s.session_token, None).await;
         assert_eq!(status, StatusCode::CONFLICT, "{problem}");
         assert_eq!(problem["code"], "task_archived");
-        let (status, problem) = session_call(addr, Method::POST, &task_path(s, f.task_id, &format!("/revisions/{revision_id}/restore")), &s.session_token, Some(json!({}))).await;
+        let (status, problem) = session_call(addr, Method::POST, &task_path(s, f.task_id, &format!("/revisions/{revision_id}/restore")), &s.session_token, Some(json!({"correlationId": Uuid::now_v7(), "expectedTailSeq": "0"}))).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(problem["code"], "task_archived");
         sqlx::query("UPDATE fvoci.tasks SET archived_at = NULL WHERE id = $1").bind(f.task_id).execute(&admin).await.unwrap();

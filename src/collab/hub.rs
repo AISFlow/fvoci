@@ -536,14 +536,15 @@ impl CollabHub {
         actor_user_id: Uuid,
         session_id: Uuid,
         snap: Vec<u8>,
-    ) -> Result<(), RevisionRestoreError> {
+        intent: crate::db::revisions::RestoreRevisionInput,
+    ) -> Result<Uuid, RevisionRestoreError> {
         let key: RoomKey = key.into();
         let (handle, _lease) = self
             .borrow_live_room(key)
             .await
             .map_err(|_| RevisionRestoreError::Unavailable)?;
         handle
-            .restore_from_snapshot(actor_user_id, session_id, snap)
+            .restore_from_snapshot(actor_user_id, session_id, snap, intent)
             .await
     }
 

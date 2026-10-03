@@ -805,6 +805,8 @@ pub struct RevisionMetaResponse {
     #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
     pub created_by: Option<String>,
     pub created_at: DateTime<Utc>,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub restored_from_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -829,14 +831,17 @@ pub struct RevisionDetailResponse {
     pub created_at: DateTime<Utc>,
     pub content_json: Value,
     pub y_snapshot: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub restored_from_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct RevisionRestoreBody {
-    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
-    pub correlation_id: Option<Uuid>,
+    pub correlation_id: Uuid,
+    /// Opaque canonical decimal tail sequence; never a JavaScript number.
+    pub expected_tail_seq: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -844,6 +849,17 @@ pub struct RevisionRestoreBody {
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct RevisionRestoreResponse {
     pub restored: bool,
+    pub revision_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct RevisionRestorePreviewResponse {
+    pub source: RevisionDetailResponse,
+    pub current_content_json: Value,
+    /// Captured with current_content_json in the same room actor operation.
+    pub current_tail_seq: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

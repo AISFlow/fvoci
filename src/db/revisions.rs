@@ -1,12 +1,11 @@
 use chrono::{DateTime, Utc};
-use serde_json::{json, Value};
+use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{
     begin_read, lock_membership_users, recheck_session, session_is_live, set_system, set_tenant,
 };
-use crate::db::identity::{append_event, EventAppend};
 use crate::db::projects::{load_live_project, project_permission, share_lock_project_permission};
 use crate::db::workspace::workspace_is_live;
 use crate::projects::ProjectPermission;
@@ -23,6 +22,8 @@ pub enum RevisionDbError {
     TaskArchived,
     /// Task revision write in an archived project (409 `project_archived`).
     ProjectArchived,
+    /// A restore preview or correlation no longer describes this operation.
+    RestoreConflict,
 }
 
 /// Revision owner (`revisions.target_kind` / `target_id`).
@@ -91,6 +92,7 @@ pub struct RevisionMeta {
     pub reason: String,
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
+    pub restored_from_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone)]
@@ -235,7 +237,15 @@ fn is_automatic_revision_reason(reason: &str) -> bool {
     reason == SESSION_REASON || reason == SCHEDULED_REASON
 }
 
-type RevisionMetaRow = (Uuid, String, Uuid, String, Option<Uuid>, DateTime<Utc>);
+type RevisionMetaRow = (
+    Uuid,
+    String,
+    Uuid,
+    String,
+    Option<Uuid>,
+    DateTime<Utc>,
+    Option<Uuid>,
+);
 type RevisionDetailRow = (
     Uuid,
     String,
@@ -243,6 +253,7 @@ type RevisionDetailRow = (
     String,
     Option<Uuid>,
     DateTime<Utc>,
+    Option<Uuid>,
     Value,
     Vec<u8>,
 );
@@ -561,7 +572,7 @@ pub async fn list_revisions(
         Some(cursor) => {
             sqlx::query_as(
                 r#"
-                SELECT id, target_kind, target_id, reason, created_by, created_at
+                SELECT id, target_kind, target_id, reason, created_by, created_at, restored_from_id
                 FROM fvoci.revisions
                 WHERE workspace_id = $1
                   AND target_kind = $2
@@ -583,7 +594,7 @@ pub async fn list_revisions(
         None => {
             sqlx::query_as(
                 r#"
-                SELECT id, target_kind, target_id, reason, created_by, created_at
+                SELECT id, target_kind, target_id, reason, created_by, created_at, restored_from_id
                 FROM fvoci.revisions
                 WHERE workspace_id = $1
                   AND target_kind = $2
@@ -604,13 +615,16 @@ pub async fn list_revisions(
     let mut items: Vec<RevisionMeta> = rows
         .into_iter()
         .map(
-            |(id, target_kind, target_id, reason, created_by, created_at)| RevisionMeta {
-                id,
-                target_kind,
-                target_id,
-                reason,
-                created_by,
-                created_at,
+            |(id, target_kind, target_id, reason, created_by, created_at, restored_from_id)| {
+                RevisionMeta {
+                    id,
+                    target_kind,
+                    target_id,
+                    reason,
+                    created_by,
+                    created_at,
+                    restored_from_id,
+                }
             },
         )
         .collect();
@@ -658,7 +672,7 @@ pub async fn get_revision(
     }
     let row: Option<RevisionDetailRow> = sqlx::query_as(
         r#"
-        SELECT id, target_kind, target_id, reason, created_by, created_at, content_json, y_snapshot
+        SELECT id, target_kind, target_id, reason, created_by, created_at, restored_from_id, content_json, y_snapshot
         FROM fvoci.revisions
         WHERE workspace_id = $1 AND id = $2
         "#,
@@ -676,6 +690,7 @@ pub async fn get_revision(
             reason,
             created_by,
             created_at,
+            restored_from_id,
             content_json,
             y_snapshot,
         )) if target.matches(&target_kind, target_id) => Ok(Ok(RevisionDetail {
@@ -686,6 +701,7 @@ pub async fn get_revision(
                 reason,
                 created_by,
                 created_at,
+                restored_from_id,
             },
             content_json,
             y_snapshot,
@@ -1099,30 +1115,105 @@ pub async fn resolve_restore(
         tx.rollback().await?;
         return Ok(Err(RevisionDbError::NotFound));
     }
-    append_event(
-        &mut tx,
-        EventAppend {
-            id: Uuid::now_v7(),
-            workspace_id: Some(workspace_id),
-            actor_user_id: Some(actor_user_id),
-            verb: format!("{}.updated", target.kind_str()),
-            target_type: Some(target.kind_str().into()),
-            target_id: Some(target.id()),
-            payload: match target {
-                RevisionTarget::Document(id) => json!({
-                    "documentId": id,
-                    "restoreRequested": revision_id,
-                }),
-                RevisionTarget::Task(id) => json!({
-                    "taskId": id,
-                    "restoreRequested": revision_id,
-                }),
-            },
-        },
-    )
-    .await?;
+    // Successful restore provenance is committed with the forward update.
+    // Resolving a source is not a restore and must not announce success.
     tx.commit().await?;
     Ok(Ok(y_snapshot))
+}
+
+/// Captured restore intent; the tail is an opaque decimal string at HTTP only.
+#[derive(Debug, Clone, Copy)]
+pub struct RestoreRevisionInput {
+    pub scope: RevisionScope,
+    pub source_revision_id: Uuid,
+    pub correlation_id: Uuid,
+    pub expected_tail_seq: i64,
+}
+
+/// Prepared from the exact committed snapshot/tail plus restore payload.
+pub struct RestoreRevisionAppend {
+    pub intent: RestoreRevisionInput,
+    pub revision_id: Uuid,
+    pub y_snapshot: Vec<u8>,
+    pub content_json: Value,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RestoredRevision {
+    pub revision_id: Uuid,
+    pub committed_tail_seq: i64,
+}
+
+/// Revalidate the route's project/document/task boundary in the append tx.
+pub(crate) async fn authorize_restore_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    input: RestoreRevisionInput,
+) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
+    authorize_target(
+        tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        input.scope,
+        true,
+    )
+    .await
+}
+
+/// Current authorization precedes response-loss replay recovery. Workspace-wide
+/// correlation uniqueness also catches accidental actor/target reuse.
+pub async fn lookup_restored_revision(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    input: RestoreRevisionInput,
+) -> Result<Result<Option<RestoredRevision>, RevisionDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    if let Err(err) =
+        authorize_restore_in_tx(&mut tx, workspace_id, actor_user_id, session_id, input).await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(err));
+    }
+    let result =
+        lookup_restored_revision_in_tx(&mut tx, workspace_id, actor_user_id, input).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub(crate) async fn lookup_restored_revision_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    input: RestoreRevisionInput,
+) -> Result<Result<Option<RestoredRevision>, RevisionDbError>, sqlx::Error> {
+    let row: Option<(Uuid, String, Uuid, Option<Uuid>, Option<Uuid>, Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT id, target_kind, target_id, created_by, restored_from_id, restore_base_tail_seq, restore_committed_tail_seq FROM fvoci.revisions WHERE workspace_id = $1 AND restore_correlation_id = $2",
+    )
+    .bind(workspace_id).bind(input.correlation_id).fetch_optional(&mut **tx).await?;
+    let Some((id, kind, target_id, actor, source, base, committed)) = row else {
+        return Ok(Ok(None));
+    };
+    if !input.scope.target().matches(&kind, target_id)
+        || actor != Some(actor_user_id)
+        || source != Some(input.source_revision_id)
+        || base != Some(input.expected_tail_seq)
+    {
+        return Ok(Err(RevisionDbError::RestoreConflict));
+    }
+    let Some(committed_tail_seq) = committed else {
+        return Ok(Err(RevisionDbError::RestoreConflict));
+    };
+    Ok(Ok(Some(RestoredRevision {
+        revision_id: id,
+        committed_tail_seq,
+    })))
 }
 
 pub async fn load_persisted_target_source(

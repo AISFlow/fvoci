@@ -92,6 +92,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/044_email_change_auth_generation.sql"),
         44,
     ),
+    (
+        include_str!("../../migrations/050_revision_restore_metadata.sql"),
+        50,
+    ),
 ];
 
 pub(crate) const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;

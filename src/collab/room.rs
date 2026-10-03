@@ -31,15 +31,15 @@ use crate::collab::engine_bridge::{
     warn_engine_not_applied, BridgeError, EngineBridge, RecycleError,
 };
 use crate::collab::guard::RoomGuard;
-use crate::collab::revision::prepare_revision_text;
+use crate::collab::revision::{capture_revision_offline, prepare_revision_text};
 use crate::collab::validation::{
     classify_admission_load, validate_recovery_bundle, validate_snapshot_only, BundleValidation,
     ValidateStageTimings,
 };
 use crate::db::revisions::{
     create_system_revision, latest_revision_y_snapshot, load_durable_collab_for_system,
-    CreateRevisionInput, RevisionDbError, RevisionTarget, SystemRevisionHead,
-    SYSTEM_REVISION_HEAD_RETRIES,
+    lookup_restored_revision, CreateRevisionInput, RestoreRevisionAppend, RestoreRevisionInput,
+    RevisionDbError, RevisionTarget, SystemRevisionHead, SYSTEM_REVISION_HEAD_RETRIES,
 };
 
 const MAX_REJECTED_CANDIDATES_PER_USER: usize = 8;
@@ -54,11 +54,11 @@ use crate::collab::wire::CollabKind;
 use crate::collab::wire::{encode, AuthMessage, DocumentMessage, SyncStep, WireFrame};
 use crate::collab::y_sync::{encode_sync_payload, is_empty_update, parse_sync_payload};
 use crate::db::collab::{
-    append_collab_update_kind, append_collab_update_on_conn_timed, claim_writer_and_load_kind,
-    compact_collab_snapshot_kind, load_collab_readonly_kind, project_derived_body_kind,
-    resolve_collab_admission_kind, verify_collab_operation_kind, AppendCollabInput,
-    AppendCollabResult, CollabDbError, CompactCollabInput, ProjectDerivedBodyInput,
-    ProjectDerivedBodyResult, VerifyCollabInput,
+    append_collab_restore_kind, append_collab_update_kind, append_collab_update_on_conn_timed,
+    claim_writer_and_load_kind, compact_collab_snapshot_kind, load_collab_readonly_kind,
+    project_derived_body_kind, resolve_collab_admission_kind, verify_collab_operation_kind,
+    AppendCollabInput, AppendCollabResult, CollabDbError, CompactCollabInput,
+    ProjectDerivedBodyInput, ProjectDerivedBodyResult, VerifyCollabInput,
 };
 use crate::db::collab_delivery::{check_delivery_admission_kind, DeliveryAdmission};
 use crate::db::identity::LiveSession;
@@ -824,7 +824,8 @@ enum RoomCommand {
         actor_user_id: Uuid,
         session_id: Uuid,
         snap: Vec<u8>,
-        reply: oneshot::Sender<Result<(), RevisionRestoreError>>,
+        intent: RestoreRevisionInput,
+        reply: oneshot::Sender<Result<Uuid, RevisionRestoreError>>,
     },
     /// External body write (PUT body / patch block): replace the fragment with
     /// the Doc seeded from `seed` as one forward system update.
@@ -912,6 +913,7 @@ pub enum RevisionCaptureError {
 pub enum RevisionRestoreError {
     Rejected,
     Unavailable,
+    Conflict,
 }
 
 /// Outcome of an external body write applied through the room actor.
@@ -1056,13 +1058,15 @@ impl RoomHandle {
         actor_user_id: Uuid,
         session_id: Uuid,
         snap: Vec<u8>,
-    ) -> Result<(), RevisionRestoreError> {
+        intent: RestoreRevisionInput,
+    ) -> Result<Uuid, RevisionRestoreError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RoomCommand::Restore {
                 actor_user_id,
                 session_id,
                 snap,
+                intent,
                 reply: reply_tx,
             })
             .await
@@ -1452,10 +1456,11 @@ impl RoomActor {
                             actor_user_id,
                             session_id,
                             snap,
+                            intent,
                             reply,
                         }) => {
                             let _ = reply
-                                .send(self.handle_restore(actor_user_id, session_id, snap).await);
+                                .send(self.handle_restore(actor_user_id, session_id, snap, intent).await);
                         }
                         Some(RoomCommand::ReplaceBody {
                             actor_user_id,
@@ -3769,7 +3774,32 @@ impl RoomActor {
         actor_user_id: Uuid,
         session_id: Uuid,
         snap: Vec<u8>,
-    ) -> Result<(), RevisionRestoreError> {
+        intent: RestoreRevisionInput,
+    ) -> Result<Uuid, RevisionRestoreError> {
+        self.prepare_forward_writer(actor_user_id, session_id)
+            .await
+            .map_err(|err| match err {
+                ForwardWriteError::Rejected => RevisionRestoreError::Rejected,
+                _ => RevisionRestoreError::Unavailable,
+            })?;
+        // Recheck current authorization before recovering a previous commit.
+        // Recovery precedes the old tail comparison: our own committed restore
+        // must not invalidate a response-loss retry of that exact operation.
+        if let Some(restored) = lookup_restored_revision(
+            &self.pool,
+            self.workspace_id,
+            actor_user_id,
+            session_id,
+            intent,
+        )
+        .await
+        .map_err(|_| RevisionRestoreError::Unavailable)?
+        .map_err(|err| match err {
+            RevisionDbError::RestoreConflict => RevisionRestoreError::Conflict,
+            _ => RevisionRestoreError::Rejected,
+        })? {
+            return Ok(restored.revision_id);
+        }
         let applied = self
             .apply_forward_write(
                 actor_user_id,
@@ -3778,24 +3808,23 @@ impl RoomActor {
                     snap_b64: snap,
                     encoding: 1,
                 },
-                None,
+                Some(intent.expected_tail_seq),
+                Some(intent),
             )
             .await
             .map_err(|err| match err {
                 ForwardWriteError::Rejected | ForwardWriteError::AppendTooLarge => {
                     RevisionRestoreError::Rejected
                 }
-                ForwardWriteError::Unavailable
-                | ForwardWriteError::Conflict
-                | ForwardWriteError::EngineLimit
-                | ForwardWriteError::EngineMalformed => RevisionRestoreError::Unavailable,
+                ForwardWriteError::Conflict => RevisionRestoreError::Conflict,
+                _ => RevisionRestoreError::Unavailable,
             })?;
-        if let Some(seq) = applied {
+        if let Some(seq) = applied.0 {
             let _ = self
                 .maybe_project_derived_body(seq, actor_user_id, session_id, false)
                 .await;
         }
-        Ok(())
+        applied.1.ok_or(RevisionRestoreError::Unavailable)
     }
 
     /// Source `replaceLiveCollabContent`: the whole fragment becomes the seed
@@ -3817,6 +3846,7 @@ impl RoomActor {
                     encoding: 1,
                 },
                 expected_tail_seq,
+                None,
             )
             .await
             .map_err(|err| match err {
@@ -3828,7 +3858,7 @@ impl RoomActor {
                 }
                 ForwardWriteError::EngineMalformed => BodyWriteError::Invalid,
             })?;
-        let Some(seq) = applied else {
+        let Some(seq) = applied.0 else {
             return Ok(());
         };
         // The update is durable and broadcast at this point: the write has
@@ -3932,7 +3962,8 @@ impl RoomActor {
         session_id: Uuid,
         request: Request,
         expected_tail_seq: Option<i64>,
-    ) -> Result<Option<i64>, ForwardWriteError> {
+        restore: Option<RestoreRevisionInput>,
+    ) -> Result<(Option<i64>, Option<Uuid>), ForwardWriteError> {
         self.prepare_forward_writer(actor_user_id, session_id)
             .await?;
         if expected_tail_seq.is_some_and(|expected| expected != self.committed.tail_seq) {
@@ -3953,8 +3984,8 @@ impl RoomActor {
             },
             Err(_) => return Err(ForwardWriteError::Unavailable),
         };
-        if is_empty_update(&payload) {
-            return Ok(None);
+        if is_empty_update(&payload) && restore.is_none() {
+            return Ok((None, None));
         }
 
         let validation = validate_recovery_bundle(
@@ -3978,24 +4009,55 @@ impl RoomActor {
         let op_id = Uuid::now_v7();
         let expected_tail = self.committed.tail_seq;
         let digest = payload_digest(&payload);
-        let append = append_collab_update_kind(
-            &self.pool,
-            self.kind,
-            AppendCollabInput {
-                workspace_id: self.workspace_id,
-                actor_user_id,
-                session_id,
-                document_id: self.document_id,
-                writer_generation,
-                expected_tail_seq: expected_tail,
-                op_id,
-                payload: &payload,
-                client_ip: None,
-            },
-        )
-        .await;
+        // The engine computes restore payloads without mutating its primary
+        // Doc. Capture the exact future committed bundle in the existing
+        // isolated helper; never snapshot a later peer state after HTTP apply.
+        let capture = if let Some(intent) = restore {
+            let engine_bin = self.engine.engine_bin().to_path_buf();
+            let limits = self.engine.limits();
+            let snapshot = self.committed.snapshot.clone();
+            let mut tail = self.committed.tail_payloads.clone();
+            tail.push(payload.clone());
+            let captured = tokio::task::spawn_blocking(move || {
+                capture_revision_offline(engine_bin, limits, snapshot, tail)
+            })
+            .await
+            .map_err(|_| ForwardWriteError::Unavailable)?
+            .map_err(|_| ForwardWriteError::Unavailable)?;
+            let text = prepare_revision_text(&captured.content_json)
+                .map_err(|_| ForwardWriteError::EngineMalformed)?;
+            Some(RestoreRevisionAppend {
+                intent,
+                revision_id: Uuid::now_v7(),
+                y_snapshot: captured.y_snapshot,
+                content_json: captured.content_json,
+                text,
+            })
+        } else {
+            None
+        };
+        let input = AppendCollabInput {
+            workspace_id: self.workspace_id,
+            actor_user_id,
+            session_id,
+            document_id: self.document_id,
+            writer_generation,
+            expected_tail_seq: expected_tail,
+            op_id,
+            payload: &payload,
+            client_ip: None,
+        };
+        let append = if let Some(capture) = capture.as_ref() {
+            append_collab_restore_kind(&self.pool, self.kind, input, capture)
+                .await
+                .map(|result| result.map(|(append, revision_id)| (append, Some(revision_id))))
+        } else {
+            append_collab_update_kind(&self.pool, self.kind, input)
+                .await
+                .map(|result| result.map(|append| (append, None)))
+        };
 
-        let committed = match append {
+        let (committed, restored_revision_id) = match append {
             Ok(Ok(result)) => result,
             Ok(Err(CollabDbError::StaleWriter)) => {
                 self.fatal_writer_stale(CloseOrder::Preempt).await;
@@ -4003,6 +4065,11 @@ impl RoomActor {
             }
             Ok(Err(CollabDbError::PayloadTooLarge | CollabDbError::StateBudgetExceeded)) => {
                 return Err(ForwardWriteError::AppendTooLarge);
+            }
+            Ok(Err(CollabDbError::OpIdConflict | CollabDbError::StaleCutoff))
+                if restore.is_some() =>
+            {
+                return Err(ForwardWriteError::Conflict);
             }
             Ok(Err(err)) if Self::is_definite_append_rejection(&err) => {
                 return Err(ForwardWriteError::Rejected);
@@ -4019,11 +4086,34 @@ impl RoomActor {
                     )
                     .await
                 {
-                    Some(result) => result,
+                    Some(result) => (result, capture.as_ref().map(|capture| capture.revision_id)),
                     None => return Err(ForwardWriteError::Unavailable),
                 }
             }
         };
+
+        if restore.is_some() {
+            if let AppendCollabResult::DuplicateAck { seq } = committed {
+                // A concurrently recovered replay already owns its exact payload.
+                // Reload durable bytes; do not broadcast our speculative payload.
+                let load = load_collab_readonly_kind(
+                    &self.pool,
+                    self.kind,
+                    self.workspace_id,
+                    actor_user_id,
+                    session_id,
+                    self.document_id,
+                )
+                .await
+                .map_err(|_| ForwardWriteError::Unavailable)?
+                .map_err(|_| ForwardWriteError::Rejected)?;
+                self.set_committed_from_load(&load);
+                self.reload_primary_from_committed()
+                    .await
+                    .map_err(|_| ForwardWriteError::Unavailable)?;
+                return Ok((Some(seq), restored_revision_id));
+            }
+        }
 
         let seq = match committed {
             AppendCollabResult::Committed { seq } | AppendCollabResult::DuplicateAck { seq } => {
@@ -4052,7 +4142,7 @@ impl RoomActor {
         }
         let y_protocol = encode_sync_payload(SyncStep::Update, &payload);
         self.broadcast_update(&y_protocol).await;
-        Ok(Some(seq))
+        Ok((Some(seq), restored_revision_id))
     }
 
     async fn broadcast_update(&mut self, y_protocol: &[u8]) {

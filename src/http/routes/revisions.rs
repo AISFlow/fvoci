@@ -15,18 +15,20 @@ use uuid::Uuid;
 
 use crate::api::dto::{
     RevisionCreateResponse, RevisionDetailResponse, RevisionListResponse, RevisionMetaResponse,
-    RevisionRestoreBody, RevisionRestoreResponse,
+    RevisionRestoreBody, RevisionRestorePreviewResponse, RevisionRestoreResponse,
 };
 use crate::auth::scopes::ApiTokenScope;
 use crate::auth::session::SessionUser;
 use crate::collab::revision::{capture_revision_offline, prepare_revision_text};
 use crate::collab::room::RoomKey;
-use crate::collab::room::{CapturedRevision, RevisionCaptureError, RevisionRestoreError};
+use crate::collab::room::{
+    BodyWriteError, CapturedRevision, RevisionCaptureError, RevisionRestoreError,
+};
 use crate::db::revisions::{
     authorize_revision_target, create_manual_revision, decode_revision_cursor,
     get_revision as get_revision_for, list_revisions as list_revisions_for,
-    load_persisted_target_source, resolve_restore, CreateRevisionInput, RevisionDbError,
-    RevisionDetail, RevisionMeta, RevisionScope, RevisionTarget,
+    load_persisted_target_source, resolve_restore, CreateRevisionInput, RestoreRevisionInput,
+    RevisionDbError, RevisionDetail, RevisionMeta, RevisionScope, RevisionTarget,
 };
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::authz::{require_request_auth, Access};
@@ -45,6 +47,10 @@ pub fn router() -> Router<AppState> {
             get(get_revision),
         )
         .route(
+            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/restore-preview",
+            get(preview_restore_revision),
+        )
+        .route(
             "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/restore",
             post(restore_revision),
         )
@@ -57,6 +63,10 @@ pub fn router() -> Router<AppState> {
             get(get_project_document_revision),
         )
         .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/revisions/{revision_id}/restore-preview",
+            get(preview_restore_project_document_revision),
+        )
+        .route(
             "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/revisions/{revision_id}/restore",
             post(restore_project_document_revision),
         )
@@ -67,6 +77,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/revisions/{revision_id}",
             get(get_task_revision),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/revisions/{revision_id}/restore-preview",
+            get(preview_restore_task_revision),
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/revisions/{revision_id}/restore",
@@ -499,13 +513,10 @@ async fn restore_target_revision(
     body: Bytes,
 ) -> Result<Json<RevisionRestoreResponse>, RevisionApiError> {
     check_origin(&headers, &state.public_origin)?;
-    let _restore_body: RevisionRestoreBody = if body.is_empty() {
-        RevisionRestoreBody {
-            correlation_id: None,
-        }
-    } else {
-        serde_json::from_slice(&body).map_err(|_| AppError::from_code(ProblemCode::InvalidInput))?
-    };
+    let restore_body: RevisionRestoreBody = serde_json::from_slice(&body)
+        .map_err(|_| AppError::from_code(ProblemCode::InvalidInput))?;
+    let expected_tail_seq = parse_restore_tail(&restore_body.expected_tail_seq)
+        .ok_or_else(|| AppError::from_code(ProblemCode::InvalidInput))?;
     let (user_id, credential_id) =
         revision_credential(&state, &headers, &jar, workspace_id, scope.target(), true).await?;
     let _ = peer_ip(peer.ip());
@@ -544,15 +555,162 @@ async fn restore_target_revision(
         user_id,
         credential_id,
         snap,
+        RestoreRevisionInput {
+            scope,
+            source_revision_id: revision_id,
+            correlation_id: restore_body.correlation_id,
+            expected_tail_seq,
+        },
     );
     match tokio::time::timeout(timeout.max(Duration::from_millis(1)), restore).await {
-        Ok(Ok(())) => Ok(Json(RevisionRestoreResponse { restored: true })),
+        Ok(Ok(revision_id)) => Ok(Json(RevisionRestoreResponse {
+            restored: true,
+            revision_id: revision_id.to_string(),
+        })),
         Ok(Err(RevisionRestoreError::Rejected)) => {
             Err(AppError::from_code(ProblemCode::RestoreRejected).into())
         }
+        Ok(Err(RevisionRestoreError::Conflict)) => Err(restore_conflict()),
         Ok(Err(RevisionRestoreError::Unavailable)) => Err(collab_unavailable()),
         Err(_) => Err(AppError::from_code(ProblemCode::CollabTimeoutRetry).into()),
     }
+}
+
+fn parse_restore_tail(raw: &str) -> Option<i64> {
+    if raw.is_empty()
+        || raw.len() > 19
+        || !raw.bytes().all(|byte| byte.is_ascii_digit())
+        || (raw.len() > 1 && raw.starts_with('0'))
+    {
+        return None;
+    }
+    raw.parse::<i64>().ok().filter(|tail| *tail >= 0)
+}
+
+fn restore_conflict() -> RevisionApiError {
+    RevisionApiError::Coded {
+        status: StatusCode::CONFLICT,
+        code: "revision_restore_conflict",
+        title: "Document changed since the restore preview; review a fresh preview".into(),
+        params: None,
+    }
+}
+
+async fn preview_restore_revision(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, document_id, revision_id)): Path<(Uuid, Uuid, Uuid)>,
+) -> Result<Json<RevisionRestorePreviewResponse>, RevisionApiError> {
+    preview_restore_target(
+        state,
+        headers,
+        jar,
+        workspace_id,
+        RevisionTarget::Document(document_id).into(),
+        revision_id,
+    )
+    .await
+}
+async fn preview_restore_project_document_revision(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id, document_id, revision_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+) -> Result<Json<RevisionRestorePreviewResponse>, RevisionApiError> {
+    preview_restore_target(
+        state,
+        headers,
+        jar,
+        workspace_id,
+        RevisionScope::project_document(project_id, document_id),
+        revision_id,
+    )
+    .await
+}
+async fn preview_restore_task_revision(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, task_id, revision_id)): Path<(Uuid, Uuid, Uuid)>,
+) -> Result<Json<RevisionRestorePreviewResponse>, RevisionApiError> {
+    preview_restore_target(
+        state,
+        headers,
+        jar,
+        workspace_id,
+        RevisionTarget::Task(task_id).into(),
+        revision_id,
+    )
+    .await
+}
+async fn preview_restore_target(
+    state: AppState,
+    headers: HeaderMap,
+    jar: CookieJar,
+    workspace_id: Uuid,
+    scope: RevisionScope,
+    revision_id: Uuid,
+) -> Result<Json<RevisionRestorePreviewResponse>, RevisionApiError> {
+    let (user_id, credential_id) =
+        revision_credential(&state, &headers, &jar, workspace_id, scope.target(), true).await?;
+    // The immutable source must belong to this exact route target. A preview
+    // is for an editable restore; viewing history alone does not permit it.
+    resolve_restore(
+        &state.auth.db.pool,
+        workspace_id,
+        user_id,
+        credential_id,
+        scope,
+        revision_id,
+        None,
+    )
+    .await
+    .map_err(internal)?
+    .map_err(map_revision_error)?;
+    let source = get_revision_for(
+        &state.auth.db.pool,
+        workspace_id,
+        user_id,
+        credential_id,
+        scope,
+        revision_id,
+    )
+    .await
+    .map_err(internal)?
+    .map_err(map_revision_error)?;
+    let hub = state.collab.as_ref().ok_or_else(collab_unavailable)?;
+    let current = tokio::time::timeout(
+        hub.rpc_timeout().max(Duration::from_millis(1)),
+        hub.project_live(
+            room_key(workspace_id, scope.target()),
+            user_id,
+            credential_id,
+        ),
+    )
+    .await
+    .map_err(|_| AppError::from_code(ProblemCode::CollabTimeoutRetry))?
+    .map_err(|err| match err {
+        BodyWriteError::Rejected => map_revision_error(RevisionDbError::Forbidden),
+        _ => collab_unavailable(),
+    })?;
+    // Check route affiliation again after room startup/project work.
+    authorize_revision_target(
+        &state.auth.db.pool,
+        workspace_id,
+        user_id,
+        credential_id,
+        scope,
+        true,
+    )
+    .await
+    .map_err(internal)?
+    .map_err(map_revision_error)?;
+    Ok(Json(RevisionRestorePreviewResponse {
+        source: detail_response(source),
+        current_content_json: current.content_json,
+        current_tail_seq: current.tail_seq.to_string(),
+    }))
 }
 
 async fn capture_for_create(
@@ -608,6 +766,7 @@ fn meta_response(meta: RevisionMeta) -> RevisionMetaResponse {
         reason: meta.reason,
         created_by: meta.created_by.map(|id| id.to_string()),
         created_at: meta.created_at,
+        restored_from_id: meta.restored_from_id.map(|id| id.to_string()),
     }
 }
 
@@ -619,6 +778,7 @@ fn detail_response(detail: RevisionDetail) -> RevisionDetailResponse {
         reason: detail.meta.reason,
         created_by: detail.meta.created_by.map(|id| id.to_string()),
         created_at: detail.meta.created_at,
+        restored_from_id: detail.meta.restored_from_id.map(|id| id.to_string()),
         content_json: detail.content_json,
         y_snapshot: collab_engine::b64::encode(&detail.y_snapshot),
     }
@@ -629,6 +789,7 @@ fn map_revision_error(err: RevisionDbError) -> RevisionApiError {
         RevisionDbError::NotFound
         | RevisionDbError::Forbidden
         | RevisionDbError::StaleRevisionHead => AppError::from_code(ProblemCode::NotFound).into(),
+        RevisionDbError::RestoreConflict => restore_conflict(),
         RevisionDbError::TaskArchived => AppError::from_code(ProblemCode::TaskArchived).into(),
         RevisionDbError::ProjectArchived => {
             AppError::from_code(ProblemCode::ProjectArchived).into()
@@ -706,4 +867,31 @@ fn parse_user_id(value: &str) -> Result<Uuid, AppError> {
 fn internal(err: sqlx::Error) -> AppError {
     tracing::error!("database error: {}", err);
     AppError::internal()
+}
+
+#[cfg(test)]
+mod restore_tail_tests {
+    use super::parse_restore_tail;
+    #[test]
+    fn opaque_tail_preserves_integer_precision_and_refuses_noncanonical_input() {
+        assert_eq!(parse_restore_tail("0"), Some(0));
+        assert_eq!(
+            parse_restore_tail("9007199254740993"),
+            Some(9_007_199_254_740_993)
+        );
+        assert_eq!(parse_restore_tail("9223372036854775807"), Some(i64::MAX));
+        for input in [
+            "",
+            "01",
+            "-1",
+            "+1",
+            "1.0",
+            "1e2",
+            " 1",
+            "1 ",
+            "9223372036854775808",
+        ] {
+            assert_eq!(parse_restore_tail(input), None, "{input}");
+        }
+    }
 }

@@ -6,6 +6,8 @@ import * as Query from "@tanstack/vue-query";
 import ts from "typescript";
 import * as Vue from "vue";
 import { parse } from "vue/compiler-sfc";
+import { UNIQUE_ID_NODE_TYPES } from "@fvoci/editor/extract";
+import { compareRevisionProjections } from "../../../features/documents/revision-diff";
 import { persistThenCreate } from "../../../features/documents/revision-persist";
 import { ProblemError } from "../../../lib/api";
 
@@ -46,6 +48,7 @@ function harness() {
     projectId: null as string | null,
     targetKind: "document",
     readOnly: false,
+    sourceDirty: false,
     persistNow: () => {
       persists++;
       return ack.promise;
@@ -81,12 +84,16 @@ function harness() {
     meQuery: {},
     membersQuery: () => ({}),
     persistThenCreate,
+    UNIQUE_ID_NODE_TYPES,
+    compareRevisionProjections,
     ProblemError,
     createRevision: (...args: unknown[]) => request("create", args),
     restoreRevision: (...args: unknown[]) => request("restore", args),
     getRevision: (...args: unknown[]) => request("preview", args),
+    previewRestoreRevision: (...args: unknown[]) => request("restore-preview", args),
     crypto,
     AbortController,
+    AbortSignal,
     document: { activeElement: null },
     HTMLElement: class {
       focus() {}
@@ -111,6 +118,8 @@ function harness() {
     setup() {
       const javascript = new Bun.Transpiler({ loader: "ts" }).transformSync(
         `(() => {${source}\nreturn {save,restore,showPreview,notice,preview,pendingRestoreId,
+          beginRestore,cancelRestore,restorePreview,restorePreviewPending,restorePending,restorable,
+          compareSelected,beforeId,afterId,comparison,comparisonBodies,changeIndex,moveChange,queryKey,
           confirmRestore: typeof confirmRestore === 'function' ? confirmRestore : () => restore.mutate(pendingRestoreId.value)};})()`,
       );
       panel = record(runInNewContext(javascript, injected));
@@ -181,6 +190,41 @@ await test("delayed persist ACK: repeated save starts exactly one persist and re
     h.stop();
   }
 });
+
+function detail(id: string, text = "이전 내용") {
+  return {
+    id,
+    targetId: "document-A",
+    targetKind: "document",
+    contentJson: {
+      type: "doc",
+      content: [
+        { type: "paragraph", attrs: { id: "paragraph-A" }, content: [{ type: "text", text }] },
+      ],
+    },
+  };
+}
+function restoreDetail(id: string, tail = "9007199254740993") {
+  return {
+    source: detail(id),
+    currentTailSeq: tail,
+    currentContentJson: detail("current", "현재 내용").contentJson,
+  };
+}
+async function readyRestore(h: ReturnType<typeof harness>, id: string) {
+  const preview = h.queue();
+  const ready = h.call("beginRestore", id);
+  assert.equal(
+    h.calls.filter((call) => call.method === "restore-preview").length,
+    0,
+    "wait for matched ACK",
+  );
+  h.ack.resolve();
+  await settle();
+  preview.resolve(restoreDetail(id));
+  await ready;
+  assert.equal(h.value("restorable"), true);
+}
 
 function transition(h: ReturnType<typeof harness>, change: string) {
   if (change === "aba") {
@@ -256,8 +300,8 @@ await test("old restore success/timeout never updates a new scope or its documen
     for (const change of retirements) {
       const h = harness();
       try {
+        await readyRestore(h, "revision-old");
         const http = h.queue();
-        h.set("pendingRestoreId", "revision-old");
         h.call("confirmRestore");
         await settle();
         assert.equal(h.calls.filter((call) => call.method === "restore").length, 1);
@@ -315,6 +359,153 @@ await test("delayed persist ACK: changing the target retires the pending save", 
     await settle();
     assert.equal(h.calls.filter((call) => call.method === "create").length, 0);
     assert.equal(h.value("notice"), null);
+  } finally {
+    h.stop();
+  }
+});
+
+await test("restore requires preview after ACK and sends captured opaque tail with stable retry correlation", async () => {
+  const h = harness();
+  try {
+    h.set("pendingRestoreId", "revision-A");
+    h.call("confirmRestore");
+    await settle();
+    assert.equal(h.calls.filter((call) => call.method === "restore").length, 0);
+    await readyRestore(h, "revision-A");
+    const first = h.queue();
+    h.call("confirmRestore");
+    await settle();
+    const request = h.calls.find((call) => call.method === "restore");
+    assert.ok(request);
+    assert.equal(request.args[4], "revision-A");
+    assert.equal(request.args[6], "9007199254740993");
+    first.reject(new ProblemError(504));
+    await settle();
+    assert.equal(h.value("restorable"), true, "ambiguous response keeps the captured preview");
+    const second = h.queue();
+    h.call("confirmRestore");
+    await settle();
+    const requests = h.calls.filter((call) => call.method === "restore");
+    assert.equal(requests.length, 2);
+    assert.equal(requests.at(1)?.args[5], request.args[5], "retry recovers the same operation");
+    assert.equal(requests.at(1)?.args[6], request.args[6]);
+    second.resolve({ restored: true, revisionId: "new-revision" });
+    await settle();
+    assert.equal(h.value("pendingRestoreId"), null);
+  } finally {
+    h.stop();
+  }
+});
+
+await test("dirty source and failed persist ACK cannot fetch preview or enqueue restore", async () => {
+  for (const dirty of [true, false]) {
+    const h = harness();
+    try {
+      h.props.sourceDirty = dirty;
+      const ready = h.call("beginRestore", "revision-A");
+      if (!dirty) h.ack.reject(new Error("persist failed"));
+      await ready;
+      h.call("confirmRestore");
+      await settle();
+      assert.equal(
+        h.calls.filter((call) => ["restore", "restore-preview"].includes(call.method)).length,
+        0,
+      );
+      assert.equal(h.value("restorePreview"), null);
+    } finally {
+      h.stop();
+    }
+  }
+});
+
+await test("preview cancellation, source dirty, and scope retirement discard late preview", async () => {
+  for (const change of ["cancel", "dirty", ...retirements]) {
+    const h = harness();
+    try {
+      const response = h.queue();
+      const done = h.call("beginRestore", "revision-old");
+      h.ack.resolve();
+      await settle();
+      assert.equal(h.calls.filter((call) => call.method === "restore-preview").length, 1);
+      if (change === "cancel") h.call("cancelRestore");
+      else if (change === "dirty") h.props.sourceDirty = true;
+      else transition(h, change);
+      response.resolve(restoreDetail("revision-old"));
+      await done;
+      h.call("confirmRestore");
+      await settle();
+      assert.equal(h.value("restorePreview"), null, change);
+      assert.equal(h.calls.filter((call) => call.method === "restore").length, 0, change);
+    } finally {
+      h.stop();
+    }
+  }
+});
+
+await test("reordered restore previews keep latest source and its own tail", async () => {
+  const h = harness();
+  try {
+    const first = h.queue();
+    const old = h.call("beginRestore", "first");
+    h.ack.resolve();
+    await settle();
+    const second = h.queue();
+    const latest = h.call("beginRestore", "second");
+    await settle();
+    second.resolve(restoreDetail("second", "17"));
+    await latest;
+    first.resolve(restoreDetail("first", "16"));
+    await old;
+    assert.equal(record(record(h.value("restorePreview")).source).id, "second");
+    const restore = h.queue();
+    h.call("confirmRestore");
+    await settle();
+    const request = h.calls.find((call) => call.method === "restore");
+    assert.ok(request);
+    assert.equal(request.args[4], "second");
+    assert.equal(request.args[6], "17");
+    restore.reject(new ProblemError(409));
+    await settle();
+    assert.equal(h.value("restorePreview"), null, "peer conflict requires a fresh preview");
+    assert.equal(h.value("notice"), "version.restore.conflict");
+    const count = h.calls.filter((call) => call.method === "restore").length;
+    h.call("confirmRestore");
+    await settle();
+    assert.equal(h.calls.filter((call) => call.method === "restore").length, count);
+  } finally {
+    h.stop();
+  }
+});
+
+await test("reordered comparison freezes the same literal before/after pair through navigation", async () => {
+  const h = harness();
+  try {
+    const leftOld = h.queue(),
+      rightOld = h.queue();
+    h.set("beforeId", "before-old");
+    h.set("afterId", "after-old");
+    await Vue.nextTick();
+    const leftNew = h.queue(),
+      rightNew = h.queue();
+    h.set("beforeId", "before-new");
+    h.set("afterId", "after-new");
+    await Vue.nextTick();
+    leftNew.resolve(detail("before-new", "한국어 이전"));
+    rightNew.resolve(detail("after-new", "한국어 이후"));
+    await settle();
+    leftOld.resolve(detail("before-old"));
+    rightOld.resolve(detail("after-old", "늦은 내용"));
+    await settle();
+    const diff = record(h.value("comparison"));
+    assert.equal(diff.beforeId, "before-new");
+    assert.equal(diff.afterId, "after-new");
+    h.call("moveChange", 1);
+    assert.equal(h.value("comparison"), diff, "navigation cannot refetch or change the pair");
+    assert.equal(h.calls.filter((call) => call.method === "preview").length, 4);
+    assert.deepEqual(Array.from(h.value("queryKey") as string[]).slice(-2), [
+      "actor-A",
+      "session-A",
+    ]);
   } finally {
     h.stop();
   }
