@@ -2401,7 +2401,6 @@ test("owner releases opaque legacy reservations after task permission loss witho
       {
         data: {
           startedAt: "2026-09-29T01:02:03.123456Z",
-          endedAt: null,
           note: "기존 비공개 미종료 메모",
         },
       },
