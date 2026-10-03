@@ -25,9 +25,10 @@ use crate::http::guard::check_origin;
 use crate::http::routes::tasks::{internal, require_session};
 use crate::http::state::AppState;
 use crate::streams::{
-    initial_cursor, poll_access_events, poll_task_events, project_stream_access,
-    task_stream_wire_hint, workspace_stream_access, EventCursor, StreamAccess, StreamAcquireError,
-    StreamGuard, StreamHub, STREAM_CHANNEL_CAPACITY, STREAM_KEEPALIVE, STREAM_POLL_INTERVAL,
+    initial_cursor, poll_access_events, poll_task_events, poll_workspace_task_events,
+    project_stream_access, task_stream_wire_hint, workspace_stream_access, EventCursor,
+    StreamAccess, StreamAcquireError, StreamGuard, StreamHub, STREAM_CHANNEL_CAPACITY,
+    STREAM_KEEPALIVE, STREAM_POLL_INTERVAL,
 };
 
 #[cfg(feature = "db-tests")]
@@ -86,6 +87,247 @@ pub fn router() -> Router<AppState> {
             "/api/v1/workspaces/{workspace_id}/access-stream",
             get(workspace_access_stream),
         )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/task-stream",
+            get(workspace_task_stream),
+        )
+}
+
+/// One task stream for every project of a workspace (C6): a tab otherwise
+/// holds one persistent HTTP/1.1 response per project and starves ordinary
+/// requests at six sockets. Same `open`/`task` protocol plus `projectId`;
+/// project access is re-evaluated in every poll and again for every item.
+async fn workspace_task_stream(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<Uuid>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Response, AppError> {
+    check_origin(&headers, &state.public_origin)?;
+    let guard = match state.streams.try_acquire() {
+        Ok(guard) => guard,
+        Err(StreamAcquireError::Capacity) => {
+            return Err(AppError::from_code(ProblemCode::RateLimitExceeded));
+        }
+        Err(StreamAcquireError::Stopped) => return Ok(stream_stopped()),
+    };
+    let (_, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksRead),
+        Some(workspace_id),
+    )
+    .await?;
+    admit(workspace_stream_access(&state.auth.db.pool, workspace_id, user_id, session_id).await)?;
+
+    let pool = state.auth.db.pool.clone();
+    let hub = state.streams.clone();
+    let cursor = initial_cursor(&pool).await.map_err(internal)?;
+    let stream = workspace_task_sse_stream(
+        hub,
+        pool,
+        WorkspaceTaskAuth {
+            workspace_id,
+            user_id,
+            session_id,
+        },
+        cursor,
+        guard,
+    );
+    Ok(sse_response(stream))
+}
+
+#[derive(Clone, Copy)]
+struct WorkspaceTaskAuth {
+    workspace_id: Uuid,
+    user_id: Uuid,
+    session_id: Uuid,
+}
+
+enum WorkspaceStreamItem {
+    Open,
+    Hint {
+        wire_verb: String,
+        task_id: String,
+        project_id: Uuid,
+    },
+}
+
+/// What the body does with one queued item after its current check.
+enum Delivery {
+    Emit,
+    /// The project is no longer visible: withhold only this hint.
+    Withhold,
+    /// The credential or workspace access is gone (or could not be checked).
+    End,
+}
+
+struct WorkspaceTaskSseStream {
+    queue_rx: tokio::sync::mpsc::Receiver<WorkspaceStreamItem>,
+    pool: sqlx::PgPool,
+    auth: WorkspaceTaskAuth,
+    pending: Option<WorkspaceStreamItem>,
+    authorize: Option<Pin<Box<dyn Future<Output = Delivery> + Send>>>,
+    _guard: StreamGuard,
+}
+
+impl Stream for WorkspaceTaskSseStream {
+    type Item = Result<Event, Infallible>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            if this.pending.is_none() {
+                match this.queue_rx.poll_recv(cx) {
+                    Poll::Ready(Some(item)) => this.pending = Some(item),
+                    Poll::Ready(None) => return Poll::Ready(None),
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+            if this.authorize.is_none() {
+                let item = this.pending.as_ref().expect("pending item");
+                this.authorize = Some(authorize_workspace_item(&this.pool, this.auth, item));
+            }
+            let authorize = this.authorize.as_mut().expect("authorize future");
+            match authorize.as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Delivery::End) => {
+                    this.queue_rx.close();
+                    this.pending = None;
+                    this.authorize = None;
+                    return Poll::Ready(None);
+                }
+                Poll::Ready(Delivery::Withhold) => {
+                    this.pending = None;
+                    this.authorize = None;
+                }
+                Poll::Ready(Delivery::Emit) => {
+                    let item = this.pending.take().expect("pending after auth");
+                    this.authorize = None;
+                    return Poll::Ready(Some(Ok(workspace_item_to_event(item))));
+                }
+            }
+        }
+    }
+}
+
+/// Every item is checked against current access when the body takes it, so
+/// a hint queued before a revocation commits is never delivered. Errors fail
+/// closed and end the stream; the client resyncs on reconnect.
+fn authorize_workspace_item(
+    pool: &sqlx::PgPool,
+    auth: WorkspaceTaskAuth,
+    item: &WorkspaceStreamItem,
+) -> Pin<Box<dyn Future<Output = Delivery> + Send>> {
+    let pool = pool.clone();
+    let project_id = match item {
+        WorkspaceStreamItem::Open => None,
+        WorkspaceStreamItem::Hint { project_id, .. } => Some(*project_id),
+    };
+    Box::pin(async move {
+        let WorkspaceTaskAuth {
+            workspace_id,
+            user_id,
+            session_id,
+        } = auth;
+        let access = match project_id {
+            None => workspace_stream_access(&pool, workspace_id, user_id, session_id).await,
+            Some(project_id) => {
+                project_stream_access(&pool, workspace_id, project_id, user_id, session_id).await
+            }
+        };
+        match (project_id, access) {
+            (_, Ok(StreamAccess::Allowed)) => Delivery::Emit,
+            (Some(_), Ok(StreamAccess::Denied)) => Delivery::Withhold,
+            _ => Delivery::End,
+        }
+    })
+}
+
+fn workspace_item_to_event(item: WorkspaceStreamItem) -> Event {
+    match item {
+        WorkspaceStreamItem::Open => Event::default().event("open").data("{}"),
+        WorkspaceStreamItem::Hint {
+            wire_verb,
+            task_id,
+            project_id,
+        } => {
+            let data =
+                json!({"verb": wire_verb, "taskId": task_id, "projectId": project_id}).to_string();
+            Event::default().event("task").data(data)
+        }
+    }
+}
+
+fn workspace_task_sse_stream(
+    hub: Arc<StreamHub>,
+    pool: sqlx::PgPool,
+    auth: WorkspaceTaskAuth,
+    cursor: EventCursor,
+    guard: StreamGuard,
+) -> WorkspaceTaskSseStream {
+    let (queue_tx, queue_rx) = tokio::sync::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+    let producer_pool = pool.clone();
+    tokio::spawn(async move {
+        if queue_tx.try_send(WorkspaceStreamItem::Open).is_err() {
+            return;
+        }
+        let mut cursor = cursor;
+        loop {
+            if queue_tx.is_closed() || !hub.accepting() {
+                return;
+            }
+            tokio::select! {
+                _ = queue_tx.closed() => return,
+                _ = tokio::time::sleep(STREAM_POLL_INTERVAL) => {}
+            }
+            // Credential, membership and per-project View share one
+            // transaction, so a revocation stops hints within one tick.
+            match poll_workspace_task_events(
+                &producer_pool,
+                auth.workspace_id,
+                auth.user_id,
+                auth.session_id,
+                &cursor,
+                50,
+            )
+            .await
+            {
+                Ok(None) => return,
+                Ok(Some(page)) => {
+                    for (project_id, row) in &page.rows {
+                        let Some((wire_verb, task_id)) = task_stream_wire_hint(row) else {
+                            continue;
+                        };
+                        let hint = WorkspaceStreamItem::Hint {
+                            wire_verb,
+                            task_id,
+                            project_id: *project_id,
+                        };
+                        if queue_tx.try_send(hint).is_err() {
+                            // A full queue ends the stream; the client resyncs on reconnect.
+                            return;
+                        }
+                    }
+                    cursor = page.next;
+                }
+                Err(err) => {
+                    tracing::warn!("workspace task stream poll failed: {}", err);
+                    return;
+                }
+            }
+        }
+    });
+
+    WorkspaceTaskSseStream {
+        queue_rx,
+        pool,
+        auth,
+        pending: None,
+        authorize: None,
+        _guard: guard,
+    }
 }
 
 async fn project_task_stream(

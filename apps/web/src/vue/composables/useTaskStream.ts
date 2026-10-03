@@ -6,7 +6,7 @@ import {
 } from "@/features/tasks/task-cache";
 import { ProblemError } from "@/lib/api";
 import { meQuery } from "@/lib/queries";
-import { subscribeTaskStream } from "@/lib/task-stream";
+import { subscribeWorkspaceTaskStream } from "@/lib/task-stream";
 /** Existing authorized project streams feed mounted aggregate consumers too. */
 export function useTaskStreams(
   workspaceId: MaybeRefOrGetter<string | undefined>,
@@ -32,22 +32,25 @@ export function useTaskStreams(
         queryClient.getQueryData<{ userId: string; sessionId: string }>(["auth", "me"])?.userId ===
           actor &&
         queryClient.getQueryData<{ sessionId: string }>(["auth", "me"])?.sessionId === credential;
-      const subscriptions = ids.split(",").map((project) =>
-        subscribeTaskStream(ws, project, {
-          onResync: () => {
-            if (current()) invalidateTaskStreamResyncCaches(queryClient, ws, project);
-          },
-          onTask: (hint) => {
-            if (current())
-              invalidateTaskCaches(queryClient, ws, project, hint.taskId).catch(reportError);
-          },
-        }),
-      );
+      // One pooled workspace stream instead of one socket per project (C6).
+      // Hints name their project; only this caller's projects are settled,
+      // never a global invalidation. Resync covers each connection's `open`
+      // and a project joining an already open connection.
+      const watched = new Set(ids.split(","));
+      const subscription = subscribeWorkspaceTaskStream(ws, [...watched], {
+        onResync: (projects) => {
+          if (!current()) return;
+          for (const project of projects)
+            invalidateTaskStreamResyncCaches(queryClient, ws, project);
+        },
+        onTask: (hint) => {
+          if (current() && watched.has(hint.projectId))
+            invalidateTaskCaches(queryClient, ws, hint.projectId, hint.taskId).catch(reportError);
+        },
+      });
       onCleanup(() => {
         generation++;
-        subscriptions.forEach((subscription) => {
-          subscription.close();
-        });
+        subscription.close();
       });
     },
     { immediate: true },
