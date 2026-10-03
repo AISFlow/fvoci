@@ -115,6 +115,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/052_timer_receipt_restore_provenance.sql"),
         52,
     ),
+    (
+        include_str!("../../migrations/053_timer_receipt_historical_run.sql"),
+        53,
+    ),
 ];
 
 pub(crate) const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -787,6 +791,10 @@ mod tests {
         (
             52,
             "7472a27beda41856d5c93e6a428a0913571696c2727759a6dcf5eabcf78253f3",
+        ),
+        (
+            53,
+            "1fac26baa0b5ebaaf97312131dfd10cfb024ad4e516307a95dea5a3653fe5a89",
         ),
     ];
 

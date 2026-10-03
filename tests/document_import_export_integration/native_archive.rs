@@ -5047,3 +5047,783 @@ async fn native_archive_restores_owner_saved_views_for_a_fresh_client() {
         std::fs::remove_dir_all(storage).unwrap();
     }
 }
+
+#[tokio::test]
+async fn native_archive_keeps_historical_audit_locators_and_refuses_retained_provenance() {
+    use fvoci_server::db::native_archive::{capture, publish, NativeDbError};
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let session = project_harness::session_id_for_user(&fx.admin, fx.user_id).await;
+    let ws = fx.workspace_id;
+    let project =
+        project_harness::create_project(fx.app.clone(), &fx.cookie, ws, "HIS", "private").await;
+    let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+    let (status, task) = json_request(
+        fx.app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/tasks"),
+        Some(json!({"title":"이동된 태스크 🧪"})),
+        Some(&fx.cookie),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {task}");
+    let task_id = Uuid::parse_str(task["id"].as_str().unwrap()).unwrap();
+    let start = timer_body(&fx, &fx.cookie, json!({"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null,"note":null})).await;
+    let timer = format!("/api/v1/workspaces/{ws}/tasks/{task_id}/timer");
+    let (status, started) = timer_post(&fx, &fx.cookie, &timer, &start).await;
+    assert!(status.is_success(), "{status} {started}");
+    let stop = timer_body(&fx, &fx.cookie, json!({"requestId":Uuid::now_v7(),"operation":"stop","expectedVersion":started["version"],"runId":started["runId"]})).await;
+    let (status, stopped) = timer_post(&fx, &fx.cookie, &timer, &stop).await;
+    assert!(status.is_success(), "{status} {stopped}");
+    // The MOVE provenance shape (labeled restricted-role fixture writer: W2
+    // MOVE is not in this tree): an audit of this task written while it lived
+    // in an earlier workspace keeps that historical workspace locator.
+    let (historical, earlier) = (Uuid::now_v7(), Uuid::now_v7());
+    as_actor(&fx.pool, ws, fx.user_id,
+        "INSERT INTO fvoci.task_timer_audit(id,user_id,request_id,workspace_id,task_id,time_entry_id,verb,before_value,after_value,reason,created_at)
+         SELECT (b->>0)::uuid,(b->>1)::uuid,gen_random_uuid(),(b->>2)::uuid,(b->>3)::uuid,NULL,'task.estimate.minutes','null'::jsonb,jsonb_build_object('value','30','unit','minutes'),'이전 워크스페이스','2026-10-01T09:00:00Z' FROM (SELECT $1::jsonb AS b) q",
+        vec![json!(historical), json!(fx.user_id), json!(earlier), json!(task_id)]).await;
+    let captured = capture(&fx.pool, ws, fx.user_id, session, &project_only(project_id))
+        .await
+        .expect("historical provenance is captured");
+    let archive = captured.archive;
+    assert!(archive
+        .graph
+        .timer_audit
+        .iter()
+        .any(|a| a.id == historical && a.workspace_id == Some(earlier)));
+    archive
+        .validate()
+        .expect("a historical locator with a selected task is accepted");
+
+    let destination_db = TestDb::bootstrap().await;
+    let dst = fixture(&destination_db).await;
+    let (destination, _, claim) = claimed_restore(&dst, dst.user_id, &dst.cookie).await;
+    publish(
+        &dst.pool,
+        &claim,
+        &archive,
+        &std::collections::BTreeMap::new(),
+        &dst.settings.quota,
+    )
+    .await
+    .expect("historical provenance restores");
+    let locators: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
+        "SELECT id, workspace_id FROM fvoci.task_timer_audit WHERE user_id=$1 ORDER BY created_at, id",
+    )
+    .bind(dst.user_id)
+    .fetch_all(&dst.admin)
+    .await
+    .unwrap();
+    let mut expected: Vec<(Uuid, Option<Uuid>)> = archive
+        .graph
+        .timer_audit
+        .iter()
+        .map(|a| {
+            (
+                a.id,
+                a.workspace_id
+                    .map(|w| if w == ws { destination } else { w }),
+            )
+        })
+        .collect();
+    expected.sort_by_key(|(id, _)| *id);
+    let mut got = locators.clone();
+    got.sort_by_key(|(id, _)| *id);
+    assert_eq!(got, expected);
+    assert!(
+        got.contains(&(historical, Some(earlier))),
+        "historical locator unchanged"
+    );
+
+    // A real purge keeps this actor's receipts and audit naming the task.
+    let (status, purged) = json_request(
+        fx.app.clone(),
+        "DELETE",
+        &format!("/api/v1/workspaces/{ws}/tasks/{task_id}"),
+        None,
+        Some(&fx.cookie),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {purged}");
+    let retained: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.task_timer_audit WHERE user_id=$1 AND task_id=$2",
+    )
+    .bind(fx.user_id)
+    .bind(task_id)
+    .fetch_one(&fx.admin)
+    .await
+    .unwrap();
+    assert!(retained >= 3, "{retained}");
+
+    // ABA: the same person on another installation already retains history
+    // naming these identities (the post-purge shape, labeled fixture writer).
+    // Restoring the same IDs is refused before effects, also when the archive
+    // omits its receipts and audit.
+    let aba_db = TestDb::bootstrap().await;
+    let aba = fixture(&aba_db).await;
+    let cookie = same_person(&aba, fx.user_id).await;
+    as_actor(&aba.pool, aba.workspace_id, fx.user_id,
+        "INSERT INTO fvoci.task_timer_audit(id,user_id,request_id,workspace_id,task_id,time_entry_id,verb,before_value,after_value,reason,created_at)
+         SELECT gen_random_uuid(),(b->>0)::uuid,gen_random_uuid(),NULL,(b->>1)::uuid,NULL,'running','{}'::jsonb,'{}'::jsonb,'남은 기록',now() FROM (SELECT $1::jsonb AS b) q",
+        vec![json!(fx.user_id), json!(task_id)]).await;
+    let mut omitted = archive.clone();
+    omitted.graph.timer_commands.clear();
+    omitted.graph.timer_audit.clear();
+    omitted
+        .validate()
+        .expect("an archive may omit receipts and audit");
+    // One claimed restore; each refused publish rolls back entirely.
+    let (target, _, claim) = claimed_restore(&aba, fx.user_id, &cookie).await;
+    for (label, candidate) in [("full", &archive), ("omitted", &omitted)] {
+        let refused = publish(
+            &aba.pool,
+            &claim,
+            candidate,
+            &std::collections::BTreeMap::new(),
+            &aba.settings.quota,
+        )
+        .await;
+        assert!(
+            matches!(refused, Err(NativeDbError::Conflict)),
+            "{label}: {refused:?}"
+        );
+        let effects: i64 = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM fvoci.projects WHERE workspace_id=$1)+(SELECT count(*) FROM fvoci.task_timer_runs WHERE user_id=$2)+(SELECT count(*) FROM fvoci.task_timer_commands WHERE user_id=$2)",
+        )
+        .bind(target)
+        .bind(fx.user_id)
+        .fetch_one(&aba.admin)
+        .await
+        .unwrap();
+        assert_eq!(effects, 0, "{label}");
+    }
+
+    let storages = [fx.storage_root(), dst.storage_root(), aba.storage_root()];
+    for f in [&fx, &dst, &aba] {
+        f.pool.close().await;
+        f.admin.close().await;
+    }
+    harness.cleanup().await;
+    destination_db.cleanup().await;
+    aba_db.cleanup().await;
+    for storage in storages {
+        std::fs::remove_dir_all(storage).unwrap();
+    }
+}
+
+/// A captured single-author archive with task time from the real routes: a
+/// closed manual entry and a stopped run with its segment.
+async fn timed_archive() -> (TestDb, Fixture, fvoci_server::native_archive::Archive) {
+    use fvoci_server::db::native_archive::capture;
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let session = project_harness::session_id_for_user(&fx.admin, fx.user_id).await;
+    let ws = fx.workspace_id;
+    let project =
+        project_harness::create_project(fx.app.clone(), &fx.cookie, ws, "GRD", "private").await;
+    let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+    let (status, task) = json_request(
+        fx.app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/tasks"),
+        Some(json!({"title":"보호 대상 🧪"})),
+        Some(&fx.cookie),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {task}");
+    let task_id = task["id"].as_str().unwrap().to_owned();
+    let (status, entry) = json_request(
+        fx.app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/tasks/{task_id}/time-entries"),
+        Some(json!({"startedAt":"2026-10-02T09:00:00.000Z","endedAt":"2026-10-02T10:00:00.000Z"})),
+        Some(&fx.cookie),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {entry}");
+    let timer = format!("/api/v1/workspaces/{ws}/tasks/{task_id}/timer");
+    let start = timer_body(&fx, &fx.cookie, json!({"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null,"note":null})).await;
+    let (status, started) = timer_post(&fx, &fx.cookie, &timer, &start).await;
+    assert!(status.is_success(), "{status} {started}");
+    let stop = timer_body(&fx, &fx.cookie, json!({"requestId":Uuid::now_v7(),"operation":"stop","expectedVersion":started["version"],"runId":started["runId"]})).await;
+    let (status, stopped) = timer_post(&fx, &fx.cookie, &timer, &stop).await;
+    assert!(status.is_success(), "{status} {stopped}");
+    let archive = capture(&fx.pool, ws, fx.user_id, session, &project_only(project_id))
+        .await
+        .expect("timed archive")
+        .archive;
+    archive.validate().expect("timed archive is valid");
+    assert!(!archive.graph.timer_segments.is_empty() && !archive.graph.time_entries.is_empty());
+    (harness, fx, archive)
+}
+
+/// Digest every row of every application table, including jobs, outbox and
+/// events. Only digests leave this oracle; credential values are not logged.
+async fn restore_database_effects(admin: &sqlx::PgPool) -> Vec<(String, i64, String)> {
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT tablename FROM pg_tables WHERE schemaname='fvoci' ORDER BY tablename",
+    )
+    .fetch_all(admin)
+    .await
+    .unwrap();
+    assert!(!tables.is_empty());
+    let mut effects = Vec::new();
+    for table in tables {
+        let quoted = table.replace('"', "\"\"");
+        let (count, digest): (i64, String) = sqlx::query_as(&format!(
+            "SELECT count(*),coalesce(md5(string_agg(row_json::text,E'\\n' ORDER BY row_json::text)),md5(''))
+             FROM (SELECT to_jsonb(t) AS row_json FROM fvoci.\"{quoted}\" t) q"
+        ))
+        .fetch_one(admin)
+        .await
+        .unwrap();
+        effects.push((table, count, digest));
+    }
+    effects
+}
+
+fn restore_storage_effects(root: &std::path::Path) -> Vec<(std::path::PathBuf, String)> {
+    use sha2::{Digest, Sha256};
+    fn visit(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        out: &mut Vec<(std::path::PathBuf, String)>,
+    ) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let metadata = std::fs::symlink_metadata(&path).unwrap();
+            assert!(!metadata.file_type().is_symlink());
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if metadata.is_dir() {
+                out.push((relative, "directory".into()));
+                visit(root, &path, out);
+            } else {
+                out.push((
+                    relative,
+                    format!("{:x}", Sha256::digest(std::fs::read(path).unwrap())),
+                ));
+            }
+        }
+    }
+    let mut effects = Vec::new();
+    visit(root, root, &mut effects);
+    effects.sort();
+    effects
+}
+
+#[tokio::test]
+async fn native_archive_post053_command_only_guard_refuses_full_and_omitted_history() {
+    use fvoci_server::db::native_archive::{publish, NativeDbError};
+    let (harness, fx, archive) = timed_archive().await;
+    let versions: Vec<i32> =
+        sqlx::query_scalar("SELECT version FROM fvoci.schema_migrations ORDER BY version")
+            .fetch_all(&fx.admin)
+            .await
+            .unwrap();
+    assert_eq!(versions, (1..=53).collect::<Vec<_>>());
+    let run = archive.graph.timer_runs[0].id;
+    let task = archive.graph.timer_runs[0].task_id;
+    let historical: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(c) FROM fvoci.task_timer_commands c
+         WHERE user_id=$1 AND run_id=$2 ORDER BY request_id LIMIT 1",
+    )
+    .bind(fx.user_id)
+    .bind(run)
+    .fetch_one(&fx.admin)
+    .await
+    .unwrap();
+    let history = timer_graph(&fx.admin, fx.user_id).await;
+    // Real command writer followed by ordinary purge: 053 must retain the
+    // exact request UUID, hash, result and run locator after canonical loss.
+    let (status, body) = json_request(
+        fx.app.clone(),
+        "DELETE",
+        &format!("/api/v1/workspaces/{}/tasks/{task}", fx.workspace_id),
+        None,
+        Some(&fx.cookie),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {body}");
+    let canonical: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.task_timer_runs WHERE id=$1")
+            .bind(run)
+            .fetch_one(&fx.admin)
+            .await
+            .unwrap();
+    assert_eq!(canonical, 0);
+    let purged = timer_graph(&fx.admin, fx.user_id).await;
+    assert_eq!(purged["commands"], history["commands"]);
+    assert_eq!(purged["audit"], history["audit"]);
+    let mut omitted = archive.clone();
+    omitted.graph.timer_commands.clear();
+    omitted.graph.timer_audit.clear();
+    omitted.validate().unwrap();
+    assert!(archive
+        .graph
+        .timer_commands
+        .iter()
+        .any(|c| c.run_id == Some(run)));
+    assert!(!archive.graph.timer_audit.is_empty());
+
+    for (label, foreign, different_run) in [
+        ("same actor", false, false),
+        ("foreign actor", true, false),
+        ("different run", false, true),
+    ] {
+        for (history_label, candidate) in [("full", &archive), ("omitted", &omitted)] {
+            let db = TestDb::bootstrap().await;
+            let inst = fixture(&db).await;
+            let cookie = same_person(&inst, fx.user_id).await;
+            let owner = if foreign {
+                project_harness::add_workspace_user(
+                    &inst.admin,
+                    inst.workspace_id,
+                    "member",
+                    "command-other",
+                )
+                .await
+                .user_id
+            } else {
+                fx.user_id
+            };
+            let missing_fk: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_constraint
+             WHERE conrelid='fvoci.task_timer_commands'::regclass
+               AND conname='task_timer_commands_run_id_fkey'",
+            )
+            .fetch_one(&inst.admin)
+            .await
+            .unwrap();
+            assert_eq!(missing_fk, 0, "post053 fixture required");
+            // A labeled history-only fixture on a second installation. The
+            // negative uses the exact real post-purge command, with NO audit or
+            // canonical state. Positive controls change only its owner or its
+            // request/run identities (and matching result runId).
+            let mut retained = historical.clone();
+            retained["user_id"] = json!(owner);
+            if different_run {
+                let unrelated = Uuid::now_v7();
+                retained["request_id"] = json!(Uuid::now_v7());
+                retained["run_id"] = json!(unrelated);
+                retained["result"]["runId"] = json!(unrelated);
+            }
+            as_actor(&inst.pool, inst.workspace_id, owner,
+            "INSERT INTO fvoci.task_timer_commands(user_id,request_id,request_hash,run_id,result,created_at,restored_from_archive)
+             SELECT (b->>'user_id')::uuid,(b->>'request_id')::uuid,b->>'request_hash',(b->>'run_id')::uuid,b->'result',
+                    (b->>'created_at')::timestamptz,(b->>'restored_from_archive')::uuid
+             FROM (SELECT $1::jsonb->0 AS b) q",
+            vec![retained.clone()]).await;
+            let request = Uuid::parse_str(retained["request_id"].as_str().unwrap()).unwrap();
+            let read_command = || async {
+                sqlx::query_scalar::<_, Value>(
+                "SELECT to_jsonb(c) FROM fvoci.task_timer_commands c WHERE user_id=$1 AND request_id=$2",
+            )
+            .bind(owner)
+            .bind(request)
+            .fetch_one(&inst.admin)
+            .await
+            .unwrap()
+            };
+            assert_eq!(read_command().await, retained);
+            let before_timer = timer_graph(&inst.admin, owner).await;
+            assert!(before_timer["runs"].as_array().unwrap().is_empty());
+            assert!(before_timer["audit"].as_array().unwrap().is_empty());
+            let (target, _, claim) = claimed_restore(&inst, fx.user_id, &cookie).await;
+            let before_db = restore_database_effects(&inst.admin).await;
+            let before_storage = restore_storage_effects(&inst.storage_root());
+            let result = publish(
+                &inst.pool,
+                &claim,
+                candidate,
+                &std::collections::BTreeMap::new(),
+                &inst.settings.quota,
+            )
+            .await;
+            if foreign || different_run {
+                result.unwrap_or_else(|e| panic!("{label}/{history_label}: {e:?}"));
+                let restored: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM fvoci.task_timer_runs WHERE id=$1 AND user_id=$2",
+                )
+                .bind(run)
+                .bind(fx.user_id)
+                .fetch_one(&inst.admin)
+                .await
+                .unwrap();
+                assert_eq!(restored, 1, "{label}");
+                let projects: i64 =
+                    sqlx::query_scalar("SELECT count(*) FROM fvoci.projects WHERE workspace_id=$1")
+                        .bind(target)
+                        .fetch_one(&inst.admin)
+                        .await
+                        .unwrap();
+                assert_eq!(projects, 1, "{label}");
+            } else {
+                assert!(
+                    matches!(result, Err(NativeDbError::Conflict)),
+                    "{history_label}: {result:?}"
+                );
+                assert_eq!(
+                    restore_database_effects(&inst.admin).await,
+                    before_db,
+                    "{history_label}: all rows/jobs/events unchanged"
+                );
+                assert_eq!(
+                    restore_storage_effects(&inst.storage_root()),
+                    before_storage,
+                    "{history_label}: owned storage unchanged"
+                );
+                assert_eq!(
+                    timer_graph(&inst.admin, owner).await,
+                    before_timer,
+                    "{history_label}: exact retained history"
+                );
+            }
+            assert_eq!(
+                read_command().await,
+                retained,
+                "{label}/{history_label}: immutable receipt"
+            );
+            let storage = inst.storage_root();
+            inst.pool.close().await;
+            inst.admin.close().await;
+            db.cleanup().await;
+            std::fs::remove_dir_all(storage).unwrap();
+        }
+    }
+    let storage = fx.storage_root();
+    fx.pool.close().await;
+    fx.admin.close().await;
+    harness.cleanup().await;
+    std::fs::remove_dir_all(storage).unwrap();
+}
+
+/// A retained timer audit row: task, entry, before and after values.
+type RetainedAudit = (Option<Uuid>, Option<Uuid>, Value, Value);
+
+/// A fresh installation where `owner` (the archive's person, or another
+/// member when `foreign`) already retains the given timer audit rows; then
+/// the archive's person restores each candidate on one claim. Returns each
+/// result with the restore workspace's project count after it.
+async fn restore_over_retained(
+    archive_person: Uuid,
+    retained: &[RetainedAudit],
+    foreign: bool,
+    candidates: &[&fvoci_server::native_archive::Archive],
+) -> Vec<(bool, String, i64)> {
+    use fvoci_server::db::native_archive::publish;
+    let db = TestDb::bootstrap().await;
+    let inst = fixture(&db).await;
+    let cookie = same_person(&inst, archive_person).await;
+    let owner = if foreign {
+        project_harness::add_workspace_user(&inst.admin, inst.workspace_id, "member", "other-timer")
+            .await
+            .user_id
+    } else {
+        archive_person
+    };
+    // Labeled fixture writer: the restricted role inserts the owner's
+    // retained append-only audit rows (task, entry, before, after).
+    for (task, entry, before, after) in retained {
+        as_actor(&inst.pool, inst.workspace_id, owner,
+            "INSERT INTO fvoci.task_timer_audit(id,user_id,request_id,workspace_id,task_id,time_entry_id,verb,before_value,after_value,reason)
+             SELECT gen_random_uuid(),(b->>0)::uuid,gen_random_uuid(),NULL,(b->>1)::uuid,(b->>2)::uuid,'retained',b->3,b->4,'남은 기록' FROM (SELECT $1::jsonb AS b) q",
+            vec![json!(owner), json!(task), json!(entry), before.clone(), after.clone()]).await;
+    }
+    let (target, _, claim) = claimed_restore(&inst, archive_person, &cookie).await;
+    let mut out = Vec::new();
+    for candidate in candidates {
+        let result = publish(
+            &inst.pool,
+            &claim,
+            candidate,
+            &std::collections::BTreeMap::new(),
+            &inst.settings.quota,
+        )
+        .await;
+        let projects: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM fvoci.projects WHERE workspace_id=$1")
+                .bind(target)
+                .fetch_one(&inst.admin)
+                .await
+                .unwrap();
+        out.push((result.is_ok(), format!("{:?}", result.err()), projects));
+    }
+    let storage = inst.storage_root();
+    inst.pool.close().await;
+    inst.admin.close().await;
+    db.cleanup().await;
+    std::fs::remove_dir_all(storage).unwrap();
+    out
+}
+
+#[tokio::test]
+async fn native_archive_retained_guard_ignores_a_wrong_kind_record_id() {
+    let (harness, fx, archive) = timed_archive().await;
+    // A retained segment-kind audit whose recordId equals a restored *entry*
+    // id names no restored segment (IDs are only unique per table): the
+    // restore must proceed.
+    let entry = archive.graph.time_entries[0].id;
+    let wrong_kind = json!({"recordId":entry,"kind":"segment"});
+    let results = restore_over_retained(
+        fx.user_id,
+        &[(None, None, json!({}), wrong_kind)],
+        false,
+        &[&archive],
+    )
+    .await;
+    assert_eq!(results.len(), 1);
+    assert!(results[0].0, "wrong kind: {}", results[0].1);
+    assert_eq!(results[0].2, 1);
+    // The inverse: a manual-kind recordId equal to a restored segment id.
+    let segment = archive.graph.timer_segments[0].id;
+    let inverse = json!({"recordId":segment,"kind":"manual"});
+    let results = restore_over_retained(
+        fx.user_id,
+        &[(None, None, inverse, json!({}))],
+        false,
+        &[&archive],
+    )
+    .await;
+    assert!(results[0].0, "inverse wrong kind: {}", results[0].1);
+    assert_eq!(results[0].2, 1);
+    let storage = fx.storage_root();
+    fx.pool.close().await;
+    fx.admin.close().await;
+    harness.cleanup().await;
+    std::fs::remove_dir_all(storage).unwrap();
+}
+
+#[tokio::test]
+async fn native_archive_retained_guard_refuses_each_typed_branch_and_passes_unrelated() {
+    let (harness, fx, archive) = timed_archive().await;
+    let g = &archive.graph;
+    let (task, entry, segment, run) = (
+        g.tasks[0].id,
+        g.time_entries
+            .iter()
+            .find(|e| {
+                !g.timer_segments
+                    .iter()
+                    .any(|s| s.time_entry_id == Some(e.id))
+            })
+            .unwrap()
+            .id,
+        g.timer_segments[0].id,
+        g.timer_runs[0].id,
+    );
+    let mut omitted = archive.clone();
+    omitted.graph.timer_commands.clear();
+    omitted.graph.timer_audit.clear();
+    omitted.validate().unwrap();
+    let both = [&archive, &omitted];
+    // Each retained row kind alone refuses the full and the omitted archive
+    // with no effects. (A command-only run locator cannot exist before the
+    // W5 053 FK change - purge sets it NULL - so that branch stays a W5
+    // integration witness.)
+    let refusing: Vec<(&str, RetainedAudit)> = vec![
+        ("entry column", (None, Some(entry), json!({}), json!({}))),
+        (
+            "manual before",
+            (
+                None,
+                None,
+                json!({"recordId":entry,"kind":"manual"}),
+                json!({}),
+            ),
+        ),
+        (
+            "segment before",
+            (
+                None,
+                None,
+                json!({"recordId":segment,"kind":"segment"}),
+                json!({}),
+            ),
+        ),
+        (
+            "segment after",
+            (
+                None,
+                None,
+                json!({}),
+                json!({"recordId":segment,"kind":"segment"}),
+            ),
+        ),
+        (
+            "cleanup runId, NULL locators",
+            (
+                None,
+                None,
+                json!({"version":1}),
+                json!({"runId":run,"recordId":Uuid::now_v7(),"kind":"segment"}),
+            ),
+        ),
+        ("task column", (Some(task), None, json!({}), json!({}))),
+        (
+            "manual after",
+            (
+                None,
+                None,
+                json!({}),
+                json!({"recordId":entry,"kind":"manual"}),
+            ),
+        ),
+        (
+            "runId before",
+            (None, None, json!({"runId":run}), json!({})),
+        ),
+    ];
+    for (label, row) in refusing {
+        let results = restore_over_retained(fx.user_id, &[row], false, &both).await;
+        for (ok, error, projects) in &results {
+            assert!(
+                !ok && error.contains("Conflict") && *projects == 0,
+                "{label}: {results:?}"
+            );
+        }
+    }
+    // Unrelated retained ids, another member's history naming the task, and
+    // an archive without task time over unrelated history all restore.
+    let unrelated = (
+        Some(Uuid::now_v7()),
+        Some(Uuid::now_v7()),
+        json!({"recordId":Uuid::now_v7(),"kind":"manual"}),
+        json!({"runId":Uuid::now_v7()}),
+    );
+    let results = restore_over_retained(
+        fx.user_id,
+        std::slice::from_ref(&unrelated),
+        false,
+        &[&archive],
+    )
+    .await;
+    assert!(results[0].0 && results[0].2 == 1, "unrelated: {results:?}");
+    let results = restore_over_retained(
+        fx.user_id,
+        &[(Some(task), Some(entry), json!({}), json!({}))],
+        true,
+        &[&archive],
+    )
+    .await;
+    assert!(
+        results[0].0 && results[0].2 == 1,
+        "foreign actor: {results:?}"
+    );
+    let mut timeless = archive.clone();
+    let tg = &mut timeless.graph;
+    (
+        tg.time_entries,
+        tg.timer_runs,
+        tg.timer_segments,
+        tg.timer_legacy_open,
+        tg.timer_commands,
+        tg.timer_audit,
+    ) = (vec![], vec![], vec![], vec![], vec![], vec![]);
+    timeless.validate().unwrap();
+    let results = restore_over_retained(fx.user_id, &[unrelated], false, &[&timeless]).await;
+    assert!(
+        results[0].0 && results[0].2 == 1,
+        "no task time: {results:?}"
+    );
+
+    let storage = fx.storage_root();
+    fx.pool.close().await;
+    fx.admin.close().await;
+    harness.cleanup().await;
+    std::fs::remove_dir_all(storage).unwrap();
+}
+
+#[tokio::test]
+async fn native_archive_retained_guard_cost_is_measured() {
+    use fvoci_server::db::native_archive::RETAINED_PROVENANCE_SQL;
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let other =
+        project_harness::add_workspace_user(&fx.admin, fx.workspace_id, "member", "cost-other")
+            .await;
+    let fxr = &fx;
+    let fill = |owner: Uuid, n: i64| async move {
+        as_actor(&fxr.pool, fxr.workspace_id, owner,
+            "INSERT INTO fvoci.task_timer_audit(id,user_id,request_id,workspace_id,task_id,time_entry_id,verb,before_value,after_value,reason)
+             SELECT gen_random_uuid(),(b->>0)::uuid,gen_random_uuid(),NULL,gen_random_uuid(),NULL,'retained','{}'::jsonb,
+                    jsonb_build_object('recordId',gen_random_uuid(),'kind','manual'),'측정' FROM (SELECT $1::jsonb AS b) q, generate_series(1,(b->>1)::int)",
+            vec![json!(owner), json!(n)]).await;
+    };
+    // 100 restored ids of each kind, none retained.
+    let ids: Vec<Uuid> = (0..100).map(|_| Uuid::now_v7()).collect();
+    let texts: Vec<String> = ids.iter().map(Uuid::to_string).collect();
+    let measure = |label: &'static str| {
+        let (ids, texts) = (ids.clone(), texts.clone());
+        let fx = &fx;
+        async move {
+            let mut tx = fx.pool.begin().await.unwrap();
+            fvoci_server::db::context::set_tenant(&mut tx, fx.workspace_id)
+                .await
+                .unwrap();
+            fvoci_server::db::context::set_self_user(&mut tx, fx.user_id)
+                .await
+                .unwrap();
+            let plan: Value = sqlx::query_scalar(&format!(
+                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {RETAINED_PROVENANCE_SQL}"
+            ))
+            .bind(fx.user_id)
+            .bind(&ids)
+            .bind(&ids)
+            .bind(&ids)
+            .bind(&texts)
+            .bind(&texts)
+            .bind(&texts)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+            let found: bool = sqlx::query_scalar(RETAINED_PROVENANCE_SQL)
+                .bind(fx.user_id)
+                .bind(&ids)
+                .bind(&ids)
+                .bind(&ids)
+                .bind(&texts)
+                .bind(&texts)
+                .bind(&texts)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            tx.rollback().await.unwrap();
+            assert!(!found, "{label}: unrelated history must not match");
+            // Every plan node over the audit table, as measured.
+            fn nodes(v: &Value, out: &mut Vec<Value>) {
+                if v.get("Relation Name") == Some(&json!("task_timer_audit")) {
+                    out.push(json!({"node":v["Node Type"],"actualRows":v["Actual Rows"],"loops":v["Actual Loops"],
+                        "removedByFilter":v["Rows Removed by Filter"],"sharedHit":v["Shared Hit Blocks"],"sharedRead":v["Shared Read Blocks"]}));
+                }
+                for child in v
+                    .get("Plans")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    nodes(child, out);
+                }
+            }
+            let mut audit = Vec::new();
+            nodes(&plan[0]["Plan"], &mut audit);
+            println!(
+                "W7-GUARD-COST {}",
+                json!({"label":label,"executionMs":plan[0]["Execution Time"],"auditNodes":audit})
+            );
+            assert!(!audit.is_empty(), "{label}: {plan}");
+        }
+    };
+    fill(fx.user_id, 2048).await;
+    measure("actor 2048, other 0").await;
+    fill(fx.user_id, 20_000 - 2048).await;
+    measure("actor 20000, other 0").await;
+    fill(other.user_id, 20_000).await;
+    measure("actor 20000, other 20000").await;
+
+    let storage = fx.storage_root();
+    fx.pool.close().await;
+    fx.admin.close().await;
+    harness.cleanup().await;
+    std::fs::remove_dir_all(storage).unwrap();
+}

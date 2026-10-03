@@ -4575,4 +4575,776 @@ mod task_timer {
         drop(app);
         harness.cleanup().await;
     }
+
+    #[tokio::test]
+    async fn timer_historical_receipt_purge_actor_and_restore_precedence() {
+        let harness = TestDb::bootstrap().await;
+        let (fixture, app, cookie, actor, workspace) = TimerFixture::setup(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let project = create_project(app.clone(), &cookie, workspace, "HISTKEY", "workspace").await;
+        let task = create_task(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            json!({"title":"Historical receipt"}),
+        )
+        .await;
+        let task_id = Uuid::parse_str(task["id"].as_str().unwrap()).unwrap();
+        let base = format!("/api/v1/workspaces/{workspace}/tasks/{task_id}");
+        let start = captured(app.clone(), &cookie, json!({"requestId":Uuid::now_v7(),"operation":"start","runId":null,"expectedVersion":0,"note":null})).await;
+        let (status, started) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &format!("{base}/timer"),
+            Some(start),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        let run = Uuid::parse_str(started["runId"].as_str().unwrap()).unwrap();
+        let cleanup = captured(
+            app.clone(),
+            &cookie,
+            json!({"requestId":Uuid::now_v7(),"runId":run,"expectedVersion":1}),
+        )
+        .await;
+        let (status, stopped) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            "/api/v1/me/task-timer/stop",
+            Some(cleanup.clone()),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{stopped}");
+        let request = Uuid::parse_str(cleanup["requestId"].as_str().unwrap()).unwrap();
+        let receipt_sql = "SELECT to_jsonb(c) FROM fvoci.task_timer_commands c WHERE user_id=$1 AND request_id=$2";
+        let original: Value = sqlx::query_scalar(receipt_sql)
+            .bind(actor)
+            .bind(request)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+        let (fresh, _) = fixture
+            .login(app.clone(), "owner@example.com", "supersecret1")
+            .await;
+        let before = timer_effects(&admin, &[actor], &[task_id]).await;
+        let (status, replayed) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            "/api/v1/me/task-timer/stop",
+            Some(cleanup.clone()),
+            Some(&fresh),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replayed}");
+        assert_eq!(replayed, stopped);
+        assert_eq!(timer_effects(&admin, &[actor], &[task_id]).await, before);
+        let foreign = add_workspace_user(&admin, workspace, "member", "receipt-other-actor").await;
+        let before_denial = timer_effects(&admin, &[actor, foreign.user_id], &[task_id]).await;
+        let (status, denied) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            "/api/v1/me/task-timer/stop",
+            Some(cleanup.clone()),
+            Some(&foreign.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{denied}");
+        assert_eq!(denied["params"]["code"], "timer_context_changed");
+        assert_eq!(
+            timer_effects(&admin, &[actor, foreign.user_id], &[task_id]).await,
+            before_denial
+        );
+        // Historical locators remain immutable during ordinary product purge.
+        let (status, purged) =
+            timer_checked_request(&fixture, app.clone(), "DELETE", &base, None, Some(&fresh)).await;
+        assert_eq!(status, StatusCode::OK, "{purged}");
+        let retained: Value = sqlx::query_scalar(receipt_sql)
+            .bind(actor)
+            .bind(request)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+        assert_eq!(retained, original);
+        assert_eq!(retained["run_id"], json!(run));
+        let before = timer_effects(&admin, &[actor], &[task_id]).await;
+        let (status, retired) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            "/api/v1/me/task-timer/stop",
+            Some(cleanup.clone()),
+            Some(&fresh),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{retired}");
+        assert_eq!(retired["params"]["code"], "timer_retired");
+        assert_eq!(timer_effects(&admin, &[actor], &[task_id]).await, before);
+        // A foreign canonical UUID cannot make this actor's historical receipt live.
+        let other = add_workspace_user(&admin, workspace, "member", "historical-foreign").await;
+        let other_task = create_task(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            json!({"title":"Foreign canonical run"}),
+        )
+        .await;
+        let other_id = Uuid::parse_str(other_task["id"].as_str().unwrap()).unwrap();
+        sqlx::query("INSERT INTO fvoci.task_timer_runs(id,user_id,workspace_id,task_id,status,version,started_at,stopped_at) VALUES($1,$2,$3,$4,'stopped',2,now(),now())")
+            .bind(run).bind(other.user_id).bind(workspace).bind(other_id).execute(&admin).await.unwrap();
+        let before = timer_effects(&admin, &[actor, other.user_id], &[task_id, other_id]).await;
+        let (status, denied) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            "/api/v1/me/task-timer/stop",
+            Some(cleanup.clone()),
+            Some(&fresh),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{denied}");
+        assert_eq!(denied["params"]["code"], "timer_retired");
+        assert_eq!(
+            timer_effects(&admin, &[actor, other.user_id], &[task_id, other_id]).await,
+            before
+        );
+        // Controlled fixture models an already imported marked receipt. W7 owns
+        // actual publication/ABA refusal; this is only replay precedence.
+        sqlx::query("UPDATE fvoci.task_timer_commands SET restored_from_archive=$3 WHERE user_id=$1 AND request_id=$2")
+            .bind(actor).bind(request).bind(Uuid::now_v7()).execute(&admin).await.unwrap();
+        sqlx::query("UPDATE fvoci.task_timer_runs SET user_id=$2 WHERE id=$1")
+            .bind(run)
+            .bind(actor)
+            .execute(&admin)
+            .await
+            .unwrap();
+        let before = timer_effects(&admin, &[actor, other.user_id], &[task_id, other_id]).await;
+        for (body, code) in [
+            (cleanup.clone(), "timer_retired"),
+            (
+                {
+                    let mut v = cleanup.clone();
+                    v["expectedVersion"] = json!(2);
+                    v
+                },
+                "request_mismatch",
+            ),
+        ] {
+            let (status, rejected) = timer_checked_request(
+                &fixture,
+                app.clone(),
+                "POST",
+                "/api/v1/me/task-timer/stop",
+                Some(body),
+                Some(&fresh),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+            assert_eq!(rejected["params"]["code"], code);
+            assert_eq!(
+                timer_effects(&admin, &[actor, other.user_id], &[task_id, other_id]).await,
+                before
+            );
+        }
+        // Existing old-schema NULL locators are not backfilled from JSON.
+        sqlx::query("UPDATE fvoci.task_timer_commands SET restored_from_archive=NULL,run_id=NULL WHERE user_id=$1 AND request_id=$2")
+            .bind(actor).bind(request).execute(&admin).await.unwrap();
+        let (status, retired) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            "/api/v1/me/task-timer/stop",
+            Some(cleanup),
+            Some(&fresh),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{retired}");
+        assert_eq!(retired["params"]["code"], "timer_retired");
+        admin.close().await;
+        drop(app);
+        fixture.close().await;
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn timer_historical_nested_correction_null_run_is_retired() {
+        let harness = TestDb::bootstrap().await;
+        let (fixture, app, cookie, actor, workspace) = TimerFixture::setup(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let project = create_project(app.clone(), &cookie, workspace, "NESTED", "workspace").await;
+        let task = create_task(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            json!({"title":"Old nested receipt"}),
+        )
+        .await;
+        let task_id = Uuid::parse_str(task["id"].as_str().unwrap()).unwrap();
+        let run = Uuid::now_v7();
+        let segment = Uuid::now_v7();
+        sqlx::query("INSERT INTO fvoci.task_timer_runs(id,user_id,workspace_id,task_id,status,version,started_at,stopped_at) VALUES($1,$2,$3,$4,'stopped',2,'2026-09-30T10:00:00Z','2026-09-30T10:01:00Z')").bind(run).bind(actor).bind(workspace).bind(task_id).execute(&admin).await.unwrap();
+        sqlx::query("INSERT INTO fvoci.task_timer_segments(id,run_id,user_id,workspace_id,task_id,started_at,ended_at) VALUES($1,$2,$3,$4,$5,'2026-09-30T10:00:00Z','2026-09-30T10:01:00Z')").bind(segment).bind(run).bind(actor).bind(workspace).bind(task_id).execute(&admin).await.unwrap();
+        let path = format!(
+            "/api/v1/workspaces/{workspace}/tasks/{task_id}/timer/records/{segment}/correct"
+        );
+        let body=captured(app.clone(),&cookie,json!({"requestId":Uuid::now_v7(),"kind":"segment","expectedRevision":0,"expectedStartedAt":"2026-09-30T10:00:00Z","expectedEndedAt":"2026-09-30T10:01:00Z","expectedNote":null,"startedAt":"2026-09-30T10:00:00Z","endedAt":"2026-09-30T10:00:30Z","note":null,"reason":"Explicit nested receipt"})).await;
+        let (status, corrected) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &path,
+            Some(body.clone()),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{corrected}");
+        assert_eq!(corrected["record"]["runId"], json!(run));
+        let request = Uuid::parse_str(body["requestId"].as_str().unwrap()).unwrap();
+        // Emulate a pre-053 SET NULL receipt with the task still authorized.
+        sqlx::query("DELETE FROM fvoci.task_timer_runs WHERE id=$1")
+            .bind(run)
+            .execute(&admin)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE fvoci.task_timer_commands SET run_id=NULL WHERE user_id=$1 AND request_id=$2",
+        )
+        .bind(actor)
+        .bind(request)
+        .execute(&admin)
+        .await
+        .unwrap();
+        let before = timer_effects(&admin, &[actor], &[task_id]).await;
+        let (status, retired) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &path,
+            Some(body),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{retired}");
+        assert_eq!(retired["params"]["code"], "timer_retired");
+        assert_eq!(timer_effects(&admin, &[actor], &[task_id]).await, before);
+        admin.close().await;
+        drop(app);
+        fixture.close().await;
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn timer_historical_corrections_follow_scoped_relocated_records() {
+        let harness = TestDb::bootstrap().await;
+        let (fixture, app, cookie, actor, source) = TimerFixture::setup(&harness).await;
+        let admin = admin_pool(&harness).await;
+        sqlx::query("UPDATE fvoci.users SET timezone='Asia/Seoul' WHERE id=$1")
+            .bind(actor)
+            .execute(&admin)
+            .await
+            .unwrap();
+        let destination = insert_workspace(&admin).await;
+        sqlx::query(
+            "INSERT INTO fvoci.memberships(workspace_id,user_id,role) VALUES($1,$2,'owner')",
+        )
+        .bind(destination)
+        .bind(actor)
+        .execute(&admin)
+        .await
+        .unwrap();
+        let other = add_workspace_user(&admin, destination, "member", "move-private-reader").await;
+        let project = create_project(app.clone(), &cookie, source, "SRCHIST", "workspace").await;
+        let target_project =
+            create_project(app.clone(), &cookie, destination, "DSTHIST", "workspace").await;
+        let task = create_task(
+            app.clone(),
+            &cookie,
+            source,
+            project["id"].as_str().unwrap(),
+            json!({"title":"Scoped historical corrections"}),
+        )
+        .await;
+        let template = create_task(
+            app.clone(),
+            &cookie,
+            destination,
+            target_project["id"].as_str().unwrap(),
+            json!({"title":"Owned relocation fixture"}),
+        )
+        .await;
+        let task_id = Uuid::parse_str(task["id"].as_str().unwrap()).unwrap();
+        let template_id = Uuid::parse_str(template["id"].as_str().unwrap()).unwrap();
+        let old_base = format!("/api/v1/workspaces/{source}/tasks/{task_id}");
+        let new_base = format!("/api/v1/workspaces/{destination}/tasks/{task_id}");
+        let manual = Uuid::now_v7();
+        let projection = Uuid::now_v7();
+        let run = Uuid::now_v7();
+        let segment = Uuid::now_v7();
+        let released = Uuid::now_v7();
+        // Controlled canonical history, including >100 records straddling local
+        // midnight. Requests below run through the actual restricted Router.
+        let mut seed = admin.begin().await.unwrap();
+        sqlx::query("SELECT set_config('app.self_user_id',$1,true)")
+            .bind(actor.to_string())
+            .execute(&mut *seed)
+            .await
+            .unwrap();
+        for id in std::iter::once(manual).chain((0..100).map(|_| Uuid::now_v7())) {
+            sqlx::query("INSERT INTO fvoci.time_entries(id,user_id,workspace_id,task_id,started_at,ended_at,duration_seconds,note) VALUES($1,$2,$3,$4,'2026-09-30T14:59:30Z','2026-09-30T15:00:30Z',60,'Shared raw manual')")
+                .bind(id).bind(actor).bind(source).bind(task_id).execute(&mut *seed).await.unwrap();
+        }
+        sqlx::query("INSERT INTO fvoci.time_entries(id,user_id,workspace_id,task_id,started_at,ended_at,duration_seconds,note) VALUES($1,$2,$3,$4,'2026-09-30T14:59:40Z','2026-09-30T15:00:00Z',20,'Shared raw projection')")
+            .bind(projection).bind(actor).bind(source).bind(task_id).execute(&mut *seed).await.unwrap();
+        sqlx::query("INSERT INTO fvoci.time_entries(id,user_id,workspace_id,task_id,started_at,note) VALUES($1,$2,$3,$4,'2026-09-30T10:00:00Z','Shared unresolved open')")
+            .bind(released).bind(actor).bind(source).bind(task_id).execute(&mut *seed).await.unwrap();
+        seed.commit().await.unwrap();
+        let release = captured(
+            app.clone(),
+            &cookie,
+            json!({"requestId":Uuid::now_v7(),"timeEntryId":released}),
+        )
+        .await;
+        let (status, release_result) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            "/api/v1/me/task-timer/legacy-release",
+            Some(release.clone()),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{release_result}");
+        sqlx::query("INSERT INTO fvoci.task_timer_runs(id,user_id,workspace_id,task_id,status,version,started_at,stopped_at,note) VALUES($1,$2,$3,$4,'stopped',2,'2026-09-30T14:59:40Z','2026-09-30T15:00:00Z','Private run note')")
+            .bind(run).bind(actor).bind(source).bind(task_id).execute(&admin).await.unwrap();
+        sqlx::query("INSERT INTO fvoci.task_timer_segments(id,run_id,user_id,workspace_id,task_id,started_at,ended_at,time_entry_id) VALUES($1,$2,$3,$4,$5,'2026-09-30T14:59:40Z','2026-09-30T15:00:00Z',$6)")
+            .bind(segment).bind(run).bind(actor).bind(source).bind(task_id).bind(projection).execute(&admin).await.unwrap();
+        // Latest ordered segment-note audit remains scoped through its canonical ID.
+        sqlx::query("INSERT INTO fvoci.task_timer_audit(id,user_id,request_id,verb,before_value,after_value,reason) VALUES($1,$2,$3,'cleanup','{}',$4,'Private note history')")
+            .bind(Uuid::now_v7()).bind(actor).bind(Uuid::now_v7()).bind(json!({"recordId":segment,"note":"Private segment note"})).execute(&admin).await.unwrap();
+        let mut corrected = Vec::new();
+        let mut segment_intent = None;
+        for (id, kind, start, raw_end, initial_note, final_end) in [
+            (
+                manual,
+                "manual",
+                "2026-09-30T14:59:30Z",
+                "2026-09-30T15:00:30Z",
+                "Shared raw manual",
+                "2026-09-30T15:00:00Z",
+            ),
+            (
+                segment,
+                "segment",
+                "2026-09-30T14:59:40Z",
+                "2026-09-30T15:00:00Z",
+                "Private segment note",
+                "2026-09-30T14:59:55Z",
+            ),
+        ] {
+            let mut baseline =
+                json!({"startedAt":start,"endedAt":raw_end,"note":initial_note,"revision":0});
+            for revision in 0..2 {
+                let body=captured(app.clone(),&cookie,json!({"requestId":Uuid::now_v7(),"kind":kind,"expectedRevision":revision,"expectedStartedAt":baseline["startedAt"],"expectedEndedAt":baseline["endedAt"],"expectedNote":baseline["note"],"startedAt":start,"endedAt":final_end,"note":if revision==0 {json!("Actor private corrected note")} else {Value::Null},"reason":"Actor private correction reason"})).await;
+                let (status, value) = timer_checked_request(
+                    &fixture,
+                    app.clone(),
+                    "POST",
+                    &format!("{old_base}/timer/records/{id}/correct"),
+                    Some(body.clone()),
+                    Some(&cookie),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{value}");
+                baseline = value["record"].clone();
+                if kind == "segment" {
+                    segment_intent = Some(body);
+                }
+            }
+            corrected.push(baseline);
+        }
+        let history_suffix = "/timer/history?from=2026-09-30&to=2026-10-01";
+        let (status, old_page) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &format!("{old_base}{history_suffix}"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{old_page}");
+        let old_cursor = old_page["nextCursor"].as_str().unwrap();
+        let immutable = timer_effects(&admin, &[actor], &[task_id]).await;
+        // This fixture tests the W5 consumer, not the W2 publication writer.
+        // Reinsert the exact canonical IDs after the ordinary task cascade,
+        // using only this test's isolated owner preparation transaction.
+        let mut relocation = admin.begin().await.unwrap();
+        let mut moved_task: Value =
+            sqlx::query_scalar("SELECT to_jsonb(t) FROM fvoci.tasks t WHERE id=$1")
+                .bind(task_id)
+                .fetch_one(&mut *relocation)
+                .await
+                .unwrap();
+        let destination_task: Value =
+            sqlx::query_scalar("SELECT to_jsonb(t) FROM fvoci.tasks t WHERE id=$1")
+                .bind(template_id)
+                .fetch_one(&mut *relocation)
+                .await
+                .unwrap();
+        for key in ["workspace_id", "project_id", "status_id", "number"] {
+            moved_task[key] = destination_task[key].clone();
+        }
+        sqlx::query("DELETE FROM fvoci.tasks WHERE id=ANY($1)")
+            .bind(vec![task_id, template_id])
+            .execute(&mut *relocation)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO fvoci.tasks SELECT * FROM jsonb_populate_record(NULL::fvoci.tasks,$1)",
+        )
+        .bind(moved_task)
+        .execute(&mut *relocation)
+        .await
+        .unwrap();
+        sqlx::query("SELECT set_config('app.self_user_id',$1,true)")
+            .bind(actor.to_string())
+            .execute(&mut *relocation)
+            .await
+            .unwrap();
+        for (table, key) in [
+            ("time_entries", "history"),
+            ("task_timer_runs", "runs"),
+            ("task_timer_segments", "segments"),
+        ] {
+            for original in immutable[key].as_array().unwrap() {
+                let mut row = original.clone();
+                row["workspace_id"] = json!(destination);
+                sqlx::query(&format!("INSERT INTO fvoci.{table} SELECT * FROM jsonb_populate_record(NULL::fvoci.{table},$1)"))
+                    .bind(row).execute(&mut *relocation).await.unwrap();
+                if table == "time_entries" && original["ended_at"].is_null() {
+                    sqlx::query("DELETE FROM fvoci.task_timer_legacy_open WHERE time_entry_id=$1")
+                        .bind(released)
+                        .execute(&mut *relocation)
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+        relocation.commit().await.unwrap();
+        let after = timer_effects(&admin, &[actor], &[task_id]).await;
+        assert_eq!(after["receipts"], immutable["receipts"]);
+        assert_eq!(after["audit"], immutable["audit"]);
+        assert!(after["legacy"].as_array().unwrap().is_empty());
+        let before_rejected_reads = timer_effects(&admin, &[actor], &[task_id]).await;
+        let (status, hidden) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &format!("{old_base}{history_suffix}"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{hidden}");
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("cursor", old_cursor)
+            .finish();
+        let (status, invalid_cursor) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &format!("{new_base}{history_suffix}&{query}"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid_cursor}");
+        assert_eq!(invalid_cursor["code"], "invalid_input");
+        assert!(hidden.get("items").is_none());
+        assert!(invalid_cursor.get("items").is_none());
+        assert_eq!(
+            timer_effects(&admin, &[actor], &[task_id]).await,
+            before_rejected_reads
+        );
+        let mut path = format!("{new_base}{history_suffix}");
+        let mut records = Vec::new();
+        let mut first_cursor = None;
+        loop {
+            let (status, page) =
+                timer_checked_request(&fixture, app.clone(), "GET", &path, None, Some(&cookie))
+                    .await;
+            assert_eq!(status, StatusCode::OK, "{page}");
+            records.extend(page["items"].as_array().unwrap().clone());
+            if let Some(cursor) = page["nextCursor"].as_str() {
+                if first_cursor.is_none() {
+                    first_cursor = Some(cursor.to_owned());
+                }
+                let query = url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("cursor", cursor)
+                    .finish();
+                path = format!("{new_base}{history_suffix}&{query}");
+            } else {
+                break;
+            }
+        }
+        assert_eq!(records.len(), 103);
+        let ids: std::collections::HashSet<_> = records
+            .iter()
+            .map(|r| (r["kind"].to_string(), r["id"].to_string()))
+            .collect();
+        assert_eq!(ids.len(), 103);
+        for expected in &corrected {
+            assert_eq!(
+                records.iter().find(|r| r["id"] == expected["id"]).unwrap(),
+                expected
+            );
+        }
+        assert!(
+            !records.iter().any(|r| r["id"] == json!(projection)),
+            "canonical segment excludes raw projection"
+        );
+        let open = records.iter().find(|r| r["id"] == json!(released)).unwrap();
+        assert!(open["endedAt"].is_null());
+        assert_eq!(open["reservedLegacy"], false);
+        let (status, total) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &format!("{new_base}/timer/summary?from=2026-09-30&to=2026-10-01"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{total}");
+        assert_eq!(total["totalMilliseconds"], 6_045_000);
+        assert_eq!(total["days"][0]["milliseconds"], 3_045_000);
+        assert_eq!(total["days"][1]["milliseconds"], 3_000_000);
+        for (viewer, manual_note, segment_note) in [
+            (&cookie, Value::Null, Value::Null),
+            (
+                &other.cookie,
+                json!("Shared raw manual"),
+                json!("Shared raw projection"),
+            ),
+        ] {
+            let (status, raw) = timer_checked_request(
+                &fixture,
+                app.clone(),
+                "GET",
+                &format!("{new_base}/time-entries"),
+                None,
+                Some(viewer),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{raw}");
+            let rows = raw["items"].as_array().unwrap();
+            assert_eq!(
+                rows.iter().find(|r| r["id"] == json!(manual)).unwrap()["note"],
+                manual_note
+            );
+            assert_eq!(
+                rows.iter().find(|r| r["id"] == json!(projection)).unwrap()["note"],
+                segment_note
+            );
+            assert!(!raw.to_string().contains("Actor private correction reason"));
+        }
+        let (status, private) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &format!("{new_base}{history_suffix}"),
+            None,
+            Some(&other.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{private}");
+        assert!(private["items"].as_array().unwrap().is_empty());
+        let (status, replayed) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            "/api/v1/me/task-timer/legacy-release",
+            Some(release),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replayed}");
+        assert_eq!(replayed, release_result);
+        let (status, mismatch) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &format!("{new_base}/timer/records/{segment}/correct"),
+            segment_intent,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{mismatch}");
+        assert_eq!(mismatch["params"]["code"], "request_mismatch");
+        let current = &corrected[0];
+        let next=captured(app.clone(),&cookie,json!({"requestId":Uuid::now_v7(),"kind":"manual","expectedRevision":2,"expectedStartedAt":current["startedAt"],"expectedEndedAt":current["endedAt"],"expectedNote":null,"startedAt":current["startedAt"],"endedAt":current["endedAt"],"note":"Fresh authorized correction","reason":"New destination correction"})).await;
+        let (status, revision) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &format!("{new_base}/timer/records/{manual}/correct"),
+            Some(next.clone()),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{revision}");
+        assert_eq!(revision["record"]["revision"], 3);
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("cursor", first_cursor.as_deref().unwrap())
+            .finish();
+        let (status, invalid) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &format!("{new_base}{history_suffix}&{query}"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{invalid}");
+        let mut stale = next;
+        stale["requestId"] = json!(Uuid::now_v7());
+        let (status, rejected) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &format!("{new_base}/timer/records/{manual}/correct"),
+            Some(stale),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+        assert_eq!(rejected["params"]["code"], "time_record_version");
+        let after = timer_effects(&admin, &[actor], &[task_id]).await;
+        assert_eq!(
+            after["audit"].as_array().unwrap().len(),
+            immutable["audit"].as_array().unwrap().len() + 1,
+            "only the fresh authorized correction adds an audit"
+        );
+        admin.close().await;
+        drop(app);
+        fixture.close().await;
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn timer_historical_schema_upgrade_preserves_receipts_and_security() {
+        let harness = TestDb::bootstrap_through(52).await;
+        let (app, cookie, actor, workspace) = setup_session(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let project = create_project(app.clone(), &cookie, workspace, "UPHIST", "workspace").await;
+        let task = create_task(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            json!({"title":"Current populated 052"}),
+        )
+        .await;
+        let task_id = Uuid::parse_str(task["id"].as_str().unwrap()).unwrap();
+        let run = Uuid::now_v7();
+        sqlx::query("INSERT INTO fvoci.task_timer_runs(id,user_id,workspace_id,task_id,status,version,started_at,stopped_at) VALUES($1,$2,$3,$4,'stopped',2,now(),now())").bind(run).bind(actor).bind(workspace).bind(task_id).execute(&admin).await.unwrap();
+        for (locator, marker, result) in [
+            (Some(run), None, json!({"runId":run,"note":null})),
+            (None, None, json!({"runId":run})),
+            (
+                Some(run),
+                Some(Uuid::now_v7()),
+                json!({"record":{"runId":run,"note":null}}),
+            ),
+        ] {
+            sqlx::query("INSERT INTO fvoci.task_timer_commands(user_id,request_id,request_hash,run_id,result,restored_from_archive) VALUES($1,$2,$3,$4,$5,$6)")
+                .bind(actor).bind(Uuid::now_v7()).bind("b".repeat(64)).bind(locator).bind(result).bind(marker).execute(&admin).await.unwrap();
+        }
+        let receipts_sql =
+            "SELECT jsonb_agg(to_jsonb(c) ORDER BY request_id) FROM fvoci.task_timer_commands c";
+        let before: Value = sqlx::query_scalar(receipts_sql)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+        let constraints_sql="SELECT jsonb_agg(jsonb_build_object('table',c.conrelid::regclass::text,'name',c.conname,'definition',pg_get_constraintdef(c.oid)) ORDER BY c.conrelid,c.conname) FROM pg_constraint c WHERE c.connamespace='fvoci'::regnamespace AND c.contype='f' AND c.conname<>'task_timer_commands_run_id_fkey'";
+        let constraints: Value = sqlx::query_scalar(constraints_sql)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+        let fk:String=sqlx::query_scalar("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='fvoci.task_timer_commands'::regclass AND conname='task_timer_commands_run_id_fkey'").fetch_one(&admin).await.unwrap();
+        assert!(
+            fk.contains("FOREIGN KEY (run_id)") && fk.contains("ON DELETE SET NULL"),
+            "{fk}"
+        );
+        fvoci_server::db::migrate::run_migrations(&harness.admin_url)
+            .await
+            .unwrap();
+        fvoci_server::db::migrate::assert_schema_current(&admin)
+            .await
+            .unwrap();
+        let after: Value = sqlx::query_scalar(receipts_sql)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+        assert_eq!(after, before);
+        let after_constraints: Value = sqlx::query_scalar(constraints_sql)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+        assert_eq!(after_constraints, constraints);
+        let fk_count:i64=sqlx::query_scalar("SELECT count(*) FROM pg_constraint WHERE conrelid='fvoci.task_timer_commands'::regclass AND conname='task_timer_commands_run_id_fkey'").fetch_one(&admin).await.unwrap();
+        assert_eq!(fk_count, 0);
+        let restricted = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&harness.app_url)
+            .await
+            .unwrap();
+        fvoci_server::db::migrate::assert_app_role(&restricted)
+            .await
+            .unwrap();
+        for table in ["task_timer_commands", "task_timer_audit"] {
+            assert_rls_forced(&admin, table).await;
+            for verb in ["UPDATE", "DELETE"] {
+                let statement = if verb == "UPDATE" {
+                    format!("UPDATE fvoci.{table} SET user_id=user_id")
+                } else {
+                    format!("DELETE FROM fvoci.{table}")
+                };
+                let error = sqlx::query(&statement)
+                    .execute(&restricted)
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error.as_database_error().unwrap().code().as_deref(),
+                    Some("42501")
+                );
+            }
+        }
+        sqlx::query("DELETE FROM fvoci.task_timer_runs WHERE id=$1")
+            .bind(run)
+            .execute(&admin)
+            .await
+            .unwrap();
+        let after: Value = sqlx::query_scalar(receipts_sql)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+        assert_eq!(
+            after, before,
+            "true purge retains locators/hash/results/markers/null notes unchanged"
+        );
+        restricted.close().await;
+        admin.close().await;
+        drop(app);
+        harness.cleanup().await;
+    }
 }

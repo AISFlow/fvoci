@@ -1142,11 +1142,18 @@ fn validate_task_time(g: &Graph, tasks: &BTreeSet<Uuid>) -> Result<(), ArchiveEr
             return Err(invalid());
         }
     }
+    let segment_tasks: BTreeMap<Uuid, Uuid> =
+        g.timer_segments.iter().map(|s| (s.id, s.task_id)).collect();
     let mut audits = BTreeSet::new();
+    // A historical workspace locator (the operation ran before an ordinary
+    // MOVE re-homed the task) is actor-private provenance, accepted only when
+    // the audit also locates a selected task or entry; it grants nothing.
     for a in &g.timer_audit {
         validate_dates(a)?;
         if a.user_id != actor
-            || a.workspace_id.is_some_and(|w| w != g.source_workspace_id)
+            || a.workspace_id.is_some_and(|w| {
+                w != g.source_workspace_id && a.task_id.is_none() && a.time_entry_id.is_none()
+            })
             || a.task_id.is_some_and(|t| !tasks.contains(&t))
             || a.time_entry_id.is_some_and(|e| !entries.contains_key(&e))
             || a.verb.is_empty()
@@ -1154,6 +1161,54 @@ fn validate_task_time(g: &Graph, tasks: &BTreeSet<Uuid>) -> Result<(), ArchiveEr
             || !audits.insert(a.id)
         {
             return Err(invalid());
+        }
+        // Typed association, by the writers' own value shapes (record_audit,
+        // TimerCommandOutput, LegacyReleaseOutput, task estimate): a recordId
+        // names a selected record of its recorded kind, a runId a selected
+        // run, a timeEntryId the entry column; each, like the entry column,
+        // belongs to the audit's task when the audit names one. NULL values
+        // (a start's absent run, an un-closed segment) and NULL-locator cleanup
+        // stay valid; an estimate audit carries no record reference.
+        let in_task = |owner: Uuid| a.task_id.is_none_or(|task| task == owner);
+        if a.time_entry_id
+            .is_some_and(|e| !in_task(entries[&e].task_id))
+        {
+            return Err(invalid());
+        }
+        for side in [&a.before_value, &a.after_value] {
+            let Some(value) = side.as_object() else {
+                continue;
+            };
+            let id = |key: &str| -> Result<Option<Uuid>, ArchiveError> {
+                match value.get(key) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(v) => v
+                        .as_str()
+                        .and_then(|s| Uuid::parse_str(s).ok())
+                        .map(Some)
+                        .ok_or_else(invalid),
+                }
+            };
+            if let Some(record) = id("recordId")? {
+                let owner = match value.get("kind").and_then(Value::as_str) {
+                    Some("manual") => entries.get(&record).map(|e| e.task_id),
+                    Some("segment") => segment_tasks.get(&record).copied(),
+                    _ => None,
+                };
+                if !owner.is_some_and(in_task) {
+                    return Err(invalid());
+                }
+            }
+            if let Some(run) = id("runId")? {
+                if !runs.get(&run).is_some_and(|r| in_task(r.task_id)) {
+                    return Err(invalid());
+                }
+            }
+            if let Some(entry) = id("timeEntryId")? {
+                if a.time_entry_id != Some(entry) {
+                    return Err(invalid());
+                }
+            }
         }
     }
     Ok(())
@@ -3120,9 +3175,18 @@ pub(crate) mod tests {
             |a| a.graph.timer_commands[0].run_id = Some(Uuid::nil())
         ));
         assert!(invalid(|a| a.graph.timer_commands[0].user_id = Uuid::nil()));
-        assert!(invalid(
-            |a| a.graph.timer_audit[0].workspace_id = Some(Uuid::nil())
-        ));
+        // A historical workspace locator needs a selected task or entry on the
+        // same audit row (MOVE provenance); alone it is outside the closure.
+        assert!(invalid(|a| {
+            a.graph.timer_audit[0].workspace_id = Some(Uuid::nil());
+            a.graph.timer_audit[0].task_id = None;
+            a.graph.timer_audit[0].time_entry_id = None;
+        }));
+        let mut historical = task_time_fixture();
+        historical.graph.timer_audit[0].workspace_id = Some(Uuid::from_u128(77));
+        historical.validate().unwrap();
+        historical.graph.timer_audit[0].time_entry_id = None;
+        historical.validate().unwrap();
         assert!(invalid(|a| a.graph.timer_audit[0].reason = String::new()));
         assert!(invalid(
             |a| a.graph.timer_audit[0].time_entry_id = Some(Uuid::nil())
@@ -3134,6 +3198,88 @@ pub(crate) mod tests {
         archive.graph.timer_audit[0].task_id = None;
         archive.graph.timer_commands[0].run_id = None;
         archive.validate().unwrap();
+        // Typed JSON association (writer value shapes): references inside the
+        // archive, of the recorded kind, on the audit's task.
+        assert!(invalid(
+            |a| a.graph.timer_audit[0].before_value["recordId"] = json!(Uuid::nil())
+        ));
+        assert!(invalid(
+            |a| a.graph.timer_audit[0].after_value["kind"] = json!("segment")
+        ));
+        assert!(invalid(
+            |a| a.graph.timer_audit[0].before_value["kind"] = json!("x")
+        ));
+        assert!(invalid(
+            |a| a.graph.timer_audit[0].after_value["recordId"] = json!(7)
+        ));
+        assert!(invalid(
+            |a| a.graph.timer_audit[0].after_value["runId"] = json!(Uuid::nil())
+        ));
+        assert!(invalid(
+            |a| a.graph.timer_audit[0].after_value["timeEntryId"] = json!(Uuid::nil())
+        ));
+        assert!(invalid(|a| {
+            // The audit names another selected task than its record's.
+            let other = with_task(a, 1);
+            a.graph.timer_audit[0].task_id = Some(other);
+            a.graph.timer_audit[0].time_entry_id = None;
+        }));
+        assert!(invalid(|a| {
+            // The entry column on another selected task than the audit's.
+            let other = with_task(a, 1);
+            a.graph.timer_audit[0].task_id = Some(other);
+            a.graph.timer_audit[0].before_value = json!({});
+            a.graph.timer_audit[0].after_value = json!({});
+        }));
+        // Valid writer shapes: a segment correction, a NULL-locator cleanup
+        // naming its run and closed segment, a start (no run yet, no closed
+        // segment), an estimate (no record) and a release (entry column).
+        let shapes = [
+            (
+                true,
+                false,
+                json!({"recordId":Uuid::from_u128(0x7200_0000_0000_4000_8000_0000_0000_0003),"kind":"segment"}),
+                json!({}),
+            ),
+            (
+                false,
+                false,
+                json!({"version":2}),
+                json!({"runId":Uuid::from_u128(0x7200_0000_0000_4000_8000_0000_0000_0002),"recordId":Uuid::from_u128(0x7200_0000_0000_4000_8000_0000_0000_0003),"kind":"segment"}),
+            ),
+            (
+                true,
+                false,
+                json!({"runId":null,"expectedVersion":0}),
+                json!({"runId":Uuid::from_u128(0x7200_0000_0000_4000_8000_0000_0000_0002),"recordId":null,"kind":"segment"}),
+            ),
+            (
+                true,
+                false,
+                json!({"value":null,"unit":null,"updatedAt":"2026-10-02T00:00:00Z"}),
+                json!({"value":"90","unit":"minutes","updatedAt":"2026-10-02T01:00:00Z"}),
+            ),
+            (
+                false,
+                true,
+                json!({"reserved":true}),
+                json!({"timeEntryId":Uuid::from_u128(0x7200_0000_0000_4000_8000_0000_0000_0001),"released":true}),
+            ),
+        ];
+        for (with_task_locator, with_entry, before, after) in shapes {
+            let mut archive = task_time_fixture();
+            let audit = &mut archive.graph.timer_audit[0];
+            if !with_task_locator {
+                (audit.workspace_id, audit.task_id) = (None, None);
+            }
+            if !with_entry {
+                audit.time_entry_id = None;
+            }
+            (audit.before_value, audit.after_value) = (before.clone(), after.clone());
+            archive
+                .validate()
+                .unwrap_or_else(|e| panic!("{before} {after}: {e:?}"));
+        }
         // A released legacy reservation (open entry without one) is valid.
         let mut archive = task_time_fixture();
         archive.graph.timer_segments.clear();

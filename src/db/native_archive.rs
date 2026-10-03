@@ -986,6 +986,16 @@ async fn publish_zotero(
     Ok(())
 }
 
+/// The retained-provenance guard of `publish_task_time` (public for the
+/// cost measurement test): $1 actor, $2 run ids, $3 task ids, $4 entry ids,
+/// $5 entry id texts, $6 segment id texts, $7 run id texts.
+pub const RETAINED_PROVENANCE_SQL: &str = "SELECT EXISTS(SELECT 1 FROM fvoci.task_timer_commands WHERE user_id=$1 AND run_id=ANY($2))
+    OR EXISTS(SELECT 1 FROM fvoci.task_timer_audit a WHERE a.user_id=$1 AND (a.task_id=ANY($3) OR a.time_entry_id=ANY($4)
+        OR EXISTS(SELECT 1 FROM (VALUES (a.before_value),(a.after_value)) v(x) WHERE
+            (x->>'kind'='manual' AND x->>'recordId'=ANY($5))
+            OR (x->>'kind'='segment' AND x->>'recordId'=ANY($6))
+            OR x->>'runId'=ANY($7))))";
+
 /// Task time lands under the destination actor with every identity kept.
 /// The person-global one-unfinished-stopwatch rule is checked before any
 /// time row; the 034 trigger re-creates open reservations, so an archive
@@ -998,6 +1008,32 @@ async fn publish_task_time(
     actor: Uuid,
     job: Uuid,
 ) -> Result<(), NativeDbError> {
+    set_self_user(tx, actor).await?;
+    // ABA guard: a restored identity (task, entry, segment, run) that this
+    // actor's retained receipts or audit already name - e.g. after a purge -
+    // would let old history replay or re-attach to a recreated row, even when
+    // the archive omits those receipts/audits. Refused before any time row.
+    // Audit record references are typed by their recorded kind: a "manual"
+    // recordId names an entry, a "segment" recordId a segment (ids are only
+    // unique per table).
+    let tasks: Vec<Uuid> = g.tasks.iter().map(|t| t.id).collect();
+    let entries: Vec<Uuid> = g.time_entries.iter().map(|e| e.id).collect();
+    let runs: Vec<Uuid> = g.timer_runs.iter().map(|r| r.id).collect();
+    let texts = |ids: &[Uuid]| ids.iter().map(Uuid::to_string).collect::<Vec<_>>();
+    let segments: Vec<Uuid> = g.timer_segments.iter().map(|s| s.id).collect();
+    let retained: bool = sqlx::query_scalar(RETAINED_PROVENANCE_SQL)
+        .bind(actor)
+        .bind(&runs)
+        .bind(&tasks)
+        .bind(&entries)
+        .bind(texts(&entries))
+        .bind(texts(&segments))
+        .bind(texts(&runs))
+        .fetch_one(&mut **tx)
+        .await?;
+    if retained {
+        return Err(NativeDbError::Conflict);
+    }
     if g.time_entries.is_empty()
         && g.timer_runs.is_empty()
         && g.timer_commands.is_empty()
@@ -1005,7 +1041,6 @@ async fn publish_task_time(
     {
         return Ok(());
     }
-    set_self_user(tx, actor).await?;
     let unfinished = g.timer_runs.iter().any(|r| r.status != "stopped")
         || g.time_entries.iter().any(|e| e.ended_at.is_none());
     if unfinished {
@@ -1054,9 +1089,12 @@ async fn publish_task_time(
     // Explicit columns: a JSON null before/after value (time.manual has no
     // before state) is a jsonb null, which jsonb_populate_record would turn
     // into SQL NULL against the NOT NULL columns.
+    // The source workspace locator becomes the restore workspace (where the
+    // selected task now lives); an older historical locator stays as it was.
     for a in &g.timer_audit {
         sqlx::query("INSERT INTO fvoci.task_timer_audit(id,user_id,request_id,workspace_id,task_id,time_entry_id,verb,before_value,after_value,reason,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::timestamptz)")
-            .bind(a.id).bind(actor).bind(a.request_id).bind(a.workspace_id.map(|_| workspace))
+            .bind(a.id).bind(actor).bind(a.request_id)
+            .bind(a.workspace_id.map(|w| if w == g.source_workspace_id { workspace } else { w }))
             .bind(a.task_id).bind(a.time_entry_id).bind(&a.verb).bind(&a.before_value)
             .bind(&a.after_value).bind(&a.reason).bind(&a.created_at).execute(&mut **tx).await?;
     }

@@ -473,10 +473,32 @@ async fn replay(
             Ok(Err(TimerDbError::Conflict("request_mismatch")))
         }
         Some((_, true, _, _)) => Ok(Err(TimerDbError::Conflict("timer_retired"))),
-        Some((_, _, None, value)) if value.get("runId").is_some() => {
+        Some((_, _, None, value))
+            if value.get("runId").is_some()
+                || value
+                    .pointer("/record/runId")
+                    .is_some_and(|id| !id.is_null()) =>
+        {
             Ok(Err(TimerDbError::Conflict("timer_retired")))
         }
-        Some((_, _, _, value)) => Ok(Ok(Some(value))),
+        Some((_, _, Some(run), value)) => {
+            // 053 keeps this immutable historical locator through relocation.
+            // Current self RLS and the explicit actor predicate distinguish a
+            // preserved stopped run from a purge or another actor's run UUID.
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM fvoci.task_timer_runs WHERE id=$1 AND user_id=$2)",
+            )
+            .bind(run)
+            .bind(actor)
+            .fetch_one(&mut **tx)
+            .await?;
+            if exists {
+                Ok(Ok(Some(value)))
+            } else {
+                Ok(Err(TimerDbError::Conflict("timer_retired")))
+            }
+        }
+        Some((_, _, None, value)) => Ok(Ok(Some(value))),
         None => Ok(Ok(None)),
     }
 }
@@ -803,6 +825,12 @@ const RECORDS_SQL: &str = r#"
 WITH scoped_segments AS MATERIALIZED (
  SELECT s.* FROM fvoci.task_timer_segments s
  WHERE s.workspace_id=$1 AND s.task_id=$2 AND s.user_id=$3
+), scoped_records AS MATERIALIZED (
+ SELECT id,'segment'::text AS kind FROM scoped_segments
+ UNION ALL
+ SELECT e.id,'manual'::text FROM fvoci.time_entries e
+ WHERE e.workspace_id=$1 AND e.task_id=$2 AND e.user_id=$3
+ AND NOT EXISTS(SELECT 1 FROM fvoci.task_timer_segments s WHERE s.time_entry_id=e.id)
 ), segment_notes AS MATERIALIZED (
  SELECT DISTINCT ON (a.after_value->>'recordId')
         a.after_value->>'recordId' AS record_id,a.after_value
@@ -814,7 +842,9 @@ WITH scoped_segments AS MATERIALIZED (
  SELECT DISTINCT ON (a.after_value->>'kind',a.after_value->>'recordId')
         a.after_value->>'kind' AS kind,a.after_value->>'recordId' AS record_id,a.after_value
  FROM fvoci.task_timer_audit a
- WHERE a.user_id=$3 AND a.workspace_id=$1 AND a.task_id=$2 AND a.verb='time.correct'
+ JOIN scoped_records b ON a.after_value->>'recordId'=b.id::text
+                          AND a.after_value->>'kind'=b.kind
+ WHERE a.user_id=$3 AND a.verb='time.correct'
  ORDER BY a.after_value->>'kind',a.after_value->>'recordId',
           (a.after_value->>'revision')::bigint DESC,a.id DESC
 )
@@ -870,7 +900,7 @@ pub async fn apply_self_corrections(
           ON s.time_entry_id=e.id AND s.workspace_id=$1 AND s.task_id=$2 AND s.user_id=$3
         JOIN LATERAL (
           SELECT after_value FROM fvoci.task_timer_audit
-          WHERE user_id=$3 AND workspace_id=$1 AND task_id=$2 AND verb='time.correct'
+          WHERE user_id=$3 AND verb='time.correct'
             AND after_value->>'recordId'=COALESCE(s.id,e.id)::text
             AND after_value->>'kind'=CASE WHEN s.id IS NULL THEN 'manual' ELSE 'segment' END
           ORDER BY (after_value->>'revision')::bigint DESC,id DESC LIMIT 1
