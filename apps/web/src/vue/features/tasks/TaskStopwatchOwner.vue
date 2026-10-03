@@ -12,6 +12,7 @@ import {
   captureTimerDenial,
   captureTimerQuery,
   removeCapturedTimerQuery,
+  sendLegacyRelease,
   type TimerQueryCapture,
 } from "./task-stopwatch-queries";
 
@@ -40,6 +41,15 @@ let retry:
       body: components["schemas"]["TimerCleanupBody"];
     }
   | undefined;
+let legacyRetry:
+  | {
+      actor: string;
+      credential: string;
+      generation: number;
+      scopeLifetime: number;
+      body: components["schemas"]["LegacyReleaseBody"];
+    }
+  | undefined;
 function denied(err: unknown): err is ProblemError {
   return (
     (err instanceof ProblemError && [401, 403, 404].includes(err.status)) ||
@@ -61,6 +71,7 @@ async function retireOwnerState(
   revoked.value = true;
   generation++;
   retry = undefined;
+  legacyRetry = undefined;
   pending.value = false;
   replayAllowed.value = false;
   error.value = null;
@@ -104,6 +115,7 @@ watch(
     scopeLifetime++;
     generation++;
     retry = undefined;
+    legacyRetry = undefined;
     pending.value = false;
     error.value = null;
     replayAllowed.value = false;
@@ -115,10 +127,15 @@ watch(
 // A server-confirmed successor owns its controls immediately, even while an
 // earlier run's committed response is still waiting for delivery to this tab.
 watch(
-  () => owner.data.value?.runId,
+  [
+    () => owner.data.value?.runId,
+    () => owner.data.value?.version,
+    () => owner.data.value?.legacyOpenIds.join(","),
+  ],
   () => {
     generation++;
     retry = undefined;
+    legacyRetry = undefined;
     pending.value = false;
     error.value = null;
     replayAllowed.value = false;
@@ -157,7 +174,8 @@ async function stop(): Promise<void> {
     capture.credential === credential.value &&
     capture.generation === generation &&
     capture.scopeLifetime === scopeLifetime &&
-    capture.body.runId === owner.data.value?.runId;
+    capture.body.runId === owner.data.value?.runId &&
+    capture.body.expectedVersion === owner.data.value.version;
   pending.value = true;
   error.value = null;
   replayAllowed.value = false;
@@ -200,6 +218,66 @@ async function stop(): Promise<void> {
     if (current()) pending.value = false;
   }
 }
+
+async function releaseLegacy(timeEntryId: string): Promise<void> {
+  if (
+    pending.value ||
+    !actor.value ||
+    !credential.value ||
+    revoked.value ||
+    owner.isError.value ||
+    !visibleOwner.value?.legacyOpenIds.includes(timeEntryId)
+  )
+    return;
+  const capture =
+    legacyRetry?.body.timeEntryId === timeEntryId
+      ? legacyRetry
+      : {
+          actor: actor.value,
+          credential: credential.value,
+          generation,
+          scopeLifetime,
+          body: {
+            expectedActorId: actor.value,
+            expectedSessionId: credential.value,
+            requestId: crypto.randomUUID(),
+            timeEntryId,
+          },
+        };
+  const current = () =>
+    live &&
+    capture.actor === actor.value &&
+    capture.credential === credential.value &&
+    capture.generation === generation &&
+    capture.scopeLifetime === scopeLifetime &&
+    owner.data.value?.legacyOpenIds.includes(capture.body.timeEntryId);
+  pending.value = true;
+  error.value = null;
+  replayAllowed.value = false;
+  legacyRetry = undefined;
+  try {
+    await sendLegacyRelease(capture.body);
+    if (!current()) return;
+    await client.invalidateQueries({
+      queryKey: ownerStopwatchQuery(capture.actor, capture.credential).queryKey,
+      exact: true,
+    });
+  } catch (err) {
+    if (!current()) return;
+    error.value = loadErrorMessage(err);
+    replayAllowed.value = !(err instanceof ProblemError) || err.status === 429 || err.status >= 500;
+    legacyRetry = replayAllowed.value ? capture : undefined;
+    if (denied(err))
+      await retireOwnerState(
+        err,
+        captureTimerQuery(client, ownerStopwatchQuery(capture.actor, capture.credential).queryKey),
+        capture.scopeLifetime,
+      );
+    else if (err instanceof ProblemError && err.status === 409) await owner.refetch();
+  } finally {
+    if (current()) pending.value = false;
+  }
+}
 </script>
 
 <template>
@@ -224,6 +302,37 @@ async function stop(): Promise<void> {
       :disabled="pending || owner.isError.value"
       @click="stop"
       >{{ replayAllowed ? "같은 종료 요청 다시 보내기" : "현재 측정 종료" }}</UButton
+    >
+    <p v-if="error" role="alert" class="break-keep text-error">{{ error }}</p>
+    <p v-else-if="owner.isError.value" role="alert" class="break-keep text-error">{{
+      loadErrorMessage(owner.error.value)
+    }}</p>
+  </section>
+  <section
+    v-if="visibleOwner?.legacyOpenIds.length"
+    class="flex flex-col gap-2 border-b border-default pb-3 text-sm"
+    data-testid="timer-legacy-owner"
+  >
+    <p class="break-keep">이전 미종료 기록 때문에 새 측정을 시작할 수 없습니다.</p>
+    <p class="break-keep"
+      >측정 제한을 해제해도 기존 기록과 메모는 보존합니다. 종료 시각을 알 수 없는 기록은 측정 합계에
+      포함하지 않습니다.</p
+    >
+    <UButton
+      v-for="entryId in visibleOwner.legacyOpenIds"
+      :key="entryId"
+      type="button"
+      size="sm"
+      color="neutral"
+      variant="outline"
+      class="self-start whitespace-normal break-keep text-start"
+      :disabled="pending || owner.isError.value"
+      @click="releaseLegacy(entryId)"
+      >{{
+        replayAllowed && legacyRetry?.body.timeEntryId === entryId
+          ? "같은 제한 해제 요청 다시 보내기"
+          : "미종료 기록의 측정 제한 해제"
+      }}</UButton
     >
     <p v-if="error" role="alert" class="break-keep text-error">{{ error }}</p>
     <p v-else-if="owner.isError.value" role="alert" class="break-keep text-error">{{
