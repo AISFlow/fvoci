@@ -336,7 +336,49 @@ test("literal Korean semantic pair navigates, previews a conflict, restores new 
       [referenced.id, "원본 참조"],
       [referenced.id, "새 참조"],
     );
-    await expect(a.page.getByTestId("revision-diff")).toContainText("ID");
+    const sourceNodes = (sourceDetail.contentJson as TiptapNode).content ?? [];
+    const historicalIdless = sourceNodes.find(
+      (node) => node.content?.[0]?.text === "과거 ID 없는 문단",
+    );
+    expect(historicalIdless).toBeDefined();
+    expect(historicalIdless?.attrs?.id ?? null).toBeNull();
+    const afterDetail = revisionDetailSchema.parse(
+      await (await a.page.request.get(base + "/revisions/" + after.id)).json(),
+    );
+    const currentIdless = (afterDetail.contentJson as TiptapNode).content?.find(
+      (node) => node.content?.[0]?.text === "ID 없는 문단의 편집",
+    );
+    expect(currentIdless).toBeDefined();
+    const selectLiteral = async (kind: string, side: number, literal: string) => {
+      const buttons = a.page.locator(`.revision-diff__changes [data-change-kind="${kind}"]`);
+      for (let index = 0; index < (await buttons.count()); index++) {
+        await buttons.nth(index).click();
+        const change = a.page.getByTestId("revision-change");
+        if ((await change.locator("section").nth(side).innerText()).includes(literal)) {
+          await expect(change).toHaveAttribute("data-before-revision", source.id);
+          await expect(change).toHaveAttribute("data-after-revision", after.id);
+          await expect(change.locator("section").nth(side)).toContainText(literal);
+          return change;
+        }
+      }
+      throw new Error(`Missing literal ${kind} comparison: ${literal}`);
+    };
+    if (typeof currentIdless?.attrs?.id === "string" && currentIdless.attrs.id.length) {
+      // A later live ID cannot reconstruct the historical missing ID.
+      await expect(await selectLiteral("removed", 0, "과거 ID 없는 문단")).toContainText(
+        "추가·삭제된 내용",
+      );
+      await expect(await selectLiteral("added", 1, "ID 없는 문단의 편집")).toContainText(
+        "추가·삭제된 내용",
+      );
+    } else {
+      const positional = await selectLiteral("text", 0, "과거 ID 없는 문단");
+      await expect(positional.locator("section").nth(1)).toContainText("ID 없는 문단의 편집");
+      await expect(positional).toContainText("위치에 따른 비교");
+    }
+    await expect(a.page.getByTestId("revision-diff")).toContainText(
+      "과거 블록 ID가 없는 부분은 위치로 비교합니다. 같은 블록이라는 보장은 없습니다.",
+    );
     await a.page.getByTestId("revision-change-next").click();
     await expect(a.page.getByTestId("revision-change")).toHaveAttribute(
       "data-before-revision",

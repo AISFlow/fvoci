@@ -6,7 +6,7 @@ mod support;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::token::new_token;
 use fvoci_server::collab::config::CollabConfig;
@@ -250,6 +250,101 @@ async fn revision_fingerprint(
     .unwrap();
     tx.commit().await.unwrap();
     result
+}
+
+type RevisionPeerSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn receive_exact_peer_update(ws: &mut RevisionPeerSocket, key: &str, payload: &[u8]) {
+    let expected = fvoci_server::collab::wire::decode(&sync_update_frame(key, payload)).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "peer did not receive exact committed update"
+        );
+        let frame = tokio::time::timeout(remaining, ws.next())
+            .await
+            .expect("peer update deadline")
+            .expect("peer remains connected")
+            .expect("peer frame");
+        if let Message::Binary(bytes) = frame {
+            let decoded = fvoci_server::collab::wire::decode(&bytes).unwrap();
+            if matches!(
+                &decoded,
+                fvoci_server::collab::wire::WireFrame::Document {
+                    message: fvoci_server::collab::wire::DocumentMessage::Sync(
+                        fvoci_server::collab::wire::SyncMessage {
+                            step: fvoci_server::collab::wire::SyncStep::Update,
+                            ..
+                        }
+                    ),
+                    ..
+                }
+            ) {
+                assert_eq!(
+                    decoded, expected,
+                    "actual routed bytes must equal this durable update, not just any Sync Update"
+                );
+                return;
+            }
+        } else if matches!(frame, Message::Close(_)) {
+            panic!("peer closed before committed update");
+        }
+    }
+}
+
+fn revision_peer_doc(
+    load: &fvoci_server::db::collab::CollabLoadState,
+) -> collab_engine::process::EngineSession {
+    let mut peer =
+        collab_engine::process::EngineSession::spawn(collab_engine::process::SpawnRequest {
+            engine_bin: fvoci_server::collab::config::require_collab_engine_for_tests(),
+            limits: collab_engine::Limits::for_tests(),
+            slot_kind: collab_engine::process::ChildSlotKind::Primary,
+            slot_wait: None,
+            test_hang_ms: None,
+            test_exit_after_read: None,
+            test_close_stdout_hang_ms: None,
+            test_exit_after_write: None,
+        })
+        .expect("independent initialized peer Doc");
+    assert!(peer
+        .call(&collab_engine::protocol::Request::Load {
+            snapshot_b64: Some(load.snapshot.clone()),
+            tail_b64: load.tail.iter().map(|row| row.payload.clone()).collect(),
+            encoding: 1,
+        })
+        .outcome
+        .is_applied_ok());
+    peer
+}
+
+fn revision_peer_projection(peer: &mut collab_engine::process::EngineSession) -> Value {
+    match peer
+        .call(&collab_engine::protocol::Request::Project { encoding: 1 })
+        .outcome
+    {
+        collab_engine::outcome::EngineStatus::Ok {
+            content_json: Some(body),
+            ..
+        } => body,
+        other => panic!("peer projection failed: {other:?}"),
+    }
+}
+
+fn revision_peer_update(
+    peer: &mut collab_engine::process::EngineSession,
+    request: collab_engine::protocol::Request,
+) -> Vec<u8> {
+    match peer.call(&request).outcome {
+        collab_engine::outcome::EngineStatus::Ok {
+            update_b64: Some(bytes),
+            ..
+        } => collab_engine::b64::decode(&bytes).unwrap(),
+        other => panic!("peer edit failed: {other:?}"),
+    }
 }
 
 async fn count_updates(pool: &PgPool, workspace_id: Uuid, document_id: Uuid) -> i64 {
@@ -830,6 +925,17 @@ async fn restore_committed_ambiguous_receipt_converges() {
         auth_and_join(&mut editor, &key, 9).await;
         complete_sync_handshake(&mut editor, &key).await;
 
+        let peer_initial = fvoci_server::db::collab::load_collab_readonly_kind(
+            &wiki.session.pool,
+            CollabKind::Document,
+            wiki.session.workspace_id,
+            wiki.session.user_id,
+            wiki.session.session_id,
+            wiki.document_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let restore_body = preview_restore_body(
             addr,
             &revision_path(&wiki, &format!("/{revision_id}/restore")),
@@ -860,14 +966,55 @@ async fn restore_committed_ambiguous_receipt_converges() {
         let _ = proceed.send(());
         let (status, body) = restore.await.unwrap();
         assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-        assert!(
-            wait_for_sync_update(&mut observer, Duration::from_secs(8)).await,
-            "observer must receive the restore update"
-        );
-        assert!(
-            wait_for_sync_update(&mut editor, Duration::from_secs(8)).await,
-            "both existing peers receive the committed restore despite response ambiguity"
-        );
+        let durable = fvoci_server::db::collab::load_collab_readonly_kind(
+            &wiki.session.pool,
+            CollabKind::Document,
+            wiki.session.workspace_id,
+            wiki.session.user_id,
+            wiki.session.session_id,
+            wiki.document_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let restored_update = &durable
+            .tail
+            .iter()
+            .find(|row| row.seq == peer_initial.tail_seq + 1)
+            .expect("durable restore update")
+            .payload;
+        receive_exact_peer_update(&mut observer, &key, restored_update).await;
+        receive_exact_peer_update(&mut editor, &key, restored_update).await;
+        // Each independent peer starts from its pre-restore canonical state,
+        // then applies the exact bytes verified on that peer's actual socket.
+        let mut observer_doc = revision_peer_doc(&peer_initial);
+        let mut editor_doc = revision_peer_doc(&peer_initial);
+        for doc in [&mut observer_doc, &mut editor_doc] {
+            assert!(doc
+                .call(&collab_engine::protocol::Request::Apply {
+                    update_b64: restored_update.clone(),
+                    encoding: 1
+                })
+                .outcome
+                .is_applied_ok());
+            let body = revision_peer_projection(doc);
+            assert_eq!(body["content"][0]["attrs"]["id"], "p-alpha-001");
+            assert_eq!(
+                body["content"][0]["content"][1]["marks"][0]["attrs"]["href"],
+                "https://example.invalid/wiki/안녕"
+            );
+            assert_eq!(body["content"][0]["content"][3]["attrs"]["id"], "user-42");
+            assert_eq!(body["content"][1]["attrs"]["id"], "tbl-001");
+            assert!(body.to_string().contains("한글셀"));
+            assert!(
+                body.to_string().contains("안녕 본문"),
+                "peer sees literal restored meaning: {body}"
+            );
+            assert!(
+                !body.to_string().contains("후속편집한글"),
+                "peer cannot retain replaced followup: {body}"
+            );
+        }
         let (status, replay) = http_json(
             addr,
             reqwest::Method::POST,
@@ -891,21 +1038,64 @@ async fn restore_committed_ambiguous_receipt_converges() {
             2,
             "one source and one ambiguous restore, retry adds no history"
         );
+        let mut edited = revision_peer_projection(&mut editor_doc);
+        let text = edited["content"][0]["content"][0]["text"]
+            .as_str()
+            .expect("restored paragraph")
+            .to_owned();
+        assert_eq!(text, "안녕 본문 ");
+        edited["content"][0]["content"][0]["text"] = json!(format!("{text}복원한 피어의 재편집 "));
+        let seed = revision_peer_update(
+            &mut editor_doc,
+            collab_engine::protocol::Request::SeedFromTiptap {
+                content_json: edited.to_string(),
+                encoding: 1,
+            },
+        );
+        let edit_update = revision_peer_update(
+            &mut editor_doc,
+            collab_engine::protocol::Request::ReplaceFromUpdate {
+                update_b64: seed,
+                encoding: 1,
+            },
+        );
+        assert!(editor_doc
+            .call(&collab_engine::protocol::Request::Apply {
+                update_b64: edit_update.clone(),
+                encoding: 1
+            })
+            .outcome
+            .is_applied_ok());
         editor
             .send(Message::Binary(
-                sync_update_frame(&key, &engine_fixture("korean_emoji_base.v1")).into(),
+                sync_update_frame(&key, &edit_update).into(),
             ))
             .await
             .unwrap();
         assert!(
             wait_for_sync_applied(&mut editor, Duration::from_secs(8)).await,
-            "peer reedit after recovered restore applies"
+            "restored-peer-derived edit applies"
         );
-        assert!(
-            wait_for_sync_update(&mut observer, Duration::from_secs(8)).await,
-            "observer must receive the concurrent edit"
+        receive_exact_peer_update(&mut observer, &key, &edit_update).await;
+        assert!(observer_doc
+            .call(&collab_engine::protocol::Request::Apply {
+                update_b64: edit_update,
+                encoding: 1
+            })
+            .outcome
+            .is_applied_ok());
+        let editor_body = revision_peer_projection(&mut editor_doc);
+        let observer_body = revision_peer_projection(&mut observer_doc);
+        assert_eq!(
+            observer_body, editor_body,
+            "both initialized peer Docs converge after derived edit"
         );
-
+        assert_eq!(
+            editor_body["content"][0]["content"][0]["text"],
+            "안녕 본문 복원한 피어의 재편집 "
+        );
+        drop(observer_doc);
+        drop(editor_doc);
         let request_id = Uuid::now_v7();
         editor
             .send(Message::Binary(
@@ -936,12 +1126,17 @@ async fn restore_committed_ambiguous_receipt_converges() {
             "restored structured content must remain {text}"
         );
         assert!(
-            text.contains("가나다"),
-            "concurrent peer edit must not be lost {text}"
+            text.contains("복원한 피어의 재편집"),
+            "restored-peer-derived reedit must not be lost {text}"
         );
         assert!(
             !text.contains("후속편집한글"),
             "follow-up edit must be replaced by restore {text}"
+        );
+
+        assert_eq!(
+            live["contentJson"], editor_body,
+            "server durable projection equals both actual peer Docs"
         );
 
         run.shutdown_last_server().await.expect("stop");
@@ -1210,6 +1405,247 @@ async fn restore_committed_ambiguity_rechecks_removed_actor() {
                 wiki.document_id,
             )
             .await;
+            assert!(durable["contentJson"].to_string().contains("안녕 본문"));
+            assert!(!durable["contentJson"].to_string().contains("후속편집한글"));
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn restore_committed_ambiguity_rechecks_read_only_actor() {
+    run_test(
+        "restore_committed_ambiguity_rechecks_read_only_actor",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let owner = setup_owner_session(&run.harness).await;
+            let project = create_project(
+                &owner.pool,
+                owner.workspace_id,
+                owner.user_id,
+                owner.session_id,
+                CreateProjectInput {
+                    key: "R1READ",
+                    name: "Restore WRITE-only demotion",
+                    visibility: "private",
+                    description: None,
+                    icon: None,
+                    lead_user_id: None,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let document = create_project_document(
+                &owner.pool,
+                owner.workspace_id,
+                project.id,
+                owner.user_id,
+                owner.session_id,
+                CreateDocumentInput {
+                    parent_id: project.root_document_id,
+                    title: "Restore current READ",
+                    icon: None,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let wiki = WikiDocFixture {
+                session: owner,
+                document_id: document.id,
+            };
+            let revision_base = format!(
+                "/api/v1/workspaces/{}/projects/{}/documents/{}/revisions",
+                wiki.session.workspace_id, project.id, wiki.document_id
+            );
+            let member = create_member_session(
+                &run.harness,
+                wiki.session.workspace_id,
+                &format!("rev-member-{}@example.com", Uuid::now_v7().simple()),
+            )
+            .await;
+            add_project_member(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                project.id,
+                wiki.session.user_id,
+                wiki.session.session_id,
+                member.user_id,
+                ProjectMemberRole::Member,
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let (state, hub) =
+                collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+            let addr = run.spawn_router_state(state, hub).await;
+            let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+            apply_and_persist(
+                addr,
+                &wiki.session.session_token,
+                &key,
+                1,
+                &engine_fixture("structured.v1"),
+            )
+            .await;
+            let (status, created) = http_json(
+                addr,
+                reqwest::Method::POST,
+                &revision_base.clone(),
+                &wiki.session.session_token,
+                None,
+            )
+            .await;
+            assert_eq!(status, reqwest::StatusCode::CREATED, "{created}");
+            let revision_id = created["id"].as_str().unwrap().to_string();
+            apply_and_persist(
+                addr,
+                &member.session_token,
+                &key,
+                4,
+                &engine_fixture("followup_edit.v1"),
+            )
+            .await;
+
+            let before = count_updates(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.document_id,
+            )
+            .await;
+            let restore_body = preview_restore_body(
+                addr,
+                &format!("{revision_base}/{revision_id}/restore"),
+                &member.session_token,
+            )
+            .await;
+            let (reached, proceed) = fvoci_server::db::collab::arm_restore_committed_ambiguity(
+                wiki.session.workspace_id,
+                wiki.document_id,
+            )
+            .await;
+            let restore = tokio::spawn({
+                let token = member.session_token.clone();
+                let path = format!("{revision_base}/{revision_id}/restore");
+                let restore_body = restore_body.clone();
+                async move {
+                    http_json(
+                        addr,
+                        reqwest::Method::POST,
+                        &path,
+                        &token,
+                        Some(restore_body),
+                    )
+                    .await
+                }
+            });
+            reached.await.expect("restore reached persist barrier");
+            fvoci_server::db::projects::update_project_member_role(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                project.id,
+                wiki.session.user_id,
+                wiki.session.session_id,
+                member.user_id,
+                ProjectMemberRole::Viewer,
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let admission = resolve_collab_admission(
+                &member.pool,
+                member.workspace_id,
+                member.user_id,
+                member.session_id,
+                wiki.document_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(
+                admission.read_only,
+                "actor retains authenticated READ while losing WRITE"
+            );
+            let (read_status, _) = http_json(
+                addr,
+                reqwest::Method::GET,
+                &format!("{revision_base}/{revision_id}"),
+                &member.session_token,
+                None,
+            )
+            .await;
+            assert_eq!(
+                read_status,
+                reqwest::StatusCode::OK,
+                "receipt READ remains authorized"
+            );
+            let _ = proceed.send(());
+            let (status, body) = restore.await.unwrap();
+            assert_eq!(
+                status,
+                reqwest::StatusCode::CONFLICT,
+                "verified receipt READ must not bypass current WRITE: {body}"
+            );
+            assert_eq!(body["code"], "restore_rejected");
+            let after = count_updates(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.document_id,
+            )
+            .await;
+            assert_eq!(
+                after,
+                before + 1,
+                "commit precedes revocation; no claim of rollback"
+            );
+            let (status, _) = http_json(
+                addr,
+                reqwest::Method::POST,
+                &format!("{revision_base}/{revision_id}/restore"),
+                &member.session_token,
+                Some(restore_body),
+            )
+            .await;
+            assert_eq!(
+                status,
+                reqwest::StatusCode::NOT_FOUND,
+                "current route authorization precedes correlation retry"
+            );
+            let (_, history) = http_json(
+                addr,
+                reqwest::Method::GET,
+                &revision_base.clone(),
+                &wiki.session.session_token,
+                None,
+            )
+            .await;
+            assert_eq!(history["items"].as_array().unwrap().len(), 2);
+            let restored = history["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["reason"] == "restore")
+                .unwrap();
+            assert_eq!(restored["restoredFromId"], revision_id);
+            assert_eq!(restored["createdBy"], member.user_id.to_string());
+            let (status, durable) = http_json(
+                addr,
+                reqwest::Method::GET,
+                &format!(
+                    "/api/v1/workspaces/{}/projects/{}/documents/{}/body",
+                    wiki.session.workspace_id, project.id, wiki.document_id
+                ),
+                &wiki.session.session_token,
+                None,
+            )
+            .await;
+            assert_eq!(status, reqwest::StatusCode::OK);
             assert!(durable["contentJson"].to_string().contains("안녕 본문"));
             assert!(!durable["contentJson"].to_string().contains("후속편집한글"));
             run.finish().await.expect("cleanup");
