@@ -65,6 +65,7 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
     if (!resultDir) throw new Error("owned restart result namespace missing");
     const ownedProcesses: Array<{
       witness: TimerNative;
+      log: string;
       exit?: { exitCode: number | null; signal: NodeJS.Signals | null; unexpectedExit: boolean };
     }> = [];
     const ownershipPath = path.join(resultDir, "w5-native-restart-owned-processes.json");
@@ -173,26 +174,26 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
       writeFileSync(log, "", { mode: 0o600, flag: "wx" });
       const child = spawn(configuredBin, [], { env: inherited, stdio: "pipe" });
       child.stdin.end();
-      let stdout = "";
+      let nativeOutput = "";
       const ready = new Promise<string>((resolve, reject) => {
         child.once("error", reject);
         child.once("exit", (code, signal) => {
           reject(new Error(`native exited before readiness: ${String(code)}/${String(signal)}`));
         });
-        child.stdout.on("data", (chunk: Buffer) => {
+        const nativeOutputReceived = (chunk: Buffer) => {
           const text = chunk.toString("utf8");
           appendFileSync(log, text);
-          stdout += text;
-          const origin = stdout
+          nativeOutput += text;
+          const origin = nativeOutput
             .split("\n")
             .find((line) => line.includes("fvoci-server listening on "))
             ?.split("fvoci-server listening on ")[1]
             ?.trim();
           if (origin) resolve(origin);
-        });
-        child.stderr.on("data", (chunk: Buffer) => {
-          appendFileSync(log, chunk);
-        });
+        };
+        // main.rs announces readiness on stderr; capture both real native streams.
+        child.stdout.on("data", nativeOutputReceived);
+        child.stderr.on("data", nativeOutputReceived);
       });
       if (!child.pid) throw new Error("spawned native PID unavailable");
       // Save ownership immediately so cancellation/readiness failure also cleans this child.
@@ -213,7 +214,7 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
         },
       };
       restartedTimerServers.set(page, current);
-      ownedProcesses.push({ witness: current.witness });
+      ownedProcesses.push({ witness: current.witness, log });
       persistOwnership();
       const childStat = readFileSync(`/proc/${String(child.pid)}/stat`, "utf8");
       const childStartTicks = childStat.slice(childStat.lastIndexOf(")") + 2).split(" ")[19];
@@ -300,9 +301,27 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
       }
       const finalExit = await exitChild(current);
       restartedTimerServers.delete(page);
+      const nativeLogs = ownedProcesses.map(({ witness, log }) => {
+        const content = readFileSync(log, "utf8").replace(
+          /(DATABASE_URL|DATABASE_APP_URL|FVOCI_E2E_ADMIN_DATABASE_URL|TEST_DATABASE_URL)=[^\s]+/g,
+          "$1=redacted",
+        );
+        const target = testInfo.outputPath(path.basename(log));
+        writeFileSync(target, content, { mode: 0o600 });
+        const evidence = process.env.FVOCI_W5_EVIDENCE_DIR;
+        if (evidence)
+          writeFileSync(path.join(evidence, path.basename(log)), content, { mode: 0o600 });
+        return {
+          pid: witness.pid,
+          procStartTicks: witness.procStartTicks,
+          path: target,
+          sha256: createHash("sha256").update(content).digest("hex"),
+        };
+      });
       const proof = {
         transitions,
         ownedProcesses,
+        nativeLogs,
         finalExit,
         diagnosticDatabase: diagnosticDatabase(),
       };
@@ -3747,6 +3766,16 @@ test("native same-database restart preserves paused and running anchors for genu
   await expect(widget.getByTestId("timer-start")).toBeEnabled();
   await widget.getByTestId("timer-start").click();
   await expect(widget.getByTestId("timer-state")).toHaveText("측정 중");
+  // Existing034 projections require a positive whole second; await the real
+  // server anchor, without sleeping or weakening the two-entry assertion.
+  await expect
+    .poll(
+      async () =>
+        timerShape.parse(
+          await (await page.request.get(`${initialOrigin}${fixture.timerUrl}`)).json(),
+        ).run?.elapsedMilliseconds ?? 0,
+    )
+    .toBeGreaterThanOrEqual(1000);
   await widget.getByTestId("timer-pause").click();
   await expect(widget.getByTestId("timer-state")).toHaveText("일시정지");
   const paused = timerShape.parse(
@@ -3792,6 +3821,13 @@ test("native same-database restart preserves paused and running anchors for genu
     expect(running.run?.runningSince).toBe(resumed.run.runningSince);
     expect(running.run?.version).toBe(resumed.run.version);
     expect(running.run?.elapsedMilliseconds).toBeGreaterThan(resumed.run.elapsedMilliseconds);
+    await expect
+      .poll(
+        async () =>
+          timerShape.parse(await (await fresh.request.get(fixture.timerUrl)).json()).run
+            ?.elapsedMilliseconds ?? 0,
+      )
+      .toBeGreaterThanOrEqual((paused.run?.elapsedMilliseconds ?? 0) + 1000);
     await current.getByTestId("timer-stop").click();
     await expect(current.getByTestId("timer-start")).toBeEnabled();
     const stopped = timerShape.parse(await (await fresh.request.get(fixture.timerUrl)).json());
