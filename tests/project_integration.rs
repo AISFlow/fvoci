@@ -2634,9 +2634,16 @@ async fn insert_document_revision(
     admin: &sqlx::PgPool,
     workspace_id: Uuid,
     document_id: &str,
-    text: &str,
 ) -> Uuid {
     let id = Uuid::now_v7();
+    let expected: Value = serde_json::from_str(include_str!(
+        "../crates/collab-engine/fixtures/expectations.json"
+    ))
+    .unwrap();
+    let body = fvoci_server::collab::derived_body::prepare_derived_body(
+        expected["structured"]["prosemirror_json"].clone(),
+    )
+    .unwrap();
     sqlx::query(
         r#"
         INSERT INTO fvoci.revisions (
@@ -2647,13 +2654,41 @@ async fn insert_document_revision(
     .bind(id)
     .bind(workspace_id)
     .bind(Uuid::parse_str(document_id).unwrap())
-    .bind(text.as_bytes())
-    .bind(json!({"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": text}]}]}))
-    .bind(text)
+    .bind(include_bytes!("../crates/collab-engine/fixtures/structured.v1").as_slice())
+    .bind(body.content_json())
+    .bind(body.text())
     .execute(admin)
     .await
     .expect("insert revision");
     id
+}
+
+async fn project_restore_witness(admin: &sqlx::PgPool, workspace_id: Uuid, doc_id: &str) -> Value {
+    sqlx::query_scalar(
+        r#"
+        SELECT jsonb_build_object(
+            'body', (SELECT jsonb_build_object('content', content_json, 'text', text,
+                'chosung', chosung, 'updatedAt', updated_at)
+                FROM fvoci.documents WHERE workspace_id=$1 AND id=$2),
+            'state', (SELECT to_jsonb(s) FROM fvoci.document_states s
+                WHERE workspace_id=$1 AND document_id=$2),
+            'updates', (SELECT coalesce(jsonb_agg(to_jsonb(u) ORDER BY seq), '[]'::jsonb)
+                FROM fvoci.document_collab_updates u WHERE workspace_id=$1 AND document_id=$2),
+            'receipts', (SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY op_id), '[]'::jsonb)
+                FROM fvoci.document_collab_op_receipts r WHERE workspace_id=$1 AND document_id=$2),
+            'history', (SELECT coalesce(jsonb_agg(to_jsonb(h) ORDER BY id), '[]'::jsonb)
+                FROM fvoci.revisions h WHERE workspace_id=$1 AND target_kind='document' AND target_id=$2),
+            'events', (SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY id), '[]'::jsonb)
+                FROM fvoci.events e WHERE workspace_id=$1 AND target_id=$2),
+            'audit', (SELECT coalesce(jsonb_agg(to_jsonb(a) ORDER BY id), '[]'::jsonb)
+                FROM fvoci.audit_log a WHERE workspace_id=$1 AND target_id=$2))
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(Uuid::parse_str(doc_id).unwrap())
+    .fetch_one(admin)
+    .await
+    .unwrap()
 }
 
 /// Project document revisions use the owning project's permission on the
@@ -2694,11 +2729,49 @@ async fn project_document_revisions_follow_project_permission() {
     assert_eq!(status, StatusCode::CREATED, "{created:?}");
     let doc_id = created["id"].as_str().unwrap().to_string();
 
-    // These read fixtures contain text bytes rather than Yjs updates. Every
-    // well-formed restore below must reject on permission/scope/archive before
-    // a native engine can inspect the snapshot.
-    let rev = insert_document_revision(&admin, workspace_id, &doc_id, "first").await;
-    let sibling_rev = insert_document_revision(&admin, workspace_id, &root_id, "root").await;
+    // Use the same immutable native corpus as the real HTTP restore suite.
+    let rev = insert_document_revision(&admin, workspace_id, &doc_id).await;
+    let sibling_rev = insert_document_revision(&admin, workspace_id, &root_id).await;
+    // The canonical empty Yjs update matches the newly created empty body.
+    // State must exist so missing state cannot mask a broken restore guard.
+    sqlx::query(
+        "INSERT INTO fvoci.document_states (workspace_id, document_id, state, encoding) VALUES ($1, $2, $3, 1)",
+    )
+    .bind(workspace_id)
+    .bind(Uuid::parse_str(&doc_id).unwrap())
+    .bind(vec![0u8, 0])
+    .execute(&admin)
+    .await
+    .unwrap();
+    let expected: Value = serde_json::from_str(include_str!(
+        "../crates/collab-engine/fixtures/expectations.json"
+    ))
+    .unwrap();
+    let before_restore = project_restore_witness(&admin, workspace_id, &doc_id).await;
+    // These PostgreSQL CI shards do not build a worker. The restricted app
+    // role's successful source resolution is the positive control here; the
+    // unchanged revision integration suite executes actual native HTTP restore.
+    let restore_pool = project_harness::app_pool(&harness).await;
+    let session_id = project_harness::session_id_for_user(&admin, lead.user_id).await;
+    let source = fvoci_server::db::revisions::resolve_restore(
+        &restore_pool,
+        workspace_id,
+        lead.user_id,
+        session_id,
+        fvoci_server::db::revisions::RevisionScope::project_document(
+            Uuid::parse_str(&project_id).unwrap(),
+            Uuid::parse_str(&doc_id).unwrap(),
+        ),
+        rev,
+        None,
+    )
+    .await
+    .unwrap()
+    .expect("authorized source resolves with real state and snapshot");
+    assert_eq!(
+        source,
+        include_bytes!("../crates/collab-engine/fixtures/structured.v1")
+    );
     let base = project_revisions_url(workspace_id, &project_id, &doc_id);
     // A well-formed request must reach server authorization. An empty body is
     // invalid before authorization and would not exercise these 404/409 gates.
@@ -2735,8 +2808,8 @@ async fn project_document_revisions_follow_project_permission() {
         assert_eq!(status, StatusCode::OK, "{detail:?}");
         assert_eq!(detail["targetId"], doc_id.as_str());
         assert_eq!(
-            detail["contentJson"]["content"][0]["content"][0]["text"],
-            "first"
+            detail["contentJson"],
+            expected["structured"]["prosemirror_json"]
         );
     }
 
@@ -2842,6 +2915,15 @@ async fn project_document_revisions_follow_project_permission() {
     assert_eq!(status, StatusCode::OK);
     let (status, _) = json_request(app.clone(), "GET", &base, None, Some(&viewer.cookie)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("{base}/{rev}/restore"),
+        Some(restore_body.clone()),
+        Some(&viewer.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
 
     // Archived project: reads stay, writes are refused with project_archived.
     let (status, _) = json_request(
@@ -2878,6 +2960,12 @@ async fn project_document_revisions_follow_project_permission() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
+    assert_eq!(
+        project_restore_witness(&admin, workspace_id, &doc_id).await,
+        before_restore,
+        "source resolution and malformed/scope/permission/archive denials cannot change document effects",
+    );
+
     // A trashed project document has no revision routes.
     let (status, body) = json_request(
         app.clone(),
@@ -2893,6 +2981,22 @@ async fn project_document_revisions_follow_project_permission() {
     let (status, _) = json_request(app.clone(), "GET", &base, None, Some(&lead.cookie)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
+    let trashed = project_restore_witness(&admin, workspace_id, &doc_id).await;
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("{base}/{rev}/restore"),
+        Some(restore_body),
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+    assert_eq!(
+        project_restore_witness(&admin, workspace_id, &doc_id).await,
+        trashed
+    );
+
+    restore_pool.close().await;
     admin.close().await;
     harness.cleanup().await;
 }
