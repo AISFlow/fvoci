@@ -259,6 +259,7 @@ pub async fn set_estimate(
 
 /// Shared only by the two real estimate consumers, inside their already
 /// authorized/locked transaction. This does not acquire a different fence.
+#[allow(clippy::too_many_arguments)] // Explicit locator, raw CAS baseline and correction reason.
 async fn persist_estimate(
     tx: &mut Transaction<'_, Postgres>,
     workspace: Uuid,
@@ -486,6 +487,9 @@ async fn receipt(
     Ok(())
 }
 
+// Keep the immutable audit row's identity, nullable locators and before/after
+// values explicit, in the same order as its SQL columns and binds.
+#[allow(clippy::too_many_arguments)]
 async fn audit(
     tx: &mut Transaction<'_, Postgres>,
     actor: Uuid,
