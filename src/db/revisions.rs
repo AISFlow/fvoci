@@ -3,6 +3,7 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::collab::derived_body::PreparedDerivedBody;
 use crate::db::context::{
     begin_read, lock_membership_users, recheck_session, session_is_live, set_system, set_tenant,
 };
@@ -1135,8 +1136,7 @@ pub struct RestoreRevisionAppend {
     pub intent: RestoreRevisionInput,
     pub revision_id: Uuid,
     pub y_snapshot: Vec<u8>,
-    pub content_json: Value,
-    pub text: String,
+    pub prepared_body: PreparedDerivedBody,
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -4024,14 +4024,13 @@ impl RoomActor {
             .await
             .map_err(|_| ForwardWriteError::Unavailable)?
             .map_err(|_| ForwardWriteError::Unavailable)?;
-            let text = prepare_revision_text(&captured.content_json)
+            let prepared_body = prepare_derived_body(captured.content_json)
                 .map_err(|_| ForwardWriteError::EngineMalformed)?;
             Some(RestoreRevisionAppend {
                 intent,
                 revision_id: Uuid::now_v7(),
                 y_snapshot: captured.y_snapshot,
-                content_json: captured.content_json,
-                text,
+                prepared_body,
             })
         } else {
             None

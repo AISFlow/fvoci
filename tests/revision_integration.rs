@@ -1033,6 +1033,79 @@ async fn restore_concurrent_peer_update_converges() {
 }
 
 #[tokio::test]
+async fn restore_body_write_failure_rolls_back_the_whole_commit() {
+    async fn witness(wiki: &WikiDocFixture) -> Value {
+        let mut tx = revision_read_context(&wiki.session.pool, wiki.session.workspace_id).await;
+        let value = sqlx::query_scalar(r#"
+            SELECT jsonb_build_object(
+                'body', (SELECT jsonb_build_object('content',content_json,'text',text,'chosung',chosung,'at',updated_at)
+                    FROM fvoci.documents WHERE workspace_id=$1 AND id=$2),
+                'state', (SELECT to_jsonb(s) FROM fvoci.document_states s WHERE workspace_id=$1 AND document_id=$2),
+                'updates', (SELECT coalesce(jsonb_agg(to_jsonb(u) ORDER BY seq),'[]'::jsonb)
+                    FROM fvoci.document_collab_updates u WHERE workspace_id=$1 AND document_id=$2),
+                'receipts', (SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY op_id),'[]'::jsonb)
+                    FROM fvoci.document_collab_op_receipts r WHERE workspace_id=$1 AND document_id=$2),
+                'history', (SELECT coalesce(jsonb_agg(to_jsonb(h) ORDER BY id),'[]'::jsonb)
+                    FROM fvoci.revisions h WHERE workspace_id=$1 AND target_kind='document' AND target_id=$2),
+                'events', (SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY id),'[]'::jsonb)
+                    FROM fvoci.events e WHERE workspace_id=$1 AND target_id=$2),
+                'audit', (SELECT coalesce(jsonb_agg(to_jsonb(a) ORDER BY id),'[]'::jsonb)
+                    FROM fvoci.audit_log a WHERE workspace_id=$1 AND target_id=$2))
+        "#).bind(wiki.session.workspace_id).bind(wiki.document_id).fetch_one(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+        value
+    }
+    run_test("restore_body_write_failure_rolls_back_the_whole_commit", async {
+        let mut run = TestRun::new(support::TestDb::bootstrap().await);
+        let wiki = setup_wiki_doc(&run.harness).await;
+        let (state, hub) = collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+        // Keep an actual client connected throughout: automatic snapshots stay
+        // enabled, but this fixture never has a last-client departure mid-oracle.
+        let mut observer = connect_member(addr, &wiki.session.session_token).await;
+        auth_and_join(&mut observer, &key, 99).await;
+        complete_sync_handshake(&mut observer, &key).await;
+        apply_and_persist(addr, &wiki.session.session_token, &key, 1, &engine_fixture("structured.v1")).await;
+        let (status, source) = http_json(addr, reqwest::Method::POST, &revision_path(&wiki, ""),
+            &wiki.session.session_token, None).await;
+        assert_eq!(status, reqwest::StatusCode::CREATED, "{source}");
+        let revision_id = source["id"].as_str().unwrap();
+        apply_and_persist(addr, &wiki.session.session_token, &key, 2, &engine_fixture("followup_edit.v1")).await;
+        let path = revision_path(&wiki, &format!("/{revision_id}/restore"));
+        let request = preview_restore_body(addr, &path, &wiki.session.session_token).await;
+        // Fixture-owner DDL only. The HTTP mutation still executes as the real
+        // restricted app role; this constraint forces a late body UPDATE error,
+        // after append/history/event statements, without mocking a transaction.
+        let admin = PgPoolOptions::new().max_connections(1).connect(&run.harness.admin_url).await.unwrap();
+        sqlx::query(&format!("ALTER TABLE fvoci.documents ADD CONSTRAINT w4_restore_body_reject CHECK (id <> '{}'::uuid OR content_json::text LIKE '%후속편집한글%')", wiki.document_id))
+            .execute(&admin).await.unwrap();
+        let before = witness(&wiki).await;
+        assert!(before["body"]["content"].to_string().contains("후속편집한글"));
+        let (status, failure) = http_json(addr, reqwest::Method::POST, &path,
+            &wiki.session.session_token, Some(request)).await;
+        assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE, "{failure}");
+        assert_eq!(failure["code"], "collab_unavailable");
+        assert_eq!(witness(&wiki).await, before,
+            "late body failure rolls back tail/snapshot, updates, receipts, every history row, body, events and audit");
+        let body = support::get_document_body(addr, &wiki.session.session_token,
+            wiki.session.workspace_id, wiki.document_id).await;
+        assert!(body["contentJson"].to_string().contains("후속편집한글"));
+        let (status, preview) = http_json(addr, reqwest::Method::GET, &format!("{path}-preview"),
+            &wiki.session.session_token, None).await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{preview}");
+        assert_eq!(preview["currentTailSeq"], before["state"]["tail_seq"].as_i64().unwrap().to_string(),
+            "room and actual durable tail stay on the pre-failure version");
+        assert!(preview["currentContentJson"].to_string().contains("후속편집한글"),
+            "failed restore never speculatively mutates the live canonical Doc");
+        sqlx::query("ALTER TABLE fvoci.documents DROP CONSTRAINT w4_restore_body_reject").execute(&admin).await.unwrap();
+        admin.close().await;
+        let _ = observer.close(None).await;
+        run.finish().await.expect("cleanup");
+    }).await;
+}
+
+#[tokio::test]
 async fn restore_committed_ambiguous_receipt_converges() {
     run_test("restore_committed_ambiguous_receipt_converges", async {
         let mut run = TestRun::new(support::TestDb::bootstrap().await);

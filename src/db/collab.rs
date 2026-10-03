@@ -1416,7 +1416,7 @@ async fn append_collab_update_in_tx(
             "INSERT INTO fvoci.revisions (id, workspace_id, target_kind, target_id, y_snapshot, encoding, content_json, text, reason, created_by, restored_from_id, restore_correlation_id, restore_base_tail_seq, restore_committed_tail_seq) VALUES ($1,$2,$3,$4,$5,1,$6,$7,'restore',$8,$9,$10,$11,$12)",
         )
         .bind(restore.revision_id).bind(workspace_id).bind(t.target_type).bind(document_id)
-        .bind(&restore.y_snapshot).bind(&restore.content_json).bind(&restore.text).bind(actor_user_id)
+        .bind(&restore.y_snapshot).bind(restore.prepared_body.content_json()).bind(restore.prepared_body.text()).bind(actor_user_id)
         .bind(restore.intent.source_revision_id).bind(restore.intent.correlation_id)
         .bind(restore.intent.expected_tail_seq).bind(seq).execute(&mut *tx).await?;
         let mut payload = serde_json::json!({
@@ -1439,6 +1439,35 @@ async fn append_collab_update_in_tx(
             },
         )
         .await?;
+
+        // This exact future canonical body belongs to the already-authorized
+        // restore commit. Project it while the actor/resource/state locks are
+        // held: post-commit revocation can deny recovery without leaving the
+        // durable body API on the content that the committed restore replaced.
+        // Correlation/receipt replays returned above and never project again.
+        let updated: Option<(Uuid,)> = sqlx::query_as(&t.sql(
+            r#"
+            UPDATE {resource}
+            SET content_json = $3,
+                text = $4,
+                chosung = $5,
+                updated_at = now()
+            WHERE workspace_id = $1
+              AND id = $2
+              AND content_json IS DISTINCT FROM $3::jsonb
+            RETURNING id
+            "#,
+        ))
+        .bind(workspace_id)
+        .bind(document_id)
+        .bind(restore.prepared_body.content_json())
+        .bind(restore.prepared_body.text())
+        .bind(restore.prepared_body.chosung())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if updated.is_some() {
+            append_system_updated_event(&mut tx, t, workspace_id, document_id).await?;
+        }
     }
     timings.stmt_us = stmt_started.elapsed().as_micros() as u64;
     let commit_started = Instant::now();
