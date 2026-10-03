@@ -50,8 +50,16 @@ type TimerNative = {
   procStartTicks: string;
   supervision?: "direct Playwright fixture child";
 };
+type NativeClose = {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  closeObserved: true;
+  stdoutEnded: boolean;
+  stderrEnded: boolean;
+};
 type RestartedTimerServer = {
   child: ChildProcessWithoutNullStreams;
+  closed: Promise<NativeClose>;
   witness: TimerNative;
   original: TimerNative;
   log: string;
@@ -61,12 +69,18 @@ type TimerRestart = () => Promise<string>;
 const test = base.extend<{ restartTimerServer: TimerRestart }>({
   restartTimerServer: async ({ page }, use, testInfo) => {
     const transitions: Array<Record<string, unknown>> = [];
+    const restartSnapshots: Array<Record<string, unknown>> = [];
     const resultDir = process.env.FVOCI_E2E_RESULT_DIR;
     if (!resultDir) throw new Error("owned restart result namespace missing");
     const ownedProcesses: Array<{
       witness: TimerNative;
       log: string;
-      exit?: { exitCode: number | null; signal: NodeJS.Signals | null; unexpectedExit: boolean };
+      exit?: {
+        exitCode: number | null;
+        signal: NodeJS.Signals | null;
+        unexpectedExit: boolean;
+        outputCompletion: NativeClose;
+      };
     }> = [];
     const ownershipPath = path.join(resultDir, "w5-native-restart-owned-processes.json");
     const persistOwnership = () => {
@@ -118,13 +132,23 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
         expect(owned.child.kill("SIGTERM")).toBe(true);
         ({ code, signal } = await exited);
       }
+      // Node close follows exit/error and closure of all child stdio. This
+      // promise was enrolled at spawn, so an already-exited child cannot miss it.
+      const outputCompletion = await owned.closed;
       const record = ownedProcesses.find((process) => process.witness.pid === owned.witness.pid);
       if (!record) throw new Error("restart ownership record missing");
-      record.exit = { exitCode: code, signal, unexpectedExit };
+      record.exit = { exitCode: code, signal, unexpectedExit, outputCompletion };
       persistOwnership();
       const procAbsent = !existsSync(`/proc/${String(owned.witness.pid)}`);
       expect(procAbsent).toBe(true);
-      return { pid: owned.witness.pid, exitCode: code, signal, unexpectedExit, procAbsent };
+      return {
+        pid: owned.witness.pid,
+        exitCode: code,
+        signal,
+        unexpectedExit,
+        procAbsent,
+        outputCompletion,
+      };
     };
     let current: RestartedTimerServer | undefined;
     const restart: TimerRestart = async () => {
@@ -157,7 +181,37 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
       expect(inherited.FVOCI_BIND).toBe("127.0.0.1:0");
       expect(inherited.DATABASE_URL).toBeUndefined();
       expect(inherited.DATABASE_APP_URL).toBeTruthy();
+      const phase = before.supervision
+        ? "measured same-database restart"
+        : "process ownership preparation";
+      const retainSnapshot = (stage: "before-stop" | "after-stop" | "after-ready", raw: string) => {
+        const basename = `timer-restart-${String(transitions.length + 1)}-${stage}.json`;
+        const target = path.join(resultDir, basename);
+        const evidence = process.env.FVOCI_W5_EVIDENCE_DIR;
+        const durablePath = evidence ? path.join(evidence, basename) : null;
+        const snapshot = {
+          restartNumber: transitions.length + 1,
+          phase,
+          stage,
+          before,
+          raw,
+          rawSha256: createHash("sha256").update(raw).digest("hex"),
+          path: target,
+          durablePath,
+        };
+        // Preserve actual unfiltered six-table SQL bytes before equality oracles,
+        // including a failed transition that never reaches transitions.push.
+        restartSnapshots.push(snapshot);
+        const content = JSON.stringify(snapshot, null, 2);
+        writeFileSync(target, content, { mode: 0o600 });
+        if (evidence && durablePath) {
+          mkdirSync(evidence, { recursive: true });
+          writeFileSync(durablePath, content, { mode: 0o600 });
+        }
+        return snapshot;
+      };
       const beforeRaw = timerDatabaseEffectsForRestart();
+      const beforeStopSnapshot = retainSnapshot("before-stop", beforeRaw);
       // Leave the app before SIGTERM, closing its real SSE/collaboration transports.
       // The paused/running database rows are never changed by this fixture.
       await page.goto("about:blank");
@@ -190,10 +244,24 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
       expect(
         readFileSync(`/proc/${String(original.parentPid)}/cmdline`, "utf8").split("\0"),
       ).toContain(original.launcher);
-      expect(timerDatabaseEffectsForRestart()).toBe(beforeRaw);
+      const afterStopRaw = timerDatabaseEffectsForRestart();
+      const afterStopSnapshot = retainSnapshot("after-stop", afterStopRaw);
+      expect(afterStopRaw).toBe(beforeRaw);
       const log = path.join(resultDir, `timer-restart-${String(transitions.length + 1)}.log`);
       writeFileSync(log, "", { mode: 0o600, flag: "wx" });
       const child = spawn(configuredBin, [], { env: inherited, stdio: "pipe" });
+      // Enroll before any await or readiness work; close includes stdio drain.
+      const closed = new Promise<NativeClose>((resolve) => {
+        child.once("close", (code, signal) => {
+          resolve({
+            code,
+            signal,
+            closeObserved: true,
+            stdoutEnded: child.stdout.readableEnded,
+            stderrEnded: child.stderr.readableEnded,
+          });
+        });
+      });
       child.stdin.end();
       let nativeOutput = "";
       const ready = new Promise<string>((resolve, reject) => {
@@ -239,6 +307,7 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
       // Save ownership immediately so cancellation/readiness failure also cleans this child.
       current = {
         child,
+        closed,
         original,
         log,
         witness: {
@@ -274,11 +343,11 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
       const setup = await page.request.get(`${origin}/api/v1/setup`);
       expect(setup.status(), await setup.text()).toBe(200);
       expect(runtimeHash(inherited)).toBe(inheritedHash);
-      expect(timerDatabaseEffectsForRestart()).toBe(beforeRaw);
+      const afterReadyRaw = timerDatabaseEffectsForRestart();
+      const afterReadySnapshot = retainSnapshot("after-ready", afterReadyRaw);
+      expect(afterReadyRaw).toBe(beforeRaw);
       transitions.push({
-        phase: before.supervision
-          ? "measured same-database restart"
-          : "process ownership preparation",
+        phase,
         before,
         stopped,
         after: current.witness,
@@ -297,6 +366,7 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
         nativeFeaturesBasis:
           "identical executable bytes across generations; actual build flags/fingerprints belong the batch build receipt",
         samePersistedRows: true,
+        sixTableSnapshots: [beforeStopSnapshot, afterStopSnapshot, afterReadySnapshot],
       });
       await page.goto(origin);
       return origin;
@@ -319,6 +389,7 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
             ? null
             : { type: typeof fixtureError },
       transitions,
+      restartSnapshots,
       ownedProcesses,
       phase: "before cleanup assertions",
     };
@@ -385,6 +456,7 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
       }
       const proof = {
         transitions,
+        restartSnapshots,
         ownedProcesses,
         nativeLogs,
         finalExit,
