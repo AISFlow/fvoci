@@ -2559,3 +2559,240 @@ test("owner releases opaque legacy reservations after task permission loss witho
     await context.close();
   }
 });
+
+test("a late legacy release cannot clear a genuine successor release pending", async ({
+  page,
+  browser,
+}, testInfo) => {
+  const fixture = await ordinaryTimerTask(page, "TLEGSTALE", true);
+  const entriesUrl = `/api/v1/workspaces/${fixture.workspaceId}/tasks/${fixture.task.id}/time-entries`;
+  const createLegacy = async (client: import("@playwright/test").Page, note: string) => {
+    const response = await client.request.post(entriesUrl, {
+      data: { startedAt: "2026-09-29T01:02:03.123Z", note },
+    });
+    expect(response.status(), await response.text()).toBe(201);
+    return z.object({ id: z.string() }).parse(await response.json()).id;
+  };
+  const firstEntry = await createLegacy(page, "첫 미종료 기록 보존");
+  const rawEntry = (id: string) =>
+    diagnosticSql(`SELECT to_jsonb(e) FROM fvoci.time_entries e WHERE e.id='${id}'`);
+  const firstRaw = rawEntry(firstEntry);
+  await page.goto(`/w/${fixture.slug}/my-tasks`);
+  const owner = page.getByTestId("timer-legacy-owner");
+  const button = owner.getByRole("button", { name: "미종료 기록의 측정 제한 해제", exact: true });
+  await expect(button).toBeEnabled();
+  await page.setViewportSize({ width: 320, height: 900 });
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = "200%";
+  });
+  await button.focus();
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Tab");
+  await expect(button).toBeFocused();
+  await testInfo.attach("legacy-owner-320-text200-keyboard", {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: "image/png",
+  });
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = "";
+  });
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.evaluate(() => {
+    const witness = document.createElement("script");
+    witness.type = "application/json";
+    witness.dataset.testid = "legacy-delivery-witness";
+    document.body.append(witness);
+    const requested: string[] = [];
+    const completed: string[] = [];
+    let canonical: string[] = [];
+    const publish = () => {
+      witness.textContent = JSON.stringify({ requested, completed, canonical });
+    };
+    publish();
+    const nativeFetch = globalThis.fetch.bind(globalThis);
+    globalThis.fetch = async (input, init) => {
+      const method = input instanceof Request ? input.method : (init?.method ?? "GET");
+      const url = input instanceof Request ? input.url : String(input);
+      const pathname = new URL(url, location.href).pathname;
+      const releasing = method === "POST" && pathname === "/api/v1/me/task-timer/legacy-release";
+      const reading = method === "GET" && pathname === "/api/v1/me/task-timer";
+      if (!releasing && !reading) return nativeFetch(input, init);
+      let entryId = "";
+      if (releasing) {
+        let body: unknown;
+        if (input instanceof Request) body = await input.clone().json();
+        else {
+          if (typeof init?.body !== "string") throw new Error("actual release JSON missing");
+          body = JSON.parse(init.body);
+        }
+        if (
+          typeof body !== "object" ||
+          body === null ||
+          !("timeEntryId" in body) ||
+          typeof body.timeEntryId !== "string"
+        )
+          throw new Error("actual release entry identity missing");
+        entryId = body.timeEntryId;
+        requested.push(entryId);
+        publish();
+      }
+      const response = await nativeFetch(input, init);
+      const nativeJson = response.json.bind(response);
+      response.json = async () => {
+        const result: unknown = await nativeJson();
+        const delivery = new MessageChannel();
+        delivery.port1.onmessage = () => {
+          if (releasing) completed.push(entryId);
+          else if (
+            typeof result === "object" &&
+            result !== null &&
+            "legacyOpenIds" in result &&
+            Array.isArray(result.legacyOpenIds) &&
+            result.legacyOpenIds.every((id): id is string => typeof id === "string")
+          )
+            canonical = result.legacyOpenIds;
+          publish();
+          delivery.port1.close();
+          delivery.port2.close();
+        };
+        delivery.port2.postMessage(entryId);
+        return result;
+      };
+      return response;
+    };
+  });
+  const held = Array.from({ length: 2 }, () => {
+    let release = () => {};
+    let committed = () => {};
+    const delivery = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const commit = new Promise<void>((resolve) => {
+      committed = resolve;
+    });
+    const command: {
+      release: () => void;
+      committed: () => void;
+      delivery: Promise<void>;
+      commit: Promise<void>;
+      body: unknown;
+    } = { release, committed, delivery, commit, body: undefined };
+    return command;
+  });
+  const [first, second] = held;
+  if (!first || !second) throw new Error("missing two actual release gates");
+  const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  let releaseOwner = () => {};
+  const ownerDelivery = new Promise<void>((resolve) => {
+    releaseOwner = resolve;
+  });
+  let count = 0;
+  await page.route(
+    (url) => url.pathname === "/api/v1/me/task-timer/legacy-release",
+    async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      const command = held[count++];
+      if (!command) throw new Error("unexpected third release request");
+      command.body = route.request().postDataJSON();
+      const response = await route.fetch();
+      expect(response.status(), await response.text()).toBe(200);
+      command.committed();
+      await command.delivery;
+      if (!page.isClosed()) await route.fulfill({ response });
+    },
+  );
+  const observations = async () =>
+    z
+      .object({
+        requested: z.array(z.string()),
+        completed: z.array(z.string()),
+        canonical: z.array(z.string()),
+      })
+      .parse(
+        JSON.parse((await page.getByTestId("legacy-delivery-witness").textContent()) ?? "null"),
+      );
+  try {
+    await button.click();
+    await first.commit;
+    const fresh = await context.newPage();
+    await login(fresh, fixture.email, credentials.password);
+    const freshActor = identityShape.parse(
+      await (await fresh.request.get("/api/v1/auth/me")).json(),
+    );
+    expect(freshActor.userId).toBe(fixture.actor.userId);
+    expect(freshActor.sessionId).not.toBe(fixture.actor.sessionId);
+    const secondEntry = await createLegacy(fresh, "후속 미종료 기록 보존");
+    expect(secondEntry).not.toBe(firstEntry);
+    const secondRaw = rawEntry(secondEntry);
+    await page.bringToFront();
+    await expect.poll(async () => (await observations()).canonical).toEqual([secondEntry]);
+    await expect(button).toBeEnabled();
+    await page.route(
+      (url) => url.pathname === "/api/v1/me/task-timer",
+      async (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        const response = await route.fetch();
+        await ownerDelivery;
+        if (!page.isClosed()) await route.fulfill({ response });
+      },
+    );
+    await button.click();
+    await second.commit;
+    expect(
+      z
+        .object({
+          timeEntryId: z.string(),
+          expectedActorId: z.string(),
+          expectedSessionId: z.string(),
+        })
+        .parse(second.body),
+    ).toMatchObject({
+      timeEntryId: secondEntry,
+      expectedActorId: fixture.actor.userId,
+      expectedSessionId: fixture.actor.sessionId,
+    });
+    await expect(button).toBeDisabled();
+    const beforeDelivery = timerDatabaseEffects(fixture.actor.userId, fixture.task.id);
+    first.release();
+    await expect.poll(async () => (await observations()).completed).toContain(firstEntry);
+    await expect(button).toBeDisabled();
+    await button.evaluate((element) => {
+      if (!(element instanceof HTMLButtonElement)) throw new Error("native release button missing");
+      element.click();
+    });
+    expect((await observations()).requested).toEqual([firstEntry, secondEntry]);
+    expect(count).toBe(2);
+    expect(timerDatabaseEffects(fixture.actor.userId, fixture.task.id)).toBe(beforeDelivery);
+    expect(rawEntry(firstEntry)).toBe(firstRaw);
+    expect(rawEntry(secondEntry)).toBe(secondRaw);
+    await testInfo.attach("legacy-successor-pending-old-completion-native", {
+      body: JSON.stringify({
+        firstEntry,
+        secondEntry,
+        observations: await observations(),
+        commands: held.map((command) => command.body),
+        count,
+        rawEntriesPreserved: true,
+      }),
+      contentType: "application/json",
+    });
+    second.release();
+    releaseOwner();
+    await expect(owner).toHaveCount(0);
+    const freshOwner = z
+      .object({ legacyOpenIds: z.array(z.string()) })
+      .parse(await (await fresh.request.get("/api/v1/me/task-timer")).json());
+    expect(freshOwner.legacyOpenIds).toEqual([]);
+    expect(
+      diagnosticSql(
+        `SELECT count(*) FROM fvoci.task_timer_audit WHERE user_id='${fixture.actor.userId}' AND verb='legacy.release' AND reason='explicit_release_original_range_unresolved'`,
+      ),
+    ).toBe("2");
+    expect(rawEntry(firstEntry)).toBe(firstRaw);
+    expect(rawEntry(secondEntry)).toBe(secondRaw);
+  } finally {
+    for (const command of held) command.release();
+    releaseOwner();
+    await context.close();
+  }
+});
