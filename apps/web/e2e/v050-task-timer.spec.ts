@@ -4646,3 +4646,405 @@ test("native same-database restart preserves paused and running anchors for genu
     await secondContext.close();
   }
 });
+
+type JointTimerEstimateState = {
+  timerRows: string;
+  estimate: string | null;
+  unit: string | null;
+  identity: unknown;
+};
+function assertJointTimerEstimatePreserved(
+  before: JointTimerEstimateState,
+  after: JointTimerEstimateState,
+) {
+  expect(after.timerRows, "restore/refused estimate must preserve all six raw timer tables").toBe(
+    before.timerRows,
+  );
+  expect(after.estimate).toBe("15");
+  expect(after.unit).toBe("minutes");
+  expect(after.identity, "same planned task/project/document origin").toEqual(before.identity);
+}
+
+test("one ordinary task restore preserves paused timer and explicit estimate while its stale estimate intent conflicts", async ({
+  page,
+  browser,
+}, testInfo) => {
+  const fixture = await ordinaryTimerTask(page, "JOINT", true);
+  const notesResponse = await page.request.post(
+    `/api/v1/workspaces/${fixture.workspaceId}/documents`,
+    { data: { parentId: null, title: "공동 복원·측정 연구 노트" } },
+  );
+  expect(notesResponse.status(), await notesResponse.text()).toBe(201);
+  const notes = z
+    .object({ id: z.string().uuid(), number: z.number() })
+    .parse(await notesResponse.json());
+  const project = z
+    .object({ projectId: z.string().uuid() })
+    .parse(
+      await (
+        await page.request.get(`/api/v1/workspaces/${fixture.workspaceId}/tasks/${fixture.task.id}`)
+      ).json(),
+    );
+  await page.goto(`/w/${fixture.slug}/my-tasks`);
+  const planner = page.getByTestId("study-plan-builder");
+  await planner.getByText("학습·연구·업무 계획 만들기", { exact: true }).click();
+  await planner.getByLabel("목표", { exact: true }).fill("복원과 측정을 같은 연구 목표에서 확인");
+  await planner.getByLabel("목표 예상 시간(분, 선택)", { exact: true }).fill("15");
+  for (const label of ["목표·연구 노트 문서 링크", "읽을 자료 문서 링크"])
+    await planner.getByLabel(label, { exact: true }).fill(`WIKI-${String(notes.number)}`);
+  await planner.getByRole("button", { name: "연결할 문서 확인", exact: true }).click();
+  await expect(
+    planner.getByLabel("저장할 프로젝트", { exact: true }).locator("option", { hasText: "JOINT" }),
+  ).toHaveCount(1);
+  await planner.getByLabel("저장할 프로젝트", { exact: true }).selectOption(project.projectId);
+  const createdGoal = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      response.url().endsWith(`/documents/${notes.id}/study-plan/task`) &&
+      response.status() === 200,
+  );
+  await planner.getByRole("button", { name: "계획 저장", exact: true }).click();
+  const goal = z
+    .object({ taskId: z.string().uuid(), number: z.number(), projectKey: z.string() })
+    .parse(await (await createdGoal).json());
+  await expect(planner.getByRole("status").filter({ hasText: "저장된 목표와 단계" })).toContainText(
+    "4개 저장됨",
+  );
+  const base = `/api/v1/workspaces/${fixture.workspaceId}/tasks/${goal.taskId}`;
+  const detail = `/w/${fixture.slug}/${goal.projectKey}-${String(goal.number)}`;
+  const timerUrl = base + "/timer";
+  const estimateShape = z.object({
+    value: z.string().nullable(),
+    unit: z.string().nullable(),
+    updatedAt: z.string(),
+  });
+  const readState = () => ({
+    timerRows: timerDatabaseEffectsForRestart(),
+    ...z
+      .object({
+        estimate: z.string().nullable(),
+        unit: z.string().nullable(),
+        updatedAt: z.string(),
+        tail: z.string(),
+        updates: z.number(),
+        identity: z.object({
+          task: z.string().uuid(),
+          project: z.string().uuid(),
+          origins: z.array(
+            z.object({ document_id: z.string().uuid(), task_id: z.string().uuid() }).passthrough(),
+          ),
+        }),
+      })
+      .parse(
+        JSON.parse(
+          diagnosticSql(
+            `SELECT jsonb_build_object('estimate',t.estimate::text,'unit',t.estimate_unit,'updatedAt',to_char(t.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"'),'tail',(SELECT tail_seq::text FROM fvoci.task_states WHERE workspace_id=t.workspace_id AND task_id=t.id),'updates',(SELECT count(*) FROM fvoci.task_collab_updates WHERE workspace_id=t.workspace_id AND task_id=t.id),'identity',jsonb_build_object('task',t.id,'project',t.project_id,'origins',(SELECT jsonb_agg(to_jsonb(o) ORDER BY o.workspace_id,o.task_id) FROM fvoci.task_origins o WHERE o.workspace_id=t.workspace_id AND o.task_id=t.id))) FROM fvoci.tasks t WHERE t.workspace_id='${fixture.workspaceId}' AND t.id='${goal.taskId}'`,
+          ),
+        ),
+      ),
+  });
+  const history = async () => {
+    const response = await page.request.get(base + "/revisions");
+    expect(response.ok()).toBe(true);
+    return z
+      .object({ items: z.array(z.object({ id: z.string().uuid() }).passthrough()) })
+      .parse(await response.json()).items;
+  };
+  const body = async () => {
+    const response = await page.request.get(base + "/body");
+    expect(response.ok()).toBe(true);
+    return z.object({ contentJson: z.unknown() }).parse(await response.json()).contentJson;
+  };
+  await page.goto(detail);
+  const widget = page.getByTestId(`task-stopwatch-${goal.taskId}`);
+  await expect(widget.getByTestId("timer-estimate")).toHaveText("예상 15분");
+  await widget.getByTestId("timer-start").click();
+  await expect(widget.getByTestId("timer-state")).toHaveText("측정 중");
+  await widget.getByTestId("timer-pause").click();
+  await expect(widget.getByTestId("timer-state")).toHaveText("일시정지");
+  const paused = timerShape.parse(await (await page.request.get(timerUrl)).json());
+  expect(paused.run?.status).toBe("paused");
+  const editor = page.locator(".fvoci-editor .ProseMirror");
+  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible();
+  await editor.click();
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.type("공동 연구 원본 본문");
+  await page.getByRole("button", { name: "저장", exact: true }).click();
+  await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible();
+  await page.getByTestId("revision-history").click();
+  const saved = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" && response.url().endsWith(base + "/revisions"),
+  );
+  await page.getByTestId("revision-save").click();
+  const savedResponse = await saved;
+  expect(savedResponse.status()).toBe(201);
+  const source = z.object({ id: z.string().uuid() }).parse(await savedResponse.json());
+  const sourceDetailResponse = await page.request.get(base + "/revisions/" + source.id);
+  expect(sourceDetailResponse.ok()).toBe(true);
+  const sourceDetail: unknown = await sourceDetailResponse.json();
+  const sourceBody = z.object({ contentJson: z.unknown() }).parse(sourceDetail).contentJson;
+  await page.getByTestId("revision-history").click();
+  await editor.click();
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.type("공동 연구 현재 본문");
+  await page.getByRole("button", { name: "저장", exact: true }).click();
+  await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible();
+  await page.getByTestId("revision-history").click();
+  const sourceIndex = (await history()).findIndex((item) => item.id === source.id);
+  expect(sourceIndex).toBeGreaterThanOrEqual(0);
+  let restoreButton = page
+    .getByTestId("revision-item")
+    .nth(sourceIndex)
+    .getByTestId("revision-restore");
+  const beforeDraftBody = await body();
+  const beforeDraftHistory = await history();
+  const draftRequests: string[] = [];
+  page.on("request", (request) => {
+    if (
+      request.url().startsWith(new URL(base + "/revisions/", page.url()).href) &&
+      /restore(?:-preview)?$/.test(request.url())
+    )
+      draftRequests.push(request.url());
+  });
+  await page.locator('[data-editor-mode="markdown"]').click();
+  const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });
+  await field.focus();
+  await page.keyboard.press("ControlOrMeta+a");
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    await cdp.send("Input.imeSetComposition", { text: "ㅎ", selectionStart: 1, selectionEnd: 1 });
+    await expect(field).toHaveValue("ㅎ");
+    await expect(restoreButton).toBeDisabled();
+    await expect(page.getByTestId("revision-save")).toBeDisabled();
+    expect(draftRequests).toHaveLength(0);
+    expect(await body()).toEqual(beforeDraftBody);
+    expect(await history()).toEqual(beforeDraftHistory);
+    await cdp.send("Input.insertText", { text: "공동 연구 현재 본문" });
+    await expect(restoreButton).toBeDisabled();
+    await page.getByRole("button", { name: "적용", exact: true }).click();
+  } finally {
+    await cdp.detach();
+  }
+  await page.getByTestId("revision-history").click();
+  await page.locator('[data-editor-mode="rich"]').click();
+  await page.getByRole("button", { name: "저장", exact: true }).click();
+  await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible();
+  await page.getByTestId("revision-history").click();
+  restoreButton = page
+    .getByTestId("revision-item")
+    .nth((await history()).findIndex((item) => item.id === source.id))
+    .getByTestId("revision-restore");
+  await restoreButton.click();
+  await expect(page.getByTestId("revision-restore-current")).toContainText("현재 본문");
+  await expect(page.getByTestId("revision-restore-source")).toContainText("원본 본문");
+  const peerContext = await browser.newContext({
+    baseURL: new URL(page.url()).origin,
+    storageState: await page.context().storageState(),
+  });
+  try {
+    const peer = await peerContext.newPage();
+    await peer.goto(detail);
+    await expect(peer.locator('[data-collab-status="connected"]')).toBeVisible();
+    await peer.locator(".fvoci-editor .ProseMirror").click();
+    await peer.keyboard.press("ControlOrMeta+a");
+    await peer.keyboard.type("공동 연구 동료 최신 본문");
+    await peer.getByRole("button", { name: "저장", exact: true }).click();
+    await expect(peer.locator('[data-collab-persisted="true"]')).toBeVisible();
+    await expect(editor).toContainText("동료 최신 본문");
+    const beforeConflict = readState();
+    const beforeConflictHistory = await history();
+    const beforeConflictBody = await body();
+    const conflict = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url().endsWith(`/revisions/${source.id}/restore`),
+    );
+    await page.getByTestId("revision-restore-confirm").click();
+    const conflictResponse = await conflict;
+    expect(conflictResponse.status()).toBe(409);
+    z.object({ code: z.literal("revision_restore_conflict") }).parse(await conflictResponse.json());
+    const afterConflict = readState();
+    assertJointTimerEstimatePreserved(beforeConflict, afterConflict);
+    expect(afterConflict.tail).toBe(beforeConflict.tail);
+    expect(afterConflict.updates).toBe(beforeConflict.updates);
+    expect(await history()).toEqual(beforeConflictHistory);
+    expect(await body()).toEqual(beforeConflictBody);
+    await page.getByTestId("revision-restore-refresh").click();
+    await expect(page.getByTestId("revision-restore-current")).toContainText("동료 최신 본문");
+    await page.getByTestId("revision-restore-cancel").click();
+  } finally {
+    await peerContext.close();
+  }
+  // Capture E0 after the peer commit. The restore alone must retire its exact
+  // microsecond timestamp; no-op persist must not manufacture that conflict.
+  await page.reload();
+  await expect(widget.getByTestId("timer-state")).toHaveText("일시정지");
+  const current = await page.request.get(timerUrl);
+  expect(current.ok()).toBe(true);
+  const e0 = z.object({ estimate: estimateShape }).parse(await current.json()).estimate;
+  const beforeRestore = readState();
+  expect(e0.value).toBe("15");
+  expect(e0.unit).toBe("minutes");
+  expect(e0.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|\+00:00)$/);
+  expect(
+    diagnosticSql(
+      `SELECT (updated_at='${e0.updatedAt}'::timestamptz)::text FROM fvoci.tasks WHERE workspace_id='${fixture.workspaceId}' AND id='${goal.taskId}'`,
+    ),
+    "E0 exact microsecond timestamp matches real task row",
+  ).toBe("true");
+  expect(beforeRestore.identity).toMatchObject({
+    task: goal.taskId,
+    project: project.projectId,
+    origins: [{ document_id: notes.id, task_id: goal.taskId }],
+  });
+  const estimateEditor = widget.getByTestId("task-estimate-editor");
+  await estimateEditor.getByText("예상 시간 설정", { exact: true }).click();
+  await estimateEditor.getByLabel("예상 시간(분)", { exact: true }).fill("25");
+  await estimateEditor.getByLabel("예상 시간 변경 사유", { exact: true }).fill("복원 전 예상 의도");
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const commandShape = z.object({
+    requestId: z.string().uuid(),
+    expectedActorId: z.string().uuid(),
+    expectedSessionId: z.string().uuid(),
+    expected: estimateShape,
+    minutes: z.literal(25),
+    reason: z.literal("복원 전 예상 의도"),
+  });
+  let heldBody: z.infer<typeof commandShape> | undefined;
+  const estimateRoute = (url: URL) => url.pathname === timerUrl + "/estimate";
+  await page.route(estimateRoute, async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    heldBody = commandShape.parse(route.request().postDataJSON());
+    await gate;
+    await route.continue();
+  });
+  try {
+    await estimateEditor.getByRole("button", { name: "예상 시간 저장", exact: true }).click();
+    await expect.poll(() => heldBody !== undefined).toBe(true);
+    if (!heldBody) throw new Error("real mounted estimate intent missing");
+    expect(heldBody.expected).toEqual(e0);
+    expect(heldBody.expectedActorId).toBe(fixture.actor.userId);
+    expect(heldBody.expectedSessionId).toBe(fixture.actor.sessionId);
+    await expect(
+      estimateEditor.getByRole("button", { name: "예상 시간 저장", exact: true }),
+    ).toBeDisabled();
+    await page.getByTestId("revision-history").click();
+    const revisionsBefore = await history();
+    await page
+      .getByTestId("revision-item")
+      .nth(revisionsBefore.findIndex((item) => item.id === source.id))
+      .getByTestId("revision-restore")
+      .click();
+    await expect(page.getByTestId("revision-restore-preview")).toHaveAttribute(
+      "data-source-revision",
+      source.id,
+    );
+    expect(readState().updatedAt, "preview's no-op persist keeps exact E0").toBe(
+      beforeRestore.updatedAt,
+    );
+    const restoredResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url().endsWith(`/revisions/${source.id}/restore`),
+    );
+    await page.getByTestId("revision-restore-confirm").click();
+    const restoredReply = await restoredResponse;
+    expect(restoredReply.status()).toBe(200);
+    const restored = z.object({ revisionId: z.string().uuid() }).parse(await restoredReply.json());
+    expect(restored.revisionId).not.toBe(source.id);
+    await expect(editor).toContainText("원본 본문");
+    expect(await body()).toEqual(sourceBody);
+    const afterRestore = readState();
+    assertJointTimerEstimatePreserved(beforeRestore, afterRestore);
+    expect(afterRestore.updatedAt).not.toBe(beforeRestore.updatedAt);
+    expect(BigInt(afterRestore.tail)).toBe(BigInt(beforeRestore.tail) + 1n);
+    expect(afterRestore.updates).toBe(beforeRestore.updates + 1);
+    const restoreDetail = await page.request.get(base + "/revisions/" + restored.revisionId);
+    expect(restoreDetail.ok()).toBe(true);
+    z.object({
+      reason: z.literal("restore"),
+      restoredFromId: z.literal(source.id),
+      contentJson: z.unknown(),
+    }).parse(await restoreDetail.json());
+    expect(await (await page.request.get(base + "/revisions/" + source.id)).json()).toEqual(
+      sourceDetail,
+    );
+    expect((await history()).filter((item) => item.id === restored.revisionId)).toHaveLength(1);
+    const staleReply = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" && response.url().endsWith(timerUrl + "/estimate"),
+    );
+    release();
+    const stale = await staleReply;
+    expect(stale.status()).toBe(409);
+    z.object({ params: z.object({ code: z.literal("estimate_changed") }) }).parse(
+      await stale.json(),
+    );
+    await expect(
+      estimateEditor.getByRole("button", { name: "예상 시간 저장", exact: true }),
+    ).toBeEnabled();
+    await expect(estimateEditor.getByLabel("예상 시간(분)", { exact: true })).toHaveValue("25");
+    await expect(estimateEditor.getByLabel("예상 시간 변경 사유", { exact: true })).toHaveValue(
+      "복원 전 예상 의도",
+    );
+    await expect(estimateEditor).toContainText("예상 시간이 다른 곳에서 변경되었습니다");
+    const afterStale = readState();
+    assertJointTimerEstimatePreserved(beforeRestore, afterStale);
+    expect(afterStale.updatedAt).toBe(afterRestore.updatedAt);
+    const freshContext = await browser.newContext({ baseURL: new URL(page.url()).origin });
+    try {
+      const fresh = await freshContext.newPage();
+      await login(fresh, fixture.email, credentials.password);
+      const freshActor = identityShape.parse(
+        await (await fresh.request.get("/api/v1/auth/me")).json(),
+      );
+      expect(freshActor.userId).toBe(fixture.actor.userId);
+      expect(freshActor.sessionId).not.toBe(fixture.actor.sessionId);
+      await fresh.goto(detail);
+      await expect(fresh.locator(".fvoci-editor .ProseMirror")).toContainText("원본 본문");
+      const freshWidget = fresh.getByTestId(`task-stopwatch-${goal.taskId}`);
+      await expect(freshWidget.getByTestId("timer-state")).toHaveText("일시정지");
+      await expect(freshWidget.getByTestId("timer-estimate")).toHaveText("예상 15분");
+      expect(timerShape.parse(await (await fresh.request.get(timerUrl)).json()).run).toEqual(
+        paused.run,
+      );
+      const freshBody = await fresh.request.get(base + "/body");
+      expect(
+        z.object({ contentJson: z.unknown() }).parse(await freshBody.json()).contentJson,
+      ).toEqual(sourceBody);
+      const freshHistory = await fresh.request.get(base + "/revisions");
+      expect(
+        z
+          .object({ items: z.array(z.object({ id: z.string() })) })
+          .parse(await freshHistory.json())
+          .items.some((item) => item.id === restored.revisionId),
+      ).toBe(true);
+      assertJointTimerEstimatePreserved(beforeRestore, readState());
+    } finally {
+      await freshContext.close();
+    }
+    await testInfo.attach("same-task-restore-timer-estimate", {
+      body: JSON.stringify({
+        taskId: goal.taskId,
+        source: source.id,
+        restored: restored.revisionId,
+        pausedRun: paused.run,
+        expected: e0,
+        afterRestoreUpdatedAt: afterRestore.updatedAt,
+        estimateRequestId: heldBody.requestId,
+        before: beforeRestore,
+        afterRestore,
+        afterStale,
+        staleStatus: stale.status(),
+      }),
+      contentType: "application/json",
+    });
+  } finally {
+    release();
+    await page.unroute(estimateRoute);
+  }
+});
