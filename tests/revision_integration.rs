@@ -742,6 +742,79 @@ async fn create_list_restore_with_live_room() {
     .await;
 }
 
+/// The project permission fixture must be a revision Snapshot with retained
+/// history, rather than an UpdateV1 that source resolution merely returns.
+#[test]
+fn project_permission_snapshot_is_consumed_by_native_restore() {
+    let expected: Value = serde_json::from_str(include_str!(
+        "../crates/collab-engine/fixtures/expectations.json"
+    ))
+    .unwrap();
+    let snapshot = engine_fixture("revision_snapshot.bin");
+    let state = engine_fixture("revision_before.v1");
+    // The pinned Yjs generator captured client 41's array before editing it.
+    // There is no ProseMirror fragment, so its independent body oracle is empty.
+    let captured = capture_revision_offline(
+        fvoci_server::collab::config::require_collab_engine_for_tests(),
+        collab_engine::Limits::for_tests(),
+        state.clone(),
+        vec![],
+    )
+    .expect("capture genuine revision Snapshot from retained state");
+    assert_eq!(captured.y_snapshot, snapshot);
+    assert_eq!(
+        captured.content_json,
+        expected["empty_doc"]["prosemirror_json"]
+    );
+
+    let mut peer = revision_peer_doc(&fvoci_server::db::collab::CollabLoadState {
+        snapshot: state,
+        tail: vec![],
+        writer_generation: 0,
+        snapshot_cutoff_seq: 0,
+        tail_seq: 0,
+    });
+    assert_eq!(
+        revision_peer_projection(&mut peer),
+        expected["empty_doc"]["prosemirror_json"]
+    );
+    assert!(peer
+        .call(&collab_engine::protocol::Request::Apply {
+            update_b64: engine_fixture("structured.v1"),
+            encoding: 1,
+        })
+        .outcome
+        .is_applied_ok());
+    assert_eq!(
+        revision_peer_projection(&mut peer),
+        expected["structured"]["prosemirror_json"]
+    );
+    // Actual Snapshot decoding and reconstruction must restore the old empty
+    // body through a forward update, leaving the live Doc unchanged until Apply.
+    let forward = revision_peer_update(
+        &mut peer,
+        collab_engine::protocol::Request::RestoreFromSnapshot {
+            snap_b64: snapshot,
+            encoding: 1,
+        },
+    );
+    assert_eq!(
+        revision_peer_projection(&mut peer),
+        expected["structured"]["prosemirror_json"]
+    );
+    assert!(peer
+        .call(&collab_engine::protocol::Request::Apply {
+            update_b64: forward,
+            encoding: 1,
+        })
+        .outcome
+        .is_applied_ok());
+    assert_eq!(
+        revision_peer_projection(&mut peer),
+        expected["empty_doc"]["prosemirror_json"]
+    );
+}
+
 #[tokio::test]
 async fn create_and_restore_without_live_room() {
     run_test("create_and_restore_without_live_room", async {

@@ -2641,7 +2641,7 @@ async fn insert_document_revision(
     ))
     .unwrap();
     let body = fvoci_server::collab::derived_body::prepare_derived_body(
-        expected["structured"]["prosemirror_json"].clone(),
+        expected["empty_doc"]["prosemirror_json"].clone(),
     )
     .unwrap();
     sqlx::query(
@@ -2654,7 +2654,7 @@ async fn insert_document_revision(
     .bind(id)
     .bind(workspace_id)
     .bind(Uuid::parse_str(document_id).unwrap())
-    .bind(include_bytes!("../crates/collab-engine/fixtures/structured.v1").as_slice())
+    .bind(include_bytes!("../crates/collab-engine/fixtures/revision_snapshot.bin").as_slice())
     .bind(body.content_json())
     .bind(body.text())
     .execute(admin)
@@ -2729,17 +2729,20 @@ async fn project_document_revisions_follow_project_permission() {
     assert_eq!(status, StatusCode::CREATED, "{created:?}");
     let doc_id = created["id"].as_str().unwrap().to_string();
 
-    // Use the same immutable native corpus as the real HTTP restore suite.
+    // This pinned Yjs Snapshot belongs to revision_before.v1, whose shared
+    // array has no ProseMirror content. The native revision suite consumes
+    // this exact pair and checks the independent empty_doc projection.
     let rev = insert_document_revision(&admin, workspace_id, &doc_id).await;
     let sibling_rev = insert_document_revision(&admin, workspace_id, &root_id).await;
-    // The canonical empty Yjs update matches the newly created empty body.
+    // Retain the Snapshot's client-41 history, with no tail. Its empty
+    // ProseMirror projection matches the newly created document body.
     // State must exist so missing state cannot mask a broken restore guard.
     sqlx::query(
         "INSERT INTO fvoci.document_states (workspace_id, document_id, state, encoding) VALUES ($1, $2, $3, 1)",
     )
     .bind(workspace_id)
     .bind(Uuid::parse_str(&doc_id).unwrap())
-    .bind(vec![0u8, 0])
+    .bind(include_bytes!("../crates/collab-engine/fixtures/revision_before.v1").as_slice())
     .execute(&admin)
     .await
     .unwrap();
@@ -2750,7 +2753,8 @@ async fn project_document_revisions_follow_project_permission() {
     let before_restore = project_restore_witness(&admin, workspace_id, &doc_id).await;
     // These PostgreSQL CI shards do not build a worker. The restricted app
     // role's successful source resolution is the positive control here; the
-    // unchanged revision integration suite executes actual native HTTP restore.
+    // revision integration suite consumes this exact Snapshot in a native child
+    // and also executes actual native HTTP restore.
     let restore_pool = project_harness::app_pool(&harness).await;
     let session_id = project_harness::session_id_for_user(&admin, lead.user_id).await;
     let source = fvoci_server::db::revisions::resolve_restore(
@@ -2770,7 +2774,7 @@ async fn project_document_revisions_follow_project_permission() {
     .expect("authorized source resolves with real state and snapshot");
     assert_eq!(
         source,
-        include_bytes!("../crates/collab-engine/fixtures/structured.v1")
+        include_bytes!("../crates/collab-engine/fixtures/revision_snapshot.bin")
     );
     let base = project_revisions_url(workspace_id, &project_id, &doc_id);
     // A well-formed request must reach server authorization. An empty body is
@@ -2809,7 +2813,7 @@ async fn project_document_revisions_follow_project_permission() {
         assert_eq!(detail["targetId"], doc_id.as_str());
         assert_eq!(
             detail["contentJson"],
-            expected["structured"]["prosemirror_json"]
+            expected["empty_doc"]["prosemirror_json"]
         );
     }
 
