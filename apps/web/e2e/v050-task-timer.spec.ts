@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { expect, test, type Route } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
 import { z } from "zod";
 import { createE2eUser, login } from "./helpers";
 import { isoToDatetimeLocalInTimeZone } from "../src/lib/datetime";
@@ -97,6 +97,50 @@ test.beforeAll(() => {
       FOR EACH ROW EXECUTE FUNCTION public.w5_timer_runtime_witness();
   `);
 });
+// Read entrypoints in the fresh about:blank document before any test navigation.
+// Capture actual browser responses while the app loads: auth retirement may
+// destroy the final document before afterEach, but cannot replace this evidence.
+type EntrypointCapture = { url: string; sha256: string } | { url: string; error: unknown };
+const loadedEntrypoints = new WeakMap<
+  Page,
+  { paths: string[]; responses: Map<string, Promise<EntrypointCapture>> }
+>();
+test.beforeEach(async ({ page }) => {
+  const staticDir = process.env.FVOCI_STATIC_DIR;
+  if (!staticDir) throw new Error("own static namespace missing");
+  const paths = await page.evaluate(
+    (html) => {
+      const document = new DOMParser().parseFromString(html, "text/html");
+      return Array.from(document.querySelectorAll('script[src*="/assets/"]'), (element) =>
+        element.getAttribute("src"),
+      ).filter((value): value is string => Boolean(value));
+    },
+    readFileSync(path.join(staticDir, "index.html"), "utf8"),
+  );
+  expect(paths.length).toBeGreaterThan(0);
+  const responses = new Map<string, Promise<EntrypointCapture>>();
+  loadedEntrypoints.set(page, { paths, responses });
+  page.on("response", (response) => {
+    const pathname = new URL(response.url()).pathname;
+    if (
+      response.request().resourceType() === "script" &&
+      paths.includes(pathname) &&
+      response.ok() &&
+      !responses.has(pathname)
+    ) {
+      const url = response.url();
+      // Begin reading before any auth reload. A failed read remains a hard
+      // afterEach failure; the rejection handler only retains its original cause.
+      responses.set(
+        pathname,
+        response.body().then(
+          (body) => ({ url, sha256: createHash("sha256").update(body).digest("hex") }),
+          (error: unknown) => ({ url, error }),
+        ),
+      );
+    }
+  });
+});
 test.afterEach(async ({ page }, testInfo) => {
   const rows = witnessRows.parse(
     JSON.parse(
@@ -164,17 +208,20 @@ test.afterEach(async ({ page }, testInfo) => {
     }
   }
   expect(createHash("sha256").update(readFileSync(configuredBin)).digest("hex")).toBe(binaryHash);
-  const scripts = await page
-    .locator('script[src*="/assets/"]')
-    .evaluateAll((elements) =>
-      elements
-        .map((element) => element.getAttribute("src"))
-        .filter((value): value is string => Boolean(value)),
-    );
+  const entrypoints = loadedEntrypoints.get(page);
+  if (!entrypoints) throw new Error("browser entrypoint capture missing");
   const assets = [];
-  for (const src of scripts) {
-    const pathname = new URL(src, page.url()).pathname;
-    const response = await page.request.get(pathname);
+  for (const pathname of entrypoints.paths) {
+    const pending = entrypoints.responses.get(pathname);
+    if (!pending) throw new Error(`entrypoint was not loaded by the browser: ${pathname}`);
+    const loaded = await pending;
+    if ("error" in loaded)
+      throw new Error(`browser entrypoint body capture failed: ${pathname}`, {
+        cause: loaded.error,
+      });
+    expect(new URL(loaded.url).origin).toBe(new URL(page.url()).origin);
+    const browserLoaded = loaded.sha256;
+    const response = await page.request.get(loaded.url);
     expect(response.ok(), pathname).toBe(true);
     const served = createHash("sha256")
       .update(await response.body())
@@ -184,8 +231,14 @@ test.afterEach(async ({ page }, testInfo) => {
     const copied = createHash("sha256")
       .update(readFileSync(path.join(staticDir, pathname)))
       .digest("hex");
+    expect(browserLoaded, pathname).toBe(copied);
     expect(served, pathname).toBe(copied);
-    assets.push({ path: pathname, servedSha256: served, ownStaticSha256: copied });
+    assets.push({
+      path: pathname,
+      browserLoadedSha256: browserLoaded,
+      servedSha256: served,
+      ownStaticSha256: copied,
+    });
   }
   const { container, database, role } = diagnosticDatabase();
   const proof = {
