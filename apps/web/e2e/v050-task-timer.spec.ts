@@ -4751,7 +4751,7 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
       .parse(await response.json()).items;
   };
   const body = async () => {
-    const response = await page.request.get(base + "/body");
+    const response = await page.request.get(base);
     expect(response.ok()).toBe(true);
     return z.object({ contentJson: z.unknown() }).parse(await response.json()).contentJson;
   };
@@ -5012,7 +5012,7 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
       expect(timerShape.parse(await (await fresh.request.get(timerUrl)).json()).run).toEqual(
         paused.run,
       );
-      const freshBody = await fresh.request.get(base + "/body");
+      const freshBody = await fresh.request.get(base);
       expect(
         z.object({ contentJson: z.unknown() }).parse(await freshBody.json()).contentJson,
       ).toEqual(sourceBody);
