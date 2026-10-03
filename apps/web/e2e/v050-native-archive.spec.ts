@@ -3670,7 +3670,15 @@ test("native archive restores document tag search filters into a separate instal
       ws,
       "document",
       tagged.id,
-      [{ type: "paragraph", runs: [{ text: body, marks: [] }] }],
+      [
+        {
+          type: "paragraph",
+          runs: [
+            { text: `${token} 실제 보존 본문 한글`, marks: [] },
+            { emoji: "slightly_smiling_face" },
+          ],
+        },
+      ],
       actor.userId,
     );
     const expectedIds = [tagged.id, untagged.id].sort();
