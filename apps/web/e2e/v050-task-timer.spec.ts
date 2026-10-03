@@ -3276,6 +3276,9 @@ test("an estimate A-B-A target change cannot clear the current native mutation p
   await page.goto(`/w/${fixture.slug}/my-tasks`);
   await observePlanningCompletion(page);
   await page.getByTestId(`my-task-${fixture.task.id}`).click();
+  await expect(page).toHaveURL(new RegExp(`${fixture.detail}$`));
+  await expect(page.locator("h1.task-detail__title")).toHaveText("TEABA 기록 검증");
+  await expect(page.getByTestId("my-tasks")).toHaveCount(0);
   const widget = page.getByTestId(`task-stopwatch-${fixture.task.id}`);
   const editor = widget.getByTestId("task-estimate-editor");
   await editor.getByText("예상 시간 설정", { exact: true }).click();
@@ -3304,10 +3307,18 @@ test("an estimate A-B-A target change cannot clear the current native mutation p
     await page.goBack();
     await expect(page.getByTestId("my-tasks")).toBeVisible();
     await page.getByTestId(`my-task-${other.id}`).click();
+    await expect(page).toHaveURL(new RegExp(`/w/${fixture.slug}/TEABA-${String(other.number)}$`));
+    await expect(page.locator("h1.task-detail__title")).toHaveText(
+      "변경하지 않을 다른 예상 시간 대상",
+    );
+    await expect(page.getByTestId("my-tasks")).toHaveCount(0);
     await expect(page.getByTestId(`task-stopwatch-${other.id}`)).toBeVisible();
     await page.goBack();
     await expect(page.getByTestId("my-tasks")).toBeVisible();
     await page.getByTestId(`my-task-${fixture.task.id}`).click();
+    await expect(page).toHaveURL(new RegExp(`${fixture.detail}$`));
+    await expect(page.locator("h1.task-detail__title")).toHaveText("TEABA 기록 검증");
+    await expect(page.getByTestId("my-tasks")).toHaveCount(0);
     await expect(widget.getByTestId("timer-estimate")).toHaveText("예상 45분");
     await editor.getByText("예상 시간 설정", { exact: true }).click();
     await editor.getByLabel("예상 시간(분)", { exact: true }).fill("60");
