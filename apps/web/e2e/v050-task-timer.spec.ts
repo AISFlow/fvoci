@@ -343,47 +343,84 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
       } catch (error) {
         navigationError = error;
       }
-      const finalExit = await exitChild(current);
-      restartedTimerServers.delete(page);
-      const nativeLogs = ownedProcesses.map(({ witness, log }) => {
-        const content = readFileSync(log, "utf8").replace(
-          /(DATABASE_URL|DATABASE_APP_URL|FVOCI_E2E_ADMIN_DATABASE_URL|TEST_DATABASE_URL)=[^\s]+/g,
-          "$1=redacted",
-        );
-        const target = testInfo.outputPath(path.basename(log));
-        writeFileSync(target, content, { mode: 0o600 });
-        const evidence = process.env.FVOCI_W5_EVIDENCE_DIR;
-        if (evidence)
-          writeFileSync(path.join(evidence, path.basename(log)), content, { mode: 0o600 });
-        return {
-          pid: witness.pid,
-          procStartTicks: witness.procStartTicks,
-          path: target,
-          sha256: createHash("sha256").update(content).digest("hex"),
-        };
-      });
+      let finalExit: Awaited<ReturnType<typeof exitChild>> | undefined;
+      const cleanupErrors: unknown[] = [];
+      const nativeLogs: Array<{
+        pid: number;
+        procStartTicks: string;
+        path: string;
+        sha256: string;
+      }> = [];
+      try {
+        finalExit = await exitChild(current);
+      } catch (error) {
+        cleanupErrors.push(error);
+      } finally {
+        restartedTimerServers.delete(page);
+        // Retain every available child's real log even if exit validation/read
+        // failed. Retention failures remain failures, never successful cleanup.
+        for (const { witness, log } of ownedProcesses) {
+          try {
+            const content = readFileSync(log, "utf8").replace(
+              /(DATABASE_URL|DATABASE_APP_URL|FVOCI_E2E_ADMIN_DATABASE_URL|TEST_DATABASE_URL)=[^\s]+/g,
+              "$1=redacted",
+            );
+            const target = testInfo.outputPath(path.basename(log));
+            writeFileSync(target, content, { mode: 0o600 });
+            const evidence = process.env.FVOCI_W5_EVIDENCE_DIR;
+            if (evidence) {
+              mkdirSync(evidence, { recursive: true });
+              writeFileSync(path.join(evidence, path.basename(log)), content, { mode: 0o600 });
+            }
+            nativeLogs.push({
+              pid: witness.pid,
+              procStartTicks: witness.procStartTicks,
+              path: target,
+              sha256: createHash("sha256").update(content).digest("hex"),
+            });
+          } catch (error) {
+            cleanupErrors.push(error);
+          }
+        }
+      }
       const proof = {
         transitions,
         ownedProcesses,
         nativeLogs,
         finalExit,
+        cleanupFailures: cleanupErrors.map((error) =>
+          error instanceof Error
+            ? { name: error.name, message: error.message }
+            : { type: typeof error },
+        ),
         diagnosticDatabase: diagnosticDatabase(),
       };
-      const target = testInfo.outputPath("native-same-db-restart-process-proof.json");
-      writeFileSync(target, JSON.stringify(proof, null, 2));
-      await testInfo.attach("native-same-db-restart-process-proof", {
-        path: target,
-        contentType: "application/json",
-      });
-      const evidence = process.env.FVOCI_W5_EVIDENCE_DIR;
-      if (evidence)
-        writeFileSync(
-          path.join(evidence, "native-same-db-restart-process-proof.json"),
-          JSON.stringify(proof, null, 2),
+      try {
+        const target = testInfo.outputPath("native-same-db-restart-process-proof.json");
+        writeFileSync(target, JSON.stringify(proof, null, 2));
+        const evidence = process.env.FVOCI_W5_EVIDENCE_DIR;
+        if (evidence)
+          writeFileSync(
+            path.join(evidence, "native-same-db-restart-process-proof.json"),
+            JSON.stringify(proof, null, 2),
+          );
+        await testInfo.attach("native-same-db-restart-process-proof", {
+          path: target,
+          contentType: "application/json",
+        });
+        expect(finalExit).toBeDefined();
+        expect(finalExit?.unexpectedExit).toBe(false);
+        expect(finalExit?.exitCode).toBe(0);
+        expect(finalExit?.signal).toBeNull();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      if (cleanupErrors.length) {
+        fixtureError = new AggregateError(
+          [fixtureError, ...cleanupErrors].filter((error) => error !== undefined),
+          "timer restart cleanup or evidence retention failed",
         );
-      expect(finalExit.unexpectedExit).toBe(false);
-      expect(finalExit.exitCode).toBe(0);
-      expect(finalExit.signal).toBeNull();
+      }
     }
     if (fixtureError !== undefined || navigationError !== undefined)
       throw new AggregateError(
@@ -3840,6 +3877,7 @@ test("native same-database restart preserves paused and running anchors for genu
   const firstContext = await browser.newContext({ baseURL: pausedOrigin });
   let resumed: z.infer<typeof restartShape> | undefined;
   let firstFreshIdentity: z.infer<typeof identityShape> | undefined;
+  let pausedAfterRestart: z.infer<typeof restartShape> | undefined;
   try {
     const fresh = await firstContext.newPage();
     await login(fresh, fixture.email, credentials.password);
@@ -3850,9 +3888,10 @@ test("native same-database restart preserves paused and running anchors for genu
     await fresh.goto(`/w/${fixture.slug}/my-tasks`);
     const current = fresh.getByTestId(`task-stopwatch-${fixture.task.id}`);
     await expect(current.getByTestId("timer-state")).toHaveText("일시정지");
-    expect(
-      restartShape.parse(await (await fresh.request.get(fixture.timerUrl)).json()).run,
-    ).toEqual(paused.run);
+    pausedAfterRestart = restartShape.parse(
+      await (await fresh.request.get(fixture.timerUrl)).json(),
+    );
+    expect(pausedAfterRestart.run).toEqual(paused.run);
     await current.getByTestId("timer-resume").click();
     await expect(current.getByTestId("timer-state")).toHaveText("측정 중");
     resumed = restartShape.parse(await (await fresh.request.get(fixture.timerUrl)).json());
@@ -3884,6 +3923,26 @@ test("native same-database restart preserves paused and running anchors for genu
     expect(running.run?.version).toBe(resumed.run.version);
     expect(running.run?.elapsedMilliseconds).toBe(resumed.run.elapsedMilliseconds);
     expect(effectiveElapsed(running)).toBeGreaterThan(effectiveElapsed(resumed));
+    const displayedSeconds = (text: string) => {
+      const parsed = z
+        .string()
+        .regex(/^\d+:\d{2}:\d{2}$/)
+        .parse(text)
+        .split(":")
+        .map(Number);
+      const [hours, minutes, seconds] = parsed;
+      if (hours === undefined || minutes === undefined || seconds === undefined)
+        throw new Error("genuine timer output missing hours/minutes/seconds");
+      return hours * 3600 + minutes * 60 + seconds;
+    };
+    const freshDisplayBefore = await current.getByTestId("timer-elapsed").innerText();
+    expect(displayedSeconds(freshDisplayBefore)).toBeGreaterThanOrEqual(
+      Math.floor(resumed.run.elapsedMilliseconds / 1000),
+    );
+    await expect
+      .poll(async () => displayedSeconds(await current.getByTestId("timer-elapsed").innerText()))
+      .toBeGreaterThan(displayedSeconds(freshDisplayBefore));
+    const freshDisplayAfter = await current.getByTestId("timer-elapsed").innerText();
     await expect
       .poll(async () =>
         effectiveElapsed(
@@ -3930,6 +3989,29 @@ test("native same-database restart preserves paused and running anchors for genu
       'entries',(SELECT coalesce(jsonb_agg(jsonb_build_object('id',id,'workspaceId',workspace_id,'taskId',task_id,'userId',user_id,'endedAt',ended_at)),'[]'::jsonb) FROM fvoci.time_entries))`),
         ),
       );
+    const rawGraph: unknown = JSON.parse(
+      diagnosticSql(`SELECT jsonb_build_object(
+      'runs',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM fvoci.task_timer_runs t),
+      'segments',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM fvoci.task_timer_segments t),
+      'entries',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM fvoci.time_entries t))`),
+    );
+    // Keep actual source data before the graph oracles, including on failure.
+    await testInfo.attach("native-restart-actual-responses-and-full-graph", {
+      body: JSON.stringify({
+        paused,
+        pausedAfterRestart,
+        resumed,
+        running,
+        stopped,
+        task,
+        rawGraph,
+        freshDisplayBefore,
+        freshDisplayAfter,
+        firstFreshIdentity,
+        secondFreshIdentity,
+      }),
+      contentType: "application/json",
+    });
     expect(graph.runs).toHaveLength(1);
     expect(graph.segments).toHaveLength(2);
     expect(graph.entries).toHaveLength(2);
@@ -3957,6 +4039,10 @@ test("native same-database restart preserves paused and running anchors for genu
         firstFreshIdentity,
         secondFreshIdentity,
         allGraphRowsClosedAndReferencesExact: true,
+        actualResponses: { paused, pausedAfterRestart, resumed, running, stopped, task },
+        rawGraph,
+        freshDisplayBefore,
+        freshDisplayAfter,
         finalActual: stopped.actualMilliseconds,
         actualFreshLogins: 2,
         measuredPhysicalRestarts: 2,
