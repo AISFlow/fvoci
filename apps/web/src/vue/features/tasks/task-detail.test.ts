@@ -333,6 +333,7 @@ async function detailGrants(options: {
     "./TaskBodyEditor.vue",
     "./TaskDetailForm.vue",
     "./TaskTimeEntries.vue",
+    "./TaskStopwatch.vue",
   ]) {
     imports[name] = { default: leaf(path.basename(name, ".vue")) };
   }
@@ -418,6 +419,7 @@ await test("readonly body admission leaves HTTP metadata editable without granti
     "TaskDetailForm",
     "TaskCollectionProperties",
     "TaskTimeEntries",
+    "TaskStopwatch",
     "TaskActivityPanel",
   ]) {
     assert.equal(grants.get(name)?.readOnly, false, name);
@@ -438,6 +440,7 @@ await test("archived and permission-denied page rights keep metadata and body re
       "TaskDetailForm",
       "TaskCollectionProperties",
       "TaskTimeEntries",
+      "TaskStopwatch",
       "TaskActivityPanel",
     ]) {
       assert.equal(grants.get(name)?.readOnly, true, name);
@@ -460,6 +463,7 @@ await test("in-flight archive and restore hold REST panels and body readonly and
       "TaskDetailForm",
       "TaskCollectionProperties",
       "TaskTimeEntries",
+      "TaskStopwatch",
       "TaskActivityPanel",
     ]) {
       assert.equal(grants.get(name)?.readOnly, true, name);
