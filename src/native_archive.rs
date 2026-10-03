@@ -95,6 +95,18 @@ record!(TaskDependency {
     r#type: String,
     lag_days: i32
 });
+// Workspace document tags named by archived documents (migration 028).
+record!(DocumentTag {
+    id: Uuid,
+    name: String,
+    color: String,
+    created_at: String,
+    updated_at: String
+});
+record!(DocumentTagAssignment {
+    document_id: Uuid,
+    tag_id: Uuid
+});
 // Owner-private saved project views (migration 028 `views`).
 record!(View {
     id: Uuid,
@@ -287,6 +299,7 @@ record!(Graph {
     project: Project, workflows: Vec<Workflow>, statuses: Vec<Status>, documents: Vec<Document>,
     tasks: Vec<Task>, assignees: Vec<Assignee>, labels: Vec<Label>, task_labels: Vec<TaskLabel>,
     milestones: Vec<Milestone>, dependencies: Vec<TaskDependency>, views: Vec<View>,
+    document_tags: Vec<DocumentTag>, document_tag_assignments: Vec<DocumentTagAssignment>,
     origins: Vec<Origin>, activity: Vec<Activity>, comments: Vec<Comment>,
     states: Vec<NativeState>, revisions: Vec<Revision>, attachments: Vec<Attachment>,
     collections: Vec<Collection>, collection_items: Vec<CollectionItem>,
@@ -731,6 +744,7 @@ impl Archive {
             }
         }
         validate_collections(g, &docs, &tasks, &statuses, &labels, &milestones)?;
+        validate_document_tags(g, &docs)?;
         let mut expected = BTreeSet::new();
         let mut state_ids = BTreeSet::new();
         for s in &g.states {
@@ -931,6 +945,44 @@ fn restore_metadata_is_valid(r: &Revision, state_tail: Option<i64>) -> bool {
 
 /// 034/048 task time: rows of the single source actor on archived tasks, the
 /// tables' own CHECK/uniqueness rules, and every relation inside the archive.
+/// Workspace document tags (028) travel with the archived documents that
+/// carry them: exactly the tags those assignments name, each with the tag
+/// writers' trimmed name (parse_name) and palette color, unique ids, and an
+/// assignment of an archived document to an archived tag at most once. The
+/// case-insensitive name uniqueness stays the database's (lower(name)), so a
+/// destination with the same name is an ordinary Conflict on restore.
+fn validate_document_tags(g: &Graph, docs: &BTreeSet<Uuid>) -> Result<(), ArchiveError> {
+    let invalid = || ArchiveError::Invalid("document tags".into());
+    let mut tags = BTreeSet::new();
+    for t in &g.document_tags {
+        validate_dates(t)?;
+        if crate::collections::parse_name(&Value::String(t.name.clone()))
+            .ok()
+            .as_deref()
+            != Some(t.name.as_str())
+            || !crate::db::labels::label_color_is_valid(&t.color)
+            || !tags.insert(t.id)
+        {
+            return Err(invalid());
+        }
+    }
+    let mut pairs = BTreeSet::new();
+    let mut named = BTreeSet::new();
+    for a in &g.document_tag_assignments {
+        if !docs.contains(&a.document_id)
+            || !tags.contains(&a.tag_id)
+            || !pairs.insert((a.document_id, a.tag_id))
+        {
+            return Err(invalid());
+        }
+        named.insert(a.tag_id);
+    }
+    if named != tags {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 /// The project's collections (028): its one trigger-made task collection,
 /// with its real name/version (the project's name at creation; a later
 /// project rename does not change it), plus live document collections of the
@@ -2474,6 +2526,8 @@ pub(crate) mod tests {
             "milestones",
             "dependencies",
             "views",
+            "document_tags",
+            "document_tag_assignments",
             "collection_fields",
             "collection_options",
             "collection_values",
@@ -3433,6 +3487,47 @@ pub(crate) mod tests {
             .unwrap(),
         );
         assert!(matches!(archive.validate(), Err(ArchiveError::Invalid(m)) if m == "dependencies"));
+    }
+
+    #[test]
+    fn native_archive_policy_document_tags_follow_the_writers() {
+        let tag = Uuid::from_u128(0x7700_0000_0000_4000_8000_0000_0000_0001);
+        let fixture = || {
+            let mut archive = policy_fixture();
+            let doc = archive.graph.documents[0].id;
+            archive.graph.document_tags = serde_json::from_value(json!([{"id":tag,"name":"Ref 참고 🧪",
+                "color":"blue","created_at":"2026-10-02T00:00:00Z","updated_at":"2026-10-02T00:00:00Z"}]))
+            .unwrap();
+            archive.graph.document_tag_assignments =
+                serde_json::from_value(json!([{"document_id":doc,"tag_id":tag}])).unwrap();
+            archive
+        };
+        fixture().validate().unwrap();
+        let invalid = |edit: fn(&mut Archive)| {
+            let mut archive = fixture();
+            edit(&mut archive);
+            matches!(archive.validate(), Err(ArchiveError::Invalid(m)) if m == "document tags")
+        };
+        assert!(invalid(|a| a.graph.document_tags[0].name = " Ref".into()));
+        assert!(invalid(|a| a.graph.document_tags[0].name = "가".repeat(101)));
+        assert!(invalid(|a| a.graph.document_tags[0].color = "black".into()));
+        assert!(invalid(|a| {
+            let copy = a.graph.document_tags[0].clone();
+            a.graph.document_tags.push(copy);
+        }));
+        assert!(invalid(
+            |a| a.graph.document_tag_assignments[0].document_id = Uuid::nil()
+        ));
+        assert!(invalid(
+            |a| a.graph.document_tag_assignments[0].tag_id = Uuid::nil()
+        ));
+        assert!(invalid(|a| {
+            let copy = a.graph.document_tag_assignments[0].clone();
+            a.graph.document_tag_assignments.push(copy);
+        }));
+        // A tag no archived document carries is workspace data, not this
+        // archive's.
+        assert!(invalid(|a| a.graph.document_tag_assignments.clear()));
     }
 
     #[test]

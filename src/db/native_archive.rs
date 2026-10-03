@@ -313,6 +313,10 @@ pub async fn capture(
     let labels = rows(&mut tx, "SELECT to_jsonb(l)-'workspace_id' FROM fvoci.labels l WHERE l.project_id=$1 ORDER BY l.id LIMIT 10001", &scope).await?;
     let task_labels = rows(&mut tx, "SELECT to_jsonb(x)-'workspace_id' FROM fvoci.task_labels x JOIN fvoci.tasks t ON t.id=x.task_id WHERE t.project_id=$1 ORDER BY x.task_id,x.label_id LIMIT 10001", &scope).await?;
     let milestones = rows(&mut tx, "SELECT to_jsonb(m)-'workspace_id' FROM fvoci.milestones m WHERE m.project_id=$1 ORDER BY m.id LIMIT 10001", &scope).await?;
+    // Tags named by archived documents' assignments (unassigned workspace
+    // tags are workspace data, not this project's).
+    let document_tag_assignments = rows(&mut tx, "SELECT jsonb_build_object('document_id',a.document_id,'tag_id',a.tag_id) FROM fvoci.document_tag_assignments a WHERE a.document_id IN {DOCS} ORDER BY a.document_id,a.tag_id LIMIT 10001", &scope).await?;
+    let document_tags = rows(&mut tx, "SELECT to_jsonb(t)-'workspace_id' FROM fvoci.document_tags t WHERE t.id IN(SELECT a.tag_id FROM fvoci.document_tag_assignments a WHERE a.document_id IN {DOCS}) ORDER BY t.id LIMIT 10001", &scope).await?;
     // Every person's saved views of the project are read so another person's
     // private view is refused by validation, never silently left behind.
     let views = rows(&mut tx, "SELECT to_jsonb(v)-'workspace_id' FROM fvoci.views v WHERE v.project_id=$1 ORDER BY v.id LIMIT 10001", &scope).await?;
@@ -510,6 +514,8 @@ pub async fn capture(
                 milestones,
                 dependencies,
                 views,
+                document_tags,
+                document_tag_assignments,
                 origins,
                 activity,
                 comments,
@@ -654,7 +660,6 @@ async fn reject_unsupported(
             OR EXISTS(SELECT 1 FROM fvoci.task_collab_op_receipts r WHERE r.task_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1) AND NOT EXISTS(SELECT 1 FROM fvoci.task_states s WHERE s.task_id=r.task_id))
             OR EXISTS(SELECT 1 FROM fvoci.revisions v WHERE ((v.target_kind='document' AND v.target_id IN {DOCS} AND NOT EXISTS(SELECT 1 FROM fvoci.document_states s WHERE s.document_id=v.target_id))
                 OR (v.target_kind='task' AND v.target_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1) AND NOT EXISTS(SELECT 1 FROM fvoci.task_states s WHERE s.task_id=v.target_id))))"),
-        ("document tags", "SELECT EXISTS(SELECT 1 FROM fvoci.document_tag_assignments WHERE document_id IN {DOCS})"),
         // Migration028 triggers give every project one task collection and every
         // task one item of it; person-made fields/values/views of the
         // project's collections are typed records. Still refused here: a
@@ -1230,6 +1235,20 @@ pub async fn publish(
         let row = remaining.remove(index);
         insert_record(&mut tx, "documents", mapped(row, workspace, actor)?).await?;
         inserted.insert(row.id);
+    }
+    // Workspace tags of the archived documents, then their assignments (the
+    // documents are inserted above). A destination tag with the same lower
+    // name, or a global id collision, is an ordinary unique violation.
+    for row in &g.document_tags {
+        insert_record(&mut tx, "document_tags", mapped(row, workspace, actor)?).await?;
+    }
+    for row in &g.document_tag_assignments {
+        insert_record(
+            &mut tx,
+            "document_tag_assignments",
+            mapped(row, workspace, actor)?,
+        )
+        .await?;
     }
     // Before tasks: tasks.milestone_id references a milestone.
     for row in &g.milestones {

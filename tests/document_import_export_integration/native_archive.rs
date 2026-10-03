@@ -321,6 +321,8 @@ fn structural_archive(ids: &StructuralIds) -> fvoci_server::native_archive::Arch
         "milestones",
         "dependencies",
         "views",
+        "document_tags",
+        "document_tag_assignments",
         "collection_fields",
         "collection_options",
         "collection_values",
@@ -6984,4 +6986,419 @@ async fn native_archive_capture_graph_budget_is_cumulative_and_row_bounded() {
     fx.admin.close().await;
     harness.cleanup().await;
     std::fs::remove_dir_all(storage).unwrap();
+}
+
+#[tokio::test]
+async fn native_archive_restores_document_tags_for_a_fresh_client() {
+    use fvoci_server::db::native_archive::{capture, publish, NativeDbError};
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let session = project_harness::session_id_for_user(&fx.admin, fx.user_id).await;
+    let ws = fx.workspace_id;
+    let call = |app: axum::Router,
+                method: &'static str,
+                path: String,
+                body: Option<Value>,
+                cookie: String| async move {
+        let (status, reply) = json_request(app, method, &path, body, Some(&cookie)).await;
+        assert!(status.is_success(), "{method} {path}: {status} {reply}");
+        reply
+    };
+    let project =
+        project_harness::create_project(fx.app.clone(), &fx.cookie, ws, "TAG", "private").await;
+    let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+    let w = format!("/api/v1/workspaces/{ws}");
+    let root: Uuid = sqlx::query_scalar("SELECT root_document_id FROM fvoci.projects WHERE id=$1")
+        .bind(project_id)
+        .fetch_one(&fx.admin)
+        .await
+        .unwrap();
+    let child = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/projects/{project_id}/documents"),
+        Some(json!({"parentId":root,"title":"하위 문서 🧪"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let child_id = child["id"].as_str().unwrap().to_owned();
+    // Tags through the ordinary writers: one renamed and one recolored by the
+    // owner (an admin), one never assigned.
+    let red = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/document-tags"),
+        Some(json!({"name":"검토","color":"red"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let blue = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/document-tags"),
+        Some(json!({"name":"Ref 참고 🧪"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let unused = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/document-tags"),
+        Some(json!({"name":"안 씀"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    call(
+        fx.app.clone(),
+        "PATCH",
+        format!("{w}/document-tags/{}", red["id"].as_str().unwrap()),
+        Some(json!({"name":"검토 완료"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    call(
+        fx.app.clone(),
+        "PATCH",
+        format!("{w}/document-tags/{}", blue["id"].as_str().unwrap()),
+        Some(json!({"color":"blue"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let docs_base = format!("{w}/projects/{project_id}/documents");
+    for (doc, tag) in [
+        (root.to_string(), &red),
+        (root.to_string(), &blue),
+        (child_id.clone(), &blue),
+    ] {
+        call(
+            fx.app.clone(),
+            "POST",
+            format!("{docs_base}/{doc}/tags"),
+            Some(json!({"tagId":tag["id"]})),
+            fx.cookie.clone(),
+        )
+        .await;
+    }
+    let read = |app: axum::Router, w: String, cookie: String| {
+        let (child_id, red_id) = (child_id.clone(), red["id"].as_str().unwrap().to_owned());
+        async move {
+            let docs_base = format!("{w}/projects/{project_id}/documents");
+            let mut out = Vec::new();
+            for doc in [root.to_string(), child_id] {
+                out.push(
+                    call(
+                        app.clone(),
+                        "GET",
+                        format!("{docs_base}/{doc}/tags"),
+                        None,
+                        cookie.clone(),
+                    )
+                    .await,
+                );
+            }
+            let tree = call(
+                app.clone(),
+                "GET",
+                format!("{docs_base}?tag={red_id}"),
+                None,
+                cookie.clone(),
+            )
+            .await;
+            let mut ids: Vec<String> = tree["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n["id"].as_str().unwrap().to_owned())
+                .collect();
+            ids.sort();
+            out.push(json!(ids));
+            let pool = call(
+                app.clone(),
+                "GET",
+                format!("{w}/document-tags"),
+                None,
+                cookie.clone(),
+            )
+            .await;
+            let mut names: Vec<(String, String, String)> = pool["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| {
+                    (
+                        t["id"].as_str().unwrap().to_owned(),
+                        t["name"].as_str().unwrap().to_owned(),
+                        t["color"].as_str().unwrap().to_owned(),
+                    )
+                })
+                .collect();
+            names.sort();
+            out.push(json!(names));
+            out
+        }
+    };
+    let source_reads = read(fx.app.clone(), w.clone(), fx.cookie.clone()).await;
+
+    let captured = capture(&fx.pool, ws, fx.user_id, session, &project_only(project_id))
+        .await
+        .expect("document tags are capturable");
+    // Read through the serialized graph so this test also compiles on the
+    // pre-change source (its RED is a capture refusal).
+    let graph = serde_json::to_value(&captured.archive.graph).unwrap();
+    let mut tag_ids: Vec<String> = graph["document_tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap().to_owned())
+        .collect();
+    tag_ids.sort();
+    let mut expected = vec![
+        red["id"].as_str().unwrap().to_owned(),
+        blue["id"].as_str().unwrap().to_owned(),
+    ];
+    expected.sort();
+    assert_eq!(
+        tag_ids, expected,
+        "the unassigned workspace tag stays behind"
+    );
+    assert!(!tag_ids.contains(&unused["id"].as_str().unwrap().to_owned()));
+    assert_eq!(
+        graph["document_tag_assignments"].as_array().unwrap().len(),
+        3
+    );
+    captured.archive.validate().expect("and valid");
+
+    let destination_db = TestDb::bootstrap().await;
+    let dst = fixture(&destination_db).await;
+    let (destination, _, claim) = claimed_restore(&dst, dst.user_id, &dst.cookie).await;
+    publish(
+        &dst.pool,
+        &claim,
+        &captured.archive,
+        &std::collections::BTreeMap::new(),
+        &dst.settings.quota,
+    )
+    .await
+    .expect("document tags restore");
+    let dw = format!("/api/v1/workspaces/{destination}");
+    // The destination client reads the same tags per document, the same tree
+    // filter result, and a pool of exactly the restored tags.
+    let restored_reads = read(dst.app.clone(), dw.clone(), dst.cookie.clone()).await;
+    let source_pool: Vec<Value> = source_reads[3]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t[0] != json!(unused["id"]))
+        .cloned()
+        .collect();
+    // Tags are workspace rows: their workspaceId is the restore workspace;
+    // every other field (ids, names, colors, timestamps) is unchanged.
+    let mut expected_reads = source_reads[..3].to_vec();
+    for document in expected_reads.iter_mut().take(2) {
+        for tag in document["items"].as_array_mut().unwrap() {
+            assert_eq!(tag["workspaceId"], json!(ws));
+            tag["workspaceId"] = json!(destination);
+        }
+    }
+    assert_eq!(&restored_reads[..3], &expected_reads[..]);
+    assert_eq!(restored_reads[3], json!(source_pool));
+    // The writers continue on the restored tags.
+    let ddocs = format!("{dw}/projects/{project_id}/documents");
+    call(
+        dst.app.clone(),
+        "POST",
+        format!("{ddocs}/{child_id}/tags"),
+        Some(json!({"tagId":red["id"]})),
+        dst.cookie.clone(),
+    )
+    .await;
+    call(
+        dst.app.clone(),
+        "DELETE",
+        format!("{ddocs}/{root}/tags/{}", blue["id"].as_str().unwrap()),
+        None,
+        dst.cookie.clone(),
+    )
+    .await;
+    call(
+        dst.app.clone(),
+        "PATCH",
+        format!("{dw}/document-tags/{}", blue["id"].as_str().unwrap()),
+        Some(json!({"name":"참고 끝"})),
+        dst.cookie.clone(),
+    )
+    .await;
+    // ... and their effects are read back, not only their 2xx.
+    let after_writes = read(dst.app.clone(), dw.clone(), dst.cookie.clone()).await;
+    let tag_names = |tags: &Value| {
+        let mut names: Vec<String> = tags["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(tag_names(&after_writes[0]), vec!["검토 완료".to_owned()]);
+    assert_eq!(
+        tag_names(&after_writes[1]),
+        vec!["검토 완료".to_owned(), "참고 끝".to_owned()]
+    );
+
+    // A destination personal workspace already holding a tag of the same name
+    // in another case refuses the whole restore, with no effects.
+    let busy_db = TestDb::bootstrap().await;
+    let busy = fixture(&busy_db).await;
+    let (status, personal) = json_request(
+        busy.app.clone(),
+        "POST",
+        "/api/v1/me/personal-workspace",
+        None,
+        Some(&busy.cookie),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {personal}");
+    let personal_id = personal["id"].as_str().unwrap().to_owned();
+    call(
+        busy.app.clone(),
+        "POST",
+        format!("/api/v1/workspaces/{personal_id}/document-tags"),
+        Some(json!({"name":"REF 참고 🧪"})),
+        busy.cookie.clone(),
+    )
+    .await;
+    let (target, _, claim) = claimed_restore(&busy, busy.user_id, &busy.cookie).await;
+    assert_eq!(target.to_string(), personal_id);
+    // Bounded before/after observation of the rejected publish: every
+    // application table's row count and row digest (no payload printed), the
+    // existing tag's exact row, and the storage inventory.
+    let existing_tag = |admin: sqlx::PgPool| async move {
+        sqlx::query_scalar::<_, Value>(
+            "SELECT to_jsonb(t) FROM fvoci.document_tags t WHERE lower(name)=lower('REF 참고 🧪')",
+        )
+        .fetch_one(&admin)
+        .await
+        .unwrap()
+    };
+    let tables_before = application_table_digests(&busy.admin).await;
+    let tag_before = existing_tag(busy.admin.clone()).await;
+    let storage_before = storage_inventory(&busy.storage_root());
+    let refused = publish(
+        &busy.pool,
+        &claim,
+        &captured.archive,
+        &std::collections::BTreeMap::new(),
+        &busy.settings.quota,
+    )
+    .await;
+    // Direct publish surfaces the database's unique violation (the HTTP
+    // route maps it to 409), the same strict oracle as the late-collision
+    // test.
+    let unique_violation = |result: &Result<_, NativeDbError>| matches!(result, Err(NativeDbError::Sql(error)) if error.as_database_error().is_some_and(|e| e.is_unique_violation()));
+    assert!(unique_violation(&refused), "{refused:?}");
+    let effects: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM fvoci.projects WHERE workspace_id=$1)+(SELECT count(*) FROM fvoci.documents WHERE workspace_id=$1)+(SELECT count(*) FROM fvoci.document_tag_assignments WHERE workspace_id=$1)+(SELECT count(*) FROM fvoci.document_tags WHERE workspace_id=$1)")
+        .bind(target)
+        .fetch_one(&busy.admin)
+        .await
+        .unwrap();
+    assert_eq!(effects, 1, "only the pre-existing tag remains");
+    assert_eq!(application_table_digests(&busy.admin).await, tables_before);
+    assert_eq!(existing_tag(busy.admin.clone()).await, tag_before);
+    assert_eq!(tag_before["color"], json!("gray"));
+    assert_eq!(storage_inventory(&busy.storage_root()), storage_before);
+
+    // A destination that already holds a tag with an archived tag's id (a
+    // different name; labeled admin fixture writer) is the same refusal.
+    let taken_db = TestDb::bootstrap().await;
+    let taken = fixture(&taken_db).await;
+    let (target, _, claim) = claimed_restore(&taken, taken.user_id, &taken.cookie).await;
+    sqlx::query("INSERT INTO fvoci.document_tags (id, workspace_id, name, color) VALUES ($1::text::uuid, $2, '다른 이름', 'green')")
+        .bind(red["id"].as_str().unwrap())
+        .bind(target)
+        .execute(&taken.admin)
+        .await
+        .unwrap();
+    let tables_before = application_table_digests(&taken.admin).await;
+    let refused = publish(
+        &taken.pool,
+        &claim,
+        &captured.archive,
+        &std::collections::BTreeMap::new(),
+        &taken.settings.quota,
+    )
+    .await;
+    assert!(unique_violation(&refused), "{refused:?}");
+    assert_eq!(application_table_digests(&taken.admin).await, tables_before);
+
+    let storages = [
+        fx.storage_root(),
+        dst.storage_root(),
+        busy.storage_root(),
+        taken.storage_root(),
+    ];
+    for f in [&fx, &dst, &busy, &taken] {
+        f.pool.close().await;
+        f.admin.close().await;
+    }
+    harness.cleanup().await;
+    destination_db.cleanup().await;
+    busy_db.cleanup().await;
+    taken_db.cleanup().await;
+    for storage in storages {
+        std::fs::remove_dir_all(storage).unwrap();
+    }
+}
+
+/// Row count and an order-independent digest of every fvoci table (admin
+/// read; only digests leave the database). Test-local observation.
+async fn application_table_digests(
+    admin: &sqlx::PgPool,
+) -> std::collections::BTreeMap<String, (i64, String)> {
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT table_name::text FROM information_schema.tables WHERE table_schema='fvoci' AND table_type='BASE TABLE' ORDER BY 1",
+    )
+    .fetch_all(admin)
+    .await
+    .unwrap();
+    let mut out = std::collections::BTreeMap::new();
+    for table in tables {
+        let row: (i64, String) = sqlx::query_as(&format!(
+            "SELECT count(*)::bigint, coalesce(md5(string_agg(md5(t::text), '' ORDER BY md5(t::text))), '') FROM fvoci.\"{table}\" t"
+        ))
+        .fetch_one(admin)
+        .await
+        .unwrap();
+        out.insert(table, row);
+    }
+    out
+}
+
+/// Relative path and size of every stored object under a storage root. Any
+/// directory or metadata read failure fails the test (an unreadable store is
+/// never an empty one).
+fn storage_inventory(root: &std::path::Path) -> Vec<(String, u64)> {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<(String, u64)>) {
+        let entries =
+            std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|e| panic!("entry in {}: {e}", dir.display()));
+            let path = entry.path();
+            let metadata = entry
+                .metadata()
+                .unwrap_or_else(|e| panic!("metadata {}: {e}", path.display()));
+            if metadata.is_dir() {
+                walk(&path, root, out);
+            } else {
+                out.push((
+                    path.strip_prefix(root).unwrap().display().to_string(),
+                    metadata.len(),
+                ));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
 }

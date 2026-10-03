@@ -44,6 +44,7 @@ const MODELS: &[&str] = &[
     "collection-field",
     "collection-value",
     "collection-view",
+    "document-tag",
 ];
 const POLICY: &str = "preserve-content-ids-fresh-private-workspace";
 
