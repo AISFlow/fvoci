@@ -708,6 +708,7 @@ function flashBlock(id: string): void {
             :project-id="null"
             :read-only="readOnly"
             :persist-now="canPersist ? persistBody : undefined"
+            :source-dirty="!!sourceDraft?.dirty || !!sourceDraft?.composing"
           />
         </div>
         <UCollapsible

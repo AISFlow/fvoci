@@ -6,7 +6,7 @@ mod support;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::token::new_token;
 use fvoci_server::collab::config::CollabConfig;
@@ -213,15 +213,293 @@ async fn wait_room_empty(
     }
 }
 
+async fn revision_read_context(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut tx = fvoci_server::db::context::begin_read(pool).await.unwrap();
+    fvoci_server::db::context::set_tenant(&mut tx, workspace_id)
+        .await
+        .unwrap();
+    let witness: (String, bool, bool, bool, bool, bool, Uuid, String) = sqlx::query_as(
+        "SELECT current_user::text, r.rolsuper, r.rolbypassrls, pg_get_userbyid(c.relowner) <> current_user, c.relforcerowsecurity, row_security_active(c.oid), public.app_tenant_id(), current_setting('transaction_read_only') FROM pg_roles r JOIN pg_class c ON c.oid = 'fvoci.revisions'::regclass WHERE r.rolname = current_user",
+    ).fetch_one(&mut *tx).await.unwrap();
+    assert!(!witness.0.is_empty());
+    assert_eq!(
+        (witness.1, witness.2, witness.3, witness.4, witness.5),
+        (false, false, true, true, true)
+    );
+    assert_eq!(witness.6, workspace_id);
+    assert_eq!(witness.7, "on");
+    tx
+}
+
+async fn revision_fingerprint(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    revision_id: Uuid,
+) -> (Vec<u8>, Value) {
+    let mut tx = revision_read_context(pool, workspace_id).await;
+    let result = sqlx::query_as(
+        "SELECT y_snapshot, content_json FROM fvoci.revisions WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id)
+    .bind(revision_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    result
+}
+
+type RevisionHistoryRows = Vec<(Value, Vec<u8>)>;
+
+async fn capture_history_contract(
+    wiki: &WikiDocFixture,
+) -> (RevisionHistoryRows, CapturedRevision, i64) {
+    let mut tx = revision_read_context(&wiki.session.pool, wiki.session.workspace_id).await;
+    let rows = sqlx::query_as("SELECT to_jsonb(r), r.y_snapshot FROM fvoci.revisions r WHERE workspace_id=$1 AND target_kind='document' AND target_id=$2 ORDER BY created_at,id")
+        .bind(wiki.session.workspace_id).bind(wiki.document_id).fetch_all(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    let load = fvoci_server::db::collab::load_collab_readonly_kind(
+        &wiki.session.pool,
+        CollabKind::Document,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let captured = capture_revision_offline(
+        fvoci_server::collab::config::require_collab_engine_for_tests(),
+        collab_engine::Limits::for_tests(),
+        load.snapshot,
+        load.tail.iter().map(|row| row.payload.clone()).collect(),
+    )
+    .unwrap();
+    (rows, captured, load.tail_seq)
+}
+
+async fn assert_restore_history_contract(
+    wiki: &WikiDocFixture,
+    before: &RevisionHistoryRows,
+    base: &CapturedRevision,
+    source_id: &str,
+    restored_id: Option<&str>,
+    actor: Uuid,
+    request: &Value,
+) -> RevisionHistoryRows {
+    let mut tx = revision_read_context(&wiki.session.pool, wiki.session.workspace_id).await;
+    let after: RevisionHistoryRows = sqlx::query_as("SELECT to_jsonb(r), r.y_snapshot FROM fvoci.revisions r WHERE workspace_id=$1 AND target_kind='document' AND target_id=$2 ORDER BY created_at,id")
+        .bind(wiki.session.workspace_id).bind(wiki.document_id).fetch_all(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    for old in before {
+        assert_eq!(after.iter().find(|row| row.0["id"] == old.0["id"]), Some(old),
+            "every complete old row, content, IDs, source metadata and snapshot bytes remain immutable");
+    }
+    let manuals = after
+        .iter()
+        .filter(|row| row.0["reason"] == "manual")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        manuals.len(),
+        1,
+        "exact original manual count; automatic history is never promoted"
+    );
+    assert_eq!(manuals[0].0["id"], source_id);
+    assert_eq!(manuals[0].0["created_by"], wiki.session.user_id.to_string());
+    let restored = after
+        .iter()
+        .filter(|row| {
+            row.0["reason"] == "restore" && !before.iter().any(|old| old.0["id"] == row.0["id"])
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        restored.len(),
+        1,
+        "exactly ONE new restore, independently of allowed automatic history"
+    );
+    let metadata = &restored[0].0;
+    let source_at =
+        chrono::DateTime::parse_from_rfc3339(manuals[0].0["created_at"].as_str().unwrap()).unwrap();
+    let restored_at =
+        chrono::DateTime::parse_from_rfc3339(metadata["created_at"].as_str().unwrap()).unwrap();
+    assert!(
+        restored_at >= source_at && restored_at <= Utc::now(),
+        "new restore records an actual time after its preserved source"
+    );
+    if let Some(id) = restored_id {
+        assert_eq!(metadata["id"], id);
+    }
+    assert_ne!(metadata["id"], source_id);
+    assert_eq!(metadata["restored_from_id"], source_id);
+    assert_eq!(metadata["created_by"], actor.to_string());
+    assert_eq!(metadata["restore_correlation_id"], request["correlationId"]);
+    let tail = request["expectedTailSeq"]
+        .as_str()
+        .unwrap()
+        .parse::<i64>()
+        .unwrap();
+    assert_eq!(metadata["restore_base_tail_seq"], tail);
+    assert_eq!(metadata["restore_committed_tail_seq"], tail + 1);
+    assert_eq!(
+        metadata["content_json"], manuals[0].0["content_json"],
+        "restored known IDs/resources/content match the manual source"
+    );
+    for (row, bytes) in &after {
+        if row["reason"] == "session" {
+            let captured_at =
+                chrono::DateTime::parse_from_rfc3339(row["created_at"].as_str().unwrap()).unwrap();
+            assert!(
+                captured_at >= source_at && captured_at <= Utc::now(),
+                "automatic pre-restore capture retains actual system timestamp"
+            );
+            assert_eq!(
+                row["created_by"],
+                Value::Null,
+                "automatic system session actor is NULL (#308)"
+            );
+            assert_eq!(row["workspace_id"], wiki.session.workspace_id.to_string());
+            assert_eq!(row["target_kind"], "document");
+            assert_eq!(row["target_id"], wiki.document_id.to_string());
+            for field in [
+                "restored_from_id",
+                "restore_correlation_id",
+                "restore_base_tail_seq",
+                "restore_committed_tail_seq",
+            ] {
+                assert_eq!(
+                    row[field],
+                    Value::Null,
+                    "automatic row cannot masquerade as restore provenance"
+                );
+            }
+            assert_eq!(
+                row["content_json"], base.content_json,
+                "automatic row represents the actual pre-restore durable tail"
+            );
+            assert!(fvoci_server::collab::revision::revision_snapshots_equal_offline(
+                fvoci_server::collab::config::require_collab_engine_for_tests(), collab_engine::Limits::for_tests(), bytes, &base.y_snapshot).unwrap(),
+                "automatic snapshot semantically equals the independently captured pre-restore tail");
+        } else {
+            assert!(
+                row["reason"] == "manual" || row["reason"] == "restore",
+                "no unexpected history classification"
+            );
+        }
+    }
+    after
+}
+
+type RevisionPeerSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn receive_exact_peer_update(ws: &mut RevisionPeerSocket, key: &str, payload: &[u8]) {
+    let expected = fvoci_server::collab::wire::decode(&sync_update_frame(key, payload)).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "peer did not receive exact committed update"
+        );
+        let frame = tokio::time::timeout(remaining, ws.next())
+            .await
+            .expect("peer update deadline")
+            .expect("peer remains connected")
+            .expect("peer frame");
+        if let Message::Binary(bytes) = frame {
+            let decoded = fvoci_server::collab::wire::decode(&bytes).unwrap();
+            if matches!(
+                &decoded,
+                fvoci_server::collab::wire::WireFrame::Document {
+                    message: fvoci_server::collab::wire::DocumentMessage::Sync(
+                        fvoci_server::collab::wire::SyncMessage {
+                            step: fvoci_server::collab::wire::SyncStep::Update,
+                            ..
+                        }
+                    ),
+                    ..
+                }
+            ) {
+                assert_eq!(
+                    decoded, expected,
+                    "actual routed bytes must equal this durable update, not just any Sync Update"
+                );
+                return;
+            }
+        } else if matches!(frame, Message::Close(_)) {
+            panic!("peer closed before committed update");
+        }
+    }
+}
+
+fn revision_peer_doc(
+    load: &fvoci_server::db::collab::CollabLoadState,
+) -> collab_engine::process::EngineSession {
+    let mut peer =
+        collab_engine::process::EngineSession::spawn(collab_engine::process::SpawnRequest {
+            engine_bin: fvoci_server::collab::config::require_collab_engine_for_tests(),
+            limits: collab_engine::Limits::for_tests(),
+            slot_kind: collab_engine::process::ChildSlotKind::Primary,
+            slot_wait: None,
+            test_hang_ms: None,
+            test_exit_after_read: None,
+            test_close_stdout_hang_ms: None,
+            test_exit_after_write: None,
+        })
+        .expect("independent initialized peer Doc");
+    assert!(peer
+        .call(&collab_engine::protocol::Request::Load {
+            snapshot_b64: Some(load.snapshot.clone()),
+            tail_b64: load.tail.iter().map(|row| row.payload.clone()).collect(),
+            encoding: 1,
+        })
+        .outcome
+        .is_applied_ok());
+    peer
+}
+
+fn revision_peer_projection(peer: &mut collab_engine::process::EngineSession) -> Value {
+    match peer
+        .call(&collab_engine::protocol::Request::Project { encoding: 1 })
+        .outcome
+    {
+        collab_engine::outcome::EngineStatus::Ok {
+            content_json: Some(body),
+            ..
+        } => body,
+        other => panic!("peer projection failed: {other:?}"),
+    }
+}
+
+fn revision_peer_update(
+    peer: &mut collab_engine::process::EngineSession,
+    request: collab_engine::protocol::Request,
+) -> Vec<u8> {
+    match peer.call(&request).outcome {
+        collab_engine::outcome::EngineStatus::Ok {
+            update_b64: Some(bytes),
+            ..
+        } => collab_engine::b64::decode(&bytes).unwrap(),
+        other => panic!("peer edit failed: {other:?}"),
+    }
+}
+
 async fn count_updates(pool: &PgPool, workspace_id: Uuid, document_id: Uuid) -> i64 {
-    sqlx::query_scalar(
+    let mut tx = revision_read_context(pool, workspace_id).await;
+    let count = sqlx::query_scalar(
         "SELECT count(*) FROM fvoci.document_collab_updates WHERE workspace_id = $1 AND document_id = $2",
     )
     .bind(workspace_id)
     .bind(document_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
-    .unwrap()
+    .unwrap();
+    tx.commit().await.unwrap();
+    count
 }
 
 async fn create_member_session(
@@ -280,6 +558,28 @@ fn revision_path(wiki: &WikiDocFixture, extra: &str) -> String {
     )
 }
 
+/// Obtain a coherent server preview before arming any existing append barrier.
+async fn preview_restore_body(
+    addr: std::net::SocketAddr,
+    path: &str,
+    token: &str,
+) -> serde_json::Value {
+    let (status, preview) = http_json(
+        addr,
+        reqwest::Method::GET,
+        &format!("{path}-preview"),
+        token,
+        None,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{preview}");
+    assert!(
+        preview["currentTailSeq"].is_string(),
+        "opaque committed sequence {preview}"
+    );
+    serde_json::json!({"correlationId": Uuid::now_v7(), "expectedTailSeq": preview["currentTailSeq"]})
+}
+
 #[tokio::test]
 async fn create_list_restore_with_live_room() {
     run_test("create_list_restore_with_live_room", async {
@@ -329,16 +629,97 @@ async fn create_list_restore_with_live_room() {
         )
         .await;
 
+        let restore_path = revision_path(&wiki, &format!("/{revision_id}/restore"));
+        let (_, source_before) = http_json(addr, reqwest::Method::GET,
+            &revision_path(&wiki, &format!("/{revision_id}")), &wiki.session.session_token, None).await;
+        let source_fingerprint = revision_fingerprint(&wiki.session.pool, wiki.session.workspace_id, Uuid::parse_str(&revision_id).unwrap()).await;
+        let (status, other_document) = http_json(addr, reqwest::Method::POST,
+            &format!("/api/v1/workspaces/{}/documents", wiki.session.workspace_id),
+            &wiki.session.session_token, Some(json!({"parentId": null, "title": "other restore target"}))).await;
+        assert_eq!(status, reqwest::StatusCode::CREATED, "{other_document}");
+        let other_id = other_document["id"].as_str().unwrap();
+        let (status, _) = http_json(addr, reqwest::Method::GET,
+            &format!("/api/v1/workspaces/{}/documents/{other_id}/revisions/{revision_id}/restore-preview", wiki.session.workspace_id),
+            &wiki.session.session_token, None).await;
+        assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "same workspace wrong document cannot preview source");
+        let (status, _) = http_json(addr, reqwest::Method::POST,
+            &format!("/api/v1/workspaces/{}/documents/{other_id}/revisions/{revision_id}/restore", wiki.session.workspace_id),
+            &wiki.session.session_token, Some(json!({"correlationId": Uuid::now_v7(), "expectedTailSeq": "0"}))).await;
+        assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "wrong document cannot restore source");
+        let (status, _) = http_json(addr, reqwest::Method::GET,
+            &format!("/api/v1/workspaces/{}/tasks/{}/revisions/{revision_id}/restore-preview", wiki.session.workspace_id, wiki.document_id),
+            &wiki.session.session_token, None).await;
+        assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "task/document namespaces remain distinct");
+        let (status, _) = http_json(addr, reqwest::Method::GET,
+            &format!("/api/v1/workspaces/{}/documents/{}/revisions/{revision_id}/restore-preview", Uuid::now_v7(), wiki.document_id),
+            &wiki.session.session_token, None).await;
+        assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "foreign workspace cannot preview source");
+        let before_updates = count_updates(&wiki.session.pool, wiki.session.workspace_id, wiki.document_id).await;
+        let (missing_version_status, _) = http_json(addr, reqwest::Method::POST, &restore_path,
+            &wiki.session.session_token, Some(json!({"correlationId": Uuid::now_v7()}))).await;
+        assert_eq!(missing_version_status, reqwest::StatusCode::BAD_REQUEST, "restore cannot bypass preview version");
+        let (wrong_source_status, _) = http_json(addr, reqwest::Method::GET,
+            &revision_path(&wiki, &format!("/{}/restore-preview", Uuid::now_v7())),
+            &wiki.session.session_token, None).await;
+        assert_eq!(wrong_source_status, reqwest::StatusCode::NOT_FOUND);
+        let (history_before, history_base, history_tail) = capture_history_contract(&wiki).await;
+        let restore_body = preview_restore_body(addr, &revision_path(&wiki, &format!("/{revision_id}/restore")), &wiki.session.session_token).await;
+        assert_eq!(restore_body["expectedTailSeq"], history_tail.to_string());
+        assert!(history_base.content_json.to_string().contains("후속편집한글"));
+
         let (status, restored) = http_json(
             addr,
             reqwest::Method::POST,
             &revision_path(&wiki, &format!("/{revision_id}/restore")),
             &wiki.session.session_token,
-            Some(serde_json::json!({})),
+            Some(restore_body.clone()),
         )
         .await;
         assert_eq!(status, reqwest::StatusCode::OK, "{restored}");
         assert_eq!(restored["restored"], true);
+        let new_revision_id = restored["revisionId"].as_str().expect("new revision ID");
+        assert_ne!(new_revision_id, revision_id, "restore records new history");
+        let after_updates = count_updates(&wiki.session.pool, wiki.session.workspace_id, wiki.document_id).await;
+        assert_eq!(after_updates, before_updates + 1);
+        let history_first_restore = assert_restore_history_contract(&wiki, &history_before, &history_base, &revision_id,
+            Some(new_revision_id), wiki.session.user_id, &restore_body).await;
+        let (status, replay) = http_json(addr, reqwest::Method::POST, &restore_path,
+            &wiki.session.session_token, Some(restore_body.clone())).await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{replay}");
+        assert_eq!(replay["revisionId"], new_revision_id, "response-loss retry recovers exact committed restore");
+        assert_eq!(assert_restore_history_contract(&wiki, &history_before, &history_base, &revision_id,
+            Some(new_revision_id), wiki.session.user_id, &restore_body).await, history_first_restore, "same correlation retry adds ZERO rows or changes");
+
+        assert_eq!(count_updates(&wiki.session.pool, wiki.session.workspace_id, wiki.document_id).await, after_updates);
+        let mut changed_replay = restore_body.clone();
+        changed_replay["expectedTailSeq"] = json!("0");
+        let (status, _) = http_json(addr, reqwest::Method::POST, &restore_path,
+            &wiki.session.session_token, Some(changed_replay)).await;
+        assert_eq!(status, reqwest::StatusCode::CONFLICT, "correlation cannot authorize different input");
+        let mut stale_preview = restore_body.clone();
+        stale_preview["correlationId"] = json!(Uuid::now_v7());
+        let (status, _) = http_json(addr, reqwest::Method::POST, &restore_path,
+            &wiki.session.session_token, Some(stale_preview)).await;
+        assert_eq!(status, reqwest::StatusCode::CONFLICT, "a committed peer/version change invalidates the preview");
+        assert_eq!(count_updates(&wiki.session.pool, wiki.session.workspace_id, wiki.document_id).await, after_updates,
+            "conflicts must not append");
+        let (status, new_revision) = http_json(addr, reqwest::Method::GET,
+            &revision_path(&wiki, &format!("/{new_revision_id}")), &wiki.session.session_token, None).await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{new_revision}");
+        assert_eq!(new_revision["reason"], "restore");
+        assert_eq!(new_revision["restoredFromId"], revision_id);
+        assert_eq!(new_revision["createdBy"], wiki.session.user_id.to_string());
+        let created_at = chrono::DateTime::parse_from_rfc3339(new_revision["createdAt"].as_str().unwrap()).unwrap();
+        assert!(created_at <= Utc::now());
+        assert!(created_at > Utc::now() - ChronoDuration::minutes(1));
+        assert_eq!(new_revision["contentJson"], source_before["contentJson"], "content IDs/resources survive restore");
+        let retained = revision_fingerprint(&wiki.session.pool, wiki.session.workspace_id, Uuid::parse_str(&revision_id).unwrap()).await;
+        assert_eq!(retained, source_fingerprint, "old source history bytes are immutable");
+        let (status, history) = http_json(addr, reqwest::Method::GET,
+            &revision_path(&wiki, ""), &wiki.session.session_token, None).await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        assert_eq!(history["items"].as_array().unwrap().len(), history_first_restore.len(), "API and full restricted-role history agree");
+
 
         let body = support::get_document_body(
             addr,
@@ -359,6 +740,79 @@ async fn create_list_restore_with_live_room() {
         run.finish().await.expect("cleanup");
     })
     .await;
+}
+
+/// The project permission fixture must be a revision Snapshot with retained
+/// history, rather than an UpdateV1 that source resolution merely returns.
+#[test]
+fn project_permission_snapshot_is_consumed_by_native_restore() {
+    let expected: Value = serde_json::from_str(include_str!(
+        "../crates/collab-engine/fixtures/expectations.json"
+    ))
+    .unwrap();
+    let snapshot = engine_fixture("revision_snapshot.bin");
+    let state = engine_fixture("revision_before.v1");
+    // The pinned Yjs generator captured client 41's array before editing it.
+    // There is no ProseMirror fragment, so its independent body oracle is empty.
+    let captured = capture_revision_offline(
+        fvoci_server::collab::config::require_collab_engine_for_tests(),
+        collab_engine::Limits::for_tests(),
+        state.clone(),
+        vec![],
+    )
+    .expect("capture genuine revision Snapshot from retained state");
+    assert_eq!(captured.y_snapshot, snapshot);
+    assert_eq!(
+        captured.content_json,
+        expected["empty_doc"]["prosemirror_json"]
+    );
+
+    let mut peer = revision_peer_doc(&fvoci_server::db::collab::CollabLoadState {
+        snapshot: state,
+        tail: vec![],
+        writer_generation: 0,
+        snapshot_cutoff_seq: 0,
+        tail_seq: 0,
+    });
+    assert_eq!(
+        revision_peer_projection(&mut peer),
+        expected["empty_doc"]["prosemirror_json"]
+    );
+    assert!(peer
+        .call(&collab_engine::protocol::Request::Apply {
+            update_b64: engine_fixture("structured.v1"),
+            encoding: 1,
+        })
+        .outcome
+        .is_applied_ok());
+    assert_eq!(
+        revision_peer_projection(&mut peer),
+        expected["structured"]["prosemirror_json"]
+    );
+    // Actual Snapshot decoding and reconstruction must restore the old empty
+    // body through a forward update, leaving the live Doc unchanged until Apply.
+    let forward = revision_peer_update(
+        &mut peer,
+        collab_engine::protocol::Request::RestoreFromSnapshot {
+            snap_b64: snapshot,
+            encoding: 1,
+        },
+    );
+    assert_eq!(
+        revision_peer_projection(&mut peer),
+        expected["structured"]["prosemirror_json"]
+    );
+    assert!(peer
+        .call(&collab_engine::protocol::Request::Apply {
+            update_b64: forward,
+            encoding: 1,
+        })
+        .outcome
+        .is_applied_ok());
+    assert_eq!(
+        revision_peer_projection(&mut peer),
+        expected["empty_doc"]["prosemirror_json"]
+    );
 }
 
 #[tokio::test]
@@ -412,12 +866,18 @@ async fn create_and_restore_without_live_room() {
             .execute_idle_evict_if_eligible((wiki.session.workspace_id, wiki.document_id))
             .await;
 
+        let restore_body = preview_restore_body(
+            addr,
+            &revision_path(&wiki, &format!("/{revision_id}/restore")),
+            &wiki.session.session_token,
+        )
+        .await;
         let (status, restored) = http_json(
             addr,
             reqwest::Method::POST,
             &revision_path(&wiki, &format!("/{revision_id}/restore")),
             &wiki.session.session_token,
-            Some(serde_json::json!({})),
+            Some(restore_body),
         )
         .await;
         assert_eq!(status, reqwest::StatusCode::OK, "{restored}");
@@ -540,6 +1000,12 @@ async fn restore_concurrent_peer_update_converges() {
         auth_and_join(&mut editor, &key, 9).await;
         complete_sync_handshake(&mut editor, &key).await;
 
+        let restore_body = preview_restore_body(
+            addr,
+            &revision_path(&wiki, &format!("/{revision_id}/restore")),
+            &wiki.session.session_token,
+        )
+        .await;
         let (reached, proceed) = arm_append_revoke_barrier(wiki.document_id).await;
         let restore = tokio::spawn({
             let token = wiki.session.session_token.clone();
@@ -550,7 +1016,7 @@ async fn restore_concurrent_peer_update_converges() {
                     reqwest::Method::POST,
                     &path,
                     &token,
-                    Some(serde_json::json!({})),
+                    Some(restore_body),
                 )
                 .await
             }
@@ -640,6 +1106,389 @@ async fn restore_concurrent_peer_update_converges() {
 }
 
 #[tokio::test]
+async fn restore_body_write_failure_rolls_back_the_whole_commit() {
+    async fn witness(wiki: &WikiDocFixture) -> Value {
+        let mut tx = revision_read_context(&wiki.session.pool, wiki.session.workspace_id).await;
+        let value = sqlx::query_scalar(r#"
+            SELECT jsonb_build_object(
+                'body', (SELECT jsonb_build_object('content',content_json,'text',text,'chosung',chosung,'at',updated_at)
+                    FROM fvoci.documents WHERE workspace_id=$1 AND id=$2),
+                'state', (SELECT to_jsonb(s) FROM fvoci.document_states s WHERE workspace_id=$1 AND document_id=$2),
+                'updates', (SELECT coalesce(jsonb_agg(to_jsonb(u) ORDER BY seq),'[]'::jsonb)
+                    FROM fvoci.document_collab_updates u WHERE workspace_id=$1 AND document_id=$2),
+                'receipts', (SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY op_id),'[]'::jsonb)
+                    FROM fvoci.document_collab_op_receipts r WHERE workspace_id=$1 AND document_id=$2),
+                'history', (SELECT coalesce(jsonb_agg(to_jsonb(h) ORDER BY id),'[]'::jsonb)
+                    FROM fvoci.revisions h WHERE workspace_id=$1 AND target_kind='document' AND target_id=$2),
+                'events', (SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY id),'[]'::jsonb)
+                    FROM fvoci.events e WHERE workspace_id=$1 AND target_id=$2),
+                'audit', (SELECT coalesce(jsonb_agg(to_jsonb(a) ORDER BY id),'[]'::jsonb)
+                    FROM fvoci.audit_log a WHERE workspace_id=$1 AND target_id=$2))
+        "#).bind(wiki.session.workspace_id).bind(wiki.document_id).fetch_one(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+        value
+    }
+    run_test("restore_body_write_failure_rolls_back_the_whole_commit", async {
+        let mut run = TestRun::new(support::TestDb::bootstrap().await);
+        let wiki = setup_wiki_doc(&run.harness).await;
+        let (state, hub) = collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+        // Keep an actual client connected throughout: automatic snapshots stay
+        // enabled, but this fixture never has a last-client departure mid-oracle.
+        let mut observer = connect_member(addr, &wiki.session.session_token).await;
+        auth_and_join(&mut observer, &key, 99).await;
+        complete_sync_handshake(&mut observer, &key).await;
+        apply_and_persist(addr, &wiki.session.session_token, &key, 1, &engine_fixture("structured.v1")).await;
+        let (status, source) = http_json(addr, reqwest::Method::POST, &revision_path(&wiki, ""),
+            &wiki.session.session_token, None).await;
+        assert_eq!(status, reqwest::StatusCode::CREATED, "{source}");
+        let revision_id = source["id"].as_str().unwrap();
+        apply_and_persist(addr, &wiki.session.session_token, &key, 2, &engine_fixture("followup_edit.v1")).await;
+        let path = revision_path(&wiki, &format!("/{revision_id}/restore"));
+        let request = preview_restore_body(addr, &path, &wiki.session.session_token).await;
+        // Fixture-owner DDL only. The HTTP mutation still executes as the real
+        // restricted app role; this constraint forces a late body UPDATE error,
+        // after append/history/event statements, without mocking a transaction.
+        let admin = PgPoolOptions::new().max_connections(1).connect(&run.harness.admin_url).await.unwrap();
+        sqlx::query(&format!("ALTER TABLE fvoci.documents ADD CONSTRAINT w4_restore_body_reject CHECK (id <> '{}'::uuid OR content_json::text LIKE '%후속편집한글%')", wiki.document_id))
+            .execute(&admin).await.unwrap();
+        let before = witness(&wiki).await;
+        assert!(before["body"]["content"].to_string().contains("후속편집한글"));
+        let (status, failure) = http_json(addr, reqwest::Method::POST, &path,
+            &wiki.session.session_token, Some(request)).await;
+        assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE, "{failure}");
+        assert_eq!(failure["code"], "collab_unavailable");
+        assert_eq!(witness(&wiki).await, before,
+            "late body failure rolls back tail/snapshot, updates, receipts, every history row, body, events and audit");
+        let body = support::get_document_body(addr, &wiki.session.session_token,
+            wiki.session.workspace_id, wiki.document_id).await;
+        assert!(body["contentJson"].to_string().contains("후속편집한글"));
+        let (status, preview) = http_json(addr, reqwest::Method::GET, &format!("{path}-preview"),
+            &wiki.session.session_token, None).await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{preview}");
+        assert_eq!(preview["currentTailSeq"], before["state"]["tail_seq"].as_i64().unwrap().to_string(),
+            "room and actual durable tail stay on the pre-failure version");
+        assert!(preview["currentContentJson"].to_string().contains("후속편집한글"),
+            "failed restore never speculatively mutates the live canonical Doc");
+        sqlx::query("ALTER TABLE fvoci.documents DROP CONSTRAINT w4_restore_body_reject").execute(&admin).await.unwrap();
+        admin.close().await;
+        let _ = observer.close(None).await;
+        run.finish().await.expect("cleanup");
+    }).await;
+}
+
+#[tokio::test]
+async fn restore_committed_ambiguous_receipt_converges() {
+    run_test("restore_committed_ambiguous_receipt_converges", async {
+        let mut run = TestRun::new(support::TestDb::bootstrap().await);
+        let wiki = setup_wiki_doc(&run.harness).await;
+        let (state, hub) =
+            collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+        apply_and_persist(
+            addr,
+            &wiki.session.session_token,
+            &key,
+            1,
+            &engine_fixture("structured.v1"),
+        )
+        .await;
+        let (status, created) = http_json(
+            addr,
+            reqwest::Method::POST,
+            &revision_path(&wiki, ""),
+            &wiki.session.session_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::CREATED, "{created}");
+        let revision_id = created["id"].as_str().unwrap().to_string();
+        apply_and_persist(
+            addr,
+            &wiki.session.session_token,
+            &key,
+            2,
+            &engine_fixture("followup_edit.v1"),
+        )
+        .await;
+
+        let mut observer = connect_member(addr, &wiki.session.session_token).await;
+        auth_and_join(&mut observer, &key, 8).await;
+        complete_sync_handshake(&mut observer, &key).await;
+        let mut editor = connect_member(addr, &wiki.session.session_token).await;
+        auth_and_join(&mut editor, &key, 9).await;
+        complete_sync_handshake(&mut editor, &key).await;
+
+        let peer_initial = fvoci_server::db::collab::load_collab_readonly_kind(
+            &wiki.session.pool,
+            CollabKind::Document,
+            wiki.session.workspace_id,
+            wiki.session.user_id,
+            wiki.session.session_id,
+            wiki.document_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (history_before, history_base, history_tail) = capture_history_contract(&wiki).await;
+        let restore_body = preview_restore_body(
+            addr,
+            &revision_path(&wiki, &format!("/{revision_id}/restore")),
+            &wiki.session.session_token,
+        )
+        .await;
+        assert_eq!(restore_body["expectedTailSeq"], history_tail.to_string());
+        assert!(history_base
+            .content_json
+            .to_string()
+            .contains("후속편집한글"));
+
+        let (reached, proceed) = fvoci_server::db::collab::arm_restore_committed_ambiguity(
+            wiki.session.workspace_id,
+            wiki.document_id,
+        )
+        .await;
+        let restore = tokio::spawn({
+            let token = wiki.session.session_token.clone();
+            let path = revision_path(&wiki, &format!("/{revision_id}/restore"));
+            let restore_body = restore_body.clone();
+            async move {
+                http_json(
+                    addr,
+                    reqwest::Method::POST,
+                    &path,
+                    &token,
+                    Some(restore_body.clone()),
+                )
+                .await
+            }
+        });
+        reached.await.expect("restore reached persist barrier");
+        let _ = proceed.send(());
+        let (status, body) = restore.await.unwrap();
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        let durable = fvoci_server::db::collab::load_collab_readonly_kind(
+            &wiki.session.pool,
+            CollabKind::Document,
+            wiki.session.workspace_id,
+            wiki.session.user_id,
+            wiki.session.session_id,
+            wiki.document_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let restored_update = &durable
+            .tail
+            .iter()
+            .find(|row| row.seq == peer_initial.tail_seq + 1)
+            .expect("durable restore update")
+            .payload;
+        receive_exact_peer_update(&mut observer, &key, restored_update).await;
+        receive_exact_peer_update(&mut editor, &key, restored_update).await;
+        // Each independent peer starts from its pre-restore canonical state,
+        // then applies the exact bytes verified on that peer's actual socket.
+        let mut observer_doc = revision_peer_doc(&peer_initial);
+        let mut editor_doc = revision_peer_doc(&peer_initial);
+        for doc in [&mut observer_doc, &mut editor_doc] {
+            assert!(doc
+                .call(&collab_engine::protocol::Request::Apply {
+                    update_b64: restored_update.clone(),
+                    encoding: 1
+                })
+                .outcome
+                .is_applied_ok());
+            let body = revision_peer_projection(doc);
+            assert_eq!(body["content"][0]["attrs"]["id"], "p-alpha-001");
+            assert_eq!(
+                body["content"][0]["content"][1]["marks"][0]["attrs"]["href"],
+                "https://example.invalid/wiki/안녕"
+            );
+            assert_eq!(body["content"][0]["content"][3]["attrs"]["id"], "user-42");
+            assert_eq!(body["content"][1]["attrs"]["id"], "tbl-001");
+            assert!(body.to_string().contains("한글셀"));
+            assert!(
+                body.to_string().contains("안녕 본문"),
+                "peer sees literal restored meaning: {body}"
+            );
+            assert!(
+                !body.to_string().contains("후속편집한글"),
+                "peer cannot retain replaced followup: {body}"
+            );
+        }
+        let history_first_restore = assert_restore_history_contract(
+            &wiki,
+            &history_before,
+            &history_base,
+            &revision_id,
+            body["revisionId"].as_str(),
+            wiki.session.user_id,
+            &restore_body,
+        )
+        .await;
+        let (status, replay) = http_json(
+            addr,
+            reqwest::Method::POST,
+            &revision_path(&wiki, &format!("/{revision_id}/restore")),
+            &wiki.session.session_token,
+            Some(restore_body.clone()),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{replay}");
+        assert_eq!(replay["revisionId"], body["revisionId"]);
+        let (_, history) = http_json(
+            addr,
+            reqwest::Method::GET,
+            &revision_path(&wiki, ""),
+            &wiki.session.session_token,
+            None,
+        )
+        .await;
+        assert_eq!(
+            history["items"].as_array().unwrap().len(),
+            history_first_restore.len()
+        );
+        assert_eq!(
+            assert_restore_history_contract(
+                &wiki,
+                &history_before,
+                &history_base,
+                &revision_id,
+                body["revisionId"].as_str(),
+                wiki.session.user_id,
+                &restore_body
+            )
+            .await,
+            history_first_restore,
+            "same correlation retry adds ZERO rows or changes"
+        );
+        let mut edited = revision_peer_projection(&mut editor_doc);
+        let text = edited["content"][0]["content"][0]["text"]
+            .as_str()
+            .expect("restored paragraph")
+            .to_owned();
+        assert_eq!(text, "안녕 본문 ");
+        edited["content"][0]["content"][0]["text"] = json!(format!("{text}복원한 피어의 재편집 "));
+        let seed = revision_peer_update(
+            &mut editor_doc,
+            collab_engine::protocol::Request::SeedFromTiptap {
+                content_json: edited.to_string(),
+                encoding: 1,
+            },
+        );
+        let edit_update = revision_peer_update(
+            &mut editor_doc,
+            collab_engine::protocol::Request::ReplaceFromUpdate {
+                update_b64: seed,
+                encoding: 1,
+            },
+        );
+        assert!(editor_doc
+            .call(&collab_engine::protocol::Request::Apply {
+                update_b64: edit_update.clone(),
+                encoding: 1
+            })
+            .outcome
+            .is_applied_ok());
+        editor
+            .send(Message::Binary(
+                sync_update_frame(&key, &edit_update).into(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            wait_for_sync_applied(&mut editor, Duration::from_secs(8)).await,
+            "restored-peer-derived edit applies"
+        );
+        receive_exact_peer_update(&mut observer, &key, &edit_update).await;
+        assert!(observer_doc
+            .call(&collab_engine::protocol::Request::Apply {
+                update_b64: edit_update,
+                encoding: 1
+            })
+            .outcome
+            .is_applied_ok());
+        let editor_body = revision_peer_projection(&mut editor_doc);
+        let observer_body = revision_peer_projection(&mut observer_doc);
+        assert_eq!(
+            observer_body, editor_body,
+            "both initialized peer Docs converge after derived edit"
+        );
+        assert_eq!(
+            editor_body["content"][0]["content"][0]["text"],
+            "안녕 본문 복원한 피어의 재편집 "
+        );
+        drop(observer_doc);
+        drop(editor_doc);
+        let request_id = Uuid::now_v7();
+        editor
+            .send(Message::Binary(
+                stateless_frame(&key, &format!("persist:{request_id}")).into(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            wait_for_stateless_exact(
+                &mut editor,
+                &format!("persisted:{request_id}"),
+                Duration::from_secs(8)
+            )
+            .await,
+            "persist ack after restore+concurrent edit"
+        );
+
+        let live = support::get_document_body(
+            addr,
+            &wiki.session.session_token,
+            wiki.session.workspace_id,
+            wiki.document_id,
+        )
+        .await;
+        let text = live["contentJson"].to_string();
+        assert!(
+            text.contains("안녕 본문"),
+            "restored structured content must remain {text}"
+        );
+        assert!(
+            text.contains("복원한 피어의 재편집"),
+            "restored-peer-derived reedit must not be lost {text}"
+        );
+        assert!(
+            !text.contains("후속편집한글"),
+            "follow-up edit must be replaced by restore {text}"
+        );
+
+        assert_eq!(
+            live["contentJson"], editor_body,
+            "server durable projection equals both actual peer Docs"
+        );
+
+        run.shutdown_last_server().await.expect("stop");
+        let (state, hub) =
+            collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        let durable = support::get_document_body(
+            addr,
+            &wiki.session.session_token,
+            wiki.session.workspace_id,
+            wiki.document_id,
+        )
+        .await;
+        assert_eq!(
+            durable["contentJson"], live["contentJson"],
+            "durable state after reload must keep restored content plus concurrent edit"
+        );
+        let mut fresh = connect_member(addr, &wiki.session.session_token).await;
+        auth_and_join(&mut fresh, &key, 11).await;
+        complete_sync_handshake(&mut fresh, &key).await;
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn restore_rejects_when_permission_revoked_before_apply() {
     run_test(
         "restore_rejects_when_permission_revoked_before_apply",
@@ -689,6 +1538,12 @@ async fn restore_rejects_when_permission_revoked_before_apply() {
                 wiki.document_id,
             )
             .await;
+            let restore_body = preview_restore_body(
+                addr,
+                &revision_path(&wiki, &format!("/{revision_id}/restore")),
+                &member.session_token,
+            )
+            .await;
             let (reached, proceed) = arm_append_revoke_barrier(wiki.document_id).await;
             let restore = tokio::spawn({
                 let token = member.session_token.clone();
@@ -699,7 +1554,7 @@ async fn restore_rejects_when_permission_revoked_before_apply() {
                         reqwest::Method::POST,
                         &path,
                         &token,
-                        Some(serde_json::json!({})),
+                        Some(restore_body),
                     )
                     .await
                 }
@@ -727,6 +1582,440 @@ async fn restore_rejects_when_permission_revoked_before_apply() {
             )
             .await;
             assert_eq!(after, before, "rejected restore must not append");
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn restore_committed_ambiguity_rechecks_removed_actor() {
+    run_test(
+        "restore_committed_ambiguity_rechecks_removed_actor",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let member = create_member_session(
+                &run.harness,
+                wiki.session.workspace_id,
+                &format!("rev-member-{}@example.com", Uuid::now_v7().simple()),
+            )
+            .await;
+            let (state, hub) =
+                collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+            let addr = run.spawn_router_state(state, hub).await;
+            let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+            apply_and_persist(
+                addr,
+                &wiki.session.session_token,
+                &key,
+                1,
+                &engine_fixture("structured.v1"),
+            )
+            .await;
+            let (status, created) = http_json(
+                addr,
+                reqwest::Method::POST,
+                &revision_path(&wiki, ""),
+                &wiki.session.session_token,
+                None,
+            )
+            .await;
+            assert_eq!(status, reqwest::StatusCode::CREATED, "{created}");
+            let revision_id = created["id"].as_str().unwrap().to_string();
+            apply_and_persist(
+                addr,
+                &member.session_token,
+                &key,
+                4,
+                &engine_fixture("followup_edit.v1"),
+            )
+            .await;
+
+            let before = count_updates(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.document_id,
+            )
+            .await;
+            let (history_before, history_base, history_tail) =
+                capture_history_contract(&wiki).await;
+            let restore_body = preview_restore_body(
+                addr,
+                &revision_path(&wiki, &format!("/{revision_id}/restore")),
+                &member.session_token,
+            )
+            .await;
+            assert_eq!(restore_body["expectedTailSeq"], history_tail.to_string());
+            assert!(history_base
+                .content_json
+                .to_string()
+                .contains("후속편집한글"));
+
+            let (reached, proceed) = fvoci_server::db::collab::arm_restore_committed_ambiguity(
+                wiki.session.workspace_id,
+                wiki.document_id,
+            )
+            .await;
+            let restore = tokio::spawn({
+                let token = member.session_token.clone();
+                let path = revision_path(&wiki, &format!("/{revision_id}/restore"));
+                let restore_body = restore_body.clone();
+                async move {
+                    http_json(
+                        addr,
+                        reqwest::Method::POST,
+                        &path,
+                        &token,
+                        Some(restore_body.clone()),
+                    )
+                    .await
+                }
+            });
+            reached.await.expect("restore reached persist barrier");
+            workspace::remove_member(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.session.user_id,
+                wiki.session.session_id,
+                member.user_id,
+                None,
+            )
+            .await
+            .unwrap()
+            .expect("removed member");
+            let _ = proceed.send(());
+            let (status, body) = restore.await.unwrap();
+            assert_eq!(
+                status,
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "receipt recovery cannot authorize a removed actor: {body}"
+            );
+            let after = count_updates(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.document_id,
+            )
+            .await;
+            assert_eq!(
+                after,
+                before + 1,
+                "commit precedes revocation; no claim of rollback"
+            );
+            let (status, _) = http_json(
+                addr,
+                reqwest::Method::POST,
+                &revision_path(&wiki, &format!("/{revision_id}/restore")),
+                &member.session_token,
+                Some(restore_body.clone()),
+            )
+            .await;
+            assert_eq!(
+                status,
+                reqwest::StatusCode::NOT_FOUND,
+                "current route authorization precedes correlation retry"
+            );
+            let (_, history) = http_json(
+                addr,
+                reqwest::Method::GET,
+                &revision_path(&wiki, ""),
+                &wiki.session.session_token,
+                None,
+            )
+            .await;
+            let history_after = assert_restore_history_contract(
+                &wiki,
+                &history_before,
+                &history_base,
+                &revision_id,
+                None,
+                member.user_id,
+                &restore_body,
+            )
+            .await;
+            assert_eq!(
+                history["items"].as_array().unwrap().len(),
+                history_after.len()
+            );
+            let restored = history["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["reason"] == "restore")
+                .unwrap();
+            assert_eq!(restored["restoredFromId"], revision_id);
+            assert_eq!(restored["createdBy"], member.user_id.to_string());
+            let durable = support::get_document_body(
+                addr,
+                &wiki.session.session_token,
+                wiki.session.workspace_id,
+                wiki.document_id,
+            )
+            .await;
+            assert!(durable["contentJson"].to_string().contains("안녕 본문"));
+            assert!(!durable["contentJson"].to_string().contains("후속편집한글"));
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn restore_committed_ambiguity_rechecks_read_only_actor() {
+    run_test(
+        "restore_committed_ambiguity_rechecks_read_only_actor",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let owner = setup_owner_session(&run.harness).await;
+            let project = create_project(
+                &owner.pool,
+                owner.workspace_id,
+                owner.user_id,
+                owner.session_id,
+                CreateProjectInput {
+                    key: "R1READ",
+                    name: "Restore WRITE-only demotion",
+                    visibility: "private",
+                    description: None,
+                    icon: None,
+                    lead_user_id: None,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let document = create_project_document(
+                &owner.pool,
+                owner.workspace_id,
+                project.id,
+                owner.user_id,
+                owner.session_id,
+                CreateDocumentInput {
+                    parent_id: project.root_document_id,
+                    title: "Restore current READ",
+                    icon: None,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let wiki = WikiDocFixture {
+                session: owner,
+                document_id: document.id,
+            };
+            let revision_base = format!(
+                "/api/v1/workspaces/{}/projects/{}/documents/{}/revisions",
+                wiki.session.workspace_id, project.id, wiki.document_id
+            );
+            let member = create_member_session(
+                &run.harness,
+                wiki.session.workspace_id,
+                &format!("rev-member-{}@example.com", Uuid::now_v7().simple()),
+            )
+            .await;
+            add_project_member(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                project.id,
+                wiki.session.user_id,
+                wiki.session.session_id,
+                member.user_id,
+                ProjectMemberRole::Member,
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let (state, hub) =
+                collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+            let addr = run.spawn_router_state(state, hub).await;
+            let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+            apply_and_persist(
+                addr,
+                &wiki.session.session_token,
+                &key,
+                1,
+                &engine_fixture("structured.v1"),
+            )
+            .await;
+            let (status, created) = http_json(
+                addr,
+                reqwest::Method::POST,
+                &revision_base.clone(),
+                &wiki.session.session_token,
+                None,
+            )
+            .await;
+            assert_eq!(status, reqwest::StatusCode::CREATED, "{created}");
+            let revision_id = created["id"].as_str().unwrap().to_string();
+            apply_and_persist(
+                addr,
+                &member.session_token,
+                &key,
+                4,
+                &engine_fixture("followup_edit.v1"),
+            )
+            .await;
+
+            let before = count_updates(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.document_id,
+            )
+            .await;
+            let (history_before, history_base, history_tail) =
+                capture_history_contract(&wiki).await;
+            let restore_body = preview_restore_body(
+                addr,
+                &format!("{revision_base}/{revision_id}/restore"),
+                &member.session_token,
+            )
+            .await;
+            assert_eq!(restore_body["expectedTailSeq"], history_tail.to_string());
+            assert!(history_base
+                .content_json
+                .to_string()
+                .contains("후속편집한글"));
+
+            let (reached, proceed) = fvoci_server::db::collab::arm_restore_committed_ambiguity(
+                wiki.session.workspace_id,
+                wiki.document_id,
+            )
+            .await;
+            let restore = tokio::spawn({
+                let token = member.session_token.clone();
+                let path = format!("{revision_base}/{revision_id}/restore");
+                let restore_body = restore_body.clone();
+                async move {
+                    http_json(
+                        addr,
+                        reqwest::Method::POST,
+                        &path,
+                        &token,
+                        Some(restore_body.clone()),
+                    )
+                    .await
+                }
+            });
+            reached.await.expect("restore reached persist barrier");
+            fvoci_server::db::projects::update_project_member_role(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                project.id,
+                wiki.session.user_id,
+                wiki.session.session_id,
+                member.user_id,
+                ProjectMemberRole::Viewer,
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let admission = resolve_collab_admission(
+                &member.pool,
+                member.workspace_id,
+                member.user_id,
+                member.session_id,
+                wiki.document_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(
+                admission.read_only,
+                "actor retains authenticated READ while losing WRITE"
+            );
+            let (read_status, _) = http_json(
+                addr,
+                reqwest::Method::GET,
+                &format!("{revision_base}/{revision_id}"),
+                &member.session_token,
+                None,
+            )
+            .await;
+            assert_eq!(
+                read_status,
+                reqwest::StatusCode::OK,
+                "receipt READ remains authorized"
+            );
+            let _ = proceed.send(());
+            let (status, body) = restore.await.unwrap();
+            assert_eq!(
+                status,
+                reqwest::StatusCode::CONFLICT,
+                "verified receipt READ must not bypass current WRITE: {body}"
+            );
+            assert_eq!(body["code"], "restore_rejected");
+            let after = count_updates(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.document_id,
+            )
+            .await;
+            assert_eq!(
+                after,
+                before + 1,
+                "commit precedes revocation; no claim of rollback"
+            );
+            let (status, _) = http_json(
+                addr,
+                reqwest::Method::POST,
+                &format!("{revision_base}/{revision_id}/restore"),
+                &member.session_token,
+                Some(restore_body.clone()),
+            )
+            .await;
+            assert_eq!(
+                status,
+                reqwest::StatusCode::NOT_FOUND,
+                "current route authorization precedes correlation retry"
+            );
+            let (_, history) = http_json(
+                addr,
+                reqwest::Method::GET,
+                &revision_base.clone(),
+                &wiki.session.session_token,
+                None,
+            )
+            .await;
+            let history_after = assert_restore_history_contract(
+                &wiki,
+                &history_before,
+                &history_base,
+                &revision_id,
+                None,
+                member.user_id,
+                &restore_body,
+            )
+            .await;
+            assert_eq!(
+                history["items"].as_array().unwrap().len(),
+                history_after.len()
+            );
+            let restored = history["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["reason"] == "restore")
+                .unwrap();
+            assert_eq!(restored["restoredFromId"], revision_id);
+            assert_eq!(restored["createdBy"], member.user_id.to_string());
+            let (status, durable) = http_json(
+                addr,
+                reqwest::Method::GET,
+                &format!(
+                    "/api/v1/workspaces/{}/projects/{}/documents/{}/body",
+                    wiki.session.workspace_id, project.id, wiki.document_id
+                ),
+                &wiki.session.session_token,
+                None,
+            )
+            .await;
+            assert_eq!(status, reqwest::StatusCode::OK);
+            assert!(durable["contentJson"].to_string().contains("안녕 본문"));
+            assert!(!durable["contentJson"].to_string().contains("후속편집한글"));
             run.finish().await.expect("cleanup");
         },
     )
@@ -768,12 +2057,18 @@ async fn restart_after_restore_serves_restored_content() {
             &engine_fixture("followup_edit.v1"),
         )
         .await;
+        let restore_body = preview_restore_body(
+            addr,
+            &revision_path(&wiki, &format!("/{revision_id}/restore")),
+            &wiki.session.session_token,
+        )
+        .await;
         let (status, restored) = http_json(
             addr,
             reqwest::Method::POST,
             &revision_path(&wiki, &format!("/{revision_id}/restore")),
             &wiki.session.session_token,
-            Some(serde_json::json!({})),
+            Some(restore_body),
         )
         .await;
         assert_eq!(status, reqwest::StatusCode::OK, "{restored}");
@@ -879,6 +2174,12 @@ async fn restore_timeout_before_append_is_504_and_nothing_persisted() {
                 wiki.document_id,
             )
             .await;
+            let restore_body = preview_restore_body(
+                addr,
+                &revision_path(&wiki, &format!("/{revision_id}/restore")),
+                &wiki.session.session_token,
+            )
+            .await;
             let (reached, proceed) = arm_append_revoke_barrier(wiki.document_id).await;
             let restore = tokio::spawn({
                 let token = wiki.session.session_token.clone();
@@ -889,7 +2190,7 @@ async fn restore_timeout_before_append_is_504_and_nothing_persisted() {
                         reqwest::Method::POST,
                         &path,
                         &token,
-                        Some(serde_json::json!({})),
+                        Some(restore_body),
                     )
                     .await
                 }

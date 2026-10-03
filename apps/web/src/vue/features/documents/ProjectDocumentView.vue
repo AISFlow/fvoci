@@ -733,6 +733,7 @@ function refOf(number: number): string {
             :project-id="project.id"
             :read-only="readOnly"
             :persist-now="canPersist ? persistBody : undefined"
+            :source-dirty="!!sourceDraft?.dirty || !!sourceDraft?.composing"
           />
         </div>
         <UCollapsible

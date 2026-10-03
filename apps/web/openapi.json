@@ -10909,6 +10909,110 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/restore-preview": {
+      "get": {
+        "tags": [
+          "documents"
+        ],
+        "operationId": "preview_restore_revision",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "document_id",
+            "in": "path",
+            "description": "Document id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "revision_id",
+            "in": "path",
+            "description": "Revision id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Immutable source and current body with a coherent opaque tail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevisionRestorePreviewResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Target or revision unavailable or not editable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Archived target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collaboration unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Collaboration timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/documents/{document_id}/sort": {
       "post": {
         "tags": [
@@ -16988,6 +17092,119 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/revisions/{revision_id}/restore-preview": {
+      "get": {
+        "tags": [
+          "documents"
+        ],
+        "operationId": "preview_restore_project_document_revision",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "document_id",
+            "in": "path",
+            "description": "Document id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "revision_id",
+            "in": "path",
+            "description": "Revision id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Immutable source and current body with a coherent opaque tail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevisionRestorePreviewResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Target or revision unavailable or not editable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Archived target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collaboration unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Collaboration timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/sort": {
       "post": {
         "tags": [
@@ -22207,6 +22424,110 @@
           },
           "504": {
             "description": "Collab timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/revisions/{revision_id}/restore-preview": {
+      "get": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "preview_restore_task_revision",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "Task id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "revision_id",
+            "in": "path",
+            "description": "Revision id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Immutable source and current body with a coherent opaque tail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevisionRestorePreviewResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Target or revision unavailable or not editable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Archived target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collaboration unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Collaboration timeout",
             "content": {
               "application/json": {
                 "schema": {
@@ -30703,7 +31024,8 @@
           "createdBy",
           "createdAt",
           "contentJson",
-          "ySnapshot"
+          "ySnapshot",
+          "restoredFromId"
         ],
         "properties": {
           "contentJson": {},
@@ -30722,6 +31044,12 @@
           },
           "reason": {
             "type": "string"
+          },
+          "restoredFromId": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "targetId": {
             "type": "string"
@@ -30763,7 +31091,8 @@
           "targetId",
           "reason",
           "createdBy",
-          "createdAt"
+          "createdAt",
+          "restoredFromId"
         ],
         "properties": {
           "createdAt": {
@@ -30782,6 +31111,12 @@
           "reason": {
             "type": "string"
           },
+          "restoredFromId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "targetId": {
             "type": "string"
           },
@@ -30792,25 +31127,52 @@
       },
       "RevisionRestoreBody": {
         "type": "object",
+        "required": [
+          "correlationId",
+          "expectedTailSeq"
+        ],
         "properties": {
           "correlationId": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": "string",
             "format": "uuid"
+          },
+          "expectedTailSeq": {
+            "type": "string",
+            "description": "Opaque canonical decimal tail sequence; never a JavaScript number."
           }
         },
         "additionalProperties": false
       },
+      "RevisionRestorePreviewResponse": {
+        "type": "object",
+        "required": [
+          "source",
+          "currentContentJson",
+          "currentTailSeq"
+        ],
+        "properties": {
+          "currentContentJson": {},
+          "currentTailSeq": {
+            "type": "string",
+            "description": "Captured with current_content_json in the same room actor operation."
+          },
+          "source": {
+            "$ref": "#/components/schemas/RevisionDetailResponse"
+          }
+        }
+      },
       "RevisionRestoreResponse": {
         "type": "object",
         "required": [
-          "restored"
+          "restored",
+          "revisionId"
         ],
         "properties": {
           "restored": {
             "type": "boolean"
+          },
+          "revisionId": {
+            "type": "string"
           }
         }
       },

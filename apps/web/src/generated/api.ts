@@ -1960,6 +1960,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/restore-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["preview_restore_revision"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/documents/{document_id}/sort": {
         parameters: {
             query?: never;
@@ -2856,6 +2872,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/revisions/{revision_id}/restore-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["preview_restore_project_document_revision"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/sort": {
         parameters: {
             query?: never;
@@ -3570,6 +3602,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["restore_task_revision"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/revisions/{revision_id}/restore-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["preview_restore_task_revision"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -5575,6 +5623,7 @@ export interface components {
             createdBy: string | null;
             id: string;
             reason: string;
+            restoredFromId: string | null;
             targetId: string;
             targetKind: string;
             ySnapshot: string;
@@ -5589,15 +5638,25 @@ export interface components {
             createdBy: string | null;
             id: string;
             reason: string;
+            restoredFromId: string | null;
             targetId: string;
             targetKind: string;
         };
         RevisionRestoreBody: {
             /** Format: uuid */
-            correlationId?: string | null;
+            correlationId: string;
+            /** @description Opaque canonical decimal tail sequence; never a JavaScript number. */
+            expectedTailSeq: string;
+        };
+        RevisionRestorePreviewResponse: {
+            currentContentJson: unknown;
+            /** @description Captured with current_content_json in the same room actor operation. */
+            currentTailSeq: string;
+            source: components["schemas"]["RevisionDetailResponse"];
         };
         RevisionRestoreResponse: {
             restored: boolean;
+            revisionId: string;
         };
         ScaleTickOutput: {
             date: components["schemas"]["String"];
@@ -14312,6 +14371,78 @@ export interface operations {
             };
         };
     };
+    preview_restore_revision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Document id */
+                document_id: string;
+                /** @description Revision id */
+                revision_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Immutable source and current body with a coherent opaque tail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevisionRestorePreviewResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Target or revision unavailable or not editable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Archived target */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Collaboration unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Collaboration timeout */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
     sort_document: {
         parameters: {
             query?: never;
@@ -18290,6 +18421,80 @@ export interface operations {
             };
         };
     };
+    preview_restore_project_document_revision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Project id */
+                project_id: string;
+                /** @description Document id */
+                document_id: string;
+                /** @description Revision id */
+                revision_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Immutable source and current body with a coherent opaque tail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevisionRestorePreviewResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Target or revision unavailable or not editable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Archived target */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Collaboration unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Collaboration timeout */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
     sort_project_document: {
         parameters: {
             query?: never;
@@ -21554,6 +21759,78 @@ export interface operations {
                 };
             };
             /** @description Collab timeout */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    preview_restore_task_revision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Task id */
+                task_id: string;
+                /** @description Revision id */
+                revision_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Immutable source and current body with a coherent opaque tail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevisionRestorePreviewResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Target or revision unavailable or not editable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Archived target */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Collaboration unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Collaboration timeout */
             504: {
                 headers: {
                     [name: string]: unknown;

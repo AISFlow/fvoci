@@ -97,6 +97,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
         45,
     ),
     (include_str!("../../migrations/048_task_timers.sql"), 48),
+    (
+        include_str!("../../migrations/050_revision_restore_metadata.sql"),
+        50,
+    ),
 ];
 
 pub(crate) const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -745,6 +749,10 @@ mod tests {
         (
             48,
             "b7f943996e9cc9918c90ceb780db285708a31c165368064cd17eb0a5f14ed787",
+        ),
+        (
+            50,
+            "201e77d18302c25e2b933168d4678a6bb27e251454f1d9d42e5f3aa0ceda09bf",
         ),
     ];
 
