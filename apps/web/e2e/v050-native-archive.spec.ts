@@ -3604,11 +3604,10 @@ test("native archive restores document tag search filters into a separate instal
       z
         .object({
           id: z.string(),
-          kind: z.string(),
+          kind: z.literal("document"),
           documentId: z.string().uuid(),
           workspaceId: z.string().uuid(),
-          title: z.string(),
-          body: z.string(),
+          projectId: z.string().uuid(),
         })
         .passthrough(),
     ),
@@ -3695,7 +3694,30 @@ test("native archive restores document tag search filters into a separate instal
         }),
       });
       expect(response.status, "real Meili candidate observer HTTP").toBe(200);
-      return candidatesSchema.parse(await response.json()).hits;
+      const hits = candidatesSchema.parse(await response.json()).hits;
+      const indexedSchema = candidatesSchema.shape.hits.element.extend({
+        title: z.string(),
+        body: z.string(),
+      });
+      return Promise.all(
+        hits.map(async (hit) => {
+          // Product search returns identity candidates only; SQL hydrates content/ACL.
+          // The private test observer separately verifies the indexed document bytes.
+          expect(hit.workspaceId).toBe(tenant);
+          expect(hit.projectId).toBe(project.id);
+          expect(Object.hasOwn(hit, "title")).toBe(false);
+          expect(Object.hasOwn(hit, "body")).toBe(false);
+          const indexedResponse = await fetch(
+            `${meiliUrl}/indexes/${index}/documents/${encodeURIComponent(hit.id)}`,
+            { headers: { Authorization: `Bearer ${observerKey}` } },
+          );
+          expect(indexedResponse.status, "real Meili indexed document observer HTTP").toBe(200);
+          const indexed = indexedSchema.parse(await indexedResponse.json());
+          for (const key of ["id", "kind", "documentId", "workspaceId", "projectId"] as const)
+            expect(indexed[key], `indexed identity matches search candidate ${key}`).toBe(hit[key]);
+          return { ...hit, title: indexed.title, body: indexed.body };
+        }),
+      );
     };
     const search = async (request: APIRequestContext, tenant: string, tagId?: string) => {
       const query = `q=${token}&type=document${tagId ? `&tag=${tagId}` : ""}`;
