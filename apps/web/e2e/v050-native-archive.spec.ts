@@ -3748,7 +3748,11 @@ test("native archive restores document tag search filters into a separate instal
       expect(privateRead.status()).toBe(404);
       expect(await privateRead.text()).not.toContain(token);
     } finally {
-      await unauthorized.close();
+      try {
+        await unauthorized.close();
+      } catch (error) {
+        errors.push(error);
+      }
     }
     record(out, "expected-before-export.json", {
       ws,
@@ -3807,7 +3811,11 @@ test("native archive restores document tag search filters into a separate instal
       await importer.getByRole("button", { name: "확인한 내용 복원" }).click();
       await expect(importer.getByRole("status")).toContainText("복원이 완료되었습니다");
     } finally {
-      await destination.close();
+      try {
+        await destination.close();
+      } catch (error) {
+        errors.push(error);
+      }
     }
     const fresh = await browser.newContext({ baseURL: destinationInstall.url });
     try {
@@ -3903,7 +3911,11 @@ test("native archive restores document tag search filters into a separate instal
         normalServerEnvNames: destinationInstall.envNames,
       });
     } finally {
-      await fresh.close();
+      try {
+        await fresh.close();
+      } catch (error) {
+        errors.push(error);
+      }
     }
     destinationInstall.createUser(probe);
     const outsider = await browser.newContext({ baseURL: destinationInstall.url });
@@ -3923,10 +3935,14 @@ test("native archive restores document tag search filters into a separate instal
       expect(workspaceRead.status()).toBe(404);
       expect(await workspaceRead.text()).not.toContain(token);
     } finally {
-      await outsider.close();
+      try {
+        await outsider.close();
+      } catch (error) {
+        errors.push(error);
+      }
     }
   } catch (error) {
-    errors.push(error);
+    errors.unshift(error);
   }
   // Keep the primary assertion first and attempt both owned cleanup steps even
   // if either fails; throw only after every attempt, outside a finally block.
