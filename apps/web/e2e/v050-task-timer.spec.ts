@@ -4665,6 +4665,32 @@ function assertJointTimerEstimatePreserved(
   expect(after.identity, "same planned task/project/document origin").toEqual(before.identity);
 }
 
+type JointCollabReceipt = {
+  seq: string;
+  op_id: string;
+  actor_user_id: string;
+  payload_len: number;
+  payload_sha256: string;
+};
+function assertJointRestoreAppend(
+  before: { tail: string; receipts: JointCollabReceipt[] },
+  after: { tail: string; receipts: JointCollabReceipt[] },
+  actorId: string,
+) {
+  expect(BigInt(after.tail)).toBe(BigInt(before.tail) + 1n);
+  // Persist compacts update rows, but durable operation receipts survive it.
+  expect(after.receipts).toHaveLength(before.receipts.length + 1);
+  expect(after.receipts.slice(0, -1)).toEqual(before.receipts);
+  const receipt = after.receipts.at(-1);
+  expect(receipt).toBeDefined();
+  if (!receipt) throw new Error("restore forward receipt missing");
+  expect(receipt.seq).toBe(after.tail);
+  expect(receipt.actor_user_id).toBe(actorId);
+  expect(before.receipts.some((old) => old.op_id === receipt.op_id)).toBe(false);
+  expect(receipt.payload_len).toBeGreaterThan(0);
+  expect(receipt.payload_sha256).toMatch(/^\\x[0-9a-f]{64}$/);
+}
+
 test("one ordinary task restore preserves paused timer and explicit estimate while its stale estimate intent conflicts", async ({
   page,
   browser,
@@ -4727,6 +4753,17 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
         updatedAt: z.string(),
         tail: z.string(),
         updates: z.number(),
+        receipts: z.array(
+          z
+            .object({
+              seq: z.string(),
+              op_id: z.string().uuid(),
+              actor_user_id: z.string().uuid(),
+              payload_len: z.number(),
+              payload_sha256: z.string(),
+            })
+            .passthrough(),
+        ),
         identity: z.object({
           task: z.string().uuid(),
           project: z.string().uuid(),
@@ -4738,7 +4775,7 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
       .parse(
         JSON.parse(
           diagnosticSql(
-            `SELECT jsonb_build_object('estimate',t.estimate::text,'unit',t.estimate_unit,'updatedAt',to_char(t.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"'),'tail',(SELECT tail_seq::text FROM fvoci.task_states WHERE workspace_id=t.workspace_id AND task_id=t.id),'updates',(SELECT count(*) FROM fvoci.task_collab_updates WHERE workspace_id=t.workspace_id AND task_id=t.id),'identity',jsonb_build_object('task',t.id,'project',t.project_id,'origins',(SELECT jsonb_agg(to_jsonb(o) ORDER BY o.workspace_id,o.task_id) FROM fvoci.task_origins o WHERE o.workspace_id=t.workspace_id AND o.task_id=t.id))) FROM fvoci.tasks t WHERE t.workspace_id='${fixture.workspaceId}' AND t.id='${goal.taskId}'`,
+            `SELECT jsonb_build_object('estimate',t.estimate::text,'unit',t.estimate_unit,'updatedAt',to_char(t.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"'),'tail',(SELECT tail_seq::text FROM fvoci.task_states WHERE workspace_id=t.workspace_id AND task_id=t.id),'updates',(SELECT count(*) FROM fvoci.task_collab_updates WHERE workspace_id=t.workspace_id AND task_id=t.id),'receipts',(SELECT coalesce(jsonb_agg(to_jsonb(r)||jsonb_build_object('seq',r.seq::text) ORDER BY r.seq,r.op_id),'[]'::jsonb) FROM fvoci.task_collab_op_receipts r WHERE r.workspace_id=t.workspace_id AND r.task_id=t.id),'identity',jsonb_build_object('task',t.id,'project',t.project_id,'origins',(SELECT jsonb_agg(to_jsonb(o) ORDER BY o.workspace_id,o.task_id) FROM fvoci.task_origins o WHERE o.workspace_id=t.workspace_id AND o.task_id=t.id))) FROM fvoci.tasks t WHERE t.workspace_id='${fixture.workspaceId}' AND t.id='${goal.taskId}'`,
           ),
         ),
       ),
@@ -4923,11 +4960,15 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
   });
   let heldBody: z.infer<typeof commandShape> | undefined;
   const estimateRoute = (url: URL) => url.pathname === timerUrl + "/estimate";
+  let heldContinuation: Promise<void> | undefined;
   await page.route(estimateRoute, async (route) => {
     if (route.request().method() !== "POST") return route.continue();
-    heldBody = commandShape.parse(route.request().postDataJSON());
-    await gate;
-    await route.continue();
+    heldContinuation = (async () => {
+      heldBody = commandShape.parse(route.request().postDataJSON());
+      await gate;
+      await route.continue();
+    })();
+    await heldContinuation;
   });
   try {
     await estimateEditor.getByRole("button", { name: "예상 시간 저장", exact: true }).click();
@@ -4968,8 +5009,7 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
     const afterRestore = readState();
     assertJointTimerEstimatePreserved(beforeRestore, afterRestore);
     expect(afterRestore.updatedAt).not.toBe(beforeRestore.updatedAt);
-    expect(BigInt(afterRestore.tail)).toBe(BigInt(beforeRestore.tail) + 1n);
-    expect(afterRestore.updates).toBe(beforeRestore.updates + 1);
+    assertJointRestoreAppend(beforeRestore, afterRestore, fixture.actor.userId);
     const restoreDetail = await page.request.get(base + "/revisions/" + restored.revisionId);
     expect(restoreDetail.ok()).toBe(true);
     z.object({
@@ -5052,6 +5092,7 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
     });
   } finally {
     release();
+    await heldContinuation;
     await page.unroute(estimateRoute);
   }
 });
