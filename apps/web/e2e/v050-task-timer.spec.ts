@@ -154,6 +154,9 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
     const restart: TimerRestart = async () => {
       const { native, configuredBin, binaryHash } = captureTimerNative(page);
       expect(native).toHaveLength(1);
+      // Finish this generation's browser/served-byte observation while its
+      // exact server is still live; later generations retain separate records.
+      await verifyLoadedEntrypoints(page, native);
       const before = native[0];
       if (!before) throw new Error("verified original native witness missing");
       expect(before.procStartTicks).toMatch(/^\d+$/);
@@ -682,11 +685,71 @@ test.beforeAll(() => {
 // Read entrypoints in the fresh about:blank document before any test navigation.
 // Capture actual browser responses while the app loads: auth retirement may
 // destroy the final document before afterEach, but cannot replace this evidence.
-type EntrypointCapture = { url: string; sha256: string } | { url: string; error: unknown };
+type EntrypointEvidence = {
+  path: string;
+  url: string;
+  documentUrl: string;
+  pageUrl: string;
+  servedUrl: string;
+  native: TimerNative;
+  browserLoadedSha256: string;
+  servedSha256: string;
+  ownStaticSha256: string;
+};
+type EntrypointCapture = EntrypointEvidence | { url: string; error: unknown };
 const loadedEntrypoints = new WeakMap<
   Page,
-  { paths: string[]; responses: Map<string, Promise<EntrypointCapture>> }
+  {
+    paths: string[];
+    responses: Map<string, Promise<EntrypointCapture>>;
+    errors: Array<{ url: string; error: unknown }>;
+  }
 >();
+function nativeGeneration(native: TimerNative) {
+  return `${String(native.pid)}:${native.procStartTicks}:${native.listeningOrigin}`;
+}
+function assertEntrypointEvidence(evidence: EntrypointEvidence) {
+  const origin = new URL(evidence.url).origin;
+  expect(new URL(evidence.url).pathname).toBe(evidence.path);
+  expect(origin).toBe(new URL(evidence.documentUrl).origin);
+  expect(origin).toBe(new URL(evidence.pageUrl).origin);
+  expect(origin).toBe(new URL(evidence.servedUrl).origin);
+  expect(new URL(evidence.servedUrl).pathname).toBe(evidence.path);
+  expect(origin).toBe(evidence.native.listeningOrigin);
+  expect(evidence.native.pid).toBeGreaterThan(0);
+  expect(evidence.native.procStartTicks).toMatch(/^\d+$/);
+  expect(evidence.native.knownFileSha256).toMatch(/^[0-9a-f]{64}$/);
+  expect(evidence.browserLoadedSha256, evidence.path).toBe(evidence.ownStaticSha256);
+  expect(evidence.servedSha256, evidence.path).toBe(evidence.ownStaticSha256);
+}
+async function verifyLoadedEntrypoints(page: Page, native: TimerNative[]) {
+  const entrypoints = loadedEntrypoints.get(page);
+  if (!entrypoints) throw new Error("browser entrypoint capture missing");
+  if (entrypoints.errors.length) throw entrypoints.errors[0]?.error;
+  const assets: EntrypointEvidence[] = [];
+  for (const pending of entrypoints.responses.values()) {
+    const loaded = await pending;
+    if ("error" in loaded)
+      throw new Error(`browser/served entrypoint capture failed: ${loaded.url}`, {
+        cause: loaded.error,
+      });
+    assertEntrypointEvidence(loaded);
+    assets.push(loaded);
+  }
+  expect(native).toHaveLength(1);
+  const current = native[0];
+  if (!current) throw new Error("current native generation missing");
+  for (const pathname of entrypoints.paths) {
+    expect(
+      assets.some(
+        (asset) =>
+          asset.path === pathname && nativeGeneration(asset.native) === nativeGeneration(current),
+      ),
+      `entrypoint was not loaded by this native generation: ${pathname}`,
+    ).toBe(true);
+  }
+  return assets;
+}
 test.beforeEach(async ({ page }) => {
   const staticDir = process.env.FVOCI_STATIC_DIR;
   if (!staticDir) throw new Error("own static namespace missing");
@@ -701,25 +764,59 @@ test.beforeEach(async ({ page }) => {
   );
   expect(paths.length).toBeGreaterThan(0);
   const responses = new Map<string, Promise<EntrypointCapture>>();
-  loadedEntrypoints.set(page, { paths, responses });
+  const errors: Array<{ url: string; error: unknown }> = [];
+  loadedEntrypoints.set(page, { paths, responses, errors });
   page.on("response", (response) => {
     const pathname = new URL(response.url()).pathname;
     if (
       response.request().resourceType() === "script" &&
       paths.includes(pathname) &&
-      response.ok() &&
-      !responses.has(pathname)
+      response.ok()
     ) {
       const url = response.url();
-      // Begin reading before any auth reload. A failed read remains a hard
-      // afterEach failure; the rejection handler only retains its original cause.
-      responses.set(
-        pathname,
-        response.body().then(
-          (body) => ({ url, sha256: createHash("sha256").update(body).digest("hex") }),
-          (error: unknown) => ({ url, error }),
-        ),
-      );
+      try {
+        expect(response.frame()).toBe(page.mainFrame());
+        const documentUrl = response.frame().url();
+        const pageUrl = page.url();
+        const { native } = captureTimerNative(page);
+        expect(native).toHaveLength(1);
+        const witness = native[0];
+        if (!witness) throw new Error("browser response native generation missing");
+        const key = `${nativeGeneration(witness)}:${pathname}`;
+        if (responses.has(key)) return;
+        // Independent HTTP bytes are read at capture, before this server can
+        // stop. Keep every generation's first browser response, never overwrite.
+        const capture = async (): Promise<EntrypointEvidence> => {
+          const body = await response.body();
+          const served = await page.request.get(url);
+          expect(served.ok(), url).toBe(true);
+          const evidence = {
+            path: pathname,
+            url,
+            documentUrl,
+            pageUrl,
+            servedUrl: served.url(),
+            native: witness,
+            browserLoadedSha256: createHash("sha256").update(body).digest("hex"),
+            servedSha256: createHash("sha256")
+              .update(await served.body())
+              .digest("hex"),
+            ownStaticSha256: createHash("sha256")
+              .update(readFileSync(path.join(staticDir, pathname)))
+              .digest("hex"),
+          };
+          assertEntrypointEvidence(evidence);
+          return evidence;
+        };
+        responses.set(
+          key,
+          capture().catch((error: unknown) => ({ url, error })),
+        );
+      } catch (error) {
+        // Event callbacks cannot await. Retain the original hard failure for
+        // the pre-stop fence/afterEach instead of losing an unhandled rejection.
+        errors.push({ url, error });
+      }
     }
   });
 });
@@ -732,38 +829,7 @@ test.afterEach(async ({ page }, testInfo) => {
     ),
   );
   const { native } = captureTimerNative(page);
-  const entrypoints = loadedEntrypoints.get(page);
-  if (!entrypoints) throw new Error("browser entrypoint capture missing");
-  const assets = [];
-  for (const pathname of entrypoints.paths) {
-    const pending = entrypoints.responses.get(pathname);
-    if (!pending) throw new Error(`entrypoint was not loaded by the browser: ${pathname}`);
-    const loaded = await pending;
-    if ("error" in loaded)
-      throw new Error(`browser entrypoint body capture failed: ${pathname}`, {
-        cause: loaded.error,
-      });
-    expect(new URL(loaded.url).origin).toBe(new URL(page.url()).origin);
-    const browserLoaded = loaded.sha256;
-    const response = await page.request.get(loaded.url);
-    expect(response.ok(), pathname).toBe(true);
-    const served = createHash("sha256")
-      .update(await response.body())
-      .digest("hex");
-    const staticDir = process.env.FVOCI_STATIC_DIR;
-    if (!staticDir) throw new Error("own static namespace missing");
-    const copied = createHash("sha256")
-      .update(readFileSync(path.join(staticDir, pathname)))
-      .digest("hex");
-    expect(browserLoaded, pathname).toBe(copied);
-    expect(served, pathname).toBe(copied);
-    assets.push({
-      path: pathname,
-      browserLoadedSha256: browserLoaded,
-      servedSha256: served,
-      ownStaticSha256: copied,
-    });
-  }
+  const assets = await verifyLoadedEntrypoints(page, native);
   const { container, database, role } = diagnosticDatabase();
   const proof = {
     test: testInfo.title,
