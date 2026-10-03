@@ -3680,6 +3680,8 @@ test("native archive restores document tag search filters into a separate instal
       ],
       actor.userId,
     );
+    record(out, "source-native-save-ack.json", { workspaceId: ws, documentId: tagged.id, stored });
+    expect(stored.text, "ordinary save SQL text matches the independent body literal").toBe(body);
     const expectedIds = [tagged.id, untagged.id].sort();
     const candidates = async (index: string, tenant: string) => {
       // Test observer uses fetch, so its synthetic preparation key is not written
@@ -3730,8 +3732,14 @@ test("native archive restores document tag search filters into a separate instal
       return replies;
     };
     await expect
-      .poll(async () => (await candidates(sourceIndex, ws)).map((item) => item.documentId).sort())
-      .toEqual(expectedIds);
+      .poll(async () => {
+        const indexed = await candidates(sourceIndex, ws);
+        return {
+          ids: indexed.map((item) => item.documentId).sort(),
+          taggedBody: indexed.find((item) => item.documentId === tagged.id)?.body,
+        };
+      })
+      .toEqual({ ids: expectedIds, taggedBody: body });
     const sourceCandidates = await candidates(sourceIndex, ws);
     expect(
       sourceCandidates
@@ -3897,12 +3905,14 @@ test("native archive restores document tag search filters into a separate instal
         ).items,
       ).toEqual([]);
       await expect
-        .poll(async () =>
-          (await candidates(destinationIndex, restoredWorkspace))
-            .map((item) => item.documentId)
-            .sort(),
-        )
-        .toEqual(expectedIds);
+        .poll(async () => {
+          const indexed = await candidates(destinationIndex, restoredWorkspace);
+          return {
+            ids: indexed.map((item) => item.documentId).sort(),
+            taggedBody: indexed.find((item) => item.documentId === tagged.id)?.body,
+          };
+        })
+        .toEqual({ ids: expectedIds, taggedBody: body });
       const restoredCandidates = await candidates(destinationIndex, restoredWorkspace);
       expect(
         restoredCandidates
