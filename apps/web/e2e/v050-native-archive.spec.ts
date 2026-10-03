@@ -39,7 +39,7 @@ const workspaces = z.object({
 
 // A real refused ordinary-project flow. It does not replace the required
 // two-installation native history/attachment/peer-edit positive fixture.
-test("native archive shows limits and refuses an unsupported recurring task without downloading an incomplete artifact", async ({
+test("native archive shows limits and refuses an unsupported member grant without downloading an incomplete artifact", async ({
   page,
 }) => {
   const csp = watchCspViolations(page);
@@ -67,13 +67,26 @@ test("native archive shows limits and refuses an unsupported recurring task with
   const project = ids
     .extend({ rootDocumentId: z.string().uuid() })
     .parse(await projectResponse.json());
-  // Task time, dependencies and saved views are supported models now; a
-  // recurring task is still refused.
-  const recurring = await page.request.post(
-    `/api/v1/workspaces/${workspace.id}/projects/${project.id}/tasks`,
-    { data: { title: "반복 태스크 🧪", recurrence: { kind: "weekly" } } },
+  // Task time, dependencies, saved views and recurring tasks are supported
+  // models now; a second person's project grant (team/multi-author) is still
+  // refused.
+  createE2eUser("native-member@example.com", "nativemember123", "멤버", {
+    workspaceSlug: "native-source",
+    membershipRole: "member",
+  });
+  const members = await page.request.get(`/api/v1/workspaces/${workspace.id}/members`);
+  expect(members.ok()).toBe(true);
+  const member = z
+    .object({ items: z.array(z.object({ email: z.string(), userId: z.string() }).passthrough()) })
+    .passthrough()
+    .parse(await members.json())
+    .items.find((item) => item.email === "native-member@example.com");
+  if (!member) throw new Error("ordinary second member missing");
+  const grant = await page.request.post(
+    `/api/v1/workspaces/${workspace.id}/projects/${project.id}/members`,
+    { data: { userId: member.userId, role: "viewer" } },
   );
-  expect(recurring.ok(), await recurring.text()).toBe(true);
+  expect(grant.status(), await grant.text()).toBe(201);
   await page.goto("/w/native-source/settings");
   await page.getByLabel("보관할 프로젝트").selectOption(project.id);
   const source = page
@@ -96,7 +109,7 @@ test("native archive shows limits and refuses an unsupported recurring task with
   const alerts = source.getByRole("alert");
   await expect(alerts).toHaveCount(2);
   await expect(alerts.nth(0)).toContainText("완전한 보관 파일이나 복원이 생성되지 않았습니다");
-  await expect(alerts.nth(1)).toHaveText("recurrence");
+  await expect(alerts.nth(1)).toHaveText("multiple authors or grants");
   expect(downloads).toBe(0);
   expect(csp).toEqual([]);
 });
@@ -879,6 +892,7 @@ class Installation {
   constructor(
     readonly dir: string,
     pepper?: { keys: string; active: string },
+    readonly search?: { url: string; index: string },
   ) {
     this.pepper = pepper?.keys ?? JSON.stringify({ dst: randomBytes(32).toString("hex") });
     this.pepperId = pepper?.active ?? "dst";
@@ -956,6 +970,15 @@ class Installation {
     );
     this.created.role = true;
     this.tool(["fvoci-migrate", "--grant-app-role", this.role], { DATABASE_URL: this.adminUrl });
+    if (this.search) {
+      const master = process.env.MEILI_MASTER_KEY;
+      if (!master) throw new Error("test-owned Meili preparation key missing");
+      this.tool(["fvoci-migrate", "--ensure-meili-key", path.join(this.storageDir, "meili.key")], {
+        FVOCI_MEILI_URL: this.search.url,
+        FVOCI_MEILI_INDEX: this.search.index,
+        MEILI_MASTER_KEY: master,
+      });
+    }
   }
   async startServer(): Promise<void> {
     const env = ownedServerChildEnv("127.0.0.1:0");
@@ -964,6 +987,11 @@ class Installation {
     env.PASSWORD_PEPPER_KEYS = this.pepper;
     env.PASSWORD_PEPPER_ACTIVE_KEY_ID = this.pepperId;
     env.RUST_LOG = "warn,tower_http=debug";
+    if (this.search) {
+      env.FVOCI_MEILI_URL = this.search.url;
+      env.FVOCI_MEILI_INDEX = this.search.index;
+      env.FVOCI_MEILI_KEY_FILE = path.join(this.storageDir, "meili.key");
+    }
     this.envNames = Object.keys(env).sort();
     const serverBin = process.env.FVOCI_E2E_SERVER_BIN;
     if (!serverBin) throw new Error("FVOCI_E2E_SERVER_BIN missing");
@@ -3525,4 +3553,392 @@ test("Z2 harness: a late CLI reply poisons the protocol and cleanup attempts eve
   }
   // Only reached when the test body passed: cleanup failures still fail it.
   if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "harness cleanup failed");
+});
+
+// Proposed test-only delta; NOTRUN until Root source-GO and frozen runtime START.
+test("native archive restores document tag search filters into a separate installation", async ({
+  browser,
+  baseURL,
+}, testInfo) => {
+  const meiliUrl = process.env.FVOCI_MEILI_URL;
+  const sourceIndex = process.env.FVOCI_MEILI_INDEX ?? "fvoci";
+  const observerKey = process.env.MEILI_MASTER_KEY;
+  const sourceApp = process.env.DATABASE_APP_URL;
+  if (!baseURL || !meiliUrl || !observerKey || !sourceApp)
+    throw new Error("real source app-role/Meili fixture missing");
+  const out = testInfo.outputPath("native-tags");
+  mkdirSync(out, { recursive: true });
+  const destinationIndex = `native_tags_${randomBytes(8).toString("hex")}`;
+  const destinationInstall = new Installation(out, undefined, {
+    url: meiliUrl,
+    index: destinationIndex,
+  });
+  const token = `w8tag${randomBytes(8).toString("hex")}`;
+  const body = `${token} 실제 보존 본문 한글🙂`;
+  const titles = [`${token} 태그 문서`, `${token} 태그 없는 문서`];
+  const tagSchema = z
+    .object({
+      id: z.string().uuid(),
+      workspaceId: z.string().uuid(),
+      name: z.string(),
+      color: z.string(),
+    })
+    .passthrough();
+  const tagsSchema = z.object({ items: z.array(tagSchema) });
+  const searchSchema = z.object({
+    items: z.array(
+      z
+        .object({
+          id: z.string().uuid(),
+          type: z.string(),
+          title: z.string(),
+          workspaceId: z.string().uuid(),
+          snippet: z.array(z.object({ text: z.string(), match: z.boolean() })).nullable(),
+        })
+        .passthrough(),
+    ),
+    nextCursor: z.string().nullable(),
+  });
+  const candidatesSchema = z.object({
+    hits: z.array(
+      z
+        .object({
+          id: z.string(),
+          kind: z.string(),
+          documentId: z.string().uuid(),
+          workspaceId: z.string().uuid(),
+          title: z.string(),
+          body: z.string(),
+        })
+        .passthrough(),
+    ),
+  });
+  const source = await browser.newContext({ baseURL });
+  const errors: unknown[] = [];
+  try {
+    const page = await source.newPage();
+    await login(page, SOURCE_OWNER.email, SOURCE_OWNER.password);
+    const actor = await okJson(page.request.get("/api/v1/auth/me"), meSchema);
+    const workspace = (
+      await okJson(page.request.get("/api/v1/me/workspaces"), workspaces)
+    ).items.find((item) => item.slug === "native-source");
+    if (!workspace) throw new Error("ordinary source workspace missing");
+    const ws = workspace.id;
+    const project = await okJson(
+      page.request.post(`/api/v1/workspaces/${ws}/projects`, {
+        data: { key: "W8TAG", name: "태그 검색 복원 🧪", visibility: "private" },
+      }),
+      projectSchema,
+    );
+    const documents = [];
+    for (const title of titles)
+      documents.push(
+        await okJson(
+          page.request.post(`/api/v1/workspaces/${ws}/projects/${project.id}/documents`, {
+            data: { title, parentId: project.rootDocumentId },
+          }),
+          documentMeta,
+        ),
+      );
+    const tagged = documents[0];
+    const untagged = documents[1];
+    if (!tagged || !untagged) throw new Error("two ordinary documents missing");
+    const tag = await okJson(
+      page.request.post(`/api/v1/workspaces/${ws}/document-tags`, {
+        data: { name: "파란 복원 태그 🧪", color: "blue" },
+      }),
+      tagSchema,
+    );
+    const assignment = await page.request.post(
+      `/api/v1/workspaces/${ws}/projects/${project.id}/documents/${tagged.id}/tags`,
+      {
+        data: { tagId: tag.id },
+      },
+    );
+    expect(assignment.status(), await assignment.text()).toBe(200);
+    await openItem(page, workspace.slug, `W8TAG-${String(tagged.number)}`, ".document-page");
+    await edit(page, ".document-page", {
+      kind: "set",
+      content: {
+        type: "doc",
+        content: [{ type: "paragraph", content: [{ type: "text", text: body }] }],
+      },
+    });
+    await persist(page, ".document-page");
+    const stored = await waitDurable(
+      sourceApp,
+      ws,
+      "document",
+      tagged.id,
+      [{ type: "paragraph", runs: [{ text: body, marks: [] }] }],
+      actor.userId,
+    );
+    const expectedIds = [tagged.id, untagged.id].sort();
+    const candidates = async (index: string, tenant: string) => {
+      // Test observer uses fetch, so its synthetic preparation key is not written
+      // into Playwright request traces or any evidence; normal servers use scoped keyFILE.
+      const response = await fetch(`${meiliUrl}/indexes/${index}/search`, {
+        method: "POST",
+        headers: { "content-type": "application/json", Authorization: `Bearer ${observerKey}` },
+        body: JSON.stringify({
+          q: token,
+          filter: `workspaceId = "${tenant}" AND kind = "document"`,
+          limit: 20,
+        }),
+      });
+      expect(response.status, "real Meili candidate observer HTTP").toBe(200);
+      return candidatesSchema.parse(await response.json()).hits;
+    };
+    const search = async (request: APIRequestContext, tenant: string, tagId?: string) => {
+      const query = `q=${token}&type=document${tagId ? `&tag=${tagId}` : ""}`;
+      const replies = [];
+      for (const route of [`/api/v1/workspaces/${tenant}/search`, "/api/v1/search"]) {
+        const response = await request.get(`${route}?${query}`);
+        expect(response.status(), await response.text()).toBe(200);
+        replies.push(searchSchema.parse(await response.json()));
+      }
+      return replies;
+    };
+    await expect
+      .poll(async () => (await candidates(sourceIndex, ws)).map((item) => item.documentId).sort())
+      .toEqual(expectedIds);
+    const sourceCandidates = await candidates(sourceIndex, ws);
+    expect(
+      sourceCandidates
+        .map((item) => ({ id: item.id, title: item.title, workspaceId: item.workspaceId }))
+        .sort((a, b) => a.id.localeCompare(b.id)),
+    ).toEqual(
+      documents
+        .map((item) => ({ id: `document_${item.id}`, title: item.title, workspaceId: ws }))
+        .sort((a, b) => a.id.localeCompare(b.id)),
+    );
+    expect(sourceCandidates.find((item) => item.documentId === tagged.id)?.body).toBe(body);
+    for (const reply of await search(page.request, ws))
+      expect(reply.items.map((item) => item.id).sort()).toEqual(expectedIds);
+    const sourceFiltered = await search(page.request, ws, tag.id);
+    for (const reply of sourceFiltered) {
+      expect(reply.nextCursor).toBeNull();
+      expect(
+        reply.items.map((item) => ({
+          id: item.id,
+          type: item.type,
+          title: item.title,
+          workspaceId: item.workspaceId,
+        })),
+      ).toEqual([{ id: tagged.id, type: "document", title: titles[0], workspaceId: ws }]);
+      expect(reply.items[0]?.snippet?.map((piece) => piece.text).join("")).toBe(body);
+    }
+    const probe = { email: "native-tags-probe@example.com", password: "nativetagsprobe123" };
+    createE2eUser(probe.email, probe.password, "태그 권한 검증", {
+      workspaceSlug: "native-source",
+      membershipRole: "member",
+    });
+    const unauthorized = await browser.newContext({ baseURL });
+    try {
+      const ppage = await unauthorized.newPage();
+      await login(ppage, probe.email, probe.password);
+      const denied = await search(ppage.request, ws, tag.id);
+      for (const reply of denied) {
+        expect(reply.items).toEqual([]);
+        expect(JSON.stringify(reply)).not.toContain(token);
+      }
+      const privateRead = await ppage.request.get(
+        `/api/v1/workspaces/${ws}/projects/${project.id}/documents/${tagged.id}`,
+      );
+      expect(privateRead.status()).toBe(404);
+      expect(await privateRead.text()).not.toContain(token);
+    } finally {
+      await unauthorized.close();
+    }
+    record(out, "expected-before-export.json", {
+      ws,
+      project: project.id,
+      documents,
+      tag,
+      body,
+      sourceCandidates,
+      sourceFiltered,
+    });
+    await page.goto(`/w/${workspace.slug}/settings`);
+    await page.getByLabel("보관할 프로젝트").selectOption(project.id);
+    const exporter = page
+      .locator(".native-archive")
+      .filter({ has: page.getByRole("button", { name: "네이티브 보관 파일 다운로드" }) });
+    const response = page.waitForResponse((res) =>
+      res.url().endsWith(`/projects/${project.id}/native-archive`),
+    );
+    const download = page.waitForEvent("download");
+    download.catch(() => undefined);
+    await exporter.getByRole("button", { name: "네이티브 보관 파일 다운로드" }).click();
+    expect((await response).status()).toBe(200);
+    const archivePath = path.join(out, "native-tags.zip");
+    await (await download).saveAs(archivePath);
+    const archive = readFileSync(archivePath);
+    const archiveHash = sha256(archive);
+    await destinationInstall.start();
+    checkServerEnvNames(destinationInstall.envNames);
+    expect(destinationInstall.envNames).toEqual(
+      expect.arrayContaining(["FVOCI_MEILI_URL", "FVOCI_MEILI_INDEX", "FVOCI_MEILI_KEY_FILE"]),
+    );
+    const destination = await browser.newContext({ baseURL: destinationInstall.url });
+    let restoredWorkspace = "";
+    let restoredSlug = "";
+    try {
+      const dpage = await destination.newPage();
+      await setupThroughUi(dpage, DESTINATION_OWNER, {
+        name: "태그 검색 설치",
+        slug: "native-tags-destination",
+      });
+      const personal = await okJson(
+        dpage.request.post("/api/v1/me/personal-workspace"),
+        workspaceMeta,
+      );
+      restoredWorkspace = personal.id;
+      restoredSlug = personal.slug;
+      await dpage.goto(`/w/${personal.slug}/settings`);
+      const importer = dpage
+        .locator(".native-archive")
+        .filter({ has: dpage.getByRole("button", { name: /복원할 네이티브 보관 파일 선택/ }) });
+      const chooser = dpage.waitForEvent("filechooser");
+      await importer.getByRole("button", { name: /복원할 네이티브 보관 파일 선택/ }).click();
+      await (await chooser).setFiles(archivePath);
+      await expect(importer.getByText(archiveHash)).toBeVisible();
+      await importer.getByRole("checkbox").check();
+      await importer.getByRole("button", { name: "확인한 내용 복원" }).click();
+      await expect(importer.getByRole("status")).toContainText("복원이 완료되었습니다");
+    } finally {
+      await destination.close();
+    }
+    const fresh = await browser.newContext({ baseURL: destinationInstall.url });
+    try {
+      const fpage = await fresh.newPage();
+      await login(fpage, DESTINATION_OWNER.email, DESTINATION_OWNER.password);
+      const restoredActor = await okJson(fpage.request.get("/api/v1/auth/me"), meSchema);
+      expect(restoredWorkspace).not.toBe(ws);
+      expect(restoredActor.userId).not.toBe(actor.userId);
+      const current = nativeRow.parse(
+        appRoleRead(
+          destinationInstall.appUrl,
+          restoredWorkspace,
+          nativeSelect("document", tagged.id),
+        ),
+      );
+      expect(current.content).toEqual(stored.content);
+      expect(current.text).toBe(body);
+      expect([
+        current.state,
+        current.cutoff,
+        current.tail,
+        current.updates,
+        receiptFacts(current),
+      ]).toEqual([stored.state, stored.cutoff, stored.tail, stored.updates, receiptFacts(stored)]);
+      checkBinding(current, restoredActor.userId);
+      expect(fullNativeStructure(nativeDoc(current))).toEqual(fullJsonStructure(stored.content));
+      const restoredTags = await okJson(
+        fpage.request.get(
+          `/api/v1/workspaces/${restoredWorkspace}/projects/${project.id}/documents/${tagged.id}/tags`,
+        ),
+        tagsSchema,
+      );
+      expect(
+        restoredTags.items.map(({ id, workspaceId, name, color }) => ({
+          id,
+          workspaceId,
+          name,
+          color,
+        })),
+      ).toEqual([{ id: tag.id, workspaceId: restoredWorkspace, name: tag.name, color: tag.color }]);
+      expect(
+        (
+          await okJson(
+            fpage.request.get(
+              `/api/v1/workspaces/${restoredWorkspace}/projects/${project.id}/documents/${untagged.id}/tags`,
+            ),
+            tagsSchema,
+          )
+        ).items,
+      ).toEqual([]);
+      await expect
+        .poll(async () =>
+          (await candidates(destinationIndex, restoredWorkspace))
+            .map((item) => item.documentId)
+            .sort(),
+        )
+        .toEqual(expectedIds);
+      const restoredCandidates = await candidates(destinationIndex, restoredWorkspace);
+      expect(
+        restoredCandidates
+          .map((item) => ({ id: item.id, title: item.title, body: item.body }))
+          .sort((a, b) => a.id.localeCompare(b.id)),
+      ).toEqual(
+        sourceCandidates
+          .map((item) => ({ id: item.id, title: item.title, body: item.body }))
+          .sort((a, b) => a.id.localeCompare(b.id)),
+      );
+      for (const reply of await search(fpage.request, restoredWorkspace))
+        expect(reply.items.map((item) => item.id).sort()).toEqual(expectedIds);
+      const filtered = await search(fpage.request, restoredWorkspace, tag.id);
+      expect(filtered).toEqual(
+        sourceFiltered.map((reply) => ({
+          ...reply,
+          items: reply.items.map((item) => ({ ...item, workspaceId: restoredWorkspace })),
+        })),
+      );
+      await openItem(fpage, restoredSlug, `W8TAG-${String(tagged.number)}`, ".document-page");
+      await expect(fpage.locator(".document-page .fvoci-editor .ProseMirror")).toContainText(body);
+      record(out, "observed-current54-tags.json", {
+        sourceIndex,
+        destinationIndex,
+        archiveHash,
+        ws,
+        restoredWorkspace,
+        tagged: tagged.id,
+        untagged: untagged.id,
+        tag: tag.id,
+        sourceCandidates,
+        restoredCandidates,
+        filtered,
+        sourceRoles: roleWitness(sourceApp, ws),
+        destinationRoles: roleWitness(destinationInstall.appUrl, restoredWorkspace),
+        normalServerEnvNames: destinationInstall.envNames,
+      });
+    } finally {
+      await fresh.close();
+    }
+    destinationInstall.createUser(probe);
+    const outsider = await browser.newContext({ baseURL: destinationInstall.url });
+    try {
+      const ppage = await outsider.newPage();
+      await login(ppage, probe.email, probe.password);
+      const global = await ppage.request.get(
+        `/api/v1/search?q=${token}&type=document&tag=${tag.id}`,
+      );
+      expect(global.status(), await global.text()).toBe(200);
+      const denied = searchSchema.parse(await global.json());
+      expect(denied.items).toEqual([]);
+      expect(JSON.stringify(denied)).not.toContain(token);
+      const workspaceRead = await ppage.request.get(
+        `/api/v1/workspaces/${restoredWorkspace}/search?q=${token}&type=document&tag=${tag.id}`,
+      );
+      expect(workspaceRead.status()).toBe(404);
+      expect(await workspaceRead.text()).not.toContain(token);
+    } finally {
+      await outsider.close();
+    }
+  } catch (error) {
+    errors.push(error);
+  }
+  // Keep the primary assertion first and attempt both owned cleanup steps even
+  // if either fails; throw only after every attempt, outside a finally block.
+  try {
+    await source.close();
+  } catch (error) {
+    errors.push(error);
+  }
+  try {
+    await destinationInstall.stop();
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length) throw new AggregateError(errors, "native tag oracle or cleanup failed");
 });

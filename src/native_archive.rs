@@ -588,8 +588,14 @@ impl Archive {
             if t.milestone_id.is_some_and(|id| !milestones.contains(&id)) {
                 return Err(invalid());
             }
-            if t.recurrence.is_some() {
-                return Err(ArchiveError::Unsupported("recurrence".into()));
+            // The writers' recurrence preset (create DTO deserializer, patch
+            // recurrence_preset_is_valid): null or exactly {"kind": daily |
+            // weekly | monthly}.
+            if t.recurrence
+                .as_ref()
+                .is_some_and(|r| !recurrence_preset_is_valid(r))
+            {
+                return Err(invalid());
             }
             validate_derived_body(&t.content_json, &t.text, Some(&t.chosung))?;
             validate_references(&t.content_json, &docs, &tasks, &g.attachments)?;
@@ -945,6 +951,18 @@ fn restore_metadata_is_valid(r: &Revision, state_tail: Option<i64>) -> bool {
 
 /// 034/048 task time: rows of the single source actor on archived tasks, the
 /// tables' own CHECK/uniqueness rules, and every relation inside the archive.
+/// The task writers' recurrence preset: exactly one key "kind" whose value
+/// is daily, weekly or monthly.
+fn recurrence_preset_is_valid(value: &Value) -> bool {
+    value.as_object().is_some_and(|preset| {
+        preset.len() == 1
+            && matches!(
+                preset.get("kind").and_then(Value::as_str),
+                Some("daily" | "weekly" | "monthly")
+            )
+    })
+}
+
 /// Workspace document tags (028) travel with the archived documents that
 /// carry them: exactly the tags those assignments name, each with the tag
 /// writers' trimmed name (parse_name) and palette color, unique ids, and an
@@ -2110,8 +2128,8 @@ pub fn mapped_comment_reactions(reactions: &Value, source: Uuid, destination: Uu
 /// null or {id: archived task, label: null}; assigneeIds [{id: the single
 /// source actor, label: null}] (remapped on restore); labelIds [{id: archived
 /// label, label: historical name or null}]; milestoneId null or {id: archived
-/// milestone, label: historical name or null}; recurrence stays null (that
-/// model is refused). Anything else fails closed.
+/// milestone, label: historical name or null}; recurrence null or the
+/// preset's kind (daily, weekly, monthly). Anything else fails closed.
 fn activity_changes_supported(
     changes: &Value,
     actor: Uuid,
@@ -2199,7 +2217,10 @@ fn activity_changes_supported(
                                 || string(&label, &crate::db::milestones::milestone_name_is_valid))
                     })
             }
-            "recurrence" => v.is_null(),
+            // The activity snapshot records the preset's kind or null.
+            "recurrence" => {
+                v.is_null() || matches!(v.as_str(), Some("daily" | "weekly" | "monthly"))
+            }
             _ => false,
         })
     })
@@ -2690,7 +2711,8 @@ pub(crate) mod tests {
         assert!(unsupported(|a| a.graph.activity[1].changes = json!([])));
         for changes in [
             json!([{"field":"milestoneId","from":null,"to":{"id":"10000000-0000-4000-8000-000000000001","label":"m"}}]),
-            json!([{"field":"recurrence","from":null,"to":"weekly"}]),
+            json!([{"field":"recurrence","from":null,"to":"yearly"}]),
+            json!([{"field":"recurrence","from":null,"to":{"kind":"weekly"}}]),
             json!([{"field":"parentId","from":null,"to":{"id":"10000000-0000-4000-8000-000000000003","label":"제목"}}]),
             json!([{"field":"dueAt","from":null,"to":"tomorrow"}]),
             json!([{"field":"archived","from":false,"to":"yes"}]),
@@ -2721,6 +2743,10 @@ pub(crate) mod tests {
             {"field":"milestoneId","from":null,"to":null},
             {"field":"recurrence","from":null,"to":null}
         ]);
+        archive.validate().unwrap();
+        // A recurrence change records the preset kinds.
+        archive.graph.activity[1].changes =
+            json!([{"field":"recurrence","from":"daily","to":"monthly"}]);
         archive.validate().unwrap();
         // Restore remaps only assignee identities to the destination actor.
         let archive = policy_fixture();
@@ -3455,12 +3481,26 @@ pub(crate) mod tests {
             let last = a.graph.activity[1].changes.as_array().unwrap().len() - 1;
             a.graph.activity[1].changes[last]["to"]["label"] = json!("");
         }));
-        // Recurrence is still a typed refusal.
-        let mut archive = fixture();
-        archive.graph.tasks[0].recurrence = Some(json!({"kind":"weekly"}));
-        assert!(
-            matches!(archive.validate(), Err(ArchiveError::Unsupported(m)) if m == "recurrence")
-        );
+        // Recurrence: the writers' preset travels; any other shape is invalid.
+        for kind in ["daily", "weekly", "monthly"] {
+            let mut archive = fixture();
+            archive.graph.tasks[0].recurrence = Some(json!({"kind": kind}));
+            archive.validate().unwrap();
+        }
+        for preset in [
+            json!({"kind":"yearly"}),
+            json!({"kind":"weekly","interval":2}),
+            json!({}),
+            json!("weekly"),
+            json!({"kind":null}),
+        ] {
+            let mut archive = fixture();
+            archive.graph.tasks[0].recurrence = Some(preset.clone());
+            assert!(
+                matches!(archive.validate(), Err(ArchiveError::Invalid(_))),
+                "{preset}"
+            );
+        }
         // Cost: the iterative cycle check walks a 250-task project (the state
         // object bound) with a long chain plus every forward edge within 40
         // steps, and still finds a single closing back edge.

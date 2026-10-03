@@ -7720,3 +7720,405 @@ async fn native_archive_current54_collections_tags_and_command_guard_share_one_r
     harness.cleanup().await;
     std::fs::remove_dir_all(storage).unwrap();
 }
+
+#[tokio::test]
+async fn native_archive_restores_recurring_tasks_for_a_fresh_client() {
+    use fvoci_server::db::native_archive::{capture, publish};
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let session = project_harness::session_id_for_user(&fx.admin, fx.user_id).await;
+    let ws = fx.workspace_id;
+    let call = |app: axum::Router,
+                method: &'static str,
+                path: String,
+                body: Option<Value>,
+                cookie: String| async move {
+        let (status, reply) = json_request(app, method, &path, body, Some(&cookie)).await;
+        assert!(status.is_success(), "{method} {path}: {status} {reply}");
+        reply
+    };
+    let project =
+        project_harness::create_project(fx.app.clone(), &fx.cookie, ws, "REC", "private").await;
+    let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+    let w = format!("/api/v1/workspaces/{ws}");
+    let done_of = |workflow: &Value| {
+        workflow["statuses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["category"] == "done")
+            .unwrap()["id"]
+            .clone()
+    };
+    let workflow = call(
+        fx.app.clone(),
+        "GET",
+        format!("{w}/projects/{project_id}/workflow"),
+        None,
+        fx.cookie.clone(),
+    )
+    .await;
+    let done = done_of(&workflow);
+    let label = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/projects/{project_id}/labels"),
+        Some(json!({"name":"반복 🧪","color":"teal"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    // A weekly task with dates, a label and its author assigned, completed
+    // through the ordinary transition: the writer clears its recurrence and
+    // spawns the successor (shifted dates, copied label/assignee).
+    let weekly = call(fx.app.clone(), "POST", format!("{w}/projects/{project_id}/tasks"),
+        Some(json!({"title":"주간 점검 🧪","recurrence":{"kind":"weekly"},"startDate":"2026-10-01","dueDate":"2026-10-07"})), fx.cookie.clone()).await;
+    let weekly_id = weekly["id"].as_str().unwrap().to_owned();
+    call(
+        fx.app.clone(),
+        "PATCH",
+        format!("{w}/tasks/{weekly_id}"),
+        Some(json!({"labelIds":[label["id"]],"assigneeIds":[fx.user_id]})),
+        fx.cookie.clone(),
+    )
+    .await;
+    call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/tasks/{weekly_id}/move"),
+        Some(json!({"statusId":done})),
+        fx.cookie.clone(),
+    )
+    .await;
+    // A daily task changed to monthly (a recurrence activity change).
+    let monthly = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/projects/{project_id}/tasks"),
+        Some(json!({"title":"월간 정리","recurrence":{"kind":"daily"}})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let monthly_id = monthly["id"].as_str().unwrap().to_owned();
+    call(
+        fx.app.clone(),
+        "PATCH",
+        format!("{w}/tasks/{monthly_id}"),
+        Some(json!({"recurrence":{"kind":"monthly"}})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let successor_id: Uuid = sqlx::query_scalar("SELECT id FROM fvoci.tasks WHERE project_id=$1 AND title='주간 점검 🧪' AND id <> $2::text::uuid")
+        .bind(project_id)
+        .bind(&weekly_id)
+        .fetch_one(&fx.admin)
+        .await
+        .unwrap();
+    let ids = [
+        weekly_id.clone(),
+        successor_id.to_string(),
+        monthly_id.clone(),
+    ];
+    let read = |app: axum::Router, w: String, cookie: String| {
+        let ids = ids.clone();
+        async move {
+            let mut out = Vec::new();
+            for id in &ids {
+                let task = call(
+                    app.clone(),
+                    "GET",
+                    format!("{w}/tasks/{id}"),
+                    None,
+                    cookie.clone(),
+                )
+                .await;
+                out.push(json!({"id":task["id"],"number":task["number"],"title":task["title"],"recurrence":task["recurrence"],
+                    "startDate":task["startDate"],"dueDate":task["dueDate"],"labelIds":task["labelIds"],"assigneeIds":task["assigneeIds"]}));
+                let activity = call(
+                    app.clone(),
+                    "GET",
+                    format!("{w}/tasks/{id}/activity"),
+                    None,
+                    cookie.clone(),
+                )
+                .await;
+                let items: Vec<Value> = activity["items"].as_array().unwrap().iter()
+                    .map(|i| json!({"id":i["id"],"kind":i["kind"],"channel":i["channel"],"changes":i["changes"]}))
+                    .collect();
+                out.push(json!(items));
+            }
+            out
+        }
+    };
+    let source_reads = read(fx.app.clone(), w.clone(), fx.cookie.clone()).await;
+    // Source facts the oracle relies on (the writer's own behaviour).
+    assert_eq!(source_reads[0]["recurrence"], Value::Null);
+    assert_eq!(source_reads[2]["recurrence"], json!({"kind":"weekly"}));
+    assert_eq!(
+        (&source_reads[2]["startDate"], &source_reads[2]["dueDate"]),
+        (&json!("2026-10-08"), &json!("2026-10-14"))
+    );
+    assert_eq!(source_reads[4]["recurrence"], json!({"kind":"monthly"}));
+
+    let captured = capture(&fx.pool, ws, fx.user_id, session, &project_only(project_id))
+        .await
+        .expect("recurring tasks are capturable");
+    captured
+        .archive
+        .validate()
+        .expect("recurring tasks are valid");
+
+    let destination_db = TestDb::bootstrap().await;
+    let dst = fixture(&destination_db).await;
+    let (destination, _, claim) = claimed_restore(&dst, dst.user_id, &dst.cookie).await;
+    publish(
+        &dst.pool,
+        &claim,
+        &captured.archive,
+        &std::collections::BTreeMap::new(),
+        &dst.settings.quota,
+    )
+    .await
+    .expect("recurring tasks restore");
+    let dw = format!("/api/v1/workspaces/{destination}");
+    // Independent oracle: the source reads with only the assignee identity
+    // (the source person) mapped to the destination person.
+    let mut expected = source_reads.clone();
+    for task in expected.iter_mut().step_by(2) {
+        for assignee in task["assigneeIds"].as_array_mut().unwrap() {
+            if *assignee == json!(fx.user_id) {
+                *assignee = json!(dst.user_id);
+            }
+        }
+    }
+    // The activity API shows an assignee side as {items: [{id, label: the
+    // person's current name}], totalCount}. The one assignee change the
+    // writers made here (the weekly task's PATCH) is asserted exactly, with
+    // each label checked against that installation's users row; restore maps
+    // only the person's id.
+    let person_name = |admin: sqlx::PgPool, user: Uuid| async move {
+        let (given, family): (String, Option<String>) =
+            sqlx::query_as("SELECT given_name, family_name FROM fvoci.users WHERE id=$1")
+                .bind(user)
+                .fetch_one(&admin)
+                .await
+                .unwrap();
+        match family {
+            Some(family) if !family.is_empty() => format!("{given} {family}"),
+            _ => given,
+        }
+    };
+    let source_name = person_name(fx.admin.clone(), fx.user_id).await;
+    let destination_name = person_name(dst.admin.clone(), dst.user_id).await;
+    assert!(source_name.starts_with("Owner"), "{source_name}");
+    assert!(destination_name.starts_with("Owner"), "{destination_name}");
+    let assignee_side =
+        |user: Uuid, name: &str| json!({"items":[{"id": user, "label": name}], "totalCount": 1});
+    let mut assignee_changes = 0;
+    for activity in expected.iter_mut().skip(1).step_by(2) {
+        for item in activity.as_array_mut().unwrap() {
+            for change in item["changes"].as_array_mut().unwrap() {
+                if change["field"] == "assigneeIds" {
+                    assignee_changes += 1;
+                    assert_eq!(
+                        (&change["from"], &change["to"]),
+                        (
+                            &json!({"items": [], "totalCount": 0}),
+                            &assignee_side(fx.user_id, &source_name)
+                        )
+                    );
+                    change["to"] = assignee_side(dst.user_id, &destination_name);
+                }
+            }
+        }
+    }
+    assert_eq!(assignee_changes, 1);
+    let restored = read(dst.app.clone(), dw.clone(), dst.cookie.clone()).await;
+    assert_eq!(restored, expected);
+    // The writer continues: completing the restored successor spawns the next
+    // occurrence with the restored allocator's next number and shifted dates.
+    let next_number: i32 = sqlx::query_scalar(
+        "SELECT next_number FROM fvoci.projects WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(destination)
+    .bind(project_id)
+    .fetch_one(&dst.admin)
+    .await
+    .unwrap();
+    let workflow = call(
+        dst.app.clone(),
+        "GET",
+        format!("{dw}/projects/{project_id}/workflow"),
+        None,
+        dst.cookie.clone(),
+    )
+    .await;
+    // Current authority governs the restored recurring task: a destination
+    // member granted viewer on the private project, and then the same member
+    // after the owner removes that grant, cannot complete it. Each refusal
+    // leaves the preset, the allocator, the task count and every application
+    // table unchanged (nothing spawned).
+    let viewer =
+        project_harness::add_workspace_user(&dst.admin, destination, "member", "viewer").await;
+    call(
+        dst.app.clone(),
+        "POST",
+        format!("{dw}/projects/{project_id}/members"),
+        Some(json!({"userId": viewer.user_id, "role": "viewer"})),
+        dst.cookie.clone(),
+    )
+    .await;
+    // The viewer reads the task first (session bookkeeping happens before the
+    // observation, and the refusal below is not a visibility miss).
+    let seen = call(
+        dst.app.clone(),
+        "GET",
+        format!("{dw}/tasks/{successor_id}"),
+        None,
+        viewer.cookie.clone(),
+    )
+    .await;
+    assert_eq!(seen["recurrence"], json!({"kind":"weekly"}));
+    let observe = |admin: sqlx::PgPool| async move {
+        let state: (Value, i32, i64) = sqlx::query_as(
+            "SELECT (SELECT recurrence FROM fvoci.tasks WHERE id=$3), \
+                    (SELECT next_number FROM fvoci.projects WHERE workspace_id=$1 AND id=$2), \
+                    (SELECT count(*) FROM fvoci.tasks WHERE workspace_id=$1)",
+        )
+        .bind(destination)
+        .bind(project_id)
+        .bind(successor_id)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        (state, application_table_digests(&admin).await)
+    };
+    for revoked in [false, true] {
+        if revoked {
+            call(
+                dst.app.clone(),
+                "DELETE",
+                format!("{dw}/projects/{project_id}/members/{}", viewer.user_id),
+                None,
+                dst.cookie.clone(),
+            )
+            .await;
+        }
+        let before = observe(dst.admin.clone()).await;
+        assert_eq!(
+            before.0,
+            (json!({"kind":"weekly"}), next_number, 3),
+            "revoked {revoked}"
+        );
+        let (status, problem) = json_request(
+            dst.app.clone(),
+            "POST",
+            &format!("{dw}/tasks/{successor_id}/move"),
+            Some(json!({"statusId":done_of(&workflow)})),
+            Some(&viewer.cookie),
+        )
+        .await;
+        assert_eq!(
+            (status, &problem["code"]),
+            (StatusCode::NOT_FOUND, &json!("not_found")),
+            "revoked {revoked}: {problem}"
+        );
+        assert!(
+            observe(dst.admin.clone()).await == before,
+            "refused completion (revoked {revoked}) changed state"
+        );
+    }
+    call(
+        dst.app.clone(),
+        "POST",
+        format!("{dw}/tasks/{successor_id}/move"),
+        Some(json!({"statusId":done_of(&workflow)})),
+        dst.cookie.clone(),
+    )
+    .await;
+    let (spawned_id, number, start, due, preset): (
+        Uuid,
+        i32,
+        Option<chrono::NaiveDate>,
+        Option<chrono::NaiveDate>,
+        Value,
+    ) = sqlx::query_as(
+        "SELECT id, number, start_date, due_date, recurrence FROM fvoci.tasks WHERE workspace_id=$1 AND project_id=$2 AND title='주간 점검 🧪' AND id NOT IN ($3::text::uuid, $4)",
+    )
+    .bind(destination)
+    .bind(project_id)
+    .bind(&weekly_id)
+    .bind(successor_id)
+    .fetch_one(&dst.admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        (number, start, due, preset),
+        (
+            next_number,
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 15),
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 21),
+            json!({"kind":"weekly"})
+        )
+    );
+    // A fresh ordinary read of the new occurrence: the restored label and the
+    // destination person copied from the restored successor, the writer's
+    // empty body (the same body the source writer gave its own spawned
+    // successor), and one system creation activity by the current actor.
+    let fresh = call(
+        dst.app.clone(),
+        "GET",
+        format!("{dw}/tasks/{spawned_id}"),
+        None,
+        dst.cookie.clone(),
+    )
+    .await;
+    let source_successor = call(
+        fx.app.clone(),
+        "GET",
+        format!("{w}/tasks/{successor_id}"),
+        None,
+        fx.cookie.clone(),
+    )
+    .await;
+    assert_eq!(
+        (
+            &fresh["labelIds"],
+            &fresh["assigneeIds"],
+            &fresh["contentJson"]
+        ),
+        (
+            &json!([label["id"]]),
+            &json!([dst.user_id]),
+            &source_successor["contentJson"]
+        )
+    );
+    let activity = call(
+        dst.app.clone(),
+        "GET",
+        format!("{dw}/tasks/{spawned_id}/activity"),
+        None,
+        dst.cookie.clone(),
+    )
+    .await;
+    let items: Vec<Value> = activity["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| json!({"kind":i["kind"],"channel":i["channel"],"changes":i["changes"],"actor":i["actor"]["id"]}))
+        .collect();
+    assert_eq!(
+        items,
+        vec![json!({"kind":"created","channel":"system","changes":[],"actor":dst.user_id})]
+    );
+
+    let storages = [fx.storage_root(), dst.storage_root()];
+    fx.pool.close().await;
+    fx.admin.close().await;
+    dst.pool.close().await;
+    dst.admin.close().await;
+    harness.cleanup().await;
+    destination_db.cleanup().await;
+    for storage in storages {
+        std::fs::remove_dir_all(storage).unwrap();
+    }
+}
