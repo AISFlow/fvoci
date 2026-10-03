@@ -326,7 +326,7 @@ pub(crate) fn map_origin_error(err: TaskOriginDbError) -> TaskApiError {
 }
 
 /// Source `taskCreateInput` after parsing, as hashed by `createDocumentTask`.
-fn normalized_task_input(body: &CreateTaskBody) -> Value {
+pub(crate) fn normalized_task_input(body: &CreateTaskBody) -> Value {
     json!({
         "title": body.title,
         "type": body.task_type,

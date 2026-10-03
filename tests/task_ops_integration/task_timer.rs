@@ -1115,7 +1115,7 @@ mod task_timer {
       'history',(SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY e.id),'[]'::jsonb) FROM fvoci.time_entries e WHERE e.user_id=ANY($1)),
       'events',(SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY e.id),'[]'::jsonb) FROM fvoci.events e WHERE e.target_id=ANY($2)),
       'taskAudit',(SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY a.id),'[]'::jsonb) FROM fvoci.audit_log a WHERE a.target_id=ANY($2)),
-      'tasks',(SELECT COALESCE(jsonb_agg(jsonb_build_object('id',t.id,'statusId',t.status_id,'startDate',t.start_date,'dueDate',t.due_date,'dueAt',t.due_at,'recurrence',t.recurrence,'estimate',t.estimate,'updatedAt',t.updated_at) ORDER BY t.id),'[]'::jsonb) FROM fvoci.tasks t WHERE t.id=ANY($2))
+      'tasks',(SELECT COALESCE(jsonb_agg(jsonb_build_object('id',t.id,'statusId',t.status_id,'startDate',t.start_date,'dueDate',t.due_date,'dueAt',t.due_at,'recurrence',t.recurrence,'estimate',t.estimate,'estimateUnit',t.estimate_unit,'updatedAt',t.updated_at) ORDER BY t.id),'[]'::jsonb) FROM fvoci.tasks t WHERE t.id=ANY($2))
     )"#).bind(actors).bind(tasks).fetch_one(admin).await.unwrap()
     }
 
@@ -3911,6 +3911,668 @@ mod task_timer {
         admin.close().await;
         drop(app);
         fixture.close().await;
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn explicit_minutes_preserve_legacy_compare_exact_timestamp_and_replay_without_effects() {
+        let harness = TestDb::bootstrap().await;
+        let (fixture, app, cookie, actor, workspace) = TimerFixture::setup(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let project = create_project(app.clone(), &cookie, workspace, "MINUTES", "private").await;
+        let task = create_task(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            json!({"title":"Explicit estimate"}),
+        )
+        .await;
+        let task_id = Uuid::parse_str(task["id"].as_str().unwrap()).unwrap();
+        let base = format!("/api/v1/workspaces/{workspace}/tasks/{task_id}");
+        let url = format!("{base}/timer/estimate");
+        let actors = [actor];
+        let tasks = [task_id];
+        let (status, legacy) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "PATCH",
+            &base,
+            Some(json!({"estimate":"17.25"})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{legacy}");
+        sqlx::query("UPDATE fvoci.tasks SET updated_at='2026-10-01T00:00:00.123456Z' WHERE id=$1")
+            .bind(task_id)
+            .execute(&admin)
+            .await
+            .unwrap();
+        let (status, state) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &format!("{base}/timer"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{state}");
+        assert_eq!(state["estimate"]["value"], "17.25");
+        assert!(
+            state["estimate"]["unit"].is_null(),
+            "legacy numeric is never inferred as minutes"
+        );
+        assert_eq!(
+            state["estimate"]["updatedAt"],
+            "2026-10-01T00:00:00.123456Z"
+        );
+        let intent = captured(
+            app.clone(),
+            &cookie,
+            json!({"requestId":Uuid::now_v7(),
+            "expected":state["estimate"],"minutes":40,"reason":"Explicit reading budget"}),
+        )
+        .await;
+        // A millisecond-only task DTO token is insufficient for the exact CAS.
+        let mut rounded = intent.clone();
+        rounded["expected"]["updatedAt"] = json!("2026-10-01T00:00:00.123Z");
+        timer_no_effect_request(
+            &fixture,
+            &admin,
+            &actors,
+            &tasks,
+            app.clone(),
+            &url,
+            rounded,
+            &cookie,
+            StatusCode::CONFLICT,
+        )
+        .await;
+        let before = timer_effects(&admin, &actors, &tasks).await;
+        let (status, committed) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &url,
+            Some(intent.clone()),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{committed}");
+        assert_eq!(committed["value"], "40");
+        assert_eq!(committed["unit"], "minutes");
+        let after = timer_effects(&admin, &actors, &tasks).await;
+        for key in ["runs", "segments", "legacy", "history"] {
+            assert_eq!(before[key], after[key], "{key}");
+        }
+        for key in ["receipts", "audit", "events", "taskAudit"] {
+            assert_eq!(
+                after[key].as_array().unwrap().len(),
+                before[key].as_array().unwrap().len() + 1,
+                "{key}"
+            );
+        }
+        assert_eq!(
+            before["tasks"][0]["statusId"],
+            after["tasks"][0]["statusId"]
+        );
+        assert_eq!(after["tasks"][0]["estimateUnit"], "minutes");
+        let replay = timer_no_effect_request(
+            &fixture,
+            &admin,
+            &actors,
+            &tasks,
+            app.clone(),
+            &url,
+            intent.clone(),
+            &cookie,
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(replay, committed);
+        let mut changed = intent.clone();
+        changed["minutes"] = json!(41);
+        timer_no_effect_request(
+            &fixture,
+            &admin,
+            &actors,
+            &tasks,
+            app.clone(),
+            &url,
+            changed,
+            &cookie,
+            StatusCode::CONFLICT,
+        )
+        .await;
+        let mut stale = intent.clone();
+        stale["requestId"] = json!(Uuid::now_v7());
+        timer_no_effect_request(
+            &fixture,
+            &admin,
+            &actors,
+            &tasks,
+            app.clone(),
+            &url,
+            stale,
+            &cookie,
+            StatusCode::CONFLICT,
+        )
+        .await;
+        for (minutes, reason) in [(json!(-1), "Negative"), (json!(1), "   ")] {
+            let invalid = captured(
+                app.clone(),
+                &cookie,
+                json!({"requestId":Uuid::now_v7(),
+                "expected":committed,"minutes":minutes,"reason":reason}),
+            )
+            .await;
+            timer_no_effect_request(
+                &fixture,
+                &admin,
+                &actors,
+                &tasks,
+                app.clone(),
+                &url,
+                invalid,
+                &cookie,
+                StatusCode::BAD_REQUEST,
+            )
+            .await;
+        }
+        // Ordinary unrelated metadata preserves the explicit unit; supplying
+        // the generic estimate (even the same number) deliberately retires it.
+        let (status, patched) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "PATCH",
+            &base,
+            Some(json!({"title":"Same task new title"})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{patched}");
+        let (_, state) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &format!("{base}/timer"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(state["estimate"]["unit"], "minutes");
+        let (status, patched) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "PATCH",
+            &base,
+            Some(json!({"estimate":"40"})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{patched}");
+        let (_, state) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &format!("{base}/timer"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(state["estimate"]["value"], "40");
+        assert!(state["estimate"]["unit"].is_null());
+        let clear = captured(
+            app.clone(),
+            &cookie,
+            json!({"requestId":Uuid::now_v7(),
+            "expected":state["estimate"],"minutes":null,"reason":"Explicitly remove budget"}),
+        )
+        .await;
+        let (status, cleared) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &url,
+            Some(clear),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        assert!(cleared["value"].is_null());
+        assert!(cleared["unit"].is_null());
+        let (status, _, headers) = project_harness::json_request_with_headers(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/login",
+            Some(json!({"email":"owner@example.com","password":"supersecret1"})),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let fresh_cookie = timer_session_cookie(&headers);
+        let fresh_replay = captured(app.clone(), &fresh_cookie, intent.clone()).await;
+        let replay = timer_no_effect_request(
+            &fixture,
+            &admin,
+            &actors,
+            &tasks,
+            app.clone(),
+            &url,
+            fresh_replay,
+            &fresh_cookie,
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(
+            replay, committed,
+            "success replay never restores the old estimate"
+        );
+        let (_, fresh) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &format!("{base}/timer"),
+            None,
+            Some(&fresh_cookie),
+        )
+        .await;
+        assert_eq!(fresh["estimate"], cleared);
+        let mut old_new = intent.clone();
+        old_new["requestId"] = json!(Uuid::now_v7());
+        old_new["expected"] = cleared;
+        timer_no_effect_request(
+            &fixture,
+            &admin,
+            &actors,
+            &tasks,
+            app.clone(),
+            &url,
+            old_new,
+            &fresh_cookie,
+            StatusCode::CONFLICT,
+        )
+        .await;
+        admin.close().await;
+        drop(app);
+        fixture.close().await;
+        harness.cleanup().await;
+    }
+
+    async fn plan_effects(admin: &sqlx::PgPool, workspace: Uuid, actor: Uuid) -> Value {
+        sqlx::query_scalar(r#"SELECT jsonb_build_object(
+            'tasks',(SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t.id),'[]'::jsonb) FROM fvoci.tasks t WHERE t.workspace_id=$1),
+            'projects',(SELECT COALESCE(jsonb_agg(to_jsonb(p) ORDER BY p.id),'[]'::jsonb) FROM fvoci.projects p WHERE p.workspace_id=$1),
+            'documents',(SELECT COALESCE(jsonb_agg(to_jsonb(d) ORDER BY d.id),'[]'::jsonb) FROM fvoci.documents d WHERE d.workspace_id=$1),
+            'origins',(SELECT COALESCE(jsonb_agg(to_jsonb(o) ORDER BY o.document_id,o.request_id),'[]'::jsonb) FROM fvoci.task_origins o WHERE o.workspace_id=$1),
+            'events',(SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY e.id),'[]'::jsonb) FROM fvoci.events e WHERE e.workspace_id=$1),
+            'audits',(SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY a.id),'[]'::jsonb) FROM fvoci.audit_log a WHERE a.workspace_id=$1),
+            'timerAudits',(SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY a.id),'[]'::jsonb) FROM fvoci.task_timer_audit a WHERE a.user_id=$2),
+            'receipts',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY c.request_id),'[]'::jsonb) FROM fvoci.task_timer_commands c WHERE c.user_id=$2)
+        )"#).bind(workspace).bind(actor).fetch_one(admin).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn ordinary_plan_origins_bind_minutes_and_replay_after_session_without_reapplying() {
+        let harness = TestDb::bootstrap().await;
+        let (fixture, app, cookie, actor, workspace) = TimerFixture::setup(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let project = create_project(app.clone(), &cookie, workspace, "PLAN", "private").await;
+        let reader = add_workspace_user(&admin, workspace, "member", "plan-reader").await;
+        add_project_member(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            reader.user_id,
+            "viewer",
+        )
+        .await;
+        let (status, notes) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{workspace}/documents"),
+            Some(json!({"parentId":null,"title":"Goal and research notes"})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{notes}");
+        let (status, material) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{workspace}/documents"),
+            Some(json!({"parentId":null,"title":"Reading material"})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{material}");
+        let notes_url = format!(
+            "/api/v1/workspaces/{workspace}/documents/{}/study-plan/task",
+            notes["id"].as_str().unwrap()
+        );
+        let material_url = format!(
+            "/api/v1/workspaces/{workspace}/documents/{}/study-plan/task",
+            material["id"].as_str().unwrap()
+        );
+        let intent=captured(app.clone(),&cookie,json!({"requestId":Uuid::now_v7(),"projectId":project["id"],"selfAssign":false,
+            "anchor":"notes","minutes":0,"task":{"title":"Answer a research question","type":"epic"}})).await;
+        let picker = format!(
+            "{notes_url}?expectedActorId={}&expectedSessionId={}",
+            intent["expectedActorId"].as_str().unwrap(),
+            intent["expectedSessionId"].as_str().unwrap()
+        );
+        let before = plan_effects(&admin, workspace, actor).await;
+        let (status, targets) =
+            timer_checked_request(&fixture, app.clone(), "GET", &picker, None, Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{targets}");
+        assert!(targets["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == project["id"]));
+        let (status, denied) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &picker,
+            None,
+            Some(&reader.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{denied}");
+        assert!(denied.get("items").is_none());
+        let (status, denied) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &notes_url,
+            Some(intent.clone()),
+            Some(&reader.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{denied}");
+        assert_eq!(plan_effects(&admin, workspace, actor).await, before);
+        let (status, goal) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &notes_url,
+            Some(intent.clone()),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{goal}");
+        assert_eq!(goal["projectKey"], "PLAN");
+        let goal_id = goal["taskId"].as_str().unwrap();
+        let after = plan_effects(&admin, workspace, actor).await;
+        let (status, replayed) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &notes_url,
+            Some(intent.clone()),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replayed}");
+        assert_eq!(replayed, goal);
+        assert_eq!(plan_effects(&admin, workspace, actor).await, after);
+        // Minutes are part of this operation's existing origin receipt hash.
+        for minutes in [json!(1), Value::Null] {
+            let mut changed = intent.clone();
+            changed["minutes"] = minutes;
+            let (status, denied) = timer_checked_request(
+                &fixture,
+                app.clone(),
+                "POST",
+                &notes_url,
+                Some(changed),
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{denied}");
+            assert_eq!(plan_effects(&admin, workspace, actor).await, after);
+        }
+        let goal_url = format!("/api/v1/workspaces/{workspace}/tasks/{goal_id}");
+        let (status, state) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &format!("{goal_url}/timer"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{state}");
+        assert_eq!(state["estimate"]["value"], "0");
+        assert_eq!(state["estimate"]["unit"], "minutes");
+        let reading = captured(
+            app.clone(),
+            &cookie,
+            json!({"requestId":Uuid::now_v7(),"projectId":project["id"],"minutes":30,
+            "anchor":"material","task":{"title":"Read evidence","type":"task","parentId":goal_id}}),
+        )
+        .await;
+        let (status, child) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &material_url,
+            Some(reading.clone()),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{child}");
+        let child_id = Uuid::parse_str(child["taskId"].as_str().unwrap()).unwrap();
+        let (parent, minutes, unit): (Option<Uuid>, Option<String>, Option<String>) =
+            sqlx::query_as(
+                "SELECT parent_id,estimate::text,estimate_unit FROM fvoci.tasks WHERE id=$1",
+            )
+            .bind(child_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+        assert_eq!(parent, Some(Uuid::parse_str(goal_id).unwrap()));
+        assert_eq!(minutes.as_deref(), Some("30"));
+        assert_eq!(unit.as_deref(), Some("minutes"));
+        let origins:Vec<(Uuid,Uuid)>=sqlx::query_as("SELECT task_id,document_id FROM fvoci.task_origins WHERE workspace_id=$1 ORDER BY task_id")
+            .bind(workspace).fetch_all(&admin).await.unwrap();
+        assert!(origins.contains(&(
+            Uuid::parse_str(goal_id).unwrap(),
+            Uuid::parse_str(notes["id"].as_str().unwrap()).unwrap()
+        )));
+        assert!(origins.contains(&(
+            child_id,
+            Uuid::parse_str(material["id"].as_str().unwrap()).unwrap()
+        )));
+        let (status, _, headers) = project_harness::json_request_with_headers(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/login",
+            Some(json!({"email":"owner@example.com","password":"supersecret1"})),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let fresh_cookie = timer_session_cookie(&headers);
+        let (status, patched) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "PATCH",
+            &goal_url,
+            Some(json!({"estimate":"1.5"})),
+            Some(&fresh_cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{patched}");
+        let before = plan_effects(&admin, workspace, actor).await;
+        let (status, replayed) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &notes_url,
+            Some(intent.clone()),
+            Some(&fresh_cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replayed}");
+        assert_eq!(replayed, goal);
+        assert_eq!(plan_effects(&admin, workspace, actor).await, before);
+        let (status, state) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &format!("{goal_url}/timer"),
+            None,
+            Some(&fresh_cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(state["estimate"]["value"], "1.5");
+        assert!(state["estimate"]["unit"].is_null());
+        let mut old_new = intent.clone();
+        old_new["requestId"] = json!(Uuid::now_v7());
+        old_new["task"]["title"] = json!("Old-session new goal");
+        let (status, denied) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &notes_url,
+            Some(old_new),
+            Some(&fresh_cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{denied}");
+        assert_eq!(
+            plan_effects(&admin, workspace, actor).await,
+            before,
+            "stale Created rolls back task, origin, numbering, estimate, events and audits"
+        );
+        let mut reader_intent = captured(app.clone(), &reader.cookie, intent.clone()).await;
+        reader_intent["requestId"] = json!(Uuid::now_v7());
+        let (status, denied) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &notes_url,
+            Some(reader_intent),
+            Some(&reader.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{denied}");
+        assert_eq!(plan_effects(&admin, workspace, actor).await, before);
+        admin.close().await;
+        drop(app);
+        fixture.close().await;
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn explicit_minutes_two_independent_database_cas_and_duplicate_barriers() {
+        let harness = TestDb::bootstrap().await;
+        let (app, cookie, actor, workspace) = setup_session(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let project = create_project(app.clone(), &cookie, workspace, "MINCAS", "private").await;
+        let task = create_task(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            json!({"title":"Concurrent minute budget"}),
+        )
+        .await;
+        let task_id = Uuid::parse_str(task["id"].as_str().unwrap()).unwrap();
+        let state_url = format!("/api/v1/workspaces/{workspace}/tasks/{task_id}/timer");
+        let url = format!("{state_url}/estimate");
+        let actors = [actor];
+        let tasks = [task_id];
+        for duplicate in [false, true] {
+            let (status, state) =
+                json_request(app.clone(), "GET", &state_url, None, Some(&cookie)).await;
+            assert_eq!(status, StatusCode::OK, "{state}");
+            let first = captured(
+                app.clone(),
+                &cookie,
+                json!({"requestId":Uuid::now_v7(),"expected":state["estimate"],
+                "minutes":if duplicate {30}else{10},"reason":"Actual concurrent budget"}),
+            )
+            .await;
+            let mut second = first.clone();
+            if !duplicate {
+                second["requestId"] = json!(Uuid::now_v7());
+                second["minutes"] = json!(20);
+            }
+            let before = timer_effects(&admin, &actors, &tasks).await;
+            let mut holder = admin.begin().await.unwrap();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *holder)
+                .await
+                .unwrap();
+            hold_membership_user_lock(&mut holder, actor).await;
+            let (a, ca, ua) = (app.clone(), cookie.clone(), url.clone());
+            let one =
+                tokio::spawn(
+                    async move { json_request(a, "POST", &ua, Some(first), Some(&ca)).await },
+                );
+            let (b, cb, ub) = (app.clone(), cookie.clone(), url.clone());
+            let two =
+                tokio::spawn(
+                    async move { json_request(b, "POST", &ub, Some(second), Some(&cb)).await },
+                );
+            let waiters = project_harness::wait_for_blocked_query_count(
+                &admin,
+                pid,
+                "%pg_advisory_xact_lock%",
+                2,
+            )
+            .await;
+            assert_ne!(
+                waiters[0], waiters[1],
+                "two real independent backend writers"
+            );
+            let roles:Vec<(i32,bool,bool)>=sqlx::query_as("SELECT a.pid,r.rolsuper,r.rolbypassrls FROM pg_stat_activity a JOIN pg_roles r ON r.rolname=a.usename WHERE a.pid=ANY($1) ORDER BY a.pid")
+                .bind(&waiters).fetch_all(&admin).await.unwrap();
+            assert_eq!(roles.len(), 2);
+            assert!(roles
+                .iter()
+                .all(|(_, superuser, bypass)| !superuser && !bypass));
+            holder.commit().await.unwrap();
+            let x = one.await.unwrap();
+            let y = two.await.unwrap();
+            if duplicate {
+                assert_eq!(x.0, StatusCode::OK, "{x:?}");
+                assert_eq!(y.0, StatusCode::OK, "{y:?}");
+                assert_eq!(x.1, y.1, "duplicate outcome is the same durable receipt");
+            } else {
+                assert!(
+                    (x.0 == StatusCode::OK && y.0 == StatusCode::CONFLICT)
+                        || (y.0 == StatusCode::OK && x.0 == StatusCode::CONFLICT),
+                    "{x:?} {y:?}"
+                );
+            }
+            let after = timer_effects(&admin, &actors, &tasks).await;
+            for key in ["runs", "segments", "legacy", "history"] {
+                assert_eq!(before[key], after[key], "{key}");
+            }
+            for key in ["receipts", "audit", "events", "taskAudit"] {
+                assert_eq!(
+                    after[key].as_array().unwrap().len(),
+                    before[key].as_array().unwrap().len() + 1,
+                    "{key}"
+                );
+            }
+            assert_eq!(
+                before["tasks"][0]["statusId"],
+                after["tasks"][0]["statusId"]
+            );
+            assert_eq!(after["tasks"][0]["estimateUnit"], "minutes");
+            println!("W5 estimate actual DB barrier duplicate={duplicate}: pids={waiters:?} roles={roles:?}, exactly one receipt/audit/event/metadata commit");
+        }
+        admin.close().await;
+        drop(app);
         harness.cleanup().await;
     }
 }

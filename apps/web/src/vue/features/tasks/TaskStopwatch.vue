@@ -5,6 +5,8 @@ import { computed, onScopeDispose, ref, watch } from "vue";
 import { ProblemError, loadErrorMessage } from "@/lib/api";
 import { meQuery } from "@/lib/queries";
 import { anchoredElapsed, stopwatchText } from "./task-stopwatch-clock";
+import { minuteEstimate } from "./task-plan-input";
+import TaskEstimateEditor from "./TaskEstimateEditor.vue";
 import {
   taskStopwatchQuery,
   capturedTimeEntriesQuery,
@@ -147,6 +149,19 @@ watch(
   },
   { flush: "sync" },
 );
+// Canonical reads retire the old command immediately. Its late response must
+// neither disable the successor nor clear a command already pending for it.
+watch(
+  [() => visibleState.value?.run?.id, () => visibleState.value?.run?.version],
+  () => {
+    generation++;
+    command = undefined;
+    error.value = null;
+    retryable.value = false;
+    pending.value = false;
+  },
+  { flush: "sync" },
+);
 
 const receivedAt = ref(performance.now());
 const tick = ref(receivedAt.value);
@@ -194,6 +209,11 @@ const actual = computed(
     (visibleState.value?.actualMilliseconds ?? 0) +
     (run.value?.runningSince ? Math.max(0, elapsed.value - run.value.elapsedMilliseconds) : 0),
 );
+const estimateMinutes = computed(() =>
+  visibleState.value
+    ? minuteEstimate(visibleState.value.estimate.value, visibleState.value.estimate.unit)
+    : null,
+);
 const disabled = computed(
   () => !editable.value || pending.value || !state.isSuccess.value || !actor.value,
 );
@@ -206,7 +226,9 @@ function current(capture: Capture): boolean {
     capture.actor === actor.value &&
     capture.credential === credential.value &&
     capture.workspace === props.workspaceId &&
-    capture.task === props.taskId
+    capture.task === props.taskId &&
+    capture.body.runId === (run.value?.id ?? null) &&
+    capture.body.expectedVersion === (run.value?.version ?? 0)
   );
 }
 
@@ -313,12 +335,47 @@ async function retry(): Promise<void> {
         >실제 {{ stopwatchText(actual) }}</span
       >
       <span
-        v-if="visibleState && estimate != null"
+        v-if="visibleState?.estimate.value != null"
         class="text-sm text-muted"
         data-testid="timer-estimate"
-        >예상 {{ estimate }}</span
+        >{{
+          estimateMinutes === null
+            ? `기존 예상 ${visibleState.estimate.value} (단위 미지정)`
+            : `예상 ${estimateMinutes}분`
+        }}</span
+      >
+      <span
+        v-if="estimateMinutes !== null"
+        class="break-keep text-sm text-muted"
+        data-testid="timer-variance"
+        >{{
+          actual > estimateMinutes * 60000
+            ? `예상보다 ${stopwatchText(actual - estimateMinutes * 60000)} 초과`
+            : `예상까지 ${stopwatchText(estimateMinutes * 60000 - actual)}`
+        }}</span
       >
     </div>
+    <TaskEstimateEditor
+      v-if="visibleState && editable"
+      :workspace-id="workspaceId"
+      :task-id="taskId"
+      :actor="actor"
+      :session="credential"
+      :snapshot="visibleState.estimate"
+      :can-edit="editable"
+      @refresh="state.refetch()"
+      @denied="
+        (err) =>
+          retirePrivateState(
+            err,
+            captureTimerQuery(
+              client,
+              taskStopwatchQuery(actor, workspaceId, taskId, credential).queryKey,
+            ),
+            scopeLifetime,
+          )
+      "
+    />
     <p v-if="revoked || state.isError.value" role="alert" class="break-keep text-error">{{
       loadErrorMessage(denial ?? state.error.value)
     }}</p>

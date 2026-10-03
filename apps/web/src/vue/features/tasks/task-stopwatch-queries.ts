@@ -9,6 +9,16 @@ export type TimerRecord = components["schemas"]["TimeRecord"];
 export type TimerManual = components["schemas"]["TimerManualBody"];
 export type TimerCorrection = components["schemas"]["TimeCorrectionBody"];
 export type TimerLegacyRelease = components["schemas"]["LegacyReleaseBody"];
+export type TaskEstimateCommand = components["schemas"]["TaskEstimateCommandBody"];
+
+export async function sendTaskEstimate(workspace: string, task: string, body: TaskEstimateCommand) {
+  return ensureOk(
+    await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/estimate", {
+      params: { path: { workspace_id: workspace, task_id: task } },
+      body,
+    }),
+  );
+}
 
 export function capturedTimeEntriesQuery(
   actor: string,

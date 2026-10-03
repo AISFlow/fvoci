@@ -1992,6 +1992,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/study-plan/task": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["study_plan_targets"];
+        put?: never;
+        post: operations["study_plan_task"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/documents/{document_id}/tags": {
         parameters: {
             query?: never;
@@ -3666,6 +3682,22 @@ export interface paths {
         get: operations["task_state"];
         put?: never;
         post: operations["task_command"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/estimate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["task_estimate"];
         delete?: never;
         options?: never;
         head?: never;
@@ -5853,6 +5885,32 @@ export interface components {
             wipLimit?: number | null;
         };
         String: string;
+        /**
+         * @description Creates one ordinary task linked to an existing material/notes document.
+         *     The planner keeps goal/reading steps as ordinary task hierarchy and origins.
+         */
+        StudyPlanTaskBody: {
+            anchor?: string | null;
+            /** Format: uuid */
+            expectedActorId: string;
+            /** Format: uuid */
+            expectedSessionId: string;
+            /** Format: int32 */
+            minutes?: number | null;
+            /** Format: uuid */
+            projectId: string;
+            /** Format: uuid */
+            requestId: string;
+            selfAssign?: boolean;
+            task: components["schemas"]["CreateTaskBody"];
+        };
+        StudyPlanTaskOutput: {
+            /** Format: int32 */
+            number: number;
+            projectKey: string;
+            /** Format: uuid */
+            taskId: string;
+        };
         TaskChildOutput: {
             id: string;
             /** Format: int32 */
@@ -5880,6 +5938,31 @@ export interface components {
             /** Format: int32 */
             lagDays: number;
             type: string;
+        };
+        /**
+         * @description Raw database timestamp preserves microseconds for compare-and-set; the
+         *     ordinary task DTO's millisecond timestamp is not an estimate write token.
+         */
+        TaskEstimate: {
+            unit: string | null;
+            /** Format: date-time */
+            updatedAt: string;
+            value: string | null;
+        };
+        TaskEstimateCommandBody: {
+            expected: components["schemas"]["TaskEstimate"];
+            /** Format: uuid */
+            expectedActorId: string;
+            /** Format: uuid */
+            expectedSessionId: string;
+            /**
+             * Format: int32
+             * @description Null explicitly clears both the value and the unit.
+             */
+            minutes: number | null;
+            reason: string;
+            /** Format: uuid */
+            requestId: string;
         };
         TaskListItemOutput: components["schemas"]["TaskMetaOutput"] & {
             assigneeIds: string[];
@@ -5987,6 +6070,7 @@ export interface components {
             busyElsewhere: boolean;
             /** @description Current existing time-entry Edit/archive capability, in this snapshot. */
             canControl: boolean;
+            estimate: components["schemas"]["TaskEstimate"];
             legacyOpen: boolean;
             run: components["schemas"]["TimerRunOutput"] | null;
             /** Format: date-time */
@@ -14481,6 +14565,129 @@ export interface operations {
             };
         };
     };
+    study_plan_targets: {
+        parameters: {
+            query?: {
+                expectedActorId?: string;
+                expectedSessionId?: string;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskProjectPickerResponse"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    study_plan_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StudyPlanTaskBody"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StudyPlanTaskOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
     list_wiki_document_tags: {
         parameters: {
             query?: never;
@@ -22097,6 +22304,72 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    task_estimate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TaskEstimateCommandBody"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskEstimate"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
