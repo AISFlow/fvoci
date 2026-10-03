@@ -24,7 +24,14 @@ const PROBE = "/api/v1/me/workspaces";
 // shorter than the pool reopen backoff ceiling. Not a retry or a fix.
 const STALL_WINDOW_MS = 8_000;
 
-type NetEvent = { at: number; kind: string; url: string; requestId: string; detail?: unknown };
+type NetEvent = {
+  at: number;
+  receivedAt?: number;
+  kind: string;
+  url: string;
+  requestId: string;
+  detail?: unknown;
+};
 
 async function setup(page: Page): Promise<void> {
   await page.goto("/");
@@ -84,7 +91,11 @@ async function instrument(page: Page): Promise<{ cdp: CDPSession; events: NetEve
   cdp.on("Network.requestWillBeSent", (event) => {
     urls.set(event.requestId, event.request.url);
     events.push({
-      at: Date.now(),
+      // CDP delivery can follow the server's on_request log. Compare the
+      // browser's physical issue time with that log, retaining delivery time
+      // separately so a delayed callback cannot erase a real arrival.
+      at: Math.floor(event.wallTime * 1_000),
+      receivedAt: Date.now(),
       kind: "request",
       url: event.request.url,
       requestId: event.requestId,
@@ -115,7 +126,7 @@ async function instrument(page: Page): Promise<{ cdp: CDPSession; events: NetEve
   });
   return { cdp, events };
 }
-async function startProbe(page: Page): Promise<void> {
+async function startProbe(page: Page, probeUrl: string): Promise<void> {
   await page.evaluate((probe) => {
     (window as unknown as { __probe: Promise<number> }).__probe = fetch(probe, {
       cache: "no-store",
@@ -124,7 +135,7 @@ async function startProbe(page: Page): Promise<void> {
       (response) => response.status,
       () => -1,
     );
-  }, PROBE);
+  }, probeUrl);
 }
 async function probeWithin(page: Page, ms: number): Promise<number | "pending"> {
   return page.evaluate(
@@ -205,20 +216,19 @@ async function correlatedProbe(
   page: Page,
   events: NetEvent[],
 ): Promise<{ probeId: string | undefined; probeIssuedAt: number }> {
-  // The shell itself also GETs the probe URL while loading: correlate the
-  // probe by its own CDP requestId, first seen after the probe starts.
+  // The shell also GETs this route. A fixture-only query identifies our
+  // request exactly in CDP; the server still logs the redacted route template.
+  const probeUrl = `${new URL(PROBE, page.url()).href}?fvoci_capacity_probe=${crypto.randomUUID()}`;
   const beforeProbe = events.length;
-  await startProbe(page);
+  await startProbe(page, probeUrl);
   await expect
     .poll(() =>
-      events
-        .slice(beforeProbe)
-        .some((event) => event.kind === "request" && event.url.endsWith(PROBE)),
+      events.slice(beforeProbe).some((event) => event.kind === "request" && event.url === probeUrl),
     )
     .toBe(true);
   const probeId = events
     .slice(beforeProbe)
-    .find((event) => event.kind === "request" && event.url.endsWith(PROBE))?.requestId;
+    .find((event) => event.kind === "request" && event.url === probeUrl)?.requestId;
   const probeIssuedAt =
     events.slice(beforeProbe).find((event) => event.requestId === probeId)?.at ?? 0;
   return { probeId, probeIssuedAt };
@@ -250,7 +260,14 @@ test("N=8 projects: the shell holds one workspace task stream plus the access st
   const created = events.filter(
     (event) => event.kind === "request" && /\/(task-stream|access-stream|stream)$/.test(event.url),
   ).length;
-  await attach(testInfo, "fixed-n8", events, { result, probeId, arrivals, urls, created });
+  await attach(testInfo, "fixed-n8", events, {
+    result,
+    probeId,
+    probeIssuedAt,
+    arrivals,
+    urls,
+    created,
+  });
   expect(probeId).toBeTruthy();
   expect(result).toBe(200);
   expect(arrivals).toHaveLength(1);
