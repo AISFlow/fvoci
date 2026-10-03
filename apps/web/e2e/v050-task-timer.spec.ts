@@ -2376,9 +2376,7 @@ test("owner releases opaque legacy reservations after task permission loss witho
   try {
     const person = await context.newPage();
     await login(person, fixture.email, credentials.password);
-    const identity = identityShape.parse(
-      await (await person.request.get("/api/v1/auth/me")).json(),
-    );
+    let identity = identityShape.parse(await (await person.request.get("/api/v1/auth/me")).json());
     expect(
       z
         .object({ isInstanceAdmin: z.literal(false) })
@@ -2416,10 +2414,23 @@ test("owner releases opaque legacy reservations after task permission loss witho
     });
     expect(nextWorkspaceResponse.status(), await nextWorkspaceResponse.text()).toBe(201);
     const nextWorkspace = z.object({ id: z.string() }).parse(await nextWorkspaceResponse.json());
-    createE2eUser(fixture.email, credentials.password, "권한 검사", {
-      workspaceSlug: nextSlug,
-      membershipRole: "member",
+    const invitation = await page.request.post(
+      `/api/v1/workspaces/${nextWorkspace.id}/invitations`,
+      { data: { email: fixture.email, role: "member" } },
+    );
+    expect(invitation.status(), await invitation.text()).toBe(201);
+    const acceptUrl = z.object({ acceptUrl: z.string() }).parse(await invitation.json()).acceptUrl;
+    const token = new URL(acceptUrl).pathname.split("/invite/")[1];
+    if (!token) throw new Error("existing member invitation token missing");
+    const accepted = await person.request.post(`/api/v1/invitations/${token}/accept`, {
+      data: { password: credentials.password },
     });
+    expect(accepted.status(), await accepted.text()).toBe(200);
+    const acceptedIdentity = identityShape.parse(
+      await (await person.request.get("/api/v1/auth/me")).json(),
+    );
+    expect(acceptedIdentity.userId).toBe(identity.userId);
+    identity = acceptedIdentity;
     const nextProjectResponse = await page.request.post(
       `/api/v1/workspaces/${nextWorkspace.id}/projects`,
       {
