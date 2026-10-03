@@ -7402,3 +7402,321 @@ fn storage_inventory(root: &std::path::Path) -> Vec<(String, u64)> {
     out.sort();
     out
 }
+
+/// The C1/DT1 graph and post053 command-only provenance share one publication
+/// transaction. All records below are captured from ordinary writers; only the
+/// destination historical receipt is an explicitly labeled history-only seed.
+#[tokio::test]
+async fn native_archive_current54_collections_tags_and_command_guard_share_one_restore() {
+    use fvoci_server::db::native_archive::{capture, publish, NativeDbError};
+    let (harness, fx, timed) = timed_archive().await;
+    let ws = fx.workspace_id;
+    let project = timed.graph.project.id;
+    let task = timed.graph.timer_runs[0].task_id;
+    let run = timed.graph.timer_runs[0].id;
+    let root = timed.graph.project.root_document_id.expect("project root");
+    let w = format!("/api/v1/workspaces/{ws}");
+    let call = |app: axum::Router,
+                method: &'static str,
+                path: String,
+                body: Option<Value>,
+                cookie: String| async move {
+        let (status, reply) = json_request(app, method, &path, body, Some(&cookie)).await;
+        assert!(status.is_success(), "{method} {path}: {status} {reply}");
+        reply
+    };
+    let collection = call(
+        fx.app.clone(),
+        "GET",
+        format!("{w}/projects/{project}/collection"),
+        None,
+        fx.cookie.clone(),
+    )
+    .await;
+    let cid = collection["id"].as_str().unwrap().to_owned();
+    let field = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/collections/{cid}/fields"),
+        Some(json!({"name":"복구 메모 🧪","type":"text","options":[]})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let item = call(
+        fx.app.clone(),
+        "GET",
+        format!("{w}/tasks/{task}/collection-item"),
+        None,
+        fx.cookie.clone(),
+    )
+    .await;
+    let item_id = item["item"]["id"].as_str().unwrap();
+    let literal = "same archive: field/value/view, tag, historical receipt";
+    call(fx.app.clone(), "PUT", format!("{w}/collections/{cid}/items/{item_id}/values"), Some(json!({"fieldId":field["id"],"expectedVersion":item["item"]["version"],"expectedFieldVersion":field["version"],"value":{"text":literal}})), fx.cookie.clone()).await;
+    let view = call(fx.app.clone(), "POST", format!("{w}/collections/{cid}/views"), Some(json!({"name":"복구 표","type":"table","visibility":"private","config":{"query":{"filters":{"custom":[{"fieldId":field["id"],"operator":"equals","value":literal}]},"sort":[]},"groupBy":null,"dateBy":null}})), fx.cookie.clone()).await;
+    let tag = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/document-tags"),
+        Some(json!({"name":"복구 표식 🧪","color":"blue"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/projects/{project}/documents/{root}/tags"),
+        Some(json!({"tagId":tag["id"]})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let read = |app: axum::Router, w: String, cookie: String| {
+        let (cid, config) = (cid.clone(), view["config"].clone());
+        async move {
+            let fields = call(
+                app.clone(),
+                "GET",
+                format!("{w}/collections/{cid}/fields"),
+                None,
+                cookie.clone(),
+            )
+            .await;
+            let items = call(
+                app.clone(),
+                "POST",
+                format!("{w}/collections/{cid}/query"),
+                Some(json!({"config":config})),
+                cookie.clone(),
+            )
+            .await["items"]
+                .clone();
+            let views = call(
+                app.clone(),
+                "GET",
+                format!("{w}/collections/{cid}/views"),
+                None,
+                cookie.clone(),
+            )
+            .await;
+            let tags = call(
+                app,
+                "GET",
+                format!("{w}/projects/{project}/documents/{root}/tags"),
+                None,
+                cookie,
+            )
+            .await;
+            vec![fields, items, views, tags]
+        }
+    };
+    let source_reads = read(fx.app.clone(), w.clone(), fx.cookie.clone()).await;
+    assert_eq!(source_reads[1].as_array().unwrap().len(), 1);
+    assert_eq!(
+        source_reads[1][0]["values"][field["id"].as_str().unwrap()],
+        json!({"text":literal})
+    );
+    assert_eq!(source_reads[2]["items"][0]["id"], view["id"]);
+    assert_eq!(source_reads[3]["items"][0]["id"], tag["id"]);
+    let session = project_harness::session_id_for_user(&fx.admin, fx.user_id).await;
+    let archive = capture(&fx.pool, ws, fx.user_id, session, &project_only(project))
+        .await
+        .unwrap()
+        .archive;
+    archive.validate().unwrap();
+    assert_eq!(archive.graph.collection_fields.len(), 1);
+    assert_eq!(archive.graph.collection_values.len(), 1);
+    assert_eq!(archive.graph.collection_views.len(), 1);
+    assert_eq!(archive.graph.document_tags.len(), 1);
+    assert_eq!(archive.graph.document_tag_assignments.len(), 1);
+    assert!(!archive.graph.timer_commands.is_empty() && !archive.graph.timer_audit.is_empty());
+    let historical: Value = sqlx::query_scalar("SELECT to_jsonb(c) FROM fvoci.task_timer_commands c WHERE user_id=$1 AND run_id=$2 ORDER BY request_id LIMIT 1")
+        .bind(fx.user_id).bind(run).fetch_one(&fx.admin).await.unwrap();
+    let source_history = timer_graph(&fx.admin, fx.user_id).await;
+    call(
+        fx.app.clone(),
+        "DELETE",
+        format!("{w}/tasks/{task}"),
+        None,
+        fx.cookie.clone(),
+    )
+    .await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fvoci.task_timer_runs WHERE id=$1")
+            .bind(run)
+            .fetch_one(&fx.admin)
+            .await
+            .unwrap(),
+        0
+    );
+    let purged = timer_graph(&fx.admin, fx.user_id).await;
+    assert_eq!(purged["commands"], source_history["commands"]);
+    assert_eq!(purged["audit"], source_history["audit"]);
+    let mut omitted = archive.clone();
+    omitted.graph.timer_commands.clear();
+    omitted.graph.timer_audit.clear();
+    omitted.validate().unwrap();
+    // Extend the inherited literal publication observation only in this joint
+    // oracle; its existing body and all older assertions remain byte exact.
+    let combined_graph = |admin: sqlx::PgPool| async move {
+        let mut graph = restore_publication_graph(&admin).await;
+        for table in [
+            "collection_fields",
+            "collection_options",
+            "collection_values",
+            "collection_choices",
+            "collection_people",
+            "collection_views",
+            "document_tags",
+            "document_tag_assignments",
+        ] {
+            let rows: Value = sqlx::query_scalar(&format!("SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM fvoci.{table} t"))
+                .fetch_one(&admin).await.unwrap();
+            assert!(graph
+                .as_object_mut()
+                .unwrap()
+                .insert(table.into(), rows)
+                .is_none());
+        }
+        graph
+    };
+    for (label, foreign, different_run) in [
+        ("same actor", false, false),
+        ("foreign actor", true, false),
+        ("different run", false, true),
+    ] {
+        for (history_label, candidate) in [("full", &archive), ("omitted", &omitted)] {
+            let db = TestDb::bootstrap().await;
+            let inst = fixture(&db).await;
+            let cookie = same_person(&inst, fx.user_id).await;
+            let versions: Vec<i32> =
+                sqlx::query_scalar("SELECT version FROM fvoci.schema_migrations ORDER BY version")
+                    .fetch_all(&inst.admin)
+                    .await
+                    .unwrap();
+            assert_eq!(versions, (1..=54).collect::<Vec<_>>());
+            let owner = if foreign {
+                project_harness::add_workspace_user(
+                    &inst.admin,
+                    inst.workspace_id,
+                    "member",
+                    "joint-command-other",
+                )
+                .await
+                .user_id
+            } else {
+                fx.user_id
+            };
+            let mut retained = historical.clone();
+            retained["user_id"] = json!(owner);
+            if different_run {
+                // Explicit unrelated-id control: change the request/run and its
+                // nested response locator together; leave other receipt fields.
+                let unrelated = Uuid::now_v7();
+                retained["request_id"] = json!(Uuid::now_v7());
+                retained["run_id"] = json!(unrelated);
+                retained["result"]["runId"] = json!(unrelated);
+            }
+            as_actor(&inst.pool, inst.workspace_id, owner,
+                "INSERT INTO fvoci.task_timer_commands(user_id,request_id,request_hash,run_id,result,created_at,restored_from_archive)
+                 SELECT (b->>'user_id')::uuid,(b->>'request_id')::uuid,b->>'request_hash',(b->>'run_id')::uuid,b->'result',(b->>'created_at')::timestamptz,(b->>'restored_from_archive')::uuid
+                 FROM (SELECT $1::jsonb->0 AS b) q", vec![retained.clone()]).await;
+            let request = Uuid::parse_str(retained["request_id"].as_str().unwrap()).unwrap();
+            let read_command = || async {
+                sqlx::query_scalar::<_,Value>("SELECT to_jsonb(c) FROM fvoci.task_timer_commands c WHERE user_id=$1 AND request_id=$2")
+                    .bind(owner).bind(request).fetch_one(&inst.admin).await.unwrap()
+            };
+            assert_eq!(read_command().await, retained);
+            let before_history = timer_graph(&inst.admin, owner).await;
+            assert!(before_history["runs"].as_array().unwrap().is_empty());
+            assert!(before_history["audit"].as_array().unwrap().is_empty());
+            let missing_fk: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_constraint WHERE conrelid='fvoci.task_timer_commands'::regclass AND conname='task_timer_commands_run_id_fkey'")
+                .fetch_one(&inst.admin).await.unwrap();
+            assert_eq!(missing_fk, 0);
+            let (target, _, claim) = claimed_restore(&inst, fx.user_id, &cookie).await;
+            let before_db = restore_database_effects(&inst.admin).await;
+            let before_graph = combined_graph(inst.admin.clone()).await;
+            let before_storage = restore_storage_effects(&inst.storage_root());
+            let result = publish(
+                &inst.pool,
+                &claim,
+                candidate,
+                &std::collections::BTreeMap::new(),
+                &inst.settings.quota,
+            )
+            .await;
+            if foreign || different_run {
+                result.unwrap_or_else(|e| panic!("{label}/{history_label}: {e:?}"));
+                let restored = read(
+                    inst.app.clone(),
+                    format!("/api/v1/workspaces/{target}"),
+                    cookie.clone(),
+                )
+                .await;
+                let mut expected = source_reads.clone();
+                for tag in expected[3]["items"].as_array_mut().unwrap() {
+                    assert_eq!(tag["workspaceId"], json!(ws));
+                    tag["workspaceId"] = json!(target);
+                }
+                assert_eq!(restored, expected, "{label}/{history_label}: fresh-client field/value/view/tag identity and content");
+                let restored_run: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM fvoci.task_timer_runs WHERE id=$1 AND user_id=$2",
+                )
+                .bind(run)
+                .bind(fx.user_id)
+                .fetch_one(&inst.admin)
+                .await
+                .unwrap();
+                assert_eq!(restored_run, 1);
+                let completed: (String, Option<Uuid>) = sqlx::query_as(
+                    "SELECT status, (native_result->>'projectId')::uuid FROM fvoci.import_jobs WHERE id=$1",
+                )
+                .bind(claim.job_id)
+                .fetch_one(&inst.admin)
+                .await
+                .unwrap();
+                assert_eq!(completed, ("completed".into(), Some(project)));
+                assert!(job_events(&inst.admin, target).await > 0);
+            } else {
+                assert!(
+                    matches!(result, Err(NativeDbError::Conflict)),
+                    "{label}/{history_label}: {result:?}"
+                );
+                assert_eq!(
+                    restore_database_effects(&inst.admin).await,
+                    before_db,
+                    "all rows/jobs/events unchanged"
+                );
+                assert_eq!(
+                    combined_graph(inst.admin.clone()).await,
+                    before_graph,
+                    "literal full publication graph unchanged"
+                );
+                assert_eq!(
+                    restore_storage_effects(&inst.storage_root()),
+                    before_storage,
+                    "owned storage unchanged"
+                );
+                assert_eq!(
+                    timer_graph(&inst.admin, owner).await,
+                    before_history,
+                    "exact retained command/audit history unchanged"
+                );
+            }
+            assert_eq!(
+                read_command().await,
+                retained,
+                "{label}/{history_label}: immutable historical receipt"
+            );
+            let storage = inst.storage_root();
+            inst.pool.close().await;
+            inst.admin.close().await;
+            db.cleanup().await;
+            std::fs::remove_dir_all(storage).unwrap();
+        }
+    }
+    let storage = fx.storage_root();
+    fx.pool.close().await;
+    fx.admin.close().await;
+    harness.cleanup().await;
+    std::fs::remove_dir_all(storage).unwrap();
+}
