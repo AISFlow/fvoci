@@ -1222,7 +1222,18 @@ async function ordinaryTimerTask(
         workspaceSlug: "w5timer",
         membershipRole: "member",
       });
+      // Same setup capability as the original site's bootstrap administrator,
+      // on this isolated synthetic preparation identity only. The measured
+      // member below never receives this flag or a different database role.
+      expect(/^[a-z0-9@.-]+$/.test(bootstrap)).toBe(true);
+      const prepared = diagnosticSql(
+        `UPDATE fvoci.users SET is_instance_admin=true WHERE email='${bootstrap}' AND NOT is_instance_admin RETURNING id`,
+      );
+      expect(/^[0-9a-f-]{36}$/.test(prepared)).toBe(true);
       await login(page, bootstrap, credentials.password);
+      z.object({ isInstanceAdmin: z.literal(true) }).parse(
+        await (await page.request.get("/api/v1/auth/me")).json(),
+      );
     }
   } else await timerWorkspace(page);
   const slug = `w5-${key.toLowerCase()}-timer`;
@@ -1239,7 +1250,9 @@ async function ordinaryTimerTask(
   const loggedOut = await page.request.post("/api/v1/auth/logout");
   expect(loggedOut.ok(), await loggedOut.text()).toBe(true);
   await login(page, email, credentials.password);
-  const actor = identityShape.parse(await (await page.request.get("/api/v1/auth/me")).json());
+  const actorResponse: unknown = await (await page.request.get("/api/v1/auth/me")).json();
+  const actor = identityShape.parse(actorResponse);
+  if (independentBootstrap) z.object({ isInstanceAdmin: z.literal(false) }).parse(actorResponse);
   const createdProject = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects`, {
     data: { key, name: "기록 검증", visibility: "workspace" },
   });
@@ -1884,7 +1897,9 @@ test("ordinary research plan persists document origins explicit minutes and fres
     accepted.push({ ...result, document: pathname.split("/").at(-3) ?? "" });
   });
   await planner.getByRole("button", { name: "계획 저장", exact: true }).click();
-  await expect(planner.getByRole("status")).toContainText("4개 저장됨");
+  await expect(planner.getByRole("status").filter({ hasText: "저장된 목표와 단계" })).toContainText(
+    "4개 저장됨",
+  );
   await expect.poll(() => accepted.length).toBe(4);
   const [goal, reading] = accepted;
   if (!goal || !reading) throw new Error("missing real ordinary plan receipts");
