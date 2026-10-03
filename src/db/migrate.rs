@@ -96,6 +96,11 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/045_personal_input_commands.sql"),
         45,
     ),
+    (include_str!("../../migrations/046_native_archives.sql"), 46),
+    (
+        include_str!("../../migrations/047_personal_transfer_commands.sql"),
+        47,
+    ),
     (include_str!("../../migrations/048_task_timers.sql"), 48),
     (
         include_str!("../../migrations/049_task_estimate_unit.sql"),
@@ -104,6 +109,11 @@ const MIGRATIONS: &[(&str, i32)] = &[
     (
         include_str!("../../migrations/050_revision_restore_metadata.sql"),
         50,
+    ),
+    (include_str!("../../migrations/051_zotero_readonly.sql"), 51),
+    (
+        include_str!("../../migrations/052_timer_receipt_restore_provenance.sql"),
+        52,
     ),
 ];
 
@@ -751,6 +761,14 @@ mod tests {
             "34ba8efcdc7d13f9921611aba74a1a9bc13c88c25d8ffcb35282de4919b9f561",
         ),
         (
+            46,
+            "28a0fcfd7b95711c7bd6e17d49c331a26411046551c0ce3bf6509fb48120a1ad",
+        ),
+        (
+            47,
+            "2ec47baddc7570820e2101a8c7dbce72ca7678d84dbf2683e4a463c0b05ac47b",
+        ),
+        (
             48,
             "b7f943996e9cc9918c90ceb780db285708a31c165368064cd17eb0a5f14ed787",
         ),
@@ -761,6 +779,14 @@ mod tests {
         (
             50,
             "201e77d18302c25e2b933168d4678a6bb27e251454f1d9d42e5f3aa0ceda09bf",
+        ),
+        (
+            51,
+            "aa9315e174e62a101045fd5f254bf98e9f2ca70a08e801e2862d7c0aaaf50008",
+        ),
+        (
+            52,
+            "7472a27beda41856d5c93e6a428a0913571696c2727759a6dcf5eabcf78253f3",
         ),
     ];
 

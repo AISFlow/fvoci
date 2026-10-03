@@ -267,6 +267,13 @@ GRANT EXECUTE ON FUNCTION fvoci.app_oldest_write_xact_age_seconds() TO :"app_rol
 GRANT SELECT, INSERT ON fvoci.personal_input_commands TO :"app_role";
 REVOKE UPDATE, DELETE ON fvoci.personal_input_commands FROM :"app_role";
 
+-- 047 confirmed transfer receipt: only authenticated operation code appends.
+GRANT SELECT, INSERT ON fvoci.personal_transfer_commands TO :"app_role";
+REVOKE UPDATE, DELETE ON fvoci.personal_transfer_commands FROM :"app_role";
+
+-- 051 owner-private Zotero mirror and separately sealed credential.
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.zotero_connectors, fvoci.zotero_credentials, fvoci.zotero_references, fvoci.zotero_collections, fvoci.zotero_memberships, fvoci.zotero_links TO :"app_role";
+
 -- W5 actor-owned durable commands and correction audit are append-only.
 REVOKE UPDATE, DELETE ON fvoci.task_timer_commands FROM :"app_role";
 REVOKE UPDATE, DELETE ON fvoci.task_timer_audit FROM :"app_role";

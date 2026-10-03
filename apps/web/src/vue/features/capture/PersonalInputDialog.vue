@@ -5,6 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/vue-query";
 import { onScopeDispose, ref, useId, watch } from "vue";
 import { useRouter } from "vue-router";
 import NativeModal from "../../components/NativeModal.vue";
+import PersonalTransferDialog from "./PersonalTransferDialog.vue";
 import { loadErrorMessage, ProblemError } from "@/lib/api";
 import { itemPath } from "@/lib/href";
 import { meQuery } from "@/lib/queries";
@@ -129,6 +130,8 @@ function visit(kind: "document" | "task"): void {
     @click="open = true"
     >{{ t("capture.open") }}</UButton
   >
+  <!-- Always present: a lost MOVE success may leave no source route to mount from. -->
+  <PersonalTransferDialog :workspace-id="workspaceId" :document-id="null" />
   <NativeModal
     :id="id"
     :open="open"

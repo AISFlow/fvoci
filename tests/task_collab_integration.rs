@@ -1704,3 +1704,8 @@ async fn task_session_revision_skips_when_task_trashed_under_lock() {
 
 #[path = "task_collab_integration/personal_input.rs"]
 mod personal_input;
+
+#[path = "task_collab_integration/personal_transfer.rs"]
+mod personal_transfer;
+#[path = "task_collab_integration/zotero.rs"]
+mod zotero;

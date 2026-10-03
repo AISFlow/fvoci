@@ -4061,7 +4061,10 @@ pub fn spec_json() -> String {
     doc.merge(crate::api::openapi_identity::IdentityApiDoc::openapi());
     doc.merge(crate::api::openapi_documents::DocumentsApiDoc::openapi());
     doc.merge(crate::api::openapi_tasks::TasksApiDoc::openapi());
+    doc.merge(crate::api::personal_transfer::PersonalTransfersApiDoc::openapi());
     doc.merge(crate::api::task_timer::TaskTimerApiDoc::openapi());
+    doc.merge(crate::api::native_archive::NativeArchiveApi::openapi());
+    doc.merge(crate::api::openapi_zotero::ZoteroApiDoc::openapi());
     doc.to_pretty_json().expect("openapi json")
 }
 

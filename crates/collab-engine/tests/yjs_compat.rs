@@ -11,6 +11,8 @@ use yrs::types::ToJson;
 use yrs::updates::decoder::Decode;
 use yrs::{ReadTxn, Transact, Update};
 
+mod native_archive_history_probe;
+
 static SPAWN_TEST: Mutex<()> = Mutex::new(());
 
 fn fixtures() -> PathBuf {

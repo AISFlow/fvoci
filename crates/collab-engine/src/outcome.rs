@@ -64,6 +64,9 @@ pub enum EngineStatus {
         content_json: Option<Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         yrs: Option<String>,
+        /// Archive inventory has its own typed channel; content_json stays Tiptap.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        native_archive_inventory: Option<crate::archive_history::NativeArchiveInventory>,
     },
     Malformed {
         detail: String,
@@ -98,6 +101,7 @@ impl EngineStatus {
             xml_len: None,
             content_json: None,
             yrs: Some(crate::YRS_VERSION.into()),
+            native_archive_inventory: None,
         }
     }
 

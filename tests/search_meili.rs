@@ -35,6 +35,7 @@ fn document_source(
         chunk_no: None,
         title: text.title,
         body: text.body,
+        bibliography: None,
         chosung: text.chosung,
         stem: text.stem,
         updated_at: 1,
@@ -77,7 +78,15 @@ async fn ensure_upsert_search_scope_and_delete_by_filter() {
     let settings = fetch_settings(&config).await;
     assert_eq!(
         settings["searchableAttributes"],
-        serde_json::json!(["title", "body", "chosung", "stem"])
+        serde_json::json!([
+            "title",
+            "body",
+            "chosung",
+            "stem",
+            "bibliographyBody",
+            "bibliographyChosung",
+            "bibliographyStem"
+        ])
     );
     let filterable = settings["filterableAttributes"]
         .as_array()

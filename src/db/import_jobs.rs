@@ -37,6 +37,7 @@ pub const SYNC_IMPORT_STALE_SECS: i64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportSource {
+    NativeArchive,
     MarkdownZip,
     OfficeFile,
     NotionZip,
@@ -45,6 +46,7 @@ pub enum ImportSource {
 impl ImportSource {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::NativeArchive => "native-archive",
             Self::MarkdownZip => "markdown-zip",
             Self::OfficeFile => "office-file",
             Self::NotionZip => "notion-zip",
@@ -53,6 +55,7 @@ impl ImportSource {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
+            "native-archive" => Some(Self::NativeArchive),
             "markdown-zip" => Some(Self::MarkdownZip),
             "office-file" => Some(Self::OfficeFile),
             "notion-zip" => Some(Self::NotionZip),
@@ -636,6 +639,22 @@ pub async fn finish_import_job(
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, claim.workspace_id).await?;
+    let finished = finish_import_job_in_tx(&mut tx, claim, status).await?;
+    if finished {
+        tx.commit().await?;
+    } else {
+        tx.rollback().await?;
+    }
+    Ok(finished)
+}
+
+/// The native graph caller owns this transaction: graph, result, cleanup
+/// handoff, events and terminal state must commit together.
+pub(crate) async fn finish_import_job_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    claim: &ImportClaim,
+    status: ImportStatus,
+) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(&format!(
         r#"
         UPDATE fvoci.import_jobs
@@ -648,19 +667,17 @@ pub async fn finish_import_job(
     .bind(claim.job_id)
     .bind(claim.lease_token)
     .bind(status.as_str())
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     if result.rows_affected() != 1 {
         // Fence lost: the sweep owns the row and its parked events.
-        tx.rollback().await?;
         return Ok(false);
     }
     if status == ImportStatus::Completed {
-        publish_deferred_events(&mut tx, claim.workspace_id, claim.job_id).await?;
+        publish_deferred_events(tx, claim.workspace_id, claim.job_id).await?;
     } else {
-        discard_deferred_events(&mut tx, claim.workspace_id, claim.job_id).await?;
+        discard_deferred_events(tx, claim.workspace_id, claim.job_id).await?;
     }
-    tx.commit().await?;
     Ok(true)
 }
 

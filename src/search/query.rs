@@ -20,7 +20,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
-use crate::db::context::{begin_read, session_is_live, set_tenant};
+use crate::db::context::{begin_read, session_is_live, set_self_user, set_tenant};
 use crate::db::documents::document_permission;
 use crate::db::group_grants::guest_wiki_document_ids_select_sql;
 use crate::db::projects::{load_live_project, project_permission, visible_project_sql_for_guest};
@@ -31,9 +31,9 @@ use crate::display_id::format_display_id;
 use crate::projects::ProjectPermission;
 use crate::search::embed::Embedder;
 use crate::search::meili::{
-    search_meili, search_meili_vector, MeiliConfig, MeiliError, MeiliHit, MeiliSearchInput,
-    MeiliSearchScope, MeiliVectorSearchInput, ParentKinds, SearchSourceKind, MEILI_MAX_TOTAL_HITS,
-    SEMANTIC_CHUNK_K,
+    search_meili, search_meili_vector, search_meili_with_bibliography, MeiliConfig, MeiliError,
+    MeiliHit, MeiliSearchInput, MeiliSearchScope, MeiliVectorSearchInput, ParentKinds,
+    SearchSourceKind, MEILI_MAX_TOTAL_HITS, SEMANTIC_CHUNK_K,
 };
 use crate::search::text::{is_chosung_query, stem_text};
 
@@ -206,6 +206,7 @@ pub(crate) struct SearchAcl {
 
 #[derive(Debug, Clone)]
 struct PreparedQuery {
+    bibliographic_session: bool,
     q: String,
     stem: String,
     chosung: bool,
@@ -252,7 +253,7 @@ pub async fn query_workspace_search(
     pool: &PgPool,
     input: WorkspaceSearchRequest<'_>,
 ) -> Result<Result<SearchResultPage, SearchQueryError>, sqlx::Error> {
-    let prepared = match prepare_query(input.q, input.r#type, input.limit, input.cursor) {
+    let mut prepared = match prepare_query(input.q, input.r#type, input.limit, input.cursor) {
         Ok(Some(prepared)) => prepared,
         Ok(None) => {
             return Ok(Ok(SearchResultPage {
@@ -273,6 +274,28 @@ pub async fn query_workspace_search(
         tx.rollback().await?;
         return Ok(Err(SearchQueryError::NotFound));
     }
+    let personal = crate::db::workspace::workspace_kind_read(&mut tx, input.workspace_id)
+        .await?
+        .as_deref()
+        == Some("personal");
+    if personal
+        && !crate::db::personal_input::owns_personal_workspace(
+            &mut tx,
+            input.workspace_id,
+            input.actor_user_id,
+        )
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(SearchQueryError::NotFound));
+    }
+    prepared.bibliographic_session = personal
+        && crate::db::zotero::cookie_session_is_live(
+            &mut tx,
+            input.actor_user_id,
+            input.session_id,
+        )
+        .await?;
     let role = membership_role(&mut tx, input.workspace_id, input.actor_user_id).await?;
     let Some(role) = role else {
         tx.rollback().await?;
@@ -325,7 +348,7 @@ pub async fn query_global_search(
     pool: &PgPool,
     input: GlobalSearchRequest<'_>,
 ) -> Result<Result<SearchResultPage, SearchQueryError>, sqlx::Error> {
-    let prepared = match prepare_query(input.q, input.r#type, input.limit, input.cursor) {
+    let mut prepared = match prepare_query(input.q, input.r#type, input.limit, input.cursor) {
         Ok(Some(prepared)) => prepared,
         Ok(None) => {
             return Ok(Ok(SearchResultPage {
@@ -347,6 +370,15 @@ pub async fn query_global_search(
         }));
     }
 
+    let mut credential_tx = begin_read(pool).await?;
+    set_self_user(&mut credential_tx, input.actor_user_id).await?;
+    prepared.bibliographic_session = crate::db::zotero::cookie_session_is_live(
+        &mut credential_tx,
+        input.actor_user_id,
+        input.session_id,
+    )
+    .await?;
+    credential_tx.commit().await?;
     let filters = global_search_filters(&input, &visible);
     if let Some(cursor) = input.cursor {
         if !cursor_matches(cursor, &filters) {
@@ -408,6 +440,7 @@ fn prepare_query(
         Some(cursor) => decode_cursor_offset(cursor)?,
     };
     Ok(Some(PreparedQuery {
+        bibliographic_session: false,
         q,
         stem,
         chosung,
@@ -567,6 +600,20 @@ async fn load_visible_acls(
             continue;
         }
         if !workspace_is_live(&mut tx, workspace.id).await? {
+            tx.rollback().await?;
+            continue;
+        }
+        if crate::db::workspace::workspace_kind_read(&mut tx, workspace.id)
+            .await?
+            .as_deref()
+            == Some("personal")
+            && !crate::db::personal_input::owns_personal_workspace(
+                &mut tx,
+                workspace.id,
+                actor_user_id,
+            )
+            .await?
+        {
             tx.rollback().await?;
             continue;
         }
@@ -737,7 +784,8 @@ async fn scan_lexical_global(
         if want == 0 {
             break;
         }
-        let res = search_meili(
+        let res = search_current_fields(
+            prepared,
             meili,
             &MeiliSearchInput {
                 q: prepared.q.clone(),
@@ -882,7 +930,8 @@ async fn scan_lexical(
         if want == 0 {
             break;
         }
-        let res = search_meili(
+        let res = search_current_fields(
+            prepared,
             meili,
             &MeiliSearchInput {
                 q: prepared.q.clone(),
@@ -1061,7 +1110,8 @@ async fn hybrid_scan(
 ) -> Result<ScannedPage, ScanError> {
     let workspace_ids = HashSet::from([input.workspace_id.to_string()]);
     let scope = meili_scope(input.workspace_id, acl);
-    let res = search_meili(
+    let res = search_current_fields(
+        prepared,
         meili,
         &MeiliSearchInput {
             q: prepared.q.clone(),
@@ -1228,6 +1278,18 @@ fn finish_items_global(
         .collect()
 }
 
+async fn search_current_fields(
+    prepared: &PreparedQuery,
+    config: &MeiliConfig,
+    input: &MeiliSearchInput,
+) -> Result<crate::search::meili::MeiliSearchPage, MeiliError> {
+    if prepared.bibliographic_session {
+        search_meili_with_bibliography(config, input).await
+    } else {
+        search_meili(config, input).await
+    }
+}
+
 async fn hydrate_hits(
     pool: &PgPool,
     input: &WorkspaceSearchRequest<'_>,
@@ -1270,13 +1332,23 @@ async fn hydrate_hits_for_workspace(
     }
     let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
+    set_self_user(&mut tx, actor_user_id).await?;
     if !session_is_live(&mut tx, actor_user_id, session_id).await?
         || !workspace_is_live(&mut tx, workspace_id).await?
     {
         tx.rollback().await?;
         return Ok(Vec::new());
     }
-    let rows = hydrate_in_tx(&mut tx, workspace_id, actor_user_id, filters, acl, hits).await?;
+    let rows = hydrate_in_tx(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        filters,
+        acl,
+        hits,
+    )
+    .await?;
     tx.commit().await?;
     Ok(rows)
 }
@@ -1285,6 +1357,7 @@ async fn hydrate_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
+    session_id: Uuid,
     filters: HydrateFilters,
     acl: &SearchAcl,
     hits: &[MeiliHit],
@@ -1334,7 +1407,14 @@ async fn hydrate_in_tx(
         .bind(tag)
         .fetch_all(&mut **tx)
         .await?;
-        for (id, title, body, project_id, number, updated_at, project_key) in rows {
+        let metadata = crate::db::zotero::private_search_texts(
+            tx,
+            workspace_id,
+            Some((actor_user_id, session_id)),
+            &doc_ids,
+        )
+        .await?;
+        for (id, title, mut body, project_id, number, updated_at, project_key) in rows {
             if !visible_after_hydrate(
                 tx,
                 workspace_id,
@@ -1347,6 +1427,10 @@ async fn hydrate_in_tx(
             .await?
             {
                 continue;
+            }
+            if let Some(text) = metadata.get(&id).filter(|v| !v.is_empty()) {
+                body.push('\n');
+                body.push_str(text);
             }
             loaded.insert(
                 hit_key(SearchSourceKind::Document, &id.to_string()),

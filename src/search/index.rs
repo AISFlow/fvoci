@@ -465,6 +465,10 @@ fn to_meili(row: &SearchIndexRow) -> SearchSource {
         chunk_no: row.chunk_no.map(i64::from),
         title: text.title,
         body: text.body,
+        bibliography: row
+            .bibliographic_text
+            .as_ref()
+            .map(|v| index_document_text("", v, "")),
         chosung: text.chosung,
         stem: text.stem,
         updated_at: row.updated_at.timestamp_millis(),

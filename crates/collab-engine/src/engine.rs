@@ -73,6 +73,21 @@ impl CollabEngine {
                 }
                 self.load(snapshot_b64.as_deref().unwrap_or(&[]), tail_b64)
             }
+            Request::ArchiveLoad {
+                snapshot_b64,
+                tail_b64,
+                capture_binding,
+                ..
+            } => {
+                if let Err(st) = Request::preflight(req, &self.limits) {
+                    return st;
+                }
+                self.archive_load(
+                    snapshot_b64.as_deref().unwrap_or(&[]),
+                    tail_b64,
+                    capture_binding,
+                )
+            }
             Request::Apply { update_b64, .. } => self.apply(update_b64),
             Request::Sync {
                 state_vector_b64, ..
@@ -91,6 +106,12 @@ impl CollabEngine {
                 self.revision_snapshots_equal(left_b64, right_b64)
             }
             Request::RestoreFromSnapshot { snap_b64, .. } => self.restore_from_snapshot(snap_b64),
+            Request::ArchiveRestoreFromSnapshot { snap_b64, .. } => {
+                if let Err(st) = req.preflight(&self.limits) {
+                    return st;
+                }
+                self.archive_restore_from_snapshot(snap_b64)
+            }
             Request::ReplaceFromUpdate { update_b64, .. } => self.replace_from_update(update_b64),
             Request::SeedFromTiptap { content_json, .. } => self.seed_from_tiptap(content_json),
         }
@@ -167,6 +188,80 @@ impl CollabEngine {
             }
         }
         self.ok_applied(None)
+    }
+
+    fn archive_load(&mut self, snapshot: &[u8], tail: &[Vec<u8>], binding: &str) -> EngineStatus {
+        if self.mutated {
+            return EngineStatus::Malformed {
+                detail: "archive load requires a fresh child".into(),
+            };
+        }
+        if let Err(st) = self.bump_op() {
+            return st;
+        }
+        self.mutated = true;
+        if let Err(st) = crate::protocol::cap_load_parts(
+            Some((snapshot, tail)),
+            crate::protocol::load_total_bytes(snapshot, tail),
+            tail.len(),
+            &self.limits,
+        ) {
+            return st;
+        }
+        let mut budget = crate::archive_history::worker::Budget::new(self.limits);
+        let mut ledger = crate::archive_history::worker::InputLedger::new();
+        for bytes in std::iter::once(snapshot)
+            .filter(|s| !s.is_empty())
+            .chain(tail.iter().map(Vec::as_slice))
+        {
+            if let Err(st) = self.cap_input(bytes, "archive native blob") {
+                return st;
+            }
+            if bytes.is_empty() {
+                return EngineStatus::Malformed {
+                    detail: "empty archive tail".into(),
+                };
+            }
+            use yrs::updates::decoder::{Decoder, DecoderV1};
+            let mut decoder = DecoderV1::from(bytes);
+            let update = match Update::decode(&mut decoder) {
+                Ok(u) => u,
+                Err(e) => return classify_decode(e.into(), "archive native decode"),
+            };
+            match decoder.read_to_end() {
+                Ok([]) => {}
+                _ => {
+                    return EngineStatus::Malformed {
+                        detail: "archive native trailing bytes".into(),
+                    }
+                }
+            }
+
+            if let Err(st) = ledger.capture(&update, &mut budget) {
+                return st;
+            }
+            if let Err(e) = self.doc.transact_mut().apply_update(update) {
+                return classify_apply(e);
+            }
+        }
+        let inventory = {
+            // One canonical read scope: owned witness/clone proof precedes
+            // read-only classification inside this archive-only call.
+            let txn = self.doc.transact();
+            match crate::archive_history::worker::inventory(&txn, ledger, binding, &mut budget) {
+                Ok(v) => v,
+                Err(st) => return st,
+            }
+        };
+        let mut status = self.ok_applied(None);
+        if let EngineStatus::Ok {
+            native_archive_inventory,
+            ..
+        } = &mut status
+        {
+            *native_archive_inventory = Some(inventory);
+        }
+        status
     }
 
     pub fn apply(&mut self, update: &[u8]) -> EngineStatus {
@@ -253,6 +348,7 @@ impl CollabEngine {
             xml_len: Some(xml_len),
             content_json: None,
             yrs: Some(crate::YRS_VERSION.into()),
+            native_archive_inventory: None,
         }
     }
 
@@ -281,6 +377,7 @@ impl CollabEngine {
             xml_len: None,
             content_json: Some(content_json),
             yrs: Some(crate::YRS_VERSION.into()),
+            native_archive_inventory: None,
         }
     }
 
@@ -341,11 +438,92 @@ impl CollabEngine {
         }
     }
 
+    fn archive_restore_from_snapshot(&mut self, snap_bytes: &[u8]) -> EngineStatus {
+        if let Err(st) = self.bump_op() {
+            return st;
+        }
+        if let Err(st) = self.cap_input(snap_bytes, "archive revision snapshot") {
+            return st;
+        }
+        use yrs::updates::decoder::{Decoder, DecoderV1};
+        let mut decoder = DecoderV1::from(snap_bytes);
+        let snapshot = match Snapshot::decode(&mut decoder) {
+            Ok(snapshot) => snapshot,
+            Err(err) => return classify_decode(err.into(), "archive snapshot"),
+        };
+        if !matches!(decoder.read_to_end(), Ok([])) {
+            return EngineStatus::Malformed {
+                detail: "archive snapshot trailing bytes".into(),
+            };
+        }
+        let mut budget = crate::archive_history::worker::Budget::new(self.limits);
+        if let Err(st) = crate::archive_history::worker::prove_snapshot(
+            &self.doc.transact(),
+            &snapshot,
+            &mut budget,
+        ) {
+            return st;
+        }
+        let bytes = match self.encode_restore_snapshot(&snapshot, Some(&mut budget)) {
+            Ok(v) => v,
+            Err(st) => return st,
+        };
+        if let Err(st) = self.cap_output(&bytes, "archive revision restore") {
+            return st;
+        }
+        self.ok_applied(Some(bytes))
+    }
+
     fn encode_restore_update(&self, snap_bytes: &[u8]) -> Result<Vec<u8>, EngineStatus> {
         self.cap_input(snap_bytes, "revision_snapshot")?;
         let snap = Snapshot::decode_v1(snap_bytes)
             .map_err(|err| classify_decode(err.into(), "snapshot"))?;
-        let reconstructed = reconstruct_doc_from_snapshot(&self.doc, &snap)?;
+        self.encode_restore_snapshot(&snap, None)
+    }
+
+    fn encode_restore_snapshot(
+        &self,
+        snap: &Snapshot,
+        archive: Option<&mut crate::archive_history::worker::Budget>,
+    ) -> Result<Vec<u8>, EngineStatus> {
+        let reconstructed = if let Some(budget) = archive {
+            // Only this disposable native clone is physically materialized. The
+            // encoding must run before its mutable transaction drops/remerges.
+            let complete = self
+                .doc
+                .transact()
+                .encode_state_as_update_v1(&StateVector::default());
+            self.cap_output(&complete, "archive snapshot scratch source")?;
+            budget.delegated_native_bytes(complete.len())?;
+            let scratch = new_doc();
+            if !complete.is_empty() {
+                apply_bytes_to_doc(&scratch, &complete)?;
+            }
+            drop(complete);
+            let bytes = {
+                let mut txn = scratch.transact_mut();
+                txn.materialize_snapshot(snap);
+                let mut encoder = EncoderV1::new();
+                txn.encode_state_from_snapshot(snap, &mut encoder)
+                    .map_err(|err| classify_decode(err, "archive encode_state_from_snapshot"))?;
+                encoder.to_vec()
+            };
+            drop(scratch);
+            self.cap_output(&bytes, "archive reconstructed snapshot")?;
+            budget.delegated_native_bytes(bytes.len())?;
+            let reconstructed = new_doc();
+            if !bytes.is_empty() {
+                apply_bytes_to_doc(&reconstructed, &bytes)?;
+            }
+            crate::archive_history::worker::prove_reconstruction(
+                &reconstructed.transact(),
+                snap,
+                budget,
+            )?;
+            reconstructed
+        } else {
+            reconstruct_doc_from_snapshot(&self.doc, snap)?
+        };
         let work = clone_doc(&self.doc)?;
         let dest = work.get_or_insert_xml_fragment(FRAGMENT);
         let bytes = {
@@ -440,6 +618,7 @@ impl CollabEngine {
                 xml_len: None,
                 content_json: None,
                 yrs: Some(crate::YRS_VERSION.into()),
+                native_archive_inventory: None,
             },
             Err(st) => st,
         }
@@ -494,6 +673,7 @@ impl CollabEngine {
             xml_len: None,
             content_json: None,
             yrs: Some(crate::YRS_VERSION.into()),
+            native_archive_inventory: None,
         }
     }
 

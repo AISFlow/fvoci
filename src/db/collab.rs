@@ -88,7 +88,7 @@ pub use crate::collab::wire::CollabKind;
 /// Per-kind collab tables. The task tables (037) mirror the document tables
 /// (004/005) column for column; the closed [`CollabKind`] selects them.
 #[derive(Debug, Clone, Copy)]
-struct CollabTables {
+pub(crate) struct CollabTables {
     states: &'static str,
     updates: &'static str,
     receipts: &'static str,
@@ -122,7 +122,7 @@ const TASK_TABLES: CollabTables = CollabTables {
 };
 
 impl CollabTables {
-    fn for_kind(kind: CollabKind) -> &'static Self {
+    pub(crate) fn for_kind(kind: CollabKind) -> &'static Self {
         match kind {
             CollabKind::Document => &DOCUMENT_TABLES,
             CollabKind::Task => &TASK_TABLES,
@@ -617,7 +617,7 @@ async fn fetch_append_fence_for_update(
     .await
 }
 
-async fn fetch_state_for_update(
+pub(crate) async fn fetch_state_for_update(
     tx: &mut Transaction<'_, Postgres>,
     t: &CollabTables,
     workspace_id: Uuid,
@@ -637,7 +637,7 @@ async fn fetch_state_for_update(
     .await
 }
 
-async fn load_tail_updates(
+pub(crate) async fn load_tail_updates(
     tx: &mut Transaction<'_, Postgres>,
     t: &CollabTables,
     workspace_id: Uuid,
@@ -897,6 +897,37 @@ async fn record_collab_event_and_audit(
     )
     .await?;
     Ok(())
+}
+
+/// Test fixtures only (`db-tests`): the unchanged per-append event and audit
+/// write of [`append_collab_update_kind`], for a fixture that writes a batch
+/// of genuine appends in one transaction. No policy is copied here.
+#[cfg(feature = "db-tests")]
+#[allow(clippy::too_many_arguments)]
+pub async fn record_collab_append_for_tests(
+    tx: &mut Transaction<'_, Postgres>,
+    kind: CollabKind,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    document_id: Uuid,
+    op_id: Uuid,
+    seq: i64,
+    writer_generation: i64,
+) -> Result<(), sqlx::Error> {
+    record_collab_event_and_audit(
+        tx,
+        CollabTables::for_kind(kind),
+        CollabAuditRecord {
+            workspace_id,
+            actor_user_id,
+            document_id,
+            op_id,
+            seq,
+            writer_generation,
+            client_ip: None,
+        },
+    )
+    .await
 }
 
 pub async fn claim_writer_and_load(
@@ -1704,67 +1735,37 @@ pub async fn compact_collab_snapshot_kind(
         return Ok(Err(CollabDbError::InvalidCutoff));
     }
 
-    sqlx::query(&t.sql(
+    // Saving the already committed snapshot again (same locked cutoff, no
+    // compactable rows, byte-identical bytes) changes nothing. Skip the row
+    // rewrite, tail delete, event and audit; every check above still applied.
+    let compactable: bool = sqlx::query_scalar(&t.sql(
         r#"
-        UPDATE {states}
-        SET state = $3,
-            snapshot_cutoff_seq = $4,
-            updated_at = now()
-        WHERE workspace_id = $1 AND {id} = $2 AND writer_generation = $5
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .bind(new_snapshot)
-    .bind(cutoff_seq)
-    .bind(writer_generation)
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query(&t.sql(
-        r#"
-        DELETE FROM {updates}
-        WHERE workspace_id = $1 AND {id} = $2 AND seq <= $3
+        SELECT EXISTS(
+            SELECT 1 FROM {updates}
+            WHERE workspace_id = $1 AND {id} = $2 AND seq <= $3
+        )
         "#,
     ))
     .bind(workspace_id)
     .bind(document_id)
     .bind(cutoff_seq)
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
-
-    let payload = json!({
-        t.payload_key: document_id.to_string(),
-        "cutoffSeq": cutoff_seq,
-        "writerGeneration": writer_generation,
-    });
-    append_event(
-        &mut tx,
-        EventAppend {
-            id: Uuid::now_v7(),
-            workspace_id: Some(workspace_id),
-            actor_user_id: Some(actor_user_id),
-            verb: t.verb("collab_snapshot_compacted"),
-            target_type: Some(t.target_type.to_string()),
-            target_id: Some(document_id),
-            payload: payload.clone(),
-        },
-    )
-    .await?;
-    append_audit(
-        &mut tx,
-        AuditAppend {
-            id: Uuid::now_v7(),
-            workspace_id: Some(workspace_id),
-            actor_user_id: Some(actor_user_id),
-            verb: t.verb("collab_snapshot_compacted"),
-            target_type: Some(t.target_type.to_string()),
-            target_id: Some(document_id),
-            payload,
-            ip: client_ip.map(str::to_string),
-        },
-    )
-    .await?;
+    let unchanged = cutoff_seq == state.3 && !compactable && state.0.as_slice() == new_snapshot;
+    if !unchanged {
+        compact_rows(
+            &mut tx,
+            t,
+            workspace_id,
+            actor_user_id,
+            document_id,
+            writer_generation,
+            cutoff_seq,
+            new_snapshot,
+            client_ip,
+        )
+        .await?;
+    }
 
     let refreshed = fetch_state_for_update(&mut tx, t, workspace_id, document_id).await?;
     let Some(refreshed) = refreshed else {
@@ -1790,6 +1791,85 @@ pub async fn compact_collab_snapshot_kind(
     let load = state_row_to_load(refreshed, tail);
     tx.commit().await?;
     Ok(Ok(load))
+}
+
+/// The committing half of a compaction: new snapshot and cutoff, compacted
+/// tail removal, and the collab_snapshot_compacted event and audit.
+#[allow(clippy::too_many_arguments)]
+async fn compact_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    t: &CollabTables,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    document_id: Uuid,
+    writer_generation: i64,
+    cutoff_seq: i64,
+    new_snapshot: &[u8],
+    client_ip: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(&t.sql(
+        r#"
+        UPDATE {states}
+        SET state = $3,
+            snapshot_cutoff_seq = $4,
+            updated_at = now()
+        WHERE workspace_id = $1 AND {id} = $2 AND writer_generation = $5
+        "#,
+    ))
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(new_snapshot)
+    .bind(cutoff_seq)
+    .bind(writer_generation)
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(&t.sql(
+        r#"
+        DELETE FROM {updates}
+        WHERE workspace_id = $1 AND {id} = $2 AND seq <= $3
+        "#,
+    ))
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(cutoff_seq)
+    .execute(&mut **tx)
+    .await?;
+
+    let payload = json!({
+        t.payload_key: document_id.to_string(),
+        "cutoffSeq": cutoff_seq,
+        "writerGeneration": writer_generation,
+    });
+    append_event(
+        &mut *tx,
+        EventAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace_id),
+            actor_user_id: Some(actor_user_id),
+            verb: t.verb("collab_snapshot_compacted"),
+            target_type: Some(t.target_type.to_string()),
+            target_id: Some(document_id),
+            payload: payload.clone(),
+        },
+    )
+    .await?;
+    append_audit(
+        &mut *tx,
+        AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace_id),
+            actor_user_id: Some(actor_user_id),
+            verb: t.verb("collab_snapshot_compacted"),
+            target_type: Some(t.target_type.to_string()),
+            target_id: Some(document_id),
+            payload,
+            ip: client_ip.map(str::to_string),
+        },
+    )
+    .await?;
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

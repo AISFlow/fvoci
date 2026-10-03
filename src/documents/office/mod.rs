@@ -12,6 +12,7 @@
 //! set on Linux. Imports ask for Markdown (the document body), attachment
 //! extraction for plain text (search and preview).
 
+mod native_archive;
 mod odf;
 mod ooxml;
 mod pdf;
@@ -42,6 +43,8 @@ const MAX_STDERR_BYTES: u64 = 4096;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OfficeKind {
+    /// Internal-only container operation; never selected by legacy imports.
+    NativeArchive,
     Pdf,
     Docx,
     Pptx,
@@ -64,6 +67,7 @@ impl OfficeKind {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::NativeArchive => "native-archive",
             Self::Pdf => "pdf",
             Self::Docx => "docx",
             Self::Pptx => "pptx",
@@ -75,13 +79,16 @@ impl OfficeKind {
     }
 
     fn parse(value: &str) -> Option<Self> {
+        if value == "native-archive" {
+            return Some(Self::NativeArchive);
+        }
         Self::ALL.into_iter().find(|kind| kind.as_str() == value)
     }
 
     /// Source `pickExtractor`: the extension decides; bytes must then agree.
     pub fn from_name(name: &str) -> Option<Self> {
         let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
-        Self::parse(&ext)
+        Self::ALL.into_iter().find(|kind| kind.as_str() == ext)
     }
 }
 
@@ -192,6 +199,23 @@ pub fn extract_office(
     mode: OfficeMode,
     max_output: usize,
 ) -> OfficeOutcome {
+    if kind == OfficeKind::NativeArchive {
+        return match native_archive::process(bytes, mode == OfficeMode::Text, max_output) {
+            Ok(text) => OfficeOutcome::Ok {
+                text,
+                truncated: false,
+            },
+            Err(crate::native_archive::ArchiveError::Limit) => OfficeOutcome::ResourceLimit {
+                detail: "native archive budget".into(),
+            },
+            Err(crate::native_archive::ArchiveError::Unsupported(detail)) => {
+                OfficeOutcome::Unsupported { detail }
+            }
+            Err(error) => OfficeOutcome::Corrupt {
+                detail: error.to_string(),
+            },
+        };
+    }
     if bytes.is_empty() {
         return OfficeOutcome::Unsupported {
             detail: "empty file".into(),
@@ -199,6 +223,7 @@ pub fn extract_office(
     }
     let mut out = Output::new(mode, max_output);
     let result = match kind {
+        OfficeKind::NativeArchive => unreachable!(),
         OfficeKind::Pdf => pdf::pdf(bytes, &mut out),
         OfficeKind::Docx | OfficeKind::Pptx | OfficeKind::Xlsx => {
             open_zip(bytes).and_then(|parts| match kind {
@@ -375,8 +400,12 @@ pub async fn run_office_helper(
         return Ok(worker_failure("child pipes unavailable"));
     };
     // JSON may escape every output scalar as `\uXXXX`.
-    let output_cap = (limits.max_output as u64).saturating_mul(6) + 4096;
-    let io = async move {
+    let output_cap = if kind == OfficeKind::NativeArchive {
+        (limits.max_output as u64).saturating_mul(2) + 4096
+    } else {
+        (limits.max_output as u64).saturating_mul(6) + 4096
+    };
+    let io = async {
         let feed = async move {
             // A child that exits early closes the pipe; that is its answer.
             let _ = stdin.write_all(&source).await;
@@ -403,14 +432,20 @@ pub async fn run_office_helper(
         Ok((status, out, err))
     };
     let joined = tokio::select! {
-        () = cancel.cancelled() => return Err(OfficeCancelled),
-        joined = tokio::time::timeout(limits.timeout, io) => joined,
+        () = cancel.cancelled() => None,
+        joined = tokio::time::timeout(limits.timeout, io) => Some(joined),
     };
-    // Every early return above dropped the child: kill_on_drop reaps it.
+    // Explicitly kill and await the child on cancel, limits and timeout.
+    // Drop still requests a kill, but is not claimed as proof of reaping.
+    if !matches!(&joined, Some(Ok(Ok(_)))) {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
     let (status, out, err) = match joined {
-        Ok(Ok(done)) => done,
-        Ok(Err(outcome)) => return Ok(outcome),
-        Err(_) => {
+        None => return Err(OfficeCancelled),
+        Some(Ok(Ok(done))) => done,
+        Some(Ok(Err(outcome))) => return Ok(outcome),
+        Some(Err(_)) => {
             return Ok(OfficeOutcome::ResourceLimit {
                 detail: format!("office watchdog {}s", limits.timeout.as_secs()),
             })

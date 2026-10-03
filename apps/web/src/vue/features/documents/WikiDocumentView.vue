@@ -57,6 +57,8 @@ import OriginPanel from "./OriginPanel.vue";
 import { sourceBlockSelection } from "../capture/source-block";
 import RevisionPanel from "./RevisionPanel.vue";
 import ShareDialog from "./ShareDialog.vue";
+import PersonalTransferDialog from "../capture/PersonalTransferDialog.vue";
+import { hostTransferPrepare } from "../capture/personal-transfer-command";
 import StarToggle from "./StarToggle.vue";
 import { useDocumentHeaderDraft } from "./useDocumentHeaderDraft";
 import "@/features/documents/document-shell.css";
@@ -493,6 +495,21 @@ const readonlyCommittedBody = useReadonlyCommittedBody(() => {
       ),
   };
 });
+// Transfer publishes committed content: refuse while a header or Markdown
+// draft is unsaved, around the same durable body-save barrier.
+function prepareTransfer(): Promise<boolean> {
+  return hostTransferPrepare(
+    () => ({
+      committed: meta.value,
+      title: title.value,
+      icon: icon.value,
+      status: status.value,
+      saving: saving.value,
+      sourceDrafts: [sourceEditor.value?.sourceDraftState, sourceDraft.value],
+    }),
+    waitForEditorSave,
+  );
+}
 async function waitForEditorSave(): Promise<boolean> {
   const before = readSaveSession();
   const lifetime = persistLifecycle.value;
@@ -673,6 +690,12 @@ function flashBlock(id: string): void {
             v-if="!readOnly"
             :workspace-id="workspaceId"
             :target="{ documentId, projectId: null }"
+          />
+          <PersonalTransferDialog
+            v-if="!readOnly"
+            :workspace-id="workspaceId"
+            :document-id="documentId"
+            :prepare="prepareTransfer"
           />
         </div>
         <DocumentTagsBar

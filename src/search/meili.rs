@@ -205,6 +205,7 @@ pub struct SearchSource {
     pub chunk_no: Option<i64>,
     pub title: String,
     pub body: String,
+    pub bibliography: Option<crate::search::text::IndexedText>,
     pub chosung: String,
     pub stem: String,
     pub updated_at: i64,
@@ -355,6 +356,9 @@ fn meili_document(doc: &SearchSource) -> Result<Value, MeiliError> {
         "body": doc.body,
         "chosung": doc.chosung,
         "stem": doc.stem,
+        "bibliographyBody":doc.bibliography.as_ref().map(|v|v.body.as_str()).unwrap_or(""),
+        "bibliographyChosung":doc.bibliography.as_ref().map(|v|v.chosung.as_str()).unwrap_or(""),
+        "bibliographyStem":doc.bibliography.as_ref().map(|v|v.stem.as_str()).unwrap_or(""),
         "updatedAt": doc.updated_at,
         "resourceKey": resource_key,
         "_vectors": { ATTACHMENT_EMBEDDER: doc.embedding.as_ref().map(|v| json!(v)) },
@@ -364,7 +368,7 @@ fn meili_document(doc: &SearchSource) -> Result<Value, MeiliError> {
 fn index_settings() -> Value {
     json!({
         "searchCutoffMs": MEILI_OP_TIMEOUT_MS,
-        "searchableAttributes": ["title", "body", "chosung", "stem"],
+        "searchableAttributes": ["title", "body", "chosung", "stem", "bibliographyBody", "bibliographyChosung", "bibliographyStem"],
         "filterableAttributes": [
             "kind",
             "workspaceId",
@@ -844,13 +848,21 @@ const RETRIEVE: &[&str] = &[
 async fn search_meili_op(
     config: &MeiliConfig,
     input: &MeiliSearchInput,
+    bibliographic_session: bool,
 ) -> Result<MeiliSearchPage, MeiliError> {
-    let Some((q, attributes)) = meili_search_query(&input.q, &input.stem) else {
+    let Some((q, mut attributes)) = meili_search_query(&input.q, &input.stem) else {
         return Ok(MeiliSearchPage {
             hits: Vec::new(),
             next_offset: None,
         });
     };
+    if bibliographic_session {
+        if attributes == ["chosung"] {
+            attributes.push("bibliographyChosung");
+        } else {
+            attributes.extend(["bibliographyBody", "bibliographyStem"]);
+        }
+    }
     let mut scopes = Vec::new();
     for scope in &input.scopes {
         if let Some(clause) = scope_clause(scope)? {
@@ -1482,7 +1494,16 @@ pub async fn search_meili(
     config: &MeiliConfig,
     input: &MeiliSearchInput,
 ) -> Result<MeiliSearchPage, MeiliError> {
-    with_op_deadline(search_meili_op(config, input)).await
+    with_op_deadline(search_meili_op(config, input, false)).await
+}
+
+/// Caller must prove a current cookie session and owner-private tenant scope.
+/// Public/PAT consumers retain `search_meili` and its original authored fields.
+pub(crate) async fn search_meili_with_bibliography(
+    config: &MeiliConfig,
+    input: &MeiliSearchInput,
+) -> Result<MeiliSearchPage, MeiliError> {
+    with_op_deadline(search_meili_op(config, input, true)).await
 }
 
 pub async fn search_meili_vector(

@@ -342,6 +342,7 @@ mod tests {
                     xml_len: None,
                     content_json: None,
                     yrs: None,
+                    native_archive_inventory: None,
                 },
                 Ok(Vec::new())
             ),
@@ -363,6 +364,7 @@ mod tests {
                     xml_len: None,
                     content_json: None,
                     yrs: None,
+                    native_archive_inventory: None,
                 },
                 Err("invalid base64".into()),
             ),

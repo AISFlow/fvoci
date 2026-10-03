@@ -32,14 +32,16 @@ pub enum SecretClass {
     WorkspaceOidc,
     UserMfa,
     Vapid,
+    Zotero,
 }
 
 impl SecretClass {
-    pub const ALL: [SecretClass; 4] = [
+    pub const ALL: [SecretClass; 5] = [
         SecretClass::Webhook,
         SecretClass::WorkspaceOidc,
         SecretClass::UserMfa,
         SecretClass::Vapid,
+        SecretClass::Zotero,
     ];
 
     /// Source target names, used as report labels.
@@ -49,6 +51,7 @@ impl SecretClass {
             SecretClass::WorkspaceOidc => "workspace-oidc",
             SecretClass::UserMfa => "user-mfa",
             SecretClass::Vapid => "vapid",
+            SecretClass::Zotero => "zotero",
         }
     }
 }
@@ -93,7 +96,21 @@ async fn list(
     class: SecretClass,
     after: Option<Uuid>,
 ) -> Result<Vec<SealedRow>, sqlx::Error> {
+    if class == SecretClass::Zotero {
+        let rows: Vec<(Uuid, Uuid, Uuid, String)> = sqlx::query_as(
+            "SELECT connector_id, workspace_id, owner_user_id, sealed_key FROM fvoci.zotero_credentials WHERE ($1::uuid IS NULL OR connector_id>$1) ORDER BY connector_id LIMIT $2"
+        ).bind(after).bind(BATCH).fetch_all(&mut **tx).await?;
+        return Ok(rows
+            .into_iter()
+            .map(|(id, tenant, owner, stored)| SealedRow {
+                id,
+                context: crate::integrations::zotero::secret_context(tenant, owner, id),
+                stored,
+            })
+            .collect());
+    }
     let rows: Vec<(Uuid, Uuid, String)> = match class {
+        SecretClass::Zotero => unreachable!("zotero returned above"),
         SecretClass::Webhook => {
             sqlx::query_as(
                 "SELECT id, workspace_id, secret FROM fvoci.webhooks \
@@ -151,6 +168,7 @@ async fn list(
                 SecretClass::WorkspaceOidc => workspace_oidc_context(owner),
                 SecretClass::UserMfa => user_mfa_context(owner),
                 SecretClass::Vapid => unreachable!("vapid returned above"),
+                SecretClass::Zotero => unreachable!("zotero returned above"),
             },
             stored,
         })
@@ -166,6 +184,7 @@ async fn replace(
     stored: &str,
 ) -> Result<bool, sqlx::Error> {
     let sql = match class {
+        SecretClass::Zotero => "UPDATE fvoci.zotero_credentials SET sealed_key=$3 WHERE connector_id=$1 AND sealed_key=$2",
         SecretClass::Webhook => {
             "UPDATE fvoci.webhooks SET secret = $3, updated_at = now() WHERE id = $1 AND secret = $2"
         }

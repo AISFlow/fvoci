@@ -22,7 +22,7 @@ use crate::projects::ProjectPermission;
 pub const COMMENT_BODY_MAX: usize = 8000;
 const MENTION_MAX: usize = 50;
 const REACTION_TRIES: usize = 8;
-const VALID_REACTIONS: &[&str] = &["👍", "❤️", "🎉"];
+pub(crate) const VALID_REACTIONS: &[&str] = &["👍", "❤️", "🎉"];
 
 /// Unwraps a helper's inner result, returning its refusal as `Ok(Err(_))`.
 /// Database errors travel in the outer `Result` (`?`) and reach the route as a

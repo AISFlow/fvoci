@@ -478,6 +478,7 @@ test("private input survives lost response, keeps one source block/task UUID and
     `tasks/${taskId}/origin`,
     `tasks/${taskId}/backlinks`,
     `projects/${projectId}/stream`,
+    "task-stream",
     `search?q=${token}`,
   ]) {
     const denied = await outsider.request.get(`/api/v1/workspaces/${personal.id}/${suffix}`);

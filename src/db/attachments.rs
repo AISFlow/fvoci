@@ -188,6 +188,9 @@ struct AttachmentSessionLock {
     conn: Option<PoolConnection<Postgres>>,
     lock_key: i32,
     held: bool,
+    /// Further attachment ids held on the same connection (a transfer's
+    /// destination id); released with the main lock.
+    also: Vec<i32>,
 }
 
 impl AttachmentSessionLock {
@@ -214,7 +217,28 @@ impl AttachmentSessionLock {
             conn: Some(conn),
             lock_key,
             held: true,
+            also: Vec::new(),
         }))
+    }
+
+    /// Takes the session lock of another attachment id on this same
+    /// connection (no second pool connection); `false` when it is busy.
+    /// A key that collides with one this session already holds re-enters it
+    /// (PostgreSQL counts session locks); `release` unlocks once per
+    /// acquisition, and on error or cancellation the connection is closed on
+    /// drop (`close_on_drop` in `try_acquire`), which drops every key.
+    async fn try_also(&mut self, attachment_id: Uuid) -> Result<bool, sqlx::Error> {
+        let key = lock_key_from_uuid(attachment_id);
+        let conn = self.conn.as_mut().expect("lock connection");
+        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1, $2)")
+            .bind(ATTACHMENT_LOCK_NAMESPACE)
+            .bind(key)
+            .fetch_one(&mut **conn)
+            .await?;
+        if locked {
+            self.also.push(key);
+        }
+        Ok(locked)
     }
 
     async fn begin(&mut self) -> Result<Transaction<'_, Postgres>, sqlx::Error> {
@@ -224,11 +248,13 @@ impl AttachmentSessionLock {
     async fn release(mut self) {
         if self.held {
             if let Some(mut conn) = self.conn.take() {
-                let _ = sqlx::query("SELECT pg_advisory_unlock($1, $2)")
-                    .bind(ATTACHMENT_LOCK_NAMESPACE)
-                    .bind(self.lock_key)
-                    .execute(&mut *conn)
-                    .await;
+                for key in std::iter::once(self.lock_key).chain(self.also.iter().copied()) {
+                    let _ = sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+                        .bind(ATTACHMENT_LOCK_NAMESPACE)
+                        .bind(key)
+                        .execute(&mut *conn)
+                        .await;
+                }
             }
         }
         self.held = false;
@@ -239,7 +265,7 @@ fn parse_upload_meta(value: &Value) -> Result<UploadMeta, AttachmentDbError> {
     serde_json::from_value(value.clone()).map_err(|_| AttachmentDbError::InvalidInput)
 }
 
-async fn lock_workspace_storage(
+pub(crate) async fn lock_workspace_storage(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
 ) -> Result<(), sqlx::Error> {
@@ -2123,6 +2149,35 @@ pub mod test_barrier {
             let _ = proceed_rx.await;
         }
     }
+
+    /// Transfer staging, keyed by the destination attachment id: after the
+    /// fresh keys are journaled, before any byte is written, with the
+    /// staging locks held.
+    static STAGE_BARRIERS: LazyLock<BarrierMap> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub fn arm_transfer_stage_copy(destination_attachment_id: Uuid) -> PreMarkStoredBarrier {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+        STAGE_BARRIERS
+            .lock()
+            .expect("barrier mutex")
+            .insert(destination_attachment_id, (entered_tx, proceed_rx));
+        PreMarkStoredBarrier {
+            entered_rx,
+            proceed_tx: Some(proceed_tx),
+        }
+    }
+
+    pub async fn wait_transfer_stage_copy_barrier(destination_attachment_id: Uuid) {
+        let entry = STAGE_BARRIERS
+            .lock()
+            .expect("barrier mutex")
+            .remove(&destination_attachment_id);
+        if let Some((entered_tx, proceed_rx)) = entry {
+            let _ = entered_tx.send(());
+            let _ = proceed_rx.await;
+        }
+    }
 }
 
 /// Import asset reservation (source `storeImportedAsset`, first `importTx`):
@@ -2282,6 +2337,370 @@ pub async fn mark_import_attachment_stored(
     .await?;
     tx.commit().await?;
     Ok(true)
+}
+
+/// Grace before a staged transfer key becomes reclaimable: the transfer that
+/// publishes it must take its journal row before then (as
+/// [`crate::db::attachment_preview::journal_preview_key`] does for previews).
+pub const TRANSFER_STAGE_GRACE_SECS: i32 = 600;
+
+/// One object copied to a fresh key and journaled in the destination
+/// workspace; the publishing transaction locks and deletes `journal_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedObject {
+    pub journal_id: Uuid,
+    pub key: String,
+    pub size_bytes: i64,
+    /// SHA-256 observed while the source object was streamed, equal to the
+    /// fresh object's read-back. The attachment row stores no full-object
+    /// hash, so this proves copy fidelity, not a stored checksum.
+    pub sha256: [u8; 32],
+}
+
+/// A stored attachment staged for a transfer: the source row as checked and
+/// its original (and published preview) copied to fresh journaled keys.
+#[derive(Debug, Clone)]
+pub struct StagedAttachment {
+    pub source: AttachmentRow,
+    pub original: StagedObject,
+    /// The staged preview and its `variants.preview` value with the fresh key.
+    pub preview: Option<(StagedObject, Value)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageAttachmentError {
+    NotFound,
+    Forbidden,
+    /// Not a clean stored object right now: infected, or an extract/preview
+    /// lease is live.
+    NotReady,
+    /// The object is missing, or its size or content changed while copied.
+    Changed,
+    Storage,
+}
+
+/// Copies one stored attachment of the source workspace to fresh keys for a
+/// transfer, in the preview publication order: the source row is checked as
+/// a download is (live session and workspace, view access on the parent,
+/// stored, not infected) and must hold no live extract/preview lease; each
+/// fresh key is journaled in `attachment_object_cleanups` of the destination
+/// workspace under `destination_attachment_id` (the source id for a MOVE, the
+/// new id for a COPY) before any byte is written, so a failure or crash leaves only
+/// unreferenced journaled keys for the reclaim job; the bytes are streamed
+/// with their SHA-256 and length counted, the written size is checked
+/// against the stored size, and the copy is read back and must hash the
+/// same. Quota and publication belong to the caller's transaction, which
+/// must lock each journal row (absent: reclaim took it) and delete it.
+///
+/// The attachment's session lock (the one reclaim, delete and complete
+/// take) - and, when they differ, the destination id's lock under which the
+/// fresh keys are journaled - is held on one connection from the row checks
+/// through the copy and read-back, so the reclaim job cannot take a staged
+/// key while it is written; both are released before returning and never
+/// reacquired in the caller's transaction. A busy lock is `NotReady`.
+#[allow(clippy::too_many_arguments)]
+pub async fn stage_attachment_for_transfer(
+    pool: &PgPool,
+    storage: &ObjectStorage,
+    source_workspace_id: Uuid,
+    destination_workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    attachment_id: Uuid,
+    destination_attachment_id: Uuid,
+) -> Result<Result<StagedAttachment, StageAttachmentError>, sqlx::Error> {
+    let Some(mut lock) = AttachmentSessionLock::try_acquire(pool, attachment_id).await? else {
+        return Ok(Err(StageAttachmentError::NotReady));
+    };
+    // The fresh keys are journaled under the destination id, which is what
+    // the reclaim job locks: hold that id too (a COPY's new id) for the
+    // whole write, on the same connection.
+    if destination_attachment_id != attachment_id
+        && !lock.try_also(destination_attachment_id).await?
+    {
+        lock.release().await;
+        return Ok(Err(StageAttachmentError::NotReady));
+    }
+    let staged = stage_locked(
+        &mut lock,
+        storage,
+        source_workspace_id,
+        destination_workspace_id,
+        actor_user_id,
+        session_id,
+        attachment_id,
+        destination_attachment_id,
+    )
+    .await;
+    lock.release().await;
+    staged
+}
+
+/// Runs every short transaction on the lock's own connection, so staging
+/// never holds one pool connection while waiting for another.
+#[allow(clippy::too_many_arguments)]
+async fn stage_locked(
+    lock: &mut AttachmentSessionLock,
+    storage: &ObjectStorage,
+    source_workspace_id: Uuid,
+    destination_workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    attachment_id: Uuid,
+    destination_attachment_id: Uuid,
+) -> Result<Result<StagedAttachment, StageAttachmentError>, sqlx::Error> {
+    // The download checks (open_download's own helpers, same order).
+    let mut tx = lock.begin().await?;
+    set_tenant(&mut tx, source_workspace_id).await?;
+    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::Forbidden));
+    }
+    if !workspace_is_live(&mut tx, source_workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::NotFound));
+    }
+    let Some(att) = fetch_attachment(&mut tx, source_workspace_id, attachment_id).await? else {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::NotFound));
+    };
+    match require_view_access(&mut tx, source_workspace_id, actor_user_id, &att).await? {
+        Ok(_) => {}
+        Err(AttachmentDbError::NotFound) => {
+            tx.rollback().await?;
+            return Ok(Err(StageAttachmentError::NotFound));
+        }
+        Err(_) => {
+            tx.rollback().await?;
+            return Ok(Err(StageAttachmentError::Forbidden));
+        }
+    }
+    if att.status != "stored" {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::NotFound));
+    }
+    if att.scan_status == "infected" {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::NotReady));
+    }
+    let leased: Option<bool> = sqlx::query_scalar(
+        r#"
+        SELECT coalesce(extract_lease_expires_at > clock_timestamp(), false)
+            OR coalesce(preview_lease_expires_at > clock_timestamp(), false)
+        FROM fvoci.attachments WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(source_workspace_id)
+    .bind(attachment_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    match leased {
+        None => return Ok(Err(StageAttachmentError::NotFound)),
+        Some(true) => return Ok(Err(StageAttachmentError::NotReady)),
+        Some(false) => {}
+    }
+    let Some(size) = att.size_bytes.filter(|size| *size >= 0) else {
+        return Ok(Err(StageAttachmentError::Changed));
+    };
+    let preview = preview_variant_of(&att.variants);
+    let original_key = Uuid::now_v7().to_string();
+    let preview_key = preview.as_ref().map(|_| Uuid::now_v7().to_string());
+    let mut journal = vec![(Uuid::now_v7(), original_key.clone())];
+    if let Some(key) = &preview_key {
+        journal.push((Uuid::now_v7(), key.clone()));
+    }
+    let mut tx = lock.begin().await?;
+    set_tenant(&mut tx, destination_workspace_id).await?;
+    for (id, key) in &journal {
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.attachment_object_cleanups (id, workspace_id, attachment_id, storage_key, due_at)
+            VALUES ($1, $2, $3, $4, clock_timestamp() + ($5 * interval '1 second'))
+            "#,
+        )
+        .bind(id)
+        .bind(destination_workspace_id)
+        .bind(destination_attachment_id)
+        .bind(key)
+        .bind(TRANSFER_STAGE_GRACE_SECS)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    #[cfg(feature = "db-tests")]
+    test_barrier::wait_transfer_stage_copy_barrier(destination_attachment_id).await;
+    let original = match copy_verified(storage, &att.storage_key, &original_key, size).await {
+        Ok(sha256) => StagedObject {
+            journal_id: journal[0].0,
+            key: original_key,
+            size_bytes: size,
+            sha256,
+        },
+        Err(err) => return Ok(Err(err)),
+    };
+    let preview = match (preview, preview_key) {
+        (Some(variant), Some(key)) => {
+            let sha256 = match copy_verified(storage, &variant.key, &key, variant.bytes).await {
+                Ok(sha256) => sha256,
+                Err(err) => return Ok(Err(err)),
+            };
+            let mut value = att.variants.get("preview").cloned().unwrap_or(Value::Null);
+            if let Some(object) = value.as_object_mut() {
+                object.insert("key".into(), Value::String(key.clone()));
+            }
+            Some((
+                StagedObject {
+                    journal_id: journal[1].0,
+                    key,
+                    size_bytes: variant.bytes,
+                    sha256,
+                },
+                value,
+            ))
+        }
+        _ => None,
+    };
+    Ok(Ok(StagedAttachment {
+        source: att,
+        original,
+        preview,
+    }))
+}
+
+/// Destination storage admission for a transfer, in the caller's transaction
+/// with the destination tenant set: takes the workspace storage lock the
+/// upload paths take (held to commit) and admits each moved size in turn
+/// against the same quota as an upload.
+pub async fn admit_transfer_storage(
+    tx: &mut Transaction<'_, Postgres>,
+    quota: &StorageQuota,
+    workspace_id: Uuid,
+    sizes: &[i64],
+) -> Result<Result<(), AttachmentDbError>, sqlx::Error> {
+    lock_workspace_storage(tx, workspace_id).await?;
+    let mut reserved = count_reserved_bytes(tx, workspace_id).await?;
+    for size in sizes {
+        if let Err(err) = quota.check(reserved, *size) {
+            return Ok(Err(match err {
+                StorageQuotaError::Upload => AttachmentDbError::UploadLimit,
+                StorageQuotaError::Storage => AttachmentDbError::StorageLimit,
+            }));
+        }
+        reserved = reserved.saturating_add(*size);
+    }
+    Ok(Ok(()))
+}
+
+/// Streams `from` to the fresh key `to`, counting length and SHA-256, then
+/// checks the stored size and that the copy reads back with the same hash.
+async fn copy_verified(
+    storage: &ObjectStorage,
+    from: &str,
+    to: &str,
+    size: i64,
+) -> Result<[u8; 32], StageAttachmentError> {
+    use futures_util::StreamExt;
+    use sha2::{Digest, Sha256};
+    use std::sync::{Arc, Mutex};
+
+    let len = u64::try_from(size).map_err(|_| StageAttachmentError::Changed)?;
+    match storage.head(from).await {
+        Ok(Some(found)) if found == len => {}
+        Ok(_) => return Err(StageAttachmentError::Changed),
+        Err(_) => return Err(StageAttachmentError::Storage),
+    }
+    let read = Arc::new(Mutex::new((Sha256::new(), 0u64)));
+    let counted = Arc::clone(&read);
+    let source = if len == 0 {
+        futures_util::stream::empty::<Result<bytes::Bytes, std::io::Error>>().boxed()
+    } else {
+        storage
+            .open_payload_stream(from, 0, len - 1)
+            .await
+            .map_err(|_| StageAttachmentError::Storage)?
+            .boxed()
+    };
+    let stream = source.map(move |chunk| {
+        let chunk = chunk?;
+        let mut state = counted.lock().expect("hash state");
+        state.0.update(&chunk);
+        state.1 += chunk.len() as u64;
+        Ok::<_, std::io::Error>(chunk)
+    });
+    if storage.put_stream(to, stream, len).await.is_err() {
+        return Err(StageAttachmentError::Storage);
+    }
+    let (hasher, copied) =
+        std::mem::replace(&mut *read.lock().expect("hash state"), (Sha256::new(), 0));
+    let sha256: [u8; 32] = hasher.finalize().into();
+    match storage.head(to).await {
+        Ok(Some(found)) if found == len && copied == len => {}
+        Ok(_) => return Err(StageAttachmentError::Changed),
+        Err(_) => return Err(StageAttachmentError::Storage),
+    }
+    let mut check = Sha256::new();
+    if len > 0 {
+        let mut back = storage
+            .open_payload_stream(to, 0, len - 1)
+            .await
+            .map_err(|_| StageAttachmentError::Storage)?;
+        while let Some(chunk) = back.next().await {
+            check.update(&chunk.map_err(|_| StageAttachmentError::Storage)?);
+        }
+    }
+    let readback: [u8; 32] = check.finalize().into();
+    if readback != sha256 {
+        return Err(StageAttachmentError::Changed);
+    }
+    Ok(sha256)
+}
+
+#[cfg(test)]
+mod transfer_stage_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[tokio::test]
+    async fn copy_verified_streams_exact_bytes_and_writes_nothing_for_a_changed_source() {
+        let root = std::env::temp_dir().join(format!("fvoci-transfer-stage-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let storage = ObjectStorage::local(root.clone());
+        // Real storage keys: local storage accepts only UUID keys.
+        let key = || Uuid::now_v7().to_string();
+        let (source, copy, other, missing, third, empty, empty_copy) =
+            (key(), key(), key(), key(), key(), key(), key());
+        let bytes: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        storage.put_bytes(&source, bytes.clone()).await.unwrap();
+        let len = bytes.len() as i64;
+        let sha256 = copy_verified(&storage, &source, &copy, len).await.unwrap();
+        let expected: [u8; 32] = Sha256::digest(&bytes).into();
+        assert_eq!(sha256, expected);
+        assert_eq!(
+            storage
+                .read_range(&copy, 0, bytes.len() as u64 - 1)
+                .await
+                .unwrap(),
+            bytes
+        );
+        assert_eq!(
+            copy_verified(&storage, &source, &other, len + 1).await,
+            Err(StageAttachmentError::Changed)
+        );
+        assert_eq!(storage.head(&other).await.unwrap(), None);
+        assert_eq!(
+            copy_verified(&storage, &missing, &third, 3).await,
+            Err(StageAttachmentError::Changed)
+        );
+        assert_eq!(storage.head(&third).await.unwrap(), None);
+        storage.put_bytes(&empty, Vec::new()).await.unwrap();
+        let none: [u8; 32] = Sha256::digest(b"").into();
+        assert_eq!(
+            copy_verified(&storage, &empty, &empty_copy, 0).await,
+            Ok(none)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 #[cfg(test)]

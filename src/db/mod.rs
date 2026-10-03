@@ -30,12 +30,15 @@ pub mod magic;
 pub mod mfa;
 pub mod migrate;
 pub mod milestones;
+pub mod native_archive;
+pub mod native_history;
 pub mod notifications;
 pub mod oidc;
 pub mod outbox;
 pub mod outbox_recover;
 pub mod outbox_reset;
 pub mod personal_input;
+pub mod personal_transfer;
 pub mod pool;
 pub mod project_clone;
 pub mod project_documents;
@@ -84,3 +87,5 @@ impl Db {
         }
     }
 }
+
+pub mod zotero;

@@ -123,6 +123,9 @@ fn integrations_with(client: Arc<dyn GetClient>) -> Arc<Integrations> {
     Arc::new(Integrations {
         encryption_keys: None,
         outbound: Outbound::with_get_client(Default::default(), Arc::new(PublicDns), client),
+        zotero: fvoci_server::integrations::zotero::ZoteroClient::system(
+            fvoci_server::integrations::outbound::Outbound::system(Default::default()),
+        ),
         github: None,
         ai: None,
     })

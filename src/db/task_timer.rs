@@ -457,22 +457,26 @@ fn hash<T: serde::Serialize>(
 
 /// Receipts are read only after current credential and target permission are
 /// checked. A deleted run retires its key rather than creating a replacement.
+/// A receipt a native restore imported (052 `restored_from_archive`) is
+/// history only: after the hash check it is retired before its stored result
+/// is looked at, so it never replays as a live success.
 async fn replay(
     tx: &mut Transaction<'_, Postgres>,
     actor: Uuid,
     request: Uuid,
     digest: &str,
 ) -> DbResult<Option<Value>> {
-    let row: Option<(String, Option<Uuid>, Value)> = sqlx::query_as("SELECT request_hash, run_id, result FROM fvoci.task_timer_commands WHERE user_id = $1 AND request_id = $2")
+    let row: Option<(String, bool, Option<Uuid>, Value)> = sqlx::query_as("SELECT request_hash, restored_from_archive IS NOT NULL, run_id, result FROM fvoci.task_timer_commands WHERE user_id = $1 AND request_id = $2")
         .bind(actor).bind(request).fetch_optional(&mut **tx).await?;
     match row {
-        Some((stored, _, _)) if stored != digest => {
+        Some((stored, _, _, _)) if stored != digest => {
             Ok(Err(TimerDbError::Conflict("request_mismatch")))
         }
-        Some((_, None, value)) if value.get("runId").is_some() => {
+        Some((_, true, _, _)) => Ok(Err(TimerDbError::Conflict("timer_retired"))),
+        Some((_, _, None, value)) if value.get("runId").is_some() => {
             Ok(Err(TimerDbError::Conflict("timer_retired")))
         }
-        Some((_, _, value)) => Ok(Ok(Some(value))),
+        Some((_, _, _, value)) => Ok(Ok(Some(value))),
         None => Ok(Ok(None)),
     }
 }
