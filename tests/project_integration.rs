@@ -2694,9 +2694,25 @@ async fn project_document_revisions_follow_project_permission() {
     assert_eq!(status, StatusCode::CREATED, "{created:?}");
     let doc_id = created["id"].as_str().unwrap().to_string();
 
+    // These read fixtures contain text bytes rather than Yjs updates. Every
+    // well-formed restore below must reject on permission/scope/archive before
+    // a native engine can inspect the snapshot.
     let rev = insert_document_revision(&admin, workspace_id, &doc_id, "first").await;
     let sibling_rev = insert_document_revision(&admin, workspace_id, &root_id, "root").await;
     let base = project_revisions_url(workspace_id, &project_id, &doc_id);
+    // A well-formed request must reach server authorization. An empty body is
+    // invalid before authorization and would not exercise these 404/409 gates.
+    let restore_body = json!({"correlationId": Uuid::now_v7(), "expectedTailSeq": "0"});
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("{base}/{rev}/restore"),
+        Some(json!({})),
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert_eq!(body["code"], "invalid_input");
 
     for cookie in [&lead.cookie, &viewer.cookie] {
         let (status, list) = json_request(app.clone(), "GET", &base, None, Some(cookie)).await;
@@ -2735,6 +2751,16 @@ async fn project_document_revisions_follow_project_permission() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("{base}/{sibling_rev}/restore"),
+        Some(restore_body.clone()),
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+
     // Viewers cannot write; restore is refused before any collab work.
     let (status, _) = json_request(app.clone(), "POST", &base, None, Some(&viewer.cookie)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -2742,7 +2768,7 @@ async fn project_document_revisions_follow_project_permission() {
         app.clone(),
         "POST",
         &format!("{base}/{rev}/restore"),
-        Some(json!({})),
+        Some(restore_body.clone()),
         Some(&viewer.cookie),
     )
     .await;
@@ -2761,6 +2787,15 @@ async fn project_document_revisions_follow_project_permission() {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, body) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{base}/{rev}/restore"),
+            Some(restore_body.clone()),
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
     }
 
     // The wiki path and a mismatched project path do not expose project documents.
@@ -2785,7 +2820,7 @@ async fn project_document_revisions_follow_project_permission() {
             app.clone(),
             "POST",
             &format!("{path}/{rev}/restore"),
-            Some(json!({})),
+            Some(restore_body.clone()),
             Some(&lead.cookie),
         )
         .await;
@@ -2827,7 +2862,7 @@ async fn project_document_revisions_follow_project_permission() {
         app.clone(),
         "POST",
         &format!("{base}/{rev}/restore"),
-        Some(json!({})),
+        Some(restore_body.clone()),
         Some(&lead.cookie),
     )
     .await;

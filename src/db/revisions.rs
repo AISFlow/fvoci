@@ -1145,6 +1145,16 @@ pub struct RestoredRevision {
     pub committed_tail_seq: i64,
 }
 
+type RestoreReceiptRow = (
+    Uuid,
+    String,
+    Uuid,
+    Option<Uuid>,
+    Option<Uuid>,
+    Option<i64>,
+    Option<i64>,
+);
+
 /// Revalidate the route's project/document/task boundary in the append tx.
 pub(crate) async fn authorize_restore_in_tx(
     tx: &mut Transaction<'_, Postgres>,
@@ -1193,7 +1203,7 @@ pub(crate) async fn lookup_restored_revision_in_tx(
     actor_user_id: Uuid,
     input: RestoreRevisionInput,
 ) -> Result<Result<Option<RestoredRevision>, RevisionDbError>, sqlx::Error> {
-    let row: Option<(Uuid, String, Uuid, Option<Uuid>, Option<Uuid>, Option<i64>, Option<i64>)> = sqlx::query_as(
+    let row: Option<RestoreReceiptRow> = sqlx::query_as(
         "SELECT id, target_kind, target_id, created_by, restored_from_id, restore_base_tail_seq, restore_committed_tail_seq FROM fvoci.revisions WHERE workspace_id = $1 AND restore_correlation_id = $2",
     )
     .bind(workspace_id).bind(input.correlation_id).fetch_optional(&mut **tx).await?;
