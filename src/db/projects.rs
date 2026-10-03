@@ -664,6 +664,35 @@ pub async fn create_project(
     input: CreateProjectInput<'_>,
     client_ip: Option<&str>,
 ) -> Result<Result<ProjectRow, ProjectDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let result = create_project_tx(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        input,
+        client_ip,
+    )
+    .await?;
+    if result.is_ok() {
+        tx.commit().await?;
+    } else {
+        tx.rollback().await?;
+    }
+    Ok(result)
+}
+
+/// Existing project/workflow/root creation in the caller's tenant transaction.
+/// The caller commits only Ok and rolls back domain failures.
+pub(crate) async fn create_project_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    input: CreateProjectInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<ProjectRow, ProjectDbError>, sqlx::Error> {
     let project_id = Uuid::now_v7();
     let root_document_id = Uuid::now_v7();
     let mut lock_users = vec![actor_user_id];
@@ -673,26 +702,21 @@ pub async fn create_project(
         }
     }
 
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    lock_membership_users(&mut tx, &lock_users).await?;
-    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
-        tx.rollback().await?;
+    lock_membership_users(tx, &lock_users).await?;
+    if !recheck_session(tx, actor_user_id, session_id).await? {
         return Ok(Err(ProjectDbError::Forbidden));
     }
-    if !workspace_is_live(&mut tx, workspace_id).await? {
-        tx.rollback().await?;
+    if !workspace_is_live(tx, workspace_id).await? {
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let actor_role = membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
+    let actor_role = membership_role_for_update(tx, workspace_id, actor_user_id).await?;
     if !actor_role
         .map(|r| r.at_least(WorkspaceRole::Member))
         .unwrap_or(false)
     {
-        tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
-    lock_tree(&mut tx, workspace_id).await?;
+    lock_tree(tx, workspace_id).await?;
 
     let inserted = sqlx::query_as::<_, (Uuid,)>(
         r#"
@@ -711,13 +735,12 @@ pub async fn create_project(
     .bind(optional_text_to_db(input.icon))
     .bind(input.visibility)
     .bind(actor_user_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await;
 
     if let Err(err) = inserted {
         if let Some(db_err) = err.as_database_error() {
             if db_err.constraint() == Some("projects_workspace_id_key_unique") {
-                tx.rollback().await?;
                 return Ok(Err(ProjectDbError::Conflict));
             }
         }
@@ -735,16 +758,15 @@ pub async fn create_project(
     .bind(workspace_id)
     .bind(project_id)
     .bind(actor_user_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     if let Some(lead_user_id) = input.lead_user_id {
         if lead_user_id != actor_user_id {
-            let lead_role = membership_role(&mut tx, workspace_id, lead_user_id).await?;
+            let lead_role = membership_role(tx, workspace_id, lead_user_id).await?;
             let lead_role = match lead_role {
                 Some(r) if r.at_least(WorkspaceRole::Member) => r,
                 _ => {
-                    tx.rollback().await?;
                     return Ok(Err(ProjectDbError::NotFound));
                 }
             };
@@ -760,7 +782,7 @@ pub async fn create_project(
             .bind(workspace_id)
             .bind(project_id)
             .bind(lead_user_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
             sqlx::query(
                 r#"
@@ -772,7 +794,7 @@ pub async fn create_project(
             .bind(workspace_id)
             .bind(project_id)
             .bind(actor_user_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         }
     }
@@ -787,7 +809,7 @@ pub async fn create_project(
     )
     .bind(workspace_id)
     .bind(project_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
 
     sqlx::query(
@@ -807,7 +829,7 @@ pub async fn create_project(
     .bind(DOCUMENT_SCHEMA_VERSION)
     .bind(empty_document_json())
     .bind(actor_user_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     sqlx::query(
@@ -820,13 +842,13 @@ pub async fn create_project(
     .bind(workspace_id)
     .bind(project_id)
     .bind(root_document_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
-    seed_workflow(&mut tx, workspace_id, project_id).await?;
+    seed_workflow(tx, workspace_id, project_id).await?;
 
     record_project_event_and_audit(
-        &mut tx,
+        tx,
         ProjectChangeRecord {
             workspace_id,
             actor_user_id,
@@ -870,10 +892,9 @@ pub async fn create_project(
     )
     .bind(workspace_id)
     .bind(project_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
 
-    tx.commit().await?;
     Ok(Ok(ProjectRow {
         id: row.0,
         workspace_id,

@@ -565,7 +565,7 @@ pub async fn ensure_personal_workspace(
     }
 
     let workspace_id = Uuid::now_v7();
-    let slug = personal_workspace_slug(user_id);
+    let mut slug = personal_workspace_slug(user_id);
     let mut tx = pool.begin().await?;
     acquire_admission_lock(&mut tx).await?;
     lock_membership_users(&mut tx, &[user_id]).await?;
@@ -596,13 +596,32 @@ pub async fn ensure_personal_workspace(
         return Ok(Err(quota_error(err)));
     }
     set_tenant(&mut tx, workspace_id).await?;
-    sqlx::query(
-        "INSERT INTO fvoci.workspaces (id, slug, name, kind) VALUES ($1, $2, 'Personal', 'personal')",
-    )
-    .bind(workspace_id)
-    .bind(&slug)
-    .execute(&mut *tx)
-    .await?;
+    // A supported team may already own the deterministic address. Do not
+    // look up, disclose or convert that tenant. Only the slug conflict is
+    // handled; other constraints/errors still propagate. Existing mappings
+    // and free deterministic addresses above remain stable.
+    let mut inserted = false;
+    for attempt in 0..4 {
+        if attempt > 0 {
+            let alternate = Uuid::now_v7().simple().to_string();
+            slug = format!("u-{}", &alternate[4..]);
+        }
+        let id: Option<Uuid> = sqlx::query_scalar(
+            "INSERT INTO fvoci.workspaces (id, slug, name, kind) VALUES ($1, $2, 'Personal', 'personal') ON CONFLICT (slug) DO NOTHING RETURNING id",
+        )
+        .bind(workspace_id)
+        .bind(&slug)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if id.is_some() {
+            inserted = true;
+            break;
+        }
+    }
+    if !inserted {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::SlugTaken));
+    }
     sqlx::query(
         "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'owner')",
     )

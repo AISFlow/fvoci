@@ -18,6 +18,7 @@ use crate::api::dto::{
     OkResponse, PatchTaskBody, TaskListItemOutput, TaskListResponse, TaskMetaOutput, TaskOutput,
     TaskStatusCountOutput, WorkflowStatusOutput, WorkspaceStatusOutput,
 };
+use crate::api::task_timer::TimerContextQuery;
 use crate::api::tasks_dto::{
     BacklinkFromResponse, BacklinkItemResponse, BacklinkListResponse, StatusCreateBody,
     StatusPatchBody, TaskCloneOutput, TaskParentCandidateOutput, TaskParentListResponse,
@@ -124,6 +125,7 @@ async fn list_time_entries_route(
     headers: HeaderMap,
     jar: CookieJar,
     Path((workspace_id, task_id)): Path<(Uuid, Uuid)>,
+    query: Result<Query<TimerContextQuery>, QueryRejection>,
 ) -> Result<Json<TimeEntryListResponse>, TaskApiError> {
     let (user, _, session_id) = require_session(
         &state,
@@ -134,6 +136,13 @@ async fn list_time_entries_route(
     )
     .await?;
     let actor = parse_user_id(&user.user_id)?;
+    let Query(query) = query.map_err(|_| AppError::from_code(ProblemCode::InvalidInput))?;
+    super::task_timer::captured_context(
+        query.expected_actor_id,
+        query.expected_session_id,
+        actor,
+        session_id,
+    )?;
     let result = list_time_entries(
         &state.auth.db.pool,
         workspace_id,

@@ -92,6 +92,11 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/044_email_change_auth_generation.sql"),
         44,
     ),
+    (
+        include_str!("../../migrations/045_personal_input_commands.sql"),
+        45,
+    ),
+    (include_str!("../../migrations/048_task_timers.sql"), 48),
 ];
 
 pub(crate) const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -732,6 +737,14 @@ mod tests {
         (
             44,
             "bfabdbe0270e7275212aa45489405d2651526b34108c6d50ff718e243c363d5d",
+        ),
+        (
+            45,
+            "34ba8efcdc7d13f9921611aba74a1a9bc13c88c25d8ffcb35282de4919b9f561",
+        ),
+        (
+            48,
+            "b7f943996e9cc9918c90ceb780db285708a31c165368064cd17eb0a5f14ed787",
         ),
     ];
 

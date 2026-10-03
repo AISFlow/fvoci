@@ -163,7 +163,22 @@ await test("panel modules keep React testids, empty gates, and comment slots (so
   assert.match(attachments, /readOnly && items\.value\.length === 0/);
   assert.match(time, /data-testid="task-time-entries"/);
   assert.match(time, /data-testid="task-time-total"/);
-  assert.match(time, /id="task-time-started"/);
+  const checkTimeFieldBindings = (component: string) => {
+    assert.match(component, /const fieldId = useId\(\)/);
+    for (const field of ["start", "end", "note", "reason"]) {
+      assert.ok(component.includes(':for="`${fieldId}-' + field + '`"'));
+      assert.ok(component.includes(':id="`${fieldId}-' + field + '`"'));
+    }
+  };
+  checkTimeFieldBindings(time);
+  assert.throws(() => {
+    checkTimeFieldBindings(time.replace(':id="`${fieldId}-start`"', ':id="`${fieldId}-orphan`"'));
+  });
+  assert.throws(() => {
+    checkTimeFieldBindings(
+      time.replace("const fieldId = useId()", 'const fieldId = "fixed-panel-id"'),
+    );
+  });
   assert.match(backlinks, /data-testid="task-backlinks"/);
   assert.match(backlinks, /items\.length > 0/);
   assert.match(properties, /data-testid="task-properties"/);

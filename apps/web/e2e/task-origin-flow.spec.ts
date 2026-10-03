@@ -108,10 +108,58 @@ test("document create form makes a task origin visible on both screens", async (
   await origins.getByRole("button", { name: "새 프로젝트" }).click();
   await expect(origins.getByLabel("태스크 프로젝트")).toBeVisible();
   await origins.getByLabel("태스크 제목").fill("문서에서 만든 연결");
+  const selectedProjectId = await origins.getByLabel("태스크 프로젝트").inputValue();
+  const sourceBefore = (await (
+    await page.request.get(`/api/v1/workspaces/${wsId}/documents/${documentId}`)
+  ).json()) as unknown;
+  const targetBefore = (await (
+    await page.request.get(`/api/v1/workspaces/${wsId}/projects/${selectedProjectId}`)
+  ).json()) as unknown;
+  const grantsBefore = (await (
+    await page.request.get(`/api/v1/workspaces/${wsId}/projects/${selectedProjectId}/members`)
+  ).json()) as unknown;
+  let creationRequests = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().endsWith(`/documents/${documentId}/tasks`))
+      creationRequests++;
+  });
   await origins.getByRole("button", { name: "연결 태스크 만들기" }).click();
+  const confirmation = page.getByRole("dialog", { name: "새 할 일의 공개 범위 확인" });
+  await expect(confirmation).toBeVisible();
+  await expect(
+    confirmation.getByText("프로젝트에 권한을 가진 사람", { exact: true }),
+  ).toBeVisible();
+  await confirmation.getByRole("button", { name: "취소", exact: true }).click();
+  await expect(confirmation).not.toBeVisible();
+  expect(creationRequests).toBe(0);
+  expect(
+    await (await page.request.get(`/api/v1/workspaces/${wsId}/documents/${documentId}`)).json(),
+  ).toEqual(sourceBefore);
+  expect(
+    await (
+      await page.request.get(`/api/v1/workspaces/${wsId}/projects/${selectedProjectId}`)
+    ).json(),
+  ).toEqual(targetBefore);
+  expect(
+    await (
+      await page.request.get(`/api/v1/workspaces/${wsId}/projects/${selectedProjectId}/members`)
+    ).json(),
+  ).toEqual(grantsBefore);
+  const cancelledOrigins = originListSchema.parse(
+    await (
+      await page.request.get(`/api/v1/workspaces/${wsId}/documents/${documentId}/task-origins`)
+    ).json(),
+  );
+  expect(cancelledOrigins.count).toBe(0);
+  await origins.getByRole("button", { name: "연결 태스크 만들기" }).click();
+  await confirmation.getByRole("button", { name: "확인하고 만들기", exact: true }).click();
 
   const created = origins.getByRole("link", { name: /TORI-\d+ · 문서에서 만든 연결/ });
   await expect(created).toBeVisible();
+  expect(creationRequests).toBe(1);
+  expect(
+    await (await page.request.get(`/api/v1/workspaces/${wsId}/documents/${documentId}`)).json(),
+  ).toEqual(sourceBefore);
   await expect(origins.getByRole("heading", { name: /연결 태스크 \(1\)/ })).toBeVisible();
 
   await created.click();

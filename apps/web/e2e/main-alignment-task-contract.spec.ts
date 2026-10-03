@@ -766,22 +766,54 @@ for (const archivedTarget of [false, true]) {
         await expect(page.locator("[data-comment-compose] textarea")).toBeEnabled();
         const timePanel = page.getByTestId("task-time-entries");
         await timePanel.getByRole("button", { name: "기록 추가", exact: true }).click();
-        await page.locator("#task-time-started").fill("2027-03-14T10:00");
-        await page.locator("#task-time-ended").fill("2027-03-14T10:30");
-        await page.locator("#task-time-note").fill("UI restored REST entry");
+        // Fixed unambiguous past local time; planned future time is not an
+        // elapsed record. Keep the exact independent 1800-second DB oracle.
+        await timePanel.getByLabel("시작", { exact: true }).fill("2020-03-14T10:00");
+        await timePanel.getByLabel("종료", { exact: true }).fill("2020-03-14T10:30");
+        await timePanel.getByLabel("메모", { exact: true }).fill("UI restored REST entry");
+        await timePanel
+          .getByLabel("기록·수정 사유", { exact: true })
+          .fill("부모 복원 후 허용된 30분 기록");
+        expect(
+          await timePanel.locator("form").evaluate((form) => {
+            const fields = Array.from(
+              form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea"),
+            );
+            const ids = fields.map((field) => field.id);
+            return {
+              fields: fields.length,
+              unique: ids.every(
+                (id) =>
+                  Boolean(id) && document.querySelectorAll(`[id="${CSS.escape(id)}"]`).length === 1,
+              ),
+              associated: fields.every((field) =>
+                Array.from(field.labels ?? []).some(
+                  (label) => label.control === field && label.htmlFor === field.id,
+                ),
+              ),
+            };
+          }),
+        ).toEqual({ fields: 4, unique: true, associated: true });
         const saved = page.waitForResponse(
-          (r) => r.url().endsWith(timeEndpoint) && r.request().method() === "POST",
+          (r) =>
+            new URL(r.url()).pathname === `${parentEndpoint}/timer/history` &&
+            r.request().method() === "POST",
         );
         await timePanel.getByRole("button", { name: "기록 추가", exact: true }).click();
         const savedResponse = await saved;
-        expect(savedResponse.status()).toBe(201);
-        const entry = z
+        expect(savedResponse.status(), await savedResponse.text()).toBe(200);
+        const record = z
           .object({
-            id: z.string().uuid(),
-            durationSeconds: z.literal(1800),
-            note: z.literal("UI restored REST entry"),
+            record: z.object({
+              id: z.string().uuid(),
+              startedAt: z.string(),
+              endedAt: z.string(),
+              note: z.literal("UI restored REST entry"),
+            }),
           })
-          .parse(await savedResponse.json());
+          .parse(await savedResponse.json()).record;
+        expect((Date.parse(record.endedAt) - Date.parse(record.startedAt)) / 1000).toBe(1800);
+        const entry = { id: record.id, durationSeconds: 1800, note: record.note };
         await expect(timePanel).toContainText(entry.note);
         const database = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
         if (!database) throw new Error("Actual DB tracer requires wrapper-owned database");
