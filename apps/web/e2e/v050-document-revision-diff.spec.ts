@@ -379,7 +379,26 @@ test("literal Korean semantic pair navigates, previews a conflict, restores new 
     await expect(a.page.getByTestId("revision-diff")).toContainText(
       "과거 블록 ID가 없는 부분은 위치로 비교합니다. 같은 블록이라는 보장은 없습니다.",
     );
-    await a.page.getByTestId("revision-change-next").click();
+    // The literal missing-ID paragraph is the final corpus block. A disabled
+    // endpoint is correct; move back to the preceding reference before using
+    // the real keyboard to return to the last point on this same frozen pair.
+    const nextChange = a.page.getByTestId("revision-change-next");
+    await expect(nextChange).toBeDisabled();
+    await a.page.getByTestId("revision-change-previous").click();
+    const priorChange = a.page.getByTestId("revision-change");
+    await expect(priorChange).toHaveAttribute("data-change-kind", "reference");
+    await expect(priorChange).toHaveAttribute("data-before-revision", source.id);
+    await expect(priorChange).toHaveAttribute("data-after-revision", after.id);
+    await expect(priorChange.locator("section").nth(0)).toContainText("원본 참조");
+    await expect(priorChange.locator("section").nth(1)).toContainText("새 참조");
+    await expect(nextChange).toBeEnabled();
+    await nextChange.focus();
+    await expect(nextChange).toBeFocused();
+    await nextChange.press("Enter");
+    await expect(nextChange).toBeDisabled();
+    await expect(a.page.getByTestId("revision-change").locator("section").nth(1)).toContainText(
+      "ID 없는 문단의 편집",
+    );
     await expect(a.page.getByTestId("revision-change")).toHaveAttribute(
       "data-before-revision",
       source.id,
