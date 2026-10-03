@@ -208,10 +208,11 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
           removeReadinessListeners();
           reject(error);
         };
-        const nativeExited = (code: number | null, signal: NodeJS.Signals | null) =>
+        const nativeExited = (code: number | null, signal: NodeJS.Signals | null) => {
           nativeError(
             new Error(`native exited before readiness: ${String(code)}/${String(signal)}`),
           );
+        };
         child.once("error", nativeError);
         child.once("exit", nativeExited);
         const nativeOutputReceived = (chunk: Buffer) => {
@@ -3800,6 +3801,14 @@ test("native same-database restart preserves paused and running anchors for genu
   browser,
   restartTimerServer,
 }, testInfo) => {
+  const restartShape = timerShape.extend({ serverNow: z.string().datetime({ offset: true }) });
+  const effectiveElapsed = (view: z.infer<typeof restartShape>) =>
+    view.run
+      ? view.run.elapsedMilliseconds +
+        (view.run.runningSince
+          ? Math.max(0, Date.parse(view.serverNow) - Date.parse(view.run.runningSince))
+          : 0)
+      : 0;
   const fixture = await ordinaryTimerTask(page, "TRESTART", true);
   // Preparation takes ownership of the group's process without rewriting data.
   // Both measured restart exits below belong to our fixture-owned children.
@@ -3812,38 +3821,41 @@ test("native same-database restart preserves paused and running anchors for genu
   // Existing034 projections require a positive whole second; await the real
   // server anchor, without sleeping or weakening the two-entry assertion.
   await expect
-    .poll(
-      async () =>
-        timerShape.parse(
+    .poll(async () =>
+      effectiveElapsed(
+        restartShape.parse(
           await (await page.request.get(`${initialOrigin}${fixture.timerUrl}`)).json(),
-        ).run?.elapsedMilliseconds ?? 0,
+        ),
+      ),
     )
     .toBeGreaterThanOrEqual(1000);
   await widget.getByTestId("timer-pause").click();
   await expect(widget.getByTestId("timer-state")).toHaveText("일시정지");
-  const paused = timerShape.parse(
+  const paused = restartShape.parse(
     await (await page.request.get(`${initialOrigin}${fixture.timerUrl}`)).json(),
   );
   expect(paused.run?.status).toBe("paused");
   expect(paused.run?.elapsedMilliseconds).toBeGreaterThan(0);
   const pausedOrigin = await restartTimerServer();
   const firstContext = await browser.newContext({ baseURL: pausedOrigin });
-  let resumed: z.infer<typeof timerShape> | undefined;
+  let resumed: z.infer<typeof restartShape> | undefined;
+  let firstFreshIdentity: z.infer<typeof identityShape> | undefined;
   try {
     const fresh = await firstContext.newPage();
     await login(fresh, fixture.email, credentials.password);
     const actor = identityShape.parse(await (await fresh.request.get("/api/v1/auth/me")).json());
+    firstFreshIdentity = actor;
     expect(actor.userId).toBe(fixture.actor.userId);
     expect(actor.sessionId).not.toBe(fixture.actor.sessionId);
     await fresh.goto(`/w/${fixture.slug}/my-tasks`);
     const current = fresh.getByTestId(`task-stopwatch-${fixture.task.id}`);
     await expect(current.getByTestId("timer-state")).toHaveText("일시정지");
-    expect(timerShape.parse(await (await fresh.request.get(fixture.timerUrl)).json()).run).toEqual(
-      paused.run,
-    );
+    expect(
+      restartShape.parse(await (await fresh.request.get(fixture.timerUrl)).json()).run,
+    ).toEqual(paused.run);
     await current.getByTestId("timer-resume").click();
     await expect(current.getByTestId("timer-state")).toHaveText("측정 중");
-    resumed = timerShape.parse(await (await fresh.request.get(fixture.timerUrl)).json());
+    resumed = restartShape.parse(await (await fresh.request.get(fixture.timerUrl)).json());
     expect(resumed.run?.id).toBe(paused.run?.id);
     expect(resumed.run?.runningSince).toBeTruthy();
     expect(resumed.run?.version).toBe((paused.run?.version ?? 0) + 1);
@@ -3856,26 +3868,34 @@ test("native same-database restart preserves paused and running anchors for genu
   try {
     const fresh = await secondContext.newPage();
     await login(fresh, fixture.email, credentials.password);
+    const secondFreshIdentity = identityShape.parse(
+      await (await fresh.request.get("/api/v1/auth/me")).json(),
+    );
+    expect(secondFreshIdentity.userId).toBe(fixture.actor.userId);
+    expect(secondFreshIdentity.sessionId).not.toBe(fixture.actor.sessionId);
+    expect(secondFreshIdentity.sessionId).not.toBe(firstFreshIdentity.sessionId);
+    expect(firstFreshIdentity).toBeDefined();
     await fresh.goto(fixture.detail);
     const current = fresh.getByTestId(`task-stopwatch-${fixture.task.id}`);
     await expect(current.getByTestId("timer-state")).toHaveText("측정 중");
-    const running = timerShape.parse(await (await fresh.request.get(fixture.timerUrl)).json());
+    const running = restartShape.parse(await (await fresh.request.get(fixture.timerUrl)).json());
     expect(running.run?.id).toBe(resumed.run.id);
     expect(running.run?.runningSince).toBe(resumed.run.runningSince);
     expect(running.run?.version).toBe(resumed.run.version);
-    expect(running.run?.elapsedMilliseconds).toBeGreaterThan(resumed.run.elapsedMilliseconds);
+    expect(running.run?.elapsedMilliseconds).toBe(resumed.run.elapsedMilliseconds);
+    expect(effectiveElapsed(running)).toBeGreaterThan(effectiveElapsed(resumed));
     await expect
-      .poll(
-        async () =>
-          timerShape.parse(await (await fresh.request.get(fixture.timerUrl)).json()).run
-            ?.elapsedMilliseconds ?? 0,
+      .poll(async () =>
+        effectiveElapsed(
+          restartShape.parse(await (await fresh.request.get(fixture.timerUrl)).json()),
+        ),
       )
       .toBeGreaterThanOrEqual((paused.run?.elapsedMilliseconds ?? 0) + 1000);
     await current.getByTestId("timer-stop").click();
     await expect(current.getByTestId("timer-start")).toBeEnabled();
-    const stopped = timerShape.parse(await (await fresh.request.get(fixture.timerUrl)).json());
+    const stopped = restartShape.parse(await (await fresh.request.get(fixture.timerUrl)).json());
     expect(stopped.run).toBeNull();
-    expect(stopped.actualMilliseconds).toBeGreaterThan(running.run?.elapsedMilliseconds ?? 0);
+    expect(stopped.actualMilliseconds).toBeGreaterThan(effectiveElapsed(running));
     const task = taskShape.parse(
       await (
         await fresh.request.get(
@@ -3884,21 +3904,45 @@ test("native same-database restart preserves paused and running anchors for genu
       ).json(),
     );
     expect(task.statusId).toBe(fixture.task.statusId);
-    expect(
-      diagnosticSql(
-        `SELECT count(*) FROM fvoci.task_timer_runs WHERE user_id='${fixture.actor.userId}'`,
-      ),
-    ).toBe("1");
-    expect(
-      diagnosticSql(
-        `SELECT count(*) FROM fvoci.task_timer_segments WHERE user_id='${fixture.actor.userId}'`,
-      ),
-    ).toBe("2");
-    expect(
-      diagnosticSql(
-        `SELECT count(*) FROM fvoci.time_entries WHERE user_id='${fixture.actor.userId}' AND task_id='${fixture.task.id}' AND ended_at IS NOT NULL`,
-      ),
-    ).toBe("2");
+    const referenceShape = z.object({
+      id: z.string(),
+      workspaceId: z.string(),
+      taskId: z.string(),
+      userId: z.string(),
+    });
+    const graph = z
+      .object({
+        runs: z.array(referenceShape.extend({ status: z.literal("stopped") })),
+        segments: z.array(
+          referenceShape.extend({
+            runId: z.string(),
+            timeEntryId: z.string(),
+            endedAt: z.string(),
+          }),
+        ),
+        entries: z.array(referenceShape.extend({ endedAt: z.string() })),
+      })
+      .parse(
+        JSON.parse(
+          diagnosticSql(`SELECT jsonb_build_object(
+      'runs',(SELECT coalesce(jsonb_agg(jsonb_build_object('id',id,'workspaceId',workspace_id,'taskId',task_id,'userId',user_id,'status',status)),'[]'::jsonb) FROM fvoci.task_timer_runs),
+      'segments',(SELECT coalesce(jsonb_agg(jsonb_build_object('id',id,'workspaceId',workspace_id,'taskId',task_id,'userId',user_id,'runId',run_id,'timeEntryId',time_entry_id,'endedAt',ended_at)),'[]'::jsonb) FROM fvoci.task_timer_segments),
+      'entries',(SELECT coalesce(jsonb_agg(jsonb_build_object('id',id,'workspaceId',workspace_id,'taskId',task_id,'userId',user_id,'endedAt',ended_at)),'[]'::jsonb) FROM fvoci.time_entries))`),
+        ),
+      );
+    expect(graph.runs).toHaveLength(1);
+    expect(graph.segments).toHaveLength(2);
+    expect(graph.entries).toHaveLength(2);
+    for (const row of [...graph.runs, ...graph.segments, ...graph.entries]) {
+      expect(row.workspaceId).toBe(fixture.workspaceId);
+      expect(row.taskId).toBe(fixture.task.id);
+      expect(row.userId).toBe(fixture.actor.userId);
+    }
+    for (const segment of graph.segments) expect(segment.runId).toBe(resumed.run.id);
+    expect(graph.runs.map((run) => run.id)).toEqual([resumed.run.id]);
+    expect(graph.segments.map((segment) => segment.timeEntryId).sort()).toEqual(
+      graph.entries.map((entry) => entry.id).sort(),
+    );
     await testInfo.attach("native-same-db-persisted-run-new-clients", {
       body: JSON.stringify({
         initialOrigin,
@@ -3908,7 +3952,11 @@ test("native same-database restart preserves paused and running anchors for genu
         pausedElapsed: paused.run?.elapsedMilliseconds,
         samePausedElapsedAfterRestart: true,
         sameResumedAnchorAfterRestart: true,
-        runningElapsedAfterRestart: running.run?.elapsedMilliseconds,
+        storedClosedElapsedAfterRestart: running.run?.elapsedMilliseconds,
+        effectiveServerElapsedAfterRestart: effectiveElapsed(running),
+        firstFreshIdentity,
+        secondFreshIdentity,
+        allGraphRowsClosedAndReferencesExact: true,
         finalActual: stopped.actualMilliseconds,
         actualFreshLogins: 2,
         measuredPhysicalRestarts: 2,
