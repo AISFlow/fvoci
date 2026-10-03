@@ -258,6 +258,7 @@ async function persistBody(): Promise<void> {
         target-kind="task"
         :read-only="readOnly"
         :persist-now="canPersist ? persistBody : undefined"
+        :source-dirty="!!sourceDraft?.dirty || !!sourceDraft?.composing"
       />
     </div>
     <p v-if="persistError" role="alert" class="document-page__error">{{ persistError }}</p>

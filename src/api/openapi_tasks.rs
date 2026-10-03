@@ -11,7 +11,7 @@ use crate::api::dto::{
 };
 use crate::api::dto::{
     RevisionCreateResponse, RevisionDetailResponse, RevisionListResponse, RevisionRestoreBody,
-    RevisionRestoreResponse,
+    RevisionRestorePreviewResponse, RevisionRestoreResponse,
 };
 use crate::api::tasks_dto::{
     BacklinkListResponse, StatusCreateBody, StatusPatchBody, TaskCloneOutput,
@@ -44,6 +44,7 @@ use crate::api::tasks_dto::{
         list_task_revisions,
         create_task_revision,
         get_task_revision,
+        preview_restore_task_revision,
         restore_task_revision,
         patch_task_block,
         get_task_origin,
@@ -525,3 +526,24 @@ fn list_document_task_origins() {}
     )
 )]
 fn create_document_task() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/revisions/{revision_id}/restore-preview",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("task_id" = String, description = "Task id"),
+        ("revision_id" = String, description = "Revision id"),
+    ),
+    responses(
+        (status = 200, description = "Immutable source and current body with a coherent opaque tail", body = RevisionRestorePreviewResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Target or revision unavailable or not editable", body = ProblemResponse),
+        (status = 409, description = "Archived target", body = ProblemResponse),
+        (status = 503, description = "Collaboration unavailable", body = ProblemResponse),
+        (status = 504, description = "Collaboration timeout", body = ProblemResponse),
+    )
+)]
+fn preview_restore_task_revision() {}
