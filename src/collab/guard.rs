@@ -85,6 +85,23 @@ impl RoomGuard {
 
 /// Closed room ownership handle. PostgreSQL continues to hold its dedicated
 /// session connection; a family room retains its opaque authoritative lease.
+pub(crate) enum FamilyRoomOwnerRecord {
+    Startup {
+        owner: Uuid,
+        error: Option<std::sync::Arc<crate::db::collab::FamilyRoomStartError>>,
+        deadline_expired: bool,
+    },
+    NativeWrite {
+        fence: FamilyRoomFence,
+        error: std::sync::Arc<sqlx::Error>,
+    },
+}
+pub(crate) type FamilyRoomOwnerRecords = std::sync::Arc<
+    std::sync::Mutex<
+        std::collections::HashMap<crate::collab::room::RoomKey, FamilyRoomOwnerRecord>,
+    >,
+>;
+
 pub(crate) enum BackendRoomGuard {
     Postgres(RoomGuard),
     Family {
@@ -93,6 +110,7 @@ pub(crate) enum BackendRoomGuard {
         current: FamilyRoomFence,
         writer_owner: Uuid,
         timings: FamilyRoomTimings,
+        owner_records: FamilyRoomOwnerRecords,
     },
 }
 
@@ -101,6 +119,7 @@ impl BackendRoomGuard {
         backend: Backend,
         fence: FamilyRoomFence,
         timings: FamilyRoomTimings,
+        owner_records: FamilyRoomOwnerRecords,
     ) -> Self {
         Self::Family {
             backend,
@@ -108,6 +127,35 @@ impl BackendRoomGuard {
             current: fence,
             writer_owner: Uuid::now_v7(),
             timings,
+            owner_records,
+        }
+    }
+
+    /// Preserve this exact remote writer's uncertain fate without a new DB
+    /// observer/release. The hub refuses another start for this bounded key.
+    pub(crate) fn retain_remote_write_unknown(self, error: sqlx::Error) {
+        if let Self::Family {
+            current,
+            owner_records,
+            ..
+        } = self
+        {
+            let key = crate::collab::room::RoomKey(
+                current.workspace_id,
+                current.document_id,
+                crate::collab::wire::CollabKind::Document,
+            );
+            let previous = owner_records
+                .lock()
+                .expect("family room owner mutex")
+                .insert(
+                    key,
+                    FamilyRoomOwnerRecord::NativeWrite {
+                        fence: current,
+                        error: std::sync::Arc::new(error),
+                    },
+                );
+            assert!(previous.is_none(), "one unresolved family owner per room");
         }
     }
 
@@ -222,6 +270,7 @@ impl BackendRoomGuard {
             current,
             writer_owner,
             timings,
+            ..
         } = self
         else {
             return Ok(true);

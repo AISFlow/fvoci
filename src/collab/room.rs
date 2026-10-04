@@ -171,6 +171,8 @@ pub const NATIVE_PROJECT_FINAL_PROOF: u8 = 1;
 #[cfg(feature = "db-tests")]
 pub const MANUAL_REVISION_BEFORE_WRITE: u8 = 2;
 #[cfg(feature = "db-tests")]
+pub const NATIVE_FORWARD_FINAL_PROOF: u8 = 3;
+#[cfg(feature = "db-tests")]
 pub async fn arm_native_consumer_barrier(
     document: Uuid,
     point: u8,
@@ -2394,6 +2396,25 @@ impl RoomActor {
         }
     }
 
+    async fn fatal_remote_write_unconfirmed(&mut self, error: sqlx::Error) {
+        self.fence_lost = true;
+        self.writer_generation = None;
+        self.primary_loaded = false;
+        self.primary_dirty = true;
+        self.guard_cleanup_failed = true;
+        self.abort_session_revision_work();
+        for (_, conn) in self.connections.drain() {
+            Self::enqueue_close(&conn.events, &conn.cancel, 1013, "try again later");
+        }
+        self.pending_awareness.clear();
+        self.publish_live_conns();
+        if let Some(guard) = self.room_guard.take() {
+            // The original transaction owns its tracked cleanup/quarantine.
+            // Neither this failure nor a later rollback is a stream receipt.
+            guard.retain_remote_write_unknown(error);
+        }
+    }
+
     async fn fatal_fence_lost(&mut self) {
         self.fence_lost = true;
         self.writer_generation = None;
@@ -4235,6 +4256,11 @@ impl RoomActor {
             Err(_) => return Err(ForwardWriteError::Unavailable),
         };
         if is_empty_update(&payload) && restore.is_none() {
+            #[cfg(feature = "db-tests")]
+            pause_native_consumer_barrier(self.document_id, NATIVE_FORWARD_FINAL_PROOF).await;
+            self.check_cached_native_consumer(actor_user_id, session_id)
+                .await
+                .map_err(|_| ForwardWriteError::Unavailable)?;
             return Ok((None, None));
         }
 
@@ -4329,6 +4355,10 @@ impl RoomActor {
             }
             Ok(Err(err)) if Self::is_definite_append_rejection(&err) => {
                 return Err(ForwardWriteError::Rejected);
+            }
+            Err(error) if matches!(self.backend, Backend::LibsqlRemote(_)) => {
+                self.fatal_remote_write_unconfirmed(error).await;
+                return Err(ForwardWriteError::Unavailable);
             }
             Ok(Err(CollabDbError::StaleCutoff)) | Ok(Err(_)) | Err(_) => {
                 match self

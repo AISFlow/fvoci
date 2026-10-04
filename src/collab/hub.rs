@@ -16,7 +16,9 @@ use uuid::Uuid;
 
 use crate::collab::admission::{warn_join_db_error, MemoryLedger};
 use crate::collab::config::{CollabConfig, FamilyRoomTimings};
-use crate::collab::guard::{BackendRoomGuard, RoomGuard};
+use crate::collab::guard::{
+    BackendRoomGuard, FamilyRoomOwnerRecord, FamilyRoomOwnerRecords, RoomGuard,
+};
 use crate::collab::room::{
     BodyWriteError, CapturedRevision, ConnectionLease, JoinDelivery, JoinError, LiveProjection,
     RevisionCaptureError, RevisionRestoreError, RoomHandle, RoomJoin, RoomKey,
@@ -46,6 +48,8 @@ pub const HUB_JOIN_BARRIER_AFTER_RECLAIM_SCAN: u8 = 4;
 /// room (a join admitted before a concurrent same-ID MOVE commits).
 #[cfg(feature = "db-tests")]
 pub const HUB_JOIN_BARRIER_AFTER_ADMISSION: u8 = 5;
+#[cfg(feature = "db-tests")]
+pub const HUB_FAMILY_START_BEFORE_BEGIN: u8 = 6;
 
 /// One pre-enqueue retry after a proven undelivered join or a Closing race.
 const MAX_PRE_ENQUEUE_RETRIES: u8 = 1;
@@ -309,7 +313,7 @@ pub struct CollabHub {
     family_timings: Option<FamilyRoomTimings>,
     // Unconfirmed startup owners remain service-owned; a later attempt cannot
     // overwrite or adopt one after an unknown original stream cleanup.
-    pending_family_starts: Arc<std::sync::Mutex<std::collections::HashSet<(RoomKey, Uuid)>>>,
+    pending_family_starts: FamilyRoomOwnerRecords,
     rooms: Arc<RwLock<HashMap<RoomKey, Arc<RoomSlot>>>>,
     room_permits: Arc<Semaphore>,
     socket_permits: Arc<Semaphore>,
@@ -368,9 +372,7 @@ impl CollabHub {
             config,
             backend,
             family_timings,
-            pending_family_starts: Arc::new(
-                std::sync::Mutex::new(std::collections::HashSet::new()),
-            ),
+            pending_family_starts: Arc::new(std::sync::Mutex::new(HashMap::new())),
             rooms,
             room_permits,
             socket_permits,
@@ -634,6 +636,22 @@ impl CollabHub {
             .lock()
             .expect("family startup owner mutex")
             .len()
+    }
+
+    #[cfg(feature = "db-tests")]
+    pub fn unresolved_family_owner(&self, key: RoomKey) -> Option<Uuid> {
+        self.pending_family_starts
+            .lock()
+            .expect("family room owner mutex")
+            .get(&key)
+            .map(|record| match record {
+                FamilyRoomOwnerRecord::Startup { owner, .. } => *owner,
+                FamilyRoomOwnerRecord::NativeWrite { fence, .. } => fence.owner_token,
+            })
+    }
+    #[cfg(feature = "db-tests")]
+    pub fn can_reserve_room_memory(&self) -> bool {
+        self.memory_ledger.try_reserve(0).is_some()
     }
 
     #[cfg(feature = "db-tests")]
@@ -1128,12 +1146,28 @@ impl CollabHub {
                 drop(held);
             }
         }
-        start_task_failures = start_task_failures.saturating_add(
-            self.pending_family_starts
-                .lock()
-                .expect("family startup owner mutex")
-                .len(),
-        );
+        for (key, record) in self
+            .pending_family_starts
+            .lock()
+            .expect("family room owner mutex")
+            .iter()
+        {
+            match record {
+                FamilyRoomOwnerRecord::Startup {
+                    owner,
+                    error,
+                    deadline_expired,
+                } => {
+                    start_task_failures = start_task_failures.saturating_add(1);
+                    tracing::error!(workspace_id=%key.0,document_id=%key.1,owner=%owner,deadline_expired,
+                        error=?error.as_ref().map(|error|error.source_error()), "family startup owner remains unconfirmed");
+                }
+                FamilyRoomOwnerRecord::NativeWrite { fence, error } => {
+                    tracing::error!(workspace_id=%key.0,document_id=%key.1,fence=fence.fence,%error,
+                        "family native writer original remote outcome remains unconfirmed");
+                }
+            }
+        }
         let actor_failures = self.abnormal_actor_completions.load(Ordering::Acquire);
         ShutdownStatus {
             idle_task_failed,
@@ -1431,8 +1465,21 @@ impl CollabHub {
                 rooms.get(&key).expect("key present").clone(),
             ));
         }
-        if rooms.len() >= self.config.max_rooms {
-            return Err(JoinError::RoomFull);
+        {
+            let owners = self
+                .pending_family_starts
+                .lock()
+                .expect("family room owner mutex");
+            if owners.contains_key(&key) {
+                return Err(JoinError::CapacityRetry);
+            }
+            let unresolved = owners
+                .keys()
+                .filter(|owned| !rooms.contains_key(*owned))
+                .count();
+            if rooms.len().saturating_add(unresolved) >= self.config.max_rooms {
+                return Err(JoinError::RoomFull);
+            }
         }
 
         let slot = Arc::new(RoomSlot {
@@ -1606,7 +1653,9 @@ impl CollabHub {
                         .try_reserve(bytes)
                         .ok_or(JoinError::CapacityRetry)?;
                     let acquisition_owner=Uuid::now_v7();
-                    self.pending_family_starts.lock().expect("family startup owner mutex").insert((key,acquisition_owner));
+                    self.pending_family_starts.lock().expect("family startup owner mutex").insert(key,FamilyRoomOwnerRecord::Startup { owner: acquisition_owner, error: None, deadline_expired: false });
+                    #[cfg(feature = "db-tests")]
+                    pause_for_hub_join_barrier(key.1,HUB_FAMILY_START_BEFORE_BEGIN).await;
                     let acquired = tokio::time::timeout(
                         Duration::from_millis(self.config.rpc_timeout_ms),
                         acquire_family_document_room_for_start(
@@ -1624,6 +1673,8 @@ impl CollabHub {
                             // Dropping the unfinished remote future starts owned
                             // stream quarantine, but is not a cleanup receipt.
                             // Retain its exact owner, refuse fresh reconciliation.
+                            self.pending_family_starts.lock().expect("family room owner mutex").insert(key,
+                                FamilyRoomOwnerRecord::Startup { owner: acquisition_owner, error: None, deadline_expired: true });
                             self.abnormal_actor_completions.fetch_add(1,Ordering::Relaxed);
                             tracing::error!(workspace_id=%key.0,document_id=%key.1,
                                 "room startup deadline expired; original stream cleanup unconfirmed");
@@ -1634,7 +1685,7 @@ impl CollabHub {
                         Ok(result)=>{
                             // Success transfers the known token to the guard;
                             // a domain refusal follows explicit rollback.
-                            self.pending_family_starts.lock().expect("family startup owner mutex").remove(&(key,acquisition_owner));
+                            self.pending_family_starts.lock().expect("family startup owner mutex").remove(&key);
                             result.map_err(|error| match error {
                                 crate::db::collab::CollabDbError::StaleWriter=>JoinError::WriterStale,
                                 _=>JoinError::AdmissionDenied,
@@ -1651,8 +1702,10 @@ impl CollabHub {
                                 false
                             };
                             if cleaned {
-                                self.pending_family_starts.lock().expect("family startup owner mutex").remove(&(key,acquisition_owner));
+                                self.pending_family_starts.lock().expect("family startup owner mutex").remove(&key);
                             } else {
+                                self.pending_family_starts.lock().expect("family room owner mutex").insert(key,
+                                    FamilyRoomOwnerRecord::Startup { owner: acquisition_owner, error: Some(Arc::new(error)), deadline_expired: false });
                                 self.abnormal_actor_completions.fetch_add(1,Ordering::Relaxed);
                                 tracing::error!(workspace_id=%key.0,document_id=%key.1,
                                     "room startup cleanup unconfirmed; backend drain/quarantine required");
@@ -1661,7 +1714,7 @@ impl CollabHub {
                         }
                     };
                     let guard =
-                        BackendRoomGuard::family(self.backend.clone(), claim.fence, timings);
+                        BackendRoomGuard::family(self.backend.clone(), claim.fence, timings, self.pending_family_starts.clone());
                     Ok((guard, reservation, Some(claim.native.load)))
                 }
             }
