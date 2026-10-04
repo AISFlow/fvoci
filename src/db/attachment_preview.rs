@@ -222,7 +222,7 @@ impl OperationTx<'_, '_> {
                 let claim = PreviewClaim {
                     workspace_id: row.cell(0)?.id()?,
                     attachment_id: row.cell(1)?.id()?,
-                    lease_token: Uuid::new_v4(),
+                    lease_token: Uuid::now_v7(),
                     attempt: i16::try_from(row.cell(2)?.integer()? + 1)
                         .map_err(|_| sqlx::Error::Protocol("preview attempt overflow".into()))?,
                 };
