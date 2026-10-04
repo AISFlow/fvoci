@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Test-only: collaboration CI runner with stubbed cargo.
+# Test-only: collaboration CI runner with stubbed cargo, docker and openssl (the
+# real start-test-meili.sh path runs; no container, service or network).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -7,6 +8,7 @@ RUN="$ROOT/scripts/run-rust-collaboration-ci-tests.sh"
 FIXTURE_RUN="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-rust-ci-admission-fixture.XXXXXX")"
 FAKE_BIN="$FIXTURE_RUN/fake-bin"
 INVOCATIONS="$FIXTURE_RUN/cargo-invocations.log"
+DOCKER_CALLS="$FIXTURE_RUN/docker-calls.log"
 
 cleanup() {
   rm -rf "$FIXTURE_RUN"
@@ -63,48 +65,86 @@ assert_expected_test_targets() {
   done
 }
 
+# Each target exactly once across all invocations; only task_collab_integration
+# runs single-threaded, alone in its own invocation.
+assert_invocation_shape() {
+  local all target count
+  all="$(<"$INVOCATIONS")"
+  for target in "${EXPECTED_SUITE_NAMES[@]}"; do
+    count="$(grep -oE -- "--test ${target}( |$)" <<<"$all" | wc -l | tr -d ' ')"
+    if [[ "$count" -ne 1 ]]; then
+      echo "expected --test ${target} exactly once across invocations, found ${count}" >&2
+      return 1
+    fi
+  done
+  local threaded
+  threaded="$(grep -c -- '-- --test-threads=1' "$INVOCATIONS" || true)"
+  if [[ "$threaded" -ne 1 ]] || ! grep -- '-- --test-threads=1' "$INVOCATIONS" | grep -qE -- '--test task_collab_integration( |$)'; then
+    echo "expected exactly one single-threaded invocation, for task_collab_integration" >&2
+    return 1
+  fi
+  if [[ "$(grep -cE -- '--test ' "$INVOCATIONS")" -ne 2 ]] \
+    || grep -- '--test task_collab_integration' "$INVOCATIONS" | grep -qE -- '--test (collab_|document_|revision_)'; then
+    echo "task_collab_integration must run alone in its own invocation" >&2
+    return 1
+  fi
+  if grep -qv 'MEILI=http://127.0.0.1:43210 ' "$INVOCATIONS"; then
+    echo "every cargo invocation must see the wrapper's FVOCI_MEILI_URL" >&2
+    return 1
+  fi
+}
+
 cat >"$FAKE_BIN/cargo" <<STUB
 #!/usr/bin/env bash
-echo "\$*" >>"$INVOCATIONS"
+echo "MEILI=\${FVOCI_MEILI_URL:-unset} \$*" >>"$INVOCATIONS"
 mode="\${FVOCI_TEST_CARGO_MODE:-pass}"
+# The admission test lives in collab_product: only that invocation prints it.
+admission=0
+case " \$* " in *" --test collab_product "*) admission=1 ;; esac
+second=0
+case " \$* " in *" --test task_collab_integration "*) second=1 ;; esac
 case "\$mode" in
   fail)
-    cat <<'OUT'
-test collab_primary_huge_varint_memory_rejected_1008 ... ok
-OUT
+    [[ \$admission -eq 1 ]] && echo 'test collab_primary_huge_varint_memory_rejected_1008 ... ok'
     echo "error: simulated cargo test failure" >&2
     exit 101
     ;;
+  fail-second)
+    [[ \$admission -eq 1 ]] && echo 'test collab_primary_huge_varint_memory_rejected_1008 ... ok'
+    if [[ \$second -eq 1 ]]; then
+      echo "error: simulated cargo test failure" >&2
+      exit 101
+    fi
+    exit 0
+    ;;
   duplicate)
-    cat <<'OUT'
-test collab_primary_huge_varint_memory_rejected_1008 ... ok
-test collab_primary_huge_varint_memory_rejected_1008 ... ok
-OUT
+    if [[ \$admission -eq 1 ]]; then
+      echo 'test collab_primary_huge_varint_memory_rejected_1008 ... ok'
+      echo 'test collab_primary_huge_varint_memory_rejected_1008 ... ok'
+    fi
     exit 0
     ;;
   missing)
-    echo 'test collab_delivery_admission_parity_with_locking_join ... ok'
+    [[ \$admission -eq 1 ]] && echo 'test collab_delivery_admission_parity_with_locking_join ... ok'
     exit 0
     ;;
   failed)
-    cat <<'OUT'
-test collab_primary_huge_varint_memory_rejected_1008 ... ok
-test collab_primary_huge_varint_memory_rejected_1008 ... FAILED
-OUT
+    if [[ \$admission -eq 1 ]]; then
+      echo 'test collab_primary_huge_varint_memory_rejected_1008 ... ok'
+      echo 'test collab_primary_huge_varint_memory_rejected_1008 ... FAILED'
+    fi
     exit 0
     ;;
   ignored)
-    cat <<'OUT'
-test collab_primary_huge_varint_memory_rejected_1008 ... ok
-test collab_primary_huge_varint_memory_rejected_1008 ... ignored
-OUT
+    if [[ \$admission -eq 1 ]]; then
+      echo 'test collab_primary_huge_varint_memory_rejected_1008 ... ok'
+      echo 'test collab_primary_huge_varint_memory_rejected_1008 ... ignored'
+    fi
     exit 0
     ;;
   pass)
-    cat <<'OUT'
-test collab_primary_huge_varint_memory_rejected_1008 ... ok
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-OUT
+    [[ \$admission -eq 1 ]] && echo 'test collab_primary_huge_varint_memory_rejected_1008 ... ok'
+    echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s'
     exit 0
     ;;
   *)
@@ -115,39 +155,63 @@ esac
 STUB
 chmod +x "$FAKE_BIN/cargo"
 
+# Fake docker/openssl for the real scripts/start-test-meili.sh: records calls,
+# starts nothing.
+cat >"$FAKE_BIN/docker" <<STUB
+#!/usr/bin/env bash
+echo "\$*" >>"$DOCKER_CALLS"
+case "\$1" in
+  run) echo fixturecid ;;
+  port) echo 127.0.0.1:43210 ;;
+  exec|rm|logs) : ;;
+  *) echo "unexpected docker \$1" >&2; exit 2 ;;
+esac
+STUB
+cat >"$FAKE_BIN/openssl" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1 $2" == "rand -hex" ]] || { echo "unexpected openssl $*" >&2; exit 2; }
+echo 00112233445566778899aabbccddeeff
+STUB
+chmod +x "$FAKE_BIN/docker" "$FAKE_BIN/openssl"
+
 export PATH="$FAKE_BIN:$PATH"
 
 run_runner() {
+  : >"$INVOCATIONS"
+  : >"$DOCKER_CALLS"
   FVOCI_TEST_CARGO_MODE="$1" bash "$RUN"
 }
 
-: >"$INVOCATIONS"
 if ! run_runner pass >/dev/null; then
   echo "expected runner success with one admission ok line" >&2
   exit 1
 fi
 invocation_count="$(wc -l <"$INVOCATIONS" | tr -d ' ')"
-if [[ "$invocation_count" -ne 1 ]]; then
-  echo "expected exactly one cargo test invocation, got ${invocation_count}" >&2
+if [[ "$invocation_count" -ne 2 ]]; then
+  echo "expected exactly two cargo test invocations, got ${invocation_count}" >&2
   cat "$INVOCATIONS" >&2
   exit 1
 fi
 assert_expected_test_targets "$(<"$INVOCATIONS")"
+assert_invocation_shape
+if [[ "$(grep -c '^run ' "$DOCKER_CALLS")" -ne 1 ]] || [[ "$(grep -c '^rm ' "$DOCKER_CALLS")" -ne 1 ]]; then
+  echo "expected one isolated Meilisearch for both invocations, started and removed once" >&2
+  cat "$DOCKER_CALLS" >&2
+  exit 1
+fi
 
-fail_status=0
-if run_runner fail >/dev/null 2>&1; then
-  fail_status=0
-else
-  fail_status=$?
-fi
-if [[ "$fail_status" -eq 0 ]]; then
-  echo "expected runner failure when cargo exits non-zero" >&2
-  exit 1
-fi
-if [[ "$fail_status" -ne 101 ]]; then
-  echo "expected runner to propagate cargo exit 101, got ${fail_status}" >&2
-  exit 1
-fi
+for mode in fail fail-second; do
+  status=0
+  run_runner "$mode" >/dev/null 2>&1 || status=$?
+  if [[ "$status" -ne 101 ]]; then
+    echo "expected runner to propagate cargo exit 101 in ${mode}, got ${status}" >&2
+    exit 1
+  fi
+  if [[ "$(wc -l <"$INVOCATIONS" | tr -d ' ')" -ne 2 ]]; then
+    echo "expected both cargo invocations to run in ${mode}" >&2
+    exit 1
+  fi
+done
 
 if run_runner duplicate >/dev/null 2>&1; then
   echo "expected runner failure when admission test passes twice" >&2
