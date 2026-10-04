@@ -204,18 +204,23 @@ python3 - "$timer_log" "$ROOT/apps/web/e2e/v050-task-timer.spec.ts" <<'PYTHON'
 import json, re, sys
 rows = [json.loads(line) for line in open(sys.argv[1])]
 original = ["--workers=1", "e2e/v050-task-timer.spec.ts", "--retries=0", "--trace=on"]
-assert len(rows) == 3, rows
+assert len(rows) == 4, rows
 assert all(row[:-2] == original for row in rows), rows
-assert [row[-2] for row in rows] == ["--grep-invert", "--grep", "--grep"], rows
+assert [row[-2] for row in rows] == ["--grep-invert", "--grep", "--grep", "--grep"], rows
 titles = re.findall(r'^test\("([^"\n]+)"', open(sys.argv[2]).read(), re.MULTILINE)
 assert len(titles) == 22, titles
 groups = [
     {title for title in titles if bool(re.search(row[-1], title)) == (row[-2] == "--grep")}
     for row in rows
 ]
-assert [len(group) for group in groups] == [9, 8, 5], groups
+assert [len(group) for group in groups] == [9, 7, 1, 5], groups
 assert set.union(*groups) == set(titles), groups
 assert sum(map(len, groups)) == len(set.union(*groups)), groups
+# This fixture consumes the whole DB graph and retires the group's original
+# server; it must share neither earlier rows nor a later base-URL consumer.
+assert groups[2] == {
+    "native same-database restart preserves paused and running anchors for genuine new clients"
+}, groups
 PYTHON
 
 # Existing explicit filters, mixed specs, shard/list/pending selection and
