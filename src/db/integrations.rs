@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+use crate::db::backend::{Backend, OperationTx};
+use crate::db::codec::{Cell, FamilyRow};
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -495,4 +497,648 @@ pub async fn purge_github_deliveries(pool: &PgPool, days: i32) -> Result<u64, sq
     .rows_affected();
     tx.commit().await?;
     Ok(deleted)
+}
+
+/// Internal receipt for the actual sender, separate from the preserved PG DTO.
+/// The authoritative lease end distinguishes two claims of the same attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClaimedWebhookDelivery {
+    pub due: DueDelivery,
+    pub claimed_until: DateTime<Utc>,
+}
+
+fn webhook_commit_error(error: crate::db::backend::CommitUnknown) -> sqlx::Error {
+    sqlx::Error::AnyDriverError(Box::new(error))
+}
+fn webhook_duration_us(duration: Duration) -> Result<i64, sqlx::Error> {
+    let us = i64::try_from(duration.as_micros())
+        .map_err(|_| sqlx::Error::Protocol("webhook duration exceeds i64 microseconds".into()))?;
+    if us <= 0 {
+        return Err(sqlx::Error::Protocol(
+            "webhook duration must be positive at microsecond precision".into(),
+        ));
+    }
+    Ok(us)
+}
+fn family_webhook_row(row: &FamilyRow) -> Result<WebhookRow, sqlx::Error> {
+    Ok(WebhookRow {
+        id: row.cell(0)?.id()?,
+        workspace_id: row.cell(1)?.id()?,
+        url: row.cell(2)?.string()?,
+        events: serde_json::from_value(row.cell(3)?.value()?)
+            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
+        created_at: row.cell(4)?.datetime()?,
+        updated_at: row.cell(5)?.datetime()?,
+    })
+}
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn webhook_manager(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+        write: bool,
+    ) -> Result<bool, sqlx::Error> {
+        if write {
+            self.lock_membership_users(&[actor]).await?;
+        }
+        let live = if write {
+            self.recheck_session(actor, credential).await?
+        } else {
+            self.session_is_live(actor, credential).await?
+        };
+        if !live || !self.workspace_is_live(workspace).await? {
+            return Ok(false);
+        }
+        Ok(self
+            .membership_role(workspace, actor, write)
+            .await?
+            .is_some_and(has_workspace_manage))
+    }
+    pub(crate) async fn webhook_creator_can_manage(
+        &mut self,
+        workspace: Uuid,
+        user: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        if !self.workspace_is_live(workspace).await? {
+            return Ok(false);
+        }
+        let active = match self {
+            Self::Postgres(tx) => sqlx::query_scalar::<_, bool>(
+                "SELECT deleted_at IS NULL AND suspended_at IS NULL FROM fvoci.users WHERE id = $1",
+            )
+            .bind(user)
+            .fetch_optional(&mut ***tx)
+            .await?
+            .unwrap_or(false),
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                tx.require_system_context()?;
+                let rows = tx
+                    .query(
+                        "SELECT deleted_at IS NULL AND suspended_at IS NULL FROM users WHERE id=?1",
+                        &[Cell::uuid(user)],
+                    )
+                    .await?;
+                rows.first()
+                    .map(|r| r.cell(0)?.boolean())
+                    .transpose()?
+                    .unwrap_or(false)
+            }
+        };
+        if !active {
+            return Ok(false);
+        }
+        Ok(self
+            .membership_role(workspace, user, false)
+            .await?
+            .is_some_and(has_workspace_manage))
+    }
+    pub(crate) async fn webhook_list(
+        &mut self,
+        workspace: Uuid,
+    ) -> Result<Vec<WebhookRow>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx)=>Ok(sqlx::query_as::<_,WebhookTuple>("SELECT id,workspace_id,url,events,created_at,updated_at FROM fvoci.webhooks WHERE workspace_id=$1 ORDER BY created_at,id").bind(workspace).fetch_all(&mut ***tx).await?.into_iter().map(webhook_row).collect()),
+            Self::SqliteFamily(tx)=> {tx.require_tenant(workspace)?;tx.query("SELECT id,workspace_id,url,events,created_at,updated_at FROM webhooks WHERE workspace_id=?1 ORDER BY created_at,id",&[Cell::uuid(workspace)]).await?.iter().map(family_webhook_row).collect()}
+        }
+    }
+    pub(crate) async fn webhook_create(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        input: NewWebhook<'_>,
+    ) -> Result<WebhookRow, sqlx::Error> {
+        match self {
+            Self::Postgres(tx)=>Ok(webhook_row(sqlx::query_as::<_,WebhookTuple>("INSERT INTO fvoci.webhooks(id,workspace_id,url,secret,events,created_by) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,workspace_id,url,events,created_at,updated_at").bind(input.id).bind(workspace).bind(input.url).bind(input.sealed_secret).bind(input.events).bind(actor).fetch_one(&mut ***tx).await?)),
+            Self::SqliteFamily(tx)=> {tx.require_writer()?;tx.require_tenant(workspace)?;let rows=tx.query("INSERT INTO webhooks(id,workspace_id,url,secret,events,created_by) VALUES(?1,?2,?3,?4,?5,?6) RETURNING id,workspace_id,url,events,created_at,updated_at",&[Cell::uuid(input.id),Cell::uuid(workspace),Cell::text(input.url),Cell::text(input.sealed_secret),Cell::json(&json!(input.events))?,Cell::uuid(actor)]).await?;family_webhook_row(rows.first().ok_or(sqlx::Error::RowNotFound)?)}
+        }
+    }
+    pub(crate) async fn webhook_remove(
+        &mut self,
+        workspace: Uuid,
+        webhook: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => Ok(sqlx::query(
+                "DELETE FROM fvoci.webhooks WHERE workspace_id = $1 AND id = $2",
+            )
+            .bind(workspace)
+            .bind(webhook)
+            .execute(&mut ***tx)
+            .await?
+            .rows_affected()
+                == 1),
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                Ok(tx
+                    .execute(
+                        "DELETE FROM webhooks WHERE workspace_id=?1 AND id=?2",
+                        &[Cell::uuid(workspace), Cell::uuid(webhook)],
+                    )
+                    .await?
+                    == 1)
+            }
+        }
+    }
+    pub(crate) async fn webhook_subscriptions(
+        &mut self,
+        workspace: Uuid,
+        verb: &str,
+    ) -> Result<Vec<(Uuid, Uuid)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => subscribed_webhooks(tx, workspace, verb).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                tx.require_system_context()?;
+                tx.query("SELECT h.id,h.created_by FROM webhooks h WHERE h.workspace_id=?1 AND EXISTS(SELECT 1 FROM json_each(h.events) e WHERE e.type='text' AND e.value=?2) ORDER BY h.id",&[Cell::uuid(workspace),Cell::text(verb)]).await?.iter().map(|r|Ok((r.cell(0)?.id()?,r.cell(1)?.id()?))).collect()
+            }
+        }
+    }
+    pub(crate) async fn webhook_enqueue(
+        &mut self,
+        workspace: Uuid,
+        webhook: Uuid,
+        event: Uuid,
+    ) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => enqueue_delivery(tx, workspace, webhook, event).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_system_context()?;
+                tx.require_tenant(workspace)?;
+                tx.execute("INSERT INTO webhook_deliveries(id,workspace_id,webhook_id,event_id,attempt,status,next_attempt_at) VALUES(?1,?2,?3,?4,0,'pending',(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)) ON CONFLICT(webhook_id,event_id) DO NOTHING",&[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace),Cell::uuid(webhook),Cell::uuid(event)]).await?;
+                Ok(())
+            }
+        }
+    }
+    // Source scope reads deliberately retain historical parent rows. Permission
+    // stays in the shared project/wiki operations, never a second ACL policy.
+    pub(crate) async fn webhook_document_project(
+        &mut self,
+        workspace: Uuid,
+        document: Uuid,
+    ) -> Result<Option<Option<Uuid>>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query_scalar(
+                    "SELECT project_id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
+                )
+                .bind(workspace)
+                .bind(document)
+                .fetch_optional(&mut ***tx)
+                .await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                tx.require_system_context()?;
+                tx.query(
+                    "SELECT project_id FROM documents WHERE workspace_id=?1 AND id=?2",
+                    &[Cell::uuid(workspace), Cell::uuid(document)],
+                )
+                .await?
+                .first()
+                .map(|r| r.cell(0)?.optional(Cell::id))
+                .transpose()
+            }
+        }
+    }
+    pub(crate) async fn webhook_task_project(
+        &mut self,
+        workspace: Uuid,
+        task: Uuid,
+    ) -> Result<Option<Uuid>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query_scalar(
+                    "SELECT project_id FROM fvoci.tasks WHERE workspace_id = $1 AND id = $2",
+                )
+                .bind(workspace)
+                .bind(task)
+                .fetch_optional(&mut ***tx)
+                .await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                tx.require_system_context()?;
+                tx.query(
+                    "SELECT project_id FROM tasks WHERE workspace_id=?1 AND id=?2",
+                    &[Cell::uuid(workspace), Cell::uuid(task)],
+                )
+                .await?
+                .first()
+                .map(|r| r.cell(0)?.id())
+                .transpose()
+            }
+        }
+    }
+    pub(crate) async fn webhook_attachment_parent(
+        &mut self,
+        workspace: Uuid,
+        attachment: Uuid,
+    ) -> Result<Option<(Option<Uuid>, Option<Uuid>)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx)=>sqlx::query_as("SELECT document_id, task_id FROM fvoci.attachments WHERE workspace_id = $1 AND id = $2").bind(workspace).bind(attachment).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx)=>{tx.require_tenant(workspace)?;tx.require_system_context()?;tx.query("SELECT document_id,task_id FROM attachments WHERE workspace_id=?1 AND id=?2",&[Cell::uuid(workspace),Cell::uuid(attachment)]).await?.first().map(|r|Ok((r.cell(0)?.optional(Cell::id)?,r.cell(1)?.optional(Cell::id)?))).transpose()}
+        }
+    }
+    pub(crate) async fn webhook_comment_parent(
+        &mut self,
+        workspace: Uuid,
+        comment: Uuid,
+    ) -> Result<Option<(Option<Uuid>, Option<Uuid>)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx)=>sqlx::query_as("SELECT document_id, task_id FROM fvoci.comments WHERE workspace_id = $1 AND id = $2").bind(workspace).bind(comment).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx)=>{tx.require_tenant(workspace)?;tx.require_system_context()?;tx.query("SELECT document_id,task_id FROM comments WHERE workspace_id=?1 AND id=?2",&[Cell::uuid(workspace),Cell::uuid(comment)]).await?.first().map(|r|Ok((r.cell(0)?.optional(Cell::id)?,r.cell(1)?.optional(Cell::id)?))).transpose()}
+        }
+    }
+    pub(crate) async fn webhook_claim_due(
+        &mut self,
+        limit: i64,
+        lease: Duration,
+    ) -> Result<Vec<ClaimedWebhookDelivery>, sqlx::Error> {
+        let lease_us = webhook_duration_us(lease)?;
+        if limit <= 0 {
+            return Err(sqlx::Error::Protocol(
+                "webhook claim limit must be positive".into(),
+            ));
+        }
+        match self {
+            Self::Postgres(tx) => {
+                let rows:Vec<(Uuid,Uuid,Uuid,Uuid,i32,DateTime<Utc>)>=sqlx::query_as(r#"UPDATE fvoci.webhook_deliveries AS d
+                    SET next_attempt_at=now()+make_interval(secs=>$2::double precision),updated_at=now()
+                    WHERE d.id IN (SELECT id FROM fvoci.webhook_deliveries WHERE status='pending' AND next_attempt_at<=now() ORDER BY next_attempt_at,id LIMIT $1 FOR UPDATE SKIP LOCKED)
+                    RETURNING d.id,d.workspace_id,d.webhook_id,d.event_id,d.attempt,d.next_attempt_at"#).bind(limit).bind(lease_us as f64/1_000_000.0).fetch_all(&mut ***tx).await?;
+                Ok(rows
+                    .into_iter()
+                    .map(
+                        |(id, workspace_id, webhook_id, event_id, attempt, claimed_until)| {
+                            ClaimedWebhookDelivery {
+                                due: DueDelivery {
+                                    id,
+                                    workspace_id,
+                                    webhook_id,
+                                    event_id,
+                                    attempt,
+                                },
+                                claimed_until,
+                            }
+                        },
+                    )
+                    .collect())
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_system_context()?;
+                tx.require_writer()?;
+                let now=tx.query("SELECT (unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)",&[]).await?.first().ok_or(sqlx::Error::RowNotFound)?.cell(0)?.integer()?;
+                let until = now
+                    .checked_add(lease_us)
+                    .ok_or_else(|| sqlx::Error::Protocol("webhook lease time overflow".into()))?;
+                let rows=tx.query("SELECT id,workspace_id,webhook_id,event_id,attempt FROM webhook_deliveries WHERE status='pending' AND next_attempt_at<=?1 ORDER BY next_attempt_at,id LIMIT ?2",&[Cell::Integer(now),Cell::Integer(limit)]).await?;
+                let mut result = Vec::new();
+                for row in rows {
+                    let due = DueDelivery {
+                        id: row.cell(0)?.id()?,
+                        workspace_id: row.cell(1)?.id()?,
+                        webhook_id: row.cell(2)?.id()?,
+                        event_id: row.cell(3)?.id()?,
+                        attempt: row.cell(4)?.int32()?,
+                    };
+                    let changed=tx.execute("UPDATE webhook_deliveries SET next_attempt_at=?3,updated_at=?4 WHERE workspace_id=?1 AND id=?2 AND status='pending' AND next_attempt_at<=?4",&[Cell::uuid(due.workspace_id),Cell::uuid(due.id),Cell::Integer(until),Cell::Integer(now)]).await?;
+                    if changed != 1 {
+                        return Err(sqlx::Error::Protocol(
+                            "webhook claim changed under writer reservation".into(),
+                        ));
+                    }
+                    result.push(ClaimedWebhookDelivery {
+                        due,
+                        claimed_until: DateTime::from_timestamp_micros(until).ok_or_else(|| {
+                            sqlx::Error::Protocol("webhook lease instant out of range".into())
+                        })?,
+                    });
+                }
+                Ok(result)
+            }
+        }
+    }
+    pub(crate) async fn webhook_claim_is_current(
+        &mut self,
+        claim: &ClaimedWebhookDelivery,
+    ) -> Result<bool, sqlx::Error> {
+        let d = &claim.due;
+        match self {
+            Self::Postgres(tx)=>Ok(sqlx::query_scalar::<_,bool>("SELECT true FROM fvoci.webhook_deliveries WHERE workspace_id=$1 AND id=$2 AND webhook_id=$3 AND event_id=$4 AND status='pending' AND attempt=$5 AND next_attempt_at=$6").bind(d.workspace_id).bind(d.id).bind(d.webhook_id).bind(d.event_id).bind(d.attempt).bind(claim.claimed_until).fetch_optional(&mut ***tx).await?.unwrap_or(false)),
+            Self::SqliteFamily(tx)=>{tx.require_tenant(d.workspace_id)?;tx.require_system_context()?;tx.query("SELECT 1 FROM webhook_deliveries WHERE workspace_id=?1 AND id=?2 AND webhook_id=?3 AND event_id=?4 AND status='pending' AND attempt=?5 AND next_attempt_at=?6",&[Cell::uuid(d.workspace_id),Cell::uuid(d.id),Cell::uuid(d.webhook_id),Cell::uuid(d.event_id),Cell::Integer(i64::from(d.attempt)),Cell::instant(claim.claimed_until)?]).await.map(|r|!r.is_empty())}
+        }
+    }
+    pub(crate) async fn webhook_target(
+        &mut self,
+        due: &DueDelivery,
+    ) -> Result<Option<DeliveryTarget>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => load_delivery_target(tx, due).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(due.workspace_id)?;
+                tx.require_system_context()?;
+                tx.query("SELECT h.url,h.secret,h.created_by FROM webhooks h INNER JOIN workspaces w ON w.id=h.workspace_id AND w.deleted_at IS NULL WHERE h.workspace_id=?1 AND h.id=?2",&[Cell::uuid(due.workspace_id),Cell::uuid(due.webhook_id)]).await?.first().map(|r|Ok(DeliveryTarget{url:r.cell(0)?.string()?,sealed_secret:r.cell(1)?.string()?,created_by:r.cell(2)?.id()?})).transpose()
+            }
+        }
+    }
+    pub(crate) async fn webhook_record(
+        &mut self,
+        claim: &ClaimedWebhookDelivery,
+        outcome: DeliveryOutcome,
+        http_status: Option<u16>,
+    ) -> Result<bool, sqlx::Error> {
+        let d = &claim.due;
+        let attempt = d
+            .attempt
+            .checked_add(1)
+            .ok_or_else(|| sqlx::Error::Protocol("webhook attempt overflow".into()))?;
+        let (status, after) = match outcome {
+            DeliveryOutcome::Delivered => ("delivered", None),
+            DeliveryOutcome::Failed => ("failed", None),
+            DeliveryOutcome::Retry { after } => ("pending", Some(webhook_duration_us(after)?)),
+        };
+        // Initial original-equivalent control: attempt-only predicate retained
+        // until the allocated regression demonstrates stale reclaim mutation.
+        match self {
+            Self::Postgres(tx)=>Ok(sqlx::query("UPDATE fvoci.webhook_deliveries SET attempt=$3,status=$4,http_status=$5,next_attempt_at=CASE WHEN $6::double precision IS NULL THEN NULL ELSE now()+make_interval(secs=>$6::double precision) END,updated_at=now() WHERE workspace_id=$1 AND id=$2 AND status='pending' AND attempt=$7").bind(d.workspace_id).bind(d.id).bind(attempt).bind(status).bind(http_status.map(i32::from)).bind(after.map(|us|us as f64/1_000_000.0)).bind(d.attempt).execute(&mut ***tx).await?.rows_affected()==1),
+            Self::SqliteFamily(tx)=>{tx.require_writer()?;tx.require_tenant(d.workspace_id)?;tx.require_system_context()?;let changed=tx.execute("UPDATE webhook_deliveries SET attempt=?3,status=?4,http_status=?5,next_attempt_at=CASE WHEN ?6 IS NULL THEN NULL ELSE (unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)+?6 END,updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE workspace_id=?1 AND id=?2 AND status='pending' AND attempt=?7",&[Cell::uuid(d.workspace_id),Cell::uuid(d.id),Cell::Integer(i64::from(attempt)),Cell::text(status),http_status.map(|s|Cell::Integer(i64::from(s))).unwrap_or(Cell::Null),after.map(Cell::Integer).unwrap_or(Cell::Null),Cell::Integer(i64::from(d.attempt))]).await?;Ok(changed==1)}
+        }
+    }
+    pub(crate) async fn webhook_purge_settled(&mut self, days: i32) -> Result<u64, sqlx::Error> {
+        match self {
+            Self::Postgres(tx)=>Ok(sqlx::query(r#"WITH doomed AS (SELECT id FROM fvoci.webhook_deliveries WHERE status IN ('delivered','failed') AND created_at<now()-make_interval(days=>$1) ORDER BY created_at LIMIT $2 FOR UPDATE SKIP LOCKED) DELETE FROM fvoci.webhook_deliveries AS d USING doomed WHERE d.id=doomed.id"#).bind(days).bind(INTEGRATION_GC_BATCH).execute(&mut ***tx).await?.rows_affected()),
+            Self::SqliteFamily(tx)=>{tx.require_system_context()?;tx.require_writer()?;tx.execute("DELETE FROM webhook_deliveries WHERE id IN (SELECT id FROM webhook_deliveries WHERE status IN ('delivered','failed') AND created_at<(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)-?1 ORDER BY created_at LIMIT ?2)",&[Cell::Integer(i64::from(days)*86_400_000_000),Cell::Integer(INTEGRATION_GC_BATCH)]).await}
+        }
+    }
+}
+
+pub async fn list_webhooks_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<Vec<WebhookRow>, IntegrationDbError>, sqlx::Error> {
+    let mut tx = backend.begin_read().await?;
+    tx.operation().set_tenant(workspace).await?;
+    if !tx
+        .operation()
+        .webhook_manager(workspace, actor, credential, false)
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(IntegrationDbError::NotFound));
+    }
+    let rows = tx.operation().webhook_list(workspace).await?;
+    tx.commit().await.map_err(webhook_commit_error)?;
+    Ok(Ok(rows))
+}
+pub async fn create_webhook_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    input: NewWebhook<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<WebhookRow, IntegrationDbError>, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(workspace).await?;
+    if !tx
+        .operation()
+        .webhook_manager(workspace, actor, credential, true)
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(IntegrationDbError::NotFound));
+    }
+    let id = input.id;
+    let events = input.events.to_vec();
+    let row = tx
+        .operation()
+        .webhook_create(workspace, actor, input)
+        .await?;
+    tx.operation()
+        .append_audit(AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace),
+            actor_user_id: Some(actor),
+            verb: "webhook.created".into(),
+            target_type: Some("webhook".into()),
+            target_id: Some(id),
+            payload: json!({"webhookId":id.to_string(),"events":events}),
+            ip: client_ip.map(str::to_string),
+        })
+        .await?;
+    tx.commit().await.map_err(webhook_commit_error)?;
+    Ok(Ok(row))
+}
+pub async fn remove_webhook_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    webhook: Uuid,
+    client_ip: Option<&str>,
+) -> Result<Result<(), IntegrationDbError>, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(workspace).await?;
+    if !tx
+        .operation()
+        .webhook_manager(workspace, actor, credential, true)
+        .await?
+        || !tx.operation().webhook_remove(workspace, webhook).await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(IntegrationDbError::NotFound));
+    }
+    tx.operation()
+        .append_audit(AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace),
+            actor_user_id: Some(actor),
+            verb: "webhook.deleted".into(),
+            target_type: Some("webhook".into()),
+            target_id: Some(webhook),
+            payload: json!({"webhookId":webhook.to_string()}),
+            ip: client_ip.map(str::to_string),
+        })
+        .await?;
+    tx.commit().await.map_err(webhook_commit_error)?;
+    Ok(Ok(()))
+}
+pub(crate) async fn claim_due_webhooks_backend(
+    backend: &Backend,
+    limit: i64,
+    lease: Duration,
+) -> Result<Vec<ClaimedWebhookDelivery>, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    let previous = tx.operation().set_system().await?;
+    let rows = tx.operation().webhook_claim_due(limit, lease).await?;
+    tx.operation().restore_system(previous).await?;
+    tx.commit().await.map_err(webhook_commit_error)?;
+    Ok(rows)
+}
+pub(crate) async fn record_webhook_backend(
+    backend: &Backend,
+    claim: &ClaimedWebhookDelivery,
+    outcome: DeliveryOutcome,
+    status: Option<u16>,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(claim.due.workspace_id).await?;
+    let previous = tx.operation().set_system().await?;
+    let recorded = tx
+        .operation()
+        .webhook_record(claim, outcome, status)
+        .await?;
+    tx.operation().restore_system(previous).await?;
+    tx.commit().await.map_err(webhook_commit_error)?;
+    Ok(recorded)
+}
+pub async fn purge_settled_deliveries_backend(
+    backend: &Backend,
+    days: i32,
+) -> Result<u64, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    let previous = tx.operation().set_system().await?;
+    let deleted = tx.operation().webhook_purge_settled(days).await?;
+    tx.operation().restore_system(previous).await?;
+    tx.commit().await.map_err(webhook_commit_error)?;
+    Ok(deleted)
+}
+
+#[cfg(test)]
+pub(crate) mod webhook_family_fixture {
+    use super::*;
+    pub(crate) use crate::db::notifications::family_runtime_fixture::Fixture;
+    pub(crate) const SECRET: &str = "synthetic-webhook-key";
+    pub(crate) fn keys() -> std::sync::Arc<crate::auth::password::Keyring> {
+        std::sync::Arc::new(
+            crate::auth::password::Keyring::parse(
+                r#"{"k1":"0101010101010101010101010101010101010101010101010101010101010101"}"#,
+                "k1",
+            )
+            .unwrap(),
+        )
+    }
+    pub(crate) async fn hook(f: &Fixture, url: &str) -> Uuid {
+        sqlx::query("UPDATE memberships SET role='admin' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let id = Uuid::now_v7();
+        let sealed = crate::secret_box::seal(
+            &keys(),
+            SECRET,
+            &crate::integrations::webhooks::webhook_secret_context(f.workspace, id),
+        )
+        .unwrap();
+        let events = vec![
+            "comment.created".into(),
+            "document.updated".into(),
+            "task.deleted".into(),
+        ];
+        assert!(create_webhook_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            f.credential,
+            NewWebhook {
+                id,
+                url,
+                events: &events,
+                sealed_secret: &sealed
+            },
+            None
+        )
+        .await
+        .unwrap()
+        .is_ok());
+        id
+    }
+    pub(crate) async fn enqueue(f: &Fixture, hook: Uuid, event: Uuid) {
+        let mut tx = f.backend.begin_write().await.unwrap();
+        tx.operation().set_tenant(f.workspace).await.unwrap();
+        let p = tx.operation().set_system().await.unwrap();
+        tx.operation()
+            .webhook_enqueue(f.workspace, hook, event)
+            .await
+            .unwrap();
+        tx.operation().restore_system(p).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+    pub(crate) async fn claim(f: &Fixture) -> ClaimedWebhookDelivery {
+        claim_due_webhooks_backend(&f.backend, 1, Duration::from_secs(240))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap()
+    }
+    pub(crate) async fn row(f: &Fixture, id: Uuid) -> (i32, String, Option<i32>, Option<i64>) {
+        sqlx::query_as(
+            "SELECT attempt,status,http_status,next_attempt_at FROM webhook_deliveries WHERE id=?1",
+        )
+        .bind(id.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod webhook_backend_regressions {
+    use super::webhook_family_fixture::*;
+    use super::*;
+
+    #[tokio::test]
+    async fn actual_family_reclaimed_attempt_rejects_old_acknowledgement() {
+        let f = Fixture::new().await;
+        let hook = hook(&f, "http://127.0.0.1:1/unused").await;
+        let event = f.append_comment_event("comment.created").await;
+        enqueue(&f, hook, event.id).await;
+        let old = claim_due_webhooks_backend(&f.backend, 1, Duration::from_micros(1))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        // Observe the actual DB clock crossing this real positive lease. No
+        // manual expiry mutation, clock injection or second TTL is needed.
+        tokio::time::timeout(Duration::from_secs(1),async {
+            loop {
+                let now:i64=sqlx::query_scalar("SELECT (unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)").fetch_one(&f.pool).await.unwrap();
+                if now>=old.claimed_until.timestamp_micros(){break}
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let new = claim(&f).await;
+        assert_eq!(old.due.attempt, new.due.attempt);
+        assert!(new.claimed_until > old.claimed_until);
+        let accepted =
+            record_webhook_backend(&f.backend, &old, DeliveryOutcome::Delivered, Some(204))
+                .await
+                .unwrap();
+        let state = row(&f, new.due.id).await;
+        // Cleanup before the deliberate old-source regression assertion so
+        // even the allocated failure control has no retained fixture resource.
+        f.finish().await;
+        assert!(
+            !accepted,
+            "old claim ACK changed a reclaimed delivery with the same attempt"
+        );
+        assert_eq!(
+            state,
+            (
+                0,
+                "pending".into(),
+                None,
+                Some(new.claimed_until.timestamp_micros())
+            )
+        );
+    }
 }
