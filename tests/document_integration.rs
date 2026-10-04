@@ -2909,7 +2909,62 @@ async fn selected_backend_setup_cookie_wiki_command_readback() {
         );
         assert_eq!(read["id"], created["id"]);
         assert_eq!(read["title"], created["title"]);
-        assert_eq!(read["body"], created["body"]);
+        assert!(read.get("schemaVersion").is_some());
+        assert_eq!(read["schemaVersion"], created["schemaVersion"]);
+        let (status, body, _, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!("{path}/{document}/body"),
+            None,
+            Some(&fresh_cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{} body readback: {body}",
+            backend.kind()
+        );
+        assert!(body.get("contentJson").is_some());
+        assert_eq!(
+            body["contentJson"],
+            fvoci_server::db::documents::empty_document_json()
+        );
+        assert_eq!(body["version"], created["version"]);
+        let (status, _, _, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!(
+                "/api/v1/workspaces/{}/documents/{document}/body",
+                Uuid::now_v7()
+            ),
+            None,
+            Some(&fresh_cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{} wrong-tenant body",
+            backend.kind()
+        );
+        let (status, _, _, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!("{path}/{document}/body"),
+            None,
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{} anonymous body",
+            backend.kind()
+        );
         drop(app);
         let storage_root = match &storage {
             fvoci_server::attachments::ObjectStorage::Local(local) => local.root().to_path_buf(),

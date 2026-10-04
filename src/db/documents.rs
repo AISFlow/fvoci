@@ -926,10 +926,39 @@ pub async fn get_wiki_document_backend(
 ) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
     // Preserve the current PG route's READ COMMITTED transaction. Family reads
     // use one snapshot for current credential, affiliation, grants and body.
-    let mut tx = match backend {
+    let tx = match backend {
         Backend::Postgres(pool) => super::backend::DbTransaction::Postgres(pool.begin().await?),
         _ => backend.begin_read().await?,
     };
+    get_wiki_document_in_tx(tx, workspace_id, actor_user_id, session_id, document_id).await
+}
+
+/// Body readers preserve the original read-only repeatable snapshot on PG;
+/// identity, current wiki ACL and derived body are read in that same snapshot.
+pub async fn read_wiki_document_body_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+    get_wiki_document_in_tx(
+        backend.begin_read().await?,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+    )
+    .await
+}
+
+async fn get_wiki_document_in_tx(
+    mut tx: super::backend::DbTx,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
     let mut operation = tx.operation();
     operation.set_tenant(workspace_id).await?;
     if !operation.session_is_live(actor_user_id, session_id).await? {

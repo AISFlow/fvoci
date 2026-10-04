@@ -259,23 +259,35 @@ pub(crate) async fn read_body(
         workspace_id,
     )
     .await?;
-    let meta = db_result(
-        authorize_document(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/document_body.rs")
-                .map_err(internal)?,
-            workspace_id,
-            auth.user_id,
-            auth.credential_id,
-            scope,
-            document_id,
-            ProjectPermission::View,
-        )
-        .await,
-    )?;
+    let meta = match scope {
+        DocumentScope::Wiki => db_result(
+            crate::db::documents::read_wiki_document_body_backend(
+                &state.auth.db.pool,
+                workspace_id,
+                auth.user_id,
+                auth.credential_id,
+                document_id,
+            )
+            .await,
+        )?,
+        DocumentScope::Project(_) => db_result(
+            authorize_document(
+                state
+                    .auth
+                    .db
+                    .pool
+                    .postgres("src/http/routes/document_body.rs")
+                    .map_err(internal)?,
+                workspace_id,
+                auth.user_id,
+                auth.credential_id,
+                scope,
+                document_id,
+                ProjectPermission::View,
+            )
+            .await,
+        )?,
+    };
     if !markdown {
         return Ok(Json(DocumentBodyResponse::Json(BodyResponse {
             content_json: meta.content_json,
