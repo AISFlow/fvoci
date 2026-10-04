@@ -4578,6 +4578,11 @@ pub async fn create_upload_backend(
     match result {
         Ok(Ok(())) => {
             if let Err(unknown) = tx.commit().await {
+                if matches!(backend, Backend::LibsqlRemote(_)) {
+                    // Ordinary remote COMMIT does not provide an original-stream
+                    // settlement receipt. A fresh maxN writer is not that proof.
+                    return Err(sqlx::Error::AnyDriverError(Box::new(unknown)));
+                }
                 if let Err(e) =
                     observe_upload_mutation(backend, storage, workspace, id, actor, credential)
                         .await
@@ -4612,6 +4617,11 @@ pub async fn create_upload_backend(
     match result {
         Ok(Ok(row)) => {
             if let Err(unknown) = tx.commit().await {
+                if matches!(backend, Backend::LibsqlRemote(_)) {
+                    // Ordinary remote COMMIT does not provide an original-stream
+                    // settlement receipt. A fresh maxN writer is not that proof.
+                    return Err(sqlx::Error::AnyDriverError(Box::new(unknown)));
+                }
                 if let Err(e) =
                     observe_upload_mutation(backend, storage, workspace, id, actor, credential)
                         .await
@@ -4998,6 +5008,9 @@ pub async fn delete_attachment_backend(
         Ok(Ok(())) => match tx.commit().await {
             Ok(()) => Ok(Ok(())),
             Err(unknown) => {
+                if matches!(backend, Backend::LibsqlRemote(_)) {
+                    return Err(sqlx::Error::AnyDriverError(Box::new(unknown)));
+                }
                 // Observe current authority and row after the actual uncertain commit;
                 // leave journal processing to its separate authoritative consumer.
                 let mut observe = backend.begin_write().await?;
@@ -6141,6 +6154,9 @@ pub(crate) async fn complete_upload_backend_with_cancel(
     }
     if changed {
         if let Err(unknown) = preparation.commit().await {
+            if matches!(backend, Backend::LibsqlRemote(_)) {
+                return Err(sqlx::Error::AnyDriverError(Box::new(unknown)));
+            }
             // Observe after uncertain preparation; never enter assembly from it.
             if let Err(e) = observe_upload_completion(
                 backend,
@@ -6222,6 +6238,9 @@ pub(crate) async fn complete_upload_backend_with_cancel(
                 None => Ok(Err(AttachmentDbError::InvalidInput)),
             },
             Err(unknown) => {
+                if matches!(backend, Backend::LibsqlRemote(_)) {
+                    return Err(sqlx::Error::AnyDriverError(Box::new(unknown)));
+                }
                 #[cfg(test)]
                 cleanup_test_hooks::wait(id, 13).await;
                 if let Ok(Some(row)) = observe_upload_completion(
