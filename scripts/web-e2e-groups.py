@@ -14,6 +14,29 @@ DEFAULT_E2E_DIR = ROOT / "apps" / "web" / "e2e"
 PAIR_FIRST = "workspace-flow.spec.ts"
 PAIR_SECOND = "workspace-wiki-flow.spec.ts"
 DEFAULT_SHARD_COUNT = 8
+# Scheduling estimates only: completed group wall time (fresh runtime through
+# cleanup), rounded up, from Web run 37194529902 at main 52129a1 (2026-10-04).
+# Attempts 1/2 supply shard 0; other shards were carried forward, not rerun.
+# Keep overrides only for observed groups >= 40s; the median was 17.3s, rounded
+# to a 20s fallback for smaller and newly discovered groups. Build/dependency
+# preparation is per-shard and excluded. Timer is ONE logical group costing the
+# sum of its unchanged four fresh runs (9+7+1+5 cases), not one Playwright run.
+# These estimates affect assignment only, never discovery or test selection.
+DEFAULT_GROUP_SECONDS = 20
+OBSERVED_GROUP_SECONDS = {
+    "e2e/account-admin-vue-flow.spec.ts": 42,
+    "e2e/collection-calendar-template.spec.ts": 67,
+    "e2e/editor-entities-flow.spec.ts": 46,
+    "e2e/main-alignment-navigation-lifetime.spec.ts": 44,
+    "e2e/main-alignment-task-contract.spec.ts": 47,
+    "e2e/personal-team-transfer.spec.ts": 60,
+    "e2e/tb-a-dev-editor.spec.ts": 84,
+    "e2e/tb-d-document-header-draft.spec.ts": 52,
+    "e2e/v050-editor-modes.spec.ts": 123,
+    "e2e/v050-native-archive.spec.ts": 68,
+    "e2e/v050-task-timer.spec.ts": 230,
+    "e2e/workspace-wiki-vue-flow.spec.ts": 42,
+}
 SPEC_BASENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.spec\.ts$")
 REL_SPEC_RE = re.compile(r"^e2e/[A-Za-z0-9][A-Za-z0-9._-]*\.spec\.ts$")
 # Playwright default testMatch '**/*.@(spec|test).?(c|m)[jt]s?(x)' (pinned
@@ -117,12 +140,21 @@ def discover_groups(directory: Path | None = None) -> list[list[str]]:
     return groups
 
 
+def group_seconds(group: list[str]) -> int:
+    # A paired group has one fresh runtime. Its fallback is per logical group.
+    return max(OBSERVED_GROUP_SECONDS.get(spec, DEFAULT_GROUP_SECONDS) for spec in group)
+
+
 def assign_shards(groups: list[list[str]], shard_count: int) -> list[list[list[str]]]:
     if shard_count < 1:
         raise SystemExit("shard_count must be >= 1")
     shards: list[list[list[str]]] = [[] for _ in range(shard_count)]
-    for index, group in enumerate(groups):
-        shards[index % shard_count].append(group)
+    loads = [0] * shard_count
+    # Longest first, with path and shard-index ties for reproducible plans.
+    for group in sorted(groups, key=lambda g: (-group_seconds(g), tuple(g))):
+        index = min(range(shard_count), key=lambda i: (loads[i], i))
+        shards[index].append(group)
+        loads[index] += group_seconds(group)
     return shards
 
 
@@ -134,6 +166,12 @@ def verify_plan(
     root = (directory or DEFAULT_E2E_DIR).resolve()
     groups = discover_groups(root)
     shards = assign_shards(groups, shard_count)
+
+    # Validate the assignment too: discovery alone cannot catch a scheduler
+    # dropping, duplicating, splitting or altering a logical group.
+    assigned_groups = [group for shard in shards for group in shard]
+    if sorted(map(tuple, assigned_groups)) != sorted(map(tuple, groups)):
+        raise SystemExit("shard assignment has missing, duplicate or altered groups")
 
     spec_paths: list[str] = []
     for group in groups:
