@@ -2312,3 +2312,24 @@ pub(crate) async fn mail_messages(
     };
     Ok(crate::settings::messages::Messages::from_row(raw.as_ref()))
 }
+
+// S05 uses the same display target and checked formatting as the inbox.
+impl OperationTx<'_, '_> {
+    pub(crate) async fn notification_display_id(
+        &mut self,
+        workspace: Uuid,
+        target_type: Option<&str>,
+        target_id: Option<Uuid>,
+        payload: &Value,
+    ) -> Result<Option<String>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                display_id_for(tx, workspace, target_type, target_id, payload).await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.notification_display_id(workspace, target_type, target_id, payload)
+                    .await
+            }
+        }
+    }
+}
