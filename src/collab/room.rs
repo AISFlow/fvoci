@@ -58,9 +58,10 @@ use crate::collab::y_sync::{encode_sync_payload, is_empty_update, parse_sync_pay
 use crate::db::collab::{
     append_collab_restore_kind, compact_collab_snapshot_kind_backend, load_room_collab_readonly,
     project_derived_body_kind_backend, resolve_collab_admission_kind_backend,
-    verify_collab_operation_kind_backend, AppendCollabInput, AppendCollabResult, ClaimWriterResult,
-    CollabDbError, CompactCollabInput, FamilyRoomDeliveryFence, FamilyRoomFence,
-    ProjectDerivedBodyInput, ProjectDerivedBodyResult, VerifyCollabInput,
+    verify_room_collab_operation, verify_room_native_consumer, AppendCollabInput,
+    AppendCollabResult, ClaimWriterResult, CollabDbError, CompactCollabInput,
+    FamilyNativeConsumerProof, FamilyRoomDeliveryFence, FamilyRoomFence, ProjectDerivedBodyInput,
+    ProjectDerivedBodyResult, VerifyCollabInput,
 };
 use crate::db::collab_delivery::{check_delivery_admission_kind_backend, DeliveryAdmission};
 use crate::db::identity::LiveSession;
@@ -154,6 +155,50 @@ async fn pause_for_join_barrier(document_id: Uuid) {
         if consume_actor_panic_after_join_barrier(document_id).await {
             panic!("db-tests collab actor panic after join barrier");
         }
+    }
+}
+
+/// Pause after isolated native work or capture, before its final authority proof.
+/// A fixture mutates the actual database fence while this await is suspended.
+#[cfg(feature = "db-tests")]
+static NATIVE_CONSUMER_BARRIERS: std::sync::LazyLock<
+    tokio::sync::Mutex<HashMap<(Uuid, u8), AppendRevokeBarrier>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+#[cfg(feature = "db-tests")]
+pub const NATIVE_CAPTURE_FINAL_PROOF: u8 = 0;
+#[cfg(feature = "db-tests")]
+pub const NATIVE_PROJECT_FINAL_PROOF: u8 = 1;
+#[cfg(feature = "db-tests")]
+pub const MANUAL_REVISION_BEFORE_WRITE: u8 = 2;
+#[cfg(feature = "db-tests")]
+pub async fn arm_native_consumer_barrier(
+    document: Uuid,
+    point: u8,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (proceed_tx, proceed_rx) = oneshot::channel();
+    assert!(NATIVE_CONSUMER_BARRIERS
+        .lock()
+        .await
+        .insert(
+            (document, point),
+            AppendRevokeBarrier {
+                reached_tx,
+                proceed_rx
+            }
+        )
+        .is_none());
+    (reached_rx, proceed_tx)
+}
+#[cfg(feature = "db-tests")]
+pub(crate) async fn pause_native_consumer_barrier(document: Uuid, point: u8) {
+    let barrier = NATIVE_CONSUMER_BARRIERS
+        .lock()
+        .await
+        .remove(&(document, point));
+    if let Some(barrier) = barrier {
+        let _ = barrier.reached_tx.send(());
+        let _ = barrier.proceed_rx.await;
     }
 }
 
@@ -821,7 +866,7 @@ enum RoomCommand {
     CaptureRevision {
         actor_user_id: Uuid,
         session_id: Uuid,
-        reply: oneshot::Sender<Result<CapturedRevision, RevisionCaptureError>>,
+        reply: oneshot::Sender<Result<GuardedCapturedRevision, RevisionCaptureError>>,
     },
     Restore {
         actor_user_id: Uuid,
@@ -1042,6 +1087,16 @@ impl RoomHandle {
         actor_user_id: Uuid,
         session_id: Uuid,
     ) -> Result<CapturedRevision, RevisionCaptureError> {
+        self.capture_revision_guarded(actor_user_id, session_id)
+            .await
+            .map(|result| result.captured)
+    }
+
+    pub(crate) async fn capture_revision_guarded(
+        &self,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<GuardedCapturedRevision, RevisionCaptureError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RoomCommand::CaptureRevision {
@@ -1143,6 +1198,11 @@ impl RoomHandle {
     }
 }
 
+pub(crate) struct GuardedCapturedRevision {
+    pub(crate) captured: CapturedRevision,
+    pub(crate) proof: Option<FamilyNativeConsumerProof>,
+}
+
 struct CommittedBundle {
     snapshot: Vec<u8>,
     tail_payloads: Vec<Vec<u8>>,
@@ -1200,8 +1260,10 @@ struct RoomActor {
     backend: Backend,
     engine: EngineBridge,
     room_guard: Option<BackendRoomGuard>,
+    guard_cleanup_failed: bool,
     writer_generation: Option<i64>,
     committed: CommittedBundle,
+    committed_writer_generation: i64,
     connections: HashMap<Uuid, ConnectionState>,
     connection_lease_drops: FuturesUnordered<ConnectionLeaseDrop>,
     pending_lease_drops: Vec<PendingLeaseDrop>,
@@ -1275,8 +1337,12 @@ pub(crate) async fn spawn_room_backend(
     let engine = match EngineBridge::spawn(config.engine_bin.clone(), config.limits) {
         Ok(engine) => engine,
         Err(_) => {
-            if let Err(error) = room_guard.release().await {
-                tracing::error!(%document_id, %error, "room startup guard cleanup failed");
+            if let Err(error) = room_guard
+                .release_bounded(Duration::from_millis(config.rpc_timeout_ms))
+                .await
+            {
+                tracing::error!(%document_id, %error, "room startup guard cleanup unconfirmed");
+                return Err(JoinError::DbError);
             }
             return Err(JoinError::EngineUnavailable);
         }
@@ -1292,6 +1358,7 @@ pub(crate) async fn spawn_room_backend(
         backend,
         engine,
         room_guard: Some(room_guard),
+        guard_cleanup_failed: false,
         writer_generation: None,
         committed: CommittedBundle {
             snapshot: vec![0, 0],
@@ -1299,6 +1366,7 @@ pub(crate) async fn spawn_room_backend(
             tail_seq: 0,
             snapshot_cutoff_seq: 0,
         },
+        committed_writer_generation: 0,
         connections: HashMap::new(),
         connection_lease_drops: FuturesUnordered::new(),
         pending_lease_drops: Vec::new(),
@@ -1602,14 +1670,17 @@ impl RoomActor {
         pause_before_guard_release(self.document_id).await;
 
         let guard_clean = match self.room_guard.take() {
-            Some(guard) => match guard.release().await {
+            Some(guard) => match guard
+                .release_bounded(Duration::from_millis(self.config.rpc_timeout_ms))
+                .await
+            {
                 Ok(()) => true,
                 Err(error) => {
                     tracing::error!(%error, document_id=%self.document_id, "room guard cleanup failed");
                     false
                 }
             },
-            None => !self.fence_lost,
+            None => !self.guard_cleanup_failed,
         };
 
         matches!(exit, RoomExit::Clean) && engine_stop_ok && guard_clean
@@ -2076,6 +2147,39 @@ impl RoomActor {
         }
     }
 
+    fn native_consumer_proof(&self) -> Option<FamilyNativeConsumerProof> {
+        self.family_fence().map(|room| FamilyNativeConsumerProof {
+            room,
+            generation: self.committed_writer_generation,
+            tail: self.committed.tail_seq,
+        })
+    }
+
+    async fn check_cached_native_consumer(
+        &mut self,
+        actor: Uuid,
+        credential: Uuid,
+    ) -> Result<Option<FamilyNativeConsumerProof>, ()> {
+        let proof = self.native_consumer_proof();
+        if matches!(
+            verify_room_native_consumer(
+                &self.backend,
+                self.kind,
+                self.workspace_id,
+                actor,
+                credential,
+                self.document_id,
+                proof
+            )
+            .await,
+            Ok(Ok(()))
+        ) {
+            return Ok(proof);
+        }
+        self.fatal_fence_lost().await;
+        Err(())
+    }
+
     fn family_fence(&self) -> Option<FamilyRoomFence> {
         self.room_guard
             .as_ref()
@@ -2276,6 +2380,7 @@ impl RoomActor {
     }
 
     fn set_committed_from_load(&mut self, load: &crate::db::collab::CollabLoadState) {
+        self.committed_writer_generation = load.writer_generation;
         self.committed.snapshot = load.snapshot.clone();
         self.committed.tail_payloads = load.tail.iter().map(|r| r.payload.clone()).collect();
         self.committed.tail_seq = load.tail_seq;
@@ -2294,13 +2399,23 @@ impl RoomActor {
         self.writer_generation = None;
         self.primary_loaded = false;
         self.primary_dirty = true;
+        self.abort_session_revision_work();
+        // Publish transport cancellation for every socket before any cleanup
+        // I/O or awareness/helper work can block this terminal failure path.
+        for (_, conn) in self.connections.drain() {
+            Self::enqueue_close(&conn.events, &conn.cancel, 1013, "try again later");
+        }
+        self.pending_awareness.clear();
+        self.publish_live_conns();
         if let Some(guard) = self.room_guard.take() {
-            if let Err(error) = guard.release().await {
-                tracing::error!(%error, document_id=%self.document_id, "lost room guard cleanup failed");
+            if let Err(error) = guard
+                .release_bounded(Duration::from_millis(self.config.rpc_timeout_ms))
+                .await
+            {
+                self.guard_cleanup_failed = true;
+                tracing::error!(%error, document_id=%self.document_id, "lost room guard cleanup unconfirmed");
             }
         }
-        self.abort_session_revision_work();
-        self.close_all_connections(1013, "try again later").await;
     }
 
     async fn reload_primary_or_close_room(&mut self) -> bool {
@@ -3001,7 +3116,7 @@ impl RoomActor {
         payload: &[u8],
         digest: &[u8],
     ) -> Option<AppendCollabResult> {
-        match verify_collab_operation_kind_backend(
+        match verify_room_collab_operation(
             &self.backend,
             self.kind,
             VerifyCollabInput {
@@ -3014,6 +3129,7 @@ impl RoomActor {
                 expected_payload_sha256: digest,
                 expected_actor_user_id: actor_user_id,
             },
+            self.native_consumer_proof(),
         )
         .await
         {
@@ -3061,6 +3177,10 @@ impl RoomActor {
     }
 
     async fn fatal_writer_stale(&mut self, order: CloseOrder) {
+        if !matches!(self.backend, Backend::Postgres(_)) {
+            self.fatal_fence_lost().await;
+            return;
+        }
         self.writer_generation = None;
         // A newer writer owns durable state; `committed` may lag it, so the next
         // capture/join must reload instead of trusting the in-memory bundle.
@@ -3072,6 +3192,10 @@ impl RoomActor {
     }
 
     async fn fatal_room_divergence(&mut self, actor_user_id: Uuid, session_id: Uuid) {
+        if !matches!(self.backend, Backend::Postgres(_)) {
+            self.fatal_fence_lost().await;
+            return;
+        }
         if let Ok(Ok(load)) = load_room_collab_readonly(
             &self.backend,
             self.kind,
@@ -3827,7 +3951,7 @@ impl RoomActor {
         &mut self,
         actor_user_id: Uuid,
         session_id: Uuid,
-    ) -> Result<CapturedRevision, RevisionCaptureError> {
+    ) -> Result<GuardedCapturedRevision, RevisionCaptureError> {
         // Without a writer generation nothing fences out-of-room appends
         // (import, a newer writer), so the committed tail may be behind.
         if !self.committed_loaded || self.writer_generation.is_none() {
@@ -3851,6 +3975,9 @@ impl RoomActor {
         if self.ensure_primary_capacity().await.is_err() {
             return Err(RevisionCaptureError::Unavailable);
         }
+        self.check_cached_native_consumer(actor_user_id, session_id)
+            .await
+            .map_err(|_| RevisionCaptureError::Unavailable)?;
         let snap = match self.engine.call(Request::RevisionSnapshot).await {
             Ok(report) => match report.outcome {
                 EngineStatus::Ok {
@@ -3872,9 +3999,18 @@ impl RoomActor {
             },
             Err(_) => return Err(RevisionCaptureError::Unavailable),
         };
-        Ok(CapturedRevision {
-            y_snapshot: snap,
-            content_json,
+        #[cfg(feature = "db-tests")]
+        pause_native_consumer_barrier(self.document_id, NATIVE_CAPTURE_FINAL_PROOF).await;
+        let proof = self
+            .check_cached_native_consumer(actor_user_id, session_id)
+            .await
+            .map_err(|_| RevisionCaptureError::Unavailable)?;
+        Ok(GuardedCapturedRevision {
+            captured: CapturedRevision {
+                y_snapshot: snap,
+                content_json,
+            },
+            proof,
         })
     }
 
@@ -4014,6 +4150,11 @@ impl RoomActor {
             },
             Err(_) => return Err(BodyWriteError::Unavailable),
         };
+        #[cfg(feature = "db-tests")]
+        pause_native_consumer_barrier(self.document_id, NATIVE_PROJECT_FINAL_PROOF).await;
+        self.check_cached_native_consumer(actor_user_id, session_id)
+            .await
+            .map_err(|_| BodyWriteError::Unavailable)?;
         Ok(LiveProjection {
             content_json,
             tail_seq: self.committed.tail_seq,
@@ -4052,7 +4193,11 @@ impl RoomActor {
             .locking_session_auth_by_ids(actor_user_id, session_id, false)
             .await
         {
-            LockingAuth::Allow => Ok(()),
+            LockingAuth::Allow => self
+                .check_cached_native_consumer(actor_user_id, session_id)
+                .await
+                .map(|_| ())
+                .map_err(|_| ForwardWriteError::Unavailable),
             LockingAuth::Deny => Err(ForwardWriteError::Rejected),
             LockingAuth::DbError => Err(ForwardWriteError::Unavailable),
         }

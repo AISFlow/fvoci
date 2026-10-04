@@ -209,6 +209,15 @@ pub struct FamilyRoomFence {
     pub(crate) fence: i64,
 }
 
+/// Actor-native capture capability. Fields stay private to named product
+/// operations; HTTP clients never choose or serialize this room/head proof.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FamilyNativeConsumerProof {
+    pub(crate) room: FamilyRoomFence,
+    pub(crate) generation: i64,
+    pub(crate) tail: i64,
+}
+
 /// Stable room lineage carried by the actor-issued socket lease. Activation
 /// rotates only the known owner token, retaining the same global fence. A
 /// successor or a purged/recreated document can never match this lineage.
@@ -349,6 +358,129 @@ impl OperationTx<'_, '_> {
     }
 }
 
+impl OperationTx<'_, '_> {
+    async fn family_room_native_head(
+        &mut self,
+        proof: FamilyNativeConsumerProof,
+    ) -> Result<Option<(i64, i64)>, sqlx::Error> {
+        if !self.verify_family_room_fence(proof.room).await? {
+            return Ok(None);
+        }
+        let Self::SqliteFamily(family) = self else {
+            return Ok(None);
+        };
+        let rows=family.query("SELECT writer_generation,tail_seq FROM document_states WHERE workspace_id=?1 AND document_id=?2",
+            &[Cell::uuid(proof.room.workspace_id),Cell::uuid(proof.room.document_id)]).await?;
+        let head = rows
+            .first()
+            .map(|row| -> Result<(i64, i64), sqlx::Error> {
+                Ok((row.cell(0)?.integer()?, row.cell(1)?.integer()?))
+            })
+            .transpose()?;
+        if !self.verify_family_room_fence(proof.room).await? {
+            return Ok(None);
+        }
+        Ok(head)
+    }
+
+    pub(crate) async fn verify_family_native_consumer_proof(
+        &mut self,
+        proof: FamilyNativeConsumerProof,
+    ) -> Result<bool, sqlx::Error> {
+        Ok(self.family_room_native_head(proof).await? == Some((proof.generation, proof.tail)))
+    }
+}
+
+pub(crate) async fn verify_room_native_consumer(
+    backend: &Backend,
+    kind: CollabKind,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    resource: Uuid,
+    proof: Option<FamilyNativeConsumerProof>,
+) -> Result<Result<(), CollabDbError>, sqlx::Error> {
+    if matches!(backend, Backend::Postgres(_)) {
+        return Ok(Ok(()));
+    }
+    let Some(proof) = proof else {
+        return Ok(Err(CollabDbError::StaleWriter));
+    };
+    if kind != CollabKind::Document
+        || proof.room.workspace_id != workspace
+        || proof.room.document_id != resource
+    {
+        return Ok(Err(CollabDbError::StaleWriter));
+    }
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(workspace).await?;
+    if let Err(error) = tx
+        .operation()
+        .authorize_collab_read(
+            kind,
+            workspace,
+            actor,
+            credential,
+            resource,
+            &mut CollabDbStageTimings::default(),
+        )
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(error));
+    }
+    if !tx
+        .operation()
+        .verify_family_native_consumer_proof(proof)
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::StaleWriter));
+    }
+    tx.commit().await.map_err(|unknown| unknown.source)?;
+    Ok(Ok(()))
+}
+
+/// Ambiguous room receipts carry current lineage + native generation. The
+/// successful own COMMIT may have advanced tail beyond the actor's old cache.
+pub(crate) async fn verify_room_collab_operation(
+    backend: &Backend,
+    kind: CollabKind,
+    input: VerifyCollabInput<'_>,
+    proof: Option<FamilyNativeConsumerProof>,
+) -> Result<Result<CollabOperationLookup, CollabDbError>, sqlx::Error> {
+    if matches!(backend, Backend::Postgres(_)) {
+        return verify_collab_operation_kind_backend(backend, kind, input).await;
+    }
+    let Some(proof) = proof else {
+        return Ok(Err(CollabDbError::StaleWriter));
+    };
+    if kind != CollabKind::Document
+        || proof.room.workspace_id != input.workspace_id
+        || proof.room.document_id != input.document_id
+    {
+        return Ok(Err(CollabDbError::StaleWriter));
+    }
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(input.workspace_id).await?;
+    let result = tx.operation().verify_native_operation(kind, input).await?;
+    if let Ok(receipt) = &result {
+        let head = tx.operation().family_room_native_head(proof).await?;
+        if !head
+            .is_some_and(|(generation, tail)| generation == proof.generation && tail >= receipt.seq)
+        {
+            tx.rollback().await?;
+            return Ok(Err(CollabDbError::StaleWriter));
+        }
+    }
+    if result.is_ok() {
+        tx.commit().await.map_err(|unknown| unknown.source)?;
+    } else {
+        tx.rollback().await?;
+    }
+    Ok(result)
+}
+
 /// Atomically authorize, claim the family document room and claim native
 /// writer generation. No product lease default is selected here: the caller
 /// supplies the measured runtime bound, and protocol fixtures supply theirs.
@@ -408,6 +540,156 @@ async fn claim_family_document_room_mode(
     lease: std::time::Duration,
     mode: NativeLoadMode,
 ) -> Result<Result<FamilyRoomClaim, CollabDbError>, sqlx::Error> {
+    let (tx, claim) = match prepare_family_document_room_claim(
+        backend, workspace, actor, credential, document, owner, lease, mode,
+    )
+    .await?
+    {
+        Ok(prepared) => prepared,
+        Err(error) => return Ok(Err(error)),
+    };
+    tx.commit().await.map_err(|error| error.source)?;
+    Ok(Ok(claim))
+}
+
+/// Startup retains original COMMIT uncertainty separately from a driver error
+/// before COMMIT. Only a confirmed exact-stream cleanup authorizes reconciliation.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum FamilyRoomStartError {
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+    #[error("family room startup COMMIT outcome unknown")]
+    Commit {
+        source: sqlx::Error,
+        cleanup_error: Option<sqlx::Error>,
+    },
+}
+impl FamilyRoomStartError {
+    pub(crate) fn source_error(&self) -> &sqlx::Error {
+        match self {
+            Self::Database(error) | Self::Commit { source: error, .. } => error,
+        }
+    }
+    pub(crate) fn may_reconcile(&self) -> bool {
+        matches!(
+            self,
+            Self::Commit {
+                cleanup_error: None,
+                ..
+            }
+        )
+    }
+}
+
+#[cfg(feature = "db-tests")]
+struct RoomStartReplyFault {
+    committed: bool,
+    reached: tokio::sync::oneshot::Sender<()>,
+    proceed: tokio::sync::oneshot::Receiver<()>,
+}
+#[cfg(feature = "db-tests")]
+static ROOM_START_REPLY_FAULTS: std::sync::LazyLock<
+    tokio::sync::Mutex<std::collections::HashMap<Uuid, RoomStartReplyFault>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
+/// Inject only the application reply boundary around actual COMMIT/ROLLBACK.
+/// This is not a substitute for an actual remote lost-COMMIT protocol fixture.
+#[cfg(feature = "db-tests")]
+pub async fn arm_family_room_start_reply_fault(
+    document: Uuid,
+    committed: bool,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (reached, receive) = tokio::sync::oneshot::channel();
+    let (send, proceed) = tokio::sync::oneshot::channel();
+    assert!(ROOM_START_REPLY_FAULTS
+        .lock()
+        .await
+        .insert(
+            document,
+            RoomStartReplyFault {
+                committed,
+                reached,
+                proceed
+            }
+        )
+        .is_none());
+    (receive, send)
+}
+
+pub(crate) async fn acquire_family_document_room_for_start(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    document: Uuid,
+    owner: Uuid,
+    lease: std::time::Duration,
+) -> Result<Result<FamilyRoomClaim, CollabDbError>, FamilyRoomStartError> {
+    let (tx, claim) = match prepare_family_document_room_claim(
+        backend,
+        workspace,
+        actor,
+        credential,
+        document,
+        owner,
+        lease,
+        NativeLoadMode::Reader,
+    )
+    .await?
+    {
+        Ok(prepared) => prepared,
+        Err(error) => return Ok(Err(error)),
+    };
+    #[cfg(feature = "db-tests")]
+    let fault = ROOM_START_REPLY_FAULTS.lock().await.remove(&document);
+    #[cfg(feature = "db-tests")]
+    if let Some(fault) = fault {
+        if fault.committed {
+            commit_family_room_start(tx).await?;
+        } else {
+            tx.rollback().await?;
+        }
+        let _ = fault.reached.send(());
+        let _ = fault.proceed.await;
+        return Err(FamilyRoomStartError::Commit {
+            source: sqlx::Error::Protocol(
+                "fixture lost startup outcome reply after actual commit/rollback".into(),
+            ),
+            cleanup_error: None,
+        });
+    }
+    commit_family_room_start(tx).await?;
+    Ok(Ok(claim))
+}
+
+/// Until an accepted public SDK boundary proves settlement of the original
+/// failed-COMMIT stream, remote uncertainty cannot authorize fresh observation.
+/// Local SQLite retains SQLx's serialized rollback-queue contract; the actual
+/// local lost-reply controls below observe actual COMMIT/rollback separately.
+async fn commit_family_room_start(tx: DbTransaction<'_>) -> Result<(), FamilyRoomStartError> {
+    let remote = matches!(&tx, DbTransaction::SqliteFamily(FamilyTx::Remote(_)));
+    tx.commit()
+        .await
+        .map_err(|unknown| FamilyRoomStartError::Commit {
+            source: unknown.source,
+            cleanup_error: remote.then(|| {
+                sqlx::Error::Protocol("original remote COMMIT stream settlement unconfirmed".into())
+            }),
+        })
+}
+
+async fn prepare_family_document_room_claim<'a>(
+    backend: &'a Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    document: Uuid,
+    owner: Uuid,
+    lease: std::time::Duration,
+    mode: NativeLoadMode,
+) -> Result<Result<(DbTransaction<'a>, FamilyRoomClaim), CollabDbError>, sqlx::Error> {
     if matches!(backend, Backend::Postgres(_)) {
         return Err(sqlx::Error::Protocol(
             "PostgreSQL rooms require the session guard".into(),
@@ -463,8 +745,7 @@ async fn claim_family_document_room_mode(
         tx.rollback().await?;
         return Ok(Err(CollabDbError::StaleWriter));
     }
-    tx.commit().await.map_err(|error| error.source)?;
-    Ok(Ok(FamilyRoomClaim { fence, native }))
+    Ok(Ok((tx, FamilyRoomClaim { fence, native })))
 }
 
 /// Stable activation receipt is a fresh owner token chosen once by the room.
@@ -549,6 +830,41 @@ pub async fn activate_family_document_writer(
         fence: activated,
         native,
     }))
+}
+
+/// Resolve and retire only this hub-owned startup attempt after acquisition
+/// failure/unknown COMMIT. The once-chosen private token is retained even when
+/// no fence reply arrived. No caller authority is needed to retire its own
+/// lease after revocation; no other owner or successor is ever adopted.
+pub(crate) async fn abandon_family_document_room_start(
+    backend: &Backend,
+    workspace: Uuid,
+    document: Uuid,
+    owner: Uuid,
+) -> Result<(), sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(workspace).await?;
+    let DbTransaction::SqliteFamily(family) = &mut tx else {
+        return Err(sqlx::Error::Protocol(
+            "family startup cleanup requires family transaction".into(),
+        ));
+    };
+    let rows=family.query("SELECT fence FROM collab_room_fences WHERE workspace_id=?1 AND document_id=?2 AND owner_token=?3",&[Cell::uuid(workspace),Cell::uuid(document),Cell::uuid(owner)]).await?;
+    if let Some(row) = rows.first() {
+        let fence = row.cell(0)?.integer()?;
+        if fence <= 0 {
+            return Err(sqlx::Error::Protocol("invalid startup room fence".into()));
+        }
+        let now = family_room_now(family).await?;
+        let changed=family.execute("UPDATE collab_room_fences SET expires_at=?5 WHERE workspace_id=?1 AND document_id=?2 AND owner_token=?3 AND fence=?4",&[Cell::uuid(workspace),Cell::uuid(document),Cell::uuid(owner),Cell::Integer(fence),Cell::Integer(now)]).await?;
+        if changed != 1 {
+            return Err(sqlx::Error::Protocol(
+                "startup room cleanup scope changed".into(),
+            ));
+        }
+    }
+    tx.commit().await.map_err(|unknown| unknown.source)?;
+    Ok(())
 }
 
 /// An expired original owner cannot renew or release another owner's lease.

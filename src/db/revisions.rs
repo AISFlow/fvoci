@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::collab::derived_body::PreparedDerivedBody;
 use crate::db::backend::{Backend, OperationTx};
 use crate::db::codec::{Cell, FamilyRow};
-use crate::db::collab::{CollabKind, FamilyRoomFence};
+use crate::db::collab::{CollabKind, FamilyNativeConsumerProof, FamilyRoomFence};
 use crate::db::context::{set_system, set_tenant};
 use crate::db::projects::{load_live_project, project_permission};
 use crate::db::workspace::workspace_is_live;
@@ -776,11 +776,39 @@ pub async fn create_manual_revision_backend(
     scope: impl Into<RevisionScope>,
     input: CreateRevisionInput,
 ) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
+    create_manual_revision_with_room_proof(
+        backend,
+        workspace,
+        actor,
+        credential,
+        scope.into(),
+        input,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn create_manual_revision_with_room_proof(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    scope: RevisionScope,
+    input: CreateRevisionInput,
+    proof: Option<FamilyNativeConsumerProof>,
+) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
     let mut tx = backend.begin_write().await?;
-    let result = tx
-        .operation()
-        .create_manual_revision(workspace, actor, credential, scope.into(), input)
-        .await?;
+    let result = if proof.is_some() {
+        tx.operation()
+            .create_manual_revision_with_room_proof(
+                workspace, actor, credential, scope, input, proof,
+            )
+            .await?
+    } else {
+        tx.operation()
+            .create_manual_revision(workspace, actor, credential, scope, input)
+            .await?
+    };
     if result.is_ok() {
         tx.commit().await.map_err(|unknown| unknown.source)?;
     } else {
@@ -889,6 +917,21 @@ impl OperationTx<'_, '_> {
         scope: RevisionScope,
         input: CreateRevisionInput,
     ) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
+        self.create_manual_revision_with_room_proof(
+            workspace, actor, credential, scope, input, None,
+        )
+        .await
+    }
+
+    async fn create_manual_revision_with_room_proof(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+        scope: RevisionScope,
+        input: CreateRevisionInput,
+        proof: Option<FamilyNativeConsumerProof>,
+    ) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
         self.set_tenant(workspace).await?;
         self.lock_membership_users(&[actor]).await?;
         if !self.recheck_session(actor, credential).await? {
@@ -900,6 +943,14 @@ impl OperationTx<'_, '_> {
         {
             return Ok(Err(error));
         }
+        if let Some(proof) = proof {
+            if proof.room.workspace_id != workspace
+                || scope.target != RevisionTarget::Document(proof.room.document_id)
+                || !self.verify_family_native_consumer_proof(proof).await?
+            {
+                return Ok(Err(RevisionDbError::NotFound));
+            }
+        }
         let recent = self
             .revision_latest_snapshot(workspace, scope.target)
             .await?;
@@ -907,6 +958,11 @@ impl OperationTx<'_, '_> {
             if snapshot == input.y_snapshot {
                 if is_automatic_revision_reason(&reason) {
                     self.promote_manual_revision(workspace, id, actor).await?;
+                }
+                if let Some(proof) = proof {
+                    if !self.verify_family_native_consumer_proof(proof).await? {
+                        return Ok(Err(RevisionDbError::NotFound));
+                    }
                 }
                 return Ok(Ok(id));
             }
@@ -921,6 +977,11 @@ impl OperationTx<'_, '_> {
             MANUAL_REASON,
         )
         .await?;
+        if let Some(proof) = proof {
+            if !self.verify_family_native_consumer_proof(proof).await? {
+                return Ok(Err(RevisionDbError::NotFound));
+            }
+        }
         Ok(Ok(id))
     }
     async fn revision_latest_snapshot(

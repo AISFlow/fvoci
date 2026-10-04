@@ -241,6 +241,22 @@ impl BackendRoomGuard {
         Ok(false)
     }
 
+    /// Cancellation hands any unfinished remote transaction to its owned
+    /// cleanup/quarantine lifecycle. A deadline expiry is uncertainty, never
+    /// a successful unlock or a reusable stream receipt.
+    pub(crate) async fn release_bounded(
+        self,
+        deadline: std::time::Duration,
+    ) -> Result<(), sqlx::Error> {
+        tokio::time::timeout(deadline, self.release())
+            .await
+            .map_err(|_| {
+                sqlx::Error::Protocol(
+                    "room guard release deadline expired; cleanup unconfirmed".into(),
+                )
+            })?
+    }
+
     pub(crate) async fn release(self) -> Result<(), sqlx::Error> {
         match self {
             Self::Postgres(guard) => guard.release_confirmed().await,
