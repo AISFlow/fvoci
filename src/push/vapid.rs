@@ -231,7 +231,7 @@ mod tests {
                 .unwrap();
             // Entire fixed current DDL, executed by SQLx's existing raw_sql
             // implementation. This is a storage fixture, not a schema runner.
-            let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+            let mut tx = pool.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
             for ddl in [
                 include_str!("../../migrations/sqlite/001_current_schema.sql"),
                 include_str!("../../migrations/sqlite/002_wiki_create_commands.sql"),
@@ -240,6 +240,10 @@ mod tests {
                 sqlx::raw_sql(ddl).execute(&mut *tx).await.unwrap();
             }
             tx.commit().await.unwrap();
+            pool.close_confirmed().await.unwrap();
+            let pool = crate::db::pool::connect_sqlite_app(&path, 1)
+                .await
+                .unwrap();
             Self {
                 directory,
                 path,
