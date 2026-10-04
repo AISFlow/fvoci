@@ -89,6 +89,7 @@ pub use crate::collab::wire::CollabKind;
 /// (004/005) column for column; the closed [`CollabKind`] selects them.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CollabTables {
+    kind: CollabKind,
     states: &'static str,
     updates: &'static str,
     receipts: &'static str,
@@ -102,6 +103,7 @@ pub(crate) struct CollabTables {
 }
 
 const DOCUMENT_TABLES: CollabTables = CollabTables {
+    kind: CollabKind::Document,
     states: "fvoci.document_states",
     updates: "fvoci.document_collab_updates",
     receipts: "fvoci.document_collab_op_receipts",
@@ -112,6 +114,7 @@ const DOCUMENT_TABLES: CollabTables = CollabTables {
 };
 
 const TASK_TABLES: CollabTables = CollabTables {
+    kind: CollabKind::Task,
     states: "fvoci.task_states",
     updates: "fvoci.task_collab_updates",
     receipts: "fvoci.task_collab_op_receipts",
@@ -560,13 +563,10 @@ async fn load_resource_content(
     workspace_id: Uuid,
     resource_id: Uuid,
 ) -> Result<(Value,), sqlx::Error> {
-    sqlx::query_as(
-        &t.sql("SELECT content_json FROM {resource} WHERE workspace_id = $1 AND id = $2"),
-    )
-    .bind(workspace_id)
-    .bind(resource_id)
-    .fetch_one(&mut **tx)
-    .await
+    OperationTx::Postgres(tx)
+        .load_collab_resource_content(t, workspace_id, resource_id)
+        .await
+        .map(|body| (body,))
 }
 
 async fn ensure_collab_state_row(
@@ -576,58 +576,151 @@ async fn ensure_collab_state_row(
     document_id: Uuid,
     content_json: &Value,
 ) -> Result<Result<(), CollabDbError>, sqlx::Error> {
-    let existing: Option<(i64,)> = sqlx::query_as(&t.sql(
-        r#"
-        SELECT writer_generation
-        FROM {states}
-        WHERE workspace_id = $1 AND {id} = $2
-        FOR UPDATE
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    if existing.is_some() {
-        return Ok(Ok(()));
+    OperationTx::Postgres(tx)
+        .ensure_collab_state(t, workspace_id, document_id, content_json)
+        .await
+}
+
+impl OperationTx<'_, '_> {
+    async fn load_collab_resource_content(
+        &mut self,
+        t: &CollabTables,
+        workspace: Uuid,
+        resource: Uuid,
+    ) -> Result<Value, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                let (body,): (Value,) = sqlx::query_as(&t.sql(
+                    "SELECT content_json FROM {resource} WHERE workspace_id = $1 AND id = $2",
+                ))
+                .bind(workspace)
+                .bind(resource)
+                .fetch_one(&mut ***tx)
+                .await?;
+                Ok(body)
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                let statement = match t.kind {
+                    CollabKind::Document => {
+                        "SELECT content_json FROM documents WHERE workspace_id=?1 AND id=?2"
+                    }
+                    CollabKind::Task => {
+                        "SELECT content_json FROM tasks WHERE workspace_id=?1 AND id=?2"
+                    }
+                };
+                let rows = tx
+                    .query(statement, &[Cell::uuid(workspace), Cell::uuid(resource)])
+                    .await?;
+                rows.first()
+                    .ok_or(sqlx::Error::RowNotFound)?
+                    .cell(0)?
+                    .value()
+            }
+        }
     }
 
-    lock_collab_init(tx, document_id).await?;
-    let existing: Option<(i64,)> = sqlx::query_as(&t.sql(
-        r#"
-        SELECT writer_generation
-        FROM {states}
-        WHERE workspace_id = $1 AND {id} = $2
-        FOR UPDATE
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    if existing.is_some() {
-        return Ok(Ok(()));
+    // The same empty-only seed decision applies to both families; the PG
+    // advisory lock/recheck stays in its original position. Family callers
+    // already own BEGIN IMMEDIATE, so no second initialization owner can enter.
+    async fn ensure_collab_state(
+        &mut self,
+        t: &CollabTables,
+        workspace: Uuid,
+        resource: Uuid,
+        content: &Value,
+    ) -> Result<Result<(), CollabDbError>, sqlx::Error> {
+        if self
+            .native_state_generation(t, workspace, resource)
+            .await?
+            .is_some()
+        {
+            return Ok(Ok(()));
+        }
+        match self {
+            Self::Postgres(tx) => lock_collab_init(tx, resource).await?,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+            }
+        }
+        if self
+            .native_state_generation(t, workspace, resource)
+            .await?
+            .is_some()
+        {
+            return Ok(Ok(()));
+        }
+        if content != &empty_document_json() {
+            return Ok(Err(CollabDbError::NotFound));
+        }
+        self.insert_empty_native_state(t, workspace, resource)
+            .await?;
+        Ok(Ok(()))
     }
 
-    if content_json != &empty_document_json() {
-        return Ok(Err(CollabDbError::NotFound));
+    async fn native_state_generation(
+        &mut self,
+        t: &CollabTables,
+        workspace: Uuid,
+        resource: Uuid,
+    ) -> Result<Option<i64>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                let row: Option<(i64,)> = sqlx::query_as(&t.sql("SELECT writer_generation FROM {states} WHERE workspace_id = $1 AND {id} = $2 FOR UPDATE"))
+                    .bind(workspace).bind(resource).fetch_optional(&mut ***tx).await?;
+                Ok(row.map(|(generation,)| generation))
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                let statement = match t.kind {
+                    CollabKind::Document => "SELECT writer_generation FROM document_states WHERE workspace_id=?1 AND document_id=?2",
+                    CollabKind::Task => "SELECT writer_generation FROM task_states WHERE workspace_id=?1 AND task_id=?2",
+                };
+                tx.query(statement, &[Cell::uuid(workspace), Cell::uuid(resource)])
+                    .await?
+                    .first()
+                    .map(|row| row.cell(0)?.integer())
+                    .transpose()
+            }
+        }
     }
 
-    sqlx::query(&t.sql(
-        r#"
-        INSERT INTO {states} (
-            workspace_id, {id}, state, encoding,
-            writer_generation, snapshot_cutoff_seq, tail_seq
-        ) VALUES ($1, $2, $3, $4, 0, 0, 0)
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .bind(EMPTY_YJS_STATE_V1)
-    .bind(COLLAB_STATE_ENCODING_V1)
-    .execute(&mut **tx)
-    .await?;
-    Ok(Ok(()))
+    async fn insert_empty_native_state(
+        &mut self,
+        t: &CollabTables,
+        workspace: Uuid,
+        resource: Uuid,
+    ) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query(&t.sql("INSERT INTO {states} (workspace_id, {id}, state, encoding, writer_generation, snapshot_cutoff_seq, tail_seq) VALUES ($1, $2, $3, $4, 0, 0, 0)"))
+                    .bind(workspace).bind(resource).bind(EMPTY_YJS_STATE_V1).bind(COLLAB_STATE_ENCODING_V1)
+                    .execute(&mut ***tx).await?;
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                let statement = match t.kind {
+                    CollabKind::Document => "INSERT INTO document_states(workspace_id,document_id,state,encoding,writer_generation,snapshot_cutoff_seq,tail_seq) VALUES(?1,?2,?3,?4,0,0,0)",
+                    CollabKind::Task => "INSERT INTO task_states(workspace_id,task_id,state,encoding,writer_generation,snapshot_cutoff_seq,tail_seq) VALUES(?1,?2,?3,?4,0,0,0)",
+                };
+                tx.execute(
+                    statement,
+                    &[
+                        Cell::uuid(workspace),
+                        Cell::uuid(resource),
+                        Cell::Blob(EMPTY_YJS_STATE_V1.to_vec()),
+                        Cell::Integer(i64::from(COLLAB_STATE_ENCODING_V1)),
+                    ],
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn fetch_state_fence_for_update(
@@ -677,71 +770,138 @@ async fn fetch_append_fence_for_update(
 pub(crate) async fn fetch_state_for_update(
     tx: &mut Transaction<'_, Postgres>,
     t: &CollabTables,
-    workspace_id: Uuid,
-    document_id: Uuid,
+    workspace: Uuid,
+    resource: Uuid,
 ) -> Result<Option<StateRow>, sqlx::Error> {
-    sqlx::query_as(&t.sql(
-        r#"
-        SELECT state, encoding, writer_generation, snapshot_cutoff_seq, tail_seq, updated_at
-        FROM {states}
-        WHERE workspace_id = $1 AND {id} = $2
-        FOR UPDATE
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_optional(&mut **tx)
-    .await
+    OperationTx::Postgres(tx)
+        .fetch_native_state(t, workspace, resource)
+        .await
 }
 
 pub(crate) async fn load_tail_updates(
     tx: &mut Transaction<'_, Postgres>,
     t: &CollabTables,
-    workspace_id: Uuid,
-    document_id: Uuid,
+    workspace: Uuid,
+    resource: Uuid,
     snapshot_cutoff_seq: i64,
     snapshot_len: i64,
 ) -> Result<Result<Vec<CollabUpdateRow>, CollabDbError>, sqlx::Error> {
-    let stats: (i64, i64) = sqlx::query_as(&t.sql(
-        r#"
-        SELECT count(*)::bigint, coalesce(sum(octet_length(payload)), 0)::bigint
-        FROM {updates}
-        WHERE workspace_id = $1 AND {id} = $2 AND seq > $3
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .bind(snapshot_cutoff_seq)
-    .fetch_one(&mut **tx)
-    .await?;
-    if let Err(err) = load_budget_allows(snapshot_len, stats.0, stats.1) {
-        return Ok(Err(err));
+    OperationTx::Postgres(tx)
+        .load_native_tail(t, workspace, resource, snapshot_cutoff_seq, snapshot_len)
+        .await
+}
+
+impl OperationTx<'_, '_> {
+    async fn bump_native_writer_generation(
+        &mut self,
+        t: &CollabTables,
+        workspace: Uuid,
+        resource: Uuid,
+    ) -> Result<Option<i64>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                let row: Option<(i64,)> = sqlx::query_as(&t.sql("UPDATE {states} SET writer_generation = writer_generation + 1, updated_at = now() WHERE workspace_id = $1 AND {id} = $2 RETURNING writer_generation"))
+                    .bind(workspace).bind(resource).fetch_optional(&mut ***tx).await?;
+                Ok(row.map(|(generation,)| generation))
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                let statement = match t.kind {
+                    CollabKind::Document => "UPDATE document_states SET writer_generation=writer_generation+1,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND document_id=?2 RETURNING writer_generation",
+                    CollabKind::Task => "UPDATE task_states SET writer_generation=writer_generation+1,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND task_id=?2 RETURNING writer_generation",
+                };
+                tx.query(statement, &[Cell::uuid(workspace), Cell::uuid(resource)])
+                    .await?
+                    .first()
+                    .map(|row| row.cell(0)?.integer())
+                    .transpose()
+            }
+        }
     }
-    let rows = sqlx::query_as::<_, (i64, Uuid, Vec<u8>)>(&t.sql(
-        r#"
-        SELECT seq, op_id, payload
-        FROM {updates}
-        WHERE workspace_id = $1
-          AND {id} = $2
-          AND seq > $3
-        ORDER BY seq ASC
-        LIMIT $4
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .bind(snapshot_cutoff_seq)
-    .bind(MAX_COLLAB_TAIL_UPDATES)
-    .fetch_all(&mut **tx)
-    .await?;
-    Ok(Ok(rows
-        .into_iter()
-        .map(|(seq, op_id, payload)| CollabUpdateRow {
-            seq,
-            op_id,
-            payload,
-        })
-        .collect()))
+
+    async fn fetch_native_state(
+        &mut self,
+        t: &CollabTables,
+        workspace: Uuid,
+        resource: Uuid,
+    ) -> Result<Option<StateRow>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_as(&t.sql("SELECT state, encoding, writer_generation, snapshot_cutoff_seq, tail_seq, updated_at FROM {states} WHERE workspace_id = $1 AND {id} = $2 FOR UPDATE"))
+                .bind(workspace).bind(resource).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?; tx.require_tenant(workspace)?;
+                let statement = match t.kind {
+                    CollabKind::Document => "SELECT state,encoding,writer_generation,snapshot_cutoff_seq,tail_seq,updated_at FROM document_states WHERE workspace_id=?1 AND document_id=?2",
+                    CollabKind::Task => "SELECT state,encoding,writer_generation,snapshot_cutoff_seq,tail_seq,updated_at FROM task_states WHERE workspace_id=?1 AND task_id=?2",
+                };
+                tx.query(statement, &[Cell::uuid(workspace), Cell::uuid(resource)]).await?.first().map(|row| {
+                    Ok((row.cell(0)?.bytes()?, i16::try_from(row.cell(1)?.integer()?).map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+                        row.cell(2)?.integer()?, row.cell(3)?.integer()?, row.cell(4)?.integer()?, row.cell(5)?.datetime()?))
+                }).transpose()
+            }
+        }
+    }
+
+    async fn native_tail_stats(
+        &mut self,
+        t: &CollabTables,
+        workspace: Uuid,
+        resource: Uuid,
+        cutoff: i64,
+    ) -> Result<(i64, i64), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_as(&t.sql("SELECT count(*)::bigint, coalesce(sum(octet_length(payload)), 0)::bigint FROM {updates} WHERE workspace_id = $1 AND {id} = $2 AND seq > $3"))
+                .bind(workspace).bind(resource).bind(cutoff).fetch_one(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?; tx.require_tenant(workspace)?;
+                let statement = match t.kind {
+                    CollabKind::Document => "SELECT count(*),coalesce(sum(length(payload)),0) FROM document_collab_updates WHERE workspace_id=?1 AND document_id=?2 AND seq>?3",
+                    CollabKind::Task => "SELECT count(*),coalesce(sum(length(payload)),0) FROM task_collab_updates WHERE workspace_id=?1 AND task_id=?2 AND seq>?3",
+                };
+                let rows = tx.query(statement, &[Cell::uuid(workspace), Cell::uuid(resource), Cell::Integer(cutoff)]).await?;
+                let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+                Ok((row.cell(0)?.integer()?, row.cell(1)?.integer()?))
+            }
+        }
+    }
+
+    async fn load_native_tail(
+        &mut self,
+        t: &CollabTables,
+        workspace: Uuid,
+        resource: Uuid,
+        cutoff: i64,
+        snapshot_len: i64,
+    ) -> Result<Result<Vec<CollabUpdateRow>, CollabDbError>, sqlx::Error> {
+        let (count, bytes) = self
+            .native_tail_stats(t, workspace, resource, cutoff)
+            .await?;
+        if let Err(error) = load_budget_allows(snapshot_len, count, bytes) {
+            return Ok(Err(error));
+        }
+        let rows: Vec<(i64, Uuid, Vec<u8>)> = match self {
+            Self::Postgres(tx) => sqlx::query_as(&t.sql("SELECT seq, op_id, payload FROM {updates} WHERE workspace_id = $1 AND {id} = $2 AND seq > $3 ORDER BY seq ASC LIMIT $4"))
+                .bind(workspace).bind(resource).bind(cutoff).bind(MAX_COLLAB_TAIL_UPDATES).fetch_all(&mut ***tx).await?,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?; tx.require_tenant(workspace)?;
+                let statement = match t.kind {
+                    CollabKind::Document => "SELECT seq,op_id,payload FROM document_collab_updates WHERE workspace_id=?1 AND document_id=?2 AND seq>?3 ORDER BY seq ASC LIMIT ?4",
+                    CollabKind::Task => "SELECT seq,op_id,payload FROM task_collab_updates WHERE workspace_id=?1 AND task_id=?2 AND seq>?3 ORDER BY seq ASC LIMIT ?4",
+                };
+                tx.query(statement, &[Cell::uuid(workspace), Cell::uuid(resource), Cell::Integer(cutoff), Cell::Integer(MAX_COLLAB_TAIL_UPDATES)]).await?
+                    .iter().map(|row| Ok((row.cell(0)?.integer()?, row.cell(1)?.id()?, row.cell(2)?.bytes()?))).collect::<Result<_,sqlx::Error>>()?
+            }
+        };
+        Ok(Ok(rows
+            .into_iter()
+            .map(|(seq, op_id, payload)| CollabUpdateRow {
+                seq,
+                op_id,
+                payload,
+            })
+            .collect()))
+    }
 }
 
 fn state_row_to_load(row: StateRow, tail: Vec<CollabUpdateRow>) -> CollabLoadState {
