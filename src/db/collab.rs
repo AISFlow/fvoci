@@ -487,7 +487,7 @@ pub async fn activate_family_document_writer(
             actor,
             credential,
             guard.document_id,
-            NativeLoadMode::Reader,
+            NativeLoadMode::Writer,
         )
         .await?;
     let mut native = match native {
