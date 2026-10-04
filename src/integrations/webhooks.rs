@@ -697,3 +697,572 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod backend_regressions {
+    use super::*;
+    use crate::db::integrations::webhook_family_fixture::*;
+    use crate::db::outbox::{
+        ensure_consumer_backend, fetch_cursor_backend, is_processed_backend,
+        lease_consumer_backend, OutboxCursor,
+    };
+    use crate::integrations::outbound::OutboundPolicy;
+    use axum::{
+        body::Bytes,
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        routing::post,
+        Router,
+    };
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    };
+
+    #[derive(Clone, Default)]
+    struct Capture {
+        rows: Arc<Mutex<Vec<(HeaderMap, Vec<u8>)>>>,
+        received: Arc<Notify>,
+        unknown: Arc<AtomicBool>,
+    }
+    async fn receive(State(c): State<Capture>, headers: HeaderMap, body: Bytes) -> StatusCode {
+        c.rows.lock().unwrap().push((headers, body.to_vec()));
+        c.received.notify_one();
+        if c.unknown.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        StatusCode::NO_CONTENT
+    }
+    struct Receiver {
+        capture: Capture,
+        url: String,
+        cancel: CancellationToken,
+        join: tokio::task::JoinHandle<()>,
+    }
+    impl Receiver {
+        async fn new() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let capture = Capture::default();
+            let app = Router::new()
+                .route("/synthetic", post(receive))
+                .with_state(capture.clone());
+            let cancel = CancellationToken::new();
+            let shutdown = cancel.clone();
+            let join = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(shutdown.cancelled_owned())
+                    .await
+                    .unwrap();
+            });
+            Self {
+                capture,
+                url: format!("http://{address}/synthetic"),
+                cancel,
+                join,
+            }
+        }
+        fn outbound(&self) -> Outbound {
+            Outbound::system(OutboundPolicy::parse_allow_list("127.0.0.1").unwrap())
+        }
+        fn count(&self) -> usize {
+            self.capture.rows.lock().unwrap().len()
+        }
+        async fn finish(self) {
+            self.cancel.cancel();
+            self.join.abort();
+            assert!(self.join.await.unwrap_err().is_cancelled());
+        }
+    }
+    async fn lease(f: &Fixture) -> Uuid {
+        ensure_consumer_backend(&f.backend, WEBHOOKS_CONSUMER)
+            .await
+            .unwrap();
+        let owner = Uuid::now_v7();
+        assert!(lease_consumer_backend(
+            &f.backend,
+            WEBHOOKS_CONSUMER,
+            owner,
+            Duration::from_secs(30)
+        )
+        .await
+        .unwrap());
+        owner
+    }
+    async fn marker_queue(f: &Fixture, event: Uuid) -> (i64, i64) {
+        let m = sqlx::query_scalar(
+            "SELECT count(*) FROM processed_events WHERE consumer='webhooks' AND event_id=?1",
+        )
+        .bind(event.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        let q = sqlx::query_scalar("SELECT count(*) FROM webhook_deliveries WHERE event_id=?1")
+            .bind(event.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        (m, q)
+    }
+    async fn make_due(f: &Fixture, id: Uuid) {
+        sqlx::query("UPDATE webhook_deliveries SET next_attempt_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)-1 WHERE id=?1 AND status='pending'").bind(id.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+    }
+    async fn append(
+        f: &Fixture,
+        verb: &str,
+        target_type: Option<&str>,
+        target: Option<Uuid>,
+        payload: Value,
+    ) -> BackendOutboxEvent {
+        let id = Uuid::now_v7();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        tx.operation().set_tenant(f.workspace).await.unwrap();
+        let previous = tx.operation().set_system().await.unwrap();
+        tx.operation()
+            .append_event(crate::db::identity::EventAppend {
+                id,
+                workspace_id: Some(f.workspace),
+                actor_user_id: Some(f.actor),
+                verb: verb.into(),
+                target_type: target_type.map(str::to_string),
+                target_id: target,
+                payload,
+            })
+            .await
+            .unwrap();
+        tx.operation().restore_system(previous).await.unwrap();
+        tx.commit().await.unwrap();
+        crate::db::outbox::fetch_event_by_id_backend(&f.backend, id)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn actual_backend_registered_dispatcher_sends_signed_committed_source_and_fresh_row() {
+        let f = Fixture::new().await;
+        let receiver = Receiver::new().await;
+        let hook_id = hook(&f, &receiver.url).await;
+        let event = append(
+            &f,
+            "document.updated",
+            Some("document"),
+            Some(f.document),
+            json!({"title":"한글🙂","null":null,"version":"9007199254740993"}),
+        )
+        .await;
+        let sender = spawn_webhook_sender_backend(
+            f.backend.clone(),
+            receiver.outbound(),
+            Some(keys()),
+            WebhookDeliverySettings {
+                poll_interval: Duration::from_millis(10),
+                ..Default::default()
+            },
+        );
+        let dispatcher = crate::outbox::spawn_outbox_dispatcher_backend(
+            crate::outbox::OutboxDispatcherSettings {
+                poll_interval: Duration::from_millis(10),
+                ..Default::default()
+            },
+            f.backend.clone(),
+            vec![webhooks_consumer()],
+        )
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(3),async {
+            loop {let delivered:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM webhook_deliveries WHERE webhook_id=?1 AND event_id=?2 AND status='delivered' AND attempt=1 AND http_status=204)").bind(hook_id.as_bytes().as_slice()).bind(event.id.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();if delivered{break}tokio::task::yield_now().await;}
+        }).await.unwrap();
+        dispatcher.request_shutdown();
+        sender.request_shutdown();
+        dispatcher.join().await.unwrap();
+        sender.join().await.unwrap();
+        assert_eq!(receiver.count(), 1);
+        let capture = receiver.capture.rows.lock().unwrap()[0].clone();
+        assert_eq!(capture.1, serialize_payload_backend(&event));
+        assert_eq!(
+            capture.0["x-fvoci-signature"],
+            sign_body(SECRET, &capture.1)
+        );
+        assert_eq!(capture.0["user-agent"], WEBHOOK_USER_AGENT);
+        assert_eq!(marker_queue(&f, event.id).await, (1, 1));
+        assert!(
+            is_processed_backend(&f.backend, WEBHOOKS_CONSUMER, event.id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            fetch_cursor_backend(&f.backend, WEBHOOKS_CONSUMER)
+                .await
+                .unwrap(),
+            Some(OutboxCursor::SqliteFamily { seq: event.seq })
+        );
+        receiver.finish().await;
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn actual_backend_atomic_failed_cursor_duplicate_no_hook_and_wrong_tenant() {
+        let f = Fixture::new().await;
+        let _hook = hook(&f, "http://127.0.0.1:1/unused").await;
+        let owner = lease(&f).await;
+        let event = f.append_comment_event("comment.created").await;
+        assert!(fan_out_event_backend(&f.backend, Uuid::now_v7(), &event)
+            .await
+            .is_err());
+        assert_eq!(marker_queue(&f, event.id).await, (0, 0));
+        assert_eq!(
+            fetch_cursor_backend(&f.backend, WEBHOOKS_CONSUMER)
+                .await
+                .unwrap(),
+            Some(OutboxCursor::SqliteFamily { seq: 0 })
+        );
+        let mut forged = event.clone();
+        forged.workspace_id = Some(f.other_workspace);
+        assert!(fan_out_event_backend(&f.backend, owner, &forged)
+            .await
+            .is_err());
+        assert_eq!(marker_queue(&f, event.id).await, (0, 0));
+        fan_out_event_backend(&f.backend, owner, &event)
+            .await
+            .unwrap();
+        fan_out_event_backend(&f.backend, owner, &event)
+            .await
+            .unwrap();
+        assert_eq!(marker_queue(&f, event.id).await, (1, 1));
+        sqlx::query("UPDATE memberships SET role='member' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let no_hook = f.append_comment_event("comment.created").await;
+        fan_out_event_backend(&f.backend, owner, &no_hook)
+            .await
+            .unwrap();
+        assert_eq!(marker_queue(&f, no_hook.id).await, (1, 0));
+        assert_eq!(
+            fetch_cursor_backend(&f.backend, WEBHOOKS_CONSUMER)
+                .await
+                .unwrap(),
+            Some(OutboxCursor::SqliteFamily { seq: no_hook.seq })
+        );
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn actual_backend_current_creator_workspace_secret_and_event_scope_refuse_transport() {
+        let f = Fixture::new().await;
+        let receiver = Receiver::new().await;
+        let hook_id = hook(&f, &receiver.url).await;
+        let owner = lease(&f).await;
+        let changes = [
+            ("member", 0),
+            ("admin", 1),
+            ("admin", 2),
+            ("admin", 3),
+            ("admin", 4),
+        ];
+        for (role, case) in changes {
+            let event = f.append_comment_event("comment.created").await;
+            fan_out_event_backend(&f.backend, owner, &event)
+                .await
+                .unwrap();
+            let claim = claim(&f).await;
+            match case {
+                0 => {
+                    sqlx::query(
+                        "UPDATE memberships SET role=?3 WHERE workspace_id=?1 AND user_id=?2",
+                    )
+                    .bind(f.workspace.as_bytes().as_slice())
+                    .bind(f.user.as_bytes().as_slice())
+                    .bind(role)
+                    .execute(&f.pool)
+                    .await
+                    .unwrap();
+                }
+                1 => {
+                    sqlx::query("UPDATE users SET suspended_at=1 WHERE id=?1")
+                        .bind(f.user.as_bytes().as_slice())
+                        .execute(&f.pool)
+                        .await
+                        .unwrap();
+                }
+                2 => {
+                    sqlx::query("UPDATE workspaces SET deleted_at=1 WHERE id=?1")
+                        .bind(f.workspace.as_bytes().as_slice())
+                        .execute(&f.pool)
+                        .await
+                        .unwrap();
+                }
+                3 => {}
+                4 => {
+                    sqlx::query("UPDATE webhooks SET secret='enc:v2:wrong' WHERE id=?1")
+                        .bind(hook_id.as_bytes().as_slice())
+                        .execute(&f.pool)
+                        .await
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let key = if case == 3 { None } else { Some(keys()) };
+            deliver_one(
+                f.backend.clone(),
+                receiver.outbound(),
+                key,
+                claim.clone(),
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+            assert_eq!(row(&f, claim.due.id).await.1, "failed");
+            assert_eq!(receiver.count(), 0);
+            sqlx::query("UPDATE memberships SET role='admin' WHERE workspace_id=?1 AND user_id=?2")
+                .bind(f.workspace.as_bytes().as_slice())
+                .bind(f.user.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE users SET suspended_at=NULL WHERE id=?1")
+                .bind(f.user.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE workspaces SET deleted_at=NULL WHERE id=?1")
+                .bind(f.workspace.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+        }
+        // Same receiver and normal positive signed transport after all refusals.
+        let sealed = crate::secret_box::seal(
+            &keys(),
+            SECRET,
+            &webhook_secret_context(f.workspace, hook_id),
+        )
+        .unwrap();
+        sqlx::query("UPDATE webhooks SET secret=?2 WHERE id=?1")
+            .bind(hook_id.as_bytes().as_slice())
+            .bind(sealed)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let event = f.append_comment_event("comment.created").await;
+        fan_out_event_backend(&f.backend, owner, &event)
+            .await
+            .unwrap();
+        deliver_one(
+            f.backend.clone(),
+            receiver.outbound(),
+            Some(keys()),
+            claim(&f).await,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(receiver.count(), 1);
+        receiver.finish().await;
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn actual_backend_private_project_historical_payload_and_send_time_revocation() {
+        let f = Fixture::new().await;
+        let receiver = Receiver::new().await;
+        let _hook = hook(&f, &receiver.url).await;
+        let owner = lease(&f).await;
+        let project = Uuid::now_v7();
+        sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'PRIVATE','private','private',?3)").bind(project.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.actor.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let payload = json!({"projectId":project,"title":"historical private 한글🙂","number":7});
+        let event = append(
+            &f,
+            "task.deleted",
+            Some("task"),
+            Some(Uuid::now_v7()),
+            payload.clone(),
+        )
+        .await;
+        fan_out_event_backend(&f.backend, owner, &event)
+            .await
+            .unwrap();
+        assert_eq!(marker_queue(&f, event.id).await, (1, 0));
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'viewer')").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let pending = append(
+            &f,
+            "task.deleted",
+            Some("task"),
+            Some(Uuid::now_v7()),
+            payload.clone(),
+        )
+        .await;
+        fan_out_event_backend(&f.backend, owner, &pending)
+            .await
+            .unwrap();
+        let c = claim(&f).await;
+        sqlx::query(
+            "DELETE FROM project_members WHERE workspace_id=?1 AND project_id=?2 AND user_id=?3",
+        )
+        .bind(f.workspace.as_bytes().as_slice())
+        .bind(project.as_bytes().as_slice())
+        .bind(f.user.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        deliver_one(
+            f.backend.clone(),
+            receiver.outbound(),
+            Some(keys()),
+            c.clone(),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(receiver.count(), 0);
+        assert_eq!(row(&f, c.due.id).await.1, "failed");
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'viewer')").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let visible = append(
+            &f,
+            "task.deleted",
+            Some("task"),
+            Some(Uuid::now_v7()),
+            payload,
+        )
+        .await;
+        fan_out_event_backend(&f.backend, owner, &visible)
+            .await
+            .unwrap();
+        deliver_one(
+            f.backend.clone(),
+            receiver.outbound(),
+            Some(keys()),
+            claim(&f).await,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(receiver.count(), 1);
+        assert_eq!(
+            receiver.capture.rows.lock().unwrap()[0].1,
+            serialize_payload_backend(&visible)
+        );
+        receiver.finish().await;
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn actual_backend_unknown_response_retries_after_restart_and_preserves_fence() {
+        let f = Fixture::new().await;
+        let receiver = Receiver::new().await;
+        let _hook = hook(&f, &receiver.url).await;
+        let owner = lease(&f).await;
+        let event = f.append_comment_event("comment.created").await;
+        fan_out_event_backend(&f.backend, owner, &event)
+            .await
+            .unwrap();
+        receiver.capture.unknown.store(true, Ordering::SeqCst);
+        let first = claim(&f).await;
+        deliver_one(
+            f.backend.clone(),
+            receiver.outbound(),
+            Some(keys()),
+            first.clone(),
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
+        let state = row(&f, first.due.id).await;
+        assert_eq!((state.0, state.1, state.2), (1, "pending".into(), None));
+        assert_eq!(receiver.count(), 1);
+        let now: i64 = sqlx::query_scalar(
+            "SELECT (unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert!(state.3.unwrap() > now + 59_000_000 && state.3.unwrap() <= now + 60_000_000);
+        make_due(&f, first.due.id).await;
+        receiver.capture.unknown.store(false, Ordering::SeqCst);
+        let restarted = claim(&f).await;
+        assert_eq!(restarted.due.attempt, 1);
+        deliver_one(
+            f.backend.clone(),
+            receiver.outbound(),
+            Some(keys()),
+            restarted.clone(),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            row(&f, restarted.due.id).await,
+            (2, "delivered".into(), Some(204), None)
+        );
+        assert_eq!(receiver.count(), 2);
+        assert!(
+            !record_webhook_backend(&f.backend, &first, DeliveryOutcome::Failed, None)
+                .await
+                .unwrap()
+        );
+        for (_, body) in receiver.capture.rows.lock().unwrap().iter() {
+            assert_eq!(body, &serialize_payload_backend(&event));
+        }
+        receiver.finish().await;
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn actual_backend_sender_cancel_joins_requests_and_leaves_reclaimable_row() {
+        let f = Fixture::new().await;
+        let receiver = Receiver::new().await;
+        let _hook = hook(&f, &receiver.url).await;
+        let owner = lease(&f).await;
+        let event = f.append_comment_event("comment.created").await;
+        fan_out_event_backend(&f.backend, owner, &event)
+            .await
+            .unwrap();
+        receiver.capture.unknown.store(true, Ordering::SeqCst);
+        let sender = spawn_webhook_sender_backend(
+            f.backend.clone(),
+            receiver.outbound(),
+            Some(keys()),
+            WebhookDeliverySettings {
+                poll_interval: Duration::from_millis(10),
+                ..Default::default()
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(2), receiver.capture.received.notified())
+            .await
+            .unwrap();
+        sender.request_shutdown();
+        sender.join().await.unwrap();
+        let id: Vec<u8> = sqlx::query_scalar("SELECT id FROM webhook_deliveries WHERE event_id=?1")
+            .bind(event.id.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        let id = Uuid::from_slice(&id).unwrap();
+        let state = row(&f, id).await;
+        assert_eq!((state.0, state.1, state.2), (0, "pending".into(), None));
+        assert!(state.3.is_some());
+        assert!(
+            claim_due_webhooks_backend(&f.backend, 1, Duration::from_secs(240))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        make_due(&f, id).await;
+        receiver.capture.unknown.store(false, Ordering::SeqCst);
+        deliver_one(
+            f.backend.clone(),
+            receiver.outbound(),
+            Some(keys()),
+            claim(&f).await,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(row(&f, id).await, (1, "delivered".into(), Some(204), None));
+        assert_eq!(receiver.count(), 2);
+        receiver.finish().await;
+        f.finish().await;
+    }
+}

@@ -1142,3 +1142,222 @@ mod webhook_backend_regressions {
         );
     }
 }
+
+#[cfg(test)]
+mod webhook_operation_regressions {
+    use super::webhook_family_fixture::*;
+    use super::*;
+
+    #[tokio::test]
+    async fn actual_family_claims_two_pools_expiry_and_checked_microsecond_receipts() {
+        let f = Fixture::new().await;
+        let h = hook(&f, "http://127.0.0.1:1/unused").await;
+        let event = f.append_comment_event("comment.created").await;
+        enqueue(&f, h, event.id).await;
+        let other_pool = crate::db::pool::connect_sqlite_app(&f.dir.join("test.sqlite"), 1)
+            .await
+            .unwrap();
+        let other = Backend::Sqlite(other_pool.clone());
+        let (a, b) = tokio::join!(
+            claim_due_webhooks_backend(&f.backend, 1, Duration::from_secs(240)),
+            claim_due_webhooks_backend(&other, 1, Duration::from_secs(240))
+        );
+        let mut claims = a.unwrap();
+        claims.extend(b.unwrap());
+        assert_eq!(claims.len(), 1);
+        let receipt = claims.pop().unwrap();
+        assert_eq!(
+            row(&f, receipt.due.id).await.3,
+            Some(receipt.claimed_until.timestamp_micros())
+        );
+        assert!(claim_due_webhooks_backend(&f.backend, 1, Duration::ZERO)
+            .await
+            .is_err());
+        assert!(
+            claim_due_webhooks_backend(&f.backend, 1, Duration::from_nanos(1))
+                .await
+                .is_err()
+        );
+        let mut tx = f.backend.begin_read().await.unwrap();
+        tx.operation().set_system().await.unwrap();
+        tx.operation().set_tenant(f.other_workspace).await.unwrap();
+        assert!(tx
+            .operation()
+            .webhook_claim_is_current(&receipt)
+            .await
+            .is_err());
+        tx.rollback().await.unwrap();
+        // An expired receipt may still record if it has not been replaced.
+        // Use a precise durable timestamp to prove NULL/us and that expiry
+        // itself is not a second rejection/TTL rule.
+        let instant = DateTime::from_timestamp_micros(1_234_567).unwrap();
+        sqlx::query("UPDATE webhook_deliveries SET next_attempt_at=?2 WHERE id=?1")
+            .bind(receipt.due.id.as_bytes().as_slice())
+            .bind(instant.timestamp_micros())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let expired = ClaimedWebhookDelivery {
+            due: receipt.due.clone(),
+            claimed_until: instant,
+        };
+        assert!(record_webhook_backend(
+            &f.backend,
+            &expired,
+            DeliveryOutcome::Delivered,
+            Some(204)
+        )
+        .await
+        .unwrap());
+        assert_eq!(
+            row(&f, expired.due.id).await,
+            (1, "delivered".into(), Some(204), None)
+        );
+        other_pool.close().await;
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn actual_family_cancelled_fanout_writer_rolls_back_and_reuses_connection() {
+        let f = Fixture::new().await;
+        let h = hook(&f, "http://127.0.0.1:1/unused").await;
+        let event = f.append_comment_event("comment.created").await;
+        let backend = f.backend.clone();
+        let workspace = f.workspace;
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let ready = entered.clone();
+        let task = tokio::spawn(async move {
+            let mut tx = backend.begin_write().await.unwrap();
+            tx.operation().set_tenant(workspace).await.unwrap();
+            tx.operation().set_system().await.unwrap();
+            tx.operation()
+                .webhook_enqueue(workspace, h, event.id)
+                .await
+                .unwrap();
+            ready.notify_one();
+            std::future::pending::<()>().await;
+            tx.commit().await.unwrap();
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let n: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM webhook_deliveries WHERE webhook_id=?1")
+                .bind(h.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(n, 0);
+        let mut tx = f.backend.begin_write().await.unwrap();
+        tx.operation().set_tenant(f.other_workspace).await.unwrap();
+        tx.operation().set_system().await.unwrap();
+        assert!(tx
+            .operation()
+            .webhook_subscriptions(f.workspace, "comment.created")
+            .await
+            .is_err());
+        tx.rollback().await.unwrap();
+        enqueue(&f, h, event.id).await;
+        assert_eq!(
+            claim_due_webhooks_backend(&f.backend, 1, Duration::from_secs(240))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn actual_family_webhook_crud_current_credential_audit_and_retention() {
+        let f = Fixture::new().await;
+        let h = hook(&f, "http://127.0.0.1:1/unused").await;
+        let listed = list_webhooks_backend(&f.backend, f.workspace, f.user, f.credential)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, h);
+        assert_eq!(
+            listed[0].events,
+            vec!["comment.created", "document.updated", "task.deleted"]
+        );
+        assert_eq!(listed[0].created_at.timestamp_subsec_nanos() % 1000, 0);
+        assert!(matches!(
+            list_webhooks_backend(&f.backend, f.other_workspace, f.user, f.credential)
+                .await
+                .unwrap(),
+            Err(IntegrationDbError::NotFound)
+        ));
+        sqlx::query("DELETE FROM sessions WHERE id=?1")
+            .bind(f.credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            remove_webhook_backend(&f.backend, f.workspace, f.user, f.credential, h, None)
+                .await
+                .unwrap(),
+            Err(IntegrationDbError::NotFound)
+        ));
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM webhooks WHERE id=?1")
+            .bind(h.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        let audit: String = sqlx::query_scalar(
+            "SELECT payload FROM audit_log WHERE verb='webhook.created' AND target_id=?1",
+        )
+        .bind(h.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert!(!audit.contains("http:"));
+        assert!(!audit.contains(SECRET));
+        assert!(!audit.contains("enc:v2:"));
+        let e = f.append_comment_event("comment.created").await;
+        enqueue(&f, h, e.id).await;
+        let c = claim(&f).await;
+        assert!(
+            record_webhook_backend(&f.backend, &c, DeliveryOutcome::Delivered, Some(204))
+                .await
+                .unwrap()
+        );
+        sqlx::query("UPDATE webhook_deliveries SET created_at=1 WHERE id=?1")
+            .bind(c.due.id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let pending = f.append_comment_event("comment.created").await;
+        enqueue(&f, h, pending.id).await;
+        sqlx::query("UPDATE webhook_deliveries SET created_at=1 WHERE event_id=?1")
+            .bind(pending.id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            purge_settled_deliveries_backend(&f.backend, 90)
+                .await
+                .unwrap(),
+            1
+        );
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM webhook_deliveries WHERE webhook_id=?1 AND status='pending'",
+        )
+        .bind(h.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining, 1);
+        assert_eq!(
+            purge_settled_deliveries_backend(&f.backend, 90)
+                .await
+                .unwrap(),
+            0
+        );
+        f.finish().await;
+    }
+}
