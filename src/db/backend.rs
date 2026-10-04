@@ -792,8 +792,10 @@ mod maintenance_claim_driver_tests {
     }
     async fn pipeline(
         State(state): State<Arc<tokio::sync::Mutex<Model>>>,
-        Json(body): Json<Value>,
+        bytes: axum::body::Bytes,
     ) -> axum::response::Response {
+        // The pinned SDK sends JSON without an application/json header.
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
         let mut model = state.lock().await;
         model.requests.push(body.clone());
         let requests = body["requests"].as_array().unwrap();
