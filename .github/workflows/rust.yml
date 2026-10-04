@@ -269,8 +269,16 @@ jobs:
           path: target
           key: v2-server-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-db-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - run: cargo fetch --locked
+      - name: Build production helper for PostgreSQL B native fixtures
+        if: matrix.shard == 'b'
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/crates/collab-engine/target
+        run: |
+          cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
+          cargo build --locked --offline --manifest-path crates/collab-engine/Cargo.toml --features worker --bin collab-engine
       - name: PostgreSQL integration tests
         env:
+          FVOCI_COLLAB_ENGINE: ${{ matrix.shard == 'b' && format('{0}/crates/collab-engine/target/debug/collab-engine', github.workspace) || '' }}
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
           FVOCI_MEILI_URL: http://127.0.0.1:${{ job.services.meilisearch.ports['7700'] }}
           FVOCI_MEILI_KEY: ci-ephemeral-meili-master
