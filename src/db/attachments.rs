@@ -2105,6 +2105,8 @@ async fn reclaim_family_object(
             match tx.commit().await {
                 Ok(()) => Ok(CleanupDisposition::Reclaimed),
                 Err(unknown) => {
+                    #[cfg(test)]
+                    cleanup_test_hooks::wait(row.id, 4).await;
                     // Observe a stable current journal/reference state under
                     // the writer again, never repeat purge on an unknown reply.
                     reconcile_attachment_cleanup(backend, storage, row)
@@ -2164,6 +2166,8 @@ async fn reclaim_attachment_object_borrowed(
     }
     if let Err(err) = storage.purge_key(&row.storage_key).await {
         tracing::warn!(error=%err,"attachment.object_cleanup_storage_failed");
+        #[cfg(test)]
+        cleanup_test_hooks::wait(row.id, 2).await;
         return Ok(CleanupDisposition::Retry);
     }
     #[cfg(test)]
@@ -2176,6 +2180,8 @@ async fn reclaim_attachment_object_borrowed(
         return Ok(CleanupDisposition::Retry);
     }
     op.remove_attachment_cleanup_journal(row).await?;
+    #[cfg(test)]
+    cleanup_test_hooks::defer_fk_fault(op, row).await?;
     Ok(CleanupDisposition::Reclaimed)
 }
 
@@ -3301,6 +3307,47 @@ pub(crate) mod cleanup_test_hooks {
             .is_none());
         (entered_rx, go_tx)
     }
+    static COMMIT_FAULTS: LazyLock<Mutex<HashMap<Uuid, (Uuid, Uuid)>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    pub(super) fn arm_deferred_fk(journal: Uuid, attachment: Uuid, nonexistent_document: Uuid) {
+        assert!(COMMIT_FAULTS
+            .lock()
+            .unwrap()
+            .insert(journal, (attachment, nonexistent_document))
+            .is_none());
+    }
+    pub(super) async fn defer_fk_fault(
+        op: &mut crate::db::backend::OperationTx<'_, '_>,
+        row: &super::AttachmentObjectCleanup,
+    ) -> Result<(), sqlx::Error> {
+        let fault = COMMIT_FAULTS.lock().unwrap().remove(&row.id);
+        if let Some((attachment, document)) = fault {
+            let crate::db::backend::OperationTx::SqliteFamily(tx) = op else {
+                return Err(sqlx::Error::Protocol(
+                    "deferred-FK fixture requires actual family writer".into(),
+                ));
+            };
+            tx.require_writer()?;
+            tx.require_tenant(row.workspace_id)?;
+            tx.execute("PRAGMA defer_foreign_keys=ON", &[]).await?;
+            let changed = tx
+                .execute(
+                    "UPDATE attachments SET document_id=?2 WHERE id=?1 AND workspace_id=?3",
+                    &[
+                        crate::db::codec::Cell::uuid(attachment),
+                        crate::db::codec::Cell::uuid(document),
+                        crate::db::codec::Cell::uuid(row.workspace_id),
+                    ],
+                )
+                .await?;
+            if changed != 1 {
+                return Err(sqlx::Error::Protocol(
+                    "actual deferred-FK target missing".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
     pub(super) async fn wait(id: Uuid, phase: u8) {
         let hook = HOOKS.lock().unwrap().remove(&(id, phase));
         if let Some((entered, go)) = hook {
@@ -3743,49 +3790,141 @@ pub(crate) mod cleanup_tests {
         let key = Uuid::now_v7().to_string();
         s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
         let row = journal(&f, Uuid::now_v7(), &key, 0).await;
-        let mut tx = f.backend.begin_write().await.unwrap();
-        let mut op = tx.operation();
-        op.set_tenant(f.workspace).await.unwrap();
-        assert_eq!(
-            reclaim_attachment_object_borrowed(&mut op, &s, &row, &CancellationToken::new())
-                .await
-                .unwrap(),
-            CleanupDisposition::Reclaimed
-        );
-        let crate::db::backend::OperationTx::SqliteFamily(family) = op else {
-            panic!("actual family writer")
-        };
-        family
-            .execute("PRAGMA defer_foreign_keys=ON", &[])
-            .await
-            .unwrap();
-        family
-            .execute(
-                "UPDATE attachments SET document_id=?2 WHERE id=?1",
-                &[
-                    crate::db::codec::Cell::uuid(att),
-                    crate::db::codec::Cell::uuid(Uuid::now_v7()),
-                ],
+        cleanup_test_hooks::arm_deferred_fk(row.id, att, Uuid::now_v7());
+        let (failed_commit, continue_reconcile) = cleanup_test_hooks::arm(row.id, 4);
+        let backend = f.backend.clone();
+        let st = s.clone();
+        let mut consumer = tokio::spawn(async move {
+            reclaim_attachment_objects_backend_with_cancel(
+                &backend,
+                &st,
+                None,
+                20,
+                &CancellationToken::new(),
             )
             .await
-            .unwrap();
-        let error = tx
-            .commit()
-            .await
-            .expect_err("actual deferred FK must fail COMMIT");
-        assert!(error.source.as_database_error().is_some());
-        reconcile_attachment_cleanup(&f.backend, &s, &row)
+        });
+        entered(failed_commit).await;
+        // The real COMMIT has failed. Reserve a real independent writer before
+        // allowing the consumer's own fresh-writer reconciliation to proceed.
+        let other = crate::db::pool::connect_sqlite_app(&f.path, 1)
             .await
             .unwrap();
-        assert_eq!(current(&f, row.id).await, (key.clone(), 0, 0));
-        assert_eq!(s.head(&key).await.unwrap(), None);
+        let second = Backend::Sqlite(other.clone());
+        let held = second.begin_write().await.unwrap();
+        continue_reconcile.send(()).unwrap();
+        let wait = tokio::time::timeout(Duration::from_millis(50), &mut consumer).await;
+        let waited_for_actual_writer = wait.is_err();
+        held.rollback().await.unwrap();
+        let outcome = match wait {
+            Ok(joined) => joined.unwrap(),
+            Err(_) => consumer.await.unwrap(),
+        };
+        let pointer = current(&f, row.id).await;
+        let head = s.head(&key).await.unwrap();
         let document: Vec<u8> =
             sqlx::query_scalar("SELECT document_id FROM attachments WHERE id=?1")
                 .bind(att.as_bytes().as_slice())
                 .fetch_one(&f.pool)
                 .await
                 .unwrap();
-        assert_eq!(document, f.document.as_bytes());
+        let source_is_actual_fk = match &outcome {
+            Err(sqlx::Error::AnyDriverError(source)) => source
+                .downcast_ref::<crate::db::backend::CommitUnknown>()
+                .is_some_and(|e| e.source.as_database_error().is_some()),
+            _ => false,
+        };
+        // Fresh writer reuse must work after the consumer returns. No manual
+        // call to reconciliation can conceal a missing/unchecked await.
+        let reused = f.backend.begin_write().await.unwrap();
+        reused.rollback().await.unwrap();
+        println!("S17 real consumer commit-error outcome={outcome:?} awaited_second_writer={waited_for_actual_writer} journal_key={} attempts={} due={} storage_head={head:?}",pointer.0,pointer.1,pointer.2);
+        other.close().await;
+        let expected_document = f.document.as_bytes().to_vec();
+        f.close().await;
+        assert!(
+            waited_for_actual_writer,
+            "actual consumer must await fresh-writer reconciliation, not return immediately"
+        );
+        assert!(
+            source_is_actual_fk,
+            "real consumer must return original unknown COMMIT error, never Reclaimed: {outcome:?}"
+        );
+        assert_eq!(pointer, (key, 0, 0));
+        assert_eq!(head, None);
+        assert_eq!(document, expected_document);
+    }
+
+    #[tokio::test]
+    async fn cleanup_selected_cancelled_failed_purge_keeps_attempt_and_due() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let key = Uuid::now_v7().to_string();
+        s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+        let row = journal(&f, Uuid::now_v7(), &key, 0).await;
+        let blocked = f.root.join("s17-storage/tmp").join(&key);
+        std::fs::create_dir_all(blocked.parent().unwrap()).unwrap();
+        std::fs::write(&blocked, b"real abort ENOTDIR").unwrap();
+        let (settled, go) = cleanup_test_hooks::arm(row.id, 2);
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let backend = f.backend.clone();
+        let st = s.clone();
+        let consumer = tokio::spawn(async move {
+            reclaim_attachment_objects_backend_with_cancel(&backend, &st, None, 20, &token)
+                .await
+                .unwrap()
+        });
+        entered(settled).await;
+        // Actual purge already returned ENOTDIR, not a synthetic callback Err.
+        cancel.cancel();
+        go.send(()).unwrap();
+        let stats = consumer.await.unwrap();
+        let pointer = current(&f, row.id).await;
+        bytes(&s, &key).await;
+        println!(
+            "S17 cancelled real failed purge stats={stats:?} journal_key={} attempts={} due={}",
+            pointer.0, pointer.1, pointer.2
+        );
+        if pointer != (key.clone(), 0, 0) || (stats.claimed, stats.failed) != (1, 0) {
+            // Retain the closed actual failed fixture for root diagnostics.
+            f.backend.close().await.unwrap();
+            println!("S17 closed original failed fixture {}", f.root.display());
+            assert_eq!(
+                pointer,
+                (key.clone(), 0, 0),
+                "cancelled settled purge must retain exact pointer/attempt/due"
+            );
+            assert_eq!((stats.claimed, stats.failed), (1, 0));
+        }
+        let before: i64 = sqlx::query_scalar(
+            "SELECT unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        let (settled, go) = cleanup_test_hooks::arm(row.id, 2);
+        let backend = f.backend.clone();
+        let st = s.clone();
+        let consumer = tokio::spawn(async move {
+            reclaim_attachment_objects_backend(&backend, &st, None, 20)
+                .await
+                .unwrap()
+        });
+        entered(settled).await;
+        go.send(()).unwrap();
+        let stats = consumer.await.unwrap();
+        assert_eq!((stats.claimed, stats.failed), (1, 1));
+        let pointer = current(&f, row.id).await;
+        assert_eq!((&pointer.0, pointer.1), (&key, 1));
+        assert!(pointer.2 >= before + 60_000_000);
+        bytes(&s, &key).await;
+        std::fs::remove_file(blocked).unwrap();
+        sqlx::query("UPDATE attachment_object_cleanups SET due_at=0 WHERE id=?1")
+            .bind(row.id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
         assert_eq!(drain(&f, &s).await.reclaimed, 1);
         f.close().await;
     }
