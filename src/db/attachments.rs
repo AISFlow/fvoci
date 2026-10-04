@@ -5295,6 +5295,50 @@ mod upload_session_tests {
             .unwrap(),
             Err(AttachmentDbError::NotFound)
         );
+        // A real live second tenant with the same current actor/credential
+        // distinguishes tenant fencing from merely rejecting a missing workspace.
+        let other_workspace = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO workspaces(id,slug,name) VALUES(?1,'s18-other','S18 other tenant')",
+        )
+        .bind(other_workspace.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')")
+            .bind(other_workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            get_attachment_meta_backend(&f.backend, other_workspace, att.id, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap_err(),
+            AttachmentDbError::NotFound
+        );
+        assert_eq!(
+            complete_upload_backend(
+                &f.backend,
+                &s,
+                other_workspace,
+                att.id,
+                f.user,
+                credential,
+                supplied.clone(),
+                None
+            )
+            .await
+            .unwrap()
+            .unwrap_err(),
+            AttachmentDbError::NotFound
+        );
+        assert_eq!(listed_parts(&s, &key).await, old_listing);
+        assert_eq!(listed_parts(&s, &replacement).await, destination_listing);
+        assert_eq!(published_part_files(&f, &key), old_files);
+        assert_eq!(published_part_files(&f, &replacement), destination_files);
+        assert_eq!(counts(&f, att.id).await, (0, 0));
         let stream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
             bytes::Bytes::copy_from_slice(&changed_bytes),
         )]);
