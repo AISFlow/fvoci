@@ -848,19 +848,6 @@ mod backend_regressions {
             json!({"title":"한글🙂","null":null,"version":"9007199254740993"}),
         )
         .await;
-        // A fixed persisted timestamp gives the received body an independent
-        // precision oracle, rather than comparing two calls to the serializer.
-        sqlx::query("UPDATE events SET created_at=?1 WHERE id=?2")
-            .bind(1_700_000_000_123_456_i64)
-            .bind(event.id.as_bytes().as_slice())
-            .execute(&f.pool)
-            .await
-            .unwrap();
-        let event = crate::db::outbox::fetch_event_by_id_backend(&f.backend, event.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(event.created_at.timestamp_micros(), 1_700_000_000_123_456);
         let sender = spawn_webhook_sender_backend(
             f.backend.clone(),
             receiver.outbound(),
@@ -888,24 +875,6 @@ mod backend_regressions {
         sender.join().await.unwrap();
         assert_eq!(receiver.count(), 1);
         let capture = receiver.capture.rows.lock().unwrap()[0].clone();
-        let body: Value = serde_json::from_slice(&capture.1).unwrap();
-        assert_eq!(
-            body,
-            json!({
-                "id": event.id.to_string(),
-                "verb": "document.updated",
-                "workspaceId": f.workspace.to_string(),
-                "actorUserId": f.actor.to_string(),
-                "targetType": "document",
-                "targetId": f.document.to_string(),
-                "payload": {"title": "한글🙂", "null": null, "version": "9007199254740993"},
-                "channel": "web",
-                "createdAt": "2023-11-14T22:13:20.123Z"
-            })
-        );
-        assert!(body["payload"]["title"].is_string());
-        assert!(body["payload"]["null"].is_null());
-        assert!(body["payload"]["version"].is_string());
         assert_eq!(capture.1, serialize_payload_backend(&event));
         assert_eq!(
             capture.0["x-fvoci-signature"],
@@ -1263,7 +1232,7 @@ mod backend_regressions {
         let owner = lease(&f).await;
         let project = Uuid::now_v7();
         sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'PRIVATE','private','private',?3)").bind(project.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.actor.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
-        let payload = json!({"projectId":project,"title":"historical private 한글🙂","number":7});
+        let payload = json!({"projectId":project,"title":"historical private 한글🙂","number":7,"null":null,"version":"9007199254740993"});
         let event = append(
             &f,
             "task.deleted",
@@ -1318,6 +1287,19 @@ mod backend_regressions {
             payload,
         )
         .await;
+        // This fixture pins persisted UTC microseconds so received timestamp
+        // assertions do not obtain their expected value from the serializer.
+        sqlx::query("UPDATE events SET created_at=?1 WHERE id=?2")
+            .bind(1_700_000_000_123_456_i64)
+            .bind(visible.id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let visible = crate::db::outbox::fetch_event_by_id_backend(&f.backend, visible.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(visible.created_at.timestamp_micros(), 1_700_000_000_123_456);
         fan_out_event_backend(&f.backend, owner, &visible)
             .await
             .unwrap();
@@ -1331,6 +1313,36 @@ mod backend_regressions {
         .await
         .unwrap();
         assert_eq!(receiver.count(), 1);
+        let captured = receiver.capture.rows.lock().unwrap()[0].clone();
+        let body: Value = serde_json::from_slice(&captured.1).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "id": visible.id.to_string(),
+                "verb": "task.deleted",
+                "workspaceId": f.workspace.to_string(),
+                "actorUserId": f.actor.to_string(),
+                "targetType": "task",
+                "targetId": visible.target_id.unwrap().to_string(),
+                "payload": {
+                    "projectId": project.to_string(),
+                    "title": "historical private 한글🙂",
+                    "number": 7,
+                    "null": null,
+                    "version": "9007199254740993"
+                },
+                "channel": "web",
+                "createdAt": "2023-11-14T22:13:20.123Z"
+            })
+        );
+        assert!(body["payload"]["title"].is_string());
+        assert!(body["payload"]["number"].is_number());
+        assert!(body["payload"]["null"].is_null());
+        assert!(body["payload"]["version"].is_string());
+        assert_eq!(
+            captured.0["x-fvoci-signature"],
+            sign_body(SECRET, &captured.1)
+        );
         assert_eq!(
             receiver.capture.rows.lock().unwrap()[0].1,
             serialize_payload_backend(&visible)
