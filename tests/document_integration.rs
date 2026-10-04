@@ -3221,7 +3221,7 @@ async fn selected_backend_wiki_fixture(
         .await
         .unwrap();
     assert_eq!(capability.lineage, migrate::SQLITE_LINEAGE);
-    assert_eq!(capability.applied_steps, 3);
+    assert_eq!(capability.applied_steps, 4);
     let command = Uuid::now_v7();
     let room_owner = Uuid::now_v7();
     let mut membership_failures = Vec::new();
@@ -4842,7 +4842,7 @@ async fn sqlite_migration_cancelled_commit_retains_admission_until_drain() {
                         .await
                         .unwrap()
                         .applied_steps,
-                    3
+                    4
                 );
                 backend.close().await.unwrap();
             }
