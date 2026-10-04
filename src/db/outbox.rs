@@ -617,6 +617,59 @@ pub async fn advance_cursor_backend_tx(
 }
 
 impl OperationTx<'_, '_> {
+    /// Read the event in the caller's current transaction and authority. The
+    /// consumer owns system context, commit and rollback; this lookup opens no
+    /// second connection and does not broaden the caller's context.
+    pub(crate) async fn outbox_event_by_id(
+        &mut self,
+        event_id: Uuid,
+    ) -> Result<Option<BackendOutboxEvent>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT pg_snapshot_xmin(pg_current_snapshot())::text AS snapshot_xmin,
+                           id AS event_id, seq, xact::text, workspace_id,
+                           actor_user_id, verb, target_type, target_id, payload,
+                           channel, created_at
+                    FROM fvoci.events
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(event_id)
+                .fetch_optional(&mut ***tx)
+                .await?;
+                row.map(|row| {
+                    Ok(BackendOutboxEvent {
+                        visibility: EventVisibility::Postgres {
+                            snapshot_xmin: row.try_get("snapshot_xmin")?,
+                            xact: row.try_get("xact")?,
+                        },
+                        id: row.try_get("event_id")?,
+                        seq: row.try_get("seq")?,
+                        workspace_id: row.try_get("workspace_id")?,
+                        actor_user_id: row.try_get("actor_user_id")?,
+                        verb: row.try_get("verb")?,
+                        target_type: row.try_get("target_type")?,
+                        target_id: row.try_get("target_id")?,
+                        payload: row.try_get("payload")?,
+                        channel: row.try_get("channel")?,
+                        created_at: row.try_get("created_at")?,
+                    })
+                })
+                .transpose()
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_system_context()?;
+                let rows = tx.query(
+                    "SELECT id,seq,workspace_id,actor_user_id,verb,target_type,target_id,payload,channel,created_at FROM events WHERE id=?1",
+                    &[Cell::uuid(event_id)],
+                ).await?;
+                rows.first().map(decode_family_event).transpose()
+            }
+        }
+    }
+
     pub(crate) async fn advance_outbox_cursor(
         &mut self,
         consumer: &str,
