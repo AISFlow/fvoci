@@ -965,26 +965,6 @@ impl OperationTx<'_, '_> {
     }
 }
 
-async fn fetch_state_fence_for_update(
-    tx: &mut Transaction<'_, Postgres>,
-    t: &CollabTables,
-    workspace_id: Uuid,
-    document_id: Uuid,
-) -> Result<Option<(i64, i64)>, sqlx::Error> {
-    sqlx::query_as(&t.sql(
-        r#"
-        SELECT writer_generation, tail_seq
-        FROM {states}
-        WHERE workspace_id = $1 AND {id} = $2
-        FOR UPDATE
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_optional(&mut **tx)
-    .await
-}
-
 /// The fields an append checks, from the locked state row: the snapshot's
 /// stored size (`octet_length` reads the length without detoasting, so the
 /// snapshot bytes never leave the server), `writer_generation`,
@@ -1535,26 +1515,32 @@ async fn append_system_updated_event(
     workspace_id: Uuid,
     document_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let payload = json!({
-        t.payload_key: document_id.to_string(),
-        "collab": true,
-    });
-    sqlx::query(
-        r#"
-        INSERT INTO fvoci.events (
-            id, workspace_id, actor_user_id, verb, target_type, target_id, payload, channel
-        ) VALUES ($1, $2, NULL, $5, $6, $3, $4, 'system')
-        "#,
-    )
-    .bind(Uuid::now_v7())
-    .bind(workspace_id)
-    .bind(document_id)
-    .bind(payload)
-    .bind(t.verb("updated"))
-    .bind(t.target_type)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
+    OperationTx::Postgres(tx)
+        .append_native_body_updated(t, workspace_id, document_id)
+        .await
+}
+
+impl OperationTx<'_, '_> {
+    async fn append_native_body_updated(
+        &mut self,
+        t: &CollabTables,
+        workspace: Uuid,
+        resource: Uuid,
+    ) -> Result<(), sqlx::Error> {
+        self.append_event_channel(
+            EventAppend {
+                id: Uuid::now_v7(),
+                workspace_id: Some(workspace),
+                actor_user_id: None,
+                verb: t.verb("updated"),
+                target_type: Some(t.target_type.to_string()),
+                target_id: Some(resource),
+                payload: json!({t.payload_key:resource.to_string(),"collab":true}),
+            },
+            "system",
+        )
+        .await
+    }
 }
 
 async fn record_collab_event_and_audit(
@@ -1608,6 +1594,32 @@ enum NativeLoadMode {
 }
 
 impl OperationTx<'_, '_> {
+    /// Persisted source only: caller has authorized the route's exact scope in
+    /// this writer transaction. Unlike live sync this never seeds an absent
+    /// state. The state lock keeps snapshot/head/tail from crossing a commit.
+    pub(crate) async fn load_durable_native_source(
+        &mut self,
+        kind: CollabKind,
+        workspace: Uuid,
+        resource: Uuid,
+    ) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
+        let tables = CollabTables::for_kind(kind);
+        let Some(state) = self.fetch_native_state(tables, workspace, resource).await? else {
+            return Ok(Err(CollabDbError::NotFound));
+        };
+        if state.1 != COLLAB_STATE_ENCODING_V1 {
+            return Ok(Err(CollabDbError::NotFound));
+        }
+        let tail = match self
+            .load_native_tail(tables, workspace, resource, state.3, state.0.len() as i64)
+            .await?
+        {
+            Ok(tail) => tail,
+            Err(error) => return Ok(Err(error)),
+        };
+        Ok(Ok(state_row_to_load(state, tail)))
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn load_collab_native(
         &mut self,
@@ -2956,84 +2968,136 @@ pub async fn project_derived_body_kind(
     kind: CollabKind,
     input: ProjectDerivedBodyInput,
 ) -> Result<Result<ProjectDerivedBodyResult, CollabDbError>, sqlx::Error> {
-    let t = CollabTables::for_kind(kind);
-    let ProjectDerivedBodyInput {
-        workspace_id,
-        actor_user_id,
-        session_id,
-        document_id,
-        writer_generation,
-        expected_tail_seq,
-        prepared,
-    } = input;
-    let content_json = prepared.content_json();
-    let text = prepared.text();
-    let chosung = prepared.chosung();
+    project_derived_body_kind_backend(&Backend::Postgres(pool.clone()), kind, input).await
+}
 
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    if let Err(err) = authorize_collab_write(
-        &mut tx,
-        kind,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        document_id,
-        &mut CollabDbStageTimings::default(),
-    )
-    .await?
-    {
+pub async fn project_derived_body_kind_backend(
+    backend: &Backend,
+    kind: CollabKind,
+    input: ProjectDerivedBodyInput,
+) -> Result<Result<ProjectDerivedBodyResult, CollabDbError>, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    let result = tx
+        .operation()
+        .project_collab_derived_body(kind, input)
+        .await?;
+    if result.is_ok() {
+        tx.commit().await.map_err(|unknown| unknown.source)?;
+    } else {
         tx.rollback().await?;
-        return Ok(Err(err));
+    }
+    Ok(result)
+}
+
+impl OperationTx<'_, '_> {
+    /// Derived body effect on the caller-owned current authorized native head.
+    /// Metadata version is independent of this native tail/generation fence.
+    pub(crate) async fn project_collab_derived_body(
+        &mut self,
+        kind: CollabKind,
+        input: ProjectDerivedBodyInput,
+    ) -> Result<Result<ProjectDerivedBodyResult, CollabDbError>, sqlx::Error> {
+        let t = CollabTables::for_kind(kind);
+        let ProjectDerivedBodyInput {
+            workspace_id,
+            actor_user_id,
+            session_id,
+            document_id,
+            writer_generation,
+            expected_tail_seq,
+            prepared,
+        } = input;
+        self.set_tenant(workspace_id).await?;
+        if let Err(error) = self
+            .authorize_collab_write(
+                kind,
+                workspace_id,
+                actor_user_id,
+                session_id,
+                document_id,
+                &mut CollabDbStageTimings::default(),
+            )
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        let state = self
+            .native_append_fence(t, workspace_id, document_id)
+            .await?;
+        let Some((_, current_generation, _, current_tail_seq)) = state else {
+            return Ok(Err(CollabDbError::NotFound));
+        };
+        if current_tail_seq == 0 {
+            return Ok(Ok(ProjectDerivedBodyResult::SkippedSeed));
+        }
+        if current_generation != writer_generation {
+            return Ok(Err(CollabDbError::StaleWriter));
+        }
+        if current_tail_seq != expected_tail_seq {
+            return Ok(Err(CollabDbError::StaleCutoff));
+        }
+        if !self
+            .write_native_body_projection(t, workspace_id, document_id, &prepared)
+            .await?
+        {
+            return Ok(Ok(ProjectDerivedBodyResult::Unchanged));
+        }
+        self.append_native_body_updated(t, workspace_id, document_id)
+            .await?;
+        Ok(Ok(ProjectDerivedBodyResult::Updated))
     }
 
-    let state = fetch_state_fence_for_update(&mut tx, t, workspace_id, document_id).await?;
-    let Some((current_generation, current_tail_seq)) = state else {
-        tx.rollback().await?;
-        return Ok(Err(CollabDbError::NotFound));
-    };
-    if current_tail_seq == 0 {
-        tx.rollback().await?;
-        return Ok(Ok(ProjectDerivedBodyResult::SkippedSeed));
+    async fn write_native_body_projection(
+        &mut self,
+        t: &CollabTables,
+        workspace: Uuid,
+        resource: Uuid,
+        prepared: &PreparedDerivedBody,
+    ) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                let updated:Option<(Uuid,)>=sqlx::query_as(&t.sql(
+                    "UPDATE {resource} SET content_json=$3,text=$4,chosung=$5,updated_at=now() WHERE workspace_id=$1 AND id=$2 AND content_json IS DISTINCT FROM $3::jsonb RETURNING id"
+                )).bind(workspace).bind(resource).bind(prepared.content_json()).bind(prepared.text()).bind(prepared.chosung()).fetch_optional(&mut ***tx).await?;
+                Ok(updated.is_some())
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                let (read,write)=match t.kind {
+                    CollabKind::Document=>("SELECT content_json FROM documents WHERE workspace_id=?1 AND id=?2","UPDATE documents SET content_json=?3,text=?4,chosung=?5,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2"),
+                    CollabKind::Task=>("SELECT content_json FROM tasks WHERE workspace_id=?1 AND id=?2","UPDATE tasks SET content_json=?3,text=?4,chosung=?5,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2"),
+                };
+                let rows = tx
+                    .query(read, &[Cell::uuid(workspace), Cell::uuid(resource)])
+                    .await?;
+                let current = rows
+                    .first()
+                    .ok_or(sqlx::Error::RowNotFound)?
+                    .cell(0)?
+                    .value()?;
+                if current == *prepared.content_json() {
+                    return Ok(false);
+                }
+                let changed = tx
+                    .execute(
+                        write,
+                        &[
+                            Cell::uuid(workspace),
+                            Cell::uuid(resource),
+                            Cell::json(prepared.content_json())?,
+                            Cell::text(prepared.text()),
+                            Cell::text(prepared.chosung()),
+                        ],
+                    )
+                    .await?;
+                if changed != 1 {
+                    return Err(sqlx::Error::RowNotFound);
+                }
+                Ok(true)
+            }
+        }
     }
-    if current_generation != writer_generation {
-        tx.rollback().await?;
-        return Ok(Err(CollabDbError::StaleWriter));
-    }
-    if current_tail_seq != expected_tail_seq {
-        tx.rollback().await?;
-        return Ok(Err(CollabDbError::StaleCutoff));
-    }
-
-    let updated: Option<(Uuid,)> = sqlx::query_as(&t.sql(
-        r#"
-        UPDATE {resource}
-        SET content_json = $3,
-            text = $4,
-            chosung = $5,
-            updated_at = now()
-        WHERE workspace_id = $1
-          AND id = $2
-          AND content_json IS DISTINCT FROM $3::jsonb
-        RETURNING id
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .bind(content_json)
-    .bind(text)
-    .bind(chosung)
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    if updated.is_none() {
-        tx.commit().await?;
-        return Ok(Ok(ProjectDerivedBodyResult::Unchanged));
-    }
-
-    append_system_updated_event(&mut tx, t, workspace_id, document_id).await?;
-    tx.commit().await?;
-    Ok(Ok(ProjectDerivedBodyResult::Updated))
 }
 
 #[cfg(test)]

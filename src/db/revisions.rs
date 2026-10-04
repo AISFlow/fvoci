@@ -4,10 +4,12 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::collab::derived_body::PreparedDerivedBody;
+use crate::db::backend::{Backend, OperationTx};
+use crate::db::codec::{Cell, FamilyRow};
 use crate::db::context::{
-    begin_read, lock_membership_users, recheck_session, session_is_live, set_system, set_tenant,
+    begin_read, lock_membership_users, recheck_session, set_system, set_tenant,
 };
-use crate::db::projects::{load_live_project, project_permission, share_lock_project_permission};
+use crate::db::projects::{load_live_project, project_permission};
 use crate::db::workspace::workspace_is_live;
 use crate::projects::ProjectPermission;
 
@@ -288,234 +290,294 @@ pub fn decode_revision_cursor(raw: &str) -> Option<RevisionCursor> {
     Some(RevisionCursor { created_at, id })
 }
 
-async fn authorize_document(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    document_id: Uuid,
-    write: bool,
-) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
-    if !session_is_live(&mut *tx, actor_user_id, session_id).await? {
-        return Ok(Err(RevisionDbError::Forbidden));
+impl OperationTx<'_, '_> {
+    async fn revision_authorize_document(
+        &mut self,
+        workspace_id: Uuid,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        document_id: Uuid,
+        write: bool,
+    ) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
+        if !self.session_is_live(actor_user_id, session_id).await? {
+            return Ok(Err(RevisionDbError::Forbidden));
+        }
+        if !self.workspace_is_live(workspace_id).await? {
+            return Ok(Err(RevisionDbError::NotFound));
+        }
+        let min = if write {
+            crate::projects::ProjectPermission::Edit
+        } else {
+            crate::projects::ProjectPermission::View
+        };
+        let permission = self
+            .document_permission(workspace_id, actor_user_id, document_id, true)
+            .await?;
+        if !permission.at_least(min) {
+            return Ok(Err(RevisionDbError::NotFound));
+        }
+        Ok(Ok(()))
     }
-    if !workspace_is_live(&mut *tx, workspace_id).await? {
-        return Ok(Err(RevisionDbError::NotFound));
-    }
-    let min = if write {
-        crate::projects::ProjectPermission::Edit
-    } else {
-        crate::projects::ProjectPermission::View
-    };
-    let permission = crate::db::documents::document_permission(
-        tx,
-        workspace_id,
-        actor_user_id,
-        document_id,
-        true,
-    )
-    .await?;
-    if !permission.at_least(min) {
-        return Ok(Err(RevisionDbError::NotFound));
-    }
-    Ok(Ok(()))
-}
 
-/// The actor's effective permission on a live project and whether it is
-/// archived. A write share-locks the project row so project mutations wait for
-/// it; a read (in [`begin_read`]) takes no row lock.
-async fn project_access(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    project_id: Uuid,
-    write: bool,
-) -> Result<Option<(ProjectPermission, bool)>, sqlx::Error> {
-    if write {
-        return share_lock_project_permission(tx, workspace_id, actor_user_id, project_id).await;
+    /// The actor's effective permission on a live project and whether it is
+    /// archived. A write share-locks the project row so project mutations wait for
+    /// it; a read (in [`begin_read`]) takes no row lock.
+    async fn revision_project_access(
+        &mut self,
+        workspace_id: Uuid,
+        actor_user_id: Uuid,
+        project_id: Uuid,
+        write: bool,
+    ) -> Result<Option<(ProjectPermission, bool)>, sqlx::Error> {
+        if write {
+            return self
+                .share_lock_project_permission(workspace_id, actor_user_id, project_id)
+                .await;
+        }
+        self.revision_project_access_read(workspace_id, actor_user_id, project_id)
+            .await
     }
-    let Some(project) = load_live_project(tx, workspace_id, project_id).await? else {
-        return Ok(None);
-    };
-    let permission = project_permission(tx, workspace_id, actor_user_id, &project).await?;
-    Ok(Some((permission, project.status == "archived")))
-}
 
-/// Project document revision access: the caller's effective project permission
-/// (members and project group grants; wiki document grants never apply), under
-/// a share lock on the project row for writes, and the live document must
-/// belong to the project named by the route. Writes refuse an archived
-/// project (source `assertProjectWritable`).
-async fn authorize_project_document(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    project_id: Uuid,
-    document_id: Uuid,
-    write: bool,
-) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
-    if !workspace_is_live(&mut *tx, workspace_id).await? {
-        return Ok(Err(RevisionDbError::NotFound));
+    /// Project document revision access: the caller's effective project permission
+    /// (members and project group grants; wiki document grants never apply), under
+    /// a share lock on the project row for writes, and the live document must
+    /// belong to the project named by the route. Writes refuse an archived
+    /// project (source `assertProjectWritable`).
+    async fn revision_authorize_project_document(
+        &mut self,
+        workspace_id: Uuid,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        project_id: Uuid,
+        document_id: Uuid,
+        write: bool,
+    ) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
+        if !self.workspace_is_live(workspace_id).await? {
+            return Ok(Err(RevisionDbError::NotFound));
+        }
+        let Some((permission, project_archived)) = self
+            .revision_project_access(workspace_id, actor_user_id, project_id, write)
+            .await?
+        else {
+            return Ok(Err(RevisionDbError::NotFound));
+        };
+        // Checked after a write's project lock wait so a session revoked meanwhile
+        // is refused.
+        if !self.session_is_live(actor_user_id, session_id).await? {
+            return Ok(Err(RevisionDbError::Forbidden));
+        }
+        let min = if write {
+            crate::projects::ProjectPermission::Edit
+        } else {
+            crate::projects::ProjectPermission::View
+        };
+        if !permission.at_least(min) {
+            return Ok(Err(RevisionDbError::NotFound));
+        }
+        let document = self
+            .revision_live_document_project(workspace_id, document_id)
+            .await?;
+        if document.flatten() != Some(project_id) {
+            return Ok(Err(RevisionDbError::NotFound));
+        }
+        if write && project_archived {
+            return Ok(Err(RevisionDbError::ProjectArchived));
+        }
+        Ok(Ok(()))
     }
-    let Some((permission, project_archived)) =
-        project_access(tx, workspace_id, actor_user_id, project_id, write).await?
-    else {
-        return Ok(Err(RevisionDbError::NotFound));
-    };
-    // Checked after a write's project lock wait so a session revoked meanwhile
-    // is refused.
-    if !session_is_live(&mut *tx, actor_user_id, session_id).await? {
-        return Ok(Err(RevisionDbError::Forbidden));
-    }
-    let min = if write {
-        crate::projects::ProjectPermission::Edit
-    } else {
-        crate::projects::ProjectPermission::View
-    };
-    if !permission.at_least(min) {
-        return Ok(Err(RevisionDbError::NotFound));
-    }
-    let document: Option<(Option<Uuid>,)> = sqlx::query_as(
-        r#"
-        SELECT project_id
-        FROM fvoci.documents
-        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    if document.and_then(|(project,)| project) != Some(project_id) {
-        return Ok(Err(RevisionDbError::NotFound));
-    }
-    if write && project_archived {
-        return Ok(Err(RevisionDbError::ProjectArchived));
-    }
-    Ok(Ok(()))
-}
 
-/// Task revision access: a live task in a live project the caller can view
-/// (read) or edit (write). Writes also refuse an archived project or task
-/// (source `assertTaskWritable`) and share-lock the project row.
-async fn authorize_task(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    task_id: Uuid,
-    write: bool,
-) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
-    if !session_is_live(&mut *tx, actor_user_id, session_id).await? {
-        return Ok(Err(RevisionDbError::Forbidden));
+    /// Task revision access: a live task in a live project the caller can view
+    /// (read) or edit (write). Writes also refuse an archived project or task
+    /// (source `assertTaskWritable`) and share-lock the project row.
+    async fn revision_authorize_task(
+        &mut self,
+        workspace_id: Uuid,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        task_id: Uuid,
+        write: bool,
+    ) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
+        if !self.session_is_live(actor_user_id, session_id).await? {
+            return Ok(Err(RevisionDbError::Forbidden));
+        }
+        if !self.workspace_is_live(workspace_id).await? {
+            return Ok(Err(RevisionDbError::NotFound));
+        }
+        let task = self.revision_live_task(workspace_id, task_id).await?;
+        let Some((project_id, archived_at)) = task else {
+            return Ok(Err(RevisionDbError::NotFound));
+        };
+        let Some((permission, project_archived)) = self
+            .revision_project_access(workspace_id, actor_user_id, project_id, write)
+            .await?
+        else {
+            return Ok(Err(RevisionDbError::NotFound));
+        };
+        let min = if write {
+            crate::projects::ProjectPermission::Edit
+        } else {
+            crate::projects::ProjectPermission::View
+        };
+        if !permission.at_least(min) {
+            return Ok(Err(RevisionDbError::NotFound));
+        }
+        if write && project_archived {
+            return Ok(Err(RevisionDbError::ProjectArchived));
+        }
+        if write && archived_at.is_some() {
+            return Ok(Err(RevisionDbError::TaskArchived));
+        }
+        Ok(Ok(()))
     }
-    if !workspace_is_live(&mut *tx, workspace_id).await? {
-        return Ok(Err(RevisionDbError::NotFound));
+
+    pub(crate) async fn authorize_revision_scope(
+        &mut self,
+        workspace_id: Uuid,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        scope: RevisionScope,
+        write: bool,
+    ) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
+        match (scope.target, scope.project_id) {
+            (RevisionTarget::Document(id), None) => {
+                self.revision_authorize_document(workspace_id, actor_user_id, session_id, id, write)
+                    .await
+            }
+            (RevisionTarget::Document(id), Some(project_id)) => {
+                self.revision_authorize_project_document(
+                    workspace_id,
+                    actor_user_id,
+                    session_id,
+                    project_id,
+                    id,
+                    write,
+                )
+                .await
+            }
+            (RevisionTarget::Task(id), _) => {
+                self.revision_authorize_task(workspace_id, actor_user_id, session_id, id, write)
+                    .await
+            }
+        }
     }
-    let task: Option<(Uuid, Option<DateTime<Utc>>)> = sqlx::query_as(
-        r#"
-        SELECT project_id, archived_at
-        FROM fvoci.tasks
-        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(task_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some((project_id, archived_at)) = task else {
-        return Ok(Err(RevisionDbError::NotFound));
-    };
-    let Some((permission, project_archived)) =
-        project_access(tx, workspace_id, actor_user_id, project_id, write).await?
-    else {
-        return Ok(Err(RevisionDbError::NotFound));
-    };
-    let min = if write {
-        crate::projects::ProjectPermission::Edit
-    } else {
-        crate::projects::ProjectPermission::View
-    };
-    if !permission.at_least(min) {
-        return Ok(Err(RevisionDbError::NotFound));
+
+    async fn revision_project_access_read(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        project: Uuid,
+    ) -> Result<Option<(ProjectPermission, bool)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                let Some(row) = load_live_project(tx, workspace, project).await? else {
+                    return Ok(None);
+                };
+                let permission = project_permission(tx, workspace, actor, &row).await?;
+                Ok(Some((permission, row.status == "archived")))
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let rows=tx.query("SELECT status FROM projects WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",&[Cell::uuid(workspace),Cell::uuid(project)]).await?;
+                let Some(row) = rows.first() else {
+                    return Ok(None);
+                };
+                let archived = row.cell(0)?.string()? == "archived";
+                let permission = self
+                    .project_permission_by_id(workspace, actor, project)
+                    .await?;
+                Ok(permission.map(|permission| (permission, archived)))
+            }
+        }
     }
-    if write && project_archived {
-        return Ok(Err(RevisionDbError::ProjectArchived));
+    async fn revision_live_document_project(
+        &mut self,
+        workspace: Uuid,
+        document: Uuid,
+    ) -> Result<Option<Option<Uuid>>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx)=>sqlx::query_as::<_,(Option<Uuid>,)>("SELECT project_id FROM fvoci.documents WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL")
+                .bind(workspace).bind(document).fetch_optional(&mut ***tx).await.map(|row|row.map(|(project,)|project)),
+            Self::SqliteFamily(tx)=>{
+                tx.require_tenant(workspace)?;
+                tx.query("SELECT project_id FROM documents WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",&[Cell::uuid(workspace),Cell::uuid(document)]).await?
+                    .first().map(|row|row.cell(0)?.optional(Cell::id)).transpose()
+            },
+        }
     }
-    if write && archived_at.is_some() {
-        return Ok(Err(RevisionDbError::TaskArchived));
+    async fn revision_live_task(
+        &mut self,
+        workspace: Uuid,
+        task: Uuid,
+    ) -> Result<Option<(Uuid, Option<DateTime<Utc>>)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx)=>sqlx::query_as("SELECT project_id,archived_at FROM fvoci.tasks WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL")
+                .bind(workspace).bind(task).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx)=>{
+                tx.require_tenant(workspace)?;
+                tx.query("SELECT project_id,archived_at FROM tasks WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",&[Cell::uuid(workspace),Cell::uuid(task)]).await?
+                    .first().map(|row|Ok((row.cell(0)?.id()?,row.cell(1)?.optional(Cell::datetime)?))).transpose()
+            },
+        }
     }
-    Ok(Ok(()))
 }
 
 async fn authorize_target(
     tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
     scope: RevisionScope,
     write: bool,
 ) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
-    match (scope.target, scope.project_id) {
-        (RevisionTarget::Document(id), None) => {
-            authorize_document(tx, workspace_id, actor_user_id, session_id, id, write).await
-        }
-        (RevisionTarget::Document(id), Some(project_id)) => {
-            authorize_project_document(
-                tx,
-                workspace_id,
-                actor_user_id,
-                session_id,
-                project_id,
-                id,
-                write,
-            )
-            .await
-        }
-        (RevisionTarget::Task(id), _) => {
-            authorize_task(tx, workspace_id, actor_user_id, session_id, id, write).await
-        }
-    }
+    OperationTx::Postgres(tx)
+        .authorize_revision_scope(workspace, actor, credential, scope, write)
+        .await
 }
 
 /// Revision access check for a document or task target without other work.
 pub async fn authorize_revision_target(
     pool: &PgPool,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
     scope: impl Into<RevisionScope>,
     write: bool,
 ) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
-    let scope = scope.into();
-    // A write check share-locks the project row, which a read-only
-    // transaction refuses.
-    let mut tx = if write {
-        pool.begin().await?
-    } else {
-        begin_read(pool).await?
-    };
-    set_tenant(&mut tx, workspace_id).await?;
-    let result = authorize_target(
-        &mut tx,
-        workspace_id,
-        actor_user_id,
-        session_id,
+    authorize_revision_target_backend(
+        &Backend::Postgres(pool.clone()),
+        workspace,
+        actor,
+        credential,
         scope,
         write,
     )
-    .await?;
-    match result {
-        Ok(()) => {
-            tx.commit().await?;
-            Ok(Ok(()))
-        }
-        Err(err) => {
-            tx.rollback().await?;
-            Ok(Err(err))
-        }
+    .await
+}
+
+pub async fn authorize_revision_target_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    scope: impl Into<RevisionScope>,
+    write: bool,
+) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
+    let mut tx = if write {
+        backend.begin_write().await?
+    } else {
+        backend.begin_read().await?
+    };
+    tx.operation().set_tenant(workspace).await?;
+    let result = tx
+        .operation()
+        .authorize_revision_scope(workspace, actor, credential, scope.into(), write)
+        .await?;
+    if result.is_ok() {
+        tx.commit().await.map_err(|unknown| unknown.source)?;
+    } else {
+        tx.rollback().await?;
     }
+    Ok(result)
 }
 
 async fn collab_state_exists(
@@ -541,6 +603,27 @@ async fn collab_state_exists(
 
 pub async fn list_revisions(
     pool: &PgPool,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    scope: impl Into<RevisionScope>,
+    limit: i64,
+    before: Option<RevisionCursor>,
+) -> Result<Result<RevisionListPage, RevisionDbError>, sqlx::Error> {
+    list_revisions_backend(
+        &Backend::Postgres(pool.clone()),
+        workspace,
+        actor,
+        credential,
+        scope,
+        limit,
+        before,
+    )
+    .await
+}
+
+pub async fn list_revisions_backend(
+    backend: &Backend,
     workspace_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
@@ -550,69 +633,21 @@ pub async fn list_revisions(
 ) -> Result<Result<RevisionListPage, RevisionDbError>, sqlx::Error> {
     let scope = scope.into();
     let target = scope.target;
-    let mut tx = begin_read(pool).await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    match authorize_target(
-        &mut tx,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        scope,
-        false,
-    )
-    .await?
+    let mut tx = backend.begin_read().await?;
+    tx.operation().set_tenant(workspace_id).await?;
+    if let Err(error) = tx
+        .operation()
+        .authorize_revision_scope(workspace_id, actor_user_id, session_id, scope, false)
+        .await?
     {
-        Ok(()) => {}
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
-        }
+        tx.rollback().await?;
+        return Ok(Err(error));
     }
-    let fetch_limit = limit.saturating_add(1);
-    let rows: Vec<RevisionMetaRow> = match before {
-        Some(cursor) => {
-            sqlx::query_as(
-                r#"
-                SELECT id, target_kind, target_id, reason, created_by, created_at, restored_from_id
-                FROM fvoci.revisions
-                WHERE workspace_id = $1
-                  AND target_kind = $2
-                  AND target_id = $3
-                  AND (created_at, id) < ($4, $5)
-                ORDER BY created_at DESC, id DESC
-                LIMIT $6
-                "#,
-            )
-            .bind(workspace_id)
-            .bind(target.kind_str())
-            .bind(target.id())
-            .bind(cursor.created_at)
-            .bind(cursor.id)
-            .bind(fetch_limit)
-            .fetch_all(&mut *tx)
-            .await?
-        }
-        None => {
-            sqlx::query_as(
-                r#"
-                SELECT id, target_kind, target_id, reason, created_by, created_at, restored_from_id
-                FROM fvoci.revisions
-                WHERE workspace_id = $1
-                  AND target_kind = $2
-                  AND target_id = $3
-                ORDER BY created_at DESC, id DESC
-                LIMIT $4
-                "#,
-            )
-            .bind(workspace_id)
-            .bind(target.kind_str())
-            .bind(target.id())
-            .bind(fetch_limit)
-            .fetch_all(&mut *tx)
-            .await?
-        }
-    };
-    tx.commit().await?;
+    let rows = tx
+        .operation()
+        .revision_list_rows(workspace_id, target, limit.saturating_add(1), before)
+        .await?;
+    tx.commit().await.map_err(|unknown| unknown.source)?;
     let mut items: Vec<RevisionMeta> = rows
         .into_iter()
         .map(
@@ -645,44 +680,48 @@ pub async fn list_revisions(
 
 pub async fn get_revision(
     pool: &PgPool,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
     scope: impl Into<RevisionScope>,
-    revision_id: Uuid,
+    revision: Uuid,
+) -> Result<Result<RevisionDetail, RevisionDbError>, sqlx::Error> {
+    get_revision_backend(
+        &Backend::Postgres(pool.clone()),
+        workspace,
+        actor,
+        credential,
+        scope,
+        revision,
+    )
+    .await
+}
+
+pub async fn get_revision_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    scope: impl Into<RevisionScope>,
+    revision: Uuid,
 ) -> Result<Result<RevisionDetail, RevisionDbError>, sqlx::Error> {
     let scope = scope.into();
     let target = scope.target;
-    let mut tx = begin_read(pool).await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    match authorize_target(
-        &mut tx,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        scope,
-        false,
-    )
-    .await?
+    let mut tx = backend.begin_read().await?;
+    tx.operation().set_tenant(workspace).await?;
+    if let Err(error) = tx
+        .operation()
+        .authorize_revision_scope(workspace, actor, credential, scope, false)
+        .await?
     {
-        Ok(()) => {}
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
-        }
+        tx.rollback().await?;
+        return Ok(Err(error));
     }
-    let row: Option<RevisionDetailRow> = sqlx::query_as(
-        r#"
-        SELECT id, target_kind, target_id, reason, created_by, created_at, restored_from_id, content_json, y_snapshot
-        FROM fvoci.revisions
-        WHERE workspace_id = $1 AND id = $2
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(revision_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    tx.commit().await?;
+    let row = tx
+        .operation()
+        .revision_detail_row(workspace, revision)
+        .await?;
+    tx.commit().await.map_err(|unknown| unknown.source)?;
     match row {
         Some((
             id,
@@ -713,103 +752,241 @@ pub async fn get_revision(
 
 pub async fn create_manual_revision(
     pool: &PgPool,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
     scope: impl Into<RevisionScope>,
     input: CreateRevisionInput,
 ) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
-    let scope = scope.into();
-    let target = scope.target;
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    // Writer prologue, before the project share lock `authorize_target` takes
-    // (membership lock -> credential rows -> project, the order every project
-    // writer uses): a logout, token revocation, suspension or member removal
-    // that commits while this waits is seen instead of missed.
-    lock_membership_users(&mut tx, &[actor_user_id]).await?;
-    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
-        tx.rollback().await?;
-        return Ok(Err(RevisionDbError::Forbidden));
-    }
-    match authorize_target(
-        &mut tx,
-        workspace_id,
-        actor_user_id,
-        session_id,
+    create_manual_revision_backend(
+        &Backend::Postgres(pool.clone()),
+        workspace,
+        actor,
+        credential,
         scope,
-        true,
+        input,
     )
-    .await?
-    {
-        Ok(()) => {}
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
+    .await
+}
+
+pub async fn create_manual_revision_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    scope: impl Into<RevisionScope>,
+    input: CreateRevisionInput,
+) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    let result = tx
+        .operation()
+        .create_manual_revision(workspace, actor, credential, scope.into(), input)
+        .await?;
+    if result.is_ok() {
+        tx.commit().await.map_err(|unknown| unknown.source)?;
+    } else {
+        tx.rollback().await?;
+    }
+    Ok(result)
+}
+
+fn family_revision_meta(row: &FamilyRow) -> Result<RevisionMetaRow, sqlx::Error> {
+    Ok((
+        row.cell(0)?.id()?,
+        row.cell(1)?.string()?,
+        row.cell(2)?.id()?,
+        row.cell(3)?.string()?,
+        row.cell(4)?.optional(Cell::id)?,
+        row.cell(5)?.datetime()?,
+        row.cell(6)?.optional(Cell::id)?,
+    ))
+}
+
+impl OperationTx<'_, '_> {
+    async fn revision_list_rows(
+        &mut self,
+        workspace_id: Uuid,
+        target: RevisionTarget,
+        fetch_limit: i64,
+        before: Option<RevisionCursor>,
+    ) -> Result<Vec<RevisionMetaRow>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => match before {
+                Some(cursor) => {
+                    sqlx::query_as(
+                        r#"
+                SELECT id, target_kind, target_id, reason, created_by, created_at, restored_from_id
+                FROM fvoci.revisions
+                WHERE workspace_id = $1
+                  AND target_kind = $2
+                  AND target_id = $3
+                  AND (created_at, id) < ($4, $5)
+                ORDER BY created_at DESC, id DESC
+                LIMIT $6
+                "#,
+                    )
+                    .bind(workspace_id)
+                    .bind(target.kind_str())
+                    .bind(target.id())
+                    .bind(cursor.created_at)
+                    .bind(cursor.id)
+                    .bind(fetch_limit)
+                    .fetch_all(&mut ***tx)
+                    .await
+                }
+                None => {
+                    sqlx::query_as(
+                        r#"
+                SELECT id, target_kind, target_id, reason, created_by, created_at, restored_from_id
+                FROM fvoci.revisions
+                WHERE workspace_id = $1
+                  AND target_kind = $2
+                  AND target_id = $3
+                ORDER BY created_at DESC, id DESC
+                LIMIT $4
+                "#,
+                    )
+                    .bind(workspace_id)
+                    .bind(target.kind_str())
+                    .bind(target.id())
+                    .bind(fetch_limit)
+                    .fetch_all(&mut ***tx)
+                    .await
+                }
+            },
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace_id)?;
+                let (instant, id) = match before {
+                    Some(cursor) => (Cell::instant(cursor.created_at)?, Cell::uuid(cursor.id)),
+                    None => (Cell::Null, Cell::Null),
+                };
+                tx.query("SELECT id,target_kind,target_id,reason,created_by,created_at,restored_from_id FROM revisions WHERE workspace_id=?1 AND target_kind=?2 AND target_id=?3 AND (?4 IS NULL OR (created_at,id)<(?4,?5)) ORDER BY created_at DESC,id DESC LIMIT ?6",
+                    &[Cell::uuid(workspace_id),Cell::text(target.kind_str()),Cell::uuid(target.id()),instant,id,Cell::Integer(fetch_limit)]).await?.iter().map(family_revision_meta).collect()
+            }
         }
     }
-    let recent: Option<(Uuid, Vec<u8>, String)> = sqlx::query_as(
-        r#"
-        SELECT id, y_snapshot, reason
-        FROM fvoci.revisions
-        WHERE workspace_id = $1 AND target_kind = $2 AND target_id = $3
-        ORDER BY created_at DESC, id DESC
-        LIMIT 1
-        FOR UPDATE
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(target.kind_str())
-    .bind(target.id())
-    .fetch_optional(&mut *tx)
-    .await?;
-    if let Some((id, prev_snap, reason)) = recent {
-        if prev_snap == input.y_snapshot {
-            if is_automatic_revision_reason(&reason) {
-                sqlx::query(
-                    r#"
-                    UPDATE fvoci.revisions
-                    SET reason = $3, created_by = $4
-                    WHERE workspace_id = $1 AND id = $2
-                    "#,
+    async fn revision_detail_row(
+        &mut self,
+        workspace: Uuid,
+        revision: Uuid,
+    ) -> Result<Option<RevisionDetailRow>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx)=>sqlx::query_as("SELECT id,target_kind,target_id,reason,created_by,created_at,restored_from_id,content_json,y_snapshot FROM fvoci.revisions WHERE workspace_id=$1 AND id=$2")
+                .bind(workspace).bind(revision).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx)=>{
+                tx.require_tenant(workspace)?;
+                tx.query("SELECT id,target_kind,target_id,reason,created_by,created_at,restored_from_id,content_json,y_snapshot FROM revisions WHERE workspace_id=?1 AND id=?2",&[Cell::uuid(workspace),Cell::uuid(revision)]).await?
+                    .first().map(|row| {let (id,kind,target,reason,actor,created,source)=family_revision_meta(row)?;Ok((id,kind,target,reason,actor,created,source,row.cell(7)?.value()?,row.cell(8)?.bytes()?))}).transpose()
+            },
+        }
+    }
+    /// Current writer authorization and manual revision effect without finishing
+    /// the caller's native/body/command transaction.
+    pub(crate) async fn create_manual_revision(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+        scope: RevisionScope,
+        input: CreateRevisionInput,
+    ) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
+        self.set_tenant(workspace).await?;
+        self.lock_membership_users(&[actor]).await?;
+        if !self.recheck_session(actor, credential).await? {
+            return Ok(Err(RevisionDbError::Forbidden));
+        }
+        if let Err(error) = self
+            .authorize_revision_scope(workspace, actor, credential, scope, true)
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        let recent = self
+            .revision_latest_snapshot(workspace, scope.target)
+            .await?;
+        if let Some((id, snapshot, reason)) = recent {
+            if snapshot == input.y_snapshot {
+                if is_automatic_revision_reason(&reason) {
+                    self.promote_manual_revision(workspace, id, actor).await?;
+                }
+                return Ok(Ok(id));
+            }
+        }
+        let id = Uuid::now_v7();
+        self.insert_manual_revision(workspace, scope.target, id, actor, &input)
+            .await?;
+        Ok(Ok(id))
+    }
+    async fn revision_latest_snapshot(
+        &mut self,
+        workspace: Uuid,
+        target: RevisionTarget,
+    ) -> Result<Option<(Uuid, Vec<u8>, String)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx)=>sqlx::query_as("SELECT id,y_snapshot,reason FROM fvoci.revisions WHERE workspace_id=$1 AND target_kind=$2 AND target_id=$3 ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE")
+                .bind(workspace).bind(target.kind_str()).bind(target.id()).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx)=>{
+                tx.require_writer()?;tx.require_tenant(workspace)?;
+                tx.query("SELECT id,y_snapshot,reason FROM revisions WHERE workspace_id=?1 AND target_kind=?2 AND target_id=?3 ORDER BY created_at DESC,id DESC LIMIT 1",&[Cell::uuid(workspace),Cell::text(target.kind_str()),Cell::uuid(target.id())]).await?
+                    .first().map(|row|Ok((row.cell(0)?.id()?,row.cell(1)?.bytes()?,row.cell(2)?.string()?))).transpose()
+            },
+        }
+    }
+    async fn promote_manual_revision(
+        &mut self,
+        workspace: Uuid,
+        revision: Uuid,
+        actor: Uuid,
+    ) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query("UPDATE fvoci.revisions SET reason=$3,created_by=$4 WHERE workspace_id=$1 AND id=$2")
+                .bind(workspace).bind(revision).bind(MANUAL_REASON).bind(actor).execute(&mut ***tx).await?;
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                tx.execute(
+                    "UPDATE revisions SET reason=?3,created_by=?4 WHERE workspace_id=?1 AND id=?2",
+                    &[
+                        Cell::uuid(workspace),
+                        Cell::uuid(revision),
+                        Cell::text(MANUAL_REASON),
+                        Cell::uuid(actor),
+                    ],
                 )
-                .bind(workspace_id)
-                .bind(id)
-                .bind(MANUAL_REASON)
-                .bind(actor_user_id)
-                .execute(&mut *tx)
                 .await?;
             }
-            tx.commit().await?;
-            return Ok(Ok(id));
         }
+        Ok(())
     }
-    let id = Uuid::now_v7();
-    sqlx::query(
-        r#"
-        INSERT INTO fvoci.revisions (
-            id, workspace_id, target_kind, target_id, y_snapshot, encoding,
-            content_json, text, reason, created_by
-        ) VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8, $9)
-        "#,
-    )
-    .bind(id)
-    .bind(workspace_id)
-    .bind(target.kind_str())
-    .bind(target.id())
-    .bind(&input.y_snapshot)
-    .bind(&input.content_json)
-    .bind(&input.text)
-    .bind(if input.reason.is_empty() {
-        MANUAL_REASON
-    } else {
-        input.reason.as_str()
-    })
-    .bind(actor_user_id)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(Ok(id))
+    async fn insert_manual_revision(
+        &mut self,
+        workspace: Uuid,
+        target: RevisionTarget,
+        id: Uuid,
+        actor: Uuid,
+        input: &CreateRevisionInput,
+    ) -> Result<(), sqlx::Error> {
+        let reason = if input.reason.is_empty() {
+            MANUAL_REASON
+        } else {
+            &input.reason
+        };
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query("INSERT INTO fvoci.revisions(id,workspace_id,target_kind,target_id,y_snapshot,encoding,content_json,text,reason,created_by) VALUES($1,$2,$3,$4,$5,1,$6,$7,$8,$9)")
+                .bind(id).bind(workspace).bind(target.kind_str()).bind(target.id()).bind(&input.y_snapshot).bind(&input.content_json).bind(&input.text).bind(reason).bind(actor).execute(&mut ***tx).await?;
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                tx.execute("INSERT INTO revisions(id,workspace_id,target_kind,target_id,y_snapshot,encoding,content_json,text,reason,created_by) VALUES(?1,?2,?3,?4,?5,1,?6,?7,?8,?9)",
+                    &[Cell::uuid(id),Cell::uuid(workspace),Cell::text(target.kind_str()),Cell::uuid(target.id()),Cell::Blob(input.y_snapshot.clone()),Cell::json(&input.content_json)?,Cell::text(&input.text),Cell::text(reason),Cell::uuid(actor)]).await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn lock_system_revision_target(
@@ -1228,64 +1405,65 @@ pub(crate) async fn lookup_restored_revision_in_tx(
 
 pub async fn load_persisted_target_source(
     pool: &PgPool,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    scope: impl Into<RevisionScope>,
+) -> Result<Result<PersistedCollabSource, RevisionDbError>, sqlx::Error> {
+    load_persisted_target_source_backend(
+        &Backend::Postgres(pool.clone()),
+        workspace,
+        actor,
+        credential,
+        scope,
+    )
+    .await
+}
+
+pub async fn load_persisted_target_source_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
     scope: impl Into<RevisionScope>,
 ) -> Result<Result<PersistedCollabSource, RevisionDbError>, sqlx::Error> {
     let scope = scope.into();
     let target = scope.target;
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    match authorize_target(
-        &mut tx,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        scope,
-        true,
-    )
-    .await?
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(workspace).await?;
+    if let Err(error) = tx
+        .operation()
+        .authorize_revision_scope(workspace, actor, credential, scope, true)
+        .await?
     {
-        Ok(()) => {}
-        Err(err) => {
+        tx.rollback().await?;
+        return Ok(Err(error));
+    }
+    let kind = match target {
+        RevisionTarget::Document(_) => crate::db::collab::CollabKind::Document,
+        RevisionTarget::Task(_) => crate::db::collab::CollabKind::Task,
+    };
+    let native = tx
+        .operation()
+        .load_durable_native_source(kind, workspace, target.id())
+        .await?;
+    let native = match native {
+        Ok(native) => native,
+        Err(crate::db::collab::CollabDbError::NotFound) => {
             tx.rollback().await?;
-            return Ok(Err(err));
+            return Ok(Err(RevisionDbError::NotFound));
         }
-    }
-    let (state_sql, tail_sql) = match target {
-        RevisionTarget::Document(_) => (
-            "SELECT state, encoding, snapshot_cutoff_seq FROM fvoci.document_states WHERE workspace_id = $1 AND document_id = $2",
-            "SELECT payload FROM fvoci.document_collab_updates WHERE workspace_id = $1 AND document_id = $2 AND seq > $3 ORDER BY seq ASC",
-        ),
-        RevisionTarget::Task(_) => (
-            "SELECT state, encoding, snapshot_cutoff_seq FROM fvoci.task_states WHERE workspace_id = $1 AND task_id = $2",
-            "SELECT payload FROM fvoci.task_collab_updates WHERE workspace_id = $1 AND task_id = $2 AND seq > $3 ORDER BY seq ASC",
-        ),
+        Err(_) => {
+            tx.rollback().await?;
+            return Err(sqlx::Error::Protocol(
+                "persisted revision source exceeds native load bounds".into(),
+            ));
+        }
     };
-    let state: Option<(Vec<u8>, i16, i64)> = sqlx::query_as(state_sql)
-        .bind(workspace_id)
-        .bind(target.id())
-        .fetch_optional(&mut *tx)
-        .await?;
-    let Some((snapshot, encoding, cutoff)) = state else {
-        tx.rollback().await?;
-        return Ok(Err(RevisionDbError::NotFound));
-    };
-    if encoding != 1 {
-        tx.rollback().await?;
-        return Ok(Err(RevisionDbError::NotFound));
-    }
-    let tail: Vec<(Vec<u8>,)> = sqlx::query_as(tail_sql)
-        .bind(workspace_id)
-        .bind(target.id())
-        .bind(cutoff)
-        .fetch_all(&mut *tx)
-        .await?;
-    tx.commit().await?;
+    tx.commit().await.map_err(|unknown| unknown.source)?;
     Ok(Ok(PersistedCollabSource {
-        snapshot,
-        tail: tail.into_iter().map(|(payload,)| payload).collect(),
+        snapshot: native.snapshot,
+        tail: native.tail.into_iter().map(|row| row.payload).collect(),
     }))
 }
 

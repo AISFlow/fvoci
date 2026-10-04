@@ -3249,20 +3249,280 @@ async fn selected_backend_wiki_fixture(with_native: bool) {
                 persisted.snapshot,
                 persisted.tail.into_iter().map(|row| row.payload).collect(),
             );
+            let backend_kind = backend.kind();
             let fresh = tokio::task::spawn_blocking(move || {
-                fvoci_server::collab::revision::project_persisted_offline(
+                use collab_engine::outcome::EngineStatus;
+                use collab_engine::process::{ChildSlotKind, EngineSession, SpawnRequest};
+                use collab_engine::protocol::Request;
+                let mut child = EngineSession::spawn(SpawnRequest {
+                    engine_bin: engine.clone(),
+                    limits: collab_engine::limits::Limits::default(),
+                    slot_kind: ChildSlotKind::Primary,
+                    slot_wait: None,
+                    test_hang_ms: None,
+                    test_exit_after_read: None,
+                    test_close_stdout_hang_ms: None,
+                    test_exit_after_write: None,
+                })
+                .unwrap();
+                let pid = child.pid().unwrap();
+                let proc_path = std::path::PathBuf::from(format!("/proc/{pid}"));
+                assert_eq!(
+                    std::fs::read_link(proc_path.join("exe")).unwrap(),
+                    std::fs::canonicalize(&engine).unwrap()
+                );
+                assert!(child
+                    .call(&Request::Load {
+                        snapshot_b64: Some(snapshot),
+                        tail_b64: tail,
+                        encoding: 1
+                    })
+                    .outcome
+                    .is_applied_ok());
+                let projected = match child.call(&Request::Project { encoding: 1 }).outcome {
+                    EngineStatus::Ok {
+                        content_json: Some(content),
+                        ..
+                    } => content,
+                    other => panic!("fresh native projection: {other:?}"),
+                };
+                child.kill_and_reap();
+                assert!(
+                    !proc_path.exists(),
+                    "owned fresh native child must be reaped"
+                );
+                eprintln!(
+                    "native_fresh_child backend={backend_kind} pid={pid} reaped=true executable={}",
+                    engine.display()
+                );
+                projected
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                fresh, *content,
+                "new isolated native client loads committed state"
+            );
+            use fvoci_server::db::collab::{
+                project_derived_body_kind_backend, ProjectDerivedBodyInput,
+                ProjectDerivedBodyResult,
+            };
+            let project_input = |generation, tail, session| {
+                ProjectDerivedBodyInput::new(
+                    workspace_id,
+                    live.user_id,
+                    session,
+                    document_id,
+                    generation,
+                    tail,
+                    fvoci_server::collab::derived_body::prepare_derived_body(fresh.clone())
+                        .unwrap(),
+                )
+            };
+            for (generation, tail, session, expected) in [
+                (0, 1, live.session_id, CollabDbError::StaleWriter),
+                (1, 0, live.session_id, CollabDbError::StaleCutoff),
+                (1, 1, Uuid::now_v7(), CollabDbError::Forbidden),
+            ] {
+                assert_eq!(
+                    project_derived_body_kind_backend(
+                        &backend,
+                        CollabKind::Document,
+                        project_input(generation, tail, session)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    expected
+                );
+            }
+            assert_eq!(
+                project_derived_body_kind_backend(
+                    &backend,
+                    CollabKind::Document,
+                    project_input(1, 1, live.session_id)
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+                ProjectDerivedBodyResult::Updated
+            );
+            assert_eq!(
+                project_derived_body_kind_backend(
+                    &backend,
+                    CollabKind::Document,
+                    project_input(1, 1, live.session_id)
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+                ProjectDerivedBodyResult::Unchanged
+            );
+            let (status, projected_body, _, _) = json_request(
+                app.clone(),
+                "GET",
+                &format!("{path}/{document}/body"),
+                None,
+                Some(&fresh_cookie),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(projected_body["contentJson"], fresh);
+            assert_eq!(
+                projected_body["version"], created["version"],
+                "derived native body does not advance metadata version"
+            );
+            let revisions_path = format!("{path}/{document}/revisions");
+            let (status, manual, _, _) = json_request(
+                app.clone(),
+                "POST",
+                &revisions_path,
+                None,
+                Some(&fresh_cookie),
+                &[("origin", "http://localhost")],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "{} manual: {manual}",
+                backend.kind()
+            );
+            let revision = manual["id"].as_str().unwrap();
+            let (status, repeated_manual, _, _) = json_request(
+                app.clone(),
+                "POST",
+                &revisions_path,
+                None,
+                Some(&fresh_cookie),
+                &[("origin", "http://localhost")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED);
+            assert_eq!(
+                repeated_manual, manual,
+                "unchanged manual capture deduplicates"
+            );
+            let (status, login, readback_cookie, _) = json_request(
+                app.clone(),
+                "POST",
+                "/api/v1/auth/login",
+                Some(json!({"email":"admin@example.com","password":"supersecret1"})),
+                None,
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "fresh post-write login: {login}");
+            let readback_cookie = extract_session_cookie(readback_cookie.as_ref().unwrap());
+            assert_ne!(readback_cookie, fresh_cookie);
+            let readback_identity = fvoci_server::db::identity::find_live_session_backend(
+                &backend,
+                &hash_token(&readback_cookie),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(readback_identity.user_id, live.user_id);
+            assert_ne!(readback_identity.session_id, live.session_id);
+            let (status, fresh_body, _, _) = json_request(
+                app.clone(),
+                "GET",
+                &format!("{path}/{document}/body"),
+                None,
+                Some(&readback_cookie),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(fresh_body["contentJson"], fresh);
+            let (status, list, _, _) = json_request(
+                app.clone(),
+                "GET",
+                &revisions_path,
+                None,
+                Some(&readback_cookie),
+                &[],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{} revision list: {list}",
+                backend.kind()
+            );
+            assert_eq!(list["items"].as_array().unwrap().len(), 1);
+            assert_eq!(list["items"][0]["id"], manual["id"]);
+            assert_eq!(list["items"][0]["createdBy"], me["userId"]);
+            assert_eq!(list["items"][0]["reason"], "manual");
+            let (status, detail, _, _) = json_request(
+                app.clone(),
+                "GET",
+                &format!("{revisions_path}/{revision}"),
+                None,
+                Some(&readback_cookie),
+                &[],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{} revision detail: {detail}",
+                backend.kind()
+            );
+            assert_eq!(detail["id"], manual["id"]);
+            assert_eq!(detail["targetId"], created["id"]);
+            assert_eq!(detail["contentJson"], fresh);
+            let saved_snapshot =
+                collab_engine::b64::decode(detail["ySnapshot"].as_str().unwrap()).unwrap();
+            assert!(!saved_snapshot.is_empty());
+            let current_native = load_collab_readonly_kind_backend(
+                &backend,
+                CollabKind::Document,
+                workspace_id,
+                readback_identity.user_id,
+                readback_identity.session_id,
+                document_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let engine = engine_bin.clone();
+            let captured = tokio::task::spawn_blocking(move || {
+                fvoci_server::collab::revision::capture_revision_offline(
                     engine,
                     collab_engine::limits::Limits::default(),
-                    snapshot,
-                    tail,
+                    current_native.snapshot,
+                    current_native
+                        .tail
+                        .into_iter()
+                        .map(|row| row.payload)
+                        .collect(),
                 )
             })
             .await
             .unwrap()
             .unwrap();
             assert_eq!(
-                fresh, *content,
-                "new isolated native client loads committed state"
+                saved_snapshot, captured.y_snapshot,
+                "manual history snapshot equals freshly captured durable native source"
+            );
+            let (status, _, _, _) = json_request(
+                app.clone(),
+                "GET",
+                &format!(
+                    "/api/v1/workspaces/{}/documents/{document}/revisions/{revision}",
+                    Uuid::now_v7()
+                ),
+                None,
+                Some(&readback_cookie),
+                &[],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "wrong tenant cannot read revision"
             );
             if let Some(fence) = room_fence {
                 use fvoci_server::db::collab::{
