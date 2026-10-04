@@ -1376,3 +1376,47 @@ mod webhook_operation_regressions {
         f.finish().await;
     }
 }
+
+// Selected outbound status sync. Background authority is the original tenant
+// association, not an invented actor/manage gate; callers own transaction scope.
+impl OperationTx<'_, '_> {
+    pub(crate) async fn github_sync_target(
+        &mut self,
+        workspace: Uuid,
+        task: Uuid,
+    ) -> Result<Option<(String, i32, String, String)>, sqlx::Error> {
+        if !self.workspace_is_live(workspace).await? {
+            return Ok(None);
+        }
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query_as(
+                    r#"
+                    SELECT l.repo, l.issue_number, s.category, i.installation_id
+                    FROM fvoci.github_issue_links AS l
+                    INNER JOIN fvoci.tasks AS t ON t.workspace_id = l.workspace_id AND t.id = l.task_id
+                    INNER JOIN fvoci.statuses AS s ON s.workspace_id = t.workspace_id AND s.id = t.status_id
+                    INNER JOIN fvoci.github_installations AS i ON i.workspace_id = l.workspace_id
+                    WHERE l.workspace_id = $1 AND l.task_id = $2 AND t.deleted_at IS NULL
+                    "#,
+                )
+                .bind(workspace)
+                .bind(task)
+                .fetch_optional(&mut ***tx)
+                .await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let rows = tx.query(
+                    "SELECT l.repo,l.issue_number,s.category,i.installation_id FROM github_issue_links l JOIN tasks t ON t.workspace_id=l.workspace_id AND t.id=l.task_id JOIN statuses s ON s.workspace_id=t.workspace_id AND s.id=t.status_id JOIN github_installations i ON i.workspace_id=l.workspace_id WHERE l.workspace_id=?1 AND l.task_id=?2 AND t.deleted_at IS NULL",
+                    &[Cell::uuid(workspace), Cell::uuid(task)],
+                ).await?;
+                rows.first().map(|r| {
+                    let issue = i32::try_from(r.cell(1)?.integer()?)
+                        .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+                    Ok((r.cell(0)?.string()?, issue, r.cell(2)?.string()?, r.cell(3)?.string()?))
+                }).transpose()
+            }
+        }
+    }
+}
