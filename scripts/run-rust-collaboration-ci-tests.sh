@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# CI collaboration job: one offline cargo test invocation with captured output.
+# CI collaboration job: two offline cargo test invocations with captured output,
+# inside one isolated Meilisearch. task_collab_integration runs alone with
+# --test-threads=1 (its personal-transfer cases each run a server and native
+# seeds against the process-wide seed child cap); the other nine keep libtest's
+# default parallelism. Both always run; the first non-zero status is returned.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,6 +34,14 @@ verify_native_admission_log() {
 }
 
 cd "$ROOT"
+# One isolated Meilisearch for both invocations: re-exec this script once
+# inside the wrapper (it exports FVOCI_MEILI_URL/KEY and removes the container
+# on exit); the Zotero real-search case requires it.
+if [[ "${FVOCI_COLLAB_CI_IN_MEILI:-}" != 1 ]]; then
+  FVOCI_COLLAB_CI_IN_MEILI=1 exec bash "$ROOT/scripts/start-test-meili.sh" bash "${BASH_SOURCE[0]}"
+fi
+
+status=0
 cargo test --locked --offline --no-fail-fast --features db-tests \
   --test collab_product \
   --test collab_projection \
@@ -40,7 +52,18 @@ cargo test --locked --offline --no-fail-fast --features db-tests \
   --test document_api_integration \
   --test document_import_export_integration \
   --test document_import_formats_integration \
+  | tee "$LOG" || status=$?
+cargo test --locked --offline --no-fail-fast --features db-tests \
   --test task_collab_integration \
-  | tee "$LOG"
+  -- --test-threads=1 \
+  | tee -a "$LOG" || { second=$?; [[ "$status" -ne 0 ]] || status=$second; }
 
-verify_native_admission_log "$LOG"
+# A cargo failure (e.g. a compile error or crash before the admission line
+# printed) keeps its own status; the admission check decides only when both
+# cargo invocations succeeded.
+admission=0
+verify_native_admission_log "$LOG" || admission=$?
+if [[ "$status" -ne 0 ]]; then
+  exit "$status"
+fi
+exit "$admission"

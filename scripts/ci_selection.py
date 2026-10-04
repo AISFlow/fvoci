@@ -940,7 +940,9 @@ def _collapse_shell_words(text: str) -> str:
     return " ".join(text.split())
 
 
-def _cargo_command_suppression_error(norm: str, context: str) -> str | None:
+def _cargo_command_suppression_error(
+    norm: str, context: str, allowed_libtest_args: frozenset[str] = frozenset({"--nocapture"})
+) -> str | None:
     if "--no-run" in norm:
         return f"rust: {context} must not use --no-run"
     if "--exclude" in norm:
@@ -951,7 +953,7 @@ def _cargo_command_suppression_error(norm: str, context: str) -> str | None:
     separator = " -- "
     if separator in norm:
         suffix = norm.split(separator, 1)[1].strip()
-        if suffix != "--nocapture":
+        if suffix not in allowed_libtest_args:
             return f"rust: {context} must not use libtest filter after --"
     return None
 
@@ -1168,8 +1170,16 @@ def verify_collaboration_workflow_execution(jobs: dict) -> list[str]:
     return []
 
 
-def _collaboration_script_cargo_command(text: str) -> str | None:
+# libtest scheduling the collaboration script may pass after `--`: never a
+# filter, skip or ignored selection.
+RUST_COLLAB_LIBTEST_ARGS = frozenset({"--nocapture", "--test-threads=1"})
+
+
+def _collaboration_script_cargo_commands(text: str) -> list[str]:
+    """Every `cargo test` invocation with its `--test` continuations and an
+    optional final `-- ...` libtest line."""
     lines = text.splitlines()
+    commands: list[str] = []
     for index, line in enumerate(lines):
         stripped = line.strip()
         if not stripped.startswith("cargo test "):
@@ -1182,9 +1192,11 @@ def _collaboration_script_cargo_command(text: str) -> str | None:
                 parts.append(continuation.rstrip("\\").strip())
                 next_index += 1
                 continue
+            if continuation.startswith("-- "):
+                parts.append(continuation.rstrip("\\").strip())
             break
-        return " ".join(parts)
-    return None
+        commands.append(" ".join(parts))
+    return commands
 
 
 def collaboration_script_inventory(repo_root: Path) -> tuple[set[str], str | None]:
@@ -1192,22 +1204,32 @@ def collaboration_script_inventory(repo_root: Path) -> tuple[set[str], str | Non
     if not script_path.is_file():
         return set(), f"rust: missing collaboration CI script {RUST_COLLAB_CI_SCRIPT}"
     text = script_path.read_text(encoding="utf-8")
-    cargo_command = _collaboration_script_cargo_command(text)
-    if not cargo_command:
+    cargo_commands = _collaboration_script_cargo_commands(text)
+    if not cargo_commands:
         return set(), "rust: collaboration CI script missing cargo test invocation"
-    suppression = _cargo_command_suppression_error(
-        cargo_command, "collaboration CI script cargo test"
-    )
-    if suppression:
-        return set(), suppression
-    shape_err = _validate_cargo_test_invocation(
-        cargo_command.split(),
-        context="collaboration CI script cargo test",
-        require_tests=True,
-    )
-    if shape_err:
-        return set(), shape_err
-    tests = cargo_test_flags_in_text(cargo_command)
+    tests: set[str] = set()
+    for cargo_command in cargo_commands:
+        suppression = _cargo_command_suppression_error(
+            cargo_command, "collaboration CI script cargo test", RUST_COLLAB_LIBTEST_ARGS
+        )
+        if suppression:
+            return set(), suppression
+        cargo_args = cargo_command.split(" -- ", 1)[0]
+        shape_err = _validate_cargo_test_invocation(
+            cargo_args.split(),
+            context="collaboration CI script cargo test",
+            require_tests=True,
+        )
+        if shape_err:
+            return set(), shape_err
+        invocation_tests = cargo_test_flags_in_text(cargo_args)
+        repeated = sorted(tests & invocation_tests)
+        if repeated:
+            return set(), (
+                "rust: collaboration CI script runs --test targets more than once: "
+                + ", ".join(repeated)
+            )
+        tests |= invocation_tests
     if not tests:
         return set(), "rust: collaboration CI script declares no --test targets"
     return tests, None
