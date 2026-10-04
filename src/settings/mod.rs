@@ -615,6 +615,35 @@ pub async fn apply_change(
     }))
 }
 
+impl OperationTx<'_, '_> {
+    async fn settings_rows(&mut self) -> Result<Vec<(String, Value)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => load_rows(&mut ***tx).await,
+            Self::SqliteFamily(tx) => tx
+                .query("SELECT key,value FROM instance_settings", &[])
+                .await?
+                .into_iter()
+                .map(|row| Ok((row.cell(0)?.string()?, row.cell(1)?.value()?)))
+                .collect(),
+        }
+    }
+    async fn settings_revision(&mut self) -> Result<i64, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => load_revision(&mut ***tx).await,
+            Self::SqliteFamily(tx) => tx
+                .query(
+                    "SELECT revision FROM instance_settings_meta WHERE id=1",
+                    &[],
+                )
+                .await?
+                .first()
+                .ok_or(sqlx::Error::RowNotFound)?
+                .cell(0)?
+                .integer(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,34 +742,5 @@ mod tests {
             &mut out,
         );
         assert_eq!(out, vec!["k.b.c"]);
-    }
-}
-
-impl OperationTx<'_, '_> {
-    async fn settings_rows(&mut self) -> Result<Vec<(String, Value)>, sqlx::Error> {
-        match self {
-            Self::Postgres(tx) => load_rows(&mut ***tx).await,
-            Self::SqliteFamily(tx) => tx
-                .query("SELECT key,value FROM instance_settings", &[])
-                .await?
-                .into_iter()
-                .map(|row| Ok((row.cell(0)?.string()?, row.cell(1)?.value()?)))
-                .collect(),
-        }
-    }
-    async fn settings_revision(&mut self) -> Result<i64, sqlx::Error> {
-        match self {
-            Self::Postgres(tx) => load_revision(&mut ***tx).await,
-            Self::SqliteFamily(tx) => tx
-                .query(
-                    "SELECT revision FROM instance_settings_meta WHERE id=1",
-                    &[],
-                )
-                .await?
-                .first()
-                .ok_or(sqlx::Error::RowNotFound)?
-                .cell(0)?
-                .integer(),
-        }
     }
 }

@@ -996,17 +996,6 @@ impl OperationTx<'_, '_> {
     }
 }
 
-async fn lock_system_revision_target(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace: Uuid,
-    target: RevisionTarget,
-    expected_writer_generation: Option<i64>,
-) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
-    OperationTx::Postgres(tx)
-        .lock_system_revision_target(workspace, target, expected_writer_generation)
-        .await
-}
-
 async fn load_system_revision_generation_pg(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,

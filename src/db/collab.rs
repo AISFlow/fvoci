@@ -47,7 +47,7 @@ use crate::db::backend::{Backend, DbTransaction, FamilyTx, OperationTx};
 use crate::db::codec::Cell;
 use crate::db::context::{lock_key_from_uuid, set_tenant};
 use crate::db::documents::empty_document_json;
-use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
+use crate::db::identity::{append_event, AuditAppend, EventAppend};
 use crate::projects::ProjectPermission;
 
 pub use crate::collab::derived_body::DOCUMENT_MAX_BODY_BYTES;
@@ -939,30 +939,6 @@ impl OperationTx<'_, '_> {
     }
 }
 
-async fn load_resource_content(
-    tx: &mut Transaction<'_, Postgres>,
-    t: &CollabTables,
-    workspace_id: Uuid,
-    resource_id: Uuid,
-) -> Result<(Value,), sqlx::Error> {
-    OperationTx::Postgres(tx)
-        .load_collab_resource_content(t, workspace_id, resource_id)
-        .await
-        .map(|body| (body,))
-}
-
-async fn ensure_collab_state_row(
-    tx: &mut Transaction<'_, Postgres>,
-    t: &CollabTables,
-    workspace_id: Uuid,
-    document_id: Uuid,
-    content_json: &Value,
-) -> Result<Result<(), CollabDbError>, sqlx::Error> {
-    OperationTx::Postgres(tx)
-        .ensure_collab_state(t, workspace_id, document_id, content_json)
-        .await
-}
-
 impl OperationTx<'_, '_> {
     async fn load_collab_resource_content(
         &mut self,
@@ -1493,7 +1469,7 @@ enum ActorAccess {
 /// order of the module doc: membership advisory lock, session recheck, live
 /// workspace, membership row, then the resource rows. Runs after `set_tenant`.
 /// Records `advisory_lock_us` for the advisory lock and `row_lock_us` for the
-/// rest. Callers map the result with [`authorize_collab_write`] or
+/// rest. Callers map the result with [`OperationTx::authorize_collab_write`] or
 /// [`authorize_collab_read`].
 impl OperationTx<'_, '_> {
     async fn lock_collab_actor(
@@ -1533,32 +1509,11 @@ impl OperationTx<'_, '_> {
         access
     }
 }
-
-/// Writer check (claim, load, append, compaction, derived-body write): the
-/// actor prefix, then Edit on an unarchived resource. A dead session or a
-/// non-member is `Forbidden`. Existence (tenant, trash, affiliation) decides
-/// `NotFound` before permission decides `Forbidden`.
-async fn authorize_collab_write(
-    tx: &mut Transaction<'_, Postgres>,
-    kind: CollabKind,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    document_id: Uuid,
-    timings: &mut CollabDbStageTimings,
-) -> Result<Result<(), CollabDbError>, sqlx::Error> {
-    OperationTx::Postgres(tx)
-        .authorize_collab_write(
-            kind,
-            workspace_id,
-            actor_user_id,
-            session_id,
-            document_id,
-            timings,
-        )
-        .await
-}
 impl OperationTx<'_, '_> {
+    /// Writer check (claim, load, append, compaction, derived-body write): the
+    /// actor prefix, then Edit on an unarchived resource. A dead session or a
+    /// non-member is `Forbidden`. Existence (tenant, trash, affiliation) decides
+    /// `NotFound` before permission decides `Forbidden`.
     pub(crate) async fn authorize_collab_write(
         &mut self,
         kind: CollabKind,
