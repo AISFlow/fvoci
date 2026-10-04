@@ -1,6 +1,6 @@
 //! Family global maintenance ownership. This record does not supply business
 //! authority, scheduled consumers, or fencing of remote storage/SMTP effects.
-use super::backend::{Backend, CommitUnknown, FamilyTx, OperationTx};
+use super::backend::{Backend, CommitCleanupUnknown, CommitUnknown, FamilyTx, OperationTx};
 use super::codec::Cell;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -96,6 +96,9 @@ impl FamilyMaintenanceClaimRequest {
             owner: Uuid::now_v7(),
         }
     }
+    pub fn key(&self) -> MaintenanceJobKey {
+        self.key
+    }
     pub async fn try_acquire(
         &self,
         backend: &Backend,
@@ -131,7 +134,10 @@ impl FamilyMaintenanceClaimRequest {
         }
         #[cfg(test)]
         test_hooks::commit_fault(&mut tx, self.owner, 0).await?;
-        if let Err(unknown) = tx.commit().await {
+        if let Err(unknown) = tx.commit_with_cleanup().await {
+            if unknown.cleanup_error.is_some() {
+                return Err(unconfirmed(unknown, None));
+            }
             match observe(backend, &prepared.proof).await {
                 Ok(row)
                     if row.matches(&prepared.proof)
@@ -169,15 +175,17 @@ pub enum MaintenanceClaimError {
     CommitUnknown {
         #[source]
         source: CommitUnknown,
+        cleanup_error: Option<sqlx::Error>,
         observation_error: Option<sqlx::Error>,
     },
 }
 fn unconfirmed(
-    source: CommitUnknown,
+    unknown: CommitCleanupUnknown,
     observation_error: Option<sqlx::Error>,
 ) -> MaintenanceClaimError {
     MaintenanceClaimError::CommitUnknown {
-        source,
+        source: unknown.source,
+        cleanup_error: unknown.cleanup_error,
         observation_error,
     }
 }
@@ -247,7 +255,10 @@ impl FamilyMaintenanceClaim {
         }
         #[cfg(test)]
         test_hooks::commit_fault(&mut tx, self.proof.owner, if release { 2 } else { 1 }).await?;
-        if let Err(unknown) = tx.commit().await {
+        if let Err(unknown) = tx.commit_with_cleanup().await {
+            if unknown.cleanup_error.is_some() {
+                return Err(unconfirmed(unknown, None));
+            }
             match observe(&self.backend, &self.proof).await {
                 Ok(row)
                     if row.generation == self.proof.generation
@@ -438,8 +449,9 @@ impl OperationTx<'_, '_> {
     }
 }
 
-/// A single fresh actual writer also waits for failed local COMMIT rollback or
-/// remote finish cleanup. No unbounded retry and no effects during observation.
+/// Called after the failed remote finish's OWN cleanup receipt. Local SQLx
+/// rollback is queued before connection reuse; this fresh reserved writer also
+/// waits for that work. No unbounded retry or effects during observation.
 async fn observe(
     backend: &Backend,
     proof: &FamilyMaintenanceProof,
@@ -912,6 +924,81 @@ mod tests {
             FamilyClaimAcquisition::Busy
         ));
         recovered.release().await.unwrap();
+        other.close().await.unwrap();
+        f.close().await;
+    }
+    #[tokio::test]
+    async fn maintenance_claim_common_entry_retains_identity_and_stale_generation() {
+        use crate::jobs::{GlobalClaimAcquisition, GlobalJobClaim};
+        let f = Fixture::new().await;
+        let other = f.second().await;
+        let request = FamilyMaintenanceClaimRequest::new(MaintenanceJobKey::Uploads);
+        let cancel = CancellationToken::new();
+        test_hooks::fault(request.owner, 0);
+        let error = match GlobalJobClaim::try_claim(&f.backend, &request, policy(), &cancel).await {
+            Err(error) => error,
+            _ => panic!("common entry must retain actual failed COMMIT"),
+        };
+        assert!(
+            matches!(&error, MaintenanceClaimError::CommitUnknown { source, cleanup_error: None, observation_error: None }
+            if source.source.as_database_error().is_some())
+        );
+        assert_eq!(f.row(MaintenanceJobKey::Uploads).await, (None, 0, None));
+        let first = match GlobalJobClaim::try_claim(&f.backend, &request, policy(), &cancel)
+            .await
+            .unwrap()
+        {
+            GlobalClaimAcquisition::Acquired(GlobalJobClaim::Family(claim)) => claim,
+            _ => panic!("same caller-retained request must make healthy progress"),
+        };
+        let old_proof = first.proof.clone();
+        let before = f.row(MaintenanceJobKey::Uploads).await;
+        assert_eq!(old_proof.owner, request.owner);
+        assert_eq!(old_proof.generation, 1);
+        drop(first); // Durable ownership remains; no automatic release.
+        test_hooks::fault(request.owner, 0);
+        let replay = match GlobalJobClaim::try_claim(&other, &request, policy(), &cancel)
+            .await
+            .unwrap()
+        {
+            GlobalClaimAcquisition::Acquired(GlobalJobClaim::Family(claim)) => claim,
+            _ => panic!("common entry must reconcile the same live durable identity"),
+        };
+        assert_eq!(replay.proof, old_proof);
+        assert_eq!(f.row(MaintenanceJobKey::Uploads).await, before);
+        sqlx::query("UPDATE maintenance_job_claims SET expires_at=0 WHERE job_key=8")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let next = match GlobalJobClaim::try_claim(&f.backend, &request, policy(), &cancel)
+            .await
+            .unwrap()
+        {
+            GlobalClaimAcquisition::Acquired(GlobalJobClaim::Family(claim)) => claim,
+            _ => panic!("same owner expiry must advance persisted generation"),
+        };
+        assert_eq!(next.proof.owner, old_proof.owner);
+        assert_eq!(next.proof.generation, 2);
+        let mut tx = f.backend.begin_write().await.unwrap();
+        let mut op = tx.operation();
+        assert!(!op
+            .check_family_maintenance_claim(&old_proof, MaintenanceJobKey::Uploads)
+            .await
+            .unwrap());
+        assert!(op
+            .renew_family_maintenance_claim(&old_proof, MaintenanceJobKey::Uploads, policy())
+            .await
+            .unwrap()
+            .is_none());
+        assert!(op
+            .check_family_maintenance_claim(next.proof(), MaintenanceJobKey::Uploads)
+            .await
+            .unwrap());
+        tx.rollback().await.unwrap();
+        assert_eq!(replay.release().await.unwrap(), FamilyLeaseAction::Lost);
+        assert_eq!(f.row(MaintenanceJobKey::Uploads).await.1, 2);
+        next.release().await.unwrap();
+        println!("S16 common retained owner actual FK failure/replay and same-owner generation1->2 refusal");
         other.close().await.unwrap();
         f.close().await;
     }

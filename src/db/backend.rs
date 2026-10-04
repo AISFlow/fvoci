@@ -178,6 +178,17 @@ pub struct CommitUnknown {
     #[source]
     pub source: sqlx::Error,
 }
+
+/// The original failed COMMIT and its own remote stream cleanup receipt.
+/// Existing callers retain the original commit API; claim reconciliation uses
+/// this boundary before opening a fresh writer.
+#[derive(Debug, thiserror::Error)]
+#[error("database commit outcome is unknown after owned cleanup")]
+pub struct CommitCleanupUnknown {
+    #[source]
+    pub source: CommitUnknown,
+    pub cleanup_error: Option<sqlx::Error>,
+}
 impl DbTransaction<'_> {
     pub async fn commit(self) -> Result<(), CommitUnknown> {
         let result = match self {
@@ -185,6 +196,15 @@ impl DbTransaction<'_> {
             Self::SqliteFamily(tx) => tx.commit().await,
         };
         result.map_err(|source| CommitUnknown { source })
+    }
+    pub async fn commit_with_cleanup(self) -> Result<(), CommitCleanupUnknown> {
+        match self {
+            Self::SqliteFamily(FamilyTx::Remote(tx)) => tx.commit_with_cleanup().await,
+            other => other.commit().await.map_err(|source| CommitCleanupUnknown {
+                source,
+                cleanup_error: None,
+            }),
+        }
     }
     pub async fn rollback(self) -> Result<(), sqlx::Error> {
         match self {
@@ -617,26 +637,68 @@ impl RemoteTx {
         self.lease.take();
         Ok(())
     }
-}
-impl Drop for RemoteTx {
-    fn drop(&mut self) {
-        let Some(connection) = self.connection.take() else {
-            return;
-        };
+    async fn commit_with_cleanup(mut self) -> Result<(), CommitCleanupUnknown> {
+        if let Err(error) = self.connection().execute_batch("COMMIT").await {
+            let source = CommitUnknown {
+                source: remote_error(error),
+            };
+            // The job is owned by the existing service JoinSet, not this
+            // receiver/future. Cancellation cannot abort its rollback or lose
+            // its cleanup error; no unrelated live transaction is awaited.
+            let receipt = self.enqueue_cleanup().expect("unfinished owned stream");
+            let cleanup_error = match receipt.await {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(shared_cleanup_error(error)),
+                Err(_) => Some(sqlx::Error::Protocol(
+                    "owned remote cleanup ended without a receipt".into(),
+                )),
+            };
+            return Err(CommitCleanupUnknown {
+                source,
+                cleanup_error,
+            });
+        }
+        self.connection.take();
+        self.lease.take();
+        Ok(())
+    }
+    fn enqueue_cleanup(
+        &mut self,
+    ) -> Option<tokio::sync::oneshot::Receiver<Result<(), Arc<sqlx::Error>>>> {
+        let connection = self.connection.take()?;
         let lease = self.lease.take();
-        // This quarantined stream is never reused. An explicit rollback reply
-        // is tracked; failures stay failures and require service observation.
+        let (send, receipt) = tokio::sync::oneshot::channel();
         self.owner
             .cleanup
             .lock()
             .expect("remote cleanup mutex poisoned")
             .spawn(async move {
-                let _lease = lease;
-                connection
+                let result = connection
                     .execute_batch("ROLLBACK")
                     .await
                     .map(|_| ())
                     .map_err(remote_error)
+                    .map_err(Arc::new);
+                // A receipt means this exact cleanup finished and the stream
+                // and admission lease were disposed, even on an error reply.
+                drop(connection);
+                drop(lease);
+                let _ = send.send(result.clone());
+                result.map_err(shared_cleanup_error)
             });
+        Some(receipt)
+    }
+}
+#[derive(Debug, Clone, thiserror::Error)]
+#[error(transparent)]
+struct SharedCleanupError(Arc<sqlx::Error>);
+fn shared_cleanup_error(error: Arc<sqlx::Error>) -> sqlx::Error {
+    sqlx::Error::AnyDriverError(Box::new(SharedCleanupError(error)))
+}
+impl Drop for RemoteTx {
+    fn drop(&mut self) {
+        // This quarantined stream is never reused. An explicit rollback reply
+        // is tracked; failures stay failures and require service observation.
+        let _ = self.enqueue_cleanup();
     }
 }

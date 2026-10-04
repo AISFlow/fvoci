@@ -105,9 +105,11 @@ pub enum GlobalClaimRelease {
     Family(FamilyLeaseAction),
 }
 impl GlobalJobClaim {
+    /// Caller retains the prepared identity across uncertainty and cancellation;
+    /// a later observation/replay uses this same request, not a new token.
     pub async fn try_claim(
         backend: &crate::db::backend::Backend,
-        key: MaintenanceJobKey,
+        request: &FamilyMaintenanceClaimRequest,
         family_policy: FamilyMaintenanceLeasePolicy,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<GlobalClaimAcquisition, MaintenanceClaimError> {
@@ -115,17 +117,16 @@ impl GlobalJobClaim {
             return Ok(GlobalClaimAcquisition::Cancelled);
         }
         if let crate::db::backend::Backend::Postgres(pool) = backend {
-            return Ok(match JobClaim::try_claim(pool, key as i32).await? {
-                Some(claim) => GlobalClaimAcquisition::Acquired(Self::Postgres(claim)),
-                None => GlobalClaimAcquisition::Busy,
-            });
+            return Ok(
+                match JobClaim::try_claim(pool, request.key() as i32).await? {
+                    Some(claim) => GlobalClaimAcquisition::Acquired(Self::Postgres(claim)),
+                    None => GlobalClaimAcquisition::Busy,
+                },
+            );
         }
         use crate::db::maintenance_claim::FamilyClaimAcquisition;
         Ok(
-            match FamilyMaintenanceClaimRequest::new(key)
-                .try_acquire(backend, family_policy, cancel)
-                .await?
-            {
+            match request.try_acquire(backend, family_policy, cancel).await? {
                 FamilyClaimAcquisition::Acquired(claim) => {
                     GlobalClaimAcquisition::Acquired(Self::Family(claim))
                 }
