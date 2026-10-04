@@ -659,6 +659,21 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for RequiredNullable<T> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct CreateDocumentBody {
+    /// Chosen once per logical ordinary wiki create, retained on response loss.
+    pub command_id: Uuid,
+    #[cfg_attr(feature = "api-schema", schema(value_type = Option<Uuid>, required = true, nullable = true))]
+    #[serde(default)]
+    pub parent_id: RequiredNullable<Uuid>,
+    pub title: String,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    #[cfg_attr(feature = "api-schema", schema(nullable = true))]
+    pub icon: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateProjectDocumentBody {
     #[cfg_attr(feature = "api-schema", schema(value_type = Option<Uuid>, required = true, nullable = true))]
     #[serde(default)]
     pub parent_id: RequiredNullable<Uuid>,

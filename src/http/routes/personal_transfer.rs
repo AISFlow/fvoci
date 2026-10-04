@@ -137,7 +137,12 @@ async fn preview(
     let selection: PersonalTransferSelection = serde_json::from_slice(&body)
         .map_err(|_| AppError::from_code(ProblemCode::InvalidInput))?;
     let output = preview_personal_transfer(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/personal_transfer.rs")
+            .map_err(crate::http::routes::tasks::internal)?,
         source,
         auth.user_id,
         auth.credential_id,
@@ -166,7 +171,12 @@ async fn transfer(
     }
     let ip = peer_ip(peer.ip());
     let output = transfer_personal_item(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/personal_transfer.rs")
+            .map_err(crate::http::routes::tasks::internal)?,
         source,
         auth.user_id,
         auth.credential_id,

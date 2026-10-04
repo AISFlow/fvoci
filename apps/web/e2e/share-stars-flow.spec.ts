@@ -55,7 +55,7 @@ test("owner stars and shares a wiki document; the public link needs no session a
   const childTitle = "공유 하위 문서";
   const bodyText = "공개로 읽는 본문";
   const rootRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
-    data: { parentId: null, title: rootTitle },
+    data: { commandId: crypto.randomUUID(), parentId: null, title: rootTitle },
   });
   expect(rootRes.status()).toBe(201);
   const root = (await readJson(rootRes, flowSchemas.document)) as {
@@ -63,7 +63,7 @@ test("owner stars and shares a wiki document; the public link needs no session a
     number: number;
   };
   const childRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
-    data: { parentId: root.id, title: childTitle },
+    data: { commandId: crypto.randomUUID(), parentId: root.id, title: childTitle },
   });
   expect(childRes.status()).toBe(201);
 

@@ -89,7 +89,7 @@ async fn create_wiki_doc(
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": parent, "title": title})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": parent, "title": title})),
         Some(cookie),
     )
     .await;

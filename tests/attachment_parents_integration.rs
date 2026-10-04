@@ -72,7 +72,7 @@ async fn create_wiki_document(app: &axum::Router, cookie: &str, ws: Uuid) -> Str
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{ws}/documents"),
-        Some(json!({"parentId": null, "title": "Doc"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Doc"})),
         Some(cookie),
     )
     .await;
@@ -796,7 +796,12 @@ async fn object_journal_waits_for_an_in_flight_complete() {
         "busy row kept"
     );
     let state = app_state(&c.harness.app_url).await;
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("PostgreSQL attachment fixture")
+        .expect("actual PG fixture backend");
     // Rows rescheduled a minute out; make them due and release the holder.
     sqlx::query("SELECT pg_advisory_unlock($1, $2)")
         .bind(fvoci_server::attachments::ATTACHMENT_LOCK_NAMESPACE)
@@ -1038,7 +1043,12 @@ async fn task_attachments_stay_out_of_shares_and_reach_extract_and_search() {
 
     // The HWP extract claim takes a task-parented attachment.
     let state = app_state(&c.harness.app_url).await;
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("PostgreSQL attachment fixture")
+        .expect("actual PG fixture backend");
     let claim = fvoci_server::db::attachment_extract::claim_extract(pool)
         .await
         .unwrap()
@@ -1169,7 +1179,16 @@ async fn signed_license_upload_and_storage_limits_reach_reservation() {
     let license =
         license_fixture::signed_license_with_limits(json!({"storageBytes": 30, "uploadBytes": 12}));
     state.auth = std::sync::Arc::new(fvoci_server::auth::AuthService {
-        db: fvoci_server::db::Db::with_license(state.auth.db.pool.clone(), license.clone()),
+        db: fvoci_server::db::Db::with_license(
+            state
+                .auth
+                .db
+                .pool
+                .postgres("PostgreSQL integration fixture")
+                .expect("actual PG fixture backend")
+                .clone(),
+            license.clone(),
+        ),
         password_keys: state.auth.password_keys.clone(),
     });
     state.quota = fvoci_server::db::quota::StorageQuota::from_license(license);

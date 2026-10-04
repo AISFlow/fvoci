@@ -2534,7 +2534,7 @@ test("ordinary research plan persists document origins explicit minutes and fres
     const response = await page.request.post(
       `/api/v1/workspaces/${fixture.workspaceId}/documents`,
       {
-        data: { parentId: null, title },
+        data: { commandId: crypto.randomUUID(), parentId: null, title },
       },
     );
     expect(response.status(), await response.text()).toBe(201);
@@ -3844,7 +3844,7 @@ test("a planner A-B-A target change cannot accept a retired goal into the new pe
     const response = await page.request.post(
       `/api/v1/workspaces/${fixture.workspaceId}/documents`,
       {
-        data: { parentId: null, title },
+        data: { commandId: crypto.randomUUID(), parentId: null, title },
       },
     );
     expect(response.status(), await response.text()).toBe(201);
@@ -4072,7 +4072,7 @@ test("a genuine new session retires held planning and estimate successes without
     const response = await page.request.post(
       `/api/v1/workspaces/${fixture.workspaceId}/documents`,
       {
-        data: { parentId: null, title },
+        data: { commandId: crypto.randomUUID(), parentId: null, title },
       },
     );
     expect(response.status(), await response.text()).toBe(201);
@@ -4698,7 +4698,7 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
   const fixture = await ordinaryTimerTask(page, "JOINT", true);
   const notesResponse = await page.request.post(
     `/api/v1/workspaces/${fixture.workspaceId}/documents`,
-    { data: { parentId: null, title: "공동 복원·측정 연구 노트" } },
+    { data: { commandId: crypto.randomUUID(), parentId: null, title: "공동 복원·측정 연구 노트" } },
   );
   expect(notesResponse.status(), await notesResponse.text()).toBe(201);
   const notes = z

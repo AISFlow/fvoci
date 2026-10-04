@@ -3,6 +3,8 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use super::backend::{Backend, OperationTx};
+use super::codec::Cell;
 use crate::auth::password::{hash_password, verify_password, Keyring};
 use crate::auth::session::{as_text_scale, as_week_starts_on, SessionUser};
 use crate::auth::token::SESSION_TTL_SECS;
@@ -96,10 +98,14 @@ pub struct SetupFirstOwnerInput {
 }
 
 pub async fn count_users(pool: &PgPool) -> Result<i64, sqlx::Error> {
-    let row: (i64,) = sqlx::query_as("SELECT count(*) FROM fvoci.users")
-        .fetch_one(pool)
-        .await?;
-    Ok(row.0)
+    count_users_backend(&Backend::Postgres(pool.clone())).await
+}
+
+pub async fn count_users_backend(backend: &Backend) -> Result<i64, sqlx::Error> {
+    let mut tx = backend.begin_read().await?;
+    let count = tx.operation().setup_user_count().await?;
+    tx.rollback().await?;
+    Ok(count)
 }
 
 pub async fn maybe_slide_session(
@@ -107,22 +113,87 @@ pub async fn maybe_slide_session(
     session_id: Uuid,
     expires_at: DateTime<Utc>,
 ) -> Result<DateTime<Utc>, sqlx::Error> {
+    maybe_slide_session_backend(&Backend::Postgres(pool.clone()), session_id, expires_at).await
+}
+
+pub async fn maybe_slide_session_backend(
+    backend: &Backend,
+    session_id: Uuid,
+    expires_at: DateTime<Utc>,
+) -> Result<DateTime<Utc>, sqlx::Error> {
     let remaining = expires_at - Utc::now();
-    if remaining.num_seconds() < SESSION_SLIDE_THRESHOLD_SECS {
-        let new_expires = Utc::now() + Duration::seconds(SESSION_TTL_SECS);
-        sqlx::query(
-            "UPDATE fvoci.sessions SET expires_at = $2, updated_at = now() WHERE id = $1 AND revoked_at IS NULL",
-        )
-        .bind(session_id)
-        .bind(new_expires)
-        .execute(pool)
-        .await?;
-        return Ok(new_expires);
+    if remaining.num_seconds() >= SESSION_SLIDE_THRESHOLD_SECS {
+        return Ok(expires_at);
     }
-    Ok(expires_at)
+    let new_expires = stored_now() + Duration::seconds(SESSION_TTL_SECS);
+    let mut tx = backend.begin_write().await?;
+    tx.operation()
+        .slide_session(session_id, new_expires)
+        .await?;
+    tx.commit().await.map_err(|unknown| unknown.source)?;
+    Ok(new_expires)
+}
+
+/// Generated DB instants deliberately start at storage precision. Requests
+/// containing finer precision still fail the checked Cell::instant boundary.
+pub(crate) fn stored_now() -> DateTime<Utc> {
+    DateTime::from_timestamp_micros(Utc::now().timestamp_micros())
+        .expect("current time in chrono range")
 }
 
 pub async fn find_live_session(
+    pool: &PgPool,
+    hash: &str,
+) -> Result<Option<LiveSession>, sqlx::Error> {
+    find_live_session_backend(&Backend::Postgres(pool.clone()), hash).await
+}
+
+pub async fn find_live_session_backend(
+    backend: &Backend,
+    hash: &str,
+) -> Result<Option<LiveSession>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return find_live_session_pg(pool, hash).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let live = match tx.operation() {
+        OperationTx::SqliteFamily(ref mut family) => {
+            let rows=family.query("SELECT s.id,s.expires_at,u.id,u.email,u.given_name,u.family_name,u.text_scale,u.email_verified_at,u.is_instance_admin,u.locale,u.timezone,u.week_starts_on,(u.password_hash IS NOT NULL) FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?1 AND s.revoked_at IS NULL AND s.expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) AND u.deleted_at IS NULL AND u.suspended_at IS NULL LIMIT 1", &[Cell::text(hash)]).await?;
+            rows.first()
+                .map(|r| {
+                    Ok::<LiveSession, sqlx::Error>(LiveSession {
+                        session_id: r.cell(0)?.id()?,
+                        expires_at: r.cell(1)?.datetime()?,
+                        user_id: r.cell(2)?.id()?,
+                        email: r.cell(3)?.string()?,
+                        given_name: r.cell(4)?.string()?,
+                        family_name: r.cell(5)?.optional(Cell::string)?,
+                        text_scale: i16::try_from(r.cell(6)?.integer()?).map_err(|_| {
+                            sqlx::Error::Protocol("stored text_scale exceeds i16".into())
+                        })?,
+                        email_verified_at: r.cell(7)?.optional(Cell::datetime)?,
+                        is_instance_admin: r.cell(8)?.boolean()?,
+                        locale: r.cell(9)?.string()?,
+                        timezone: r.cell(10)?.string()?,
+                        week_starts_on: i32::try_from(r.cell(11)?.integer()?).map_err(|_| {
+                            sqlx::Error::Protocol("stored week_starts_on exceeds i32".into())
+                        })?,
+                        has_password: r.cell(12)?.boolean()?,
+                    })
+                })
+                .transpose()?
+        }
+        OperationTx::Postgres(_) => {
+            return Err(sqlx::Error::Protocol(
+                "family session read has unexpected transaction kind".into(),
+            ));
+        }
+    };
+    tx.rollback().await?;
+    Ok(live)
+}
+
+async fn find_live_session_pg(
     pool: &PgPool,
     token_hash: &str,
 ) -> Result<Option<LiveSession>, sqlx::Error> {
@@ -232,122 +303,79 @@ pub async fn setup_first_owner(
     pool: &PgPool,
     input: SetupFirstOwnerInput,
 ) -> Result<SetupFirstOwnerResult, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    lock_instance_admin_changes(&mut tx).await?;
+    setup_first_owner_backend(&Backend::Postgres(pool.clone()), input).await
+}
 
-    let existing: (i64,) = sqlx::query_as("SELECT count(*) FROM fvoci.users")
-        .fetch_one(&mut *tx)
-        .await?;
-    if existing.0 > 0 {
+/// One setup policy and commit owner for all selected backends. SQLite's
+/// writer reservation is already held before the first setup/admission read.
+pub async fn setup_first_owner_backend(
+    backend: &Backend,
+    input: SetupFirstOwnerInput,
+) -> Result<SetupFirstOwnerResult, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    let mut operation = tx.operation();
+    operation.lock_instance_admin_changes().await?;
+    if operation.setup_user_count().await? > 0 {
+        tx.rollback().await?;
         return Ok(SetupFirstOwnerResult::Closed);
     }
-
-    sqlx::query("SELECT set_config('app.tenant_id', $1, true)")
-        .bind(input.workspace_id.to_string())
-        .execute(&mut *tx)
-        .await?;
-
-    if let Err(err) = insert_setup_rows(&mut tx, &input).await {
-        if let Some(db_err) = err.as_database_error() {
-            if db_err.constraint() == Some("workspaces_slug_unique") {
-                return Ok(SetupFirstOwnerResult::SlugTaken);
-            }
+    operation.set_tenant(input.workspace_id).await?;
+    // This check also provides the SQLite-family SlugTaken outcome without
+    // parsing driver error strings. It is protected by the setup writer lock.
+    if operation.setup_slug_exists(&input.workspace_slug).await? {
+        tx.rollback().await?;
+        return Ok(SetupFirstOwnerResult::SlugTaken);
+    }
+    if let Err(err) = insert_setup_rows(&mut operation, &input).await {
+        let slug_taken = err
+            .as_database_error()
+            .is_some_and(|err| err.constraint() == Some("workspaces_slug_unique"));
+        tx.rollback().await?;
+        if slug_taken {
+            return Ok(SetupFirstOwnerResult::SlugTaken);
         }
         return Err(err);
     }
-
-    tx.commit().await?;
+    tx.commit().await.map_err(|unknown| unknown.source)?;
     Ok(SetupFirstOwnerResult::Created)
 }
 
 async fn insert_setup_rows(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut OperationTx<'_, '_>,
     input: &SetupFirstOwnerInput,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"
-        INSERT INTO fvoci.users (
-            id, email, password_hash, given_name, family_name, is_instance_admin,
-            locale, timezone, week_starts_on, text_scale
-        ) VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9)
-        "#,
-    )
-    .bind(input.user_id)
-    .bind(&input.email)
-    .bind(&input.password_hash)
-    .bind(&input.given_name)
-    .bind(&input.family_name)
-    .bind(&input.locale)
-    .bind(&input.timezone)
-    .bind(input.week_starts_on)
-    .bind(input.text_scale)
-    .execute(&mut **tx)
-    .await?;
-
-    sqlx::query("INSERT INTO fvoci.workspaces (id, slug, name) VALUES ($1, $2, $3)")
-        .bind(input.workspace_id)
-        .bind(&input.workspace_slug)
-        .bind(&input.workspace_name)
-        .execute(&mut **tx)
-        .await?;
-
-    sqlx::query(
-        "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'owner')",
-    )
-    .bind(input.workspace_id)
-    .bind(input.user_id)
-    .execute(&mut **tx)
-    .await?;
-
-    sqlx::query(
-        r#"
-        INSERT INTO fvoci.sessions (id, user_id, token_hash, expires_at)
-        VALUES ($1, $2, $3, $4)
-        "#,
-    )
-    .bind(input.session_id)
-    .bind(input.user_id)
-    .bind(&input.session_token_hash)
-    .bind(input.session_expires_at)
-    .execute(&mut **tx)
-    .await?;
-
-    let payload = json!({
-        "userId": input.user_id.to_string(),
-        "workspaceId": input.workspace_id.to_string(),
-        "email": input.email,
-    });
-
-    append_event(
-        tx,
-        EventAppend {
-            id: input.event_id,
-            workspace_id: Some(input.workspace_id),
-            actor_user_id: Some(input.user_id),
-            verb: "instance.setup".to_string(),
-            target_type: Some("workspace".to_string()),
-            target_id: Some(input.workspace_id),
-            payload: payload.clone(),
-        },
+    tx.insert_setup_user(input).await?;
+    tx.insert_setup_workspace(input).await?;
+    tx.insert_setup_membership(input).await?;
+    tx.create_session(
+        input.session_id,
+        input.user_id,
+        &input.session_token_hash,
+        input.session_expires_at,
     )
     .await?;
-
-    append_audit(
-        tx,
-        AuditAppend {
-            id: input.audit_id,
-            workspace_id: Some(input.workspace_id),
-            actor_user_id: Some(input.user_id),
-            verb: "instance.setup".to_string(),
-            target_type: Some("workspace".to_string()),
-            target_id: Some(input.workspace_id),
-            payload,
-            ip: input.ip.clone(),
-        },
-    )
+    let payload = json!({"userId":input.user_id.to_string(),"workspaceId":input.workspace_id.to_string(),"email":input.email});
+    tx.append_event(EventAppend {
+        id: input.event_id,
+        workspace_id: Some(input.workspace_id),
+        actor_user_id: Some(input.user_id),
+        verb: "instance.setup".into(),
+        target_type: Some("workspace".into()),
+        target_id: Some(input.workspace_id),
+        payload: payload.clone(),
+    })
     .await?;
-
-    Ok(())
+    tx.append_audit(AuditAppend {
+        id: input.audit_id,
+        workspace_id: Some(input.workspace_id),
+        actor_user_id: Some(input.user_id),
+        verb: "instance.setup".into(),
+        target_type: Some("workspace".into()),
+        target_id: Some(input.workspace_id),
+        payload,
+        ip: input.ip.clone(),
+    })
+    .await
 }
 
 pub async fn password_hash_by_id(
@@ -733,7 +761,18 @@ pub async fn authenticate_password(
     password: &str,
     ring: &Keyring,
 ) -> Result<Option<Uuid>, sqlx::Error> {
-    let user = find_user_id_by_email(pool, email).await?;
+    authenticate_password_backend(&Backend::Postgres(pool.clone()), email, password, ring).await
+}
+
+pub async fn authenticate_password_backend(
+    backend: &Backend,
+    email: &str,
+    password: &str,
+    ring: &Keyring,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    let mut tx = backend.begin_read().await?;
+    let user = tx.operation().password_user_by_email(email).await?;
+    tx.rollback().await?;
     let (user_id, suspended) = match user {
         Some(row) => row,
         None => {
@@ -741,22 +780,36 @@ pub async fn authenticate_password(
             return Ok(None);
         }
     };
-
-    let stored = password_hash_by_id(pool, user_id).await?;
+    let mut tx = backend.begin_read().await?;
+    let stored = tx.operation().password_hash(user_id).await?;
+    tx.rollback().await?;
     let verified = verify_password(stored.as_deref(), password, ring).await;
     if !verified.ok || suspended.is_some() {
         return Ok(None);
     }
-
     if verified.needs_pepper_rotation {
         if let Some(old_hash) = stored.as_deref() {
             if let Ok(new_hash) = hash_password(password, ring).await {
-                let _ = rehash_password_if_unchanged(pool, user_id, &new_hash, old_hash).await;
+                // Preserve the existing optional CAS rehash policy. Successful
+                // authentication does not depend on opportunistic rotation.
+                let _ = rehash_password_backend(backend, user_id, &new_hash, old_hash).await;
             }
         }
     }
-
     Ok(Some(user_id))
+}
+
+async fn rehash_password_backend(
+    backend: &Backend,
+    user: Uuid,
+    new_hash: &str,
+    old_hash: &str,
+) -> Result<(), sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    tx.operation()
+        .rehash_password(user, new_hash, old_hash)
+        .await?;
+    tx.commit().await.map_err(|unknown| unknown.source)
 }
 
 pub(crate) async fn append_event(
@@ -839,4 +892,287 @@ pub fn new_setup_input(params: SetupSessionParams) -> SetupFirstOwnerInput {
         audit_id: Uuid::now_v7(),
         ip: params.client_ip,
     }
+}
+
+impl OperationTx<'_, '_> {
+    async fn lock_instance_admin_changes(&mut self) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => lock_instance_admin_changes(tx).await,
+            Self::SqliteFamily(tx) => tx.require_writer(),
+        }
+    }
+    async fn password_user_by_email(
+        &mut self,
+        email: &str,
+    ) -> Result<Option<(Uuid, Option<DateTime<Utc>>)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query_as(
+                    "SELECT id,suspended_at FROM fvoci.users WHERE email=$1 AND deleted_at IS NULL",
+                )
+                .bind(email)
+                .fetch_optional(&mut ***tx)
+                .await
+            }
+            Self::SqliteFamily(tx) => {
+                let rows=tx.query("SELECT id,suspended_at FROM users WHERE email=?1 AND deleted_at IS NULL LIMIT 1", &[Cell::text(email)]).await?;
+                rows.first()
+                    .map(|r| {
+                        Ok::<_, sqlx::Error>((
+                            r.cell(0)?.id()?,
+                            r.cell(1)?.optional(Cell::datetime)?,
+                        ))
+                    })
+                    .transpose()
+            }
+        }
+    }
+    async fn password_hash(&mut self, user: Uuid) -> Result<Option<String>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query_scalar("SELECT fvoci.app_user_password_hash($1)")
+                    .bind(user)
+                    .fetch_one(&mut ***tx)
+                    .await
+            }
+            Self::SqliteFamily(tx) => {
+                let rows=tx.query("SELECT password_hash FROM users WHERE id=?1 AND deleted_at IS NULL LIMIT 1", &[Cell::uuid(user)]).await?;
+                match rows.first() {
+                    Some(r) => r.cell(0)?.optional(Cell::string),
+                    None => Ok(None),
+                }
+            }
+        }
+    }
+    async fn rehash_password(
+        &mut self,
+        user: Uuid,
+        new_hash: &str,
+        old_hash: &str,
+    ) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query("SELECT fvoci.app_user_rehash_password_hash($1,$2,$3)")
+                    .bind(user)
+                    .bind(new_hash)
+                    .bind(old_hash)
+                    .execute(&mut ***tx)
+                    .await?;
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.execute("UPDATE users SET password_hash=?2,updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE id=?1 AND deleted_at IS NULL AND password_hash=?3", &[Cell::uuid(user),Cell::text(new_hash),Cell::text(old_hash)]).await?;
+            }
+        }
+        Ok(())
+    }
+    pub(crate) async fn lock_sign_in(&mut self, user: Uuid) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => lock_sign_in(tx, user).await,
+            Self::SqliteFamily(tx) => tx.require_writer(),
+        }
+    }
+    async fn slide_session(&mut self, id: Uuid, expires: DateTime<Utc>) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query("UPDATE fvoci.sessions SET expires_at=$2,updated_at=now() WHERE id=$1 AND revoked_at IS NULL").bind(id).bind(expires).execute(&mut ***tx).await?;
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.execute("UPDATE sessions SET expires_at=?2,updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE id=?1 AND revoked_at IS NULL",&[Cell::uuid(id),Cell::instant(expires)?]).await?;
+            }
+        }
+        Ok(())
+    }
+    async fn setup_user_count(&mut self) -> Result<i64, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query_scalar("SELECT count(*) FROM fvoci.users")
+                    .fetch_one(&mut ***tx)
+                    .await
+            }
+            Self::SqliteFamily(tx) => tx
+                .query("SELECT count(*) FROM users", &[])
+                .await?
+                .first()
+                .ok_or(sqlx::Error::RowNotFound)?
+                .cell(0)?
+                .integer(),
+        }
+    }
+    async fn setup_slug_exists(&mut self, slug: &str) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fvoci.workspaces WHERE slug=$1)")
+                    .bind(slug)
+                    .fetch_one(&mut ***tx)
+                    .await
+            }
+            Self::SqliteFamily(tx) => tx
+                .query(
+                    "SELECT EXISTS(SELECT 1 FROM workspaces WHERE slug=?1)",
+                    &[Cell::text(slug)],
+                )
+                .await?
+                .first()
+                .ok_or(sqlx::Error::RowNotFound)?
+                .cell(0)?
+                .boolean(),
+        }
+    }
+    async fn insert_setup_user(&mut self, input: &SetupFirstOwnerInput) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query("INSERT INTO fvoci.users (id,email,password_hash,given_name,family_name,is_instance_admin,locale,timezone,week_starts_on,text_scale) VALUES ($1,$2,$3,$4,$5,true,$6,$7,$8,$9)")
+                .bind(input.user_id).bind(&input.email).bind(&input.password_hash).bind(&input.given_name).bind(&input.family_name).bind(&input.locale).bind(&input.timezone).bind(input.week_starts_on).bind(input.text_scale).execute(&mut ***tx).await?;
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(input.workspace_id)?;
+                tx.execute("INSERT INTO users (id,email,password_hash,given_name,family_name,is_instance_admin,locale,timezone,week_starts_on,text_scale) VALUES (?1,?2,?3,?4,?5,1,?6,?7,?8,?9)",
+                    &[Cell::uuid(input.user_id), Cell::text(&input.email), Cell::text(&input.password_hash), Cell::text(&input.given_name), Cell::optional_text(input.family_name.as_deref()), Cell::text(&input.locale), Cell::text(&input.timezone), Cell::Integer(i64::from(input.week_starts_on)), Cell::Integer(i64::from(input.text_scale))]).await?;
+            }
+        }
+        Ok(())
+    }
+    async fn insert_setup_workspace(
+        &mut self,
+        input: &SetupFirstOwnerInput,
+    ) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query("INSERT INTO fvoci.workspaces (id,slug,name) VALUES ($1,$2,$3)")
+                    .bind(input.workspace_id)
+                    .bind(&input.workspace_slug)
+                    .bind(&input.workspace_name)
+                    .execute(&mut ***tx)
+                    .await?;
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(input.workspace_id)?;
+                tx.execute(
+                    "INSERT INTO workspaces (id,slug,name) VALUES (?1,?2,?3)",
+                    &[
+                        Cell::uuid(input.workspace_id),
+                        Cell::text(&input.workspace_slug),
+                        Cell::text(&input.workspace_name),
+                    ],
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+    async fn insert_setup_membership(
+        &mut self,
+        input: &SetupFirstOwnerInput,
+    ) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query("INSERT INTO fvoci.memberships (workspace_id,user_id,role) VALUES ($1,$2,'owner')").bind(input.workspace_id).bind(input.user_id).execute(&mut ***tx).await?;
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(input.workspace_id)?;
+                tx.execute(
+                    "INSERT INTO memberships (workspace_id,user_id,role) VALUES (?1,?2,'owner')",
+                    &[Cell::uuid(input.workspace_id), Cell::uuid(input.user_id)],
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+    pub(crate) async fn create_session(
+        &mut self,
+        session: Uuid,
+        user: Uuid,
+        hash: &str,
+        expires: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => create_session(tx, session, user, hash, expires).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.execute(
+                    "INSERT INTO sessions (id,user_id,token_hash,expires_at) VALUES (?1,?2,?3,?4)",
+                    &[
+                        Cell::uuid(session),
+                        Cell::uuid(user),
+                        Cell::text(hash),
+                        Cell::instant(expires)?,
+                    ],
+                )
+                .await?;
+                Ok(())
+            }
+        }
+    }
+    pub(crate) async fn append_event(&mut self, row: EventAppend) -> Result<(), sqlx::Error> {
+        self.append_event_channel(row, "web").await
+    }
+    pub(crate) async fn append_event_channel(
+        &mut self,
+        row: EventAppend,
+        channel: &str,
+    ) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => append_event_channel(tx, row, channel).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                if let Some(workspace) = row.workspace_id {
+                    tx.require_tenant(workspace)?;
+                } else {
+                    tx.require_system_context()?;
+                }
+                let seq = allocate_family_event_sequence(tx).await?;
+                tx.execute("INSERT INTO events (id,seq,workspace_id,actor_user_id,verb,target_type,target_id,payload,channel) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)", &[Cell::uuid(row.id),Cell::Integer(seq),Cell::optional_uuid(row.workspace_id),Cell::optional_uuid(row.actor_user_id),Cell::text(row.verb),Cell::optional_text(row.target_type.as_deref()),Cell::optional_uuid(row.target_id),Cell::json(&row.payload)?,Cell::text(channel)]).await?;
+                Ok(())
+            }
+        }
+    }
+    pub(crate) async fn append_audit(&mut self, row: AuditAppend) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => append_audit(tx, row).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                if let Some(workspace) = row.workspace_id {
+                    tx.require_tenant(workspace)?;
+                } else {
+                    tx.require_system_context()?;
+                }
+                tx.execute("INSERT INTO audit_log (id,workspace_id,actor_user_id,verb,target_type,target_id,payload,ip) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", &[Cell::uuid(row.id),Cell::optional_uuid(row.workspace_id),Cell::optional_uuid(row.actor_user_id),Cell::text(row.verb),Cell::optional_text(row.target_type.as_deref()),Cell::optional_uuid(row.target_id),Cell::json(&row.payload)?,Cell::optional_text(row.ip.as_deref())]).await?;
+                Ok(())
+            }
+        }
+    }
+}
+
+/// SQLite-family visible event order is allocated only inside the owning
+/// serialized writer transaction. Rolled-back values never reach a reader;
+/// the counter survives retention/purge, including an empty events table.
+async fn allocate_family_event_sequence(
+    tx: &mut super::backend::FamilyTx,
+) -> Result<i64, sqlx::Error> {
+    tx.require_writer()?;
+    let rows = tx
+        .query("SELECT last_seq FROM event_sequence WHERE id=1", &[])
+        .await?;
+    let current = rows
+        .first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .cell(0)?
+        .integer()?;
+    let next = current
+        .checked_add(1)
+        .filter(|next| current >= 0 && *next > 0)
+        .ok_or_else(|| sqlx::Error::Protocol("event sequence is invalid or exhausted".into()))?;
+    let changed=tx.execute("UPDATE event_sequence SET last_seq=?2 WHERE id=1 AND typeof(last_seq)='integer' AND last_seq=?1 AND last_seq<9223372036854775807", &[Cell::Integer(current),Cell::Integer(next)]).await?;
+    if changed != 1 {
+        return Err(sqlx::Error::Protocol(
+            "event sequence allocation rejected".into(),
+        ));
+    }
+    Ok(next)
 }

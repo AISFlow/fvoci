@@ -103,7 +103,12 @@ async fn get_robots_txt() -> Response {
 /// Public RFC 9116 security contact (source `server.ts` `/.well-known/security.txt`).
 async fn get_security_txt(State(state): State<AppState>) -> Result<Response, AppError> {
     let values = settings::current_values_with_license(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/legal.rs")
+            .map_err(internal)?,
         &state.branding_name,
         &state.auth.db.license,
     )
@@ -147,7 +152,12 @@ async fn get_legal(
 ) -> Result<Json<crate::api::dto::LegalDocumentOutput>, AppError> {
     kind_param(&kind)?;
     let Query(query) = query.map_err(AppError::from)?;
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/legal.rs")
+        .map_err(internal)?;
     let doc = match query.version.as_deref() {
         None => latest_legal(pool, &kind).await,
         Some(raw) => legal_version(pool, &kind, version_param(raw)?).await,
@@ -162,9 +172,17 @@ async fn get_legal_versions(
     Path(kind): Path<String>,
 ) -> Result<Json<LegalVersionsResponse>, AppError> {
     kind_param(&kind)?;
-    let docs = list_legal_versions(&state.auth.db.pool, &kind)
-        .await
-        .map_err(internal)?;
+    let docs = list_legal_versions(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/legal.rs")
+            .map_err(internal)?,
+        &kind,
+    )
+    .await
+    .map_err(internal)?;
     Ok(Json(LegalVersionsResponse {
         versions: docs
             .into_iter()
@@ -186,9 +204,17 @@ async fn get_pending_consents(
     jar: CookieJar,
 ) -> Result<Json<ConsentsPendingResponse>, AppError> {
     let auth = require_request_auth(&state, &headers, &jar, Access::Session, None).await?;
-    let pending = pending_consents(&state.auth.db.pool, auth.user_id)
-        .await
-        .map_err(internal)?;
+    let pending = pending_consents(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/legal.rs")
+            .map_err(internal)?,
+        auth.user_id,
+    )
+    .await
+    .map_err(internal)?;
     Ok(Json(ConsentsPendingResponse {
         pending: pending.into_iter().map(legal_output).collect(),
     }))
@@ -215,9 +241,19 @@ async fn post_consents(
         .filter_map(|item| i32::try_from(item.version).ok().map(|v| (item.kind, v)))
         .collect();
     let ip = peer_ip(peer.ip());
-    match record_consents(&state.auth.db.pool, auth.user_id, &items, Some(&ip))
-        .await
-        .map_err(internal)?
+    match record_consents(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/legal.rs")
+            .map_err(internal)?,
+        auth.user_id,
+        &items,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?
     {
         RecordConsentsOutcome::Recorded => Ok(Json(OkResponse { ok: true })),
         RecordConsentsOutcome::NotLive => {
@@ -234,10 +270,19 @@ async fn get_workspace_consents(
 ) -> Result<Json<WorkspaceConsentsResponse>, AppError> {
     let auth =
         require_request_auth(&state, &headers, &jar, Access::Session, Some(workspace_id)).await?;
-    let members = workspace_consents(&state.auth.db.pool, workspace_id, auth.user_id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(not_found)?;
+    let members = workspace_consents(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/legal.rs")
+            .map_err(internal)?,
+        workspace_id,
+        auth.user_id,
+    )
+    .await
+    .map_err(internal)?
+    .ok_or_else(not_found)?;
     Ok(Json(WorkspaceConsentsResponse {
         members: members
             .into_iter()
@@ -263,14 +308,14 @@ async fn get_instance(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let snapshot = settings::load(
+    let snapshot = settings::load_backend(
         &state.auth.db.pool,
         &state.auth.db.settings_boot,
         &state.branding_name,
     )
     .await
     .map_err(internal)?;
-    let vapid_public = crate::push::load_vapid_public_key(&state.auth.db.pool)
+    let vapid_public = crate::push::vapid::load_vapid_public_key_backend(&state.auth.db.pool)
         .await
         .map_err(internal)?;
     let values = snapshot.values;
@@ -325,7 +370,12 @@ async fn get_branding_asset(
     let kind = BrandingAssetKind::parse(&asset)
         .ok_or_else(|| AppError::with_source(ProblemCode::InvalidInput, "/asset"))?;
     let values = settings::current_values_with_license(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/legal.rs")
+            .map_err(internal)?,
         &state.branding_name,
         &state.auth.db.license,
     )

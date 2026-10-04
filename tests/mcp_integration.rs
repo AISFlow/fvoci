@@ -241,7 +241,7 @@ async fn mcp_stdio_tools_against_real_server_with_scoped_pat() {
         reqwest::Method::POST,
         &format!("/api/v1/workspaces/{ws}/documents"),
         &cookie,
-        Some(json!({"parentId": null, "title": "MCP doc"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "MCP doc"})),
     )
     .await;
     let doc_id = doc["id"].as_str().unwrap().to_string();

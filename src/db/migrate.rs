@@ -123,6 +123,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/054_timer_audit_actor_index.sql"),
         54,
     ),
+    (
+        include_str!("../../migrations/055_wiki_create_commands.sql"),
+        55,
+    ),
 ];
 
 pub(crate) const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -804,6 +808,10 @@ mod tests {
             54,
             "53a6ed1058565b61305ed34c41b90a80a2d3f0dd55a4d818813672b1ac43afbc",
         ),
+        (
+            55,
+            "dc60f939985a5c000d57a7f266c12c247373601f92759630b324b22b4a29af45",
+        ),
     ];
 
     #[test]
@@ -871,5 +879,583 @@ mod tests {
         assert!(!sql.contains(APP_ROLE_PLACEHOLDER));
         assert!(sql.contains("TO \"app\"\"x\";"));
         assert!(!sql.contains("BEGIN") && !sql.contains("COMMIT"));
+    }
+}
+
+/// SQLite-family lineage: these are executed steps, never PG version markers.
+pub const SQLITE_LINEAGE: &str = "fvoci-sqlite-current-v1";
+const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
+    (
+        include_str!("../../migrations/sqlite/001_current_schema.sql"),
+        "0d49ad2c13bcc7942e95441f9965ff3a60f8982b10b3baa55d4b46e00420965f",
+    ),
+    (
+        include_str!("../../migrations/sqlite/002_wiki_create_commands.sql"),
+        "8460c39b4f0815fabf9e13e958ab6a99f2415ad10b59e04bd6de397724abe45c",
+    ),
+    (
+        include_str!("../../migrations/sqlite/003_collab_room_fences.sql"),
+        "fd9b35411378d7485c40f9fcac2821121eb260c1a09dc7bdeb08a72608ba6d70",
+    ),
+];
+
+/// Held by the actual server for its entire joined runtime, or exclusively
+/// by preparation until every migration connection has closed. Locks use
+/// the database inode, so equivalent paths cannot bypass admission.
+pub struct SqliteAdmission(std::fs::File);
+impl SqliteAdmission {
+    pub fn server(path: &std::path::Path) -> Result<Self, sqlx::Error> {
+        Self::acquire(path, false)
+    }
+    fn migration(path: &std::path::Path) -> Result<Self, sqlx::Error> {
+        Self::acquire(path, true)
+    }
+    fn acquire(path: &std::path::Path, migration: bool) -> Result<Self, sqlx::Error> {
+        if !path.is_absolute() || path.file_name().is_none() {
+            return Err(schema_error(
+                "SQLite requires an absolute persistent database file",
+            ));
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(migration);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(path).map_err(sqlx::Error::Io)?;
+        let result = if migration {
+            file.try_lock()
+        } else {
+            file.try_lock_shared()
+        };
+        result.map_err(|_| {
+            schema_error(
+                "SQLite server/migrator admission is held; stop live servers before migration",
+            )
+        })?;
+        Ok(Self(file))
+    }
+}
+impl Drop for SqliteAdmission {
+    fn drop(&mut self) {
+        // Closing the owned OS handle releases this lock, including process
+        // termination. Explicit server shutdown joins consumers before here.
+        let _ = self.0.unlock();
+    }
+}
+
+fn schema_error(message: impl Into<String>) -> sqlx::Error {
+    sqlx::Error::Protocol(message.into())
+}
+
+/// A migration step's DDL and marker share one reserved writer transaction.
+/// Cancellation cannot publish a partial step. Restart checks actual receipts
+/// and schema before deciding whether another step is needed.
+pub async fn run_sqlite_migrations(path: &std::path::Path) -> Result<(), sqlx::Error> {
+    start_sqlite_migration(path)?.wait().await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SqliteMigrationDrain {
+    Pending,
+    Closed,
+    Quarantined,
+}
+
+struct MigrationOwnerState {
+    drain: tokio::sync::watch::Receiver<SqliteMigrationDrain>,
+    join: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+/// A cancellation observer can wait for the finite cleanup owner after the
+/// request future is gone. Closed means all owned pool/worker closure finished.
+#[derive(Clone)]
+pub struct SqliteMigrationObserver(std::sync::Arc<MigrationOwnerState>);
+impl SqliteMigrationObserver {
+    pub async fn wait(&self) -> Result<SqliteMigrationDrain, sqlx::Error> {
+        let mut drain = self.0.drain.clone();
+        loop {
+            let state = *drain.borrow();
+            if state != SqliteMigrationDrain::Pending {
+                let join = self
+                    .0
+                    .join
+                    .lock()
+                    .map_err(|_| schema_error("migration join lock poisoned"))?
+                    .take();
+                if let Some(join) = join {
+                    join.join()
+                        .map_err(|_| schema_error("migration owner thread panicked"))?;
+                }
+                return Ok(state);
+            }
+            drain
+                .changed()
+                .await
+                .map_err(|_| schema_error("migration owner ended without a drain receipt"))?;
+        }
+    }
+}
+
+pub struct SqliteMigration {
+    cancel: tokio_util::sync::CancellationToken,
+    result: Option<tokio::sync::oneshot::Receiver<Result<(), sqlx::Error>>>,
+    observer: SqliteMigrationObserver,
+}
+impl SqliteMigration {
+    pub fn observer(&self) -> SqliteMigrationObserver {
+        self.observer.clone()
+    }
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+    pub async fn wait(mut self) -> Result<(), sqlx::Error> {
+        let result = self
+            .result
+            .take()
+            .expect("one migration result receiver")
+            .await
+            .map_err(|_| schema_error("migration owner ended without a result"))?;
+        self.observer.wait().await?;
+        result
+    }
+}
+impl Drop for SqliteMigration {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+#[cfg(feature = "db-tests")]
+pub struct SqliteMigrationTestControl {
+    pub connected: tokio::sync::oneshot::Sender<sqlx::SqlitePool>,
+    pub proceed: tokio::sync::oneshot::Receiver<()>,
+    pub cleanup_started: Option<tokio::sync::oneshot::Sender<()>>,
+}
+#[cfg(feature = "db-tests")]
+type MigrationControl = Option<SqliteMigrationTestControl>;
+#[cfg(not(feature = "db-tests"))]
+type MigrationControl = ();
+
+pub fn start_sqlite_migration(path: &std::path::Path) -> Result<SqliteMigration, sqlx::Error> {
+    start_sqlite_migration_owned(path, Default::default())
+}
+#[cfg(feature = "db-tests")]
+pub fn start_sqlite_migration_controlled(
+    path: &std::path::Path,
+    control: SqliteMigrationTestControl,
+) -> Result<SqliteMigration, sqlx::Error> {
+    start_sqlite_migration_owned(path, Some(control))
+}
+
+// Unconfirmed connection initialization or a panicked cleanup cannot authorize
+// another owner. Keep that inode quarantined for this process, rather than
+// treating SQLx signal-only Drop as shutdown. A CLI restart ends this process.
+static QUARANTINED_SQLITE_MIGRATIONS: std::sync::Mutex<Vec<std::sync::Arc<SqliteAdmission>>> =
+    std::sync::Mutex::new(Vec::new());
+fn quarantine_sqlite_admission(admission: std::sync::Arc<SqliteAdmission>) {
+    match QUARANTINED_SQLITE_MIGRATIONS.lock() {
+        Ok(mut quarantined) => quarantined.push(admission),
+        Err(_) => std::mem::forget(admission), // fail closed even if quarantine bookkeeping poisoned
+    }
+}
+#[derive(Debug, thiserror::Error)]
+#[error("SQLite migration cleanup is unconfirmed; admission quarantined until process restart")]
+struct MigrationCleanupUnconfirmed(#[source] sqlx::Error);
+fn unconfirmed_migration_cleanup(error: sqlx::Error) -> sqlx::Error {
+    sqlx::Error::AnyDriverError(Box::new(MigrationCleanupUnconfirmed(error)))
+}
+fn cleanup_is_unconfirmed(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::AnyDriverError(source) if source.downcast_ref::<MigrationCleanupUnconfirmed>().is_some())
+}
+
+// A reference worker without a shutdown receipt remains unconfirmed even
+// when rollback of the separate preparation transaction also fails. Ordinary
+// validation errors retain the existing rollback-error precedence.
+fn sqlite_validation_error_after_rollback(
+    primary: sqlx::Error,
+    rollback: Result<(), sqlx::Error>,
+) -> sqlx::Error {
+    if cleanup_is_unconfirmed(&primary) {
+        primary
+    } else {
+        rollback.err().unwrap_or(primary)
+    }
+}
+
+fn start_sqlite_migration_owned(
+    path: &std::path::Path,
+    control: MigrationControl,
+) -> Result<SqliteMigration, sqlx::Error> {
+    let admission = std::sync::Arc::new(SqliteAdmission::migration(path)?);
+    let path = path.to_path_buf();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let owned_cancel = cancel.clone();
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let (drain_tx, drain_rx) = tokio::sync::watch::channel(SqliteMigrationDrain::Pending);
+    let state = std::sync::Arc::new(MigrationOwnerState {
+        drain: drain_rx,
+        join: std::sync::Mutex::new(None),
+    });
+    // This finite owner has its own runtime: aborting a caller or shutting down
+    // its Tokio runtime cannot abort an in-flight COMMIT or skip worker close.
+    // No scheduler/daemon or external orchestration process is involved.
+    let join = std::thread::Builder::new()
+        .name("fvoci-sqlite-migrate".into())
+        .spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(sqlx::Error::Io)?;
+                runtime.block_on(run_sqlite_migration_owned(&path, &owned_cancel, control))
+            }));
+            let result = match outcome {
+                Ok(result) => result,
+                Err(_) => Err(unconfirmed_migration_cleanup(schema_error(
+                    "migration execution/cleanup panicked",
+                ))),
+            };
+            let drain = if result.as_ref().err().is_some_and(cleanup_is_unconfirmed) {
+                quarantine_sqlite_admission(admission);
+                SqliteMigrationDrain::Quarantined
+            } else {
+                drop(admission);
+                SqliteMigrationDrain::Closed
+            };
+            drain_tx.send_replace(drain);
+            let _ = result_tx.send(result);
+        })
+        .map_err(sqlx::Error::Io)?;
+    *state
+        .join
+        .lock()
+        .map_err(|_| schema_error("migration join lock poisoned"))? = Some(join);
+    Ok(SqliteMigration {
+        cancel,
+        result: Some(result_rx),
+        observer: SqliteMigrationObserver(state),
+    })
+}
+
+async fn run_sqlite_migration_owned(
+    path: &std::path::Path,
+    cancel: &tokio_util::sync::CancellationToken,
+    control: MigrationControl,
+) -> Result<(), sqlx::Error> {
+    let preparation = super::pool::connect_sqlite_prepare(path)
+        .await
+        .map_err(unconfirmed_migration_cleanup)?;
+    let backend = super::backend::Backend::Sqlite(preparation.pool.clone());
+    #[cfg(feature = "db-tests")]
+    let mut cleanup_started = None;
+    #[cfg(feature = "db-tests")]
+    if let Some(control) = control {
+        let _ = control.connected.send(preparation.pool.clone());
+        cleanup_started = control.cleanup_started;
+        tokio::select! {
+            _ = control.proceed => {},
+            _ = cancel.cancelled() => {},
+        }
+    }
+    #[cfg(not(feature = "db-tests"))]
+    let _ = control;
+    let result = apply_sqlite_migrations(&backend, Some(cancel)).await;
+    // Request cancellation does not cancel any operation above or this drain.
+    #[cfg(feature = "db-tests")]
+    if let Some(started) = cleanup_started {
+        let _ = started.send(());
+    }
+    preparation
+        .close_confirmed()
+        .await
+        .map_err(unconfirmed_migration_cleanup)?;
+    result
+}
+
+/// Exact old guard-in-request lifecycle, only for the barrier regression.
+/// The test pauses a real SQLite COMMIT and observes its premature admission;
+/// this is never a production backend/fallback or a new migration policy.
+#[cfg(feature = "db-tests")]
+pub async fn run_sqlite_migrations_legacy_control(
+    path: &std::path::Path,
+    control: SqliteMigrationTestControl,
+) -> Result<(), sqlx::Error> {
+    let _admission = SqliteAdmission::migration(path)?;
+    let preparation = super::pool::connect_sqlite_prepare(path).await?;
+    let backend = super::backend::Backend::Sqlite(preparation.pool.clone());
+    let _ = control.connected.send(preparation.pool.clone());
+    let _ = control.proceed.await;
+    let result = apply_sqlite_migrations(&backend, None).await;
+    backend.close().await?;
+    result
+}
+
+async fn apply_sqlite_migrations(
+    backend: &super::backend::Backend,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<(), sqlx::Error> {
+    use super::backend::DbTransaction;
+    use super::codec::Cell;
+    for (index, (sql, digest)) in SQLITE_MIGRATIONS.iter().enumerate() {
+        if cancel.is_some_and(|token| token.is_cancelled()) {
+            return Err(schema_error(
+                "SQLite migration cancelled after in-flight work settled",
+            ));
+        }
+        let mut tx = backend.begin_write().await?;
+        let result = async {
+            if cancel.is_some_and(|token| token.is_cancelled()) { return Err(schema_error("SQLite migration cancelled before new step")); }
+            let DbTransaction::SqliteFamily(family) = &mut tx else {
+                return Err(schema_error("SQLite migrations require an actual SQLite-family handle"));
+            };
+            let applied = sqlite_applied(family).await?;
+            verify_sqlite_applied(&applied, false)?;
+            verify_sqlite_objects(family, applied.len()).await?;
+            if index < applied.len() { return Ok(false); }
+            if index != applied.len() { return Err(schema_error("SQLite migration gap")); }
+            verify_compiled_sqlite_digest(sql, digest)?;
+            if cancel.is_some_and(|token| token.is_cancelled()) { return Err(schema_error("SQLite migration cancelled before DDL")); }
+            family.apply_migration_batch(sql).await?;
+            if cancel.is_some_and(|token| token.is_cancelled()) { return Err(schema_error("SQLite migration cancelled after DDL; rollback before marker/commit")); }
+            family.execute(
+                "INSERT INTO schema_migrations(version,lineage,sql_sha256,applied_at) VALUES(?1,?2,?3,unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)",
+                &[Cell::Integer((index + 1) as i64), Cell::text(SQLITE_LINEAGE), Cell::text(*digest)],
+            ).await?;
+            verify_sqlite_objects(family, index + 1).await?;
+            Ok(true)
+        }.await;
+        match result {
+            Ok(true) => {
+                if cancel.is_some_and(|token| token.is_cancelled()) {
+                    tx.rollback().await?;
+                    return Err(schema_error("SQLite migration cancelled before commit"));
+                }
+                tx.commit()
+                    .await
+                    .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+            }
+            Ok(false) => tx.rollback().await?,
+            Err(error) => {
+                return Err(sqlite_validation_error_after_rollback(
+                    error,
+                    tx.rollback().await,
+                ));
+            }
+        }
+    }
+    assert_sqlite_schema_current(backend).await.map(|_| ())
+}
+
+#[derive(Debug)]
+pub struct SqliteCapability {
+    pub lineage: &'static str,
+    pub applied_steps: usize,
+    pub schema_sha256: String,
+}
+
+pub async fn assert_sqlite_schema_current(
+    backend: &super::backend::Backend,
+) -> Result<SqliteCapability, sqlx::Error> {
+    use super::backend::DbTransaction;
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let DbTransaction::SqliteFamily(family) = &mut tx else {
+            return Err(schema_error(
+                "SQLite schema gate requires an actual SQLite-family handle",
+            ));
+        };
+        let applied = sqlite_applied(family).await?;
+        verify_sqlite_applied(&applied, true)?;
+        let schema_sha256 = verify_sqlite_objects(family, applied.len()).await?;
+        Ok(SqliteCapability {
+            lineage: SQLITE_LINEAGE,
+            applied_steps: applied.len(),
+            schema_sha256,
+        })
+    }
+    .await;
+    match result {
+        Ok(capability) => {
+            tx.rollback().await?;
+            Ok(capability)
+        }
+        Err(error) => Err(sqlite_validation_error_after_rollback(
+            error,
+            tx.rollback().await,
+        )),
+    }
+}
+
+fn verify_compiled_sqlite_digest(sql: &str, digest: &str) -> Result<(), sqlx::Error> {
+    use sha2::{Digest, Sha256};
+    if hex::encode(Sha256::digest(sql.as_bytes())) != digest {
+        return Err(schema_error(
+            "compiled SQLite migration digest does not match its registry",
+        ));
+    }
+    Ok(())
+}
+
+type SqliteApplied = (i64, String, String);
+async fn sqlite_applied(
+    family: &mut super::backend::FamilyTx,
+) -> Result<Vec<SqliteApplied>, sqlx::Error> {
+    let exists = family
+        .query(
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='schema_migrations'",
+            &[],
+        )
+        .await?;
+    if exists[0].cell(0)?.integer()? == 0 {
+        return Ok(Vec::new());
+    }
+    family
+        .query(
+            "SELECT version,lineage,sql_sha256,applied_at FROM schema_migrations ORDER BY version",
+            &[],
+        )
+        .await?
+        .iter()
+        .map(|row| {
+            // Reject a malformed storage class/time as well as an invalid set.
+            row.cell(3)?.datetime()?;
+            Ok((
+                row.cell(0)?.integer()?,
+                row.cell(1)?.string()?,
+                row.cell(2)?.string()?,
+            ))
+        })
+        .collect()
+}
+fn verify_sqlite_applied(applied: &[SqliteApplied], complete: bool) -> Result<(), sqlx::Error> {
+    if applied.len() > SQLITE_MIGRATIONS.len()
+        || (complete && applied.len() != SQLITE_MIGRATIONS.len())
+    {
+        return Err(schema_error(
+            "SQLite schema is ahead, incomplete or unprepared",
+        ));
+    }
+    for (index, (version, lineage, digest)) in applied.iter().enumerate() {
+        let (sql, expected) = SQLITE_MIGRATIONS[index];
+        verify_compiled_sqlite_digest(sql, expected)?;
+        if *version != (index + 1) as i64 || lineage != SQLITE_LINEAGE || digest != expected {
+            return Err(schema_error(
+                "SQLite schema has a gap, foreign lineage or changed digest",
+            ));
+        }
+    }
+    Ok(())
+}
+
+const SQLITE_OBJECTS: &str = "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type COLLATE BINARY,name COLLATE BINARY";
+type SqliteObject = (String, String, String, String);
+/// Ask the pinned engine to compile the fixed DDL in a separate reference
+/// connection. This validates every actual table/index/trigger definition;
+/// no handwritten SQL parser, guessed column inventory or marker-only gate.
+async fn verify_sqlite_objects(
+    family: &mut super::backend::FamilyTx,
+    steps: usize,
+) -> Result<String, sqlx::Error> {
+    use sha2::{Digest, Sha256};
+    use sqlx::Connection;
+    let mut reference = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true),
+    )
+    .await
+    .map_err(unconfirmed_migration_cleanup)?;
+    let expected = async {
+        let pin: (String, String) = sqlx::query_as("SELECT sqlite_version(),sqlite_source_id()")
+            .fetch_one(&mut reference)
+            .await?;
+        if pin.0 != super::pool::SQLITE_VERSION || pin.1 != super::pool::SQLITE_SOURCE_ID {
+            return Err(schema_error("SQLite schema reference engine pin mismatch"));
+        }
+        for (sql, digest) in SQLITE_MIGRATIONS.iter().take(steps) {
+            verify_compiled_sqlite_digest(sql, digest)?;
+            sqlx::raw_sql(sql).execute(&mut reference).await?;
+        }
+        sqlx::query_as::<_, SqliteObject>(SQLITE_OBJECTS)
+            .fetch_all(&mut reference)
+            .await
+    }
+    .await;
+    reference
+        .close()
+        .await
+        .map_err(unconfirmed_migration_cleanup)?;
+    let expected = expected?;
+    let actual = family
+        .query(SQLITE_OBJECTS, &[])
+        .await?
+        .iter()
+        .map(|row| {
+            Ok((
+                row.cell(0)?.string()?,
+                row.cell(1)?.string()?,
+                row.cell(2)?.string()?,
+                row.cell(3)?.string()?,
+            ))
+        })
+        .collect::<Result<Vec<SqliteObject>, sqlx::Error>>()?;
+    if actual != expected {
+        return Err(schema_error("SQLite schema definitions differ from compiled capability; unmarked/populated or altered schema refused"));
+    }
+    let bytes = serde_json::to_vec(&(SQLITE_LINEAGE, steps, actual))
+        .map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+#[cfg(test)]
+mod sqlite_rollback_tests {
+    use super::*;
+
+    fn unconfirmed_reference() -> sqlx::Error {
+        unconfirmed_migration_cleanup(schema_error("reference worker shutdown unconfirmed"))
+    }
+
+    #[test]
+    fn unconfirmed_primary_survives_failed_rollback() {
+        // The original rollback-first `?` loses the typed quarantine reason.
+        let legacy_primary = unconfirmed_reference();
+        let legacy = Err::<(), _>(schema_error("rollback failed"))
+            .err()
+            .unwrap_or(legacy_primary);
+        assert!(!cleanup_is_unconfirmed(&legacy));
+        let fixed = sqlite_validation_error_after_rollback(
+            unconfirmed_reference(),
+            Err(schema_error("rollback failed")),
+        );
+        assert!(cleanup_is_unconfirmed(&fixed));
+    }
+
+    #[test]
+    fn ordinary_primary_retains_failed_rollback_precedence() {
+        let fixed = sqlite_validation_error_after_rollback(
+            schema_error("schema validation failed"),
+            Err(schema_error("rollback failed")),
+        );
+        assert!(!cleanup_is_unconfirmed(&fixed));
+        assert_eq!(
+            fixed.to_string(),
+            schema_error("rollback failed").to_string()
+        );
+    }
+
+    #[test]
+    fn successful_rollback_retains_primary_classification() {
+        let unconfirmed = sqlite_validation_error_after_rollback(unconfirmed_reference(), Ok(()));
+        assert!(cleanup_is_unconfirmed(&unconfirmed));
+        let ordinary = sqlite_validation_error_after_rollback(
+            schema_error("schema validation failed"),
+            Ok(()),
+        );
+        assert!(!cleanup_is_unconfirmed(&ordinary));
+        assert_eq!(
+            ordinary.to_string(),
+            schema_error("schema validation failed").to_string()
+        );
     }
 }

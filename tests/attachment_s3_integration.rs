@@ -333,7 +333,7 @@ async fn create_document(app: &axum::Router, cookie: &str, workspace_id: Uuid) -
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Doc"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Doc"})),
         Some(cookie),
     )
     .await;
@@ -1817,7 +1817,13 @@ async fn s3_image_preview_is_stored_served_and_reclaimed() {
         fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
     )
     .await;
-    let pool = state.auth.db.pool.clone();
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("PostgreSQL integration fixture")
+        .expect("actual PG fixture backend")
+        .clone();
     let (app, cookie, workspace_id) = setup_session_with_state(&harness, state).await;
     let document_id = create_document(&app, &cookie, workspace_id).await;
 
@@ -3553,7 +3559,7 @@ async fn transfer_mode_env_lock_restart_and_startup_refusals() {
         .call(
             reqwest::Method::POST,
             &format!("/api/v1/workspaces/{workspace_id}/documents"),
-            Some(json!({"parentId": null, "title": "Doc"})),
+            Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Doc"})),
         )
         .await;
     assert_eq!(status, 201, "{doc:?}");

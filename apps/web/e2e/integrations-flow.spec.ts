@@ -196,7 +196,7 @@ test("public features.ai gates the document AI menu; the server keeps its own AI
     id: string;
   };
   const docRes = await page.request.post(`/api/v1/workspaces/${workspace.id}/documents`, {
-    data: { parentId: null, title: "AI 게이트 문서" },
+    data: { commandId: crypto.randomUUID(), parentId: null, title: "AI 게이트 문서" },
   });
   expect(docRes.status(), await docRes.text()).toBe(201);
   const doc = (await readJson(docRes, flowSchemas.createdDocument)) as {
@@ -348,7 +348,7 @@ test("confirmed AI results apply through the live editor and the project task ro
       displayId: string;
     };
     const linkRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
-      data: { parentId: null, title: "연결 후보 문서" },
+      data: { commandId: crypto.randomUUID(), parentId: null, title: "연결 후보 문서" },
     });
     expect(linkRes.status(), await linkRes.text()).toBe(201);
     const linkDoc = (await readJson(linkRes, flowSchemas.document)) as {

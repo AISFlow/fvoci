@@ -4803,6 +4803,11 @@ export interface components {
             parentId?: string | null;
         };
         CreateDocumentBody: {
+            /**
+             * Format: uuid
+             * @description Chosen once per logical ordinary wiki create, retained on response loss.
+             */
+            commandId: string;
             icon?: string | null;
             /** Format: uuid */
             parentId: string | null;
@@ -4832,6 +4837,12 @@ export interface components {
             leadUserId?: string | null;
             name: string;
             visibility: string;
+        };
+        CreateProjectDocumentBody: {
+            icon?: string | null;
+            /** Format: uuid */
+            parentId: string | null;
+            title: string;
         };
         CreateTaskBody: {
             /** Format: date */
@@ -13389,6 +13400,15 @@ export interface operations {
                     "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
+            /** @description Creation command content or actor differs */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
         };
     };
     get_document: {
@@ -17906,7 +17926,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateDocumentBody"];
+                "application/json": components["schemas"]["CreateProjectDocumentBody"];
             };
         };
         responses: {

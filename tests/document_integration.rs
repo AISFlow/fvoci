@@ -135,11 +135,15 @@ async fn apply_grants(pool: &PgPool, role_name: &str) {
 
 async fn app_state(app_url: &str) -> AppState {
     let pool = pool::connect_app(app_url).await.expect("app pool");
+    app_state_backend(fvoci_server::db::backend::Backend::Postgres(pool)).await
+}
+
+async fn app_state_backend(backend: fvoci_server::db::backend::Backend) -> AppState {
     let storage_root = std::env::temp_dir().join(format!("fvoci-doc-test-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
     AppState {
         auth: Arc::new(AuthService {
-            db: Db::new(pool),
+            db: Db::from_backend(backend),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
         }),
         branding_name: "FVOCI".to_string(),
@@ -404,7 +408,7 @@ async fn document_create_get_tree_parent_rename_status_and_nulls() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "  Root  "})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "  Root  "})),
         Some(&cookie),
         &[],
     )
@@ -430,7 +434,7 @@ async fn document_create_get_tree_parent_rename_status_and_nulls() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": root_id, "title": "Child", "icon": "📄"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": root_id, "title": "Child", "icon": "📄"})),
         Some(&cookie),
         &[],
     )
@@ -450,7 +454,7 @@ async fn document_create_get_tree_parent_rename_status_and_nulls() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Second root"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Second root"})),
         Some(&cookie),
         &[],
     )
@@ -584,7 +588,7 @@ async fn guest_tree_is_empty_and_get_create_are_not_found() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Hidden"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Hidden"})),
         Some(&owner_cookie),
         &[],
     )
@@ -632,7 +636,7 @@ async fn guest_tree_is_empty_and_get_create_are_not_found() {
         app,
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Guest write"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Guest write"})),
         Some(&guest_cookie),
         &[],
     )
@@ -663,7 +667,7 @@ async fn member_can_create_and_instance_admin_without_membership_cannot() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Member doc"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Member doc"})),
         Some(&member_cookie),
         &[],
     )
@@ -697,7 +701,9 @@ async fn member_can_create_and_instance_admin_without_membership_cannot() {
         app,
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Admin override"})),
+        Some(
+            json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Admin override"}),
+        ),
         Some(&owner_cookie),
         &[],
     )
@@ -755,7 +761,7 @@ async fn foreign_parent_affiliation_depth_and_unsupported_queries_are_rejected()
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": foreign_parent, "title": "Cross"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": foreign_parent, "title": "Cross"})),
         Some(&cookie),
         &[],
     )
@@ -813,7 +819,9 @@ async fn foreign_parent_affiliation_depth_and_unsupported_queries_are_rejected()
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": affiliated, "title": "Mismatch"})),
+        Some(
+            json!({"commandId": uuid::Uuid::now_v7(), "parentId": affiliated, "title": "Mismatch"}),
+        ),
         Some(&cookie),
         &[],
     )
@@ -840,7 +848,7 @@ async fn foreign_parent_affiliation_depth_and_unsupported_queries_are_rejected()
             app.clone(),
             "POST",
             &format!("/api/v1/workspaces/{workspace_id}/documents"),
-            Some(json!({"parentId": parent, "title": format!("D{depth}")})),
+            Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": parent, "title": format!("D{depth}")})),
             Some(&cookie),
             &[],
         )
@@ -853,7 +861,7 @@ async fn foreign_parent_affiliation_depth_and_unsupported_queries_are_rejected()
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": last_id, "title": "Too deep"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": last_id, "title": "Too deep"})),
         Some(&cookie),
         &[],
     )
@@ -930,7 +938,7 @@ async fn invalid_auth_and_input_are_source_errors() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Null regression"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Null regression"})),
         Some(&cookie),
         &[],
     )
@@ -957,7 +965,7 @@ async fn invalid_auth_and_input_are_source_errors() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Nope"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Nope"})),
         None,
         &[],
     )
@@ -969,7 +977,7 @@ async fn invalid_auth_and_input_are_source_errors() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": Uuid::now_v7(), "title": "Missing parent"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": Uuid::now_v7(), "title": "Missing parent"})),
         Some(&cookie),
         &[],
     )
@@ -981,7 +989,7 @@ async fn invalid_auth_and_input_are_source_errors() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"title": "Missing parentId"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "title": "Missing parentId"})),
         Some(&cookie),
         &[],
     )
@@ -993,7 +1001,7 @@ async fn invalid_auth_and_input_are_source_errors() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": ""})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": ""})),
         Some(&cookie),
         &[],
     )
@@ -1005,7 +1013,7 @@ async fn invalid_auth_and_input_are_source_errors() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "X"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "X"})),
         Some(&cookie),
         &[("origin", "http://evil.example.com")],
     )
@@ -1035,7 +1043,7 @@ async fn patch_icon_set_omit_preserves_then_null_clears() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Iconed", "icon": "📄"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Iconed", "icon": "📄"})),
         Some(&cookie),
         &[],
     )
@@ -1131,7 +1139,7 @@ async fn invalid_stored_sort_key_returns_internal_error() {
         app,
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Sibling of corrupt"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Sibling of corrupt"})),
         Some(&cookie),
         &[],
     )
@@ -1211,7 +1219,7 @@ async fn product_membership_revoke_races_document_write_under_lock_barrier() {
                 app,
                 "POST",
                 &format!("/api/v1/workspaces/{workspace_id}/documents"),
-                Some(json!({"parentId": null, "title": "After product demote"})),
+                Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "After product demote"})),
                 Some(&member_a_cookie),
                 &[],
             )
@@ -1263,7 +1271,7 @@ async fn product_membership_revoke_races_document_write_under_lock_barrier() {
                 app,
                 "POST",
                 &format!("/api/v1/workspaces/{workspace_id}/documents"),
-                Some(json!({"parentId": null, "title": "Before product remove"})),
+                Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Before product remove"})),
                 Some(&member_b_cookie),
                 &[],
             )
@@ -1359,7 +1367,7 @@ async fn suspend_and_guest_demotion_deny_write_after_shared_locks() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "After demote"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "After demote"})),
         Some(&member_cookie),
         &[],
     )
@@ -1385,7 +1393,7 @@ async fn suspend_and_guest_demotion_deny_write_after_shared_locks() {
                 app,
                 "POST",
                 &format!("/api/v1/workspaces/{workspace_id}/documents"),
-                Some(json!({"parentId": null, "title": "After suspend"})),
+                Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "After suspend"})),
                 Some(&owner_cookie),
                 &[],
             )
@@ -1463,7 +1471,7 @@ async fn membership_removal_and_session_revoke_share_locks_before_write() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "After remove"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "After remove"})),
         Some(&member_cookie),
         &[],
     )
@@ -1489,7 +1497,9 @@ async fn membership_removal_and_session_revoke_share_locks_before_write() {
                 app,
                 "POST",
                 &format!("/api/v1/workspaces/{workspace_id}/documents"),
-                Some(json!({"parentId": null, "title": "Raced"})),
+                Some(
+                    json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Raced"}),
+                ),
                 Some(&owner_cookie),
                 &[],
             )
@@ -1541,7 +1551,9 @@ async fn event_and_audit_failure_roll_back_document_and_allocated_number() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Blocked event"})),
+        Some(
+            json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Blocked event"}),
+        ),
         Some(&cookie),
         &[],
     )
@@ -1571,7 +1583,9 @@ async fn event_and_audit_failure_roll_back_document_and_allocated_number() {
         app,
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Blocked audit"})),
+        Some(
+            json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Blocked audit"}),
+        ),
         Some(&cookie),
         &[],
     )
@@ -1912,9 +1926,10 @@ async fn create_doc(
     parent_id: Option<&str>,
     title: &str,
 ) -> Value {
+    let command_id = Uuid::now_v7();
     let body = match parent_id {
-        Some(parent) => json!({"parentId": parent, "title": title}),
-        None => json!({"parentId": null, "title": title}),
+        Some(parent) => json!({"commandId": command_id, "parentId": parent, "title": title}),
+        None => json!({"commandId": command_id, "parentId": null, "title": title}),
     };
     let (status, body, _, _) = json_request(
         app.clone(),
@@ -2504,4 +2519,1487 @@ async fn document_move_into_project_denies_unauthorized() {
 
     admin.close().await;
     harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn wiki_create_command_replays_original_result_and_rejects_hash_actor_purge() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner, ws) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let path = format!("/api/v1/workspaces/{ws}/documents");
+    let command = Uuid::now_v7();
+    let input =
+        json!({"commandId":command,"parentId":null,"title":"한글 日本語 中文 🙂 가","icon":null});
+    let (first, second) = tokio::join!(
+        json_request(
+            app.clone(),
+            "POST",
+            &path,
+            Some(input.clone()),
+            Some(&cookie),
+            &[]
+        ),
+        json_request(
+            app.clone(),
+            "POST",
+            &path,
+            Some(input.clone()),
+            Some(&cookie),
+            &[]
+        ),
+    );
+    assert_eq!(first.0, StatusCode::CREATED, "{}", first.1);
+    assert_eq!(second.0, StatusCode::CREATED, "{}", second.1);
+    assert_eq!(
+        first.1, second.1,
+        "same command returns the original response"
+    );
+    let original = first.1;
+    let id = Uuid::parse_str(original["id"].as_str().unwrap()).unwrap();
+    let inventory: (i64, i32, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM fvoci.documents WHERE workspace_id=$1), next_document_number, (SELECT count(*) FROM fvoci.events WHERE workspace_id=$1 AND verb='document.created'), (SELECT count(*) FROM fvoci.audit_log WHERE workspace_id=$1 AND verb='document.created'), (SELECT count(*) FROM fvoci.wiki_create_commands WHERE workspace_id=$1) FROM fvoci.workspaces WHERE id=$1"
+    ).bind(ws).fetch_one(&admin).await.unwrap();
+    assert_eq!(inventory, (1, 1, 1, 1, 1));
+    let restricted = pool::connect_app(&harness.app_url).await.unwrap();
+    migrate::assert_app_role(&restricted)
+        .await
+        .expect("actual restricted application role");
+    let receipt_rls: (bool, bool) = sqlx::query_as(
+        "SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid='fvoci.wiki_create_commands'::regclass"
+    ).fetch_one(&restricted).await.unwrap();
+    assert_eq!(receipt_rls, (true, true));
+    let mut scoped = restricted.begin().await.unwrap();
+    fvoci_server::db::context::set_tenant(&mut scoped, Uuid::now_v7())
+        .await
+        .unwrap();
+    let hidden: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.wiki_create_commands WHERE workspace_id=$1")
+            .bind(ws)
+            .fetch_one(&mut *scoped)
+            .await
+            .unwrap();
+    assert_eq!(
+        hidden, 0,
+        "actual RLS hides receipts under the wrong tenant"
+    );
+    fvoci_server::db::context::set_tenant(&mut scoped, ws)
+        .await
+        .unwrap();
+    let visible: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.wiki_create_commands WHERE workspace_id=$1")
+            .bind(ws)
+            .fetch_one(&mut *scoped)
+            .await
+            .unwrap();
+    assert_eq!(visible, 1);
+    scoped.rollback().await.unwrap();
+    restricted.close().await;
+
+    let mut changed = input.clone();
+    changed["title"] = json!("different");
+    let mismatch = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(changed),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(mismatch.0, StatusCode::CONFLICT);
+    assert_eq!(mismatch.1["code"], "request_mismatch");
+    let (other, other_cookie) =
+        create_second_user_session(&harness, "other@example.com", "Other").await;
+    sqlx::query(
+        "INSERT INTO fvoci.memberships (workspace_id,user_id,role) VALUES ($1,$2,'member')",
+    )
+    .bind(ws)
+    .bind(other)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let wrong_actor = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(input.clone()),
+        Some(&other_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        wrong_actor.0,
+        StatusCode::CONFLICT,
+        "another actor cannot use the original command"
+    );
+
+    sqlx::query("UPDATE fvoci.documents SET title='Later title' WHERE id=$1")
+        .bind(id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let replay = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(input.clone()),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(replay.0, StatusCode::CREATED);
+    assert_eq!(
+        replay.1, original,
+        "readback changes cannot change the receipt echo"
+    );
+    sqlx::query("UPDATE fvoci.documents SET deleted_at=now() WHERE id=$1")
+        .bind(id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let trashed = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(input.clone()),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        trashed.0,
+        StatusCode::NOT_FOUND,
+        "a receipt cannot authorize a trashed target"
+    );
+    sqlx::query("UPDATE fvoci.documents SET deleted_at=NULL WHERE id=$1")
+        .bind(id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE fvoci.memberships SET role='guest' WHERE workspace_id=$1 AND user_id=$2")
+        .bind(ws)
+        .bind(owner)
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_eq!(
+        json_request(
+            app.clone(),
+            "POST",
+            &path,
+            Some(input.clone()),
+            Some(&cookie),
+            &[]
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    sqlx::query("UPDATE fvoci.memberships SET role='owner' WHERE workspace_id=$1 AND user_id=$2")
+        .bind(ws)
+        .bind(owner)
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM fvoci.documents WHERE id=$1")
+        .bind(id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let purged = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(input.clone()),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(purged.0, StatusCode::NOT_FOUND);
+    let retired: (i64, i32, i64, Option<Uuid>) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM fvoci.documents WHERE workspace_id=$1), next_document_number, (SELECT count(*) FROM fvoci.wiki_create_commands WHERE workspace_id=$1), (SELECT document_id FROM fvoci.wiki_create_commands WHERE workspace_id=$1 AND command_id=$2) FROM fvoci.workspaces WHERE id=$1"
+    ).bind(ws).bind(command).fetch_one(&admin).await.unwrap();
+    assert_eq!(retired, (0, 1, 1, None));
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn wiki_create_command_requires_identity_and_receipt_failure_rolls_back_everything() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, ws) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let path = format!("/api/v1/workspaces/{ws}/documents");
+    let missing = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(json!({"parentId":null,"title":"missing command"})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(missing.0, StatusCode::BAD_REQUEST);
+    install_insert_fail_trigger(&admin, "wiki_create_commands", "reject_wiki_receipt").await;
+    let input = json!({"commandId":Uuid::now_v7(),"parentId":null,"title":"rolled back"});
+    let failed = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(input.clone()),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(failed.0, StatusCode::INTERNAL_SERVER_ERROR);
+    let inventory: (i64, i32, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM fvoci.documents WHERE workspace_id=$1), next_document_number, (SELECT count(*) FROM fvoci.events WHERE workspace_id=$1 AND verb='document.created'), (SELECT count(*) FROM fvoci.audit_log WHERE workspace_id=$1 AND verb='document.created'), (SELECT count(*) FROM fvoci.wiki_create_commands WHERE workspace_id=$1) FROM fvoci.workspaces WHERE id=$1"
+    ).bind(ws).fetch_one(&admin).await.unwrap();
+    assert_eq!(inventory, (0, 0, 0, 0, 0));
+    sqlx::query("DROP TRIGGER fvoci_reject_wiki_receipt ON fvoci.wiki_create_commands")
+        .execute(&admin)
+        .await
+        .unwrap();
+    let success = json_request(app, "POST", &path, Some(input), Some(&cookie), &[]).await;
+    assert_eq!(success.0, StatusCode::CREATED);
+    assert_eq!(success.1["number"], 1);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// Early executable common fixture. Native editor/ACK/revision/browser proof
+/// is a separate required tracer; this does not claim that acceptance.
+#[tokio::test]
+async fn selected_backend_setup_cookie_wiki_command_readback() {
+    selected_backend_wiki_fixture(false).await;
+}
+
+#[tokio::test]
+async fn selected_backend_native_append_fresh_child_readback() {
+    selected_backend_wiki_fixture(true).await;
+}
+
+async fn selected_backend_wiki_fixture(with_native: bool) {
+    use fvoci_server::db::backend::Backend;
+    async fn claim_native(
+        backend: &Backend,
+        workspace: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+        document: Uuid,
+        owner: Uuid,
+    ) -> Result<
+        Result<
+            (
+                fvoci_server::db::collab::ClaimWriterResult,
+                Option<fvoci_server::db::collab::FamilyRoomFence>,
+            ),
+            fvoci_server::db::collab::CollabDbError,
+        >,
+        sqlx::Error,
+    > {
+        use fvoci_server::db::collab::{
+            claim_family_document_room, claim_writer_and_load_kind_backend, CollabKind,
+        };
+        match backend {
+            Backend::Postgres(_) => claim_writer_and_load_kind_backend(
+                backend,
+                CollabKind::Document,
+                workspace,
+                actor,
+                credential,
+                document,
+            )
+            .await
+            .map(|result| result.map(|native| (native, None))),
+            _ => claim_family_document_room(
+                backend,
+                workspace,
+                actor,
+                credential,
+                document,
+                owner,
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .map(|result| result.map(|claimed| (claimed.native, Some(claimed.fence)))),
+        }
+    }
+    async fn append_native(
+        backend: &Backend,
+        fence: Option<fvoci_server::db::collab::FamilyRoomFence>,
+        input: fvoci_server::db::collab::AppendCollabInput<'_>,
+    ) -> Result<
+        Result<
+            fvoci_server::db::collab::AppendCollabResult,
+            fvoci_server::db::collab::CollabDbError,
+        >,
+        sqlx::Error,
+    > {
+        use fvoci_server::db::collab::{append_collab_update, append_family_document_room_update};
+        match backend {
+            Backend::Postgres(pool) => append_collab_update(pool, input).await,
+            _ => {
+                append_family_document_room_update(
+                    backend,
+                    fence.expect("family claim must own a fence"),
+                    input,
+                )
+                .await
+            }
+        }
+    }
+    let native_fixture = if with_native {
+        let engine_bin = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_COLLAB_ENGINE")
+                .expect("native fixture requires freshly built FVOCI_COLLAB_ENGINE"),
+        );
+        let content = json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Selected native durable text"}]}]});
+        let seed = fvoci_server::collab::seed::SeedEngine::new(
+            engine_bin.clone(),
+            collab_engine::limits::Limits::default(),
+        );
+        let update = seed.tiptap_to_yjs_update(&content).await.unwrap();
+        Some((engine_bin, content, update))
+    } else {
+        None
+    };
+    let pg = TestDb::bootstrap().await;
+    let pg_backend = Backend::Postgres(pool::connect_app(&pg.app_url).await.unwrap());
+    let directory = std::env::temp_dir().join(format!("fvoci-selected-backend-{}", Uuid::now_v7()));
+    std::fs::create_dir(&directory).unwrap();
+    let sqlite_path = directory.join("app.db");
+    migrate::run_sqlite_migrations(&sqlite_path).await.unwrap();
+    let sqlite_admission = migrate::SqliteAdmission::server(&sqlite_path).unwrap();
+    // The actual operator path refuses a live selected-backend server.
+    assert!(migrate::run_sqlite_migrations(&sqlite_path).await.is_err());
+    let sqlite_backend = Backend::Sqlite(pool::connect_sqlite_app(&sqlite_path, 4).await.unwrap());
+    let capability = migrate::assert_sqlite_schema_current(&sqlite_backend)
+        .await
+        .unwrap();
+    assert_eq!(capability.lineage, migrate::SQLITE_LINEAGE);
+    assert_eq!(capability.applied_steps, 3);
+    let command = Uuid::now_v7();
+    let room_owner = Uuid::now_v7();
+    for backend in [pg_backend, sqlite_backend] {
+        match &backend {
+            Backend::Postgres(pool) => {
+                let role: (String,bool,bool,bool,Option<String>) = sqlx::query_as(
+                    "SELECT current_user::text,rolsuper,rolbypassrls,rolcanlogin,current_setting('app.tenant_id',true) FROM pg_catalog.pg_roles WHERE rolname=current_user"
+                ).fetch_one(pool).await.unwrap();
+                assert_eq!(role.0, pg.role_name);
+                assert!(
+                    !role.1 && !role.2 && role.3,
+                    "actual app LOGIN role must be restricted"
+                );
+                assert!(role.4.as_deref().unwrap_or("").is_empty());
+                eprintln!("selected_backend_actual_role name={} superuser={} bypassrls={} login={} tenant={:?}",role.0,role.1,role.2,role.3,role.4);
+            }
+            Backend::Sqlite(pool) => {
+                let engine: (String,String,i64) = sqlx::query_as("SELECT sqlite_version(),sqlite_source_id(),(SELECT foreign_keys FROM pragma_foreign_keys)").fetch_one(pool).await.unwrap();
+                assert_eq!(engine.0, fvoci_server::db::pool::SQLITE_VERSION);
+                assert_eq!(engine.1, fvoci_server::db::pool::SQLITE_SOURCE_ID);
+                assert_eq!(engine.2, 1);
+                eprintln!(
+                    "selected_backend_actual_sqlite version={} source={} fk={}",
+                    engine.0, engine.1, engine.2
+                );
+            }
+            Backend::LibsqlRemote(_) => unreachable!("remote primary is a separate actual proof"),
+        }
+        let state = app_state_backend(backend.clone()).await;
+        let storage = state.storage.clone();
+        let app = document_app(state);
+        let (status, instance, _, _) =
+            json_request(app.clone(), "GET", "/api/v1/instance", None, None, &[]).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{} instance: {instance}",
+            backend.kind()
+        );
+        let (status, setup, cookie, _) = json_request(
+            app.clone(),
+            "POST",
+            "/api/v1/setup",
+            Some(json!({
+                "email":"admin@example.com", "password":"supersecret1", "givenName":"Admin",
+                "workspaceSlug":"acme", "workspaceName":"Acme"
+            })),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{} setup: {setup}",
+            backend.kind()
+        );
+        let cookie = extract_session_cookie(cookie.as_ref().unwrap());
+        let workspace = setup["workspaceId"].as_str().unwrap();
+        let path = format!("/api/v1/workspaces/{workspace}/documents");
+        let input = json!({"commandId":command,"parentId":null,"title":"Same selected fixture"});
+        let (status, created, _, _) = json_request(
+            app.clone(),
+            "POST",
+            &path,
+            Some(input.clone()),
+            Some(&cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{} create: {created}",
+            backend.kind()
+        );
+        let (status, replayed, _, _) =
+            json_request(app.clone(), "POST", &path, Some(input), Some(&cookie), &[]).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{} replay: {replayed}",
+            backend.kind()
+        );
+        assert_eq!(replayed, created);
+        let (status, _, _, _) = json_request(
+            app.clone(),
+            "POST",
+            &path,
+            Some(json!({"commandId":command,"parentId":null,"title":"Changed hash"})),
+            Some(&cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "{} changed command",
+            backend.kind()
+        );
+        let (status, login, fresh_cookie, _) = json_request(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/login",
+            Some(json!({"email":"admin@example.com","password":"supersecret1"})),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{} login: {login}", backend.kind());
+        let fresh_cookie = extract_session_cookie(fresh_cookie.as_ref().unwrap());
+        assert_ne!(fresh_cookie, cookie);
+        let (status, me, _, _) = json_request(
+            app.clone(),
+            "GET",
+            "/api/v1/auth/me",
+            None,
+            Some(&fresh_cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{} me: {me}", backend.kind());
+        let document = created["id"].as_str().unwrap();
+        let (status, read, _, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!("{path}/{document}"),
+            None,
+            Some(&fresh_cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{} readback: {read}",
+            backend.kind()
+        );
+        assert_eq!(read["id"], created["id"]);
+        assert_eq!(read["title"], created["title"]);
+        assert!(read.get("schemaVersion").is_some());
+        assert_eq!(read["schemaVersion"], created["schemaVersion"]);
+        let (status, body, _, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!("{path}/{document}/body"),
+            None,
+            Some(&fresh_cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{} body readback: {body}",
+            backend.kind()
+        );
+        assert!(body.get("contentJson").is_some());
+        assert_eq!(
+            body["contentJson"],
+            fvoci_server::db::documents::empty_document_json()
+        );
+        assert_eq!(body["version"], created["version"]);
+        // Exercise the existing native authorization/empty-only seed through
+        // the real cookie identity and restricted selected-backend connection.
+        // Room transport, persist ACK and revisions remain separate acceptance.
+        use fvoci_server::db::collab::{
+            load_collab_readonly_kind_backend, resolve_collab_admission_kind_backend,
+            CollabDbError, CollabKind,
+        };
+        let live = fvoci_server::db::identity::find_live_session_backend(
+            &backend,
+            &hash_token(&fresh_cookie),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let workspace_id = Uuid::parse_str(workspace).unwrap();
+        let document_id = Uuid::parse_str(document).unwrap();
+        let admission = resolve_collab_admission_kind_backend(
+            &backend,
+            CollabKind::Document,
+            workspace_id,
+            live.user_id,
+            live.session_id,
+            document_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!admission.read_only);
+        assert!(!admission.archived);
+        let seeded = load_collab_readonly_kind_backend(
+            &backend,
+            CollabKind::Document,
+            workspace_id,
+            live.user_id,
+            live.session_id,
+            document_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(seeded.snapshot, [0, 0], "canonical empty native V1 state");
+        assert!(seeded.tail.is_empty());
+        assert_eq!(seeded.writer_generation, 0);
+        assert_eq!(seeded.snapshot_cutoff_seq, 0);
+        assert_eq!(seeded.tail_seq, 0);
+        let (claimed, room_fence) = claim_native(
+            &backend,
+            workspace_id,
+            live.user_id,
+            live.session_id,
+            document_id,
+            room_owner,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(claimed.writer_generation, 1);
+        assert_eq!(claimed.load.snapshot, seeded.snapshot);
+        let reread = load_collab_readonly_kind_backend(
+            &backend,
+            CollabKind::Document,
+            workspace_id,
+            live.user_id,
+            live.session_id,
+            document_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(reread.writer_generation, 1, "read cannot claim a writer");
+        assert_eq!(reread.snapshot, seeded.snapshot);
+        for (tenant, actor, session, expected) in [
+            (
+                Uuid::now_v7(),
+                live.user_id,
+                live.session_id,
+                CollabDbError::NotFound,
+            ),
+            (
+                workspace_id,
+                live.user_id,
+                Uuid::now_v7(),
+                CollabDbError::Forbidden,
+            ),
+            (
+                workspace_id,
+                Uuid::now_v7(),
+                live.session_id,
+                CollabDbError::Forbidden,
+            ),
+        ] {
+            assert_eq!(
+                claim_native(&backend, tenant, actor, session, document_id, room_owner)
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                expected
+            );
+        }
+        let unchanged = load_collab_readonly_kind_backend(
+            &backend,
+            CollabKind::Document,
+            workspace_id,
+            live.user_id,
+            live.session_id,
+            document_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            unchanged.writer_generation, 1,
+            "refusal cannot bump generation"
+        );
+        if let Some((engine_bin, content, payload)) = &native_fixture {
+            use fvoci_server::db::collab::{AppendCollabInput, AppendCollabResult};
+            let operation = command;
+            let input = |actor, credential, generation, op_id| AppendCollabInput {
+                workspace_id,
+                actor_user_id: actor,
+                session_id: credential,
+                document_id,
+                writer_generation: generation,
+                expected_tail_seq: 0,
+                op_id,
+                payload: payload.as_slice(),
+                client_ip: None,
+            };
+            assert_eq!(
+                append_native(
+                    &backend,
+                    room_fence,
+                    input(live.user_id, live.session_id, 1, operation)
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+                AppendCollabResult::Committed { seq: 1 }
+            );
+            // Lost-response retry retains the native operation and exact bytes.
+            assert_eq!(
+                append_native(
+                    &backend,
+                    room_fence,
+                    input(live.user_id, live.session_id, 1, operation)
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+                AppendCollabResult::DuplicateAck { seq: 1 }
+            );
+            let mut changed = payload.clone();
+            changed.push(0);
+            assert_eq!(
+                append_native(
+                    &backend,
+                    room_fence,
+                    AppendCollabInput {
+                        payload: &changed,
+                        ..input(live.user_id, live.session_id, 1, operation)
+                    }
+                )
+                .await
+                .unwrap()
+                .unwrap_err(),
+                CollabDbError::OpIdConflict
+            );
+            assert_eq!(
+                append_native(
+                    &backend,
+                    room_fence,
+                    input(Uuid::now_v7(), live.session_id, 1, operation)
+                )
+                .await
+                .unwrap()
+                .unwrap_err(),
+                CollabDbError::Forbidden
+            );
+            assert_eq!(
+                append_native(
+                    &backend,
+                    room_fence,
+                    input(live.user_id, Uuid::now_v7(), 1, operation)
+                )
+                .await
+                .unwrap()
+                .unwrap_err(),
+                CollabDbError::Forbidden
+            );
+            assert_eq!(
+                append_native(
+                    &backend,
+                    room_fence,
+                    input(live.user_id, live.session_id, 0, operation)
+                )
+                .await
+                .unwrap()
+                .unwrap_err(),
+                CollabDbError::StaleWriter
+            );
+            let persisted = load_collab_readonly_kind_backend(
+                &backend,
+                CollabKind::Document,
+                workspace_id,
+                live.user_id,
+                live.session_id,
+                document_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(persisted.tail_seq, 1);
+            assert_eq!(
+                persisted.tail.len(),
+                1,
+                "refused/replayed operations cannot add native updates"
+            );
+            assert_eq!(persisted.tail[0].op_id, operation);
+            assert_eq!(persisted.tail[0].payload, *payload);
+            let (engine, snapshot, tail) = (
+                engine_bin.clone(),
+                persisted.snapshot,
+                persisted.tail.into_iter().map(|row| row.payload).collect(),
+            );
+            let backend_kind = backend.kind();
+            let fresh = tokio::task::spawn_blocking(move || {
+                use collab_engine::outcome::EngineStatus;
+                use collab_engine::process::{ChildSlotKind, EngineSession, SpawnRequest};
+                use collab_engine::protocol::Request;
+                let mut child = EngineSession::spawn(SpawnRequest {
+                    engine_bin: engine.clone(),
+                    limits: collab_engine::limits::Limits::default(),
+                    slot_kind: ChildSlotKind::Primary,
+                    slot_wait: None,
+                    test_hang_ms: None,
+                    test_exit_after_read: None,
+                    test_close_stdout_hang_ms: None,
+                    test_exit_after_write: None,
+                })
+                .unwrap();
+                let pid = child.pid().unwrap();
+                let proc_path = std::path::PathBuf::from(format!("/proc/{pid}"));
+                assert_eq!(
+                    std::fs::read_link(proc_path.join("exe")).unwrap(),
+                    std::fs::canonicalize(&engine).unwrap()
+                );
+                assert!(child
+                    .call(&Request::Load {
+                        snapshot_b64: Some(snapshot),
+                        tail_b64: tail,
+                        encoding: 1
+                    })
+                    .outcome
+                    .is_applied_ok());
+                let projected = match child.call(&Request::Project { encoding: 1 }).outcome {
+                    EngineStatus::Ok {
+                        content_json: Some(content),
+                        ..
+                    } => content,
+                    other => panic!("fresh native projection: {other:?}"),
+                };
+                child.kill_and_reap();
+                assert!(
+                    !proc_path.exists(),
+                    "owned fresh native child must be reaped"
+                );
+                eprintln!(
+                    "native_fresh_child backend={backend_kind} pid={pid} reaped=true executable={}",
+                    engine.display()
+                );
+                projected
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                fresh, *content,
+                "new isolated native client loads committed state"
+            );
+            use fvoci_server::db::collab::{
+                project_derived_body_kind_backend, ProjectDerivedBodyInput,
+                ProjectDerivedBodyResult,
+            };
+            let project_input = |generation, tail, session| {
+                ProjectDerivedBodyInput::new(
+                    workspace_id,
+                    live.user_id,
+                    session,
+                    document_id,
+                    generation,
+                    tail,
+                    fvoci_server::collab::derived_body::prepare_derived_body(fresh.clone())
+                        .unwrap(),
+                )
+            };
+            for (generation, tail, session, expected) in [
+                (0, 1, live.session_id, CollabDbError::StaleWriter),
+                (1, 0, live.session_id, CollabDbError::StaleCutoff),
+                (1, 1, Uuid::now_v7(), CollabDbError::Forbidden),
+            ] {
+                assert_eq!(
+                    project_derived_body_kind_backend(
+                        &backend,
+                        CollabKind::Document,
+                        project_input(generation, tail, session),
+                        room_fence
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    expected
+                );
+            }
+            assert_eq!(
+                project_derived_body_kind_backend(
+                    &backend,
+                    CollabKind::Document,
+                    project_input(1, 1, live.session_id),
+                    room_fence
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+                ProjectDerivedBodyResult::Updated
+            );
+            assert_eq!(
+                project_derived_body_kind_backend(
+                    &backend,
+                    CollabKind::Document,
+                    project_input(1, 1, live.session_id),
+                    room_fence
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+                ProjectDerivedBodyResult::Unchanged
+            );
+            let (status, projected_body, _, _) = json_request(
+                app.clone(),
+                "GET",
+                &format!("{path}/{document}/body"),
+                None,
+                Some(&fresh_cookie),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(projected_body["contentJson"], fresh);
+            assert_eq!(
+                projected_body["version"], created["version"],
+                "derived native body does not advance metadata version"
+            );
+            let revisions_path = format!("{path}/{document}/revisions");
+            let (status, manual, _, _) = json_request(
+                app.clone(),
+                "POST",
+                &revisions_path,
+                None,
+                Some(&fresh_cookie),
+                &[("origin", "http://localhost")],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "{} manual: {manual}",
+                backend.kind()
+            );
+            let revision = manual["id"].as_str().unwrap();
+            let (status, repeated_manual, _, _) = json_request(
+                app.clone(),
+                "POST",
+                &revisions_path,
+                None,
+                Some(&fresh_cookie),
+                &[("origin", "http://localhost")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED);
+            assert_eq!(
+                repeated_manual, manual,
+                "unchanged manual capture deduplicates"
+            );
+            let (status, login, readback_cookie, _) = json_request(
+                app.clone(),
+                "POST",
+                "/api/v1/auth/login",
+                Some(json!({"email":"admin@example.com","password":"supersecret1"})),
+                None,
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "fresh post-write login: {login}");
+            let readback_cookie = extract_session_cookie(readback_cookie.as_ref().unwrap());
+            assert_ne!(readback_cookie, fresh_cookie);
+            let readback_identity = fvoci_server::db::identity::find_live_session_backend(
+                &backend,
+                &hash_token(&readback_cookie),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(readback_identity.user_id, live.user_id);
+            assert_ne!(readback_identity.session_id, live.session_id);
+            let (status, fresh_body, _, _) = json_request(
+                app.clone(),
+                "GET",
+                &format!("{path}/{document}/body"),
+                None,
+                Some(&readback_cookie),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(fresh_body["contentJson"], fresh);
+            let (status, list, _, _) = json_request(
+                app.clone(),
+                "GET",
+                &revisions_path,
+                None,
+                Some(&readback_cookie),
+                &[],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{} revision list: {list}",
+                backend.kind()
+            );
+            assert_eq!(list["items"].as_array().unwrap().len(), 1);
+            assert_eq!(list["items"][0]["id"], manual["id"]);
+            assert_eq!(list["items"][0]["createdBy"], me["userId"]);
+            assert_eq!(list["items"][0]["reason"], "manual");
+            let (status, detail, _, _) = json_request(
+                app.clone(),
+                "GET",
+                &format!("{revisions_path}/{revision}"),
+                None,
+                Some(&readback_cookie),
+                &[],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{} revision detail: {detail}",
+                backend.kind()
+            );
+            assert_eq!(detail["id"], manual["id"]);
+            assert_eq!(detail["targetId"], created["id"]);
+            assert_eq!(detail["contentJson"], fresh);
+            let saved_snapshot =
+                collab_engine::b64::decode(detail["ySnapshot"].as_str().unwrap()).unwrap();
+            assert!(!saved_snapshot.is_empty());
+            let current_native = load_collab_readonly_kind_backend(
+                &backend,
+                CollabKind::Document,
+                workspace_id,
+                readback_identity.user_id,
+                readback_identity.session_id,
+                document_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let engine = engine_bin.clone();
+            let captured = tokio::task::spawn_blocking(move || {
+                fvoci_server::collab::revision::capture_revision_offline(
+                    engine,
+                    collab_engine::limits::Limits::default(),
+                    current_native.snapshot,
+                    current_native
+                        .tail
+                        .into_iter()
+                        .map(|row| row.payload)
+                        .collect(),
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                saved_snapshot, captured.y_snapshot,
+                "manual history snapshot equals freshly captured durable native source"
+            );
+            let (status, _, _, _) = json_request(
+                app.clone(),
+                "GET",
+                &format!(
+                    "/api/v1/workspaces/{}/documents/{document}/revisions/{revision}",
+                    Uuid::now_v7()
+                ),
+                None,
+                Some(&readback_cookie),
+                &[],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "wrong tenant cannot read revision"
+            );
+            if let Some(fence) = room_fence {
+                use fvoci_server::db::collab::{
+                    claim_family_document_room, release_family_document_room,
+                    renew_family_document_room,
+                };
+                let retry = claim_family_document_room(
+                    &backend,
+                    workspace_id,
+                    live.user_id,
+                    live.session_id,
+                    document_id,
+                    room_owner,
+                    std::time::Duration::from_secs(30),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(retry.fence, fence);
+                assert_eq!(
+                    retry.native.writer_generation, 1,
+                    "same live owner retry cannot replace generation"
+                );
+                let other_owner = Uuid::now_v7();
+                assert_eq!(
+                    claim_family_document_room(
+                        &backend,
+                        workspace_id,
+                        live.user_id,
+                        live.session_id,
+                        document_id,
+                        other_owner,
+                        std::time::Duration::from_secs(30)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::StaleWriter
+                );
+                assert!(renew_family_document_room(
+                    &backend,
+                    fence,
+                    std::time::Duration::from_secs(30)
+                )
+                .await
+                .unwrap());
+                assert!(release_family_document_room(&backend, fence).await.unwrap());
+                assert_eq!(
+                    project_derived_body_kind_backend(
+                        &backend,
+                        CollabKind::Document,
+                        project_input(1, 1, live.session_id),
+                        Some(fence)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::StaleWriter,
+                    "expired room cannot project even an unchanged native body"
+                );
+                assert_eq!(
+                    append_native(
+                        &backend,
+                        Some(fence),
+                        input(live.user_id, live.session_id, 1, operation)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::StaleWriter,
+                    "expired ownership cannot replay a receipt"
+                );
+                let replacement = claim_family_document_room(
+                    &backend,
+                    workspace_id,
+                    live.user_id,
+                    live.session_id,
+                    document_id,
+                    other_owner,
+                    std::time::Duration::from_secs(30),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_ne!(replacement.fence, fence);
+                assert_eq!(replacement.native.writer_generation, 2);
+                assert_eq!(
+                    project_derived_body_kind_backend(
+                        &backend,
+                        CollabKind::Document,
+                        project_input(2, 1, live.session_id),
+                        Some(fence)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::StaleWriter,
+                    "old owner cannot project against replacement generation"
+                );
+                assert_eq!(
+                    project_derived_body_kind_backend(
+                        &backend,
+                        CollabKind::Document,
+                        project_input(2, 1, live.session_id),
+                        Some(replacement.fence),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                    ProjectDerivedBodyResult::Unchanged,
+                    "current replacement owner can project the unchanged native head"
+                );
+                assert!(!renew_family_document_room(
+                    &backend,
+                    fence,
+                    std::time::Duration::from_secs(30)
+                )
+                .await
+                .unwrap());
+                assert!(
+                    !release_family_document_room(&backend, fence).await.unwrap(),
+                    "old owner cannot release replacement"
+                );
+                assert_eq!(
+                    append_native(
+                        &backend,
+                        Some(fence),
+                        input(live.user_id, live.session_id, 2, operation)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::StaleWriter
+                );
+                assert_eq!(
+                    append_native(
+                        &backend,
+                        Some(replacement.fence),
+                        input(live.user_id, live.session_id, 2, operation)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                    AppendCollabResult::DuplicateAck { seq: 1 }
+                );
+                assert!(release_family_document_room(&backend, replacement.fence)
+                    .await
+                    .unwrap());
+            }
+        }
+        let (status, _, _, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!(
+                "/api/v1/workspaces/{}/documents/{document}/body",
+                Uuid::now_v7()
+            ),
+            None,
+            Some(&fresh_cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{} wrong-tenant body",
+            backend.kind()
+        );
+        let (status, _, _, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!("{path}/{document}/body"),
+            None,
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{} anonymous body",
+            backend.kind()
+        );
+        drop(app);
+        let storage_root = match &storage {
+            fvoci_server::attachments::ObjectStorage::Local(local) => local.root().to_path_buf(),
+            _ => unreachable!("owned local fixture storage"),
+        };
+        drop(storage);
+        backend.close().await.unwrap();
+        std::fs::remove_dir_all(storage_root).unwrap();
+    }
+    drop(sqlite_admission);
+    // Idempotent restart reads all real step receipts and definitions.
+    migrate::run_sqlite_migrations(&sqlite_path).await.unwrap();
+    pg.cleanup().await;
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+struct MigrationCommitPause(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+impl MigrationCommitPause {
+    fn release(&self) {
+        *self.0 .0.lock().unwrap() = true;
+        self.0 .1.notify_all();
+    }
+}
+impl Drop for MigrationCommitPause {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+async fn pause_actual_sqlite_commit(
+    pool: &sqlx::SqlitePool,
+) -> (MigrationCommitPause, tokio::sync::oneshot::Receiver<()>) {
+    let pause = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let callback_pause = pause.clone();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let mut entered_tx = Some(entered_tx);
+    let mut conn = pool.acquire().await.unwrap();
+    {
+        let mut native = conn.lock_handle().await.unwrap();
+        // Supported SQLx hook blocks its actual SQLite worker at COMMIT,
+        // after real DDL/marker operations, without faking a driver result.
+        native.set_commit_hook(move || {
+            if let Some(entered) = entered_tx.take() {
+                let _ = entered.send(());
+            }
+            let mut released = callback_pause.0.lock().unwrap();
+            while !*released {
+                released = callback_pause.1.wait(released).unwrap();
+            }
+            true // SQLx maps true to SQLite's zero/allow-commit callback result
+        });
+    }
+    drop(conn);
+    (MigrationCommitPause(pause), entered_rx)
+}
+
+#[tokio::test]
+async fn sqlite_migration_cancelled_commit_retains_admission_until_drain() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            use migrate::{SqliteAdmission, SqliteMigrationDrain, SqliteMigrationTestControl};
+            let directory =
+                std::env::temp_dir().join(format!("fvoci-migration-cancel-{}", Uuid::now_v7()));
+            std::fs::create_dir(&directory).unwrap();
+            // Old c961 lifecycle control on the same real SQLite/COMMIT barrier.
+            // It decisively admits a server while its original worker is still paused.
+            let old_path = directory.join("legacy.db");
+            let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
+            let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+            let old_request_path = old_path.clone();
+            let old_request = tokio::task::spawn_local(async move {
+                migrate::run_sqlite_migrations_legacy_control(
+                    &old_request_path,
+                    SqliteMigrationTestControl {
+                        connected: connected_tx,
+                        proceed: proceed_rx,
+                        cleanup_started: None,
+                    },
+                )
+                .await
+            });
+            let old_pool = connected_rx.await.unwrap();
+            let (old_pause, old_entered) = pause_actual_sqlite_commit(&old_pool).await;
+            proceed_tx.send(()).unwrap();
+            old_entered.await.unwrap();
+            old_request.abort();
+            assert!(old_request.await.unwrap_err().is_cancelled());
+            let wrongly_admitted = SqliteAdmission::server(&old_path)
+                .expect("old request-owned guard releases before the paused worker drains");
+            drop(wrongly_admitted);
+            old_pause.release();
+            // The old request has no cleanup owner. The control itself must
+            // obtain its actual worker-shutdown receipt before closing the pool.
+            old_pool.acquire().await.unwrap().close().await.unwrap();
+            old_pool.close().await;
+            assert!(old_pool.is_closed());
+            assert_eq!(old_pool.size(), 0);
+            drop(old_pause);
+
+            // New finite cleanup owner survives both request and request-runtime Drop.
+            let new_path = directory.join("owned.db");
+            let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
+            let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+            let run = migrate::start_sqlite_migration_controlled(
+                &new_path,
+                SqliteMigrationTestControl {
+                    connected: connected_tx,
+                    proceed: proceed_rx,
+                    cleanup_started: None,
+                },
+            )
+            .unwrap();
+            let observer = run.observer();
+            let (drop_runtime_tx, drop_runtime_rx) = tokio::sync::oneshot::channel();
+            let caller = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.spawn(run.wait());
+                runtime.block_on(async {
+                    drop_runtime_rx.await.unwrap();
+                });
+                drop(runtime); // aborts/drops the waiting request, never the cleanup owner's runtime
+            });
+            let new_pool = connected_rx.await.unwrap();
+            let (new_pause, new_entered) = pause_actual_sqlite_commit(&new_pool).await;
+            proceed_tx.send(()).unwrap();
+            new_entered.await.unwrap();
+            drop_runtime_tx.send(()).unwrap();
+            caller.join().unwrap();
+            assert!(
+                SqliteAdmission::server(&new_path).is_err(),
+                "server refused while cancelled COMMIT is unsettled"
+            );
+            assert!(
+                migrate::run_sqlite_migrations(&new_path).await.is_err(),
+                "second migrator refused while cleanup owns admission"
+            );
+            new_pause.release();
+            assert_eq!(observer.wait().await.unwrap(), SqliteMigrationDrain::Closed);
+            assert!(new_pool.is_closed());
+            assert_eq!(new_pool.size(), 0);
+            let after_drain = SqliteAdmission::server(&new_path)
+                .expect("admission available only after confirmed drain");
+            drop(after_drain);
+            drop(new_pause);
+
+            for path in [old_path, new_path] {
+                let db = pool::connect_sqlite_app(&path, 1).await.unwrap();
+                let prefix: Vec<i64> =
+                    sqlx::query_scalar("SELECT version FROM schema_migrations ORDER BY version")
+                        .fetch_all(&db)
+                        .await
+                        .unwrap();
+                assert_eq!(
+            prefix,
+            vec![1],
+            "paused COMMIT settled one whole DDL/marker step, with no next step after cancellation"
+        );
+                db.close().await;
+                migrate::run_sqlite_migrations(&path).await.unwrap();
+                let db = pool::connect_sqlite_app(&path, 1).await.unwrap();
+                let backend = fvoci_server::db::backend::Backend::Sqlite(db);
+                assert_eq!(
+                    migrate::assert_sqlite_schema_current(&backend)
+                        .await
+                        .unwrap()
+                        .applied_steps,
+                    3
+                );
+                backend.close().await.unwrap();
+            }
+            // Cancellation during preparation proceeds to a close that is physically
+            // blocked by this real leased connection. Aborting the waiting request
+            // during that close must not release admission either.
+            let close_path = directory.join("closing.db");
+            migrate::run_sqlite_migrations(&close_path).await.unwrap();
+            let db = pool::connect_sqlite_app(&close_path, 1).await.unwrap();
+            let before: Vec<(i64, String, i64)> = sqlx::query_as(
+                "SELECT version,sql_sha256,applied_at FROM schema_migrations ORDER BY version",
+            )
+            .fetch_all(&db)
+            .await
+            .unwrap();
+            db.close().await;
+            let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
+            let (_proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+            let (cleanup_started_tx, cleanup_started_rx) = tokio::sync::oneshot::channel();
+            let run = migrate::start_sqlite_migration_controlled(
+                &close_path,
+                SqliteMigrationTestControl {
+                    connected: connected_tx,
+                    proceed: proceed_rx,
+                    cleanup_started: Some(cleanup_started_tx),
+                },
+            )
+            .unwrap();
+            let close_observer = run.observer();
+            let closing_pool = connected_rx.await.unwrap();
+            let held_connection = closing_pool.acquire().await.unwrap();
+            run.cancel();
+            let request = tokio::spawn(run.wait());
+            cleanup_started_rx.await.unwrap();
+            request.abort();
+            assert!(request.await.unwrap_err().is_cancelled());
+            assert!(
+                SqliteAdmission::server(&close_path).is_err(),
+                "caller cancellation cannot release blocked close admission"
+            );
+            drop(held_connection);
+            assert_eq!(
+                close_observer.wait().await.unwrap(),
+                SqliteMigrationDrain::Closed
+            );
+            assert_eq!(closing_pool.size(), 0);
+            let db = pool::connect_sqlite_app(&close_path, 1).await.unwrap();
+            let after: Vec<(i64, String, i64)> = sqlx::query_as(
+                "SELECT version,sql_sha256,applied_at FROM schema_migrations ORDER BY version",
+            )
+            .fetch_all(&db)
+            .await
+            .unwrap();
+            assert_eq!(
+                after, before,
+                "cancelled preparation leaves the existing complete prefix unchanged"
+            );
+            db.close().await;
+            migrate::run_sqlite_migrations(&close_path).await.unwrap();
+            // Pool-level shutdown hides retirement errors. An owner that never
+            // received the original worker's close result must quarantine, even if
+            // acquiring a replacement succeeds and that replacement closes cleanly.
+            let replaced_path = directory.join("replaced.db");
+            let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
+            let (_proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+            let run = migrate::start_sqlite_migration_controlled(
+                &replaced_path,
+                SqliteMigrationTestControl {
+                    connected: connected_tx,
+                    proceed: proceed_rx,
+                    cleanup_started: None,
+                },
+            )
+            .unwrap();
+            let observer = run.observer();
+            let replaced_pool = connected_rx.await.unwrap();
+            // This real close receipt belongs to the test, not the migration owner.
+            // The owner's later acquire must not bless this replacement as its drain.
+            replaced_pool
+                .acquire()
+                .await
+                .unwrap()
+                .close()
+                .await
+                .unwrap();
+            run.cancel();
+            let error = run.wait().await.unwrap_err();
+            assert!(error.to_string().contains("cleanup is unconfirmed"));
+            assert_eq!(
+                observer.wait().await.unwrap(),
+                SqliteMigrationDrain::Quarantined
+            );
+            assert!(SqliteAdmission::server(&replaced_path).is_err());
+            assert_eq!(replaced_pool.size(), 0);
+            // Only the fail-closed inode lock remains until this test process exits;
+            // both real worker connections were explicitly closed above/by the owner.
+            std::fs::remove_dir_all(directory).unwrap();
+        })
+        .await;
 }

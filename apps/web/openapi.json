@@ -8737,6 +8737,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Creation command content or actor differs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -15456,7 +15466,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateDocumentBody"
+                "$ref": "#/components/schemas/CreateProjectDocumentBody"
               }
             }
           },
@@ -28568,10 +28578,16 @@
       "CreateDocumentBody": {
         "type": "object",
         "required": [
+          "commandId",
           "parentId",
           "title"
         ],
         "properties": {
+          "commandId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Chosen once per logical ordinary wiki create, retained on response loss."
+          },
           "icon": {
             "type": [
               "string",
@@ -28685,6 +28701,32 @@
             "type": "string"
           },
           "visibility": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateProjectDocumentBody": {
+        "type": "object",
+        "required": [
+          "parentId",
+          "title"
+        ],
+        "properties": {
+          "icon": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parentId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "title": {
             "type": "string"
           }
         },

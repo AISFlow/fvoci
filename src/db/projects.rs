@@ -5,6 +5,8 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::db::backend::OperationTx;
+use crate::db::codec::Cell;
 use crate::db::context::{
     begin_read, lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
 };
@@ -161,24 +163,95 @@ pub(crate) async fn project_member_role(
     project_id: Uuid,
     user_id: Uuid,
 ) -> Result<Option<ProjectMemberRole>, sqlx::Error> {
-    let rows = sqlx::query_as::<_, (String,)>(&format!(
-        r#"
-        SELECT role FROM fvoci.project_members
-        WHERE workspace_id = $1 AND project_id = $2 AND user_id = $3
-        UNION ALL
-        {}
-        "#,
-        group_project_grant_roles_select_sql(1, 2, 3)
-    ))
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(user_id)
-    .fetch_all(&mut **tx)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|(role,)| ProjectMemberRole::parse(&role))
-        .max_by_key(|role| role.permission()))
+    OperationTx::Postgres(tx)
+        .project_member_role(workspace_id, project_id, user_id)
+        .await
+}
+
+impl OperationTx<'_, '_> {
+    /// Current direct and group grants, evaluated in the caller's tenant
+    /// transaction. The caller retains credential/membership and commit ownership.
+    pub(crate) async fn project_member_role(
+        &mut self,
+        workspace: Uuid,
+        project: Uuid,
+        user: Uuid,
+    ) -> Result<Option<ProjectMemberRole>, sqlx::Error> {
+        let roles = match self {
+            Self::Postgres(tx) => sqlx::query_as::<_, (String,)>(&format!(
+                r#"SELECT role FROM fvoci.project_members
+                   WHERE workspace_id=$1 AND project_id=$2 AND user_id=$3
+                   UNION ALL {}"#,
+                group_project_grant_roles_select_sql(1, 2, 3)
+            ))
+            .bind(workspace)
+            .bind(project)
+            .bind(user)
+            .fetch_all(&mut ***tx)
+            .await?
+            .into_iter()
+            .map(|(role,)| role)
+            .collect::<Vec<_>>(),
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                tx.query(
+                    "SELECT role FROM project_members
+                     WHERE workspace_id=?1 AND project_id=?2 AND user_id=?3
+                     UNION ALL
+                     SELECT pm.role FROM project_members pm
+                     INNER JOIN group_members gm
+                       ON gm.workspace_id=pm.workspace_id AND gm.group_id=pm.group_id
+                     WHERE pm.workspace_id=?1 AND pm.project_id=?2
+                       AND gm.user_id=?3 AND pm.group_id IS NOT NULL",
+                    &[Cell::uuid(workspace), Cell::uuid(project), Cell::uuid(user)],
+                )
+                .await?
+                .iter()
+                .map(|row| row.cell(0)?.string())
+                .collect::<Result<Vec<_>, sqlx::Error>>()?
+            }
+        };
+        Ok(roles
+            .iter()
+            .filter_map(|role| ProjectMemberRole::parse(role))
+            .max_by_key(|role| role.permission()))
+    }
+
+    /// Effective permission on a live project in this snapshot. As in the
+    /// PostgreSQL entrypoint, consumers must first validate current credentials,
+    /// live workspace and workspace membership in this same transaction.
+    pub(crate) async fn project_permission_by_id(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        project: Uuid,
+    ) -> Result<Option<ProjectPermission>, sqlx::Error> {
+        let visibility: Option<String> = match self {
+            Self::Postgres(tx) => sqlx::query_scalar(
+                "SELECT visibility FROM fvoci.projects WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL"
+            ).bind(workspace).bind(project).fetch_optional(&mut ***tx).await?,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                tx.query(
+                    "SELECT visibility FROM projects WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",
+                    &[Cell::uuid(workspace), Cell::uuid(project)],
+                ).await?.first().map(|row| row.cell(0)?.string()).transpose()?
+            }
+        };
+        let Some(visibility) = visibility else {
+            return Ok(None);
+        };
+        let workspace_role = self
+            .membership_role(workspace, actor, false)
+            .await?
+            .unwrap_or(WorkspaceRole::Guest);
+        let member_role = self.project_member_role(workspace, project, actor).await?;
+        Ok(Some(effective_permission(
+            workspace_role,
+            &visibility,
+            member_role,
+        )))
+    }
 }
 
 async fn direct_project_member_role(
@@ -409,25 +482,9 @@ pub(crate) async fn project_permission_by_id(
     actor_user_id: Uuid,
     project_id: Uuid,
 ) -> Result<Option<ProjectPermission>, sqlx::Error> {
-    let visibility: Option<String> = sqlx::query_scalar(
-        "SELECT visibility FROM fvoci.projects WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL",
-    )
-    .bind(workspace_id)
-    .bind(project_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some(visibility) = visibility else {
-        return Ok(None);
-    };
-    let workspace_role = membership_role(tx, workspace_id, actor_user_id)
-        .await?
-        .unwrap_or(WorkspaceRole::Guest);
-    let member_role = project_member_role(tx, workspace_id, project_id, actor_user_id).await?;
-    Ok(Some(effective_permission(
-        workspace_role,
-        &visibility,
-        member_role,
-    )))
+    OperationTx::Postgres(tx)
+        .project_permission_by_id(workspace_id, actor_user_id, project_id)
+        .await
 }
 
 /// Read check for rows owned by a project (labels, milestones): a live
@@ -504,29 +561,45 @@ pub(crate) async fn share_lock_project_permission(
     actor_user_id: Uuid,
     project_id: Uuid,
 ) -> Result<Option<(ProjectPermission, bool)>, sqlx::Error> {
-    let row: Option<(String, String)> = sqlx::query_as(
-        r#"
-        SELECT visibility, status
-        FROM fvoci.projects
-        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-        FOR SHARE
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(project_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some((visibility, status)) = row else {
-        return Ok(None);
-    };
-    let workspace_role = membership_role(tx, workspace_id, actor_user_id)
-        .await?
-        .unwrap_or(WorkspaceRole::Guest);
-    let member_role = project_member_role(tx, workspace_id, project_id, actor_user_id).await?;
-    Ok(Some((
-        effective_permission(workspace_role, &visibility, member_role),
-        status == "archived",
-    )))
+    OperationTx::Postgres(tx)
+        .share_lock_project_permission(workspace_id, actor_user_id, project_id)
+        .await
+}
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn share_lock_project_permission(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        project: Uuid,
+    ) -> Result<Option<(ProjectPermission, bool)>, sqlx::Error> {
+        let row: Option<(String, String)> = match self {
+            Self::Postgres(tx) => sqlx::query_as(
+                "SELECT visibility,status FROM fvoci.projects WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL FOR SHARE"
+            ).bind(workspace).bind(project).fetch_optional(&mut ***tx).await?,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                tx.query(
+                    "SELECT visibility,status FROM projects WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",
+                    &[Cell::uuid(workspace),Cell::uuid(project)],
+                ).await?.first().map(|row| Ok::<_, sqlx::Error>((row.cell(0)?.string()?,row.cell(1)?.string()?)))
+                    .transpose()?
+            }
+        };
+        let Some((visibility, status)) = row else {
+            return Ok(None);
+        };
+        let workspace_role = self
+            .membership_role(workspace, actor, false)
+            .await?
+            .unwrap_or(WorkspaceRole::Guest);
+        let member_role = self.project_member_role(workspace, project, actor).await?;
+        Ok(Some((
+            effective_permission(workspace_role, &visibility, member_role),
+            status == "archived",
+        )))
+    }
 }
 
 async fn record_project_event_and_audit(

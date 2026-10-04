@@ -4,6 +4,8 @@ pub mod api_tokens;
 pub mod attachment_extract;
 pub mod attachment_preview;
 pub mod attachments;
+pub mod backend;
+mod codec;
 pub mod collab;
 pub mod collab_delivery;
 pub mod collection_query;
@@ -56,6 +58,7 @@ pub mod task_origins;
 pub mod task_timer;
 pub mod tasks;
 pub mod templates;
+pub(crate) mod vapid;
 pub mod user_export;
 pub mod view_query;
 pub mod workflow_statuses;
@@ -68,7 +71,7 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Db {
-    pub pool: PgPool,
+    pub pool: backend::Backend,
     pub license: Arc<crate::license::Entitlements>,
     /// Instance settings as first resolved by this process (restart badges).
     pub settings_boot: crate::settings::SettingsBoot,
@@ -80,6 +83,17 @@ impl Db {
     }
 
     pub fn with_license(pool: PgPool, license: Arc<crate::license::Entitlements>) -> Self {
+        Self::with_backend_license(backend::Backend::Postgres(pool), license)
+    }
+
+    pub fn from_backend(pool: backend::Backend) -> Self {
+        Self::with_backend_license(pool, Arc::new(crate::license::absent()))
+    }
+
+    pub fn with_backend_license(
+        pool: backend::Backend,
+        license: Arc<crate::license::Entitlements>,
+    ) -> Self {
         Self {
             pool,
             settings_boot: crate::settings::SettingsBoot::with_license(license.clone()),

@@ -1988,7 +1988,7 @@ async fn ai_routes_are_member_gated_and_use_the_document_markdown() {
             &app,
             "POST",
             &format!("/api/v1/workspaces/{workspace_id}/documents"),
-            Some(json!({ "parentId": null, "title": title })),
+            Some(json!({"commandId": uuid::Uuid::now_v7(),  "parentId": null, "title": title })),
             Some(&cookie),
         )
         .await;
@@ -2848,7 +2848,7 @@ async fn ai_routes_follow_document_permission_and_rate_limit() {
         &app,
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({ "parentId": null, "title": "위키" })),
+        Some(json!({"commandId": uuid::Uuid::now_v7(),  "parentId": null, "title": "위키" })),
         Some(&cookie),
     )
     .await;

@@ -153,9 +153,16 @@ fn map_share_error(err: ShareDbError) -> AppError {
 /// Source share public routes: 404 for every route while the instance share
 /// policy is disabled (checked before anything else, like `onBeforeHandle`).
 async fn ensure_sharing_enabled(state: &AppState) -> Result<(), AppError> {
-    let policy = crate::settings::share_policy(&state.auth.db.pool)
-        .await
-        .map_err(internal)?;
+    let policy = crate::settings::share_policy(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/share.rs")
+            .map_err(internal)?,
+    )
+    .await
+    .map_err(internal)?;
     if policy.enabled {
         Ok(())
     } else {
@@ -208,7 +215,12 @@ async fn list_links_route(
     let (user_id, credential_id) =
         require_share_manage(&state, &headers, &jar, workspace_id).await?;
     let items = list_share_links(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/share.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         credential_id,
@@ -231,11 +243,23 @@ async fn create_link(
     expires_in_days: Option<i64>,
     affiliation: Option<DocumentAffiliation>,
 ) -> Result<Response, AppError> {
-    let policy = crate::settings::share_policy(&state.auth.db.pool)
-        .await
-        .map_err(internal)?;
+    let policy = crate::settings::share_policy(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/share.rs")
+            .map_err(internal)?,
+    )
+    .await
+    .map_err(internal)?;
     let created = create_share_link(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/share.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         credential_id,
@@ -309,7 +333,12 @@ async fn revoke_link_route(
     let (user_id, credential_id) =
         require_share_manage(&state, &headers, &jar, workspace_id).await?;
     revoke_share_link(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/share.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         credential_id,
@@ -331,7 +360,12 @@ async fn list_document_links(
 ) -> Result<Json<ShareLinkListResponse>, AppError> {
     let (user_id, credential_id) = require_share_manage(state, headers, jar, workspace_id).await?;
     let items = list_share_links(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/share.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         credential_id,
@@ -470,15 +504,31 @@ pub(crate) async fn shell_head_meta(
     if enforce_share_limit(state, peer).await.is_err() {
         return Ok(None);
     }
-    let policy = crate::settings::share_policy(&state.auth.db.pool)
-        .await
-        .map_err(internal)?;
+    let policy = crate::settings::share_policy(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/share.rs")
+            .map_err(internal)?,
+    )
+    .await
+    .map_err(internal)?;
     if !policy.enabled {
         return Ok(None);
     }
-    share_public_meta(&state.auth.db.pool, token, true)
-        .await
-        .map_err(internal)
+    share_public_meta(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/share.rs")
+            .map_err(internal)?,
+        token,
+        true,
+    )
+    .await
+    .map_err(internal)
 }
 
 async fn public_meta_route(
@@ -488,10 +538,19 @@ async fn public_meta_route(
 ) -> Result<Json<SharePublicMetaOutput>, AppError> {
     ensure_sharing_enabled(&state).await?;
     enforce_share_limit(&state, peer).await?;
-    let meta = share_public_meta(&state.auth.db.pool, &token, false)
-        .await
-        .map_err(internal)?
-        .ok_or_else(not_found)?;
+    let meta = share_public_meta(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/share.rs")
+            .map_err(internal)?,
+        &token,
+        false,
+    )
+    .await
+    .map_err(internal)?
+    .ok_or_else(not_found)?;
     Ok(Json(SharePublicMetaOutput {
         title: meta.title,
         document_id: meta.document_id.map(|id| id.to_string()),
@@ -581,10 +640,19 @@ async fn document_body_response(
     document_id: Option<Uuid>,
     format: BodyFormat,
 ) -> Result<Response, AppError> {
-    let doc = share_document(&state.auth.db.pool, token, document_id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(not_found)?;
+    let doc = share_document(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/share.rs")
+            .map_err(internal)?,
+        token,
+        document_id,
+    )
+    .await
+    .map_err(internal)?
+    .ok_or_else(not_found)?;
     let tag = strong_etag(&iso(doc.updated_at), format);
     if format != BodyFormat::Html {
         if let Some(header) = headers.get(IF_NONE_MATCH).and_then(|v| v.to_str().ok()) {
@@ -697,10 +765,18 @@ async fn public_tree_route(
 ) -> Result<Json<TreeResponse>, AppError> {
     ensure_sharing_enabled(&state).await?;
     enforce_share_limit(&state, peer).await?;
-    let nodes = share_tree(&state.auth.db.pool, &token)
-        .await
-        .map_err(internal)?
-        .ok_or_else(not_found)?;
+    let nodes = share_tree(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/share.rs")
+            .map_err(internal)?,
+        &token,
+    )
+    .await
+    .map_err(internal)?
+    .ok_or_else(not_found)?;
     Ok(Json(TreeResponse {
         items: nodes
             .into_iter()
@@ -746,10 +822,19 @@ async fn public_pdf_route(
         ),
     };
     enforce_share_limit(&state, peer).await?;
-    let doc = share_document(&state.auth.db.pool, &token, document_id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(not_found)?;
+    let doc = share_document(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/share.rs")
+            .map_err(internal)?,
+        &token,
+        document_id,
+    )
+    .await
+    .map_err(internal)?
+    .ok_or_else(not_found)?;
     let Some(markdown) = state.markdown.as_ref() else {
         tracing::error!("share pdf requested but the markdown child is unavailable");
         return Err(AppError::internal());
@@ -926,7 +1011,12 @@ async fn public_search_route(
         return Err(AppError::from_code(ProblemCode::InvalidInput));
     }
     enforce_share_limit(&state, peer).await?;
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/share.rs")
+        .map_err(internal)?;
     let scope = share_search_scope(pool, &token)
         .await
         .map_err(internal)?
@@ -1062,10 +1152,19 @@ async fn public_attachment_route(
 ) -> Result<Json<AttachmentOutput>, AppError> {
     ensure_sharing_enabled(&state).await?;
     enforce_share_limit(&state, peer).await?;
-    let att = share_attachment(&state.auth.db.pool, &token, attachment_id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(not_found)?;
+    let att = share_attachment(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/share.rs")
+            .map_err(internal)?,
+        &token,
+        attachment_id,
+    )
+    .await
+    .map_err(internal)?
+    .ok_or_else(not_found)?;
     Ok(Json(AttachmentOutput {
         id: att.id.to_string(),
         name: att.name,
@@ -1102,10 +1201,19 @@ async fn public_download_route(
         Some(_) => return Err(AppError::from_code(ProblemCode::InvalidInput)),
     };
     enforce_share_limit(&state, peer).await?;
-    let att = share_attachment(&state.auth.db.pool, &token, attachment_id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(not_found)?;
+    let att = share_attachment(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/share.rs")
+            .map_err(internal)?,
+        &token,
+        attachment_id,
+    )
+    .await
+    .map_err(internal)?
+    .ok_or_else(not_found)?;
     if preview {
         let variant =
             crate::db::attachments::preview_variant_of(&att.variants).ok_or_else(not_found)?;

@@ -175,7 +175,7 @@ test("trash timestamp follows the saved user zone instead of the browser zone", 
 }) => {
   await login(page, owner.email, owner.password);
   const response = await page.request.post(`/api/v1/workspaces/${workspaceId}/documents`, {
-    data: { title: "Zone trash", parentId: null },
+    data: { commandId: crypto.randomUUID(), title: "Zone trash", parentId: null },
   });
   expect(response.status()).toBe(201);
   const doc = await readJson(response, flowSchemas.document);
@@ -217,7 +217,7 @@ test("wiki tag URLs include child-only matches and project documents; unfiltered
   }[] = [];
   for (const title of ["Wiki parent", "Wiki second", "Wiki third"]) {
     const response = await page.request.post(`/api/v1/workspaces/${workspaceId}/documents`, {
-      data: { title, parentId: null },
+      data: { commandId: crypto.randomUUID(), title, parentId: null },
     });
     expect(response.status()).toBe(201);
     wiki.push(await readJson(response, flowSchemas.createdDocument));
@@ -225,7 +225,7 @@ test("wiki tag URLs include child-only matches and project documents; unfiltered
   const fixtureValue3 = wiki[0];
   if (fixtureValue3 === undefined) throw new Error("Missing fixture value: wiki[0]");
   const childResponse = await page.request.post(`/api/v1/workspaces/${workspaceId}/documents`, {
-    data: { title: "Tagged child", parentId: fixtureValue3.id },
+    data: { commandId: crypto.randomUUID(), title: "Tagged child", parentId: fixtureValue3.id },
   });
   expect(childResponse.status()).toBe(201);
   const child = await readJson(childResponse, flowSchemas.document);

@@ -111,7 +111,7 @@ async function createProject(page: Page, workspaceId: string, key: string, name:
 
 async function createWiki(page: Page, workspaceId: string, title: string) {
   const response = await page.request.post(`/api/v1/workspaces/${workspaceId}/documents`, {
-    data: { parentId: null, title },
+    data: { commandId: crypto.randomUUID(), parentId: null, title },
   });
   expect(response.status()).toBe(201);
   return readJson(response, flowSchemas.document);

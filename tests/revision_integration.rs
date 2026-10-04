@@ -635,7 +635,7 @@ async fn create_list_restore_with_live_room() {
         let source_fingerprint = revision_fingerprint(&wiki.session.pool, wiki.session.workspace_id, Uuid::parse_str(&revision_id).unwrap()).await;
         let (status, other_document) = http_json(addr, reqwest::Method::POST,
             &format!("/api/v1/workspaces/{}/documents", wiki.session.workspace_id),
-            &wiki.session.session_token, Some(json!({"parentId": null, "title": "other restore target"}))).await;
+            &wiki.session.session_token, Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "other restore target"}))).await;
         assert_eq!(status, reqwest::StatusCode::CREATED, "{other_document}");
         let other_id = other_document["id"].as_str().unwrap();
         let (status, _) = http_json(addr, reqwest::Method::GET,

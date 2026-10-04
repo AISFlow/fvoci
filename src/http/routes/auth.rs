@@ -279,19 +279,39 @@ async fn request_password_reset(
     }
     let started = std::time::Instant::now();
     // Read for known and unknown addresses alike (same work on both paths).
-    let messages = crate::settings::messages::load(&state.auth.db.pool)
-        .await
-        .map_err(internal)?;
+    let messages = crate::settings::messages::load(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/auth.rs")
+            .map_err(internal)?,
+    )
+    .await
+    .map_err(internal)?;
     if let Some((user_id, generation, suspended_at)) =
-        crate::db::identity::find_reset_user_by_email(&state.auth.db.pool, &email)
-            .await
-            .map_err(internal)?
+        crate::db::identity::find_reset_user_by_email(
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/auth.rs")
+                .map_err(internal)?,
+            &email,
+        )
+        .await
+        .map_err(internal)?
     {
         if suspended_at.is_none() {
             let issued = new_token();
             let expires_at = crate::db::magic::magic_expires_at(chrono::Utc::now());
             crate::db::magic::issue_password_reset_token(
-                &state.auth.db.pool,
+                state
+                    .auth
+                    .db
+                    .pool
+                    .postgres("src/http/routes/auth.rs")
+                    .map_err(internal)?,
                 user_id,
                 generation,
                 &issued.hash,
@@ -328,10 +348,27 @@ async fn confirm_password_reset(
     {
         return Err(AppError::rate_limited(retry_after));
     }
-    crate::validate::validate_password_setting(&state.auth.db.pool, &body.new_password).await?;
-    let payload = crate::db::magic::consume_magic_token(&state.auth.db.pool, &body.token)
-        .await
-        .map_err(internal)?;
+    crate::validate::validate_password_setting(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/auth.rs")
+            .map_err(internal)?,
+        &body.new_password,
+    )
+    .await?;
+    let payload = crate::db::magic::consume_magic_token(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/auth.rs")
+            .map_err(internal)?,
+        &body.token,
+    )
+    .await
+    .map_err(internal)?;
     let Some(payload) = payload else {
         return Err(AppError::from_code(ProblemCode::MagicInvalid));
     };
@@ -341,10 +378,18 @@ async fn confirm_password_reset(
             tracing::error!(error = %err, "password hash failed");
             AppError::internal()
         })?;
-    let ok =
-        crate::db::magic::complete_password_reset(&state.auth.db.pool, &payload, &password_hash)
-            .await
-            .map_err(internal)?;
+    let ok = crate::db::magic::complete_password_reset(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/auth.rs")
+            .map_err(internal)?,
+        &payload,
+        &password_hash,
+    )
+    .await
+    .map_err(internal)?;
     if !ok {
         return Err(AppError::from_code(ProblemCode::MagicInvalid));
     }

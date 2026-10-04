@@ -106,7 +106,12 @@ async fn create_project_route(
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = create_project(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/projects.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,
@@ -170,7 +175,12 @@ async fn clone_project_route(
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = clone_project(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/projects.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         actor_user_id,
@@ -233,10 +243,19 @@ async fn list_projects_route(
     if deleted {
         // Source `listDeletedProjects`: task counts are zero and rows are not editable.
         // Document counts are unavailable for deleted projects.
-        let result =
-            list_deleted_projects(&state.auth.db.pool, workspace_id, actor_user_id, session_id)
-                .await
-                .map_err(internal)?;
+        let result = list_deleted_projects(
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/projects.rs")
+                .map_err(internal)?,
+            workspace_id,
+            actor_user_id,
+            session_id,
+        )
+        .await
+        .map_err(internal)?;
         return match result {
             Ok(rows) => Ok(Json(ProjectListResponse {
                 items: rows
@@ -265,9 +284,19 @@ async fn list_projects_route(
             Err(err) => Err(map_project_error(err)),
         };
     }
-    let result = list_projects(&state.auth.db.pool, workspace_id, actor_user_id, session_id)
-        .await
-        .map_err(internal)?;
+    let result = list_projects(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/projects.rs")
+            .map_err(internal)?,
+        workspace_id,
+        actor_user_id,
+        session_id,
+    )
+    .await
+    .map_err(internal)?;
     match result {
         Ok(items) => Ok(Json(ProjectListResponse {
             items: items
@@ -313,7 +342,12 @@ async fn get_project_route(
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = get_project(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/projects.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         actor_user_id,
@@ -370,7 +404,12 @@ async fn patch_project_route(
     let description = body.description.as_ref().map(|value| value.as_deref());
     let icon = body.icon.as_ref().map(|value| value.as_deref());
     let result = update_project(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/projects.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         actor_user_id,
@@ -411,7 +450,12 @@ async fn delete_project_route(
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = trash_project(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/projects.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         actor_user_id,
@@ -476,7 +520,12 @@ async fn set_archived_route(
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = set_project_archived(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/projects.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         actor_user_id,
@@ -511,7 +560,12 @@ async fn restore_project_route(
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = restore_project(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/projects.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         actor_user_id,
@@ -542,7 +596,12 @@ async fn list_members(
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = list_project_members(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/projects.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         actor_user_id,
@@ -590,7 +649,12 @@ async fn add_member(
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = add_project_member(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/projects.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         actor_user_id,
@@ -630,7 +694,12 @@ async fn patch_member(
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = update_project_member_role(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/projects.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         actor_user_id,
@@ -666,7 +735,12 @@ async fn delete_member(
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = remove_project_member(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/projects.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         actor_user_id,
@@ -698,7 +772,12 @@ async fn get_workflow(
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = get_project_workflow(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/projects.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         actor_user_id,

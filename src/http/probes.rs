@@ -17,6 +17,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::db::backend::Backend;
 use axum::extract::{ConnectInfo, MatchedPath, Request, State};
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
@@ -30,7 +31,6 @@ use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 use serde_json::{json, Map, Value};
-use sqlx::PgPool;
 
 use crate::error::{AppError, ProblemCode};
 use crate::http::state::AppState;
@@ -332,13 +332,16 @@ impl Observability {
     /// concurrent scrapes wait for the one in flight. A failed query sets
     /// both gauges to NaN and counts the failure, so neither a stale nor a
     /// zero value reads as healthy; `/metrics` still answers 200 (source).
-    async fn refresh(&self, pool: &PgPool) {
+    async fn refresh(&self, pool: &Backend) {
         let mut last = self.last_refresh.lock().await;
         if last.is_some_and(|at| at.elapsed() < self.refresh_interval) {
             return;
         }
-        let result =
-            tokio::time::timeout(CHECK_TIMEOUT, outbox_ages(pool, &self.outbox_consumers)).await;
+        let result = tokio::time::timeout(
+            CHECK_TIMEOUT,
+            crate::db::outbox::outbox_ages_backend(pool, &self.outbox_consumers),
+        )
+        .await;
         self.record_refresh(match result {
             Ok(Ok(ages)) => Some(ages),
             Ok(Err(err)) => {
@@ -353,11 +356,12 @@ impl Observability {
         *last = Some(Instant::now());
     }
 
-    fn record_refresh(&self, ages: Option<(i64, i64)>) {
+    fn record_refresh(&self, ages: Option<(i64, Option<i64>)>) {
         match ages {
             Some((lag, stall)) => {
                 self.outbox_lag.set(lag as f64);
-                self.outbox_xmin_stall.set(stall as f64);
+                self.outbox_xmin_stall
+                    .set(stall.map_or(f64::NAN, |stall| stall as f64));
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_or(f64::NAN, |d| d.as_secs_f64());
@@ -371,18 +375,17 @@ impl Observability {
         }
     }
 
-    fn sample_live(&self, state: &AppState) {
-        let pool = &state.auth.db.pool;
-        let size = i64::from(pool.size());
-        let idle = i64::try_from(pool.num_idle()).unwrap_or(i64::MAX);
+    fn sample_live(&self, state: &AppState) -> Result<(), sqlx::Error> {
+        let stats = state.auth.db.pool.connection_stats()?;
+        let size = i64::from(stats.size);
+        let idle = i64::try_from(stats.idle).unwrap_or(i64::MAX);
         self.db_pool_connections
             .get_or_create(&PoolLabels { state: "idle" })
             .set(idle);
         self.db_pool_connections
             .get_or_create(&PoolLabels { state: "active" })
             .set((size - idle).max(0));
-        self.db_pool_max_connections
-            .set(i64::from(pool.options().get_max_connections()));
+        self.db_pool_max_connections.set(i64::from(stats.max));
         self.task_stream_subscribers
             .set(i64::try_from(state.streams.active_count()).unwrap_or(i64::MAX));
         self.process_rss.set(
@@ -402,6 +405,7 @@ impl Observability {
                 .as_ref()
                 .map_or(f64::NAN, |hub| hub.config().memory_budget_bytes as f64),
         );
+        Ok(())
     }
 
     fn encode(&self) -> Result<String, std::fmt::Error> {
@@ -421,18 +425,6 @@ fn vm_rss_bytes(status: &str) -> Option<u64> {
         .parse()
         .ok()?;
     kib.checked_mul(1024)
-}
-
-/// Oldest undelivered event age across `consumers` (each has its own
-/// cursor, no snapshot-xmin filter; 0 when every consumer is caught up) and
-/// the age of the oldest xid holder in the cluster, in one statement.
-async fn outbox_ages(pool: &PgPool, consumers: &[String]) -> Result<(i64, i64), sqlx::Error> {
-    sqlx::query_as(
-        "SELECT fvoci.app_outbox_lag_seconds($1), fvoci.app_oldest_write_xact_age_seconds()",
-    )
-    .bind(consumers)
-    .fetch_one(pool)
-    .await
 }
 
 #[derive(Clone)]
@@ -474,10 +466,15 @@ async fn ready(method: Method, State(probe): State<ProbeState>) -> Response {
         return rejected;
     }
     let state = &probe.app;
-    let pg = ping_database(&state.auth.db.pool).await;
+    let database = ping_database(&state.auth.db.pool).await;
     let mut checks = Map::new();
-    checks.insert("pg".into(), Value::Bool(pg));
-    let mut ok = pg;
+    let check_name = match &state.auth.db.pool {
+        Backend::Postgres(_) => "pg",
+        Backend::Sqlite(_) => "sqlite",
+        Backend::LibsqlRemote(_) => "libsql-remote",
+    };
+    checks.insert(check_name.into(), Value::Bool(database));
+    let mut ok = database;
     if let Some(hub) = state.collab.as_ref() {
         let collab = !hub.is_shutting_down();
         checks.insert("collab".into(), Value::Bool(collab));
@@ -494,9 +491,9 @@ async fn ready(method: Method, State(probe): State<ProbeState>) -> Response {
     }
 }
 
-async fn ping_database(pool: &PgPool) -> bool {
+async fn ping_database(pool: &Backend) -> bool {
     matches!(
-        tokio::time::timeout(CHECK_TIMEOUT, sqlx::query("SELECT 1").execute(pool)).await,
+        tokio::time::timeout(CHECK_TIMEOUT, pool.ping()).await,
         Ok(Ok(_))
     )
 }
@@ -516,7 +513,10 @@ async fn metrics(State(probe): State<ProbeState>, req: Request) -> Response {
         return AppError::from_code(ProblemCode::NotFound).into_response();
     }
     observability.refresh(&probe.app.auth.db.pool).await;
-    observability.sample_live(&probe.app);
+    if let Err(err) = observability.sample_live(&probe.app) {
+        tracing::error!(%err,"metrics: connection statistics failed");
+        return AppError::internal().into_response();
+    }
     match observability.encode() {
         Ok(body) => (
             [(
@@ -657,7 +657,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
-        obs.record_refresh(Some((42, 7)));
+        obs.record_refresh(Some((42, Some(7))));
         let body = obs.encode().unwrap();
         assert_eq!(sample(&body, "fvoci_outbox_lag_seconds"), "42.0");
         assert_eq!(sample(&body, "fvoci_outbox_xmin_stall_seconds"), "7.0");
@@ -680,7 +680,7 @@ mod tests {
             .unwrap();
         assert_eq!(kept, stamp, "the last success time is kept");
 
-        obs.record_refresh(Some((0, 0)));
+        obs.record_refresh(Some((0, Some(0))));
         let body = obs.encode().unwrap();
         assert_eq!(sample(&body, "fvoci_outbox_lag_seconds"), "0.0");
         assert_eq!(

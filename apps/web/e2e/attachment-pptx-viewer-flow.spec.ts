@@ -552,7 +552,7 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   }
   const wsId = required24.id;
   const docRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
-    data: { parentId: null, title: "PPTX 첨부" },
+    data: { commandId: crypto.randomUUID(), parentId: null, title: "PPTX 첨부" },
   });
   expect(docRes.ok(), await docRes.text()).toBeTruthy();
   const documentId = (

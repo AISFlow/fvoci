@@ -2539,12 +2539,12 @@ async fn native_archive_captures_and_publishes_selected_zotero_closure() {
     // Product wiki documents: an ancestor and the backing document under it.
     let ancestor = post(
         format!("/api/v1/workspaces/{ws}/documents"),
-        json!({"parentId":null,"title":"참고 문헌 🧪"}),
+        json!({"commandId": uuid::Uuid::now_v7(), "parentId":null,"title":"참고 문헌 🧪"}),
     )
     .await;
     let backing = post(
         format!("/api/v1/workspaces/{ws}/documents"),
-        json!({"parentId":ancestor,"title":"Zotero reference"}),
+        json!({"commandId": uuid::Uuid::now_v7(), "parentId":ancestor,"title":"Zotero reference"}),
     )
     .await;
     let task = post(
@@ -2963,7 +2963,7 @@ async fn native_archive_captures_and_publishes_selected_zotero_closure() {
     .expect("closure is capturable again");
     post(
         format!("/api/v1/workspaces/{ws}/documents"),
-        json!({"parentId":backing,"title":"하위 메모"}),
+        json!({"commandId": uuid::Uuid::now_v7(), "parentId":backing,"title":"하위 메모"}),
     )
     .await;
     let omitted = capture(
@@ -3173,7 +3173,7 @@ async fn native_archive_restores_personal_input_origin_and_retired_receipt() {
         fx.app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{ws}/documents"),
-        Some(json!({"parentId":origin,"title":"하위 메모"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId":origin,"title":"하위 메모"})),
         Some(&fx.cookie),
     )
     .await;

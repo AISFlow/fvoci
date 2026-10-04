@@ -357,7 +357,7 @@ async fn workspace_purge_deletes_storage_and_is_idempotent() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{doomed_id}/documents"),
-        Some(json!({"title": "첨부 부모", "parentId": null})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "title": "첨부 부모", "parentId": null})),
         Some(&cookie),
     )
     .await;
@@ -810,7 +810,7 @@ async fn two_workspace_purge_runners_converge() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{doomed_id}/documents"),
-        Some(json!({"title": "첨부", "parentId": null})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "title": "첨부", "parentId": null})),
         Some(&cookie),
     )
     .await;
@@ -989,7 +989,7 @@ async fn scheduler_runs_stale_upload_gc_under_its_own_claim() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"title": "upload gc", "parentId": null})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "title": "upload gc", "parentId": null})),
         Some(&cookie),
     )
     .await;
@@ -1082,7 +1082,9 @@ async fn upload_gc_cursor_does_not_starve_rows_behind_a_stuck_one() {
             app.clone(),
             "POST",
             &format!("/api/v1/workspaces/{ws}/documents"),
-            Some(json!({"title": "gc cursor", "parentId": null})),
+            Some(
+                json!({"commandId": uuid::Uuid::now_v7(), "title": "gc cursor", "parentId": null}),
+            ),
             Some(&cookie),
         )
         .await;
@@ -1176,7 +1178,9 @@ async fn create_wiki_doc(app: &axum::Router, cookie: &str, ws: Uuid, parent: Opt
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{ws}/documents"),
-        Some(json!({"title": "휴지통 문서", "parentId": parent})),
+        Some(
+            json!({"commandId": uuid::Uuid::now_v7(), "title": "휴지통 문서", "parentId": parent}),
+        ),
         Some(cookie),
     )
     .await;

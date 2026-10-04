@@ -63,7 +63,7 @@ async function createDoc(
   title: string,
 ): Promise<WikiDoc> {
   const res = await request.post(`/api/v1/workspaces/${wsId}/documents`, {
-    data: { parentId: null, title },
+    data: { commandId: crypto.randomUUID(), parentId: null, title },
   });
   expect(res.status(), await res.text()).toBe(201);
   const doc = (await readJson(res, flowSchemas.document)) as {

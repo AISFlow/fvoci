@@ -1,4 +1,4 @@
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use uuid::Uuid;
 
 use crate::auth::password::{hash_password, Keyring};
@@ -6,11 +6,12 @@ use crate::auth::session::SessionUser;
 use crate::auth::token::hash_token;
 use crate::auth::token::{new_token, SESSION_TTL_SECS};
 use crate::db::identity::{
-    authenticate_password, count_users, find_live_session, live_to_session_user,
-    maybe_slide_session, new_setup_input, revoke_session_with_push, setup_first_owner,
-    update_profile, ProfilePatch, SetupFirstOwnerResult, SetupSessionParams,
+    authenticate_password_backend, count_users_backend, find_live_session_backend,
+    live_to_session_user, maybe_slide_session_backend, new_setup_input, revoke_session_with_push,
+    setup_first_owner_backend, update_profile, ProfilePatch, SetupFirstOwnerResult,
+    SetupSessionParams,
 };
-use crate::db::mfa::{issue_session_or_challenge, IssueOptions, Issued};
+use crate::db::mfa::{issue_session_or_challenge_backend, IssueOptions, Issued};
 use crate::db::Db;
 
 pub struct AuthService {
@@ -29,7 +30,7 @@ pub struct SetupInstanceInput {
 
 impl AuthService {
     pub async fn setup_needed(&self) -> Result<bool, sqlx::Error> {
-        Ok(count_users(&self.db.pool).await? == 0)
+        Ok(count_users_backend(&self.db.pool).await? == 0)
     }
 
     pub async fn setup_instance(
@@ -37,7 +38,7 @@ impl AuthService {
         password: String,
         input: SetupInstanceInput,
     ) -> Result<Result<(Uuid, Uuid, String), SetupError>, sqlx::Error> {
-        if count_users(&self.db.pool).await? > 0 {
+        if count_users_backend(&self.db.pool).await? > 0 {
             return Ok(Err(SetupError::Closed));
         }
 
@@ -46,7 +47,7 @@ impl AuthService {
             .map_err(sqlx::Error::Protocol)?;
 
         let token = new_token();
-        let expires_at = Utc::now() + Duration::seconds(SESSION_TTL_SECS);
+        let expires_at = crate::db::identity::stored_now() + Duration::seconds(SESSION_TTL_SECS);
         let input = new_setup_input(SetupSessionParams {
             email: input.email,
             password_hash,
@@ -62,7 +63,7 @@ impl AuthService {
         let workspace_id = input.workspace_id;
         let session_token = token.token;
 
-        match setup_first_owner(&self.db.pool, input).await? {
+        match setup_first_owner_backend(&self.db.pool, input).await? {
             SetupFirstOwnerResult::Created => Ok(Ok((user_id, workspace_id, session_token))),
             SetupFirstOwnerResult::Closed => Ok(Err(SetupError::Closed)),
             SetupFirstOwnerResult::SlugTaken => Ok(Err(SetupError::SlugTaken)),
@@ -73,10 +74,11 @@ impl AuthService {
     /// verified, so failures look the same with or without MFA.
     pub async fn login(&self, email: &str, password: &str) -> Result<Option<Issued>, sqlx::Error> {
         let user_id =
-            authenticate_password(&self.db.pool, email, password, &self.password_keys).await?;
+            authenticate_password_backend(&self.db.pool, email, password, &self.password_keys)
+                .await?;
         match user_id {
             Some(user_id) => {
-                issue_session_or_challenge(
+                issue_session_or_challenge_backend(
                     &self.db.pool,
                     user_id,
                     "password",
@@ -90,12 +92,13 @@ impl AuthService {
 
     pub async fn session_user(&self, token: &str) -> Result<Option<SessionUser>, sqlx::Error> {
         let token_hash = hash_token(token);
-        let live = find_live_session(&self.db.pool, &token_hash).await?;
+        let live = find_live_session_backend(&self.db.pool, &token_hash).await?;
         if let Some(live) = live {
             let expires_at =
-                maybe_slide_session(&self.db.pool, live.session_id, live.expires_at).await?;
+                maybe_slide_session_backend(&self.db.pool, live.session_id, live.expires_at)
+                    .await?;
             let refreshed = if expires_at != live.expires_at {
-                find_live_session(&self.db.pool, &token_hash).await?
+                find_live_session_backend(&self.db.pool, &token_hash).await?
             } else {
                 Some(live)
             };
@@ -113,7 +116,7 @@ impl AuthService {
         push_endpoint: Option<&str>,
     ) -> Result<(), sqlx::Error> {
         revoke_session_with_push(
-            &self.db.pool,
+            self.db.pool.postgres("auth.logout")?,
             &hash_token(token),
             actor_user_id,
             push_endpoint,
@@ -127,18 +130,24 @@ impl AuthService {
         patch: ProfilePatch,
     ) -> Result<Result<SessionUser, ()>, sqlx::Error> {
         let token_hash = hash_token(token);
-        let live = find_live_session(&self.db.pool, &token_hash).await?;
+        let live = find_live_session_backend(&self.db.pool, &token_hash).await?;
         let Some(live) = live else {
             return Ok(Err(()));
         };
         let user_id = live.user_id;
 
-        let updated = update_profile(&self.db.pool, user_id, live.session_id, patch).await?;
+        let updated = update_profile(
+            self.db.pool.postgres("auth.profile")?,
+            user_id,
+            live.session_id,
+            patch,
+        )
+        .await?;
         if !updated {
             return Ok(Err(()));
         }
 
-        let refreshed = find_live_session(&self.db.pool, &token_hash).await?;
+        let refreshed = find_live_session_backend(&self.db.pool, &token_hash).await?;
         match refreshed {
             Some(live) => Ok(Ok(live_to_session_user(&live))),
             None => Ok(Err(())),

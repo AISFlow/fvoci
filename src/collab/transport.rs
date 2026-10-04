@@ -25,7 +25,7 @@ use crate::collab::room::{
 use crate::collab::wire::{AuthMessage, CollabRoomName, DocumentMessage, WireFrame};
 use crate::db::collab::resolve_collab_admission_kind;
 use crate::db::collab_delivery::{authorize_outbound_delivery_kind, OutboundDeliveryAuth};
-use crate::db::identity::find_live_session;
+use crate::db::identity::find_live_session_backend;
 use crate::error::SESSION_COOKIE;
 use crate::http::state::AppState;
 
@@ -109,7 +109,7 @@ async fn collab_upgrade(
     let session_token = cookie_value(&headers, SESSION_COOKIE);
     let pool = state.auth.db.pool.clone();
     let live = if let Some(token) = session_token {
-        find_live_session(&pool, &hash_token(token))
+        find_live_session_backend(&pool, &hash_token(token))
             .await
             .ok()
             .flatten()

@@ -25,10 +25,12 @@ use crate::collab::room::{
     BodyWriteError, CapturedRevision, RevisionCaptureError, RevisionRestoreError,
 };
 use crate::db::revisions::{
-    authorize_revision_target, create_manual_revision, decode_revision_cursor,
-    get_revision as get_revision_for, list_revisions as list_revisions_for,
-    load_persisted_target_source, resolve_restore, CreateRevisionInput, RestoreRevisionInput,
-    RevisionDbError, RevisionDetail, RevisionMeta, RevisionScope, RevisionTarget,
+    authorize_revision_target, authorize_revision_target_backend, create_manual_revision_backend,
+    decode_revision_cursor, get_revision as get_revision_for,
+    get_revision_backend as get_selected_revision_for,
+    list_revisions_backend as list_revisions_for, load_persisted_target_source_backend,
+    resolve_restore, CreateRevisionInput, RestoreRevisionInput, RevisionDbError, RevisionDetail,
+    RevisionMeta, RevisionScope, RevisionTarget,
 };
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::authz::{require_request_auth, Access};
@@ -336,7 +338,7 @@ async fn create_target_revision(
     {
         return Err(AppError::rate_limited(retry_after).into());
     }
-    match authorize_revision_target(
+    match authorize_revision_target_backend(
         &state.auth.db.pool,
         workspace_id,
         user_id,
@@ -352,7 +354,7 @@ async fn create_target_revision(
     }
     let captured = capture_for_create(&state, workspace_id, user_id, credential_id, scope).await?;
     let text = prepare_revision_text(&captured.content_json).map_err(|_| collab_unavailable())?;
-    let result = create_manual_revision(
+    let result = create_manual_revision_backend(
         &state.auth.db.pool,
         workspace_id,
         user_id,
@@ -464,7 +466,7 @@ async fn get_target_revision(
 ) -> Result<Json<RevisionDetailResponse>, RevisionApiError> {
     let (user_id, credential_id) =
         revision_credential(&state, &headers, &jar, workspace_id, scope.target(), false).await?;
-    let result = get_revision_for(
+    let result = get_selected_revision_for(
         &state.auth.db.pool,
         workspace_id,
         user_id,
@@ -532,7 +534,12 @@ async fn restore_target_revision(
         return Err(AppError::rate_limited(retry_after).into());
     }
     let snap = resolve_restore(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/revisions.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         credential_id,
@@ -657,7 +664,12 @@ async fn preview_restore_target(
     // The immutable source must belong to this exact route target. A preview
     // is for an editable restore; viewing history alone does not permit it.
     resolve_restore(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/revisions.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         credential_id,
@@ -669,7 +681,12 @@ async fn preview_restore_target(
     .map_err(internal)?
     .map_err(map_revision_error)?;
     let source = get_revision_for(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/revisions.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         credential_id,
@@ -696,7 +713,12 @@ async fn preview_restore_target(
     })?;
     // Check route affiliation again after room startup/project work.
     authorize_revision_target(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/revisions.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         credential_id,
@@ -728,7 +750,7 @@ async fn capture_for_create(
             return live.map_err(|_| collab_unavailable());
         }
     }
-    let persisted = load_persisted_target_source(
+    let persisted = load_persisted_target_source_backend(
         &state.auth.db.pool,
         workspace_id,
         user_id,

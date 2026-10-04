@@ -128,10 +128,21 @@ async fn list_pool(
         return Err(invalid());
     }
     let limit = parse_limit(query.limit.as_deref())?;
-    let pool = list_tags(&state.auth.db.pool, workspace_id, &actor, q, limit)
-        .await
-        .map_err(internal)?
-        .map_err(map_tag_error)?;
+    let pool = list_tags(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/document_tags.rs")
+            .map_err(internal)?,
+        workspace_id,
+        &actor,
+        q,
+        limit,
+    )
+    .await
+    .map_err(internal)?
+    .map_err(map_tag_error)?;
     Ok(Json(DocumentTagPoolListResponse {
         can_create: pool.can_create,
         can_manage: pool.can_manage,
@@ -175,10 +186,21 @@ async fn create_route(
     if !label_color_is_valid(&color) {
         return Err(invalid());
     }
-    let tag = create_tag(&state.auth.db.pool, workspace_id, &actor, &name, &color)
-        .await
-        .map_err(internal)?
-        .map_err(map_tag_error)?;
+    let tag = create_tag(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/document_tags.rs")
+            .map_err(internal)?,
+        workspace_id,
+        &actor,
+        &name,
+        &color,
+    )
+    .await
+    .map_err(internal)?
+    .map_err(map_tag_error)?;
     Ok((StatusCode::CREATED, Json(tag_output(tag))).into_response())
 }
 
@@ -213,7 +235,12 @@ async fn update_route(
         return Err(invalid());
     }
     let tag = update_tag(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/document_tags.rs")
+            .map_err(internal)?,
         workspace_id,
         &actor,
         tag_id,
@@ -243,10 +270,20 @@ async fn delete_route(
         Some(peer),
     )
     .await?;
-    delete_tag(&state.auth.db.pool, workspace_id, &actor, tag_id)
-        .await
-        .map_err(internal)?
-        .map_err(map_tag_error)?;
+    delete_tag(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/document_tags.rs")
+            .map_err(internal)?,
+        workspace_id,
+        &actor,
+        tag_id,
+    )
+    .await
+    .map_err(internal)?
+    .map_err(map_tag_error)?;
     Ok(Json(OkResponse { ok: true }))
 }
 
@@ -268,7 +305,12 @@ async fn list_for(
     )
     .await?;
     let tags = list_document_tags(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/document_tags.rs")
+            .map_err(internal)?,
         workspace_id,
         &actor,
         document_id,
@@ -304,7 +346,12 @@ async fn assign_for(
     let Json(body) = body.map_err(AppError::from)?;
     let tag_id = parse_body_uuid(&body.tag_id).ok_or_else(invalid)?;
     let tag = assign_tag(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/document_tags.rs")
+            .map_err(internal)?,
         workspace_id,
         &actor,
         document_id,
@@ -337,7 +384,12 @@ async fn unassign_for(
     )
     .await?;
     unassign_tag(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/document_tags.rs")
+            .map_err(internal)?,
         workspace_id,
         &actor,
         document_id,

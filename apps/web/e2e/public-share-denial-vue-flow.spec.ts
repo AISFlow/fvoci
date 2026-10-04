@@ -60,7 +60,7 @@ test("observed body denial gates cached share tree, heading and snippets; full r
   const ws = fixtureValue1.id;
   const create = async (title: string, parentId: string | null = null) => {
     const response = await page.request.post(`/api/v1/workspaces/${ws}/documents`, {
-      data: { title, parentId },
+      data: { commandId: crypto.randomUUID(), title, parentId },
     });
     expect(response.status()).toBe(201);
     return (await readJson(response, flowSchemas.document)).id;

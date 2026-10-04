@@ -67,7 +67,7 @@ async fn wiki_discovery_bulk_grants_tags_and_default_tree_boundary() {
             app.clone(),
             "POST",
             &format!("/api/v1/workspaces/{ws}/documents"),
-            Some(json!({"title": "discovery wiki", "parentId": parent.map(|i| &wiki[i])})),
+            Some(json!({"commandId": uuid::Uuid::now_v7(), "title": "discovery wiki", "parentId": parent.map(|i| &wiki[i])})),
             Some(&cookie),
         )
         .await;
@@ -591,7 +591,7 @@ async fn wiki_document_group_grants_and_project_document_404() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "위키"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "위키"})),
         Some(&cookie),
     )
     .await;
@@ -1037,7 +1037,7 @@ async fn group_pat_scopes_match_source() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "토큰위키"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "토큰위키"})),
         Some(&cookie),
     )
     .await;
@@ -1432,7 +1432,7 @@ async fn wiki_grant_revoke_is_visible_to_collab_acl_poll() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "협업문서"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "협업문서"})),
         Some(&cookie),
     )
     .await;

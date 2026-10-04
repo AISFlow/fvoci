@@ -340,7 +340,7 @@ test("setup dataset", async ({ browser }) => {
 
   const docsRes = async (title: string) => {
     const res = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
-      data: { parentId: null, title },
+      data: { commandId: crypto.randomUUID(), parentId: null, title },
     });
     expect(res.ok(), await res.text()).toBeTruthy();
     return documentSchema.parse(await res.json());
@@ -1700,7 +1700,7 @@ test("h: collab room saturation", async ({ browser }) => {
   const occupiers: { displayId: string }[] = [];
   for (let i = 0; i < ROOM_CAP; i += 1) {
     const res = await api.request.post(`/api/v1/workspaces/${ctx.wsId}/documents`, {
-      data: { parentId: null, title: `방 점유 ${String(i)}` },
+      data: { commandId: crypto.randomUUID(), parentId: null, title: `방 점유 ${String(i)}` },
     });
     expect(res.ok(), await res.text()).toBeTruthy();
     occupiers.push(documentDisplayIdSchema.parse(await res.json()));
