@@ -1,6 +1,8 @@
 //! Checked SQLite-family values. Business operations decode their named rows;
 //! there is no JSON row bag, SQL conversion or lossy numeric coercion.
-use chrono::{DateTime, NaiveDate, Utc};
+#[cfg(test)]
+use chrono::NaiveDate;
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{Row, TypeInfo, ValueRef};
 use uuid::Uuid;
@@ -29,7 +31,7 @@ impl Cell {
     pub(crate) fn instant(value: DateTime<Utc>) -> Result<Self, sqlx::Error> {
         // The request/receipt echo may retain finer precision elsewhere. A DB
         // instant must never silently discard it at this storage boundary.
-        if value.timestamp_subsec_nanos() % 1000 != 0 {
+        if !value.timestamp_subsec_nanos().is_multiple_of(1000) {
             return Err(invalid("instant exceeds microsecond precision"));
         }
         Ok(Self::Integer(value.timestamp_micros()))
@@ -74,6 +76,8 @@ impl Cell {
         DateTime::from_timestamp_micros(self.integer()?)
             .ok_or_else(|| invalid("SQLite instant out of range"))
     }
+    // Only the codec regression currently consumes canonical date decoding.
+    #[cfg(test)]
     pub(crate) fn date(&self) -> Result<NaiveDate, sqlx::Error> {
         let raw = self.string()?;
         let date = NaiveDate::parse_from_str(&raw, "%Y-%m-%d")

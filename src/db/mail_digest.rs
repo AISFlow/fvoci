@@ -247,7 +247,7 @@ mod family_regressions {
             .unwrap();
         assert_eq!(first.len(), 1);
         let key = (first[0].0, first[0].1);
-        let mut expected = vec![(f.workspace, f.user), (f.other_workspace, f.other_user)];
+        let mut expected = [(f.workspace, f.user), (f.other_workspace, f.other_user)];
         expected.sort();
         assert_eq!(key, expected[0]);
         let last = tx

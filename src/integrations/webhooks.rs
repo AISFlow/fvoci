@@ -207,19 +207,6 @@ async fn task_scope(
 /// document, task, attachment or comment) must be viewable by `user_id`.
 /// Events outside any project are visible; a workspace document outside a
 /// project additionally follows its own document permission.
-pub(crate) async fn event_visible_to(
-    tx: &mut Transaction<'_, Postgres>,
-    user_id: Uuid,
-    event: &OutboxEvent,
-) -> Result<bool, sqlx::Error> {
-    event_visible_to_backend(
-        &mut OperationTx::Postgres(tx),
-        user_id,
-        &event.clone().into(),
-    )
-    .await
-}
-
 pub(crate) async fn event_visible_to_backend(
     tx: &mut OperationTx<'_, '_>,
     user_id: Uuid,
@@ -719,9 +706,11 @@ mod backend_regressions {
         Mutex,
     };
 
+    type CapturedRequests = Arc<Mutex<Vec<(HeaderMap, Vec<u8>)>>>;
+
     #[derive(Clone, Default)]
     struct Capture {
-        rows: Arc<Mutex<Vec<(HeaderMap, Vec<u8>)>>>,
+        rows: CapturedRequests,
         received: Arc<Notify>,
         unknown: Arc<AtomicBool>,
     }

@@ -93,10 +93,7 @@ mod family_source_tests {
         assert_eq!(rows[1].chunk_no, None);
         assert_eq!(rows[2].chunk_no, Some(0));
         let cursor = cursor_of(&rows[1]);
-        assert_eq!(
-            after_pred(SearchSourceKind::Document, Some(&cursor)).0,
-            false
-        );
+        assert!(!after_pred(SearchSourceKind::Document, Some(&cursor)).0);
         assert_eq!(
             after_pred(SearchSourceKind::Attachment, Some(&cursor)),
             (true, id, -1)

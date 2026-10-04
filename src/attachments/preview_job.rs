@@ -584,15 +584,19 @@ mod tests {
         image::DynamicImage::ImageRgba8(large)
             .write_to(&mut Cursor::new(&mut source), image::ImageFormat::Png)
             .unwrap();
-        let mut memory = PreviewLimits::default();
-        memory.child_address_space = 96 * 1024 * 1024;
+        let memory = PreviewLimits {
+            child_address_space: 96 * 1024 * 1024,
+            ..PreviewLimits::default()
+        };
         let pressure = run_preview_helper(&settings().helper, source.clone(), &memory).await;
         assert!(
             matches!(&pressure, Err(PreviewError::ResourceLimit(_))),
             "{pressure:?}"
         );
-        let mut time = PreviewLimits::default();
-        time.timeout = Duration::from_nanos(1);
+        let time = PreviewLimits {
+            timeout: Duration::from_nanos(1),
+            ..PreviewLimits::default()
+        };
         assert!(matches!(
             run_preview_helper(&settings().helper, source, &time).await,
             Err(PreviewError::ResourceLimit(_))

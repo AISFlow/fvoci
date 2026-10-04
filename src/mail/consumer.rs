@@ -527,7 +527,7 @@ mod backend_delivery_regressions {
         let consumer = MailConsumer::new(mailer);
         let owner = Uuid::now_v7();
         let (done, error) = consumer
-            .deliver_batch_backend(&f.backend, owner, &[event.clone()])
+            .deliver_batch_backend(&f.backend, owner, std::slice::from_ref(&event))
             .await;
         assert_eq!(
             done, 0,
@@ -537,7 +537,7 @@ mod backend_delivery_regressions {
         assert_eq!(received.lock().unwrap().len(), 1);
         assert!(lock(&consumer.accepted).events.is_empty());
         let (done, error) = consumer
-            .deliver_batch_backend(&f.backend, owner, &[event.clone()])
+            .deliver_batch_backend(&f.backend, owner, std::slice::from_ref(&event))
             .await;
         assert_eq!(done, 1);
         assert!(error.is_none());
