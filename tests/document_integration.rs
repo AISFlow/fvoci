@@ -2977,6 +2977,187 @@ async fn selected_fixture_view_grant(
     }
 }
 
+// Trusted synthetic preparation, then the real selected app transaction checks
+// the same ON body scope/credential/project rules on PG and SQLite.
+async fn selected_body_scope_authorization_controls(
+    backend: &fvoci_server::db::backend::Backend,
+    pg_admin_url: &str,
+    target: (Uuid, Uuid),
+    actor: Uuid,
+    credential: Uuid,
+) {
+    use fvoci_server::db::backend::Backend;
+    use fvoci_server::db::document_ops::{authorize_document_backend, DocumentScope};
+    use fvoci_server::db::documents::DocumentDbError;
+    use fvoci_server::projects::ProjectPermission;
+    let (workspace, wiki) = target;
+    let project = Uuid::now_v7();
+    let document = Uuid::now_v7();
+    let pg = match backend {
+        Backend::Postgres(_) => Some(
+            PgPoolOptions::new()
+                .max_connections(1)
+                .connect(pg_admin_url)
+                .await
+                .unwrap(),
+        ),
+        _ => None,
+    };
+    match backend {
+        Backend::Postgres(_) => {
+            let mut tx = pg.as_ref().unwrap().begin().await.unwrap();
+            sqlx::query("INSERT INTO fvoci.projects(id,workspace_id,key,name,visibility,created_by) VALUES($1,$2,'BODY','Body scope','workspace',$3)")
+                .bind(project).bind(workspace).bind(actor).execute(&mut *tx).await.unwrap();
+            sqlx::query("INSERT INTO fvoci.documents(id,workspace_id,project_id,title,path,sort_key,number,status,schema_version,content_json,created_by) VALUES($1,$2,$3,'Body scope',$4,'a0',1,'draft',2,$5,$6)")
+                .bind(document).bind(workspace).bind(project).bind(document.simple().to_string()).bind(fvoci_server::db::documents::empty_document_json()).bind(actor).execute(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+        Backend::Sqlite(pool) => {
+            let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+            sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'BODY','Body scope','workspace',?3)")
+                .bind(project.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(actor.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
+            sqlx::query("INSERT INTO documents(id,workspace_id,project_id,title,path,sort_key,number,status,schema_version,content_json,created_by) VALUES(?1,?2,?3,'Body scope',?4,'a0',1,'draft',2,?5,?6)")
+                .bind(document.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(document.simple().to_string()).bind(fvoci_server::db::documents::empty_document_json().to_string()).bind(actor.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+        Backend::LibsqlRemote(_) => {
+            unreachable!("actual remote primary proof remains separately required")
+        }
+    }
+    let read = |tenant, session, scope, target, min| {
+        authorize_document_backend(backend, tenant, actor, session, scope, target, min)
+    };
+    let meta = read(
+        workspace,
+        credential,
+        DocumentScope::Wiki,
+        wiki,
+        ProjectPermission::Edit,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(meta.id, wiki);
+    assert_eq!(meta.display_id, None);
+    assert!(matches!(
+        read(
+            workspace,
+            Uuid::now_v7(),
+            DocumentScope::Wiki,
+            wiki,
+            ProjectPermission::Edit
+        )
+        .await
+        .unwrap(),
+        Err(DocumentDbError::Forbidden)
+    ));
+    for (tenant, scope, target) in [
+        (Uuid::now_v7(), DocumentScope::Wiki, wiki),
+        (workspace, DocumentScope::Project(project), wiki),
+        (workspace, DocumentScope::Wiki, document),
+        (workspace, DocumentScope::Project(Uuid::now_v7()), document),
+    ] {
+        assert!(matches!(
+            read(tenant, credential, scope, target, ProjectPermission::View)
+                .await
+                .unwrap(),
+            Err(DocumentDbError::NotFound)
+        ));
+    }
+    for (phase, view, edit) in [
+        ("active", true, true),
+        ("archived", true, false),
+        ("private", false, false),
+        ("grant", true, true),
+        ("deleted", false, false),
+    ] {
+        match backend {
+            Backend::Postgres(_) => {
+                let mut tx = pg.as_ref().unwrap().begin().await.unwrap();
+                match phase {
+                    "archived" => {
+                        sqlx::query("UPDATE fvoci.projects SET status='archived' WHERE workspace_id=$1 AND id=$2").bind(workspace).bind(project).execute(&mut *tx).await.unwrap();
+                    }
+                    "private" => {
+                        sqlx::query("UPDATE fvoci.projects SET status='active',visibility='private' WHERE workspace_id=$1 AND id=$2").bind(workspace).bind(project).execute(&mut *tx).await.unwrap();
+                    }
+                    "grant" => {
+                        sqlx::query("INSERT INTO fvoci.project_members(workspace_id,project_id,user_id,role) VALUES($1,$2,$3,'lead')").bind(workspace).bind(project).bind(actor).execute(&mut *tx).await.unwrap();
+                    }
+                    "deleted" => {
+                        sqlx::query("UPDATE fvoci.projects SET deleted_at=now() WHERE workspace_id=$1 AND id=$2").bind(workspace).bind(project).execute(&mut *tx).await.unwrap();
+                    }
+                    _ => {}
+                }
+                tx.commit().await.unwrap();
+            }
+            Backend::Sqlite(pool) => {
+                let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+                match phase {
+                    "archived" => {
+                        sqlx::query(
+                            "UPDATE projects SET status='archived' WHERE workspace_id=?1 AND id=?2",
+                        )
+                        .bind(workspace.as_bytes().as_slice())
+                        .bind(project.as_bytes().as_slice())
+                        .execute(&mut *tx)
+                        .await
+                        .unwrap();
+                    }
+                    "private" => {
+                        sqlx::query("UPDATE projects SET status='active',visibility='private' WHERE workspace_id=?1 AND id=?2").bind(workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
+                    }
+                    "grant" => {
+                        sqlx::query("INSERT INTO project_members(workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,'lead')").bind(workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(actor.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
+                    }
+                    "deleted" => {
+                        sqlx::query(
+                            "UPDATE projects SET deleted_at=1 WHERE workspace_id=?1 AND id=?2",
+                        )
+                        .bind(workspace.as_bytes().as_slice())
+                        .bind(project.as_bytes().as_slice())
+                        .execute(&mut *tx)
+                        .await
+                        .unwrap();
+                    }
+                    _ => {}
+                }
+                tx.commit().await.unwrap();
+            }
+            Backend::LibsqlRemote(_) => unreachable!(),
+        }
+        for (min, allowed) in [
+            (ProjectPermission::View, view),
+            (ProjectPermission::Edit, edit),
+        ] {
+            let result = read(
+                workspace,
+                credential,
+                DocumentScope::Project(project),
+                document,
+                min,
+            )
+            .await
+            .unwrap();
+            if allowed {
+                let meta = result.unwrap();
+                assert_eq!(meta.id, document);
+                assert_eq!(meta.project_id, Some(project));
+                assert_eq!(meta.display_id.as_deref(), Some("BODY-1"));
+            } else {
+                assert!(
+                    matches!(result, Err(DocumentDbError::NotFound)),
+                    "{phase} {min:?}"
+                );
+            }
+        }
+    }
+    if let Some(pg) = pg {
+        pg.close().await;
+    }
+    eprintln!("selected_body_scope_authorization backend={} current_credential=true tenant_scope=true wiki_project_affiliation=true archived_edit_denied=true private_grant_current=true live_project_required=true",backend.kind());
+}
+
 async fn selected_family_fence_snapshot(
     backend: &fvoci_server::db::backend::Backend,
     workspace: Uuid,
@@ -3667,20 +3848,38 @@ async fn selected_family_forward_noop_rechecks_native_proof() {
         selected_room_support::complete_sync_handshake(&mut socket, &routing).await;
         let before =
             selected_family_fence_snapshot(&fixture.backend, fixture.workspace, document).await;
+        let body_path = format!("{}/{document}/body", fixture.path());
+        let body = json!({"contentJson":{"type":"doc","content":[]}});
+        let (status, current, _, _) = json_request(
+            fixture.app.clone(),
+            "PUT",
+            &body_path,
+            Some(body.clone()),
+            Some(&fixture.cookie),
+            &[("origin", "http://localhost")],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "actual current ON HTTP no-op: {current}"
+        );
+        assert_eq!(current["id"], document.to_string());
         let (reached, proceed) =
             arm_native_consumer_barrier(document, NATIVE_FORWARD_FINAL_PROOF).await;
-        let seed = fvoci_server::collab::seed::SeedEngine::from_hub(&fixture.hub)
-            .tiptap_to_yjs_update(&json!({"type":"doc","content":[]}))
-            .await
-            .unwrap();
         let pending = tokio::spawn({
-            let hub = fixture.hub.clone();
-            let actor = fixture.live.user_id;
-            let credential = fixture.live.session_id;
-            let workspace = fixture.workspace;
+            let app = fixture.app.clone();
+            let cookie = fixture.cookie.clone();
             async move {
-                hub.replace_body((workspace, document), actor, credential, seed, None)
-                    .await
+                json_request(
+                    app,
+                    "PUT",
+                    &body_path,
+                    Some(body),
+                    Some(&cookie),
+                    &[("origin", "http://localhost")],
+                )
+                .await
             }
         });
         tokio::time::timeout(Duration::from_secs(5), reached)
@@ -3732,10 +3931,11 @@ async fn selected_family_forward_noop_rechecks_native_proof() {
             _ => unreachable!(),
         }
         proceed.send(()).unwrap();
+        let (status, response, _, _) = pending.await.unwrap();
         assert_eq!(
-            pending.await.unwrap().unwrap_err(),
-            fvoci_server::collab::room::BodyWriteError::Unavailable,
-            "native empty replacement cannot succeed with old {control}"
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "actual HTTP native no-op cannot succeed with old {control}: {response}"
         );
         selected_room_support::wait_for_ws_close_code(
             &mut socket,
@@ -4966,6 +5166,24 @@ async fn selected_backend_wiki_fixture(
             fvoci_server::db::documents::empty_document_json()
         );
         assert_eq!(body["version"], created["version"]);
+        let scope_actor = fvoci_server::db::identity::find_live_session_backend(
+            &backend,
+            &hash_token(&fresh_cookie),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        selected_body_scope_authorization_controls(
+            &backend,
+            &pg.admin_url,
+            (
+                Uuid::parse_str(workspace).unwrap(),
+                Uuid::parse_str(document).unwrap(),
+            ),
+            scope_actor.user_id,
+            scope_actor.session_id,
+        )
+        .await;
         if let Some(hub) = room_hub {
             let (engine, content, update) = native_fixture.as_ref().unwrap();
             selected_room_transport_flow(

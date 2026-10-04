@@ -37,8 +37,8 @@ use crate::collab::derived_body::{
 use crate::collab::room::BodyWriteError;
 use crate::collab::seed::{SeedEngine, SeedError};
 use crate::db::document_ops::{
-    authorize_document, commit_duplicate, list_document_backlinks, list_project_ancestors,
-    load_duplicate_sources, DocumentScope, DuplicateBody, SourceBody,
+    authorize_document, authorize_document_backend, commit_duplicate, list_document_backlinks,
+    list_project_ancestors, load_duplicate_sources, DocumentScope, DuplicateBody, SourceBody,
 };
 use crate::db::documents::{list_wiki_tree, DocumentDbError, TreeNode};
 use crate::db::project_documents::list_project_document_tree;
@@ -409,13 +409,8 @@ async fn put_body(
     .await?;
     revision_write_limit(state, auth.user_id).await?;
     db_result(
-        authorize_document(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/document_body.rs")
-                .map_err(internal)?,
+        authorize_document_backend(
+            &state.auth.db.pool,
             workspace_id,
             auth.user_id,
             auth.credential_id,
@@ -429,13 +424,8 @@ async fn put_body(
     let seed = seed_for(state, &content_json).await?;
     replace_live_body(state, workspace_id, document_id, &auth, seed, None).await?;
     let meta = db_result(
-        authorize_document(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/document_body.rs")
-                .map_err(internal)?,
+        authorize_document_backend(
+            &state.auth.db.pool,
             workspace_id,
             auth.user_id,
             auth.credential_id,

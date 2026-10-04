@@ -13,6 +13,8 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::db::backend::{Backend, OperationTx};
+use crate::db::codec::Cell;
 use crate::db::collab::COLLAB_STATE_ENCODING_V1;
 use crate::db::context::{
     begin_read, lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
@@ -135,26 +137,132 @@ pub async fn authorize_document(
     document_id: Uuid,
     min: ProjectPermission,
 ) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
-    let mut tx = begin_read(pool).await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    if let Err(err) = scoped_access(
-        &mut tx,
+    authorize_document_backend(
+        &Backend::Postgres(pool.clone()),
         workspace_id,
         actor_user_id,
         session_id,
         scope,
         document_id,
         min,
-        false,
     )
-    .await?
-    {
+    .await
+}
+
+/// One current read snapshot for the ON body route's preliminary and response
+/// authorization. The native room performs its own authoritative write proof.
+pub async fn authorize_document_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    scope: DocumentScope,
+    document_id: Uuid,
+    min: ProjectPermission,
+) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+    let mut tx = backend.begin_read().await?;
+    let mut operation = tx.operation();
+    operation.set_tenant(workspace_id).await?;
+    let result = operation
+        .authorize_document_current_scope(
+            (workspace_id, document_id),
+            actor_user_id,
+            session_id,
+            scope,
+            min,
+        )
+        .await?;
+    if result.is_err() {
         tx.rollback().await?;
-        return Ok(Err(err));
+    } else {
+        tx.commit().await.map_err(|unknown| unknown.source)?;
     }
-    let meta = scoped_meta(&mut tx, workspace_id, scope, document_id).await?;
-    tx.commit().await?;
-    Ok(meta.ok_or(DocumentDbError::NotFound))
+    Ok(result)
+}
+
+impl OperationTx<'_, '_> {
+    async fn authorize_document_current_scope(
+        &mut self,
+        target: (Uuid, Uuid),
+        actor: Uuid,
+        credential: Uuid,
+        scope: DocumentScope,
+        min: ProjectPermission,
+    ) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+        let (workspace, document) = target;
+        if !self.session_is_live(actor, credential).await? {
+            return Ok(Err(DocumentDbError::Forbidden));
+        }
+        if !self.workspace_is_live(workspace).await? {
+            return Ok(Err(DocumentDbError::NotFound));
+        }
+        let project_key = match scope {
+            DocumentScope::Wiki => {
+                if !self
+                    .document_permission(workspace, actor, document, true)
+                    .await?
+                    .at_least(min)
+                {
+                    return Ok(Err(DocumentDbError::NotFound));
+                }
+                None
+            }
+            DocumentScope::Project(project) => {
+                let Some((key, archived, permission)) = self
+                    .document_scope_project(workspace, actor, project)
+                    .await?
+                else {
+                    return Ok(Err(DocumentDbError::NotFound));
+                };
+                if (archived && min >= ProjectPermission::Edit) || !permission.at_least(min) {
+                    return Ok(Err(DocumentDbError::NotFound));
+                }
+                Some(key)
+            }
+        };
+        let Some(row) = self.document_row(workspace, document).await? else {
+            return Ok(Err(DocumentDbError::NotFound));
+        };
+        if row.8 != scope.project_id() {
+            return Ok(Err(DocumentDbError::NotFound));
+        }
+        let meta = row_to_meta(row, scope.project_id().is_some());
+        Ok(Ok(match project_key {
+            Some(key) => with_project_display_id(meta, &key),
+            None => meta,
+        }))
+    }
+
+    async fn document_scope_project(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        project: Uuid,
+    ) -> Result<Option<(String, bool, ProjectPermission)>, sqlx::Error> {
+        let details = match self {
+            Self::Postgres(tx) => crate::db::projects::load_live_project(tx, workspace, project)
+                .await?
+                .map(|row| (row.key, row.status == "archived")),
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                tx.query(
+                    "SELECT key,status FROM projects WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",
+                    &[Cell::uuid(workspace), Cell::uuid(project)],
+                )
+                .await?
+                .first()
+                .map(|row| Ok::<_, sqlx::Error>((row.cell(0)?.string()?, row.cell(1)?.string()? == "archived")))
+                .transpose()?
+            }
+        };
+        let Some((key, archived)) = details else {
+            return Ok(None);
+        };
+        Ok(self
+            .project_permission_by_id(workspace, actor, project)
+            .await?
+            .map(|permission| (key, archived, permission)))
+    }
 }
 
 /// Source `listDocumentAncestors` for a project document.
