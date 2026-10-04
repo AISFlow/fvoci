@@ -13,8 +13,8 @@ mod verify;
 
 pub use backend::{ObjectBody, ObjectStorage};
 pub use extract_job::{
-    read_extract_input, spawn_extract_job, spawn_extract_job_with_embedder, validate_extractor_bin,
-    spawn_extract_job_backend, ExtractJobHandle, ExtractJobSettings,
+    read_extract_input, spawn_extract_job, spawn_extract_job_backend,
+    spawn_extract_job_with_embedder, validate_extractor_bin, ExtractJobHandle, ExtractJobSettings,
 };
 
 pub use disposition::content_disposition_attachment;
@@ -22,7 +22,8 @@ pub use local::{LocalStorage, PartInfo, StagedPart, StorageError};
 pub use mime::{is_image_mime, sniff_mime_from_bytes};
 pub use preview_html::{PreviewExtractor, PreviewParse, PREVIEW_BUSY_RETRY_AFTER_SECS};
 pub use preview_job::{
-    process_one_preview, spawn_preview_job, PreviewJobHandle, PreviewJobSettings,
+    process_one_preview, spawn_preview_job, spawn_preview_job_backend, PreviewJobHandle,
+    PreviewJobSettings,
 };
 pub use range::{parse_range, ParsedRange};
 pub use s3::{presign_origin_for, S3Storage, UploadTimeouts, MINIO_TEST_IMAGE};
