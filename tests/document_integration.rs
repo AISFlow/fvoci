@@ -3020,8 +3020,8 @@ async fn selected_body_scope_authorization_controls(
             .execute(&mut *tx)
             .await
             .unwrap();
-            sqlx::query("INSERT INTO fvoci.project_members(workspace_id,project_id,user_id,role) VALUES($1,$2,$3,'lead')")
-                .bind(workspace).bind(project).bind(lead).execute(&mut *tx).await.unwrap();
+            sqlx::query("INSERT INTO fvoci.project_members(id,workspace_id,project_id,user_id,role) VALUES($1,$2,$3,$4,'lead')")
+                .bind(Uuid::now_v7()).bind(workspace).bind(project).bind(lead).execute(&mut *tx).await.unwrap();
             sqlx::query("INSERT INTO fvoci.documents(id,workspace_id,project_id,title,path,sort_key,number,status,schema_version,content_json,created_by) VALUES($1,$2,$3,'Body scope',$4,'a0',1,'draft',2,$5,$6)")
                 .bind(document).bind(workspace).bind(project).bind(document.simple().to_string()).bind(fvoci_server::db::documents::empty_document_json()).bind(actor).execute(&mut *tx).await.unwrap();
             tx.commit().await.unwrap();
@@ -3040,8 +3040,8 @@ async fn selected_body_scope_authorization_controls(
             .execute(&mut *tx)
             .await
             .unwrap();
-            sqlx::query("INSERT INTO project_members(workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,'lead')")
-                .bind(workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(lead.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
+            sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')")
+                .bind(Uuid::now_v7().as_bytes().to_vec()).bind(workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(lead.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
             sqlx::query("INSERT INTO documents(id,workspace_id,project_id,title,path,sort_key,number,status,schema_version,content_json,created_by) VALUES(?1,?2,?3,'Body scope',?4,'a0',1,'draft',2,?5,?6)")
                 .bind(document.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(document.simple().to_string()).bind(fvoci_server::db::documents::empty_document_json().to_string()).bind(actor.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
             tx.commit().await.unwrap();
@@ -3108,7 +3108,7 @@ async fn selected_body_scope_authorization_controls(
                         sqlx::query("UPDATE fvoci.projects SET status='active',visibility='private' WHERE workspace_id=$1 AND id=$2").bind(workspace).bind(project).execute(&mut *tx).await.unwrap();
                     }
                     "grant" => {
-                        sqlx::query("INSERT INTO fvoci.project_members(workspace_id,project_id,user_id,role) VALUES($1,$2,$3,'lead')").bind(workspace).bind(project).bind(actor).execute(&mut *tx).await.unwrap();
+                        sqlx::query("INSERT INTO fvoci.project_members(id,workspace_id,project_id,user_id,role) VALUES($1,$2,$3,$4,'lead')").bind(Uuid::now_v7()).bind(workspace).bind(project).bind(actor).execute(&mut *tx).await.unwrap();
                     }
                     "deleted" => {
                         sqlx::query("UPDATE fvoci.projects SET deleted_at=now() WHERE workspace_id=$1 AND id=$2").bind(workspace).bind(project).execute(&mut *tx).await.unwrap();
@@ -3134,7 +3134,7 @@ async fn selected_body_scope_authorization_controls(
                         sqlx::query("UPDATE projects SET status='active',visibility='private' WHERE workspace_id=?1 AND id=?2").bind(workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
                     }
                     "grant" => {
-                        sqlx::query("INSERT INTO project_members(workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,'lead')").bind(workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(actor.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
+                        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')").bind(Uuid::now_v7().as_bytes().to_vec()).bind(workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(actor.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
                     }
                     "deleted" => {
                         sqlx::query(
