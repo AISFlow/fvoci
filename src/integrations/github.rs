@@ -2450,6 +2450,36 @@ mod backend_regressions {
             assert_eq!(f.cursor().await, prior);
             assert_eq!(f.protected().await, (1, 1, 2, 0));
         }
+        // A real owned TCP peer closes before a token response: this is a
+        // transport error, not an HTTP status or a mock classification.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let reset_peer = tokio::spawn(async move {
+            let (connection, _) = listener.accept().await.unwrap();
+            drop(connection);
+            drop(listener);
+        });
+        let reset_config = GithubConfig::new(
+            "123",
+            TEST_KEY,
+            "synthetic-secret",
+            &format!("http://{address}"),
+            [7; 32],
+        )
+        .unwrap();
+        let event = f.change().await;
+        assert!(github_sync_consumer(Some(reset_config))
+            .deliver_backend(&f.f.backend, Uuid::now_v7(), &event)
+            .await
+            .is_err());
+        reset_peer.await.unwrap();
+        assert!(
+            !is_processed_backend(&f.f.backend, GITHUB_CONSUMER, event.id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(f.cursor().await, prior);
+        assert_eq!(f.protected().await, (1, 1, 2, 0));
         provider.state.token_status.store(201, Ordering::SeqCst);
         provider.state.patch_status.store(200, Ordering::SeqCst);
         let run = dispatcher(&f, Some(provider.config()));
@@ -2466,7 +2496,7 @@ mod backend_regressions {
         wait_cursor(&f, &last).await;
         run.request_shutdown();
         run.join().await.unwrap();
-        assert_eq!(f.protected().await, (1, 1, 4, 0));
+        assert_eq!(f.protected().await, (1, 1, 5, 0));
         provider.finish().await;
         f.finish().await;
     }
