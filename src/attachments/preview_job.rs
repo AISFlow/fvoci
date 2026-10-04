@@ -160,7 +160,14 @@ pub async fn process_one_preview_backend(
         .limits
         .input_bytes
         .min(input.size_bytes.max(0) as u64);
-    let source = match read_bounded(storage, &input.storage_key, cap).await {
+    let source_read = tokio::select! {
+        () = cancel.cancelled() => {
+            let _ = release_preview_backend(backend, &claim).await;
+            return Ok(true);
+        }
+        result = read_bounded(storage, &input.storage_key, cap) => result,
+    };
+    let source = match source_read {
         Ok(Some(source)) => source,
         Ok(None) => {
             fail(backend, &claim, "stored object exceeds its row size").await?;
