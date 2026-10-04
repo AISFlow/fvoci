@@ -1084,7 +1084,7 @@ impl OperationTx<'_, '_> {
                     CollabKind::Task => "SELECT seq,payload_len,payload_sha256,actor_user_id FROM task_collab_op_receipts WHERE workspace_id=?1 AND task_id=?2 AND op_id=?3",
                 };
                 tx.query(statement, &[Cell::uuid(workspace),Cell::uuid(resource),Cell::uuid(operation)]).await?
-                    .first().map(|r| Ok((r.cell(0)?.integer()?,r.cell(1)?.integer()?,r.cell(2)?.bytes()?,r.cell(3)?.id()?))).transpose()?
+                    .first().map(|r| Ok::<_,sqlx::Error>((r.cell(0)?.integer()?,r.cell(1)?.integer()?,r.cell(2)?.bytes()?,r.cell(3)?.id()?))).transpose()?
             }
         };
         Ok(row.map(
