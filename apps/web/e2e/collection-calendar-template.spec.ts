@@ -49,17 +49,33 @@ const collectionQuerySchema = z
 test.describe.configure({ mode: "serial" });
 async function fixture(page: Page, key: string) {
   const served: Promise<{ path: string; sha256: string }>[] = [];
+  const bodylessAssets: { path: string; status: number; redirectedFrom: string | null }[] = [];
   const captureAsset = (response: Response) => {
     const path = new URL(response.url()).pathname;
     if (path.startsWith("/assets/") && /\.(js|css)$/.test(path)) {
+      const status = response.status();
+      if (status >= 300 && status < 400) {
+        const previous = response.request().redirectedFrom();
+        bodylessAssets.push({
+          path,
+          status,
+          redirectedFrom: previous ? new URL(previous.url()).pathname : null,
+        });
+        return;
+      }
+      expect(response.ok(), `asset ${path} status ${String(status)}`).toBe(true);
       served.push(
-        response.body().then((body) => ({
-          path: path.slice(1),
-          sha256: createHash("sha256").update(body).digest("hex"),
-        })),
+        response.body().then((body) => {
+          expect(body.length, `asset ${path} has a body`).toBeGreaterThan(0);
+          return {
+            path: path.slice(1),
+            sha256: createHash("sha256").update(body).digest("hex"),
+          };
+        }),
       );
     }
   };
+  page.on("response", captureAsset);
   await page.goto("/");
   await expect(
     page
@@ -112,19 +128,21 @@ async function fixture(page: Page, key: string) {
     return taskDatesSchema.parse(await res.json());
   }
   async function open(month = "2027-05") {
-    page.on("response", captureAsset);
     await page.goto(`/w/caltemplate/${key}/calendar`);
     await expect(page).toHaveURL(`/w/caltemplate/${key}/calendar`);
     await expect(page.locator("[data-v-app]")).toHaveCount(1);
     await page.locator('input[type="month"]').fill(month);
     await expect(page.locator('table[data-testid="collection-calendar"]')).toBeVisible();
+    const assets = await Promise.all(served);
+    expect(assets.length, "successful terminal asset responses were captured").toBeGreaterThan(0);
     writeFileSync(
       `/tmp/fvoci-front272-calendar-served-${key}.json`,
       JSON.stringify(
         {
           head: process.env.FVOCI_CALENDAR_VERIFY_HEAD ?? "unbound",
           url: new URL(page.url()).pathname,
-          assets: await Promise.all(served),
+          assets,
+          bodylessAssets,
         },
         null,
         2,
