@@ -4409,8 +4409,8 @@ test("native archive restores a same-ID personal MOVE graph after a lost restore
       ["timer_audit", "audit"],
     ] as const)
       expect(portable[key].map((row) => row.id)).toEqual(movedTime[sourceKey].map((row) => row.id));
-    expect(portable.timer_commands.map((row) => row.request_id)).toEqual(
-      movedTime.commands.map((row) => row.request_id),
+    expect(portable.timer_commands.map((row) => row.request_id).sort()).toEqual(
+      movedTime.commands.map((row) => row.request_id).sort(),
     );
     expect(portable.timer_audit.map((row) => row.workspace_id)).toEqual(
       movedTime.audit.map((row) => row.workspace_id),

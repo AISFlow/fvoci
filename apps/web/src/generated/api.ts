@@ -5736,7 +5736,7 @@ export interface components {
          *     diagnostic. Each value is a known unsupported model, never a quiet subset.
          * @enum {string}
          */
-        PersonalTransferBlocker: "native_history" | "outgoing_reference" | "incoming_reference" | "file" | "hierarchy" | "assignee" | "dependent_graph" | "wip_reservation" | "inventory_budget" | "block_identity" | "body_encoding" | "native_state_missing";
+        PersonalTransferBlocker: "native_history" | "outgoing_reference" | "incoming_reference" | "file" | "hierarchy" | "assignee" | "dependent_graph" | "wip_reservation" | "inventory_budget" | "block_identity" | "body_encoding" | "native_state_missing" | "timer_busy";
         PersonalTransferBody: {
             confirmed: boolean;
             previewDigest: string;
@@ -5757,7 +5757,7 @@ export interface components {
             outcome: components["schemas"]["PersonalTransferOutcome"];
         };
         /** @enum {string} */
-        PersonalTransferItem: "document" | "task" | "activity" | "history" | "attachment";
+        PersonalTransferItem: "document" | "task" | "activity" | "history" | "attachment" | "time_entry" | "timer";
         /** @enum {string} */
         PersonalTransferOutcome: "moved" | "copied_new_id" | "retained_private" | "not_included";
         PersonalTransferOutput: {

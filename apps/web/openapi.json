@@ -31996,7 +31996,8 @@
           "inventory_budget",
           "block_identity",
           "body_encoding",
-          "native_state_missing"
+          "native_state_missing",
+          "timer_busy"
         ]
       },
       "PersonalTransferBody": {
@@ -32061,7 +32062,9 @@
           "task",
           "activity",
           "history",
-          "attachment"
+          "attachment",
+          "time_entry",
+          "timer"
         ]
       },
       "PersonalTransferOutcome": {

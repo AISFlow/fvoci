@@ -1084,10 +1084,23 @@ fn validate_collections(
             == Some(name)
     };
     let mut kinds = BTreeMap::new();
+    // Live workspace wiki document collections (project_id NULL) travel when
+    // every item is an archived wiki document (the item writer keeps them to
+    // wiki documents); each must hold at least one, so no unrelated
+    // workspace collection rides along.
+    let mut wiki = BTreeSet::new();
     for c in &g.collections {
         validate_dates(c)?;
-        if c.project_id != Some(g.project.id) || c.deleted_at.is_some() {
+        if c.deleted_at.is_some() {
             return Err(unsupported());
+        }
+        match c.project_id {
+            Some(project) if project == g.project.id => {}
+            None if c.kind == "document" => {
+                wiki.insert(c.id);
+            }
+            None if c.kind == "task" => return Err(invalid()),
+            _ => return Err(unsupported()),
         }
         // The task collection's name is the project's name at creation (the
         // 028 trigger copies it): the project name contract; a document
@@ -1119,10 +1132,13 @@ fn validate_collections(
         ) {
             (Some(&"task"), None, Some(t)) => tasks.contains(&t) && item_tasks.insert(t),
             (Some(&"document"), Some(d), None) => {
+                // A project collection holds project documents, a wiki
+                // collection wiki documents (both archived).
+                let home = (!wiki.contains(&item.collection_id)).then_some(g.project.id);
                 docs.contains(&d)
                     && g.documents
                         .iter()
-                        .any(|x| x.id == d && x.project_id == Some(g.project.id))
+                        .any(|x| x.id == d && x.project_id == home)
                     && item_docs.insert(d)
             }
             _ => false,
@@ -1133,6 +1149,9 @@ fn validate_collections(
     }
     if item_tasks.len() != tasks.len() {
         return Err(unsupported());
+    }
+    if wiki.iter().any(|c| !items.values().any(|owner| owner == c)) {
+        return Err(invalid());
     }
     let mut fields = BTreeMap::new();
     let mut keys = BTreeSet::new();
@@ -3960,6 +3979,48 @@ pub(crate) mod tests {
             |a| a.graph.collections[0].kind = "document".into(),
             "collections"
         ));
+        // Another project's collection stays the typed refusal; a workspace
+        // wiki collection is a document collection holding archived wiki
+        // documents only, never empty and never a project document.
+        let wiki = |items: bool, kind: &'static str| {
+            let mut archive = fixture();
+            let mut c = archive.graph.collections[0].clone();
+            c.id = id(31);
+            c.project_id = None;
+            c.kind = kind.into();
+            c.name = "위키 모음".into();
+            archive.graph.collections.push(c);
+            if items {
+                let mut i = archive.graph.collection_items[0].clone();
+                i.id = id(32);
+                i.collection_id = id(31);
+                i.task_id = None;
+                i.document_id = Some(archive.graph.documents[0].id);
+                archive.graph.collection_items.push(i);
+            }
+            archive.validate().err()
+        };
+        assert!(matches!(
+            wiki(false, "document"),
+            Some(ArchiveError::Invalid(_))
+        ));
+        assert!(matches!(
+            wiki(true, "document"),
+            Some(ArchiveError::Invalid(_))
+        ));
+        assert!(matches!(
+            wiki(false, "task"),
+            Some(ArchiveError::Invalid(_))
+        ));
+        let mut archive = fixture();
+        let mut other = archive.graph.collections[0].clone();
+        other.id = id(33);
+        other.project_id = Some(Uuid::nil());
+        other.kind = "document".into();
+        archive.graph.collections.push(other);
+        assert!(
+            matches!(archive.validate(), Err(ArchiveError::Unsupported(m)) if m == "collections")
+        );
         // The task collection keeps the project name contract (trim only to
         // check): a leading space is a valid raw name, a blank one is not.
         let mut archive = fixture();

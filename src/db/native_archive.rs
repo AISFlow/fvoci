@@ -217,6 +217,11 @@ struct Scope {
 const DOCS: &str =
     "(SELECT id FROM fvoci.documents WHERE project_id=$1 OR (project_id IS NULL AND id=ANY($2)))";
 
+/// Archived collections: the project's, plus the workspace wiki document
+/// collections holding a wiki-closure document (capture refuses one that
+/// also holds anything outside the closure).
+const COLLECTIONS: &str = "(SELECT id FROM fvoci.collections WHERE project_id=$1 UNION ALL SELECT c.id FROM fvoci.collections c WHERE c.project_id IS NULL AND c.kind='document' AND EXISTS(SELECT 1 FROM fvoci.collection_items i WHERE i.collection_id=c.id AND i.document_id=ANY($2)))";
+
 fn scoped<'q>(
     query: sqlx::query::Query<'q, Postgres, sqlx::postgres::PgArguments>,
     scope: &'q Scope,
@@ -270,7 +275,9 @@ async fn rows<T: DeserializeOwned>(
     sql: &str,
     scope: &Scope,
 ) -> Result<Vec<T>, NativeDbError> {
-    let sql = sql.replace("{DOCS}", DOCS);
+    let sql = sql
+        .replace("{COLLECTIONS}", COLLECTIONS)
+        .replace("{DOCS}", DOCS);
     let sql = sql.as_str();
     // Refuse oversized JSON sets in the coherent source transaction before
     // fetching them into the parent. LIMIT in each owned query also bounds
@@ -361,17 +368,17 @@ pub async fn capture(
     let dependencies = rows(&mut tx, "SELECT to_jsonb(d)-'workspace_id' FROM fvoci.task_dependencies d WHERE d.blocker_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1) OR d.blocked_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1) ORDER BY d.blocker_id,d.blocked_id LIMIT 10001", &scope).await?;
     let origins = rows(&mut tx, "SELECT to_jsonb(o)-'workspace_id' FROM fvoci.task_origins o JOIN fvoci.tasks t ON t.id=o.task_id WHERE t.project_id=$1 ORDER BY o.task_id LIMIT 10001", &scope).await?;
     let activity: Vec<Activity> = rows(&mut tx, "SELECT to_jsonb(a)-'workspace_id' FROM fvoci.task_activity a JOIN fvoci.tasks t ON t.id=a.task_id WHERE t.project_id=$1 ORDER BY a.id LIMIT 10001", &scope).await?;
-    let collections = rows(&mut tx, "SELECT to_jsonb(c)-'workspace_id' FROM fvoci.collections c WHERE c.project_id=$1 ORDER BY c.id LIMIT 10001", &scope).await?;
-    let collection_items = rows(&mut tx, "SELECT to_jsonb(i)-'workspace_id' FROM fvoci.collection_items i JOIN fvoci.collections c ON c.id=i.collection_id WHERE c.project_id=$1 ORDER BY i.id LIMIT 10001", &scope).await?;
-    // Person-made collection state of the project's collections; numbers as
+    let collections = rows(&mut tx, "SELECT to_jsonb(c)-'workspace_id' FROM fvoci.collections c WHERE c.id IN {COLLECTIONS} ORDER BY c.id LIMIT 10001", &scope).await?;
+    let collection_items = rows(&mut tx, "SELECT to_jsonb(i)-'workspace_id' FROM fvoci.collection_items i WHERE i.collection_id IN {COLLECTIONS} ORDER BY i.id LIMIT 10001", &scope).await?;
+    // Person-made collection state of the archived collections; numbers as
     // their exact numeric text. Person-scoped rows of another person are read
     // so validation refuses them, never leaves them behind.
-    let collection_fields = rows(&mut tx, "SELECT to_jsonb(f)-'workspace_id' FROM fvoci.collection_fields f WHERE f.collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1) ORDER BY f.id LIMIT 10001", &scope).await?;
-    let collection_options = rows(&mut tx, "SELECT to_jsonb(o)-'workspace_id' FROM fvoci.collection_options o WHERE o.collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1) ORDER BY o.id LIMIT 10001", &scope).await?;
-    let collection_values = rows(&mut tx, "SELECT (to_jsonb(v)-'workspace_id'-'value_number')||jsonb_build_object('value_number',v.value_number::text) FROM fvoci.collection_values v WHERE v.collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1) ORDER BY v.item_id,v.field_id LIMIT 10001", &scope).await?;
-    let collection_choices = rows(&mut tx, "SELECT to_jsonb(x)-'workspace_id' FROM fvoci.collection_choices x WHERE x.collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1) ORDER BY x.item_id,x.field_id,x.option_id LIMIT 10001", &scope).await?;
-    let collection_people = rows(&mut tx, "SELECT to_jsonb(x)-'workspace_id' FROM fvoci.collection_people x WHERE x.collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1) ORDER BY x.item_id,x.field_id,x.user_id LIMIT 10001", &scope).await?;
-    let collection_views: Vec<CollectionView> = rows(&mut tx, "SELECT to_jsonb(v)-'workspace_id' FROM fvoci.collection_views v WHERE v.collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1) ORDER BY v.id LIMIT 10001", &scope).await?;
+    let collection_fields = rows(&mut tx, "SELECT to_jsonb(f)-'workspace_id' FROM fvoci.collection_fields f WHERE f.collection_id IN {COLLECTIONS} ORDER BY f.id LIMIT 10001", &scope).await?;
+    let collection_options = rows(&mut tx, "SELECT to_jsonb(o)-'workspace_id' FROM fvoci.collection_options o WHERE o.collection_id IN {COLLECTIONS} ORDER BY o.id LIMIT 10001", &scope).await?;
+    let collection_values = rows(&mut tx, "SELECT (to_jsonb(v)-'workspace_id'-'value_number')||jsonb_build_object('value_number',v.value_number::text) FROM fvoci.collection_values v WHERE v.collection_id IN {COLLECTIONS} ORDER BY v.item_id,v.field_id LIMIT 10001", &scope).await?;
+    let collection_choices = rows(&mut tx, "SELECT to_jsonb(x)-'workspace_id' FROM fvoci.collection_choices x WHERE x.collection_id IN {COLLECTIONS} ORDER BY x.item_id,x.field_id,x.option_id LIMIT 10001", &scope).await?;
+    let collection_people = rows(&mut tx, "SELECT to_jsonb(x)-'workspace_id' FROM fvoci.collection_people x WHERE x.collection_id IN {COLLECTIONS} ORDER BY x.item_id,x.field_id,x.user_id LIMIT 10001", &scope).await?;
+    let collection_views: Vec<CollectionView> = rows(&mut tx, "SELECT to_jsonb(v)-'workspace_id' FROM fvoci.collection_views v WHERE v.collection_id IN {COLLECTIONS} ORDER BY v.id LIMIT 10001", &scope).await?;
     // Purged labels/milestones the captured history or the captured view
     // filters still name: the history references and the view-filter bound
     // (two per view row) are counted and charged to the graph budget before
@@ -735,17 +742,23 @@ async fn reject_unsupported(
                 OR (v.target_kind='task' AND v.target_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1) AND NOT EXISTS(SELECT 1 FROM fvoci.task_states s WHERE s.task_id=v.target_id))))"),
         // Migration028 triggers give every project one task collection and every
         // task one item of it; person-made fields/values/views of the
-        // project's collections are typed records. Still refused here: a
-        // deleted or missing/extra task collection, an item whose target is
-        // outside the project, or a collection outside the project (a
-        // workspace collection) holding an archived document or task.
+        // project's collections are typed records, and so are those of a
+        // live workspace wiki document collection whose every item is a
+        // wiki-closure document (the item writer keeps wiki collections to
+        // wiki documents). Still refused here: a deleted or missing/extra task
+        // collection, an item whose target is outside the project, or any
+        // other collection outside the project holding an archived document
+        // or task (a deleted wiki collection, or one also holding a document
+        // outside the closure - never pruned).
         ("collections", "SELECT (SELECT count(*) FROM fvoci.collections WHERE project_id=$1 AND kind='task') <> 1
             OR EXISTS(SELECT 1 FROM fvoci.collections c WHERE c.project_id=$1 AND c.deleted_at IS NOT NULL)
             OR EXISTS(SELECT 1 FROM fvoci.collection_items i JOIN fvoci.collections c ON c.id=i.collection_id WHERE c.project_id=$1 AND NOT (
                 (i.task_id IS NOT NULL AND EXISTS(SELECT 1 FROM fvoci.tasks t WHERE t.id=i.task_id AND t.project_id=$1))
                 OR (i.document_id IS NOT NULL AND i.document_id IN {DOCS} AND EXISTS(SELECT 1 FROM fvoci.documents d WHERE d.id=i.document_id AND d.project_id=$1))))
             OR (SELECT count(*) FROM fvoci.collection_items i JOIN fvoci.collections c ON c.id=i.collection_id WHERE c.project_id=$1 AND i.task_id IS NOT NULL) <> (SELECT count(*) FROM fvoci.tasks WHERE project_id=$1)
-            OR EXISTS(SELECT 1 FROM fvoci.collection_items i JOIN fvoci.collections c ON c.id=i.collection_id WHERE (c.project_id IS DISTINCT FROM $1) AND (i.document_id IN {DOCS} OR i.task_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1)))"),
+            OR EXISTS(SELECT 1 FROM fvoci.collection_items i JOIN fvoci.collections c ON c.id=i.collection_id WHERE (c.project_id IS DISTINCT FROM $1) AND (i.document_id IN {DOCS} OR i.task_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1))
+                AND NOT (c.project_id IS NULL AND c.kind='document' AND c.deleted_at IS NULL
+                    AND NOT EXISTS(SELECT 1 FROM fvoci.collection_items j WHERE j.collection_id=c.id AND (j.document_id IS NULL OR NOT j.document_id=ANY($2)))))"),
         // Receipts touching the selection travel retired; one by another actor
         // or with any target outside the selection cannot.
         ("personal input commands", "SELECT EXISTS(SELECT 1 FROM fvoci.personal_input_commands WHERE (project_id=$1 OR document_id IN {DOCS} OR task_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1))

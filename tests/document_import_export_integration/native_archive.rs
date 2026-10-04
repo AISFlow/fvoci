@@ -8801,3 +8801,289 @@ async fn native_archive_restores_view_filters_naming_purged_labels_and_milestone
         std::fs::remove_dir_all(storage).unwrap();
     }
 }
+
+#[tokio::test]
+async fn native_archive_restores_a_wiki_collection_of_the_closure() {
+    use fvoci_server::db::native_archive::{capture, publish, NativeDbError};
+    use fvoci_server::native_archive::ArchiveError;
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let session = project_harness::session_id_for_user(&fx.admin, fx.user_id).await;
+    let call = |app: axum::Router,
+                method: &'static str,
+                path: String,
+                body: Option<Value>,
+                cookie: String| async move {
+        let (status, reply) = json_request(app, method, &path, body, Some(&cookie)).await;
+        assert!(status.is_success(), "{method} {path}: {status} {reply}");
+        reply
+    };
+    let personal = call(
+        fx.app.clone(),
+        "POST",
+        "/api/v1/me/personal-workspace".into(),
+        None,
+        fx.cookie.clone(),
+    )
+    .await;
+    let ws = Uuid::parse_str(personal["id"].as_str().unwrap()).unwrap();
+    let w = format!("/api/v1/workspaces/{ws}");
+    let project =
+        project_harness::create_project(fx.app.clone(), &fx.cookie, ws, "WCL", "private").await;
+    let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+    // The wiki closure: a personal-input origin wiki document of a project task.
+    let created = call(fx.app.clone(), "POST", format!("{w}/personal-input"),
+        Some(json!({"requestId":Uuid::now_v7(),"intent":"task","title":"모음 대상 🧪","projectId":project_id})),
+        fx.cookie.clone()).await;
+    let origin = created["documentId"].as_str().unwrap().to_owned();
+    // Ordinary writers: a wiki document collection holding that document, a
+    // text field with a value, and the owner's private table view.
+    let collection = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/collections"),
+        Some(json!({"name":"위키 모음 🧪","kind":"document","projectId":null})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let cid = collection["id"].as_str().unwrap().to_owned();
+    let field = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/collections/{cid}/fields"),
+        Some(json!({"name":"메모","type":"text","options":[]})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let item = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/collections/{cid}/items"),
+        Some(json!({"documentId":origin})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let item_id = item["id"].as_str().unwrap().to_owned();
+    call(fx.app.clone(), "PUT", format!("{w}/collections/{cid}/items/{item_id}/values"),
+        Some(json!({"fieldId":field["id"],"expectedVersion":item["version"],"expectedFieldVersion":field["version"],"value":{"text":"모음 메모 🧪"}})),
+        fx.cookie.clone()).await;
+    call(fx.app.clone(), "POST", format!("{w}/collections/{cid}/views"),
+        Some(json!({"name":"내 표","type":"table","visibility":"private","config":{"query":{"filters":{}},"groupBy":null,"dateBy":null}})),
+        fx.cookie.clone()).await;
+    // What a client reads of the collection: its row, fields, default-query
+    // items with values, and views.
+    let read = |app: axum::Router, w: String, cookie: String| {
+        let cid = cid.clone();
+        async move {
+            let pick = |v: &Value, keys: &[&str]| -> Value {
+                Value::Object(
+                    keys.iter()
+                        .map(|k| (k.to_string(), v[*k].clone()))
+                        .collect(),
+                )
+            };
+            let list = call(
+                app.clone(),
+                "GET",
+                format!("{w}/collections"),
+                None,
+                cookie.clone(),
+            )
+            .await;
+            let row = list["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"] == json!(cid))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let fields = call(
+                app.clone(),
+                "GET",
+                format!("{w}/collections/{cid}/fields"),
+                None,
+                cookie.clone(),
+            )
+            .await;
+            let query = call(
+                app.clone(),
+                "POST",
+                format!("{w}/collections/{cid}/query"),
+                Some(json!({"config":{"query":{"filters":{}},"groupBy":null,"dateBy":null}})),
+                cookie.clone(),
+            )
+            .await;
+            let views = call(
+                app.clone(),
+                "GET",
+                format!("{w}/collections/{cid}/views"),
+                None,
+                cookie.clone(),
+            )
+            .await;
+            json!({"collection":pick(&row, &["id","name","kind","projectId","version"]),
+                "fields":fields["items"].as_array().unwrap().iter().map(|f| pick(f, &["id","key","name","type","version"])).collect::<Vec<_>>(),
+                "items":query["items"].as_array().unwrap().iter().map(|i| pick(i, &["id","documentId","values","version"])).collect::<Vec<_>>(),
+                "views":views["items"].as_array().unwrap().iter().map(|v| pick(v, &["id","name","type","visibility","config","version"])).collect::<Vec<_>>()})
+        }
+    };
+    let source = read(fx.app.clone(), w.clone(), fx.cookie.clone()).await;
+    // Source facts: a wiki collection (no project) holding the origin item.
+    assert_eq!(
+        (
+            &source["collection"]["kind"],
+            &source["collection"]["projectId"]
+        ),
+        (&json!("document"), &Value::Null)
+    );
+    assert_eq!(source["items"].as_array().unwrap().len(), 1);
+    assert_eq!(source["items"][0]["documentId"], json!(origin));
+
+    let captured = capture(&fx.pool, ws, fx.user_id, session, &project_only(project_id))
+        .await
+        .expect("a wiki collection of the closure is capturable");
+    captured
+        .archive
+        .validate()
+        .expect("a wiki collection of the closure is valid");
+    let graph = serde_json::to_value(&captured.archive.graph).unwrap();
+    let wiki_collections: Vec<&Value> = graph["collections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["project_id"].is_null())
+        .collect();
+    assert_eq!(wiki_collections.len(), 1);
+    assert_eq!(wiki_collections[0]["id"], json!(cid));
+    // Negatives on the real graph: an empty foreign wiki collection, a wiki
+    // item naming a document outside the archive, and a wiki task collection
+    // never validate.
+    let edited = |edit: &dyn Fn(&mut Value)| {
+        let mut archive = serde_json::to_value(&captured.archive).unwrap();
+        edit(&mut archive["graph"]);
+        serde_json::from_value::<fvoci_server::native_archive::Archive>(archive)
+            .map_err(|e| e.to_string())
+            .and_then(|a| a.validate().map_err(|e| format!("{e:?}")))
+    };
+    let wiki_index = graph["collections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|c| c["project_id"].is_null())
+        .unwrap();
+    assert!(
+        edited(&|g: &mut Value| {
+            let mut copy = g["collections"][wiki_index].clone();
+            copy["id"] = json!(Uuid::now_v7());
+            g["collections"].as_array_mut().unwrap().push(copy);
+        })
+        .is_err(),
+        "empty foreign wiki collection"
+    );
+    assert!(
+        edited(&|g: &mut Value| {
+            for item in g["collection_items"].as_array_mut().unwrap() {
+                if item["collection_id"] == json!(cid) {
+                    item["document_id"] = json!(Uuid::now_v7());
+                }
+            }
+        })
+        .is_err(),
+        "wiki item outside the archive"
+    );
+    assert!(
+        edited(&|g: &mut Value| g["collections"][wiki_index]["kind"] = json!("task")).is_err(),
+        "wiki task collection"
+    );
+    assert_eq!(edited(&|_: &mut Value| {}), Ok(()), "unedited");
+
+    let destination_db = TestDb::bootstrap().await;
+    let dst = fixture(&destination_db).await;
+    let (destination, _, claim) = claimed_restore(&dst, dst.user_id, &dst.cookie).await;
+    publish(
+        &dst.pool,
+        &claim,
+        &captured.archive,
+        &std::collections::BTreeMap::new(),
+        &dst.settings.quota,
+    )
+    .await
+    .expect("a wiki collection of the closure restores");
+    let dw = format!("/api/v1/workspaces/{destination}");
+    let restored = read(dst.app.clone(), dw.clone(), dst.cookie.clone()).await;
+    assert_eq!(restored, source);
+    // Writers continue: a new wiki document joins the collection, the value is
+    // edited, and both read back.
+    let added = call(
+        dst.app.clone(),
+        "POST",
+        format!("{dw}/documents"),
+        Some(json!({"parentId":null,"title":"새 위키 문서"})),
+        dst.cookie.clone(),
+    )
+    .await;
+    call(
+        dst.app.clone(),
+        "POST",
+        format!("{dw}/collections/{cid}/items"),
+        Some(json!({"documentId":added["id"]})),
+        dst.cookie.clone(),
+    )
+    .await;
+    let current = restored["items"][0].clone();
+    call(dst.app.clone(), "PUT", format!("{dw}/collections/{cid}/items/{item_id}/values"),
+        Some(json!({"fieldId":field["id"],"expectedVersion":current["version"],"expectedFieldVersion":field["version"],"value":{"text":"고친 메모"}})),
+        dst.cookie.clone()).await;
+    let continued = read(dst.app.clone(), dw.clone(), dst.cookie.clone()).await;
+    let docs: Vec<&Value> = continued["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| &i["documentId"])
+        .collect();
+    assert!(
+        docs.contains(&&json!(origin)) && docs.contains(&&added["id"]),
+        "{docs:?}"
+    );
+    assert!(
+        continued["items"].to_string().contains("고친 메모"),
+        "{}",
+        continued["items"]
+    );
+
+    // A wiki collection that also holds a wiki document outside the closure
+    // is the typed collections refusal at capture, never pruned.
+    let other = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/documents"),
+        Some(json!({"parentId":null,"title":"모음 밖 문서"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/collections/{cid}/items"),
+        Some(json!({"documentId":other["id"]})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let refused = capture(&fx.pool, ws, fx.user_id, session, &project_only(project_id)).await;
+    assert!(
+        matches!(&refused, Err(NativeDbError::Archive(ArchiveError::Unsupported(m))) if m == "collections"),
+        "{:?}",
+        refused.as_ref().err()
+    );
+
+    let storages = [fx.storage_root(), dst.storage_root()];
+    fx.pool.close().await;
+    fx.admin.close().await;
+    dst.pool.close().await;
+    dst.admin.close().await;
+    harness.cleanup().await;
+    destination_db.cleanup().await;
+    for storage in storages {
+        std::fs::remove_dir_all(storage).unwrap();
+    }
+}
