@@ -308,10 +308,23 @@ pub async fn attachment_transfer_mode(
     pool: &PgPool,
     unavailable: Option<TransferUnavailable>,
 ) -> Result<TransferMode, sqlx::Error> {
+    attachment_transfer_mode_backend(&Backend::Postgres(pool.clone()), unavailable).await
+}
+
+/// The current selected-backend request mode. Unavailable storage remains a
+/// fast proxy decision; a fresh boot holder cannot cache a previous request.
+pub async fn attachment_transfer_mode_backend(
+    backend: &Backend,
+    unavailable: Option<TransferUnavailable>,
+) -> Result<TransferMode, sqlx::Error> {
     if unavailable.is_some() {
         return Ok(TransferMode::Proxy);
     }
-    Ok(attachment_transfer(pool, None).await?.mode)
+    if let Backend::Postgres(pool) = backend {
+        return Ok(attachment_transfer(pool, None).await?.mode);
+    }
+    let snapshot = load_backend(backend, &SettingsBoot::default(), "FVOCI").await?;
+    Ok(effective_transfer(&snapshot, None).mode)
 }
 
 /// Effective values without touching the boot snapshot.
