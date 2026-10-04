@@ -172,7 +172,7 @@ pub async fn process_one_preview_backend(
         let _ = release_preview_backend(backend, &claim).await;
         return Ok(true);
     }
-    #[cfg(test)]
+    #[cfg(all(test, feature = "db-tests"))]
     tests::pause(claim.attachment_id, "child").await;
     let rendered = tokio::select! {
         () = cancel.cancelled() => {
@@ -197,7 +197,7 @@ pub async fn process_one_preview_backend(
     else {
         return Ok(true);
     };
-    #[cfg(test)]
+    #[cfg(all(test, feature = "db-tests"))]
     tests::pause(claim.attachment_id, "journal").await;
     if cancel.is_cancelled() {
         let _ = release_preview_backend(backend, &claim).await;
@@ -217,7 +217,7 @@ pub async fn process_one_preview_backend(
         let _ = release_preview_backend(backend, &claim).await;
         return Ok(true);
     }
-    #[cfg(test)]
+    #[cfg(all(test, feature = "db-tests"))]
     tests::pause(claim.attachment_id, "stored").await;
     let published = publish_preview_backend_with_cancel(
         backend,
@@ -272,7 +272,7 @@ async fn read_bounded(
         .map_err(|e| format!("storage read failed: {e}"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "db-tests"))]
 mod tests {
     use super::*;
     use crate::db::attachment_preview::tests::Fixture;
