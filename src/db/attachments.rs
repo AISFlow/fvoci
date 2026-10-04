@@ -5150,6 +5150,49 @@ mod upload_session_tests {
             sha2::Sha256::digest(actual)
         );
     }
+    fn published_part_files(f: &Fixture, key: &str) -> std::collections::BTreeMap<String, Vec<u8>> {
+        std::fs::read_dir(f.root.join("s18-storage/tmp").join(key))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.is_file()
+                    && !p
+                        .file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .ends_with(".writing")
+            })
+            .map(|p| {
+                (
+                    p.file_name().unwrap().to_str().unwrap().to_string(),
+                    std::fs::read(p).unwrap(),
+                )
+            })
+            .collect()
+    }
+    fn staged_writing_files(f: &Fixture, key: &str) -> Vec<Vec<u8>> {
+        std::fs::read_dir(f.root.join("s18-storage/tmp").join(key))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .ends_with(".writing")
+            })
+            .map(|p| std::fs::read(p).unwrap())
+            .collect()
+    }
+    async fn listed_parts(s: &ObjectStorage, key: &str) -> Vec<(i32, String, u64)> {
+        s.list_parts(key, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.part_number, p.etag, p.size_bytes))
+            .collect()
+    }
     #[tokio::test]
     async fn upload_session_selected_reservation_parts_resume_current_acl_and_old_key() {
         let f = Fixture::new().await;
@@ -5170,14 +5213,36 @@ mod upload_session_tests {
                 .await
                 .unwrap()
                 .unwrap();
+        let replacement = Uuid::now_v7().to_string();
+        s.create_multipart(&replacement).await.unwrap();
+        let replacement_bytes = vec![b'R'; max as usize];
         let stream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
-            bytes::Bytes::copy_from_slice(&BYTES[..max as usize]),
+            bytes::Bytes::copy_from_slice(&replacement_bytes),
+        )]);
+        let mut destination = s
+            .stage_part_stream(&replacement, None, 1, stream, Some(max), max)
+            .await
+            .unwrap();
+        s.publish_staged_part(&replacement, 1, &mut destination)
+            .await
+            .unwrap();
+        let old_listing = listed_parts(&s, &key).await;
+        let destination_listing = listed_parts(&s, &replacement).await;
+        let old_files = published_part_files(&f, &key);
+        let destination_files = published_part_files(&f, &replacement);
+        assert_eq!(old_files["1"], BYTES[..max as usize]);
+        assert_eq!(destination_files["1"], replacement_bytes);
+        let changed_bytes = vec![b'Z'; max as usize];
+        assert_ne!(changed_bytes, BYTES[..max as usize]);
+        assert_ne!(changed_bytes, replacement_bytes);
+        let stream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
+            bytes::Bytes::copy_from_slice(&changed_bytes),
         )]);
         let mut staged = s
             .stage_part_stream(&key, upload_ref.as_deref(), 1, stream, Some(max), max)
             .await
             .unwrap();
-        let replacement = Uuid::now_v7().to_string();
+        assert_eq!(staged_writing_files(&f, &key), vec![changed_bytes.clone()]);
         sqlx::query("UPDATE attachments SET storage_key=?2 WHERE id=?1")
             .bind(att.id.as_bytes().as_slice())
             .bind(&replacement)
@@ -5202,6 +5267,14 @@ mod upload_session_tests {
             .unwrap_err(),
             AttachmentDbError::UploadState
         );
+        assert!(
+            staged_writing_files(&f, &key).is_empty(),
+            "denial must await removal while the staged handle is still alive"
+        );
+        assert_eq!(listed_parts(&s, &key).await, old_listing);
+        assert_eq!(listed_parts(&s, &replacement).await, destination_listing);
+        assert_eq!(published_part_files(&f, &key), old_files);
+        assert_eq!(published_part_files(&f, &replacement), destination_files);
         assert_eq!(s.head(&replacement).await.unwrap(), None);
         sqlx::query("UPDATE attachments SET storage_key=?2 WHERE id=?1")
             .bind(att.id.as_bytes().as_slice())
@@ -5222,11 +5295,45 @@ mod upload_session_tests {
             .unwrap(),
             Err(AttachmentDbError::NotFound)
         );
+        let stream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
+            bytes::Bytes::copy_from_slice(&changed_bytes),
+        )]);
+        let mut late_staged = s
+            .stage_part_stream(&key, upload_ref.as_deref(), 1, stream, Some(max), max)
+            .await
+            .unwrap();
+        assert_eq!(staged_writing_files(&f, &key), vec![changed_bytes]);
         sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
             .bind(credential.as_bytes().as_slice())
             .execute(&f.pool)
             .await
             .unwrap();
+        assert_eq!(
+            commit_upload_part_backend(
+                &f.backend,
+                &s,
+                f.workspace,
+                att.id,
+                f.user,
+                credential,
+                1,
+                &key,
+                upload_ref.as_deref(),
+                &mut late_staged
+            )
+            .await
+            .unwrap()
+            .unwrap_err(),
+            AttachmentDbError::Forbidden
+        );
+        assert!(
+            staged_writing_files(&f, &key).is_empty(),
+            "late revocation must settle staged cleanup before returning"
+        );
+        assert_eq!(listed_parts(&s, &key).await, old_listing);
+        assert_eq!(listed_parts(&s, &replacement).await, destination_listing);
+        assert_eq!(published_part_files(&f, &key), old_files);
+        assert_eq!(published_part_files(&f, &replacement), destination_files);
         assert_eq!(
             resume_upload_backend(&f.backend, &s, f.workspace, att.id, f.user, credential)
                 .await
