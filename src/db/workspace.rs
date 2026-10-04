@@ -2,6 +2,9 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use super::backend::OperationTx;
+use super::codec::Cell;
+
 use crate::db::context::{
     clear_self_user, lock_membership_users, recheck_session, session_is_live, set_self_user,
     set_tenant,
@@ -203,6 +206,56 @@ pub(crate) async fn workspace_is_live(
             .fetch_optional(&mut **tx)
             .await?;
     Ok(row.map(|(live,)| live).unwrap_or(false))
+}
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn membership_role(
+        &mut self,
+        workspace: Uuid,
+        user: Uuid,
+        for_update: bool,
+    ) -> Result<Option<WorkspaceRole>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) if for_update => {
+                membership_role_for_update(tx, workspace, user).await
+            }
+            Self::Postgres(tx) => membership_role(tx, workspace, user).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                if for_update {
+                    tx.require_writer()?;
+                }
+                let rows = tx
+                    .query(
+                        "SELECT role FROM memberships WHERE workspace_id=?1 AND user_id=?2",
+                        &[Cell::uuid(workspace), Cell::uuid(user)],
+                    )
+                    .await?;
+                let role = rows.first().map(|row| row.cell(0)?.string()).transpose()?;
+                Ok(role.as_deref().and_then(WorkspaceRole::parse))
+            }
+        }
+    }
+
+    pub(crate) async fn workspace_is_live(&mut self, workspace: Uuid) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => workspace_is_live(tx, workspace).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let rows = tx
+                    .query(
+                        "SELECT deleted_at IS NULL FROM workspaces WHERE id=?1",
+                        &[Cell::uuid(workspace)],
+                    )
+                    .await?;
+                Ok(rows
+                    .first()
+                    .map(|row| row.cell(0)?.boolean())
+                    .transpose()?
+                    .unwrap_or(false))
+            }
+        }
+    }
 }
 
 pub(crate) async fn workspace_kind_read(
