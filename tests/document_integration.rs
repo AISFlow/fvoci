@@ -3071,20 +3071,50 @@ async fn selected_workspace_race_controls(
 
 #[tokio::test]
 async fn selected_backend_setup_cookie_wiki_command_readback() {
-    selected_backend_wiki_fixture(false, false).await;
+    selected_backend_wiki_fixture(false, false, false).await;
 }
 
 #[tokio::test]
 async fn selected_backend_native_append_fresh_child_readback() {
-    selected_backend_wiki_fixture(true, false).await;
+    selected_backend_wiki_fixture(true, false, false).await;
 }
 
 #[tokio::test]
 async fn selected_backend_workspace_current_membership_race() {
-    selected_backend_wiki_fixture(false, true).await;
+    selected_backend_wiki_fixture(false, true, false).await;
 }
 
-async fn selected_backend_wiki_fixture(with_native: bool, membership_races: bool) {
+#[tokio::test]
+async fn selected_backend_native_compaction_receipt_readback() {
+    selected_backend_wiki_fixture(true, false, true).await;
+}
+
+async fn selected_compaction_effect_counts(
+    backend: &fvoci_server::db::backend::Backend,
+    workspace: Uuid,
+    document: Uuid,
+) -> (i64, i64) {
+    use fvoci_server::db::backend::Backend;
+    match backend {
+        Backend::Postgres(pool) => {
+            let mut tx = pool.begin().await.unwrap();
+            fvoci_server::db::context::set_tenant(&mut tx, workspace).await.unwrap();
+            let counts = sqlx::query_as("SELECT (SELECT count(*) FROM fvoci.events WHERE workspace_id=$1 AND target_id=$2 AND verb='document.collab_snapshot_compacted'),(SELECT count(*) FROM fvoci.audit_log WHERE workspace_id=$1 AND target_id=$2 AND verb='document.collab_snapshot_compacted')")
+                .bind(workspace).bind(document).fetch_one(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+            counts
+        }
+        Backend::Sqlite(pool) => sqlx::query_as("SELECT (SELECT count(*) FROM events WHERE workspace_id=?1 AND target_id=?2 AND verb='document.collab_snapshot_compacted'),(SELECT count(*) FROM audit_log WHERE workspace_id=?1 AND target_id=?2 AND verb='document.collab_snapshot_compacted')")
+            .bind(workspace.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).fetch_one(pool).await.unwrap(),
+        Backend::LibsqlRemote(_) => unreachable!("actual remote is a separate proof"),
+    }
+}
+
+async fn selected_backend_wiki_fixture(
+    with_native: bool,
+    membership_races: bool,
+    with_compaction: bool,
+) {
     use fvoci_server::db::backend::Backend;
     async fn claim_native(
         backend: &Backend,
@@ -3876,6 +3906,7 @@ async fn selected_backend_wiki_fixture(with_native: bool, membership_races: bool
             .await
             .unwrap()
             .unwrap();
+            let before_compaction = with_compaction.then(|| current_native.clone());
             let engine = engine_bin.clone();
             let captured = tokio::task::spawn_blocking(move || {
                 fvoci_server::collab::revision::capture_revision_offline(
@@ -3896,6 +3927,248 @@ async fn selected_backend_wiki_fixture(with_native: bool, membership_races: bool
                 saved_snapshot, captured.y_snapshot,
                 "manual history snapshot equals freshly captured durable native source"
             );
+            if with_compaction {
+                use fvoci_server::db::collab::{
+                    compact_collab_snapshot_kind_backend, verify_collab_operation_kind_backend,
+                    CompactCollabInput, VerifyCollabInput,
+                };
+                use sha2::{Digest, Sha256};
+                let digest = Sha256::digest(&payload).to_vec();
+                let verify = |scope, credential, op, stored_actor| VerifyCollabInput {
+                    workspace_id: scope,
+                    actor_user_id: live.user_id,
+                    session_id: credential,
+                    document_id,
+                    op_id: op,
+                    expected_payload_len: payload.len() as i64,
+                    expected_payload_sha256: &digest,
+                    expected_actor_user_id: stored_actor,
+                };
+                let receipt = verify_collab_operation_kind_backend(
+                    &backend,
+                    CollabKind::Document,
+                    verify(workspace_id, live.session_id, operation, live.user_id),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(receipt.seq, 1);
+                let wrong_digest = [0; 32];
+                let changed_verify = VerifyCollabInput {
+                    expected_payload_sha256: &wrong_digest,
+                    ..verify(workspace_id, live.session_id, operation, live.user_id)
+                };
+                assert_eq!(
+                    verify_collab_operation_kind_backend(
+                        &backend,
+                        CollabKind::Document,
+                        changed_verify
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::OpIdConflict
+                );
+                assert_eq!(
+                    verify_collab_operation_kind_backend(
+                        &backend,
+                        CollabKind::Document,
+                        verify(workspace_id, live.session_id, operation, Uuid::now_v7())
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::OpIdConflict
+                );
+                assert_eq!(
+                    verify_collab_operation_kind_backend(
+                        &backend,
+                        CollabKind::Document,
+                        verify(workspace_id, Uuid::now_v7(), operation, live.user_id)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::Forbidden
+                );
+                assert_eq!(
+                    verify_collab_operation_kind_backend(
+                        &backend,
+                        CollabKind::Document,
+                        verify(workspace_id, live.session_id, Uuid::now_v7(), live.user_id)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::NotFound
+                );
+                assert_eq!(
+                    verify_collab_operation_kind_backend(
+                        &backend,
+                        CollabKind::Document,
+                        verify(Uuid::now_v7(), live.session_id, operation, live.user_id)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::NotFound
+                );
+                let compact = |credential, generation, cutoff, tail| CompactCollabInput {
+                    workspace_id,
+                    actor_user_id: live.user_id,
+                    session_id: credential,
+                    document_id,
+                    writer_generation: generation,
+                    cutoff_seq: cutoff,
+                    expected_tail_seq: tail,
+                    new_snapshot: &captured.y_snapshot,
+                    client_ip: None,
+                };
+                assert_eq!(
+                    selected_compaction_effect_counts(&backend, workspace_id, document_id).await,
+                    (0, 0)
+                );
+                for (credential, generation, cutoff, tail, error) in [
+                    (live.session_id, 0, 1, 1, CollabDbError::StaleWriter),
+                    (live.session_id, 1, 1, 0, CollabDbError::StaleCutoff),
+                    (live.session_id, 1, 2, 1, CollabDbError::InvalidCutoff),
+                    (live.session_id, 1, 0, 1, CollabDbError::InvalidCutoff),
+                    (Uuid::now_v7(), 1, 1, 1, CollabDbError::Forbidden),
+                ] {
+                    assert_eq!(
+                        compact_collab_snapshot_kind_backend(
+                            &backend,
+                            CollabKind::Document,
+                            compact(credential, generation, cutoff, tail),
+                            room_fence
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap_err(),
+                        error
+                    );
+                }
+                if room_fence.is_some() {
+                    assert_eq!(
+                        compact_collab_snapshot_kind_backend(
+                            &backend,
+                            CollabKind::Document,
+                            compact(live.session_id, 1, 1, 1),
+                            None
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap_err(),
+                        CollabDbError::StaleWriter
+                    );
+                }
+                assert_eq!(
+                    selected_compaction_effect_counts(&backend, workspace_id, document_id).await,
+                    (0, 0)
+                );
+                let before = load_collab_readonly_kind_backend(
+                    &backend,
+                    CollabKind::Document,
+                    workspace_id,
+                    live.user_id,
+                    live.session_id,
+                    document_id,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    Some(&before),
+                    before_compaction.as_ref(),
+                    "all refused compactions leave canonical native source unchanged"
+                );
+                let compacted = compact_collab_snapshot_kind_backend(
+                    &backend,
+                    CollabKind::Document,
+                    compact(live.session_id, 1, 1, 1),
+                    room_fence,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(compacted.snapshot, captured.y_snapshot);
+                assert!(compacted.tail.is_empty());
+                assert_eq!(
+                    (
+                        compacted.writer_generation,
+                        compacted.snapshot_cutoff_seq,
+                        compacted.tail_seq
+                    ),
+                    (1, 1, 1)
+                );
+                assert_eq!(
+                    selected_compaction_effect_counts(&backend, workspace_id, document_id).await,
+                    (1, 1)
+                );
+                let repeated = compact_collab_snapshot_kind_backend(
+                    &backend,
+                    CollabKind::Document,
+                    compact(live.session_id, 1, 1, 1),
+                    room_fence,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    repeated, compacted,
+                    "identical repeat leaves durable native source unchanged"
+                );
+                assert_eq!(
+                    selected_compaction_effect_counts(&backend, workspace_id, document_id).await,
+                    (1, 1),
+                    "repeat emits no new event/audit"
+                );
+                let after_receipt = verify_collab_operation_kind_backend(
+                    &backend,
+                    CollabKind::Document,
+                    verify(workspace_id, live.session_id, operation, live.user_id),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    after_receipt, receipt,
+                    "tail compaction preserves exact immutable operation receipt"
+                );
+                let fresh = load_collab_readonly_kind_backend(
+                    &backend,
+                    CollabKind::Document,
+                    workspace_id,
+                    readback_identity.user_id,
+                    readback_identity.session_id,
+                    document_id,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    fresh, compacted,
+                    "fresh cookie actor sees exact committed snapshot/head"
+                );
+                let engine = engine_bin.clone();
+                let compacted_body = tokio::task::spawn_blocking(move || {
+                    fvoci_server::collab::revision::capture_revision_offline(
+                        engine,
+                        collab_engine::limits::Limits::default(),
+                        fresh.snapshot,
+                        Vec::new(),
+                    )
+                })
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(compacted_body.y_snapshot, captured.y_snapshot);
+                assert_eq!(
+                    compacted_body.content_json, detail["contentJson"],
+                    "compacted canonical native snapshot preserves current body/history IDs"
+                );
+                eprintln!("native_compaction backend={} cutoff=1 tail=1 generation=1 updates=0 receipts_preserved=true event=1 audit=1 repeat_no_effect=true",backend.kind());
+            }
             let (status, _, _, _) = json_request(
                 app.clone(),
                 "GET",
