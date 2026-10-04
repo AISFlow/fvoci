@@ -565,13 +565,7 @@ impl OperationTx<'_, '_> {
             return Ok(false);
         }
         let active = match self {
-            Self::Postgres(tx) => sqlx::query_scalar::<_, bool>(
-                "SELECT deleted_at IS NULL AND suspended_at IS NULL FROM fvoci.users WHERE id = $1",
-            )
-            .bind(user)
-            .fetch_optional(&mut ***tx)
-            .await?
-            .unwrap_or(false),
+            Self::Postgres(tx) => return creator_can_manage(tx, workspace, user).await,
             Self::SqliteFamily(tx) => {
                 tx.require_tenant(workspace)?;
                 tx.require_system_context()?;
@@ -862,11 +856,11 @@ impl OperationTx<'_, '_> {
             DeliveryOutcome::Failed => ("failed", None),
             DeliveryOutcome::Retry { after } => ("pending", Some(webhook_duration_us(after)?)),
         };
-        // Initial original-equivalent control: attempt-only predicate retained
-        // until the allocated regression demonstrates stale reclaim mutation.
+        // Receipt equality, not expiry alone: an expired but unreplaced claim
+        // may still finish; an old acknowledgement cannot mutate a replacement.
         match self {
-            Self::Postgres(tx)=>Ok(sqlx::query("UPDATE fvoci.webhook_deliveries SET attempt=$3,status=$4,http_status=$5,next_attempt_at=CASE WHEN $6::double precision IS NULL THEN NULL ELSE now()+make_interval(secs=>$6::double precision) END,updated_at=now() WHERE workspace_id=$1 AND id=$2 AND status='pending' AND attempt=$7").bind(d.workspace_id).bind(d.id).bind(attempt).bind(status).bind(http_status.map(i32::from)).bind(after.map(|us|us as f64/1_000_000.0)).bind(d.attempt).execute(&mut ***tx).await?.rows_affected()==1),
-            Self::SqliteFamily(tx)=>{tx.require_writer()?;tx.require_tenant(d.workspace_id)?;tx.require_system_context()?;let changed=tx.execute("UPDATE webhook_deliveries SET attempt=?3,status=?4,http_status=?5,next_attempt_at=CASE WHEN ?6 IS NULL THEN NULL ELSE (unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)+?6 END,updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE workspace_id=?1 AND id=?2 AND status='pending' AND attempt=?7",&[Cell::uuid(d.workspace_id),Cell::uuid(d.id),Cell::Integer(i64::from(attempt)),Cell::text(status),http_status.map(|s|Cell::Integer(i64::from(s))).unwrap_or(Cell::Null),after.map(Cell::Integer).unwrap_or(Cell::Null),Cell::Integer(i64::from(d.attempt))]).await?;Ok(changed==1)}
+            Self::Postgres(tx)=>Ok(sqlx::query("UPDATE fvoci.webhook_deliveries SET attempt=$3,status=$4,http_status=$5,next_attempt_at=CASE WHEN $6::double precision IS NULL THEN NULL ELSE now()+make_interval(secs=>$6::double precision) END,updated_at=now() WHERE workspace_id=$1 AND id=$2 AND status='pending' AND attempt=$7 AND next_attempt_at=$8 AND webhook_id=$9 AND event_id=$10").bind(d.workspace_id).bind(d.id).bind(attempt).bind(status).bind(http_status.map(i32::from)).bind(after.map(|us|us as f64/1_000_000.0)).bind(d.attempt).bind(claim.claimed_until).bind(d.webhook_id).bind(d.event_id).execute(&mut ***tx).await?.rows_affected()==1),
+            Self::SqliteFamily(tx)=>{tx.require_writer()?;tx.require_tenant(d.workspace_id)?;tx.require_system_context()?;let changed=tx.execute("UPDATE webhook_deliveries SET attempt=?3,status=?4,http_status=?5,next_attempt_at=CASE WHEN ?6 IS NULL THEN NULL ELSE (unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)+?6 END,updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE workspace_id=?1 AND id=?2 AND status='pending' AND attempt=?7 AND next_attempt_at=?8 AND webhook_id=?9 AND event_id=?10",&[Cell::uuid(d.workspace_id),Cell::uuid(d.id),Cell::Integer(i64::from(attempt)),Cell::text(status),http_status.map(|s|Cell::Integer(i64::from(s))).unwrap_or(Cell::Null),after.map(Cell::Integer).unwrap_or(Cell::Null),Cell::Integer(i64::from(d.attempt)),Cell::instant(claim.claimed_until)?,Cell::uuid(d.webhook_id),Cell::uuid(d.event_id)]).await?;Ok(changed==1)}
         }
     }
     pub(crate) async fn webhook_purge_settled(&mut self, days: i32) -> Result<u64, sqlx::Error> {
@@ -1125,6 +1119,11 @@ mod webhook_backend_regressions {
                 .unwrap();
         let state = row(&f, new.due.id).await;
         eprintln!("webhook stale control: old_until_us={} new_until_us={} old_attempt={} new_attempt={} old_ack_accepted={} current_state={:?}",old.claimed_until.timestamp_micros(),new.claimed_until.timestamp_micros(),old.due.attempt,new.due.attempt,accepted,state);
+        let replacement_accepted =
+            record_webhook_backend(&f.backend, &new, DeliveryOutcome::Delivered, Some(204))
+                .await
+                .unwrap();
+        let replacement_state = row(&f, new.due.id).await;
         // Cleanup before the deliberate old-source regression assertion so
         // even the allocated failure control has no retained fixture resource.
         f.finish().await;
@@ -1141,6 +1140,11 @@ mod webhook_backend_regressions {
                 Some(new.claimed_until.timestamp_micros())
             )
         );
+        assert!(
+            replacement_accepted,
+            "current receipt must still record an actual outcome"
+        );
+        assert_eq!(replacement_state, (1, "delivered".into(), Some(204), None));
     }
 }
 

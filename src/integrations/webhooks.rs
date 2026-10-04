@@ -779,14 +779,11 @@ mod backend_regressions {
             .await
             .unwrap();
         let owner = Uuid::now_v7();
-        assert!(lease_consumer_backend(
-            &f.backend,
-            WEBHOOKS_CONSUMER,
-            owner,
-            30
-        )
-        .await
-        .unwrap());
+        assert!(
+            lease_consumer_backend(&f.backend, WEBHOOKS_CONSUMER, owner, 30)
+                .await
+                .unwrap()
+        );
         owner
     }
     async fn marker_queue(f: &Fixture, event: Uuid) -> (i64, i64) {
@@ -959,6 +956,8 @@ mod backend_regressions {
             ("member", 0),
             ("admin", 1),
             ("admin", 2),
+            ("admin", 5),
+            ("admin", 6),
             ("admin", 3),
             ("admin", 4),
         ];
@@ -994,6 +993,21 @@ mod backend_regressions {
                         .await
                         .unwrap();
                 }
+                5 => {
+                    sqlx::query("UPDATE users SET deleted_at=1 WHERE id=?1")
+                        .bind(f.user.as_bytes().as_slice())
+                        .execute(&f.pool)
+                        .await
+                        .unwrap();
+                }
+                6 => {
+                    sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+                        .bind(f.workspace.as_bytes().as_slice())
+                        .bind(f.user.as_bytes().as_slice())
+                        .execute(&f.pool)
+                        .await
+                        .unwrap();
+                }
                 3 => {}
                 4 => {
                     sqlx::query("UPDATE webhooks SET secret='enc:v2:wrong' WHERE id=?1")
@@ -1005,6 +1019,17 @@ mod backend_regressions {
                 _ => unreachable!(),
             }
             let key = if case == 3 { None } else { Some(keys()) };
+            let expected_reason = match case {
+                0 | 1 | 5 | 6 => "creator_not_manager",
+                2 => "webhook_missing",
+                3 => "encryption_keys_unset",
+                4 => "secret_unavailable",
+                _ => unreachable!(),
+            };
+            assert!(
+                matches!(prepare(&f.backend,key.as_deref(),&claim).await.unwrap(),Prepared::Dead(reason) if reason==expected_reason),
+                "case {case} must reject at its current authority/secret boundary"
+            );
             deliver_one(
                 f.backend.clone(),
                 receiver.outbound(),
@@ -1016,13 +1041,13 @@ mod backend_regressions {
             .unwrap();
             assert_eq!(row(&f, claim.due.id).await.1, "failed");
             assert_eq!(receiver.count(), 0);
-            sqlx::query("UPDATE memberships SET role='admin' WHERE workspace_id=?1 AND user_id=?2")
+            sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'admin') ON CONFLICT(workspace_id,user_id) DO UPDATE SET role='admin'")
                 .bind(f.workspace.as_bytes().as_slice())
                 .bind(f.user.as_bytes().as_slice())
                 .execute(&f.pool)
                 .await
                 .unwrap();
-            sqlx::query("UPDATE users SET suspended_at=NULL WHERE id=?1")
+            sqlx::query("UPDATE users SET suspended_at=NULL,deleted_at=NULL WHERE id=?1")
                 .bind(f.user.as_bytes().as_slice())
                 .execute(&f.pool)
                 .await
@@ -1055,6 +1080,32 @@ mod backend_regressions {
             receiver.outbound(),
             Some(keys()),
             claim(&f).await,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(receiver.count(), 1);
+        let removed_event = f.append_comment_event("comment.created").await;
+        fan_out_event_backend(&f.backend, owner, &removed_event)
+            .await
+            .unwrap();
+        let removed_claim = claim(&f).await;
+        sqlx::query("DELETE FROM webhooks WHERE id=?1")
+            .bind(hook_id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            prepare(&f.backend, Some(&keys()), &removed_claim)
+                .await
+                .unwrap(),
+            Prepared::Dead("claim_replaced")
+        ));
+        deliver_one(
+            f.backend.clone(),
+            receiver.outbound(),
+            Some(keys()),
+            removed_claim,
             Duration::from_secs(1),
         )
         .await
