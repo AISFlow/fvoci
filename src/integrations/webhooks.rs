@@ -848,6 +848,19 @@ mod backend_regressions {
             json!({"title":"한글🙂","null":null,"version":"9007199254740993"}),
         )
         .await;
+        // A fixed persisted timestamp gives the received body an independent
+        // precision oracle, rather than comparing two calls to the serializer.
+        sqlx::query("UPDATE events SET created_at=?1 WHERE id=?2")
+            .bind(1_700_000_000_123_456_i64)
+            .bind(event.id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let event = crate::db::outbox::fetch_event_by_id_backend(&f.backend, event.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.created_at.timestamp_micros(), 1_700_000_000_123_456);
         let sender = spawn_webhook_sender_backend(
             f.backend.clone(),
             receiver.outbound(),
@@ -875,6 +888,24 @@ mod backend_regressions {
         sender.join().await.unwrap();
         assert_eq!(receiver.count(), 1);
         let capture = receiver.capture.rows.lock().unwrap()[0].clone();
+        let body: Value = serde_json::from_slice(&capture.1).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "id": event.id.to_string(),
+                "verb": "document.updated",
+                "workspaceId": f.workspace.to_string(),
+                "actorUserId": f.actor.to_string(),
+                "targetType": "document",
+                "targetId": f.document.to_string(),
+                "payload": {"title": "한글🙂", "null": null, "version": "9007199254740993"},
+                "channel": "web",
+                "createdAt": "2023-11-14T22:13:20.123Z"
+            })
+        );
+        assert!(body["payload"]["title"].is_string());
+        assert!(body["payload"]["null"].is_null());
+        assert!(body["payload"]["version"].is_string());
         assert_eq!(capture.1, serialize_payload_backend(&event));
         assert_eq!(
             capture.0["x-fvoci-signature"],
