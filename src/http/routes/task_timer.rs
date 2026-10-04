@@ -87,7 +87,7 @@ async fn plan_targets(
         auth.credential_id,
     )?;
     let picker = task_projects(
-        &app.auth.db.pool,
+        app.auth.db.pool.postgres("task timer").map_err(internal)?,
         workspace,
         auth.user_id,
         auth.credential_id,
@@ -160,7 +160,7 @@ async fn create_plan_task(
         &semantic,
     );
     task_timer::create_plan_task(
-        &app.auth.db.pool,
+        app.auth.db.pool.postgres("task timer").map_err(internal)?,
         workspace,
         document,
         auth.user_id,
@@ -203,7 +203,7 @@ async fn set_estimate(
     )
     .await?;
     task_timer::set_estimate(
-        &app.auth.db.pool,
+        app.auth.db.pool.postgres("task timer").map_err(internal)?,
         workspace,
         task,
         auth.user_id,
@@ -252,7 +252,7 @@ async fn state(
         auth.credential_id,
     )?;
     task_timer::task_state(
-        &app.auth.db.pool,
+        app.auth.db.pool.postgres("task timer").map_err(internal)?,
         workspace,
         task,
         auth.user_id,
@@ -282,7 +282,7 @@ async fn command(
     )
     .await?;
     task_timer::command(
-        &app.auth.db.pool,
+        app.auth.db.pool.postgres("task timer").map_err(internal)?,
         workspace,
         task,
         auth.user_id,
@@ -309,11 +309,15 @@ async fn owner(
         auth.user_id,
         auth.credential_id,
     )?;
-    task_timer::owner_state(&app.auth.db.pool, auth.user_id, auth.credential_id)
-        .await
-        .map_err(internal)?
-        .map(Json)
-        .map_err(error)
+    task_timer::owner_state(
+        app.auth.db.pool.postgres("task timer").map_err(internal)?,
+        auth.user_id,
+        auth.credential_id,
+    )
+    .await
+    .map_err(internal)?
+    .map(Json)
+    .map_err(error)
 }
 
 async fn cleanup(
@@ -325,11 +329,16 @@ async fn cleanup(
     check_origin(&headers, &app.public_origin)?;
     let Json(body) = body.map_err(AppError::from)?;
     let auth = require_request_auth(&app, &headers, &jar, Access::Session, None).await?;
-    task_timer::cleanup(&app.auth.db.pool, auth.user_id, auth.credential_id, &body)
-        .await
-        .map_err(internal)?
-        .map(Json)
-        .map_err(error)
+    task_timer::cleanup(
+        app.auth.db.pool.postgres("task timer").map_err(internal)?,
+        auth.user_id,
+        auth.credential_id,
+        &body,
+    )
+    .await
+    .map_err(internal)?
+    .map(Json)
+    .map_err(error)
 }
 
 pub(crate) fn captured_context(
@@ -366,7 +375,7 @@ async fn history(
         auth.credential_id,
     )?;
     task_timer::history(
-        &app.auth.db.pool,
+        app.auth.db.pool.postgres("task timer").map_err(internal)?,
         workspace,
         task,
         auth.user_id,
@@ -401,7 +410,7 @@ async fn summary(
         auth.credential_id,
     )?;
     task_timer::summary(
-        &app.auth.db.pool,
+        app.auth.db.pool.postgres("task timer").map_err(internal)?,
         workspace,
         task,
         auth.user_id,
@@ -431,7 +440,7 @@ async fn create_manual(
     )
     .await?;
     task_timer::create_manual(
-        &app.auth.db.pool,
+        app.auth.db.pool.postgres("task timer").map_err(internal)?,
         workspace,
         task,
         auth.user_id,
@@ -461,7 +470,7 @@ async fn correct(
     )
     .await?;
     task_timer::correct(
-        &app.auth.db.pool,
+        app.auth.db.pool.postgres("task timer").map_err(internal)?,
         workspace,
         task,
         id,
@@ -483,9 +492,14 @@ async fn release_legacy(
     check_origin(&headers, &app.public_origin)?;
     let Json(body) = body.map_err(AppError::from)?;
     let auth = require_request_auth(&app, &headers, &jar, Access::Session, None).await?;
-    task_timer::release_legacy(&app.auth.db.pool, auth.user_id, auth.credential_id, &body)
-        .await
-        .map_err(internal)?
-        .map(Json)
-        .map_err(error)
+    task_timer::release_legacy(
+        app.auth.db.pool.postgres("task timer").map_err(internal)?,
+        auth.user_id,
+        auth.credential_id,
+        &body,
+    )
+    .await
+    .map_err(internal)?
+    .map(Json)
+    .map_err(error)
 }

@@ -291,7 +291,12 @@ async fn transfer_mode_for(state: &AppState, auth: &RequestAuth) -> Result<Trans
         return Ok(TransferMode::Proxy);
     }
     crate::settings::attachment_transfer_mode(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/attachments.rs")
+            .map_err(internal)?,
         state.storage.presign_unavailable(),
     )
     .await
@@ -438,7 +443,12 @@ async fn create_upload_session(
     // `UploadMeta::transfer`).
     let transfer = transfer_mode_for(state, &auth).await?;
     let (att, meta) = create_upload(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/attachments.rs")
+            .map_err(internal)?,
         &state.storage,
         &state.upload,
         &state.quota,
@@ -487,7 +497,12 @@ async fn list_task_attachments_route(
     )
     .await?;
     let rows = list_task_attachments(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/attachments.rs")
+            .map_err(internal)?,
         workspace_id,
         task_id,
         auth.user_id,
@@ -513,7 +528,12 @@ async fn delete_attachment_route(
     require_target_scope(&state, &auth, workspace_id, attachment_id, true).await?;
     let ip = peer_ip(peer.ip());
     delete_attachment(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/attachments.rs")
+            .map_err(internal)?,
         workspace_id,
         attachment_id,
         auth.user_id,
@@ -526,7 +546,12 @@ async fn delete_attachment_route(
     // The delete trigger journaled every key in the committed transaction;
     // reclaim now, and the maintenance job retries anything left.
     if let Err(err) = reclaim_attachment_objects(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/attachments.rs")
+            .map_err(internal)?,
         &state.storage,
         Some((workspace_id, attachment_id)),
         8,
@@ -547,7 +572,12 @@ async fn get_edit_context(
     let auth = require_auth(&state, &headers, &jar, Access::Any, Some(workspace_id)).await?;
     require_target_scope(&state, &auth, workspace_id, attachment_id, false).await?;
     let ctx = attachment_edit_context(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/attachments.rs")
+            .map_err(internal)?,
         workspace_id,
         attachment_id,
         auth.user_id,
@@ -580,7 +610,12 @@ async fn put_upload_part(
     require_target_scope(&state, &auth, workspace_id, attachment_id, true).await?;
     let (user_id, session_id) = (auth.user_id, auth.credential_id);
     let auth = authorize_upload_part(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/attachments.rs")
+            .map_err(internal)?,
         workspace_id,
         attachment_id,
         user_id,
@@ -651,7 +686,12 @@ async fn put_upload_part(
     #[cfg(feature = "db-tests")]
     crate::db::attachments::test_barrier::wait_pre_publish_barrier(attachment_id).await;
     let part = commit_upload_part(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/attachments.rs")
+            .map_err(internal)?,
         &state.storage,
         workspace_id,
         attachment_id,
@@ -706,7 +746,12 @@ async fn resume_upload_session(
     require_target_scope(&state, &auth, workspace_id, attachment_id, true).await?;
     let (user_id, session_id) = (auth.user_id, auth.credential_id);
     let result = resume_upload(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/attachments.rs")
+            .map_err(internal)?,
         &state.storage,
         workspace_id,
         attachment_id,
@@ -780,7 +825,12 @@ async fn complete_upload_session(
         .collect::<Vec<_>>();
     let ip = peer_ip(peer.ip());
     let result = complete_upload(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/attachments.rs")
+            .map_err(internal)?,
         &state.storage,
         workspace_id,
         attachment_id,
@@ -820,7 +870,12 @@ async fn get_attachment(
     require_target_scope(&state, &auth, workspace_id, attachment_id, false).await?;
     let (user_id, session_id) = (auth.user_id, auth.credential_id);
     let result = get_attachment_meta(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/attachments.rs")
+            .map_err(internal)?,
         workspace_id,
         attachment_id,
         user_id,
@@ -891,7 +946,12 @@ async fn serve_download(
     require_target_scope(state, &auth, workspace_id, attachment_id, false).await?;
     let (user_id, session_id) = (auth.user_id, auth.credential_id);
     let result = open_download(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/attachments.rs")
+            .map_err(internal)?,
         workspace_id,
         attachment_id,
         user_id,
@@ -1080,10 +1140,19 @@ async fn require_target_scope(
     let Some(scopes) = auth.token_scopes.as_deref() else {
         return Ok(());
     };
-    let parent = attachment_parent(&state.auth.db.pool, workspace_id, attachment_id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| AppError::from_code(ProblemCode::NotFound))?;
+    let parent = attachment_parent(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/attachments.rs")
+            .map_err(internal)?,
+        workspace_id,
+        attachment_id,
+    )
+    .await
+    .map_err(internal)?
+    .ok_or_else(|| AppError::from_code(ProblemCode::NotFound))?;
     let required = match (parent, write) {
         (AttachmentParent::Document(_), false) => ApiTokenScope::DocumentsRead,
         (AttachmentParent::Document(_), true) => ApiTokenScope::DocumentsWrite,
@@ -1182,7 +1251,12 @@ async fn get_preview_html(
         return Err(AppError::rate_limited(retry_after));
     }
     let att = open_download(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/attachments.rs")
+            .map_err(internal)?,
         workspace_id,
         attachment_id,
         auth.user_id,
@@ -1191,9 +1265,16 @@ async fn get_preview_html(
     .await
     .map_err(internal)?
     .map_err(map_attachment_error)?;
-    let mode = crate::settings::attachment_preview_mode(&state.auth.db.pool)
-        .await
-        .map_err(internal)?;
+    let mode = crate::settings::attachment_preview_mode(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/attachments.rs")
+            .map_err(internal)?,
+    )
+    .await
+    .map_err(internal)?;
     if !preview_html_allowed(&att.name, &att.mime, &mode) {
         return Err(AppError::from_code(ProblemCode::NotFound));
     }
@@ -1204,7 +1285,12 @@ async fn get_preview_html(
         )
     };
     let text = crate::db::attachments::attachment_extract_text(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/attachments.rs")
+            .map_err(internal)?,
         workspace_id,
         attachment_id,
     )
@@ -1234,7 +1320,12 @@ async fn get_preview_html(
             }
         };
         let current = open_download(
-            &state.auth.db.pool,
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/attachments.rs")
+                .map_err(internal)?,
             workspace_id,
             attachment_id,
             auth.user_id,

@@ -95,9 +95,17 @@ async fn list(
 ) -> Result<Json<ConnectorListOutput>, TaskApiError> {
     let actor = actor(&state, &headers, &jar, workspace).await?;
     Ok(Json(
-        zotero::list(&state.auth.db.pool, actor)
-            .await
-            .map_err(error)?,
+        zotero::list(
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/zotero.rs")
+                .map_err(crate::http::routes::tasks::internal)?,
+            actor,
+        )
+        .await
+        .map_err(error)?,
     ))
 }
 async fn connect(
@@ -118,9 +126,19 @@ async fn connect(
     Ok((
         StatusCode::CREATED,
         Json(
-            zotero::connect(&state.auth.db.pool, actor, &input, keys)
-                .await
-                .map_err(error)?,
+            zotero::connect(
+                state
+                    .auth
+                    .db
+                    .pool
+                    .postgres("src/http/routes/zotero.rs")
+                    .map_err(crate::http::routes::tasks::internal)?,
+                actor,
+                &input,
+                keys,
+            )
+            .await
+            .map_err(error)?,
         ),
     ))
 }
@@ -132,9 +150,18 @@ async fn read(
 ) -> Result<Json<LibraryOutput>, TaskApiError> {
     let actor = actor(&state, &headers, &jar, workspace).await?;
     Ok(Json(
-        zotero::library(&state.auth.db.pool, actor, id)
-            .await
-            .map_err(error)?,
+        zotero::library(
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/zotero.rs")
+                .map_err(crate::http::routes::tasks::internal)?,
+            actor,
+            id,
+        )
+        .await
+        .map_err(error)?,
     ))
 }
 async fn disconnect(
@@ -146,9 +173,18 @@ async fn disconnect(
     check_origin(&headers, &state.public_origin)?;
     let actor = actor(&state, &headers, &jar, workspace).await?;
     Ok(Json(
-        zotero::disconnect(&state.auth.db.pool, actor, id)
-            .await
-            .map_err(error)?,
+        zotero::disconnect(
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/zotero.rs")
+                .map_err(crate::http::routes::tasks::internal)?,
+            actor,
+            id,
+        )
+        .await
+        .map_err(error)?,
     ))
 }
 async fn link(
@@ -162,9 +198,19 @@ async fn link(
     let actor = actor(&state, &headers, &jar, workspace).await?;
     let input: LinkBody = remote::parse(&body).map_err(|e| error(e.into()))?;
     Ok(Json(
-        zotero::link(&state.auth.db.pool, actor, id, &input)
-            .await
-            .map_err(error)?,
+        zotero::link(
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/zotero.rs")
+                .map_err(crate::http::routes::tasks::internal)?,
+            actor,
+            id,
+            &input,
+        )
+        .await
+        .map_err(error)?,
     ))
 }
 async fn sync(
@@ -180,19 +226,43 @@ async fn sync(
         .encryption_keys
         .as_deref()
         .ok_or_else(|| error(DbError::Encryption))?;
-    let cycle = zotero::start(&state.auth.db.pool, actor, id, keys)
-        .await
-        .map_err(error)?;
+    let cycle = zotero::start(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/zotero.rs")
+            .map_err(crate::http::routes::tasks::internal)?,
+        actor,
+        id,
+        keys,
+    )
+    .await
+    .map_err(error)?;
     let result = tokio::time::timeout(
         remote::CYCLE_TIMEOUT,
-        collect(&state.auth.db.pool, &cycle, &integrations.zotero),
+        collect(
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/zotero.rs")
+                .map_err(crate::http::routes::tasks::internal)?,
+            &cycle,
+            &integrations.zotero,
+        ),
     )
     .await
     .unwrap_or_else(|_| Err(ZoteroError::Transient.into()));
     if let Err(ref failure) = result {
         // A retired credential cannot update state, retry time or the new cycle.
         let _ = zotero::finish_failed(
-            &state.auth.db.pool,
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/zotero.rs")
+                .map_err(crate::http::routes::tasks::internal)?,
             &cycle,
             0,
             matches!(failure, DbError::Remote(ZoteroError::Denied)),
@@ -201,13 +271,31 @@ async fn sync(
     }
     // The read has ended (including timeout/drop of its transport future).
     // Retiring a key kept this nonce so another library could not overlap it.
-    let released = zotero::release_read(&state.auth.db.pool, &cycle).await;
+    let released = zotero::release_read(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/zotero.rs")
+            .map_err(crate::http::routes::tasks::internal)?,
+        &cycle,
+    )
+    .await;
     result.map_err(error)?;
     released.map_err(error)?;
     Ok(Json(
-        zotero::library(&state.auth.db.pool, actor, id)
-            .await
-            .map_err(error)?,
+        zotero::library(
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/zotero.rs")
+                .map_err(crate::http::routes::tasks::internal)?,
+            actor,
+            id,
+        )
+        .await
+        .map_err(error)?,
     ))
 }
 

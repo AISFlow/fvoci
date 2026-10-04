@@ -137,7 +137,12 @@ async fn start_import(
             ProblemCode::InvalidInput,
         ));
     }
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/import.rs")
+        .map_err(internal)?;
 
     if source == ImportSource::MarkdownZip {
         let seed = match state.collab.as_ref() {
@@ -274,7 +279,12 @@ async fn get_import_status(
     )
     .await?;
     let job = get_import_job(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/import.rs")
+            .map_err(internal)?,
         query.workspace_id,
         auth.user_id,
         auth.credential_id,

@@ -59,7 +59,12 @@ async fn create(
         require_request_auth(&state, &headers, &jar, Access::Session, Some(workspace_id)).await?;
     let ip = peer_ip(peer.ip());
     let output = create_personal_input(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/personal_input.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,

@@ -261,7 +261,12 @@ pub(crate) async fn read_body(
     .await?;
     let meta = db_result(
         authorize_document(
-            &state.auth.db.pool,
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/document_body.rs")
+                .map_err(internal)?,
             workspace_id,
             auth.user_id,
             auth.credential_id,
@@ -393,7 +398,12 @@ async fn put_body(
     revision_write_limit(state, auth.user_id).await?;
     db_result(
         authorize_document(
-            &state.auth.db.pool,
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/document_body.rs")
+                .map_err(internal)?,
             workspace_id,
             auth.user_id,
             auth.credential_id,
@@ -408,7 +418,12 @@ async fn put_body(
     replace_live_body(state, workspace_id, document_id, &auth, seed, None).await?;
     let meta = db_result(
         authorize_document(
-            &state.auth.db.pool,
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/document_body.rs")
+                .map_err(internal)?,
             workspace_id,
             auth.user_id,
             auth.credential_id,
@@ -506,7 +521,12 @@ async fn patch_block(
     revision_write_limit(state, auth.user_id).await?;
     db_result(
         authorize_document(
-            &state.auth.db.pool,
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/document_body.rs")
+                .map_err(internal)?,
             workspace_id,
             auth.user_id,
             auth.credential_id,
@@ -564,7 +584,12 @@ async fn patch_block(
     }
     let meta = db_result(
         authorize_document(
-            &state.auth.db.pool,
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/document_body.rs")
+                .map_err(internal)?,
             workspace_id,
             auth.user_id,
             auth.credential_id,
@@ -659,7 +684,12 @@ async fn children(
         workspace_id,
     )
     .await?;
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/document_body.rs")
+        .map_err(internal)?;
     db_result(
         authorize_document(
             pool,
@@ -742,7 +772,12 @@ async fn backlinks(
     .await?;
     let items = db_result(
         list_document_backlinks(
-            &state.auth.db.pool,
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/document_body.rs")
+                .map_err(internal)?,
             workspace_id,
             auth.user_id,
             auth.credential_id,
@@ -817,7 +852,12 @@ async fn ancestors_project(
     .await?;
     let items = db_result(
         list_project_ancestors(
-            &state.auth.db.pool,
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/document_body.rs")
+                .map_err(internal)?,
             workspace_id,
             project_id,
             auth.user_id,
@@ -926,7 +966,12 @@ pub(crate) async fn duplicate(
 ) -> Result<Response, DocumentApiError> {
     let (title, include_children) = parse_duplicate_input(bytes)?;
     check_origin(headers, &state.public_origin)?;
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/document_body.rs")
+        .map_err(internal)?;
     let sources = db_result(
         load_duplicate_sources(
             pool,
@@ -1028,10 +1073,18 @@ async fn locate(
     document_id: Uuid,
 ) -> Result<(RequestAuth, Uuid, DocumentScope), DocumentApiError> {
     let auth = require_request_auth(state, headers, jar, Access::Session, None).await?;
-    let located =
-        crate::db::document_ops::locate_document(&state.auth.db.pool, auth.user_id, document_id)
-            .await
-            .map_err(internal)?;
+    let located = crate::db::document_ops::locate_document(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/document_body.rs")
+            .map_err(internal)?,
+        auth.user_id,
+        document_id,
+    )
+    .await
+    .map_err(internal)?;
     let Some((workspace_id, project_id)) = located else {
         return Err(AppError::from_code(ProblemCode::NotFound).into());
     };
@@ -1051,7 +1104,12 @@ async fn get_by_id(
     let (auth, workspace_id, scope) = locate(&state, &headers, &jar, document_id).await?;
     let meta = db_result(
         authorize_document(
-            &state.auth.db.pool,
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/document_body.rs")
+                .map_err(internal)?,
             workspace_id,
             auth.user_id,
             auth.credential_id,
@@ -1082,7 +1140,12 @@ async fn update_by_id(
         icon: body.icon.as_ref().map(|icon| icon.as_deref()),
         status: body.status.as_deref(),
     };
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/document_body.rs")
+        .map_err(internal)?;
     let meta = match scope {
         DocumentScope::Wiki => db_result(
             crate::db::documents::update_wiki_document_meta(
@@ -1130,7 +1193,12 @@ async fn remove_by_id(
     let children = crate::http::routes::documents::parse_trash_children(query.children.as_deref())?;
     let (auth, workspace_id, scope) = locate(&state, &headers, &jar, document_id).await?;
     let ip = peer_ip(peer.ip());
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/document_body.rs")
+        .map_err(internal)?;
     match scope {
         DocumentScope::Wiki => db_result(
             crate::db::documents::trash_wiki_document(

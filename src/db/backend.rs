@@ -13,7 +13,58 @@ pub enum Backend {
     LibsqlRemote(Arc<RemoteDatabase>),
 }
 
+pub struct ConnectionStats {
+    pub size: u32,
+    pub idle: usize,
+    pub max: u32,
+}
+
 impl Backend {
+    pub fn connection_stats(&self) -> Result<ConnectionStats, sqlx::Error> {
+        match self {
+            Self::Postgres(pool) => Ok(ConnectionStats {
+                size: pool.size(),
+                idle: pool.num_idle(),
+                max: pool.options().get_max_connections(),
+            }),
+            Self::Sqlite(pool) => Ok(ConnectionStats {
+                size: pool.size(),
+                idle: pool.num_idle(),
+                max: pool.options().get_max_connections(),
+            }),
+            Self::LibsqlRemote(remote) => {
+                let state = remote
+                    .lifecycle
+                    .lock()
+                    .map_err(|_| sqlx::Error::Protocol("remote lifecycle lock poisoned".into()))?;
+                let active = u32::try_from(state.active).map_err(|_| {
+                    sqlx::Error::Protocol("remote active stream count overflow".into())
+                })?;
+                // Streams are exclusively owned until explicit finish/cleanup;
+                // there is no idle remote connection cache masquerading as PG.
+                Ok(ConnectionStats {
+                    size: active,
+                    idle: 0,
+                    max: remote.max_connections,
+                })
+            }
+        }
+    }
+
+    pub async fn ping(&self) -> Result<(), sqlx::Error> {
+        if let Self::Postgres(pool) = self {
+            return sqlx::query("SELECT 1").execute(pool).await.map(|_| ());
+        }
+        let mut tx = self.begin_read().await?;
+        let result = match &mut tx {
+            DbTransaction::Postgres(pg) => {
+                sqlx::query("SELECT 1").execute(&mut **pg).await.map(|_| ())
+            }
+            DbTransaction::SqliteFamily(family) => family.query("SELECT 1", &[]).await.map(|_| ()),
+        };
+        tx.rollback().await?;
+        result
+    }
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Postgres(_) => "postgres",
@@ -306,6 +357,7 @@ fn remote_params(args: &[Cell]) -> Vec<libsql::Value> {
 
 pub struct RemoteDatabase {
     database: libsql::Database,
+    max_connections: u32,
     admission: Arc<Semaphore>,
     cleanup: Mutex<JoinSet<Result<(), sqlx::Error>>>,
     lifecycle: Mutex<RemoteLifecycle>,
@@ -369,6 +421,7 @@ impl RemoteDatabase {
             .map_err(remote_error)?;
         Ok(Arc::new(Self {
             database,
+            max_connections: max_connections.max(1),
             admission: Arc::new(Semaphore::new(max_connections.max(1) as usize)),
             cleanup: Mutex::new(JoinSet::new()),
             lifecycle: Mutex::new(RemoteLifecycle {

@@ -147,10 +147,20 @@ async fn get_audit(
         }
         Some(raw) => Some(decode_audit_cursor(raw).ok_or_else(invalid_cursor)?),
     };
-    let page = list_audit(&state.auth.db.pool, auth.user_id, cursor, limit)
-        .await
-        .map_err(internal)?
-        .ok_or_else(not_found)?;
+    let page = list_audit(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/admin.rs")
+            .map_err(internal)?,
+        auth.user_id,
+        cursor,
+        limit,
+    )
+    .await
+    .map_err(internal)?
+    .ok_or_else(not_found)?;
     Ok(Json(AuditLogListResponse {
         items: page
             .items
@@ -182,10 +192,18 @@ async fn get_system(
     jar: CookieJar,
 ) -> Result<Json<AdminSystemOutput>, AppError> {
     let auth = session(&state, &headers, &jar).await?;
-    let dir = instance_directory(&state.auth.db.pool, auth.user_id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(not_found)?;
+    let dir = instance_directory(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/admin.rs")
+            .map_err(internal)?,
+        auth.user_id,
+    )
+    .await
+    .map_err(internal)?
+    .ok_or_else(not_found)?;
     Ok(Json(AdminSystemOutput {
         users: dir.users,
         workspaces: dir.workspaces,
@@ -200,10 +218,18 @@ async fn get_users(
     jar: CookieJar,
 ) -> Result<Json<AdminUserListResponse>, AppError> {
     let auth = session(&state, &headers, &jar).await?;
-    let rows = list_users(&state.auth.db.pool, auth.user_id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(not_found)?;
+    let rows = list_users(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/admin.rs")
+            .map_err(internal)?,
+        auth.user_id,
+    )
+    .await
+    .map_err(internal)?
+    .ok_or_else(not_found)?;
     Ok(Json(AdminUserListResponse {
         items: rows
             .into_iter()
@@ -230,10 +256,18 @@ async fn get_workspaces(
     jar: CookieJar,
 ) -> Result<Json<AdminWorkspaceListResponse>, AppError> {
     let auth = session(&state, &headers, &jar).await?;
-    let rows = list_workspaces(&state.auth.db.pool, auth.user_id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(not_found)?;
+    let rows = list_workspaces(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/admin.rs")
+            .map_err(internal)?,
+        auth.user_id,
+    )
+    .await
+    .map_err(internal)?
+    .ok_or_else(not_found)?;
     Ok(Json(AdminWorkspaceListResponse {
         items: rows
             .into_iter()
@@ -277,7 +311,12 @@ async fn patch_users(
     }
     let ip = peer_ip(peer.ip());
     let outcome = patch_instance_user(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/admin.rs")
+            .map_err(internal)?,
         &state.auth.db.license,
         auth.user_id,
         auth.credential_id,
@@ -310,7 +349,12 @@ async fn patch_instance_admins(
     let Json(body) = body.map_err(AppError::from)?;
     let ip = peer_ip(peer.ip());
     let outcome = patch_instance_user(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/admin.rs")
+            .map_err(internal)?,
         &state.auth.db.license,
         auth.user_id,
         auth.credential_id,
@@ -342,7 +386,12 @@ async fn erase_user(
     let Json(body) = body.map_err(AppError::from)?;
     let ip = peer_ip(peer.ip());
     let outcome = schedule_user_erasure(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/admin.rs")
+            .map_err(internal)?,
         auth.user_id,
         auth.credential_id,
         body.user_id,
@@ -385,7 +434,12 @@ async fn cancel_erase_user(
     let Json(body) = body.map_err(AppError::from)?;
     let ip = peer_ip(peer.ip());
     match admin_cancel_user_erasure(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/admin.rs")
+            .map_err(internal)?,
         auth.user_id,
         auth.credential_id,
         body.user_id,
@@ -450,7 +504,12 @@ async fn post_legal(
         })?;
     let ip = peer_ip(peer.ip());
     let doc = publish_legal(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/admin.rs")
+            .map_err(internal)?,
         auth.user_id,
         auth.credential_id,
         LegalPublishInput {
@@ -510,7 +569,15 @@ pub fn admin_settings_output(
 }
 
 async fn require_admin_read(state: &AppState, user_id: Uuid) -> Result<(), AppError> {
-    let mut tx = state.auth.db.pool.begin().await.map_err(internal)?;
+    let mut tx = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/admin.rs")
+        .map_err(internal)?
+        .begin()
+        .await
+        .map_err(internal)?;
     let ok = crate::db::admin::require_live_instance_admin(&mut tx, user_id)
         .await
         .map_err(internal)?;
@@ -530,7 +597,12 @@ async fn get_instance_settings(
     let auth = session(&state, &headers, &jar).await?;
     require_admin_read(&state, auth.user_id).await?;
     let snapshot = settings::load(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/admin.rs")
+            .map_err(internal)?,
         &state.auth.db.settings_boot,
         &state.branding_name,
     )
@@ -612,7 +684,12 @@ async fn patch_instance_settings(
     }
     let ip = peer_ip(peer.ip());
     let outcome = settings::apply_change(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/admin.rs")
+            .map_err(internal)?,
         auth.user_id,
         auth.credential_id,
         Some(&ip),
@@ -761,7 +838,12 @@ async fn upload_branding_asset(
     };
     let ip = peer_ip(peer.ip());
     let outcome = settings::apply_change(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/admin.rs")
+            .map_err(internal)?,
         auth.user_id,
         auth.credential_id,
         Some(&ip),
@@ -806,7 +888,12 @@ async fn remove_branding_asset(
     let kind = parse_asset_kind(&asset)?;
     let ip = peer_ip(peer.ip());
     let outcome = settings::apply_change(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/admin.rs")
+            .map_err(internal)?,
         auth.user_id,
         auth.credential_id,
         Some(&ip),

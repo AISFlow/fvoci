@@ -2170,7 +2170,13 @@ async fn stale_upload_gc_removes_expired_uploading_and_is_idempotent() {
     let storage_root = std::env::temp_dir().join(format!("fvoci-att-gc-{}", Uuid::now_v7()));
     let state = app_state_with_storage(&harness.app_url, storage_root.clone()).await;
     let storage = state.storage.clone();
-    let pool = state.auth.db.pool.clone();
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("PostgreSQL integration fixture")
+        .expect("actual PG fixture backend")
+        .clone();
     let app = app_router(state);
     let (_, _, cookie_hdr) = json_request(
         app.clone(),
@@ -2260,7 +2266,13 @@ async fn stale_upload_gc_skips_stored_and_yields_to_in_flight_complete() {
     let storage_root = std::env::temp_dir().join(format!("fvoci-att-gc-stored-{}", Uuid::now_v7()));
     let state = app_state_with_storage(&harness.app_url, storage_root.clone()).await;
     let storage = state.storage.clone();
-    let pool = state.auth.db.pool.clone();
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("PostgreSQL integration fixture")
+        .expect("actual PG fixture backend")
+        .clone();
     let app = app_router(state);
     let (_, _, cookie_hdr) = json_request(
         app.clone(),

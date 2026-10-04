@@ -458,7 +458,13 @@ pub async fn workspace_export(
 
     let inflight_guard = ExportInflightGuard::acquire(user_id)?;
 
-    let pool = state.auth.db.pool.clone();
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/workspaces/export.rs")
+        .map_err(internal)?
+        .clone();
     let loaded = workspace_export::load_export_snapshot(&pool, workspace_id, user_id, session_id)
         .await
         .map_err(internal)?;

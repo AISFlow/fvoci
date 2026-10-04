@@ -141,7 +141,12 @@ async fn withdraw(
     )
     .await?;
     let Json(body) = body.map_err(AppError::from)?;
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/account.rs")
+        .map_err(internal)?;
     let confirm = if let Some(password) = body.current_password {
         let password = non_empty(password)?;
         let Some(stored) = password_hash_by_id(pool, auth.user_id)
@@ -242,9 +247,18 @@ async fn cancel_withdraw(
     .await?;
     let Json(body) = body.map_err(AppError::from)?;
     let token = non_empty(body.token)?;
-    match account::cancel_withdraw(&state.auth.db.pool, &token, Some(&ip))
-        .await
-        .map_err(internal)?
+    match account::cancel_withdraw(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/account.rs")
+            .map_err(internal)?,
+        &token,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?
     {
         CancelWithdrawOutcome::Ok => Ok(Json(OkResponse { ok: true })),
         CancelWithdrawOutcome::NotFound | CancelWithdrawOutcome::DeadlinePassed => {
@@ -273,7 +287,12 @@ async fn request_email_change(
     )
     .await?;
     let started = Instant::now();
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/account.rs")
+        .map_err(internal)?;
     let messages = crate::settings::messages::load(pool)
         .await
         .map_err(internal)?;
@@ -326,7 +345,12 @@ async fn confirm_email_change(
     limit(&state, format!("magic-ip:{ip}"), MAGIC_PER_IP).await?;
     let Json(body) = body.map_err(AppError::from)?;
     let token = non_empty(body.token)?;
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/account.rs")
+        .map_err(internal)?;
     // Read before the token is consumed so a failed read changes nothing.
     let messages = crate::settings::messages::load(pool)
         .await
@@ -373,7 +397,12 @@ async fn change_password(
     let Json(body) = body.map_err(AppError::from)?;
     let current = body.current_password.map(non_empty).transpose()?;
     validate_password_length(&body.new_password)?;
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/account.rs")
+        .map_err(internal)?;
     let stored = password_hash_by_id(pool, auth.user_id)
         .await
         .map_err(internal)?;
@@ -423,7 +452,12 @@ async fn request_magic_link(
     let email = normalize_email(&body.email)?;
     limit(&state, format!("magic-email:{ip}:{email}"), MAGIC_PER_EMAIL).await?;
     let started = Instant::now();
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/account.rs")
+        .map_err(internal)?;
     // Read for known and unknown addresses alike (same work on both paths).
     let messages = crate::settings::messages::load(pool)
         .await
@@ -458,7 +492,12 @@ async fn consume_magic_link(
     limit(&state, format!("magic-ip:{ip}"), MAGIC_PER_IP).await?;
     let Json(body) = body.map_err(AppError::from)?;
     let token = non_empty(body.token)?;
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/account.rs")
+        .map_err(internal)?;
     let Some(payload) = consume_magic_token(pool, &token).await.map_err(internal)? else {
         return Err(AppError::from_code(ProblemCode::MagicInvalid));
     };
@@ -506,7 +545,12 @@ async fn me_dashboard(
         .map(|value| parse_uuid_param(value))
         .transpose()?;
     let board = dashboard::build_dashboard(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/account.rs")
+            .map_err(internal)?,
         auth.user_id,
         auth.credential_id,
         last_visited,
@@ -619,7 +663,12 @@ async fn me_locate(
     };
     let id = parse_uuid_param(id)?;
     let found = dashboard::locate_for_user(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/account.rs")
+            .map_err(internal)?,
         auth.user_id,
         auth.credential_id,
         kind,
@@ -909,7 +958,13 @@ async fn export(
         )
         .await
         .map_err(AppError::rate_limited)?;
-    let pool = state.auth.db.pool.clone();
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/account.rs")
+        .map_err(internal)?
+        .clone();
     let Some(profile) = user_export::export_profile(&pool, auth.user_id)
         .await
         .map_err(internal)?
