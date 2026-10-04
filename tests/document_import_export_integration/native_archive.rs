@@ -9176,11 +9176,12 @@ async fn native_archive_restores_a_wiki_collection_of_the_closure() {
 
     // A wiki collection that also holds a wiki document outside the closure
     // is the typed collections refusal at capture, never pruned.
+    let other_command_id = Uuid::now_v7();
     let other = call(
         fx.app.clone(),
         "POST",
         format!("{w}/documents"),
-        Some(json!({"parentId":null,"title":"모음 밖 문서"})),
+        Some(json!({"commandId":other_command_id,"parentId":null,"title":"모음 밖 문서"})),
         fx.cookie.clone(),
     )
     .await;
