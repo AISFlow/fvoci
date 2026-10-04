@@ -7543,13 +7543,16 @@ mod upload_owned_adapter_tests {
         // Actual DB clock expiry while the consumer retains BEGIN IMMEDIATE;
         // no manual claim-table write or pretending a pool mutex is ownership.
         tokio::time::sleep(Duration::from_millis(1200)).await;
-        let waiting = other.clone();
+        let waiting = f.backend.clone();
         let (ready, blocked) = tokio::sync::oneshot::channel();
+        let (attempting, attempted) = tokio::sync::oneshot::channel();
         let writer = tokio::spawn(async move {
+            attempting.send(()).unwrap();
             let tx = waiting.begin_write().await.unwrap();
             let _ = ready.send(());
             tx.rollback().await.unwrap();
         });
+        attempted.await.unwrap();
         tokio::task::yield_now().await;
         assert!(!writer.is_finished());
         release.send(()).unwrap();
