@@ -2324,3 +2324,342 @@ pub async fn gc_automatic_revisions_batch(
     tx.commit().await?;
     Ok(deleted as u32)
 }
+
+#[cfg(test)]
+mod maintenance_operation_tests {
+    use super::*;
+    use crate::db::maintenance_claim::{
+        FamilyClaimAcquisition, FamilyMaintenanceClaimRequest, FamilyMaintenanceLeasePolicy,
+        MaintenanceJobKey,
+    };
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    /// Actual app-connection/DDL checks for the borrowed operations. Native
+    /// capture/semantic comparison and scheduler finish belong to the separate
+    /// real consumer fixtures, not to this SQL source/retention oracle.
+    #[tokio::test]
+    async fn selected_revision_borrowed_writer_controls() {
+        let root = std::env::temp_dir().join(format!("fvoci-revision-producer-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("app.sqlite");
+        crate::db::migrate::run_sqlite_migrations(&file)
+            .await
+            .unwrap();
+        let pool = crate::db::pool::connect_sqlite_app(&file, 1).await.unwrap();
+        let backend = Backend::Sqlite(pool.clone());
+        crate::db::migrate::assert_sqlite_schema_current(&backend)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+        let workspace = Uuid::from_u128(100);
+        let other_workspace = Uuid::from_u128(200);
+        let actor = Uuid::now_v7();
+        sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,'revision@fixture.invalid','Revision')")
+            .bind(actor.as_bytes().as_slice()).execute(&pool).await.unwrap();
+        for (id, slug) in [
+            (workspace, "revision-one"),
+            (other_workspace, "revision-two"),
+        ] {
+            sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES(?1,?2,'Revision fixture')")
+                .bind(id.as_bytes().as_slice())
+                .bind(slug)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let documents = [Uuid::from_u128(20), Uuid::from_u128(10)];
+        for (number, id) in documents.iter().enumerate() {
+            sqlx::query("INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,'Revision document',?3,'V',?4,'draft',2,?5,?6)")
+                .bind(id.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(id.simple().to_string()).bind(i64::try_from(number+1).unwrap()).bind(actor.as_bytes().as_slice()).bind(crate::db::documents::empty_document_json().to_string()).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO document_states(workspace_id,document_id,state,encoding,writer_generation,created_at,updated_at) VALUES(?1,?2,?3,1,7,1000000,2000000)")
+                .bind(workspace.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).bind([0_u8,0].as_slice()).execute(&pool).await.unwrap();
+        }
+        let project = Uuid::now_v7();
+        let workflow = Uuid::now_v7();
+        let status = Uuid::now_v7();
+        let task = Uuid::from_u128(1);
+        sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'REV','Revision project','workspace',?3)")
+            .bind(project.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(actor.as_bytes().as_slice()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO workflows(id,workspace_id,project_id) VALUES(?1,?2,?3)")
+            .bind(workflow.as_bytes().as_slice())
+            .bind(workspace.as_bytes().as_slice())
+            .bind(project.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO statuses(id,workspace_id,project_id,workflow_id,name,category,sort_key) VALUES(?1,?2,?3,?4,'Todo','todo','V')")
+            .bind(status.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(workflow.as_bytes().as_slice()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,content_json,created_by) VALUES(?1,?2,?3,1,'Revision task',?4,?5,?6)")
+            .bind(task.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(status.as_bytes().as_slice()).bind(crate::db::documents::empty_document_json().to_string()).bind(actor.as_bytes().as_slice()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO task_states(workspace_id,task_id,state,writer_generation,created_at,updated_at) VALUES(?1,?2,?3,7,1000000,2000000)")
+            .bind(workspace.as_bytes().as_slice()).bind(task.as_bytes().as_slice()).bind([0_u8,0].as_slice()).execute(&pool).await.unwrap();
+
+        let cancel = CancellationToken::new();
+        let policy =
+            FamilyMaintenanceLeasePolicy::new(Duration::from_secs(300), Duration::from_secs(60))
+                .unwrap();
+        let request = FamilyMaintenanceClaimRequest::new(MaintenanceJobKey::Revisions);
+        let FamilyClaimAcquisition::Acquired(claim) = request
+            .try_acquire(&backend, policy, &cancel)
+            .await
+            .unwrap()
+        else {
+            panic!("current Revisions claim")
+        };
+        let mut read = backend.begin_read().await.unwrap();
+        read.operation().set_tenant(workspace).await.unwrap();
+        assert!(read
+            .operation()
+            .list_scheduled_revision_candidates(workspace, None, 16)
+            .await
+            .is_err());
+        read.rollback().await.unwrap();
+        let mut tx = backend.begin_write().await.unwrap();
+        assert!(!tx
+            .operation()
+            .check_family_maintenance_claim(claim.proof(), MaintenanceJobKey::Daily)
+            .await
+            .unwrap());
+        assert!(tx
+            .operation()
+            .list_revision_live_workspace_ids(None, false, 8)
+            .await
+            .is_err());
+        let previous = tx.operation().set_system().await.unwrap();
+        assert_eq!(
+            tx.operation()
+                .list_revision_live_workspace_ids(None, false, 8)
+                .await
+                .unwrap(),
+            vec![workspace, other_workspace]
+        );
+        assert_eq!(
+            tx.operation()
+                .list_revision_live_workspace_ids(Some(workspace), true, 8)
+                .await
+                .unwrap(),
+            vec![workspace, other_workspace]
+        );
+        assert_eq!(
+            tx.operation()
+                .list_revision_live_workspace_ids(Some(workspace), false, 8)
+                .await
+                .unwrap(),
+            vec![other_workspace]
+        );
+        tx.operation().restore_system(previous).await.unwrap();
+        tx.operation().set_tenant(workspace).await.unwrap();
+        assert!(tx
+            .operation()
+            .check_family_maintenance_claim(claim.proof(), MaintenanceJobKey::Revisions)
+            .await
+            .unwrap());
+        let page = tx
+            .operation()
+            .list_scheduled_revision_candidates(workspace, None, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.iter().map(|c| c.target).collect::<Vec<_>>(),
+            vec![
+                RevisionTarget::Document(documents[1]),
+                RevisionTarget::Document(documents[0])
+            ]
+        );
+        assert!(page.iter().all(|c| c.writer_generation == 7
+            && c.anchor_at.timestamp_micros() == 1000000
+            && c.state_updated_at.timestamp_micros() == 2000000));
+        let after = scheduled_revision_cursor(page.last().unwrap());
+        let tasks = tx
+            .operation()
+            .list_scheduled_revision_candidates(workspace, Some(after), 2)
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].target, RevisionTarget::Task(task));
+        assert!(tx
+            .operation()
+            .list_scheduled_revision_candidates(other_workspace, Some(after), 2)
+            .await
+            .is_err());
+        assert!(matches!(
+            tx.operation()
+                .load_scheduled_revision_source(workspace, page[0].target, 8)
+                .await
+                .unwrap(),
+            Err(RevisionDbError::NotFound)
+        ));
+        let source = tx
+            .operation()
+            .load_scheduled_revision_source(workspace, page[0].target, 7)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(source.durable.snapshot, vec![0, 0]);
+        assert!(source.durable.tail.is_empty());
+        let input = CreateRevisionInput {
+            y_snapshot: source.durable.snapshot.clone(),
+            content_json: crate::db::documents::empty_document_json(),
+            text: String::new(),
+            reason: SCHEDULED_REASON.into(),
+        };
+        let original_head = SystemRevisionHead::from_latest(
+            tx.operation()
+                .latest_scheduled_revision_head(workspace, page[0].target)
+                .await
+                .unwrap(),
+        );
+        let revision = tx
+            .operation()
+            .create_scheduled_revision(&source, &input, &original_head)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            tx.operation()
+                .create_scheduled_revision(&source, &input, &original_head)
+                .await
+                .unwrap(),
+            Err(RevisionDbError::StaleRevisionHead)
+        );
+        let current_head = SystemRevisionHead::from_latest(
+            tx.operation()
+                .latest_scheduled_revision_head(workspace, page[0].target)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            tx.operation()
+                .create_scheduled_revision(&source, &input, &current_head)
+                .await
+                .unwrap(),
+            Ok(revision)
+        );
+        let task_source = tx
+            .operation()
+            .load_scheduled_revision_source(workspace, RevisionTarget::Task(task), 7)
+            .await
+            .unwrap()
+            .unwrap();
+        let task_revision = tx
+            .operation()
+            .create_scheduled_revision(&task_source, &input, &SystemRevisionHead::from_latest(None))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(tx
+            .operation()
+            .check_family_maintenance_claim(claim.proof(), MaintenanceJobKey::Revisions)
+            .await
+            .unwrap());
+        tx.commit_with_cleanup().await.unwrap();
+        let stored: Vec<(Vec<u8>, String, Option<Vec<u8>>)> =
+            sqlx::query_as("SELECT id,reason,created_by FROM revisions ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.len(), 2);
+        assert!(stored
+            .iter()
+            .all(|(_, reason, author)| reason == SCHEDULED_REASON && author.is_none()));
+        assert!(stored.iter().any(|(id, _, _)| id == revision.as_bytes()));
+        assert!(stored
+            .iter()
+            .any(|(id, _, _)| id == task_revision.as_bytes()));
+
+        // Mutate each native proof component on the same actual reserved
+        // writer. The source's immutable proof must reject publication even
+        // though its bytes and revision head still compare equal.
+        for statement in [
+            "UPDATE document_states SET writer_generation=writer_generation+1 WHERE workspace_id=?1 AND document_id=?2",
+            "UPDATE document_states SET tail_seq=tail_seq+1 WHERE workspace_id=?1 AND document_id=?2",
+            "UPDATE document_states SET snapshot_cutoff_seq=snapshot_cutoff_seq+1 WHERE workspace_id=?1 AND document_id=?2",
+        ] {
+            let mut tx=backend.begin_write().await.unwrap();
+            tx.operation().set_tenant(workspace).await.unwrap();
+            let OperationTx::SqliteFamily(writer)=tx.operation() else {panic!("family writer")};
+            writer.execute(statement,&[Cell::uuid(workspace),Cell::uuid(documents[1])]).await.unwrap();
+            assert_eq!(tx.operation().check_scheduled_revision_source(&source).await.unwrap(),Err(RevisionDbError::NotFound));
+            assert_eq!(tx.operation().create_scheduled_revision(&source,&input,&current_head).await.unwrap(),Err(RevisionDbError::NotFound));
+            tx.rollback().await.unwrap();
+        }
+        let manual = Uuid::now_v7();
+        for (id, reason, at) in [
+            (manual, "manual", 1_i64),
+            (Uuid::now_v7(), "session", 2),
+            (Uuid::now_v7(), "scheduled", 3),
+        ] {
+            sqlx::query("INSERT INTO revisions(id,workspace_id,target_kind,target_id,y_snapshot,encoding,content_json,text,reason,created_at) VALUES(?1,?2,'document',?3,?4,1,?5,'',?6,?7)")
+                .bind(id.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(documents[1].as_bytes().as_slice()).bind([0_u8,0].as_slice()).bind(crate::db::documents::empty_document_json().to_string()).bind(reason).bind(at).execute(&pool).await.unwrap();
+        }
+        let mut tx = backend.begin_write().await.unwrap();
+        tx.operation().set_tenant(workspace).await.unwrap();
+        assert!(tx
+            .operation()
+            .check_family_maintenance_claim(claim.proof(), MaintenanceJobKey::Revisions)
+            .await
+            .unwrap());
+        assert_eq!(
+            tx.operation()
+                .gc_revision_automatic_rows(workspace, 1, 1)
+                .await
+                .unwrap(),
+            1
+        );
+        tx.rollback().await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM revisions")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            5
+        );
+        let mut tx = backend.begin_write().await.unwrap();
+        tx.operation().set_tenant(workspace).await.unwrap();
+        assert_eq!(
+            tx.operation()
+                .gc_revision_automatic_rows(workspace, 1, 1)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            tx.operation()
+                .gc_revision_automatic_rows(workspace, 1, 5000)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            tx.operation()
+                .gc_revision_automatic_rows(workspace, 1, 5000)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(tx
+            .operation()
+            .check_family_maintenance_claim(claim.proof(), MaintenanceJobKey::Revisions)
+            .await
+            .unwrap());
+        tx.commit_with_cleanup().await.unwrap();
+        let retained: Vec<Vec<u8>> = sqlx::query_scalar("SELECT id FROM revisions ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(retained.len(), 3);
+        for id in [manual, revision, task_revision] {
+            assert!(retained.iter().any(|bytes| bytes == id.as_bytes()));
+        }
+        claim.release().await.unwrap();
+        backend.close().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
