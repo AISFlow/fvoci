@@ -3782,78 +3782,107 @@ pub(crate) mod cleanup_tests {
         f.close().await;
     }
 
-    #[tokio::test]
-    async fn cleanup_selected_actual_commit_failure_reconciles_stable_journal() {
-        let f = Fixture::new().await;
-        let s = storage(&f);
-        let (att, _) = f.attachment(1, "image/png").await;
-        let key = Uuid::now_v7().to_string();
-        s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
-        let row = journal(&f, Uuid::now_v7(), &key, 0).await;
-        cleanup_test_hooks::arm_deferred_fk(row.id, att, Uuid::now_v7());
-        let (failed_commit, continue_reconcile) = cleanup_test_hooks::arm(row.id, 4);
-        let backend = f.backend.clone();
-        let st = s.clone();
-        let mut consumer = tokio::spawn(async move {
-            reclaim_attachment_objects_backend_with_cancel(
-                &backend,
-                &st,
-                None,
-                20,
-                &CancellationToken::new(),
-            )
-            .await
-        });
-        entered(failed_commit).await;
-        // The real COMMIT has failed. Reserve a real independent writer before
-        // allowing the consumer's own fresh-writer reconciliation to proceed.
-        let other = crate::db::pool::connect_sqlite_app(&f.path, 1)
-            .await
-            .unwrap();
-        let second = Backend::Sqlite(other.clone());
-        let held = second.begin_write().await.unwrap();
-        continue_reconcile.send(()).unwrap();
-        let wait = tokio::time::timeout(Duration::from_millis(50), &mut consumer).await;
-        let waited_for_actual_writer = wait.is_err();
-        held.rollback().await.unwrap();
-        let outcome = match wait {
-            Ok(joined) => joined.unwrap(),
-            Err(_) => consumer.await.unwrap(),
-        };
-        let pointer = current(&f, row.id).await;
-        let head = s.head(&key).await.unwrap();
-        let document: Vec<u8> =
-            sqlx::query_scalar("SELECT document_id FROM attachments WHERE id=?1")
-                .bind(att.as_bytes().as_slice())
-                .fetch_one(&f.pool)
-                .await
-                .unwrap();
-        let source_is_actual_fk = match &outcome {
-            Err(sqlx::Error::AnyDriverError(source)) => source
-                .downcast_ref::<crate::db::backend::CommitUnknown>()
-                .is_some_and(|e| e.source.as_database_error().is_some()),
-            _ => false,
-        };
-        // Fresh writer reuse must work after the consumer returns. No manual
-        // call to reconciliation can conceal a missing/unchecked await.
-        let reused = f.backend.begin_write().await.unwrap();
-        reused.rollback().await.unwrap();
-        println!("S17 real consumer commit-error outcome={outcome:?} awaited_second_writer={waited_for_actual_writer} journal_key={} attempts={} due={} storage_head={head:?}",pointer.0,pointer.1,pointer.2);
-        other.close().await;
-        let expected_document = f.document.as_bytes().to_vec();
-        f.close().await;
-        assert!(
-            waited_for_actual_writer,
-            "actual consumer must await fresh-writer reconciliation, not return immediately"
+#[tokio::test]
+async fn cleanup_selected_actual_commit_failure_reconciles_stable_journal() {
+    let f = Fixture::new().await;
+    let s = storage(&f);
+    let (att, _) = f.attachment(1, "image/png").await;
+    let key = Uuid::now_v7().to_string();
+    s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+    let row = journal(&f, Uuid::now_v7(), &key, 0).await;
+    cleanup_test_hooks::arm_deferred_fk(row.id, att, Uuid::now_v7());
+    let (failed_commit, continue_reconcile) = cleanup_test_hooks::arm(row.id, 4);
+    let backend = f.backend.clone();
+    let st = s.clone();
+    let mut consumer = tokio::spawn(async move {
+        reclaim_attachment_objects_backend_with_cancel(
+            &backend,
+            &st,
+            None,
+            20,
+            &CancellationToken::new(),
+        )
+        .await
+    });
+    entered(failed_commit).await;
+    // The real COMMIT has failed. Reserve a real independent writer before
+    // allowing the consumer's own fresh-writer reconciliation to proceed.
+    let other = crate::db::pool::connect_sqlite_app(&f.path, 1)
+        .await
+        .unwrap();
+    let second = Backend::Sqlite(other.clone());
+    let held = second.begin_write().await.unwrap();
+    let initially_purged = s.head(&key).await.unwrap();
+    // Restore real literal sentinel bytes after the actual failed COMMIT.
+    // Read/head-only reconciliation must preserve them; a second purge
+    // would be independently visible, even if local deletes are idempotent.
+    s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+    continue_reconcile.send(()).unwrap();
+    let wait = tokio::time::timeout(Duration::from_millis(50), &mut consumer).await;
+    let waited_for_actual_writer = wait.is_err();
+    held.rollback().await.unwrap();
+    let outcome = match wait {
+        Ok(joined) => joined.unwrap(),
+        Err(_) => consumer.await.unwrap(),
+    };
+    let pointer = current(&f, row.id).await;
+    let head = s.head(&key).await.unwrap();
+    let restored = s.read_range(&key, 0, BYTES.len() as u64 - 1).await;
+    let no_second_purge = restored
+        .as_ref()
+        .is_ok_and(|value| value.as_slice() == BYTES);
+    if let Ok(value) = &restored {
+        use sha2::Digest;
+        println!(
+            "S17 unknown-commit sentinel bytes={} sha256={:x}",
+            value.len(),
+            sha2::Sha256::digest(value)
         );
-        assert!(
-            source_is_actual_fk,
-            "real consumer must return original unknown COMMIT error, never Reclaimed: {outcome:?}"
-        );
-        assert_eq!(pointer, (key, 0, 0));
-        assert_eq!(head, None);
-        assert_eq!(document, expected_document);
     }
+    let document: Vec<u8> = sqlx::query_scalar("SELECT document_id FROM attachments WHERE id=?1")
+        .bind(att.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    let source_is_actual_fk = match &outcome {
+        Err(sqlx::Error::AnyDriverError(source)) => source
+            .downcast_ref::<crate::db::backend::CommitUnknown>()
+            .is_some_and(|e| e.source.as_database_error().is_some()),
+        _ => false,
+    };
+    // Fresh writer reuse must work after the consumer returns. No manual
+    // call to reconciliation can conceal a missing/unchecked await.
+    let reused = f.backend.begin_write().await.unwrap();
+    reused.rollback().await.unwrap();
+    println!("S17 real consumer commit-error outcome={outcome:?} awaited_second_writer={waited_for_actual_writer} journal_key={} attempts={} due={} storage_head={head:?}",pointer.0,pointer.1,pointer.2);
+    // Only an explicit fresh invocation may destructively reclaim the
+    // observed pointer; this also preserves the original positive control.
+    let explicit_positive = drain(&f, &s).await;
+    let after_explicit_retry = s.head(&key).await.unwrap();
+    let journals_after_retry = f.journals().await;
+    other.close().await;
+    let expected_document = f.document.as_bytes().to_vec();
+    f.close().await;
+    assert!(
+        waited_for_actual_writer,
+        "actual consumer must await fresh-writer reconciliation, not return immediately"
+    );
+    assert!(
+        source_is_actual_fk,
+        "real consumer must return original unknown COMMIT error, never Reclaimed: {outcome:?}"
+    );
+    assert_eq!(pointer, (key, 0, 0));
+    assert_eq!(initially_purged, None);
+    assert_eq!(head, Some(BYTES.len() as u64));
+    assert!(
+        no_second_purge,
+        "consumer must preserve restored actual bytes after unknown COMMIT: {restored:?}"
+    );
+    assert_eq!(document, expected_document);
+    assert_eq!(explicit_positive.reclaimed, 1);
+    assert_eq!(after_explicit_retry, None);
+    assert!(journals_after_retry.is_empty());
+}
 
     #[tokio::test]
     async fn cleanup_selected_cancelled_failed_purge_keeps_attempt_and_due() {
