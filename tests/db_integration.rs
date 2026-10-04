@@ -2262,7 +2262,7 @@ async fn current_empty_database_install_preserves_schema_data_and_session_on_rer
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["id"], owner_id.to_string());
+    assert_eq!(body["userId"], owner_id.to_string());
     assert_eq!(body["email"], "admin@example.com");
     admin.close().await;
     harness.cleanup().await;
