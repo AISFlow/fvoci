@@ -792,6 +792,15 @@ mod maintenance_claim_driver_tests {
             tokio::sync::oneshot::Receiver<()>,
         )>,
     }
+    fn control_sql(sql: &str) -> Option<&'static str> {
+        let sql = sql.trim();
+        match sql.strip_suffix(';').unwrap_or(sql).trim_end() {
+            "BEGIN IMMEDIATE" => Some("BEGIN IMMEDIATE"),
+            "COMMIT" => Some("COMMIT"),
+            "ROLLBACK" => Some("ROLLBACK"),
+            _ => None,
+        }
+    }
     async fn pipeline(
         State(state): State<Arc<tokio::sync::Mutex<Model>>>,
         bytes: axum::body::Bytes,
@@ -804,12 +813,22 @@ mod maintenance_claim_driver_tests {
         let mut model = state.lock().await;
         model.requests.push(body.clone());
         let requests = body["requests"].as_array().unwrap();
+        for request in requests {
+            if let Some(steps) = request["batch"]["steps"].as_array() {
+                for step in steps {
+                    let sql = step["stmt"]["sql"].as_str().unwrap();
+                    if control_sql(sql).is_some() {
+                        println!("S16 actual pinned SDK wire control SQL {sql:?}");
+                    }
+                }
+            }
+        }
         let has_sql = |verb: &str| {
             requests.iter().any(|r| {
                 r["batch"]["steps"].as_array().is_some_and(|steps| {
                     steps
                         .iter()
-                        .any(|s| s["stmt"]["sql"].as_str() == Some(verb))
+                        .any(|s| control_sql(s["stmt"]["sql"].as_str().unwrap()) == Some(verb))
                 })
             })
         };
@@ -860,11 +879,10 @@ mod maintenance_claim_driver_tests {
                         }
                         match query.execute(&mut stream.conn).await {
                             Ok(result) => {
-                                if sql.starts_with("BEGIN") {
-                                    stream.active = true;
-                                }
-                                if sql == "COMMIT" || sql == "ROLLBACK" {
-                                    stream.active = false;
+                                match control_sql(sql) {
+                                    Some("BEGIN IMMEDIATE") => stream.active = true,
+                                    Some("COMMIT" | "ROLLBACK") => stream.active = false,
+                                    _ => {}
                                 }
                                 results.push(json!({"cols":[],"rows":[],"affected_row_count":result.rows_affected(),"last_insert_rowid":null}));
                                 errors.push(Value::Null);
@@ -1046,13 +1064,17 @@ mod maintenance_claim_driver_tests {
         async fn no_wrong_rollback(&self) {
             let model = self.model.lock().await;
             assert!(
-                model.requests.iter().all(|r| r["requests"]
-                    .as_array()
-                    .unwrap()
+                model
+                    .requests
                     .iter()
-                    .all(|q| q["batch"]["steps"]
+                    .all(|r| r["requests"]
                         .as_array()
-                        .is_none_or(|steps| steps.iter().all(|s| s["stmt"]["sql"] != "ROLLBACK")))),
+                        .unwrap()
+                        .iter()
+                        .all(|q| q["batch"]["steps"].as_array().is_none_or(|steps| steps
+                            .iter()
+                            .all(|s| control_sql(s["stmt"]["sql"].as_str().unwrap())
+                                != Some("ROLLBACK"))))),
                 "failed finish must never submit a possible new-stream rollback"
             );
             let commits: Vec<_> = model
@@ -1060,9 +1082,11 @@ mod maintenance_claim_driver_tests {
                 .iter()
                 .filter(|r| {
                     r["requests"].as_array().unwrap().iter().any(|q| {
-                        q["batch"]["steps"]
-                            .as_array()
-                            .is_some_and(|s| s.iter().any(|s| s["stmt"]["sql"] == "COMMIT"))
+                        q["batch"]["steps"].as_array().is_some_and(|s| {
+                            s.iter().any(|s| {
+                                control_sql(s["stmt"]["sql"].as_str().unwrap()) == Some("COMMIT")
+                            })
+                        })
                     })
                 })
                 .collect();
@@ -1116,6 +1140,25 @@ mod maintenance_claim_driver_tests {
     }
     #[tokio::test]
     async fn maintenance_claim_driver_fk_close_does_not_rollback_new_stream() {
+        for (sql, expected) in [
+            ("BEGIN IMMEDIATE", "BEGIN IMMEDIATE"),
+            (" BEGIN IMMEDIATE; ", "BEGIN IMMEDIATE"),
+            ("COMMIT", "COMMIT"),
+            (" COMMIT; ", "COMMIT"),
+            ("ROLLBACK", "ROLLBACK"),
+            (" ROLLBACK; ", "ROLLBACK"),
+        ] {
+            assert_eq!(control_sql(sql), Some(expected));
+        }
+        for sql in [
+            "COMMIT;;",
+            "COMMIT; SELECT 1",
+            "ROLLBACK TO savepoint;",
+            "SELECT 'COMMIT';",
+            "BEGIN DEFERRED;",
+        ] {
+            assert_eq!(control_sql(sql), None);
+        }
         let f = Fixture::new().await;
         let malformed = reqwest::Client::new()
             .post(format!("{}/v3/pipeline", f.endpoint))
@@ -1132,7 +1175,9 @@ mod maintenance_claim_driver_tests {
         assert!(f.model.lock().await.requests.iter().any(|r| {
             r["requests"].as_array().unwrap().iter().any(|q| {
                 q["batch"]["steps"].as_array().is_some_and(|steps| {
-                    steps.iter().any(|s| s["stmt"]["sql"] == "BEGIN IMMEDIATE")
+                    steps.iter().any(|s| {
+                        control_sql(s["stmt"]["sql"].as_str().unwrap()) == Some("BEGIN IMMEDIATE")
+                    })
                 })
             })
         }));
@@ -1242,9 +1287,11 @@ mod maintenance_claim_driver_tests {
             .iter()
             .find(|r| {
                 r["requests"].as_array().unwrap().iter().any(|q| {
-                    q["batch"]["steps"]
-                        .as_array()
-                        .is_some_and(|s| s.iter().any(|s| s["stmt"]["sql"] == "ROLLBACK"))
+                    q["batch"]["steps"].as_array().is_some_and(|s| {
+                        s.iter().any(|s| {
+                            control_sql(s["stmt"]["sql"].as_str().unwrap()) == Some("ROLLBACK")
+                        })
+                    })
                 })
             })
             .expect("actual rollback transport request");
