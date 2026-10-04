@@ -16,11 +16,9 @@ use crate::db::context::{
     lock_key_from_uuid, lock_membership_users, recheck_session, restore_system, session_is_live,
     set_system, set_tenant,
 };
-use crate::db::documents::document_permission;
-use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
-use crate::db::projects::project_member_role;
+use crate::db::identity::{AuditAppend, EventAppend};
 use crate::db::quota::{StorageQuota, StorageQuotaError};
-use crate::db::workspace::{membership_role, membership_role_for_update, workspace_is_live};
+use crate::db::workspace::{membership_role_for_update, workspace_is_live};
 use crate::projects::effective_permission;
 use crate::projects::ProjectPermission;
 
@@ -370,84 +368,9 @@ async fn parent_access(
     parent: AttachmentParent,
     lock: bool,
 ) -> Result<Result<ParentAccess, AttachmentDbError>, sqlx::Error> {
-    let (project_id, task_archived) = match parent {
-        AttachmentParent::Document(document_id) => {
-            let sql = if lock {
-                "SELECT project_id, deleted_at FROM fvoci.documents WHERE workspace_id = $1 AND id = $2 FOR UPDATE"
-            } else {
-                "SELECT project_id, deleted_at FROM fvoci.documents WHERE workspace_id = $1 AND id = $2"
-            };
-            let row: Option<(Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(sql)
-                .bind(workspace_id)
-                .bind(document_id)
-                .fetch_optional(&mut **tx)
-                .await?;
-            match row {
-                Some((project_id, None)) => (project_id, false),
-                _ => return Ok(Err(AttachmentDbError::NotFound)),
-            }
-        }
-        AttachmentParent::Task(task_id) => {
-            let sql = if lock {
-                "SELECT project_id, archived_at FROM fvoci.tasks WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL FOR NO KEY UPDATE"
-            } else {
-                "SELECT project_id, archived_at FROM fvoci.tasks WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL"
-            };
-            let row: Option<(Uuid, Option<DateTime<Utc>>)> = sqlx::query_as(sql)
-                .bind(workspace_id)
-                .bind(task_id)
-                .fetch_optional(&mut **tx)
-                .await?;
-            match row {
-                Some((project_id, archived_at)) => (Some(project_id), archived_at.is_some()),
-                None => return Ok(Err(AttachmentDbError::NotFound)),
-            }
-        }
-    };
-    let Some(project_id) = project_id else {
-        let AttachmentParent::Document(document_id) = parent else {
-            unreachable!("tasks always belong to a project");
-        };
-        let permission =
-            document_permission(tx, workspace_id, actor_user_id, document_id, true).await?;
-        return Ok(Ok(ParentAccess {
-            permission,
-            project_id: None,
-            writable: Ok(()),
-        }));
-    };
-    let sql = if lock {
-        "SELECT visibility, status FROM fvoci.projects WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL FOR NO KEY UPDATE"
-    } else {
-        "SELECT visibility, status FROM fvoci.projects WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL"
-    };
-    let project: Option<(String, String)> = sqlx::query_as(sql)
-        .bind(workspace_id)
-        .bind(project_id)
-        .fetch_optional(&mut **tx)
-        .await?;
-    let Some((visibility, status)) = project else {
-        return Ok(Err(AttachmentDbError::NotFound));
-    };
-    let permission = match membership_role(tx, workspace_id, actor_user_id).await? {
-        None => ProjectPermission::None,
-        Some(role) => {
-            let member = project_member_role(tx, workspace_id, project_id, actor_user_id).await?;
-            effective_permission(role, &visibility, member)
-        }
-    };
-    let writable = if status == "archived" {
-        Err(AttachmentDbError::ProjectArchived)
-    } else if task_archived {
-        Err(AttachmentDbError::TaskArchived)
-    } else {
-        Ok(())
-    };
-    Ok(Ok(ParentAccess {
-        permission,
-        project_id: Some(project_id),
-        writable,
-    }))
+    crate::db::backend::OperationTx::Postgres(tx)
+        .upload_parent_access(workspace_id, actor_user_id, parent, lock)
+        .await
 }
 
 /// Source `requireUploadAccess`: edit on the parent, then uploader, then a
@@ -531,34 +454,16 @@ async fn record_attachment_event(
     payload: Value,
     client_ip: Option<&str>,
 ) -> Result<(), sqlx::Error> {
-    append_event(
-        tx,
-        EventAppend {
-            id: Uuid::now_v7(),
-            workspace_id: Some(workspace_id),
-            actor_user_id: Some(actor_user_id),
-            verb: verb.to_string(),
-            target_type: Some("attachment".to_string()),
-            target_id: Some(attachment_id),
-            payload: payload.clone(),
-        },
-    )
-    .await?;
-    append_audit(
-        tx,
-        AuditAppend {
-            id: Uuid::now_v7(),
-            workspace_id: Some(workspace_id),
-            actor_user_id: Some(actor_user_id),
-            verb: verb.to_string(),
-            target_type: Some("attachment".to_string()),
-            target_id: Some(attachment_id),
+    crate::db::backend::OperationTx::Postgres(tx)
+        .upload_event(
+            workspace_id,
+            actor_user_id,
+            verb,
+            attachment_id,
             payload,
-            ip: client_ip.map(str::to_string),
-        },
-    )
-    .await?;
-    Ok(())
+            client_ip,
+        )
+        .await
 }
 
 /// Source event payload parent fields: `documentId` (null for a task
@@ -592,68 +497,9 @@ async fn authorize_reservation(
     actor_user_id: Uuid,
     reservation: UploadReservation,
 ) -> Result<Result<(AttachmentParent, Option<String>), AttachmentDbError>, sqlx::Error> {
-    match reservation {
-        UploadReservation::Target(target) => {
-            let (parent, affiliation) = match target {
-                UploadTarget::WikiDocument(id) => (AttachmentParent::Document(id), Some(None)),
-                UploadTarget::ProjectDocument {
-                    project_id,
-                    document_id,
-                } => (
-                    AttachmentParent::Document(document_id),
-                    Some(Some(project_id)),
-                ),
-                UploadTarget::Task(id) => (AttachmentParent::Task(id), None),
-            };
-            let access = match parent_access(tx, workspace_id, actor_user_id, parent, true).await? {
-                Ok(access) => access,
-                Err(err) => return Ok(Err(err)),
-            };
-            if affiliation.is_some_and(|expected| expected != access.project_id) {
-                return Ok(Err(AttachmentDbError::NotFound));
-            }
-            if !access.permission.at_least(ProjectPermission::Edit) {
-                return Ok(Err(AttachmentDbError::Forbidden));
-            }
-            if let Err(err) = access.writable {
-                return Ok(Err(err));
-            }
-            Ok(Ok((parent, None)))
-        }
-        UploadReservation::DerivedCopy {
-            source_attachment_id,
-        } => {
-            let Some(source) = fetch_attachment(tx, workspace_id, source_attachment_id).await?
-            else {
-                return Ok(Err(AttachmentDbError::NotFound));
-            };
-            let access = match parent_access(tx, workspace_id, actor_user_id, source.parent(), true)
-                .await?
-            {
-                Ok(access) => access,
-                Err(err) => return Ok(Err(err)),
-            };
-            if !access.permission.at_least(ProjectPermission::View) {
-                return Ok(Err(AttachmentDbError::Forbidden));
-            }
-            if source.status != "stored" {
-                return Ok(Err(AttachmentDbError::NotFound));
-            }
-            if source.scan_status == "infected" {
-                return Ok(Err(AttachmentDbError::Infected));
-            }
-            if !is_hwp_attachment(&source.name, &source.mime) {
-                return Ok(Err(AttachmentDbError::NotHwp));
-            }
-            if !access.permission.at_least(ProjectPermission::Edit) {
-                return Ok(Err(AttachmentDbError::Forbidden));
-            }
-            if let Err(err) = access.writable {
-                return Ok(Err(err));
-            }
-            Ok(Ok((source.parent(), source.declared_mime)))
-        }
-    }
+    crate::db::backend::OperationTx::Postgres(tx)
+        .upload_reservation(workspace_id, actor_user_id, reservation)
+        .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -868,7 +714,7 @@ pub async fn authorize_upload_part(
             return Ok(Err(err));
         }
     };
-    if att.status != "uploading" {
+    if att.status != "uploading" || prepared_upload(&att)?.is_some() {
         tx.rollback().await?;
         return Ok(Err(AttachmentDbError::UploadState));
     }
@@ -926,7 +772,7 @@ pub async fn commit_upload_part(
             return Ok(Err(err));
         }
     };
-    if att.status != "uploading" {
+    if att.status != "uploading" || prepared_upload(&att)?.is_some() {
         tx.rollback().await?;
         staged.discard().await;
         return Ok(Err(AttachmentDbError::UploadState));
@@ -992,7 +838,7 @@ pub async fn resume_upload(
             return Ok(Err(err));
         }
     };
-    if att.status != "uploading" {
+    if att.status != "uploading" || prepared_upload(&att)?.is_some() {
         tx.rollback().await?;
         return Ok(Err(AttachmentDbError::UploadState));
     }
@@ -1038,11 +884,40 @@ pub async fn complete_upload(
     parts: Vec<(i32, String)>,
     client_ip: Option<&str>,
 ) -> Result<Result<AttachmentRow, AttachmentDbError>, sqlx::Error> {
+    complete_upload_pg_with_cancel(
+        pool,
+        storage,
+        workspace_id,
+        attachment_id,
+        actor_user_id,
+        session_id,
+        parts,
+        client_ip,
+        &CancellationToken::new(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn complete_upload_pg_with_cancel(
+    pool: &PgPool,
+    storage: &ObjectStorage,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    parts: Vec<(i32, String)>,
+    client_ip: Option<&str>,
+    cancel: &CancellationToken,
+) -> Result<Result<AttachmentRow, AttachmentDbError>, sqlx::Error> {
     const ASSEMBLE_WAIT: Duration = Duration::from_secs(60 * 60);
     const ASSEMBLE_POLL: Duration = Duration::from_millis(100);
     let deadline = std::time::Instant::now() + ASSEMBLE_WAIT;
 
     loop {
+        if cancel.is_cancelled() {
+            return Ok(Err(AttachmentDbError::UploadState));
+        }
         match try_complete_owned(
             pool,
             storage,
@@ -1052,6 +927,7 @@ pub async fn complete_upload(
             session_id,
             &parts,
             client_ip,
+            cancel,
         )
         .await?
         {
@@ -1084,6 +960,7 @@ async fn try_complete_owned(
     session_id: Uuid,
     parts: &[(i32, String)],
     client_ip: Option<&str>,
+    cancel: &CancellationToken,
 ) -> Result<CompleteAttempt, sqlx::Error> {
     let Some(mut lock) = AttachmentSessionLock::try_acquire(pool, attachment_id).await? else {
         let mut tx = pool.begin().await?;
@@ -1104,6 +981,10 @@ async fn try_complete_owned(
             }
         };
         if att.status == "stored" {
+            if !stored_upload_matches(&att, parts)? {
+                tx.rollback().await?;
+                return Ok(CompleteAttempt::Denied(AttachmentDbError::EtagMismatch));
+            }
             tx.commit().await?;
             return Ok(CompleteAttempt::Done(att));
         }
@@ -1120,6 +1001,7 @@ async fn try_complete_owned(
         session_id,
         parts,
         client_ip,
+        cancel,
     )
     .await;
     lock.release().await;
@@ -1136,8 +1018,13 @@ async fn complete_owned_inner(
     session_id: Uuid,
     parts: &[(i32, String)],
     client_ip: Option<&str>,
+    cancel: &CancellationToken,
 ) -> Result<CompleteAttempt, sqlx::Error> {
     let mut tx = lock.begin().await?;
+    if cancel.is_cancelled() {
+        tx.rollback().await?;
+        return Ok(CompleteAttempt::Denied(AttachmentDbError::UploadState));
+    }
     set_tenant(&mut tx, workspace_id).await?;
     with_upload_xact_lock(&mut tx, attachment_id).await?;
     let att = match check_upload_write_access(
@@ -1156,6 +1043,10 @@ async fn complete_owned_inner(
         }
     };
     if att.status == "stored" {
+        if !stored_upload_matches(&att, parts)? {
+            tx.rollback().await?;
+            return Ok(CompleteAttempt::Denied(AttachmentDbError::EtagMismatch));
+        }
         tx.commit().await?;
         // A retried or repeated complete also clears parts that an earlier
         // run's finalize never removed (cancelled, crashed or failed).
@@ -1170,6 +1061,47 @@ async fn complete_owned_inner(
         return Ok(CompleteAttempt::Denied(AttachmentDbError::InvalidInput));
     }
 
+    let completion = match UploadCompletion::new(&att, &meta, parts) {
+        Ok(value) => value,
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(CompleteAttempt::Denied(err));
+        }
+    };
+    let pending = prepared_upload(&att)?;
+    let record_identity = if let Some(current) = &pending {
+        if !prepared_upload_matches(&att, current) || current != &completion {
+            tx.rollback().await?;
+            return Ok(CompleteAttempt::Denied(AttachmentDbError::EtagMismatch));
+        }
+        true
+    } else {
+        match storage
+            .list_parts(&att.storage_key, meta.upload_ref.as_deref())
+            .await
+        {
+            Ok(listed) if completion_parts_match(&meta, parts, &listed) => true,
+            Ok(_) => {
+                tx.rollback().await?;
+                return Ok(CompleteAttempt::Denied(AttachmentDbError::EtagMismatch));
+            }
+            // Legacy attempts can already have consumed their S3 parts. Keep
+            // their old recovery policy, but do not invent a new part receipt.
+            Err(StorageError::UploadGone) => false,
+            Err(err) => {
+                tx.rollback().await?;
+                return Err(upload_storage_error(err));
+            }
+        }
+    };
+    if record_identity && pending.is_none() {
+        sqlx::query("UPDATE fvoci.attachments SET upload_meta=jsonb_set(upload_meta,'{_completion}',$3::jsonb,true) WHERE workspace_id=$1 AND id=$2 AND storage_key=$4 AND status IN ('uploading','assembling')")
+            .bind(workspace_id).bind(attachment_id).bind(json!(completion)).bind(&att.storage_key).execute(&mut *tx).await?;
+    }
+    if cancel.is_cancelled() {
+        tx.rollback().await?;
+        return Ok(CompleteAttempt::Denied(AttachmentDbError::UploadState));
+    }
     let storage_key = att.storage_key.clone();
     let att_name = att.name.clone();
     let needs_assembly = if att.status == "assembling" {
@@ -1181,6 +1113,10 @@ async fn complete_owned_inner(
             .discard_uncommitted_payload(&storage_key)
             .await
             .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
+        if cancel.is_cancelled() {
+            tx.rollback().await?;
+            return Ok(CompleteAttempt::Denied(AttachmentDbError::UploadState));
+        }
         let rows = sqlx::query(
             "UPDATE fvoci.attachments SET status = 'assembling' WHERE workspace_id = $1 AND id = $2 AND status = 'uploading'",
         )
@@ -1197,7 +1133,23 @@ async fn complete_owned_inner(
         tx.rollback().await?;
         return Ok(CompleteAttempt::Denied(AttachmentDbError::UploadState));
     };
-    tx.commit().await?;
+    if cancel.is_cancelled() {
+        tx.rollback().await?;
+        return Ok(CompleteAttempt::Denied(AttachmentDbError::UploadState));
+    }
+    if let Err(unknown) = tx.commit().await {
+        let _ = observe_pg_upload_completion(
+            lock,
+            storage,
+            workspace_id,
+            attachment_id,
+            actor_user_id,
+            session_id,
+            &completion,
+        )
+        .await;
+        return Err(unknown);
+    }
 
     if needs_assembly && meta.transfer == TransferMode::Presigned {
         match storage
@@ -1224,6 +1176,9 @@ async fn complete_owned_inner(
         let assemble = storage
             .assemble_multipart(&storage_key, meta.upload_ref.as_deref(), parts)
             .await;
+        if cancel.is_cancelled() {
+            return Ok(CompleteAttempt::Denied(AttachmentDbError::UploadState));
+        }
         match assemble {
             Ok(size) if size as i64 != meta.declared_size_bytes => {
                 let _ = storage.delete_object(&storage_key).await;
@@ -1248,11 +1203,17 @@ async fn complete_owned_inner(
         }
     }
 
+    if cancel.is_cancelled() {
+        return Ok(CompleteAttempt::Denied(AttachmentDbError::UploadState));
+    }
     let size_bytes = storage
         .head(&storage_key)
         .await
         .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?
         .ok_or_else(|| sqlx::Error::Io(std::io::Error::other("missing payload")))?;
+    if cancel.is_cancelled() {
+        return Ok(CompleteAttempt::Denied(AttachmentDbError::UploadState));
+    }
     if size_bytes as i64 != meta.declared_size_bytes {
         let _ = storage.delete_object(&storage_key).await;
         delete_attachment_row(lock, workspace_id, attachment_id).await?;
@@ -1263,6 +1224,9 @@ async fn complete_owned_inner(
         .sniff_mime(&storage_key)
         .await
         .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
+    if cancel.is_cancelled() {
+        return Ok(CompleteAttempt::Denied(AttachmentDbError::UploadState));
+    }
     let image = is_image_mime(&mime);
     let extract_status = initial_extract_status(&att_name, &mime);
     let preview_status = if image && crate::attachments::preview::preview_mime_supported(&mime) {
@@ -1275,6 +1239,10 @@ async fn complete_owned_inner(
     test_barrier::wait_pre_mark_stored_barrier(attachment_id).await;
 
     let mut tx = lock.begin().await?;
+    if cancel.is_cancelled() {
+        tx.rollback().await?;
+        return Ok(CompleteAttempt::Denied(AttachmentDbError::UploadState));
+    }
     set_tenant(&mut tx, workspace_id).await?;
     with_upload_xact_lock(&mut tx, attachment_id).await?;
     let att = match check_upload_write_access(
@@ -1293,9 +1261,17 @@ async fn complete_owned_inner(
         }
     };
     if att.status == "stored" {
+        if !stored_upload_matches(&att, parts)? {
+            tx.rollback().await?;
+            return Ok(CompleteAttempt::Denied(AttachmentDbError::EtagMismatch));
+        }
         tx.commit().await?;
         finalize_stored_parts(storage, attachment_id, &storage_key).await;
         return Ok(CompleteAttempt::Done(att));
+    }
+    if !completion.current_row(&att) {
+        tx.rollback().await?;
+        return Ok(CompleteAttempt::Denied(AttachmentDbError::UploadState));
     }
     if att.status != "uploading" && att.status != "assembling" {
         tx.rollback().await?;
@@ -1307,7 +1283,8 @@ async fn complete_owned_inner(
         UPDATE fvoci.attachments
         SET status = 'stored', mime = $3, size_bytes = $4, image = $5,
             scan_status = 'skipped', extract_status = $6, preview_status = $7,
-            upload_meta = NULL, completed_at = now()
+            upload_meta = NULL, completed_at = now(),
+            variants = CASE WHEN $8::jsonb IS NULL THEN variants ELSE jsonb_set(variants, '{_upload_completion}', $8::jsonb, true) END
         WHERE workspace_id = $1 AND id = $2 AND status IN ('uploading', 'assembling')
         "#,
     )
@@ -1318,6 +1295,7 @@ async fn complete_owned_inner(
     .bind(image)
     .bind(extract_status)
     .bind(preview_status)
+    .bind(record_identity.then(||json!(completion)))
     .execute(&mut *tx)
     .await?;
     if updated.rows_affected() == 0 {
@@ -1348,7 +1326,40 @@ async fn complete_owned_inner(
     let row = fetch_attachment(&mut tx, workspace_id, attachment_id)
         .await?
         .expect("stored row");
-    tx.commit().await?;
+    if cancel.is_cancelled() {
+        tx.rollback().await?;
+        return Ok(CompleteAttempt::Denied(AttachmentDbError::UploadState));
+    }
+    if let Err(unknown) = tx.commit().await {
+        if record_identity {
+            if let Ok(Some(current)) = observe_pg_upload_completion(
+                lock,
+                storage,
+                workspace_id,
+                attachment_id,
+                actor_user_id,
+                session_id,
+                &completion,
+            )
+            .await
+            {
+                finalize_stored_parts(storage, attachment_id, &storage_key).await;
+                return Ok(CompleteAttempt::Done(current));
+            }
+        } else {
+            let _ = observe_pg_upload_completion(
+                lock,
+                storage,
+                workspace_id,
+                attachment_id,
+                actor_user_id,
+                session_id,
+                &completion,
+            )
+            .await;
+        }
+        return Err(unknown);
+    }
     finalize_stored_parts(storage, attachment_id, &storage_key).await;
     Ok(CompleteAttempt::Done(row))
 }
@@ -4052,4 +4063,2547 @@ pub(crate) mod cleanup_tests {
         assert_eq!(s.head(&healthy).await.unwrap(), None);
         f.close().await;
     }
+}
+
+// Upload policy is shared by the legacy PG wrappers and selected consumers.
+// These named leaves only adapt physical rows; commit belongs to the consumer.
+impl crate::db::backend::OperationTx<'_, '_> {
+    async fn upload_document_parent(
+        &mut self,
+        workspace: Uuid,
+        id: Uuid,
+        lock: bool,
+    ) -> Result<Option<(Option<Uuid>, Option<DateTime<Utc>>)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_as(if lock {
+                "SELECT project_id,deleted_at FROM fvoci.documents WHERE workspace_id=$1 AND id=$2 FOR UPDATE"
+            } else { "SELECT project_id,deleted_at FROM fvoci.documents WHERE workspace_id=$1 AND id=$2" })
+                .bind(workspace).bind(id).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?; if lock { tx.require_writer()?; }
+                let rows=tx.query("SELECT project_id,deleted_at FROM documents WHERE workspace_id=?1 AND id=?2", &[crate::db::codec::Cell::uuid(workspace),crate::db::codec::Cell::uuid(id)]).await?;
+                rows.first().map(|r| Ok((r.cell(0)?.optional(|v|v.id())?,r.cell(1)?.optional(|v|v.datetime())?))).transpose()
+            }
+        }
+    }
+    async fn upload_task_parent(
+        &mut self,
+        workspace: Uuid,
+        id: Uuid,
+        lock: bool,
+    ) -> Result<Option<(Uuid, Option<DateTime<Utc>>)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_as(if lock {
+                "SELECT project_id,archived_at FROM fvoci.tasks WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL FOR NO KEY UPDATE"
+            } else { "SELECT project_id,archived_at FROM fvoci.tasks WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL" })
+                .bind(workspace).bind(id).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?; if lock { tx.require_writer()?; }
+                let rows=tx.query("SELECT project_id,archived_at FROM tasks WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL", &[crate::db::codec::Cell::uuid(workspace),crate::db::codec::Cell::uuid(id)]).await?;
+                rows.first().map(|r| Ok((r.cell(0)?.id()?,r.cell(1)?.optional(|v|v.datetime())?))).transpose()
+            }
+        }
+    }
+    async fn upload_project_parent(
+        &mut self,
+        workspace: Uuid,
+        id: Uuid,
+        lock: bool,
+    ) -> Result<Option<(String, String)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_as(if lock {
+                "SELECT visibility,status FROM fvoci.projects WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL FOR NO KEY UPDATE"
+            } else { "SELECT visibility,status FROM fvoci.projects WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL" })
+                .bind(workspace).bind(id).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?; if lock { tx.require_writer()?; }
+                let rows=tx.query("SELECT visibility,status FROM projects WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL", &[crate::db::codec::Cell::uuid(workspace),crate::db::codec::Cell::uuid(id)]).await?;
+                rows.first().map(|r| Ok((r.cell(0)?.string()?,r.cell(1)?.string()?))).transpose()
+            }
+        }
+    }
+    async fn upload_parent_access(
+        &mut self,
+        workspace_id: Uuid,
+        actor_user_id: Uuid,
+        parent: AttachmentParent,
+        lock: bool,
+    ) -> Result<Result<ParentAccess, AttachmentDbError>, sqlx::Error> {
+        let (project_id, task_archived) = match parent {
+            AttachmentParent::Document(document_id) => {
+                let row = self
+                    .upload_document_parent(workspace_id, document_id, lock)
+                    .await?;
+                match row {
+                    Some((project_id, None)) => (project_id, false),
+                    _ => return Ok(Err(AttachmentDbError::NotFound)),
+                }
+            }
+            AttachmentParent::Task(task_id) => {
+                let row = self.upload_task_parent(workspace_id, task_id, lock).await?;
+                match row {
+                    Some((project_id, archived_at)) => (Some(project_id), archived_at.is_some()),
+                    None => return Ok(Err(AttachmentDbError::NotFound)),
+                }
+            }
+        };
+        let Some(project_id) = project_id else {
+            let AttachmentParent::Document(document_id) = parent else {
+                unreachable!("tasks always belong to a project");
+            };
+            let permission = self
+                .document_permission(workspace_id, actor_user_id, document_id, true)
+                .await?;
+            return Ok(Ok(ParentAccess {
+                permission,
+                project_id: None,
+                writable: Ok(()),
+            }));
+        };
+        let project = self
+            .upload_project_parent(workspace_id, project_id, lock)
+            .await?;
+        let Some((visibility, status)) = project else {
+            return Ok(Err(AttachmentDbError::NotFound));
+        };
+        let permission = match self
+            .membership_role(workspace_id, actor_user_id, false)
+            .await?
+        {
+            None => ProjectPermission::None,
+            Some(role) => {
+                let member = self
+                    .project_member_role(workspace_id, project_id, actor_user_id)
+                    .await?;
+                effective_permission(role, &visibility, member)
+            }
+        };
+        let writable = if status == "archived" {
+            Err(AttachmentDbError::ProjectArchived)
+        } else if task_archived {
+            Err(AttachmentDbError::TaskArchived)
+        } else {
+            Ok(())
+        };
+        Ok(Ok(ParentAccess {
+            permission,
+            project_id: Some(project_id),
+            writable,
+        }))
+    }
+
+    async fn upload_row(
+        &mut self,
+        workspace: Uuid,
+        id: Uuid,
+    ) -> Result<Option<AttachmentRow>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => fetch_attachment(tx, workspace, id).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let rows=tx.query("SELECT id,workspace_id,document_id,task_id,uploader_id,status,name,mime,declared_mime,size_bytes,reserved_size_bytes,storage_key,image,scan_status,extract_status,upload_meta,variants,created_at,completed_at FROM attachments WHERE workspace_id=?1 AND id=?2", &[crate::db::codec::Cell::uuid(workspace),crate::db::codec::Cell::uuid(id)]).await?;
+                rows.first()
+                    .map(|r| {
+                        Ok(AttachmentRow {
+                            id: r.cell(0)?.id()?,
+                            workspace_id: r.cell(1)?.id()?,
+                            document_id: r.cell(2)?.optional(|v| v.id())?,
+                            task_id: r.cell(3)?.optional(|v| v.id())?,
+                            uploader_id: r.cell(4)?.id()?,
+                            status: r.cell(5)?.string()?,
+                            name: r.cell(6)?.string()?,
+                            mime: r.cell(7)?.string()?,
+                            declared_mime: r.cell(8)?.optional(|v| v.string())?,
+                            size_bytes: r.cell(9)?.optional(|v| v.integer())?,
+                            reserved_size_bytes: r.cell(10)?.integer()?,
+                            storage_key: r.cell(11)?.string()?,
+                            image: r.cell(12)?.boolean()?,
+                            scan_status: r.cell(13)?.string()?,
+                            extract_status: r.cell(14)?.string()?,
+                            upload_meta: r.cell(15)?.optional(|v| v.value())?,
+                            variants: r.cell(16)?.value()?,
+                            created_at: r.cell(17)?.datetime()?,
+                            completed_at: r.cell(18)?.optional(|v| v.datetime())?,
+                        })
+                    })
+                    .transpose()
+            }
+        }
+    }
+}
+
+impl crate::db::backend::OperationTx<'_, '_> {
+    async fn upload_reservation(
+        &mut self,
+        workspace_id: Uuid,
+        actor_user_id: Uuid,
+        reservation: UploadReservation,
+    ) -> Result<Result<(AttachmentParent, Option<String>), AttachmentDbError>, sqlx::Error> {
+        match reservation {
+            UploadReservation::Target(target) => {
+                let (parent, affiliation) = match target {
+                    UploadTarget::WikiDocument(id) => (AttachmentParent::Document(id), Some(None)),
+                    UploadTarget::ProjectDocument {
+                        project_id,
+                        document_id,
+                    } => (
+                        AttachmentParent::Document(document_id),
+                        Some(Some(project_id)),
+                    ),
+                    UploadTarget::Task(id) => (AttachmentParent::Task(id), None),
+                };
+                let access = match self
+                    .upload_parent_access(workspace_id, actor_user_id, parent, true)
+                    .await?
+                {
+                    Ok(access) => access,
+                    Err(err) => return Ok(Err(err)),
+                };
+                if affiliation.is_some_and(|expected| expected != access.project_id) {
+                    return Ok(Err(AttachmentDbError::NotFound));
+                }
+                if !access.permission.at_least(ProjectPermission::Edit) {
+                    return Ok(Err(AttachmentDbError::Forbidden));
+                }
+                if let Err(err) = access.writable {
+                    return Ok(Err(err));
+                }
+                Ok(Ok((parent, None)))
+            }
+            UploadReservation::DerivedCopy {
+                source_attachment_id,
+            } => {
+                let Some(source) = self.upload_row(workspace_id, source_attachment_id).await?
+                else {
+                    return Ok(Err(AttachmentDbError::NotFound));
+                };
+                let access = match self
+                    .upload_parent_access(workspace_id, actor_user_id, source.parent(), true)
+                    .await?
+                {
+                    Ok(access) => access,
+                    Err(err) => return Ok(Err(err)),
+                };
+                if !access.permission.at_least(ProjectPermission::View) {
+                    return Ok(Err(AttachmentDbError::Forbidden));
+                }
+                if source.status != "stored" {
+                    return Ok(Err(AttachmentDbError::NotFound));
+                }
+                if source.scan_status == "infected" {
+                    return Ok(Err(AttachmentDbError::Infected));
+                }
+                if !is_hwp_attachment(&source.name, &source.mime) {
+                    return Ok(Err(AttachmentDbError::NotHwp));
+                }
+                if !access.permission.at_least(ProjectPermission::Edit) {
+                    return Ok(Err(AttachmentDbError::Forbidden));
+                }
+                if let Err(err) = access.writable {
+                    return Ok(Err(err));
+                }
+                Ok(Ok((source.parent(), source.declared_mime)))
+            }
+        }
+    }
+
+    async fn upload_actor_row(
+        &mut self,
+        workspace: Uuid,
+        id: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+        write: bool,
+    ) -> Result<Result<AttachmentRow, AttachmentDbError>, sqlx::Error> {
+        if write {
+            self.lock_membership_users(&[actor]).await?;
+        }
+        let live = if write {
+            self.recheck_session(actor, credential).await?
+        } else {
+            self.session_is_live(actor, credential).await?
+        };
+        if !live {
+            return Ok(Err(AttachmentDbError::Forbidden));
+        }
+        if !self.workspace_is_live(workspace).await? {
+            return Ok(Err(AttachmentDbError::NotFound));
+        }
+        let Some(att) = self.upload_row(workspace, id).await? else {
+            return Ok(Err(AttachmentDbError::NotFound));
+        };
+        let access = match self
+            .upload_parent_access(workspace, actor, att.parent(), write)
+            .await?
+        {
+            Ok(a) => a,
+            Err(e) => return Ok(Err(e)),
+        };
+        if !access.permission.at_least(if write {
+            ProjectPermission::Edit
+        } else {
+            ProjectPermission::View
+        }) {
+            return Ok(Err(AttachmentDbError::Forbidden));
+        }
+        if write {
+            if att.uploader_id != actor {
+                return Ok(Err(AttachmentDbError::UploadForbidden));
+            }
+            if let Err(e) = access.writable {
+                return Ok(Err(e));
+            }
+        }
+        Ok(Ok(att))
+    }
+    async fn upload_event(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        verb: &str,
+        id: Uuid,
+        payload: Value,
+        ip: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        self.append_event(EventAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace),
+            actor_user_id: Some(actor),
+            verb: verb.into(),
+            target_type: Some("attachment".into()),
+            target_id: Some(id),
+            payload: payload.clone(),
+        })
+        .await?;
+        self.append_audit(AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace),
+            actor_user_id: Some(actor),
+            verb: verb.into(),
+            target_type: Some("attachment".into()),
+            target_id: Some(id),
+            payload,
+            ip: ip.map(str::to_string),
+        })
+        .await
+    }
+}
+
+/// Internal, versioned identity of one completed upload. No credentials or
+/// transport receipt: the row, event and audit must commit before it is useful.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct UploadCompletion {
+    version: u8,
+    attachment_id: Uuid,
+    workspace_id: Uuid,
+    document_id: Option<Uuid>,
+    task_id: Option<Uuid>,
+    uploader_id: Uuid,
+    storage_key: String,
+    created_at: DateTime<Utc>,
+    declared_size_bytes: i64,
+    part_size_bytes: i64,
+    upload_ref: Option<String>,
+    transfer: TransferMode,
+    parts: Vec<(i32, String)>,
+}
+impl UploadCompletion {
+    fn new(
+        att: &AttachmentRow,
+        meta: &UploadMeta,
+        parts: &[(i32, String)],
+    ) -> Result<Self, AttachmentDbError> {
+        if meta.part_count <= 0
+            || meta.part_count > MAX_PART_COUNT
+            || meta.part_size_bytes <= 0
+            || meta.declared_size_bytes <= 0
+            || meta.upload_ref.as_ref().is_some_and(|r| r.len() > 8192)
+            || att.storage_key.len() > 128
+            || parts.len() != meta.part_count as usize
+        {
+            return Err(AttachmentDbError::InvalidInput);
+        }
+        let parts = canonical_upload_parts(parts, meta.transfer)?;
+        Ok(Self {
+            version: 1,
+            attachment_id: att.id,
+            workspace_id: att.workspace_id,
+            document_id: att.document_id,
+            task_id: att.task_id,
+            uploader_id: att.uploader_id,
+            storage_key: att.storage_key.clone(),
+            created_at: att.created_at,
+            declared_size_bytes: meta.declared_size_bytes,
+            part_size_bytes: meta.part_size_bytes,
+            upload_ref: meta.upload_ref.clone(),
+            transfer: meta.transfer,
+            parts,
+        })
+    }
+    fn current_row(&self, att: &AttachmentRow) -> bool {
+        self.version == 1
+            && self.attachment_id == att.id
+            && self.workspace_id == att.workspace_id
+            && self.document_id == att.document_id
+            && self.task_id == att.task_id
+            && self.uploader_id == att.uploader_id
+            && self.storage_key == att.storage_key
+            && self.created_at == att.created_at
+            && self.declared_size_bytes == att.reserved_size_bytes
+    }
+}
+fn canonical_upload_parts(
+    parts: &[(i32, String)],
+    transfer: TransferMode,
+) -> Result<Vec<(i32, String)>, AttachmentDbError> {
+    if parts.is_empty() || parts.len() > MAX_PART_COUNT as usize {
+        return Err(AttachmentDbError::InvalidInput);
+    }
+    let mut parts: Vec<_> = parts
+        .iter()
+        .map(|(n, e)| {
+            (
+                *n,
+                if transfer == TransferMode::Presigned {
+                    e.trim().trim_matches('"').to_string()
+                } else {
+                    e.clone()
+                },
+            )
+        })
+        .collect();
+    parts.sort_by_key(|(n, _)| *n);
+    if parts.iter().enumerate().any(|(i, (n, e))| {
+        *n != i as i32 + 1 || e.is_empty() || crate::validate::utf16_len(e) > 128
+    }) {
+        return Err(AttachmentDbError::InvalidInput);
+    }
+    Ok(parts)
+}
+fn stored_upload_matches(
+    att: &AttachmentRow,
+    parts: &[(i32, String)],
+) -> Result<bool, sqlx::Error> {
+    let Some(raw) = att.variants.get("_upload_completion") else {
+        // Existing imports/transfers/uploads did not record a part identity.
+        // Keep their established authorized stored-row retry behavior; never
+        // fabricate an authoritative new receipt from a caller's request.
+        return Ok(true);
+    };
+    let receipt: UploadCompletion =
+        serde_json::from_value(raw.clone()).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+    Ok(receipt.current_row(att)
+        && att.size_bytes == Some(receipt.declared_size_bytes)
+        && canonical_upload_parts(parts, receipt.transfer).is_ok_and(|p| p == receipt.parts))
+}
+
+use crate::db::backend::{Backend, OperationTx};
+use crate::db::codec::Cell;
+use tokio_util::sync::CancellationToken;
+
+fn upload_storage_error(err: StorageError) -> sqlx::Error {
+    sqlx::Error::Io(std::io::Error::other(err.to_string()))
+}
+fn upload_cancelled(cancel: &CancellationToken) -> Result<(), AttachmentDbError> {
+    if cancel.is_cancelled() {
+        Err(AttachmentDbError::UploadState)
+    } else {
+        Ok(())
+    }
+}
+#[allow(clippy::too_many_arguments)]
+pub async fn create_upload_backend(
+    backend: &Backend,
+    storage: &ObjectStorage,
+    limits: &UploadLimits,
+    quota: &StorageQuota,
+    workspace: Uuid,
+    reservation: UploadReservation,
+    actor: Uuid,
+    credential: Uuid,
+    input: CreateUploadInput,
+    transfer: TransferMode,
+    ip: Option<&str>,
+) -> Result<Result<(AttachmentRow, UploadMeta), AttachmentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return create_upload(
+            pool,
+            storage,
+            limits,
+            quota,
+            workspace,
+            reservation,
+            actor,
+            credential,
+            input,
+            transfer,
+            ip,
+        )
+        .await;
+    }
+    if input.size_bytes <= 0 || limits.part_size_bytes <= 0 {
+        return Ok(Err(AttachmentDbError::InvalidInput));
+    }
+    if input.size_bytes > limits.max_file_size_bytes {
+        return Ok(Err(AttachmentDbError::TooLarge));
+    }
+    let count = (input.size_bytes - 1) / limits.part_size_bytes + 1;
+    if count > i64::from(MAX_PART_COUNT) {
+        return Ok(Err(AttachmentDbError::InvalidInput));
+    }
+    let id = Uuid::now_v7();
+    let key = Uuid::now_v7().to_string();
+    let mut meta = UploadMeta {
+        part_size_bytes: limits.part_size_bytes,
+        part_count: count as i32,
+        declared_size_bytes: input.size_bytes,
+        upload_ref: None,
+        transfer,
+    };
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let mut op=tx.operation();op.set_tenant(workspace).await?;op.lock_membership_users(&[actor]).await?;
+        if !op.recheck_session(actor,credential).await? {return Ok(Err(AttachmentDbError::Forbidden));}
+        if !op.workspace_is_live(workspace).await? {return Ok(Err(AttachmentDbError::NotFound));}
+        op.membership_role(workspace,actor,true).await?;
+        let (parent,inherited)=match op.upload_reservation(workspace,actor,reservation).await? {Ok(v)=>v,Err(e)=>return Ok(Err(e))};
+        let family=op.attachment_cleanup_tenant_family(workspace)?;
+        let reserved=family.query("SELECT COALESCE(SUM(reserved_size_bytes),0) FROM attachments WHERE workspace_id=?1", &[Cell::uuid(workspace)]).await?[0].cell(0)?.integer()?;
+        if let Err(e)=quota.check(reserved,input.size_bytes) {return Ok(Err(match e {StorageQuotaError::Storage=>AttachmentDbError::StorageLimit,StorageQuotaError::Upload=>AttachmentDbError::UploadLimit}));}
+        let (document,task)=match parent {AttachmentParent::Document(id)=>(Some(id),None),AttachmentParent::Task(id)=>(None,Some(id))};
+        family.execute("INSERT INTO attachments(id,workspace_id,document_id,task_id,uploader_id,status,name,declared_mime,reserved_size_bytes,storage_key,upload_meta) VALUES(?1,?2,?3,?4,?5,'uploading',?6,?7,?8,?9,?10)", &[Cell::uuid(id),Cell::uuid(workspace),Cell::optional_uuid(document),Cell::optional_uuid(task),Cell::uuid(actor),Cell::text(input.name),Cell::optional_text(input.declared_mime.or(inherited).as_deref()),Cell::Integer(input.size_bytes),Cell::text(&key),Cell::json(&json!(meta))?]).await?;
+        Ok(Ok(()))
+    }.await;
+    match result {
+        Ok(Ok(())) => {
+            if let Err(unknown) = tx.commit().await {
+                if matches!(backend, Backend::LibsqlRemote(_)) {
+                    // Ordinary remote COMMIT does not provide an original-stream
+                    // settlement receipt. A fresh maxN writer is not that proof.
+                    return Err(sqlx::Error::AnyDriverError(Box::new(unknown)));
+                }
+                if let Err(e) =
+                    observe_upload_mutation(backend, storage, workspace, id, actor, credential)
+                        .await
+                {
+                    tracing::warn!(error=%e,"upload.reservation_reconciliation_failed");
+                }
+                return Err(sqlx::Error::AnyDriverError(Box::new(unknown)));
+            }
+        }
+        Ok(Err(e)) => {
+            tx.rollback().await?;
+            return Ok(Err(e));
+        }
+        Err(e) => {
+            tx.rollback().await?;
+            return Err(e);
+        }
+    }
+    // First commit tracks this key even if multipart creation/persistence fails.
+    // No automatic repeat of external creation on an uncertain outcome.
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let mut op=tx.operation();op.set_tenant(workspace).await?;
+        let att=match op.upload_actor_row(workspace,id,actor,credential,true).await? {Ok(v)=>v,Err(e)=>return Ok(Err(e))};
+        if att.status!="uploading" || att.storage_key!=key {return Ok(Err(AttachmentDbError::UploadState));}
+        meta.upload_ref=storage.create_multipart(&key).await.map_err(upload_storage_error)?;
+        let family=op.attachment_cleanup_tenant_family(workspace)?;
+        let updated=family.execute("UPDATE attachments SET upload_meta=?3 WHERE workspace_id=?1 AND id=?2 AND status='uploading' AND storage_key=?4", &[Cell::uuid(workspace),Cell::uuid(id),Cell::json(&json!(meta))?,Cell::text(&key)]).await?;
+        if updated!=1 {return Ok(Err(AttachmentDbError::UploadState));}
+        Ok(Ok(op.upload_row(workspace,id).await?.ok_or(sqlx::Error::RowNotFound)?))
+    }.await;
+    match result {
+        Ok(Ok(row)) => {
+            if let Err(unknown) = tx.commit().await {
+                if matches!(backend, Backend::LibsqlRemote(_)) {
+                    // Ordinary remote COMMIT does not provide an original-stream
+                    // settlement receipt. A fresh maxN writer is not that proof.
+                    return Err(sqlx::Error::AnyDriverError(Box::new(unknown)));
+                }
+                if let Err(e) =
+                    observe_upload_mutation(backend, storage, workspace, id, actor, credential)
+                        .await
+                {
+                    tracing::warn!(error=%e,"upload.creation_reconciliation_failed");
+                }
+                return Err(sqlx::Error::AnyDriverError(Box::new(unknown)));
+            }
+            Ok(Ok((row, meta)))
+        }
+        Ok(Err(e)) => {
+            tx.rollback().await?;
+            Ok(Err(e))
+        }
+        Err(e) => {
+            tx.rollback().await?;
+            Err(e)
+        }
+    }
+}
+
+pub async fn authorize_upload_part_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    id: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    number: i32,
+) -> Result<Result<(String, u64, Option<String>), AttachmentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return authorize_upload_part(pool, workspace, id, actor, credential, number).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        let att = match op
+            .upload_actor_row(workspace, id, actor, credential, true)
+            .await?
+        {
+            Ok(v) => v,
+            Err(e) => return Ok(Err(e)),
+        };
+        if att.status != "uploading"
+            || att
+                .upload_meta
+                .as_ref()
+                .is_some_and(|v| v.get("_completion").is_some())
+        {
+            return Ok(Err(AttachmentDbError::UploadState));
+        }
+        let meta = match parse_upload_meta(att.upload_meta.as_ref().unwrap_or(&Value::Null)) {
+            Ok(v) => v,
+            Err(e) => return Ok(Err(e)),
+        };
+        if meta.transfer != TransferMode::Proxy {
+            return Ok(Err(AttachmentDbError::UploadState));
+        }
+        if number < 1 || number > meta.part_count {
+            return Ok(Err(AttachmentDbError::InvalidInput));
+        }
+        Ok(Ok((
+            att.storage_key,
+            meta.part_len(number),
+            meta.upload_ref,
+        )))
+    }
+    .await;
+    tx.rollback().await?;
+    result
+}
+#[allow(clippy::too_many_arguments)]
+pub async fn commit_upload_part_backend(
+    backend: &Backend,
+    storage: &ObjectStorage,
+    workspace: Uuid,
+    id: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    number: i32,
+    expected_key: &str,
+    expected_upload_ref: Option<&str>,
+    staged: &mut StagedPart,
+) -> Result<Result<PartInfo, AttachmentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return commit_upload_part(
+            pool, storage, workspace, id, actor, credential, number, staged,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        let att = match op
+            .upload_actor_row(workspace, id, actor, credential, true)
+            .await?
+        {
+            Ok(v) => v,
+            Err(e) => return Ok(Err(e)),
+        };
+        if att.storage_key != expected_key
+            || att
+                .upload_meta
+                .as_ref()
+                .is_some_and(|v| v.get("_completion").is_some())
+        {
+            return Ok(Err(AttachmentDbError::UploadState));
+        }
+        if att.status != "uploading" {
+            return Ok(Err(AttachmentDbError::UploadState));
+        }
+        let meta = match parse_upload_meta(att.upload_meta.as_ref().unwrap_or(&Value::Null)) {
+            Ok(v) => v,
+            Err(e) => return Ok(Err(e)),
+        };
+        if meta.upload_ref.as_deref() != expected_upload_ref {
+            return Ok(Err(AttachmentDbError::UploadState));
+        }
+        if meta.transfer != TransferMode::Proxy {
+            return Ok(Err(AttachmentDbError::UploadState));
+        }
+        if number < 1 || number > meta.part_count {
+            return Ok(Err(AttachmentDbError::InvalidInput));
+        }
+        if staged.size_bytes > meta.part_len(number) {
+            return Ok(Err(AttachmentDbError::PartTooLarge));
+        }
+        match storage
+            .publish_staged_part(&att.storage_key, number, staged)
+            .await
+        {
+            Ok(p) => Ok(Ok(p)),
+            Err(StorageError::UploadGone) => Ok(Err(AttachmentDbError::UploadState)),
+            Err(StorageError::PartTooLarge) => Ok(Err(AttachmentDbError::PartTooLarge)),
+            Err(e) => Err(upload_storage_error(e)),
+        }
+    }
+    .await;
+    // Publishing a part has no domain DB write. Await release before returning;
+    // complete always checks the real part bytes/ETag under its own writer.
+    tx.rollback().await?;
+    if !matches!(result, Ok(Ok(_))) {
+        staged.discard().await;
+    }
+    result
+}
+
+pub async fn resume_upload_backend(
+    backend: &Backend,
+    storage: &ObjectStorage,
+    workspace: Uuid,
+    id: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<
+    Result<(AttachmentRow, UploadMeta, Vec<(i32, String)>, Vec<i32>), AttachmentDbError>,
+    sqlx::Error,
+> {
+    if let Backend::Postgres(pool) = backend {
+        return resume_upload(pool, storage, workspace, id, actor, credential).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        let att = match op
+            .upload_actor_row(workspace, id, actor, credential, true)
+            .await?
+        {
+            Ok(v) => v,
+            Err(e) => return Ok(Err(e)),
+        };
+        if att.status != "uploading" || prepared_upload(&att)?.is_some() {
+            return Ok(Err(AttachmentDbError::UploadState));
+        }
+        let meta = match parse_upload_meta(att.upload_meta.as_ref().unwrap_or(&Value::Null)) {
+            Ok(v) => v,
+            Err(e) => return Ok(Err(e)),
+        };
+        let uploaded = storage
+            .list_parts(&att.storage_key, meta.upload_ref.as_deref())
+            .await
+            .map_err(upload_storage_error)?;
+        let done: Vec<_> = uploaded
+            .into_iter()
+            .filter(|p| {
+                p.part_number >= 1
+                    && p.part_number <= meta.part_count
+                    && (meta.transfer == TransferMode::Proxy
+                        || p.size_bytes == meta.part_len(p.part_number))
+            })
+            .map(|p| (p.part_number, p.etag))
+            .collect();
+        let remaining = (1..=meta.part_count)
+            .filter(|n| !done.iter().any(|(p, _)| p == n))
+            .collect();
+        Ok(Ok((att, meta, done, remaining)))
+    }
+    .await;
+    tx.rollback().await?;
+    result
+}
+
+pub async fn attachment_parent_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    id: Uuid,
+) -> Result<Option<AttachmentParent>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return attachment_parent(pool, workspace, id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        Ok(op.upload_row(workspace, id).await?.map(|a| a.parent()))
+    }
+    .await;
+    tx.rollback().await?;
+    result
+}
+pub async fn get_attachment_meta_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    id: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<AttachmentRow, AttachmentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return get_attachment_meta(pool, workspace, id, actor, credential).await;
+    }
+    read_upload_backend(backend, workspace, id, actor, credential, false).await
+}
+pub async fn open_download_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    id: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<AttachmentRow, AttachmentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return open_download(pool, workspace, id, actor, credential).await;
+    }
+    read_upload_backend(backend, workspace, id, actor, credential, true).await
+}
+async fn read_upload_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    id: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    download: bool,
+) -> Result<Result<AttachmentRow, AttachmentDbError>, sqlx::Error> {
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        let att = match op
+            .upload_actor_row(workspace, id, actor, credential, false)
+            .await?
+        {
+            Ok(v) => v,
+            Err(e) => return Ok(Err(e)),
+        };
+        if att.status != "stored" {
+            return Ok(Err(AttachmentDbError::NotFound));
+        }
+        if download && att.scan_status == "infected" {
+            return Ok(Err(AttachmentDbError::Infected));
+        }
+        Ok(Ok(att))
+    }
+    .await;
+    tx.rollback().await?;
+    result
+}
+
+pub async fn list_task_attachments_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<Vec<AttachmentRow>, AttachmentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_task_attachments(pool, workspace, task, actor, credential).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result=async {
+        let mut op=tx.operation();op.set_tenant(workspace).await?;
+        if !op.session_is_live(actor,credential).await? {return Ok(Err(AttachmentDbError::Forbidden));}
+        if !op.workspace_is_live(workspace).await? {return Ok(Err(AttachmentDbError::NotFound));}
+        match op.upload_parent_access(workspace,actor,AttachmentParent::Task(task),false).await? {
+            Ok(access) if access.permission.at_least(ProjectPermission::View)=>{},Ok(_)=>return Ok(Err(AttachmentDbError::Forbidden)),Err(e)=>return Ok(Err(e)),
+        }
+        let OperationTx::SqliteFamily(family)=&mut op else {unreachable!()};
+        let rows=family.query("SELECT id FROM attachments WHERE workspace_id=?1 AND task_id=?2 ORDER BY created_at,id", &[Cell::uuid(workspace),Cell::uuid(task)]).await?;
+        let mut out=Vec::with_capacity(rows.len());
+        for row in rows {out.push(op.upload_row(workspace,row.cell(0)?.id()?).await?.ok_or(sqlx::Error::RowNotFound)?);}
+        Ok(Ok(out))
+    }.await;
+    tx.rollback().await?;
+    result
+}
+
+pub async fn delete_attachment_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    id: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    ip: Option<&str>,
+) -> Result<Result<(), AttachmentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return delete_attachment(pool, workspace, id, actor, credential, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        op.lock_membership_users(&[actor]).await?;
+        if !op.recheck_session(actor, credential).await? {
+            return Ok(Err(AttachmentDbError::Forbidden));
+        }
+        if !op.workspace_is_live(workspace).await? {
+            return Ok(Err(AttachmentDbError::NotFound));
+        }
+        let Some(att) = op.upload_row(workspace, id).await? else {
+            return Ok(Err(AttachmentDbError::NotFound));
+        };
+        let access = match op
+            .upload_parent_access(workspace, actor, att.parent(), true)
+            .await?
+        {
+            Ok(v) => v,
+            Err(e) => return Ok(Err(e)),
+        };
+        let needed = if att.uploader_id == actor {
+            ProjectPermission::Edit
+        } else {
+            ProjectPermission::Manage
+        };
+        if !access.permission.at_least(needed) {
+            return Ok(Err(AttachmentDbError::Forbidden));
+        }
+        if att.status == "stored" {
+            if let Err(e) = access.writable {
+                return Ok(Err(e));
+            }
+        }
+        let family = op.attachment_cleanup_tenant_family(workspace)?;
+        if family
+            .execute(
+                "DELETE FROM attachments WHERE workspace_id=?1 AND id=?2 AND storage_key=?3",
+                &[
+                    Cell::uuid(workspace),
+                    Cell::uuid(id),
+                    Cell::text(&att.storage_key),
+                ],
+            )
+            .await?
+            != 1
+        {
+            return Ok(Err(AttachmentDbError::NotFound));
+        }
+        let mut payload = serde_json::Map::new();
+        payload.insert("name".into(), json!(att.name));
+        parent_payload(&att, &mut payload);
+        payload.insert("projectId".into(), json!(access.project_id));
+        op.upload_event(
+            workspace,
+            actor,
+            "attachment.deleted",
+            id,
+            Value::Object(payload),
+            ip,
+        )
+        .await?;
+        Ok(Ok(()))
+    }
+    .await;
+    match result {
+        Ok(Ok(())) => match tx.commit().await {
+            Ok(()) => Ok(Ok(())),
+            Err(unknown) => {
+                if matches!(backend, Backend::LibsqlRemote(_)) {
+                    return Err(sqlx::Error::AnyDriverError(Box::new(unknown)));
+                }
+                // Observe current authority and row after the actual uncertain commit;
+                // leave journal processing to its separate authoritative consumer.
+                let mut observe = backend.begin_write().await?;
+                let observed = async {
+                    let mut op = observe.operation();
+                    op.set_tenant(workspace).await?;
+                    op.recheck_session(actor, credential).await?;
+                    op.upload_row(workspace, id).await
+                }
+                .await;
+                observe.rollback().await?;
+                observed?;
+                Err(sqlx::Error::AnyDriverError(Box::new(unknown)))
+            }
+        },
+        Ok(Err(e)) => {
+            tx.rollback().await?;
+            Ok(Err(e))
+        }
+        Err(e) => {
+            tx.rollback().await?;
+            Err(e)
+        }
+    }
+}
+
+#[cfg(test)]
+mod upload_session_tests {
+    use super::*;
+    use crate::attachments::PartPutSlots;
+    use crate::db::attachment_preview::tests::Fixture;
+    const BYTES:&[u8]=b"S18 literal upload bytes: \xec\x84\xb8\xec\x85\x98 \xed\x95\x9c\xea\xb8\x80; physical original, not just head";
+    fn limits() -> UploadLimits {
+        UploadLimits {
+            part_size_bytes: 24,
+            max_file_size_bytes: 1024,
+            create_rate_per_5min: 20,
+            part_put_slots: PartPutSlots::new(2),
+        }
+    }
+    async fn new_credential(f: &Fixture) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,9223372036854775807)").bind(id.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(id.to_string()).execute(&f.pool).await.unwrap();
+        id
+    }
+    fn storage(f: &Fixture) -> ObjectStorage {
+        ObjectStorage::local(f.root.join("s18-storage"))
+    }
+    async fn create(
+        f: &Fixture,
+        s: &ObjectStorage,
+        credential: Uuid,
+    ) -> (AttachmentRow, UploadMeta) {
+        create_upload_backend(
+            &f.backend,
+            s,
+            &limits(),
+            &StorageQuota::Unlimited,
+            f.workspace,
+            UploadReservation::Target(UploadTarget::WikiDocument(f.document)),
+            f.user,
+            credential,
+            CreateUploadInput {
+                name: "S18-첨부.txt".into(),
+                size_bytes: BYTES.len() as i64,
+                declared_mime: Some("text/plain".into()),
+            },
+            TransferMode::Proxy,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    }
+    async fn parts(
+        f: &Fixture,
+        s: &ObjectStorage,
+        credential: Uuid,
+        att: &AttachmentRow,
+        meta: &UploadMeta,
+    ) -> Vec<(i32, String)> {
+        let mut out = Vec::new();
+        for n in (1..=meta.part_count).rev() {
+            let (key, max, upload_ref) = authorize_upload_part_backend(
+                &f.backend,
+                f.workspace,
+                att.id,
+                f.user,
+                credential,
+                n,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let start = (n as usize - 1) * meta.part_size_bytes as usize;
+            let body = BYTES[start..(start + max as usize).min(BYTES.len())].to_vec();
+            let stream =
+                futures_util::stream::iter(vec![Ok::<_, std::io::Error>(bytes::Bytes::from(body))]);
+            let mut staged = s
+                .stage_part_stream(&key, upload_ref.as_deref(), n, stream, Some(max), max)
+                .await
+                .unwrap();
+            let part = commit_upload_part_backend(
+                &f.backend,
+                s,
+                f.workspace,
+                att.id,
+                f.user,
+                credential,
+                n,
+                &key,
+                upload_ref.as_deref(),
+                &mut staged,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            out.push((n, part.etag));
+        }
+        out
+    }
+    fn write_payload(f: &Fixture, key: &str, bytes: &[u8]) {
+        use std::io::Write;
+        let root = f.root.join("s18-storage/objects").join(key);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut file = std::fs::File::create(root.join("payload")).unwrap();
+        file.write_all(bytes).unwrap();
+        file.sync_all().unwrap();
+    }
+    async fn literal(s: &ObjectStorage, key: &str) {
+        let actual = s.read_range(key, 0, BYTES.len() as u64 - 1).await.unwrap();
+        assert_eq!(actual, BYTES);
+        use sha2::Digest;
+        println!(
+            "S18 actual stored bytes={} sha256={:x}",
+            actual.len(),
+            sha2::Sha256::digest(actual)
+        );
+    }
+    fn published_part_files(f: &Fixture, key: &str) -> std::collections::BTreeMap<String, Vec<u8>> {
+        std::fs::read_dir(f.root.join("s18-storage/tmp").join(key))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.is_file()
+                    && !p
+                        .file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .ends_with(".writing")
+            })
+            .map(|p| {
+                (
+                    p.file_name().unwrap().to_str().unwrap().to_string(),
+                    std::fs::read(p).unwrap(),
+                )
+            })
+            .collect()
+    }
+    fn staged_writing_files(f: &Fixture, key: &str) -> Vec<Vec<u8>> {
+        std::fs::read_dir(f.root.join("s18-storage/tmp").join(key))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .ends_with(".writing")
+            })
+            .map(|p| std::fs::read(p).unwrap())
+            .collect()
+    }
+    async fn listed_parts(s: &ObjectStorage, key: &str) -> Vec<(i32, String, u64)> {
+        s.list_parts(key, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.part_number, p.etag, p.size_bytes))
+            .collect()
+    }
+    #[tokio::test]
+    async fn upload_session_selected_reservation_parts_resume_current_acl_and_old_key() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let credential = new_credential(&f).await;
+        let (att, meta) = create(&f, &s, credential).await;
+        let supplied = parts(&f, &s, credential, &att, &meta).await;
+        let (_, resumed, done, remaining) =
+            resume_upload_backend(&f.backend, &s, f.workspace, att.id, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(resumed.part_count, meta.part_count);
+        assert!(remaining.is_empty());
+        assert_eq!(done.len(), supplied.len());
+        let (key, max, upload_ref) =
+            authorize_upload_part_backend(&f.backend, f.workspace, att.id, f.user, credential, 1)
+                .await
+                .unwrap()
+                .unwrap();
+        let replacement = Uuid::now_v7().to_string();
+        s.create_multipart(&replacement).await.unwrap();
+        let replacement_bytes = vec![b'R'; max as usize];
+        let stream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
+            bytes::Bytes::copy_from_slice(&replacement_bytes),
+        )]);
+        let mut destination = s
+            .stage_part_stream(&replacement, None, 1, stream, Some(max), max)
+            .await
+            .unwrap();
+        s.publish_staged_part(&replacement, 1, &mut destination)
+            .await
+            .unwrap();
+        let old_listing = listed_parts(&s, &key).await;
+        let destination_listing = listed_parts(&s, &replacement).await;
+        let old_files = published_part_files(&f, &key);
+        let destination_files = published_part_files(&f, &replacement);
+        assert_eq!(old_files["1"], BYTES[..max as usize]);
+        assert_eq!(destination_files["1"], replacement_bytes);
+        let changed_bytes = vec![b'Z'; max as usize];
+        assert_ne!(changed_bytes, BYTES[..max as usize]);
+        assert_ne!(changed_bytes, replacement_bytes);
+        let stream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
+            bytes::Bytes::copy_from_slice(&changed_bytes),
+        )]);
+        let mut staged = s
+            .stage_part_stream(&key, upload_ref.as_deref(), 1, stream, Some(max), max)
+            .await
+            .unwrap();
+        assert_eq!(staged_writing_files(&f, &key), vec![changed_bytes.clone()]);
+        sqlx::query("UPDATE attachments SET storage_key=?2 WHERE id=?1")
+            .bind(att.id.as_bytes().as_slice())
+            .bind(&replacement)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            commit_upload_part_backend(
+                &f.backend,
+                &s,
+                f.workspace,
+                att.id,
+                f.user,
+                credential,
+                1,
+                &key,
+                upload_ref.as_deref(),
+                &mut staged
+            )
+            .await
+            .unwrap()
+            .unwrap_err(),
+            AttachmentDbError::UploadState
+        );
+        assert!(
+            staged_writing_files(&f, &key).is_empty(),
+            "denial must await removal while the staged handle is still alive"
+        );
+        assert_eq!(listed_parts(&s, &key).await, old_listing);
+        assert_eq!(listed_parts(&s, &replacement).await, destination_listing);
+        assert_eq!(published_part_files(&f, &key), old_files);
+        assert_eq!(published_part_files(&f, &replacement), destination_files);
+        assert_eq!(s.head(&replacement).await.unwrap(), None);
+        sqlx::query("UPDATE attachments SET storage_key=?2 WHERE id=?1")
+            .bind(att.id.as_bytes().as_slice())
+            .bind(&key)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            authorize_upload_part_backend(
+                &f.backend,
+                Uuid::now_v7(),
+                att.id,
+                f.user,
+                credential,
+                1
+            )
+            .await
+            .unwrap(),
+            Err(AttachmentDbError::NotFound)
+        );
+        // A real live second tenant with the same current actor/credential
+        // distinguishes tenant fencing from merely rejecting a missing workspace.
+        let other_workspace = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO workspaces(id,slug,name) VALUES(?1,'s18-other','S18 other tenant')",
+        )
+        .bind(other_workspace.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')")
+            .bind(other_workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        // Isolate the existing typed row leaf from its independent parent/status
+        // defenses, using the very same actual row and both live tenants.
+        let mut original_scope = f.backend.begin_read().await.unwrap();
+        {
+            let mut op = original_scope.operation();
+            op.set_tenant(f.workspace).await.unwrap();
+            let row = op
+                .upload_row(f.workspace, att.id)
+                .await
+                .unwrap()
+                .expect("original tenant must see its actual uploading row");
+            assert_eq!(row.id, att.id);
+            assert_eq!(row.storage_key, key);
+        }
+        original_scope.rollback().await.unwrap();
+        let mut other_scope = f.backend.begin_read().await.unwrap();
+        {
+            let mut op = other_scope.operation();
+            op.set_tenant(other_workspace).await.unwrap();
+            assert!(
+                op.upload_row(other_workspace, att.id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "row tenant predicate must independently fence the actual ID"
+            );
+        }
+        other_scope.rollback().await.unwrap();
+
+        // Complete a different attachment through real consumers. The first
+        // multipart sample remains uploading for all its existing late-denial
+        // assertions, while this stored sample makes metadata otherwise readable.
+        let (readable, readable_meta) = create(&f, &s, credential).await;
+        let readable_parts = parts(&f, &s, credential, &readable, &readable_meta).await;
+        let stored = finish(&f, &s, credential, readable.id, readable_parts)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, "stored");
+        let visible =
+            get_attachment_meta_backend(&f.backend, f.workspace, stored.id, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(visible.id, stored.id);
+        assert_eq!(visible.workspace_id, f.workspace);
+        assert_eq!(visible.storage_key, readable.storage_key);
+        assert_eq!(visible.status, "stored");
+        literal(&s, &readable.storage_key).await;
+        let committed_counts = counts(&f, stored.id).await;
+        assert_eq!(committed_counts, (1, 1));
+        assert_eq!(
+            get_attachment_meta_backend(&f.backend, other_workspace, stored.id, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap_err(),
+            AttachmentDbError::NotFound
+        );
+        literal(&s, &readable.storage_key).await;
+        assert_eq!(counts(&f, stored.id).await, committed_counts);
+        assert_eq!(
+            get_attachment_meta_backend(&f.backend, other_workspace, att.id, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap_err(),
+            AttachmentDbError::NotFound
+        );
+        assert_eq!(
+            complete_upload_backend(
+                &f.backend,
+                &s,
+                other_workspace,
+                att.id,
+                f.user,
+                credential,
+                supplied.clone(),
+                None
+            )
+            .await
+            .unwrap()
+            .unwrap_err(),
+            AttachmentDbError::NotFound
+        );
+        assert_eq!(listed_parts(&s, &key).await, old_listing);
+        assert_eq!(listed_parts(&s, &replacement).await, destination_listing);
+        assert_eq!(published_part_files(&f, &key), old_files);
+        assert_eq!(published_part_files(&f, &replacement), destination_files);
+        assert_eq!(counts(&f, att.id).await, (0, 0));
+        let stream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
+            bytes::Bytes::copy_from_slice(&changed_bytes),
+        )]);
+        let mut late_staged = s
+            .stage_part_stream(&key, upload_ref.as_deref(), 1, stream, Some(max), max)
+            .await
+            .unwrap();
+        assert_eq!(staged_writing_files(&f, &key), vec![changed_bytes]);
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            commit_upload_part_backend(
+                &f.backend,
+                &s,
+                f.workspace,
+                att.id,
+                f.user,
+                credential,
+                1,
+                &key,
+                upload_ref.as_deref(),
+                &mut late_staged
+            )
+            .await
+            .unwrap()
+            .unwrap_err(),
+            AttachmentDbError::Forbidden
+        );
+        assert!(
+            staged_writing_files(&f, &key).is_empty(),
+            "late revocation must settle staged cleanup before returning"
+        );
+        assert_eq!(listed_parts(&s, &key).await, old_listing);
+        assert_eq!(listed_parts(&s, &replacement).await, destination_listing);
+        assert_eq!(published_part_files(&f, &key), old_files);
+        assert_eq!(published_part_files(&f, &replacement), destination_files);
+        assert_eq!(
+            resume_upload_backend(&f.backend, &s, f.workspace, att.id, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap_err(),
+            AttachmentDbError::Forbidden
+        );
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            authorize_upload_part_backend(&f.backend, f.workspace, att.id, f.user, credential, 1)
+                .await
+                .unwrap(),
+            Err(AttachmentDbError::Forbidden)
+        );
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(
+            resume_upload_backend(&f.backend, &s, f.workspace, att.id, f.user, credential)
+                .await
+                .unwrap()
+                .is_ok()
+        );
+        f.close().await;
+    }
+    #[tokio::test]
+    async fn upload_session_selected_quota_affiliation_and_parent_denials_have_no_row() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let credential = new_credential(&f).await;
+        let denied = create_upload_backend(
+            &f.backend,
+            &s,
+            &limits(),
+            &StorageQuota::fixed(
+                crate::db::quota::QuotaLimit::Bytes(1),
+                crate::db::quota::QuotaLimit::Unlimited,
+            ),
+            f.workspace,
+            UploadReservation::Target(UploadTarget::WikiDocument(f.document)),
+            f.user,
+            credential,
+            CreateUploadInput {
+                name: "quota".into(),
+                size_bytes: BYTES.len() as i64,
+                declared_mime: None,
+            },
+            TransferMode::Proxy,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(denied, AttachmentDbError::StorageLimit);
+        let bad = create_upload_backend(
+            &f.backend,
+            &s,
+            &limits(),
+            &StorageQuota::Unlimited,
+            f.workspace,
+            UploadReservation::Target(UploadTarget::ProjectDocument {
+                project_id: Uuid::now_v7(),
+                document_id: f.document,
+            }),
+            f.user,
+            credential,
+            CreateUploadInput {
+                name: "wrong target".into(),
+                size_bytes: BYTES.len() as i64,
+                declared_mime: None,
+            },
+            TransferMode::Proxy,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(bad, AttachmentDbError::NotFound);
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM attachments")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        let (att, _) = create(&f, &s, credential).await;
+        assert_eq!(
+            get_attachment_meta_backend(&f.backend, f.workspace, att.id, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap_err(),
+            AttachmentDbError::NotFound
+        );
+        delete_attachment_backend(&f.backend, f.workspace, att.id, f.user, credential, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let stats =
+            reclaim_attachment_objects_backend(&f.backend, &s, Some((f.workspace, att.id)), 8)
+                .await
+                .unwrap();
+        assert_eq!(stats.reclaimed, 1);
+        assert!(f.journals().await.is_empty());
+        f.close().await;
+    }
+    async fn finish(
+        f: &Fixture,
+        s: &ObjectStorage,
+        credential: Uuid,
+        id: Uuid,
+        parts: Vec<(i32, String)>,
+    ) -> Result<Result<AttachmentRow, AttachmentDbError>, sqlx::Error> {
+        complete_upload_backend(
+            &f.backend,
+            s,
+            f.workspace,
+            id,
+            f.user,
+            credential,
+            parts,
+            None,
+        )
+        .await
+    }
+    async fn counts(f: &Fixture, id: Uuid) -> (i64, i64) {
+        let e = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE target_id=?1 AND verb='attachment.completed'",
+        )
+        .bind(id.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        let a = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_log WHERE target_id=?1 AND verb='attachment.completed'",
+        )
+        .bind(id.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        (e, a)
+    }
+    async fn pointer(f: &Fixture, id: Uuid) -> (String, String, String) {
+        sqlx::query_as("SELECT status,storage_key,upload_meta FROM attachments WHERE id=?1")
+            .bind(id.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap()
+    }
+    async fn entered(rx: tokio::sync::oneshot::Receiver<()>) {
+        tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    fn launch(
+        f: &Fixture,
+        s: &ObjectStorage,
+        credential: Uuid,
+        id: Uuid,
+        parts: Vec<(i32, String)>,
+        cancel: CancellationToken,
+    ) -> tokio::task::JoinHandle<Result<Result<AttachmentRow, AttachmentDbError>, sqlx::Error>>
+    {
+        let backend = f.backend.clone();
+        let storage = s.clone();
+        let workspace = f.workspace;
+        let actor = f.user;
+        tokio::spawn(async move {
+            complete_upload_backend_with_cancel(
+                &backend, &storage, workspace, id, actor, credential, parts, None, &cancel,
+            )
+            .await
+        })
+    }
+    #[tokio::test]
+    async fn upload_session_selected_complete_literal_fresh_client_replay_and_conflict() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let credential = new_credential(&f).await;
+        let (att, meta) = create(&f, &s, credential).await;
+        let submitted = parts(&f, &s, credential, &att, &meta).await;
+        let completed = finish(&f, &s, credential, att.id, submitted.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.status, "stored");
+        assert_eq!(completed.size_bytes, Some(BYTES.len() as i64));
+        assert_eq!(completed.id, att.id);
+        assert_eq!(completed.document_id, Some(f.document));
+        literal(&s, &att.storage_key).await;
+        assert_eq!(counts(&f, att.id).await, (1, 1));
+        let fresh_pool = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        let fresh = Backend::Sqlite(fresh_pool.clone());
+        let another = new_credential(&f).await;
+        let fresh_row = get_attachment_meta_backend(&fresh, f.workspace, att.id, f.user, another)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fresh_row.storage_key, att.storage_key);
+        assert_eq!(fresh_row.completed_at, completed.completed_at);
+        literal(&s, &fresh_row.storage_key).await;
+        let replay = complete_upload_backend(
+            &fresh,
+            &s,
+            f.workspace,
+            att.id,
+            f.user,
+            another,
+            submitted.clone(),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(replay.completed_at, completed.completed_at);
+        assert_eq!(counts(&f, att.id).await, (1, 1));
+        let output = crate::http::routes::attachments::attachment_output(&replay);
+        let public = serde_json::to_value(output).unwrap();
+        assert!(public.get("variants").is_none());
+        assert!(public.get("_upload_completion").is_none());
+        let mut changed = submitted;
+        changed[0].1 = "changed-etag".into();
+        assert_eq!(
+            finish(&f, &s, credential, att.id, changed)
+                .await
+                .unwrap()
+                .unwrap_err(),
+            AttachmentDbError::EtagMismatch
+        );
+        assert_eq!(counts(&f, att.id).await, (1, 1));
+        literal(&s, &att.storage_key).await;
+        fresh_pool.close().await;
+        f.close().await;
+    }
+    #[tokio::test]
+    async fn upload_session_selected_complete_revoked_actor_and_deleted_parent_no_effect() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let credential = new_credential(&f).await;
+        let (att, meta) = create(&f, &s, credential).await;
+        let submitted = parts(&f, &s, credential, &att, &meta).await;
+        let (paused, go) = cleanup_test_hooks::arm(att.id, 9);
+        let completing = launch(
+            &f,
+            &s,
+            credential,
+            att.id,
+            submitted.clone(),
+            CancellationToken::new(),
+        );
+        entered(paused).await;
+        let before = pointer(&f, att.id).await;
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        go.send(()).unwrap();
+        assert_eq!(
+            completing.await.unwrap().unwrap().unwrap_err(),
+            AttachmentDbError::Forbidden
+        );
+        assert_eq!(pointer(&f, att.id).await, before);
+        assert_eq!(s.head(&att.storage_key).await.unwrap(), None);
+        assert_eq!(counts(&f, att.id).await, (0, 0));
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE documents SET deleted_at=1 WHERE id=?1")
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            finish(&f, &s, credential, att.id, submitted.clone())
+                .await
+                .unwrap()
+                .unwrap_err(),
+            AttachmentDbError::NotFound
+        );
+        assert_eq!(pointer(&f, att.id).await, before);
+        sqlx::query("UPDATE documents SET deleted_at=NULL WHERE id=?1")
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        finish(&f, &s, credential, att.id, submitted)
+            .await
+            .unwrap()
+            .unwrap();
+        literal(&s, &att.storage_key).await;
+        f.close().await;
+    }
+    #[tokio::test]
+    async fn upload_session_selected_gc_first_wins_real_preparation_gap() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let credential = new_credential(&f).await;
+        let (att, meta) = create(&f, &s, credential).await;
+        let submitted = parts(&f, &s, credential, &att, &meta).await;
+        let (paused, go) = cleanup_test_hooks::arm(att.id, 9);
+        let complete = launch(
+            &f,
+            &s,
+            credential,
+            att.id,
+            submitted,
+            CancellationToken::new(),
+        );
+        entered(paused).await;
+        let other = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        let second = Backend::Sqlite(other.clone());
+        assert!(
+            gc_stale_upload_row_backend(&second, &s, f.workspace, att.id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(s.head(&att.storage_key).await.unwrap(), None);
+        go.send(()).unwrap();
+        assert_eq!(
+            complete.await.unwrap().unwrap().unwrap_err(),
+            AttachmentDbError::NotFound
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM attachments WHERE id=?1")
+            .bind(att.id.as_bytes().as_slice())
+            .fetch_one(&other)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(counts(&f, att.id).await, (0, 0));
+        assert_eq!(s.head(&att.storage_key).await.unwrap(), None);
+        other.close().await;
+        f.close().await;
+    }
+    #[tokio::test]
+    async fn upload_session_selected_publication_first_blocks_actual_gc_writer() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let credential = new_credential(&f).await;
+        let (att, meta) = create(&f, &s, credential).await;
+        let submitted = parts(&f, &s, credential, &att, &meta).await;
+        let other = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        let (paused, go) = cleanup_test_hooks::arm(att.id, 10);
+        let complete = launch(
+            &f,
+            &s,
+            credential,
+            att.id,
+            submitted,
+            CancellationToken::new(),
+        );
+        entered(paused).await;
+        let second = Backend::Sqlite(other.clone());
+        let st = s.clone();
+        let workspace = f.workspace;
+        let id = att.id;
+        let mut gc =
+            tokio::spawn(
+                async move { gc_stale_upload_row_backend(&second, &st, workspace, id).await },
+            );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut gc)
+                .await
+                .is_err(),
+            "actual independent writer must wait through active assembly"
+        );
+        go.send(()).unwrap();
+        let completed = complete.await.unwrap().unwrap().unwrap();
+        assert_eq!(completed.id, att.id);
+        assert!(!gc.await.unwrap().unwrap());
+        literal(&s, &att.storage_key).await;
+        assert_eq!(counts(&f, att.id).await, (1, 1));
+        other.close().await;
+        f.close().await;
+    }
+    #[tokio::test]
+    async fn upload_session_selected_cancel_after_settled_assembly_then_exact_retry() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let credential = new_credential(&f).await;
+        let (att, meta) = create(&f, &s, credential).await;
+        let submitted = parts(&f, &s, credential, &att, &meta).await;
+        let (paused, go) = cleanup_test_hooks::arm(att.id, 11);
+        let cancel = CancellationToken::new();
+        let complete = launch(
+            &f,
+            &s,
+            credential,
+            att.id,
+            submitted.clone(),
+            cancel.clone(),
+        );
+        entered(paused).await;
+        cancel.cancel();
+        go.send(()).unwrap();
+        assert_eq!(
+            complete.await.unwrap().unwrap().unwrap_err(),
+            AttachmentDbError::UploadState
+        );
+        let before = pointer(&f, att.id).await;
+        assert_eq!(
+            (&before.0, &before.1),
+            (&"uploading".to_string(), &att.storage_key)
+        );
+        assert_eq!(counts(&f, att.id).await, (0, 0));
+        literal(&s, &att.storage_key).await;
+        let mut changed = submitted.clone();
+        changed[0].1 = "changed-after-cancel".into();
+        assert_eq!(
+            finish(&f, &s, credential, att.id, changed)
+                .await
+                .unwrap()
+                .unwrap_err(),
+            AttachmentDbError::EtagMismatch
+        );
+        assert_eq!(pointer(&f, att.id).await, before);
+        literal(&s, &att.storage_key).await;
+        assert_eq!(
+            authorize_upload_part_backend(&f.backend, f.workspace, att.id, f.user, credential, 1)
+                .await
+                .unwrap()
+                .unwrap_err(),
+            AttachmentDbError::UploadState
+        );
+        finish(&f, &s, credential, att.id, submitted)
+            .await
+            .unwrap()
+            .unwrap();
+        literal(&s, &att.storage_key).await;
+        assert_eq!(counts(&f, att.id).await, (1, 1));
+        f.close().await;
+    }
+    #[tokio::test]
+    async fn upload_session_selected_cancel_failed_real_assemble_keeps_pointer_and_progress() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let credential = new_credential(&f).await;
+        let (att, meta) = create(&f, &s, credential).await;
+        let submitted = parts(&f, &s, credential, &att, &meta).await;
+        let (before_io, continue_io) = cleanup_test_hooks::arm(att.id, 15);
+        let (settled, continue_result) = cleanup_test_hooks::arm(att.id, 14);
+        let cancel = CancellationToken::new();
+        let complete = launch(
+            &f,
+            &s,
+            credential,
+            att.id,
+            submitted.clone(),
+            cancel.clone(),
+        );
+        entered(before_io).await;
+        let bad = f.root.join("s18-storage/objects");
+        std::fs::create_dir_all(bad.parent().unwrap()).unwrap();
+        std::fs::write(&bad, b"real ENOTDIR, not an injected Result").unwrap();
+        continue_io.send(()).unwrap();
+        entered(settled).await;
+        cancel.cancel();
+        continue_result.send(()).unwrap();
+        assert_eq!(
+            complete.await.unwrap().unwrap().unwrap_err(),
+            AttachmentDbError::UploadState
+        );
+        let before = pointer(&f, att.id).await;
+        assert_eq!(before.0, "uploading");
+        assert_eq!(before.1, att.storage_key);
+        assert_eq!(counts(&f, att.id).await, (0, 0));
+        std::fs::remove_file(bad).unwrap();
+        finish(&f, &s, credential, att.id, submitted)
+            .await
+            .unwrap()
+            .unwrap();
+        literal(&s, &att.storage_key).await;
+        assert_eq!(counts(&f, att.id).await, (1, 1));
+        f.close().await;
+    }
+    #[tokio::test]
+    async fn upload_session_selected_actual_commit_failure_read_only_reconcile_and_retry() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let credential = new_credential(&f).await;
+        let (att, meta) = create(&f, &s, credential).await;
+        let submitted = parts(&f, &s, credential, &att, &meta).await;
+        cleanup_test_hooks::arm_deferred_fk(att.id, att.id, Uuid::now_v7());
+        let (failed, go) = cleanup_test_hooks::arm(att.id, 13);
+        let mut complete = launch(
+            &f,
+            &s,
+            credential,
+            att.id,
+            submitted.clone(),
+            CancellationToken::new(),
+        );
+        entered(failed).await;
+        let before = pointer(&f, att.id).await;
+        assert_eq!(before.0, "uploading");
+        literal(&s, &att.storage_key).await;
+        let sentinel = vec![b'R'; BYTES.len()];
+        write_payload(&f, &att.storage_key, &sentinel);
+        let other = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        let second = Backend::Sqlite(other.clone());
+        let held = second.begin_write().await.unwrap();
+        go.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut complete)
+                .await
+                .is_err(),
+            "actual fresh writer reconciliation must be awaited"
+        );
+        held.rollback().await.unwrap();
+        let outcome = complete.await.unwrap();
+        assert!(
+            matches!(&outcome,Err(sqlx::Error::AnyDriverError(e)) if e.downcast_ref::<crate::db::backend::CommitUnknown>().is_some_and(|u|u.source.as_database_error().is_some())),
+            "real deferred FK COMMIT must return unknown, not healthy success: {outcome:?}"
+        );
+        assert_eq!(pointer(&f, att.id).await, before);
+        let document: Vec<u8> =
+            sqlx::query_scalar("SELECT document_id FROM attachments WHERE id=?1")
+                .bind(att.id.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(document, f.document.as_bytes());
+        assert_eq!(counts(&f, att.id).await, (0, 0));
+        assert_eq!(
+            s.read_range(&att.storage_key, 0, BYTES.len() as u64 - 1)
+                .await
+                .unwrap(),
+            sentinel
+        );
+        let mut changed = submitted.clone();
+        changed[0].1 = "different-request".into();
+        assert_eq!(
+            finish(&f, &s, credential, att.id, changed)
+                .await
+                .unwrap()
+                .unwrap_err(),
+            AttachmentDbError::EtagMismatch
+        );
+        assert_eq!(
+            s.read_range(&att.storage_key, 0, BYTES.len() as u64 - 1)
+                .await
+                .unwrap(),
+            sentinel
+        );
+        let reuse = f.backend.begin_write().await.unwrap();
+        reuse.rollback().await.unwrap();
+        finish(&f, &s, credential, att.id, submitted)
+            .await
+            .unwrap()
+            .unwrap();
+        literal(&s, &att.storage_key).await;
+        assert_eq!(counts(&f, att.id).await, (1, 1));
+        other.close().await;
+        f.close().await;
+    }
+    #[tokio::test]
+    async fn upload_session_selected_actual_head_and_partial_assembly_failures_keep_identity() {
+        for head_failure in [true, false] {
+            let f = Fixture::new().await;
+            let s = storage(&f);
+            let credential = new_credential(&f).await;
+            let (att, meta) = create(&f, &s, credential).await;
+            let submitted = parts(&f, &s, credential, &att, &meta).await;
+            let (paused, go) = cleanup_test_hooks::arm(att.id, if head_failure { 11 } else { 10 });
+            let complete = launch(
+                &f,
+                &s,
+                credential,
+                att.id,
+                submitted.clone(),
+                CancellationToken::new(),
+            );
+            entered(paused).await;
+            let moved = f.root.join("moved-original-object");
+            let object = f.root.join("s18-storage/objects").join(&att.storage_key);
+            let part = f
+                .root
+                .join("s18-storage/tmp")
+                .join(&att.storage_key)
+                .join("1");
+            if head_failure {
+                std::fs::rename(&object, &moved).unwrap();
+                std::fs::write(&object, b"actual ENOTDIR at head").unwrap();
+            } else {
+                std::fs::write(&part, b"a physically changed part").unwrap();
+            }
+            go.send(()).unwrap();
+            let outcome = complete.await.unwrap();
+            if head_failure {
+                assert!(
+                    matches!(outcome, Err(sqlx::Error::Io(_))),
+                    "head must report actual storage failure: {outcome:?}"
+                );
+                std::fs::remove_file(&object).unwrap();
+                std::fs::rename(&moved, &object).unwrap();
+            } else {
+                assert_eq!(
+                    outcome.unwrap().unwrap_err(),
+                    AttachmentDbError::EtagMismatch
+                );
+                std::fs::write(&part, &BYTES[..meta.part_size_bytes as usize]).unwrap();
+            }
+            let before = pointer(&f, att.id).await;
+            assert_eq!(before.0, "uploading");
+            assert_eq!(before.1, att.storage_key);
+            assert_eq!(counts(&f, att.id).await, (0, 0));
+            finish(&f, &s, credential, att.id, submitted)
+                .await
+                .unwrap()
+                .unwrap();
+            literal(&s, &att.storage_key).await;
+            assert_eq!(counts(&f, att.id).await, (1, 1));
+            f.close().await;
+        }
+    }
+    #[tokio::test]
+    async fn upload_session_selected_current_key_or_target_change_fences_prepared_owner() {
+        for change_key in [true, false] {
+            let f = Fixture::new().await;
+            let s = storage(&f);
+            let credential = new_credential(&f).await;
+            let (att, meta) = create(&f, &s, credential).await;
+            let submitted = parts(&f, &s, credential, &att, &meta).await;
+            let (_, other_task) = f.task_attachment().await;
+            let replacement = Uuid::now_v7().to_string();
+            write_payload(&f, &att.storage_key, BYTES);
+            s.put_bytes(&replacement, BYTES.to_vec()).await.unwrap();
+            let (paused, go) = cleanup_test_hooks::arm(att.id, 9);
+            let complete = launch(
+                &f,
+                &s,
+                credential,
+                att.id,
+                submitted,
+                CancellationToken::new(),
+            );
+            entered(paused).await;
+            if change_key {
+                sqlx::query("UPDATE attachments SET storage_key=?2 WHERE id=?1")
+                    .bind(att.id.as_bytes().as_slice())
+                    .bind(&replacement)
+                    .execute(&f.pool)
+                    .await
+                    .unwrap();
+            } else {
+                sqlx::query("UPDATE attachments SET document_id=NULL,task_id=?2 WHERE id=?1")
+                    .bind(att.id.as_bytes().as_slice())
+                    .bind(other_task.as_bytes().as_slice())
+                    .execute(&f.pool)
+                    .await
+                    .unwrap();
+            }
+            let expected = pointer(&f, att.id).await;
+            go.send(()).unwrap();
+            assert_eq!(
+                complete.await.unwrap().unwrap().unwrap_err(),
+                AttachmentDbError::UploadState
+            );
+            assert_eq!(pointer(&f, att.id).await, expected);
+            assert_eq!(counts(&f, att.id).await, (0, 0));
+            literal(&s, &att.storage_key).await;
+            literal(&s, &replacement).await;
+            f.close().await;
+        }
+    }
+    #[tokio::test]
+    async fn upload_session_selected_current_references_and_legacy_rows_preserve_objects() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let credential = new_credential(&f).await;
+        let (att, meta) = create(&f, &s, credential).await;
+        let submitted = parts(&f, &s, credential, &att, &meta).await;
+        write_payload(&f, &att.storage_key, BYTES);
+        let (other, other_key) = f.attachment(BYTES.len() as i64, "image/png").await;
+        s.put_bytes(&other_key, BYTES.to_vec()).await.unwrap();
+        let claim = crate::db::attachment_preview::claim_preview_backend(&f.backend)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.attachment_id, other);
+        let journal = crate::db::attachment_preview::journal_preview_key_backend(
+            &f.backend,
+            &claim,
+            &att.storage_key,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(crate::db::attachment_preview::publish_preview_backend(
+            &f.backend,
+            &claim,
+            journal,
+            &att.storage_key,
+            1,
+            1,
+            BYTES.len() as u64
+        )
+        .await
+        .unwrap());
+        assert_eq!(
+            finish(&f, &s, credential, att.id, submitted.clone())
+                .await
+                .unwrap()
+                .unwrap_err(),
+            AttachmentDbError::UploadState
+        );
+        literal(&s, &att.storage_key).await;
+        assert_eq!(counts(&f, att.id).await, (0, 0));
+        delete_attachment_backend(&f.backend, f.workspace, other, f.user, credential, None)
+            .await
+            .unwrap()
+            .unwrap();
+        reclaim_attachment_objects_backend(&f.backend, &s, Some((f.workspace, other)), 8)
+            .await
+            .unwrap();
+        literal(&s, &att.storage_key).await;
+        assert_eq!(s.head(&other_key).await.unwrap(), None);
+        finish(&f, &s, credential, att.id, submitted)
+            .await
+            .unwrap()
+            .unwrap();
+        literal(&s, &att.storage_key).await;
+        let (legacy, key) = f
+            .attachment(BYTES.len() as i64, "application/octet-stream")
+            .await;
+        s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+        let old = finish(
+            &f,
+            &s,
+            credential,
+            legacy,
+            vec![(1, "legacy current-data request".into())],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(old.id, legacy);
+        assert!(old.variants.get("_upload_completion").is_none());
+        literal(&s, &key).await;
+        let (unowned, meta) = create(&f, &s, credential).await;
+        let unowned_parts = parts(&f, &s, credential, &unowned, &meta).await;
+        sqlx::query("UPDATE attachments SET status='assembling' WHERE id=?1")
+            .bind(unowned.id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let before = pointer(&f, unowned.id).await;
+        assert_eq!(
+            finish(&f, &s, credential, unowned.id, unowned_parts)
+                .await
+                .unwrap()
+                .unwrap_err(),
+            AttachmentDbError::UploadState
+        );
+        assert!(
+            !gc_stale_upload_row_backend(&f.backend, &s, f.workspace, unowned.id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(pointer(&f, unowned.id).await, before);
+        assert_eq!(counts(&f, unowned.id).await, (0, 0));
+        f.close().await;
+    }
+}
+
+fn prepared_upload(att: &AttachmentRow) -> Result<Option<UploadCompletion>, sqlx::Error> {
+    att.upload_meta
+        .as_ref()
+        .and_then(|v| v.get("_completion"))
+        .map(|v| serde_json::from_value(v.clone()).map_err(|e| sqlx::Error::Decode(Box::new(e))))
+        .transpose()
+}
+fn prepared_upload_matches(att: &AttachmentRow, completion: &UploadCompletion) -> bool {
+    let Some(meta) = att
+        .upload_meta
+        .as_ref()
+        .and_then(|v| parse_upload_meta(v).ok())
+    else {
+        return false;
+    };
+    completion.current_row(att)
+        && meta.declared_size_bytes == completion.declared_size_bytes
+        && meta.part_size_bytes == completion.part_size_bytes
+        && meta.part_count as usize == completion.parts.len()
+        && meta.transfer == completion.transfer
+        && meta.upload_ref == completion.upload_ref
+}
+fn completion_parts_match(meta: &UploadMeta, parts: &[(i32, String)], listed: &[PartInfo]) -> bool {
+    if meta.transfer == TransferMode::Presigned {
+        return meta.listed_parts_match(parts, listed);
+    }
+    let Ok(parts) = canonical_upload_parts(parts, meta.transfer) else {
+        return false;
+    };
+    parts.len() == listed.len()
+        && listed
+            .iter()
+            .zip(parts)
+            .all(|(a, (n, e))| a.part_number == n && a.etag == e)
+}
+impl OperationTx<'_, '_> {
+    async fn upload_key_owned(
+        &mut self,
+        workspace: Uuid,
+        id: Uuid,
+        key: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let family = self.attachment_cleanup_tenant_family(workspace)?;
+        let rows=family.query("SELECT NOT EXISTS(SELECT 1 FROM attachments WHERE workspace_id=?1 AND ((id<>?2 AND storage_key=?3) OR json_extract(variants,'$.preview.key')=?3))", &[Cell::uuid(workspace),Cell::uuid(id),Cell::text(key)]).await?;
+        rows[0].cell(0)?.boolean()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn complete_upload_backend(
+    backend: &Backend,
+    storage: &ObjectStorage,
+    workspace: Uuid,
+    id: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    parts: Vec<(i32, String)>,
+    ip: Option<&str>,
+) -> Result<Result<AttachmentRow, AttachmentDbError>, sqlx::Error> {
+    complete_upload_backend_with_cancel(
+        backend,
+        storage,
+        workspace,
+        id,
+        actor,
+        credential,
+        parts,
+        ip,
+        &CancellationToken::new(),
+    )
+    .await
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn complete_upload_backend_with_cancel(
+    backend: &Backend,
+    storage: &ObjectStorage,
+    workspace: Uuid,
+    id: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    parts: Vec<(i32, String)>,
+    ip: Option<&str>,
+    cancel: &CancellationToken,
+) -> Result<Result<AttachmentRow, AttachmentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return complete_upload_pg_with_cancel(
+            pool, storage, workspace, id, actor, credential, parts, ip, cancel,
+        )
+        .await;
+    }
+    // Preparation durably binds the actual verified parts before S3 can consume
+    // them. There is no active assembly yet, and GC is allowed to win this gap.
+    let mut preparation = backend.begin_write().await?;
+    let prepared=async {
+        if let Err(e)=upload_cancelled(cancel) {return Ok(Err(e));}
+        let mut op=preparation.operation();op.set_tenant(workspace).await?;
+        let att=match op.upload_actor_row(workspace,id,actor,credential,true).await? {Ok(v)=>v,Err(e)=>return Ok(Err(e))};
+        if att.status=="stored" {
+            if !stored_upload_matches(&att,&parts)? {return Ok(Err(AttachmentDbError::EtagMismatch));}
+            if storage.head(&att.storage_key).await.map_err(upload_storage_error)?!=att.size_bytes.map(|s|s as u64) {return Err(sqlx::Error::Io(std::io::Error::other("stored upload payload missing or changed")));}
+            return Ok(Ok((att,None)));
+        }
+        // Legacy committed assembling rows have no proven family owner/recovery
+        // contract. New family assembly never commits this intermediate state.
+        if att.status!="uploading" {return Ok(Err(AttachmentDbError::UploadState));}
+        let meta=match parse_upload_meta(att.upload_meta.as_ref().unwrap_or(&Value::Null)) {Ok(v)=>v,Err(e)=>return Ok(Err(e))};
+        let completion=match UploadCompletion::new(&att,&meta,&parts) {Ok(v)=>v,Err(e)=>return Ok(Err(e))};
+        if let Some(current)=prepared_upload(&att)? {
+            if !prepared_upload_matches(&att,&current) || current!=completion {return Ok(Err(AttachmentDbError::EtagMismatch));}
+            return Ok(Ok((att,Some((completion,false)))));
+        }
+        if !op.upload_key_owned(workspace,id,&att.storage_key).await? {return Ok(Err(AttachmentDbError::UploadState));}
+        let listed=match storage.list_parts(&att.storage_key,meta.upload_ref.as_deref()).await {Ok(v)=>v,Err(StorageError::UploadGone)=>return Ok(Err(AttachmentDbError::UploadState)),Err(e)=>return Err(upload_storage_error(e))};
+        if let Err(e)=upload_cancelled(cancel) {return Ok(Err(e));}
+        if !completion_parts_match(&meta,&parts,&listed) {return Ok(Err(AttachmentDbError::EtagMismatch));}
+        let family=op.attachment_cleanup_tenant_family(workspace)?;
+        if family.execute("UPDATE attachments SET upload_meta=json_set(upload_meta,'$._completion',json(?3)) WHERE workspace_id=?1 AND id=?2 AND status='uploading' AND storage_key=?4", &[Cell::uuid(workspace),Cell::uuid(id),Cell::json(&json!(completion))?,Cell::text(&att.storage_key)]).await?!=1 {return Ok(Err(AttachmentDbError::UploadState));}
+        Ok(Ok((att,Some((completion,true)))))
+    }.await;
+    let (att, prepared) = match prepared {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            preparation.rollback().await?;
+            return Ok(Err(e));
+        }
+        Err(e) => {
+            preparation.rollback().await?;
+            return Err(e);
+        }
+    };
+    let Some((completion, changed)) = prepared else {
+        preparation.rollback().await?;
+        finalize_stored_parts(storage, id, &att.storage_key).await;
+        return Ok(Ok(att));
+    };
+    if cancel.is_cancelled() {
+        preparation.rollback().await?;
+        return Ok(Err(AttachmentDbError::UploadState));
+    }
+    if changed {
+        if let Err(unknown) = preparation.commit().await {
+            if matches!(backend, Backend::LibsqlRemote(_)) {
+                return Err(sqlx::Error::AnyDriverError(Box::new(unknown)));
+            }
+            // Observe after uncertain preparation; never enter assembly from it.
+            if let Err(e) = observe_upload_completion(
+                backend,
+                storage,
+                workspace,
+                id,
+                actor,
+                credential,
+                &completion,
+            )
+            .await
+            {
+                tracing::warn!(error=%e,"upload.preparation_reconciliation_failed");
+            }
+            return Err(sqlx::Error::AnyDriverError(Box::new(unknown)));
+        }
+    } else {
+        preparation.rollback().await?;
+    }
+    #[cfg(test)]
+    cleanup_test_hooks::wait(id, 9).await;
+    let mut owned = backend.begin_write().await?;
+    let outcome=async {
+        if let Err(e)=upload_cancelled(cancel) {return Ok(Err(e));}
+        let mut op=owned.operation();op.set_tenant(workspace).await?;
+        let att=match op.upload_actor_row(workspace,id,actor,credential,true).await? {Ok(v)=>v,Err(e)=>return Ok(Err(e))};
+        if att.status=="stored" {
+            if !stored_upload_matches(&att,&parts)? {return Ok(Err(AttachmentDbError::EtagMismatch));}
+            if storage.head(&att.storage_key).await.map_err(upload_storage_error)?!=att.size_bytes.map(|s|s as u64) {return Err(sqlx::Error::Io(std::io::Error::other("stored upload payload missing or changed")));}
+            return Ok(Ok(Some(att)));
+        }
+        if att.status!="uploading" || !prepared_upload_matches(&att,&completion) || prepared_upload(&att)?.as_ref()!=Some(&completion) || !op.upload_key_owned(workspace,id,&completion.storage_key).await? {return Ok(Err(AttachmentDbError::UploadState));}
+        let meta=parse_upload_meta(att.upload_meta.as_ref().unwrap_or(&Value::Null)).map_err(|e|sqlx::Error::Protocol(e.to_string()))?;
+        let family=op.attachment_cleanup_tenant_family(workspace)?;
+        if family.execute("UPDATE attachments SET status='assembling' WHERE workspace_id=?1 AND id=?2 AND status='uploading' AND storage_key=?3", &[Cell::uuid(workspace),Cell::uuid(id),Cell::text(&completion.storage_key)]).await?!=1 {return Ok(Err(AttachmentDbError::UploadState));}
+        #[cfg(test)] cleanup_test_hooks::wait(id,10).await;
+        if let Err(e)=upload_cancelled(cancel) {return Ok(Err(e));}
+        storage.discard_uncommitted_payload(&completion.storage_key).await.map_err(upload_storage_error)?;
+        if let Err(e)=upload_cancelled(cancel) {return Ok(Err(e));}
+        #[cfg(test)] cleanup_test_hooks::wait(id,15).await;
+        let assembled=storage.assemble_multipart(&completion.storage_key,meta.upload_ref.as_deref(),&completion.parts).await;
+        #[cfg(test)] cleanup_test_hooks::wait(id,14).await;
+        if let Err(e)=upload_cancelled(cancel) {return Ok(Err(e));}
+        let size=match assembled {Ok(n)=>n,Err(StorageError::EtagMismatch|StorageError::PartTooSmall)=>return Ok(Err(AttachmentDbError::EtagMismatch)),Err(StorageError::UploadGone)=>return Ok(Err(AttachmentDbError::UploadState)),Err(e)=>return Err(upload_storage_error(e))};
+        #[cfg(test)] cleanup_test_hooks::wait(id,11).await;
+        let head=storage.head(&completion.storage_key).await.map_err(upload_storage_error)?;
+        if let Err(e)=upload_cancelled(cancel) {return Ok(Err(e));}
+        if size!=completion.declared_size_bytes as u64 || head!=Some(completion.declared_size_bytes as u64) {
+            storage.purge_key(&completion.storage_key).await.map_err(upload_storage_error)?;
+            let absent=storage.head(&completion.storage_key).await.map_err(upload_storage_error)?.is_none();
+            if let Err(e)=upload_cancelled(cancel) {return Ok(Err(e));}
+            if !absent {return Err(sqlx::Error::Io(std::io::Error::other("invalid upload payload survived cleanup")));}
+            let family=op.attachment_cleanup_tenant_family(workspace)?;
+            if family.execute("DELETE FROM attachments WHERE workspace_id=?1 AND id=?2 AND status='assembling' AND storage_key=?3", &[Cell::uuid(workspace),Cell::uuid(id),Cell::text(&completion.storage_key)]).await?!=1 {return Ok(Err(AttachmentDbError::UploadState));}
+            return Ok(Ok(None));
+        }
+        let mime=storage.sniff_mime(&completion.storage_key).await.map_err(upload_storage_error)?;
+        if let Err(e)=upload_cancelled(cancel) {return Ok(Err(e));}
+        #[cfg(test)] cleanup_test_hooks::wait(id,12).await;
+        let current=match op.upload_actor_row(workspace,id,actor,credential,true).await? {Ok(v)=>v,Err(e)=>return Ok(Err(e))};
+        if current.status!="assembling" || !prepared_upload_matches(&current,&completion) || prepared_upload(&current)?.as_ref()!=Some(&completion) {return Ok(Err(AttachmentDbError::UploadState));}
+        let image=is_image_mime(&mime);let extract=initial_extract_status(&current.name,&mime);
+        let preview=if image && crate::attachments::preview::preview_mime_supported(&mime) {"pending"} else {"skipped"};
+        let family=op.attachment_cleanup_tenant_family(workspace)?;
+        if family.execute("UPDATE attachments SET status='stored',mime=?3,size_bytes=?4,image=?5,scan_status='skipped',extract_status=?6,preview_status=?7,upload_meta=NULL,completed_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000),variants=json_set(variants,'$._upload_completion',json(?8)) WHERE workspace_id=?1 AND id=?2 AND status='assembling' AND storage_key=?9", &[Cell::uuid(workspace),Cell::uuid(id),Cell::text(&mime),Cell::Integer(size as i64),Cell::Integer(i64::from(image)),Cell::text(extract),Cell::text(preview),Cell::json(&json!(completion))?,Cell::text(&completion.storage_key)]).await?!=1 {return Ok(Err(AttachmentDbError::UploadState));}
+        let mut payload=serde_json::Map::new();payload.insert("name".into(),json!(current.name));parent_payload(&current,&mut payload);payload.insert("sizeBytes".into(),json!(size));payload.insert("mime".into(),json!(mime));
+        op.upload_event(workspace,actor,"attachment.completed",id,Value::Object(payload),ip).await?;
+        #[cfg(test)] cleanup_test_hooks::defer_fk_fault(&mut op,&AttachmentObjectCleanup{id,workspace_id:workspace,attachment_id:id,storage_key:completion.storage_key.clone()}).await?;
+        if let Err(e)=upload_cancelled(cancel) {return Ok(Err(e));}
+        Ok(Ok(Some(op.upload_row(workspace,id).await?.ok_or(sqlx::Error::RowNotFound)?)))
+    }.await;
+    match outcome {
+        Ok(Ok(row)) if !cancel.is_cancelled() => match owned.commit().await {
+            Ok(()) => match row {
+                Some(row) => {
+                    finalize_stored_parts(storage, id, &completion.storage_key).await;
+                    Ok(Ok(row))
+                }
+                None => Ok(Err(AttachmentDbError::InvalidInput)),
+            },
+            Err(unknown) => {
+                if matches!(backend, Backend::LibsqlRemote(_)) {
+                    return Err(sqlx::Error::AnyDriverError(Box::new(unknown)));
+                }
+                #[cfg(test)]
+                cleanup_test_hooks::wait(id, 13).await;
+                if let Ok(Some(row)) = observe_upload_completion(
+                    backend,
+                    storage,
+                    workspace,
+                    id,
+                    actor,
+                    credential,
+                    &completion,
+                )
+                .await
+                {
+                    finalize_stored_parts(storage, id, &completion.storage_key).await;
+                    return Ok(Ok(row));
+                }
+                Err(sqlx::Error::AnyDriverError(Box::new(unknown)))
+            }
+        },
+        Ok(Ok(_)) => {
+            owned.rollback().await?;
+            Ok(Err(AttachmentDbError::UploadState))
+        }
+        Ok(Err(e)) => {
+            owned.rollback().await?;
+            Ok(Err(e))
+        }
+        Err(e) => {
+            owned.rollback().await?;
+            Err(e)
+        }
+    }
+}
+#[allow(clippy::too_many_arguments)]
+async fn observe_upload_completion(
+    backend: &Backend,
+    storage: &ObjectStorage,
+    workspace: Uuid,
+    id: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    completion: &UploadCompletion,
+) -> Result<Option<AttachmentRow>, sqlx::Error> {
+    let mut fresh = backend.begin_write().await?;
+    let observed = async {
+        let mut op = fresh.operation();
+        op.set_tenant(workspace).await?;
+        let att = match op
+            .upload_actor_row(workspace, id, actor, credential, true)
+            .await?
+        {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
+        // Current committed identity and payload are checked read/head-only;
+        // no new assembly, purge, request receipt or healthy owner is minted.
+        if !completion.current_row(&att) {
+            return Ok(None);
+        }
+        let head = storage
+            .head(&completion.storage_key)
+            .await
+            .map_err(upload_storage_error)?;
+        if att.status == "stored"
+            && stored_upload_matches(&att, &completion.parts)?
+            && att
+                .variants
+                .get("_upload_completion")
+                .map(|v| serde_json::from_value::<UploadCompletion>(v.clone()))
+                .transpose()
+                .map_err(|e| sqlx::Error::Decode(Box::new(e)))?
+                .as_ref()
+                == Some(completion)
+            && head == Some(completion.declared_size_bytes as u64)
+        {
+            Ok(Some(att))
+        } else {
+            Ok(None)
+        }
+    }
+    .await;
+    fresh.rollback().await?;
+    observed
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn observe_pg_upload_completion(
+    lock: &mut AttachmentSessionLock,
+    storage: &ObjectStorage,
+    workspace: Uuid,
+    id: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    completion: &UploadCompletion,
+) -> Result<Option<AttachmentRow>, sqlx::Error> {
+    let mut fresh = lock.begin().await?;
+    let result = async {
+        set_tenant(&mut fresh, workspace).await?;
+        let att =
+            match check_upload_write_access(&mut fresh, workspace, actor, credential, id).await? {
+                Ok(v) => v,
+                Err(_) => return Ok(None),
+            };
+        if !completion.current_row(&att) {
+            return Ok(None);
+        }
+        let head = storage
+            .head(&completion.storage_key)
+            .await
+            .map_err(upload_storage_error)?;
+        let recorded = att
+            .variants
+            .get("_upload_completion")
+            .map(|v| serde_json::from_value::<UploadCompletion>(v.clone()))
+            .transpose()
+            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        Ok(
+            if att.status == "stored"
+                && recorded.as_ref() == Some(completion)
+                && head == Some(completion.declared_size_bytes as u64)
+            {
+                Some(att)
+            } else {
+                None
+            },
+        )
+    }
+    .await;
+    fresh.rollback().await?;
+    result
+}
+
+async fn observe_upload_mutation(
+    backend: &Backend,
+    storage: &ObjectStorage,
+    workspace: Uuid,
+    id: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<(), sqlx::Error> {
+    let mut fresh = backend.begin_write().await?;
+    let observed=async {
+        let mut op=fresh.operation();op.set_tenant(workspace).await?;
+        if !op.recheck_session(actor,credential).await? || !op.workspace_is_live(workspace).await? {return Ok(());}
+        if let Some(row)=op.upload_row(workspace,id).await? {
+            if matches!(op.upload_parent_access(workspace,actor,row.parent(),true).await?,Ok(access) if access.permission.at_least(ProjectPermission::View)) {storage.head(&row.storage_key).await.map_err(upload_storage_error)?;}
+        }
+        let family=op.attachment_cleanup_tenant_family(workspace)?;
+        let rows=family.query("SELECT storage_key FROM attachment_object_cleanups WHERE workspace_id=?1 AND attachment_id=?2 ORDER BY id LIMIT 8", &[Cell::uuid(workspace),Cell::uuid(id)]).await?;
+        for row in rows {let key=row.cell(0)?.string()?;storage.head(&key).await.map_err(upload_storage_error)?;}
+        Ok(())
+    }.await;
+    fresh.rollback().await?;
+    observed
 }

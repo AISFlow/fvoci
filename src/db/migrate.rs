@@ -897,6 +897,10 @@ const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
         include_str!("../../migrations/sqlite/003_collab_room_fences.sql"),
         "fd9b35411378d7485c40f9fcac2821121eb260c1a09dc7bdeb08a72608ba6d70",
     ),
+    (
+        include_str!("../../migrations/sqlite/004_maintenance_claims.sql"),
+        "6e034f6aa3f69b6c7a4ac4ff13035e5276ec7e840eb73d97a78a1456105dbade",
+    ),
 ];
 
 /// Held by the actual server for its entire joined runtime, or exclusively
@@ -1195,56 +1199,67 @@ async fn apply_sqlite_migrations(
     backend: &super::backend::Backend,
     cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<(), sqlx::Error> {
-    use super::backend::DbTransaction;
-    use super::codec::Cell;
     for (index, (sql, digest)) in SQLITE_MIGRATIONS.iter().enumerate() {
-        if cancel.is_some_and(|token| token.is_cancelled()) {
-            return Err(schema_error(
-                "SQLite migration cancelled after in-flight work settled",
-            ));
-        }
-        let mut tx = backend.begin_write().await?;
-        let result = async {
-            if cancel.is_some_and(|token| token.is_cancelled()) { return Err(schema_error("SQLite migration cancelled before new step")); }
-            let DbTransaction::SqliteFamily(family) = &mut tx else {
-                return Err(schema_error("SQLite migrations require an actual SQLite-family handle"));
-            };
-            let applied = sqlite_applied(family).await?;
-            verify_sqlite_applied(&applied, false)?;
-            verify_sqlite_objects(family, applied.len()).await?;
-            if index < applied.len() { return Ok(false); }
-            if index != applied.len() { return Err(schema_error("SQLite migration gap")); }
-            verify_compiled_sqlite_digest(sql, digest)?;
-            if cancel.is_some_and(|token| token.is_cancelled()) { return Err(schema_error("SQLite migration cancelled before DDL")); }
-            family.apply_migration_batch(sql).await?;
-            if cancel.is_some_and(|token| token.is_cancelled()) { return Err(schema_error("SQLite migration cancelled after DDL; rollback before marker/commit")); }
-            family.execute(
-                "INSERT INTO schema_migrations(version,lineage,sql_sha256,applied_at) VALUES(?1,?2,?3,unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)",
-                &[Cell::Integer((index + 1) as i64), Cell::text(SQLITE_LINEAGE), Cell::text(*digest)],
-            ).await?;
-            verify_sqlite_objects(family, index + 1).await?;
-            Ok(true)
-        }.await;
-        match result {
-            Ok(true) => {
-                if cancel.is_some_and(|token| token.is_cancelled()) {
-                    tx.rollback().await?;
-                    return Err(schema_error("SQLite migration cancelled before commit"));
-                }
-                tx.commit()
-                    .await
-                    .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
-            }
-            Ok(false) => tx.rollback().await?,
-            Err(error) => {
-                return Err(sqlite_validation_error_after_rollback(
-                    error,
-                    tx.rollback().await,
-                ));
-            }
-        }
+        apply_sqlite_migration_step(backend, index, sql, digest, cancel).await?;
     }
     assert_sqlite_schema_current(backend).await.map(|_| ())
+}
+
+async fn apply_sqlite_migration_step(
+    backend: &super::backend::Backend,
+    index: usize,
+    sql: &'static str,
+    digest: &'static str,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<(), sqlx::Error> {
+    use super::backend::DbTransaction;
+    use super::codec::Cell;
+    if cancel.is_some_and(|token| token.is_cancelled()) {
+        return Err(schema_error(
+            "SQLite migration cancelled after in-flight work settled",
+        ));
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        if cancel.is_some_and(|token| token.is_cancelled()) { return Err(schema_error("SQLite migration cancelled before new step")); }
+        let DbTransaction::SqliteFamily(family) = &mut tx else {
+            return Err(schema_error("SQLite migrations require an actual SQLite-family handle"));
+        };
+        let applied = sqlite_applied(family).await?;
+        verify_sqlite_applied(&applied, false)?;
+        verify_sqlite_objects(family, applied.len()).await?;
+        if index < applied.len() { return Ok(false); }
+        if index != applied.len() { return Err(schema_error("SQLite migration gap")); }
+        verify_compiled_sqlite_digest(sql, digest)?;
+        if cancel.is_some_and(|token| token.is_cancelled()) { return Err(schema_error("SQLite migration cancelled before DDL")); }
+        family.apply_migration_batch(sql).await?;
+        if cancel.is_some_and(|token| token.is_cancelled()) { return Err(schema_error("SQLite migration cancelled after DDL; rollback before marker/commit")); }
+        family.execute(
+            "INSERT INTO schema_migrations(version,lineage,sql_sha256,applied_at) VALUES(?1,?2,?3,unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)",
+            &[Cell::Integer((index + 1) as i64), Cell::text(SQLITE_LINEAGE), Cell::text(digest)],
+        ).await?;
+        verify_sqlite_objects(family, index + 1).await?;
+        Ok(true)
+    }.await;
+    match result {
+        Ok(true) => {
+            if cancel.is_some_and(|token| token.is_cancelled()) {
+                tx.rollback().await?;
+                return Err(schema_error("SQLite migration cancelled before commit"));
+            }
+            tx.commit()
+                .await
+                .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+        }
+        Ok(false) => tx.rollback().await?,
+        Err(error) => {
+            return Err(sqlite_validation_error_after_rollback(
+                error,
+                tx.rollback().await,
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1457,5 +1472,185 @@ mod sqlite_rollback_tests {
             ordinary.to_string(),
             schema_error("schema validation failed").to_string()
         );
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod maintenance_claim_migration_tests {
+    use super::super::backend::Backend;
+    use super::*;
+    #[tokio::test]
+    async fn maintenance_claim_migration_current_populated_restart_and_gap_refusal() {
+        let root = std::env::temp_dir().join(format!("fvoci-s16-migrate-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("app.sqlite");
+        run_sqlite_migrations(&path).await.unwrap();
+        let pool = super::super::pool::connect_sqlite_app(&path, 1)
+            .await
+            .unwrap();
+        let backend = Backend::Sqlite(pool.clone());
+        let before = assert_sqlite_schema_current(&backend).await.unwrap();
+        assert_eq!(before.applied_steps, 4);
+        let workspace = uuid::Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO workspaces(id,slug,name) VALUES(?1,'s16-populated','preserved literal')",
+        )
+        .bind(workspace.as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE maintenance_job_claims SET generation=7 WHERE job_key=8")
+            .execute(&pool)
+            .await
+            .unwrap();
+        backend.close().await.unwrap();
+        run_sqlite_migrations(&path).await.unwrap();
+        let pool = super::super::pool::connect_sqlite_app(&path, 1)
+            .await
+            .unwrap();
+        let backend = Backend::Sqlite(pool.clone());
+        let current = assert_sqlite_schema_current(&backend).await.unwrap();
+        assert_eq!(current.applied_steps, 4);
+        assert_eq!(current.schema_sha256, before.schema_sha256);
+        let preserved: String = sqlx::query_scalar("SELECT name FROM workspaces WHERE id=?1")
+            .bind(workspace.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(preserved, "preserved literal");
+        let rows: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT job_key,generation FROM maintenance_job_claims ORDER BY job_key",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 9);
+        assert_eq!(
+            rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+            (1..=9).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            rows[7].1, 7,
+            "restart cannot reseed/reset released generation"
+        );
+        let fk: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(fk, 1);
+        sqlx::query("DELETE FROM schema_migrations WHERE version=2")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(assert_sqlite_schema_current(&backend).await.is_err());
+        backend.close().await.unwrap();
+        assert!(run_sqlite_migrations(&path).await.is_err());
+        let pool = super::super::pool::connect_sqlite_app(&path, 1)
+            .await
+            .unwrap();
+        let name: String = sqlx::query_scalar("SELECT name FROM workspaces WHERE id=?1")
+            .bind(workspace.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(name, "preserved literal");
+        pool.close().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn maintenance_claim_migration_refuses_changed_definition_without_reset() {
+        let root = std::env::temp_dir().join(format!("fvoci-s16-migrate-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("app.sqlite");
+        run_sqlite_migrations(&path).await.unwrap();
+        let pool = super::super::pool::connect_sqlite_app(&path, 1)
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE maintenance_job_claims ADD COLUMN unexpected TEXT")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let backend = Backend::Sqlite(pool.clone());
+        assert!(assert_sqlite_schema_current(&backend).await.is_err());
+        backend.close().await.unwrap();
+        assert!(run_sqlite_migrations(&path).await.is_err());
+        let pool = super::super::pool::connect_sqlite_app(&path, 1)
+            .await
+            .unwrap();
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM maintenance_job_claims")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 9);
+        let unexpected:i64=sqlx::query_scalar("SELECT count(*) FROM pragma_table_info('maintenance_job_claims') WHERE name='unexpected'").fetch_one(&pool).await.unwrap();
+        assert_eq!(unexpected, 1);
+        pool.close().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod maintenance_claim_upgrade_tests {
+    use super::super::backend::Backend;
+    use super::*;
+    #[tokio::test]
+    async fn maintenance_claim_migration_populated_three_to_four_atomic_upgrade() {
+        let root = std::env::temp_dir().join(format!("fvoci-s16-upgrade-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("app.sqlite");
+        // Historical exact registry prefix, executed by the SAME maintained
+        // per-step initializer and actual preparation/admission owner.
+        let admission = SqliteAdmission::migration(&path).unwrap();
+        let preparation = super::super::pool::connect_sqlite_prepare(&path)
+            .await
+            .unwrap();
+        let backend = Backend::Sqlite(preparation.pool.clone());
+        for (index, (sql, digest)) in SQLITE_MIGRATIONS.iter().take(3).enumerate() {
+            apply_sqlite_migration_step(&backend, index, sql, digest, None)
+                .await
+                .unwrap();
+        }
+        let workspace = uuid::Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO workspaces(id,slug,name) VALUES(?1,'s16-upgrade','populated003 literal')",
+        )
+        .bind(workspace.as_bytes().as_slice())
+        .execute(&preparation.pool)
+        .await
+        .unwrap();
+        assert!(
+            assert_sqlite_schema_current(&backend).await.is_err(),
+            "old prefix is never current4"
+        );
+        preparation.close_confirmed().await.unwrap();
+        drop(admission);
+        run_sqlite_migrations(&path).await.unwrap();
+        let pool = super::super::pool::connect_sqlite_app(&path, 1)
+            .await
+            .unwrap();
+        let backend = Backend::Sqlite(pool.clone());
+        assert_eq!(
+            assert_sqlite_schema_current(&backend)
+                .await
+                .unwrap()
+                .applied_steps,
+            4
+        );
+        let name: String = sqlx::query_scalar("SELECT name FROM workspaces WHERE id=?1")
+            .bind(workspace.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(name, "populated003 literal");
+        let markers: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM schema_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(markers, vec![1, 2, 3, 4]);
+        let count:i64=sqlx::query_scalar("SELECT count(*) FROM maintenance_job_claims WHERE owner_token IS NULL AND generation=0 AND expires_at IS NULL").fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 9);
+        backend.close().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

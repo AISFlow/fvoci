@@ -32,7 +32,10 @@ use crate::attachments::ObjectStorage;
 use crate::mail::Mailer;
 
 pub use claim::{
-    JobClaim, JOB_KEY_DAILY, JOB_KEY_DIGEST, JOB_KEY_ICS, JOB_KEY_MAGIC, JOB_KEY_NOTIFICATIONS,
+    FamilyLeaseAction, FamilyMaintenanceClaim, FamilyMaintenanceClaimRequest,
+    FamilyMaintenanceLeasePolicy, FamilyMaintenanceProof, GlobalClaimAcquisition,
+    GlobalClaimRelease, GlobalJobClaim, JobClaim, MaintenanceClaimError, MaintenanceJobKey,
+    JOB_KEY_DAILY, JOB_KEY_DIGEST, JOB_KEY_ICS, JOB_KEY_MAGIC, JOB_KEY_NOTIFICATIONS,
     JOB_KEY_PROCESSED, JOB_KEY_REVISIONS, JOB_KEY_UPLOADS, JOB_KEY_WORKSPACE, JOB_LOCK_NAMESPACE,
 };
 pub use documents::{
@@ -51,7 +54,9 @@ pub use revisions::{
     WORKSPACE_SCAN_BATCH,
 };
 pub use tokens::{run_ics_token_gc, run_magic_token_gc, TOKEN_GC_BATCH};
-pub use uploads::{run_stale_upload_gc, StaleUploadGcStats, UPLOAD_GC_BATCH};
+pub use uploads::{
+    run_stale_upload_gc, run_stale_upload_gc_backend, StaleUploadGcStats, UPLOAD_GC_BATCH,
+};
 pub use withdrawn::run_withdrawn_anonymize;
 pub use workspace::{
     run_workspace_purge, WorkspacePurgeStats, WORKSPACE_PURGE_AFTER_DAYS, WORKSPACE_PURGE_BATCH,

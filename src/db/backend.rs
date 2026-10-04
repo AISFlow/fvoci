@@ -178,6 +178,29 @@ pub struct CommitUnknown {
     #[source]
     pub source: sqlx::Error,
 }
+
+/// The original failed COMMIT and its own cleanup/uncertainty receipt.
+/// Existing callers retain the original commit API; claim reconciliation uses
+/// this boundary before opening a fresh writer. The pinned remote SDK cannot
+/// certify failed-finish settlement: that branch explicitly refuses observation.
+#[derive(Debug, thiserror::Error)]
+#[error("database commit outcome is unknown; settlement receipt retained")]
+pub struct CommitCleanupUnknown {
+    #[source]
+    pub source: CommitUnknown,
+    pub settlement: CommitSettlement,
+    pub cleanup_error: Option<sqlx::Error>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitSettlement {
+    LocalWriterReconcile,
+    RemoteUnconfirmed,
+}
+impl CommitCleanupUnknown {
+    pub fn permits_reconciliation(&self) -> bool {
+        self.settlement == CommitSettlement::LocalWriterReconcile && self.cleanup_error.is_none()
+    }
+}
 impl DbTransaction<'_> {
     pub async fn commit(self) -> Result<(), CommitUnknown> {
         let result = match self {
@@ -185,6 +208,16 @@ impl DbTransaction<'_> {
             Self::SqliteFamily(tx) => tx.commit().await,
         };
         result.map_err(|source| CommitUnknown { source })
+    }
+    pub async fn commit_with_cleanup(self) -> Result<(), CommitCleanupUnknown> {
+        match self {
+            Self::SqliteFamily(FamilyTx::Remote(tx)) => tx.commit_with_cleanup().await,
+            other => other.commit().await.map_err(|source| CommitCleanupUnknown {
+                source,
+                settlement: CommitSettlement::LocalWriterReconcile,
+                cleanup_error: None,
+            }),
+        }
     }
     pub async fn rollback(self) -> Result<(), sqlx::Error> {
         match self {
@@ -386,6 +419,7 @@ struct RemoteLifecycle {
     active: usize,
     cleanup_failed: bool,
     failure: Option<sqlx::Error>,
+    unconfirmed_finish: bool,
 }
 
 /// Admission remains held through an explicit rollback cleanup reply. Closing
@@ -446,6 +480,7 @@ impl RemoteDatabase {
                 active: 0,
                 cleanup_failed: false,
                 failure: None,
+                unconfirmed_finish: false,
             }),
             idle: Notify::new(),
             close_serial: tokio::sync::Mutex::new(()),
@@ -483,6 +518,9 @@ impl RemoteDatabase {
             write_reserved: write,
             tenant: None,
             system_context: false,
+            finish_started: false,
+            #[cfg(test)]
+            cleanup_pause: None,
         };
         let control = if write {
             "PRAGMA foreign_keys=ON; BEGIN IMMEDIATE;"
@@ -589,6 +627,11 @@ impl RemoteDatabase {
                 "remote cleanup previously failed".into(),
             ));
         }
+        if state.unconfirmed_finish {
+            return Err(sqlx::Error::AnyDriverError(Box::new(
+                RemoteSettlementUnconfirmed,
+            )));
+        }
         Ok(())
     }
 }
@@ -601,6 +644,14 @@ pub struct RemoteTx {
     connection: Option<libsql::Connection>,
     lease: Option<RemoteLease>,
     owner: Arc<RemoteDatabase>,
+    // The pinned SDK may Close/reset its baton before returning a finish
+    // error. The same Connection object is then not an original-stream handle.
+    finish_started: bool,
+    #[cfg(test)]
+    cleanup_pause: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
 }
 impl RemoteTx {
     fn connection(&self) -> &libsql::Connection {
@@ -609,6 +660,7 @@ impl RemoteTx {
             .expect("owned unfinished remote transaction")
     }
     async fn finish(mut self, control: &'static str) -> Result<(), sqlx::Error> {
+        self.finish_started = true;
         self.connection()
             .execute_batch(control)
             .await
@@ -617,26 +669,637 @@ impl RemoteTx {
         self.lease.take();
         Ok(())
     }
-}
-impl Drop for RemoteTx {
-    fn drop(&mut self) {
-        let Some(connection) = self.connection.take() else {
-            return;
-        };
+    async fn commit_with_cleanup(mut self) -> Result<(), CommitCleanupUnknown> {
+        self.finish_started = true;
+        if let Err(error) = self.connection().execute_batch("COMMIT").await {
+            let source = CommitUnknown {
+                source: remote_error(error),
+            };
+            // The SDK hides the original Close receipt on an error. Quarantine
+            // and retain explicit uncertainty; never submit a possible NEW
+            // stream ROLLBACK or observe as though original finish was proved.
+            let receipt = self.enqueue_cleanup().expect("unfinished owned stream");
+            let cleanup_error = match receipt.await {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(shared_cleanup_error(error)),
+                Err(_) => Some(sqlx::Error::Protocol(
+                    "owned remote cleanup ended without a receipt".into(),
+                )),
+            };
+            return Err(CommitCleanupUnknown {
+                source,
+                settlement: CommitSettlement::RemoteUnconfirmed,
+                cleanup_error,
+            });
+        }
+        self.connection.take();
+        self.lease.take();
+        Ok(())
+    }
+    fn enqueue_cleanup(
+        &mut self,
+    ) -> Option<tokio::sync::oneshot::Receiver<Result<(), Arc<sqlx::Error>>>> {
+        let connection = self.connection.take()?;
         let lease = self.lease.take();
-        // This quarantined stream is never reused. An explicit rollback reply
-        // is tracked; failures stay failures and require service observation.
+        let finish_started = self.finish_started;
+        let owner = self.owner.clone();
+        #[cfg(test)]
+        let pause = self.cleanup_pause.take();
+        let (send, receipt) = tokio::sync::oneshot::channel();
         self.owner
             .cleanup
             .lock()
             .expect("remote cleanup mutex poisoned")
             .spawn(async move {
-                let _lease = lease;
-                connection
-                    .execute_batch("ROLLBACK")
-                    .await
-                    .map(|_| ())
-                    .map_err(remote_error)
+                #[cfg(test)]
+                if let Some((entered, go)) = pause {
+                    let _ = entered.send(());
+                    let _ = go.await;
+                }
+                let result = if finish_started {
+                    owner
+                        .lifecycle
+                        .lock()
+                        .expect("remote lifecycle mutex poisoned")
+                        .unconfirmed_finish = true;
+                    // No post-finish SQL cleanup call was made. SDK Drop
+                    // Close has no public outcome; missing proof is a distinct
+                    // service state, never a fabricated attempt error.
+                    Ok(())
+                } else {
+                    connection
+                        .execute_batch("ROLLBACK")
+                        .await
+                        .map(|_| ())
+                        .map_err(remote_error)
+                        .map_err(Arc::new)
+                };
+                // Object/lease disposal is not a server Close receipt. SDK
+                // Drop may send a best-effort Close; failure remains failure.
+                drop(connection);
+                drop(lease);
+                let _ = send.send(result.clone());
+                result.map_err(shared_cleanup_error)
             });
+        Some(receipt)
+    }
+}
+#[derive(Debug, Clone, thiserror::Error)]
+#[error(transparent)]
+struct SharedCleanupError(Arc<sqlx::Error>);
+#[derive(Debug, thiserror::Error)]
+#[error("original remote stream settlement is unconfirmed: pinned SDK hides finish/Close receipt")]
+pub struct RemoteSettlementUnconfirmed;
+fn shared_cleanup_error(error: Arc<sqlx::Error>) -> sqlx::Error {
+    sqlx::Error::AnyDriverError(Box::new(SharedCleanupError(error)))
+}
+impl Drop for RemoteTx {
+    fn drop(&mut self) {
+        // This quarantined stream is never reused. An explicit rollback reply
+        // is tracked; failures stay failures and require service observation.
+        let _ = self.enqueue_cleanup();
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod maintenance_claim_driver_tests {
+    // Transport fixture, NOT Turso: pinned SDK emits real pipeline requests;
+    // maintained full SQLite initializer/engine executes the actual SQL. Only
+    // this finish seam is exercised, not production TLS/admission/query cursors.
+    use super::*;
+    use axum::{extract::State, response::IntoResponse, routing::post, Json, Router};
+    use base64::Engine;
+    use futures_util::StreamExt;
+    use serde_json::{json, Value};
+    use sqlx::Connection;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use uuid::Uuid;
+
+    struct Stream {
+        conn: sqlx::SqliteConnection,
+        active: bool,
+    }
+    struct Model {
+        pool: SqlitePool,
+        streams: HashMap<String, Stream>,
+        requests: Vec<Value>,
+        sqlite_errors: Vec<String>,
+        mode: Arc<AtomicU8>, // 1: COMMIT HTTP failure; 2: rollback failure; 3: truncated body.
+        loss_pause: Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    }
+    fn control_sql(sql: &str) -> Option<&'static str> {
+        let sql = sql.trim();
+        match sql.strip_suffix(';').unwrap_or(sql).trim_end() {
+            "BEGIN IMMEDIATE" => Some("BEGIN IMMEDIATE"),
+            "COMMIT" => Some("COMMIT"),
+            "ROLLBACK" => Some("ROLLBACK"),
+            _ => None,
+        }
+    }
+    async fn pipeline(
+        State(state): State<Arc<tokio::sync::Mutex<Model>>>,
+        bytes: axum::body::Bytes,
+    ) -> axum::response::Response {
+        // The pinned SDK sends JSON without an application/json header.
+        let body: Value = match serde_json::from_slice(&bytes) {
+            Ok(body) => body,
+            Err(_) => return axum::http::StatusCode::BAD_REQUEST.into_response(),
+        };
+        let mut model = state.lock().await;
+        model.requests.push(body.clone());
+        let requests = body["requests"].as_array().unwrap();
+        for request in requests {
+            if let Some(steps) = request["batch"]["steps"].as_array() {
+                for step in steps {
+                    let sql = step["stmt"]["sql"].as_str().unwrap();
+                    if control_sql(sql).is_some() {
+                        println!("S16 actual pinned SDK wire control SQL {sql:?}");
+                    }
+                }
+            }
+        }
+        let has_sql = |verb: &str| {
+            requests.iter().any(|r| {
+                r["batch"]["steps"].as_array().is_some_and(|steps| {
+                    steps
+                        .iter()
+                        .any(|s| control_sql(s["stmt"]["sql"].as_str().unwrap()) == Some(verb))
+                })
+            })
+        };
+        if model.mode.load(Ordering::SeqCst) == 2 && has_sql("ROLLBACK") {
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        let baton = body["baton"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| Uuid::now_v7().to_string());
+        if body["baton"].is_string() && !model.streams.contains_key(&baton) {
+            // An already closed baton cannot open a fresh server stream.
+            return axum::http::StatusCode::GONE.into_response();
+        }
+        let mut stream = match model.streams.remove(&baton) {
+            Some(stream) => stream,
+            None => Stream {
+                conn: model.pool.acquire().await.unwrap().detach(),
+                active: false,
+            },
+        };
+        let mut responses = Vec::new();
+        let mut close = false;
+        for request in requests {
+            let response = match request["type"].as_str().unwrap() {
+                "batch" => {
+                    let mut results = Vec::new();
+                    let mut errors = Vec::new();
+                    for step in request["batch"]["steps"].as_array().unwrap() {
+                        let stmt = &step["stmt"];
+                        let sql = stmt["sql"].as_str().unwrap();
+                        let mut query = sqlx::query(sql);
+                        for arg in stmt["args"].as_array().unwrap() {
+                            query = match arg["type"].as_str().unwrap() {
+                                "null" => query.bind(Option::<i64>::None),
+                                "integer" => query
+                                    .bind(arg["value"].as_str().unwrap().parse::<i64>().unwrap()),
+                                "text" => query.bind(arg["value"].as_str().unwrap().to_owned()),
+                                "blob" => query.bind(
+                                    base64::engine::general_purpose::STANDARD_NO_PAD
+                                        .decode(
+                                            arg["base64"].as_str().unwrap().trim_end_matches('='),
+                                        )
+                                        .unwrap(),
+                                ),
+                                other => panic!("unsupported fixture bind {other}"),
+                            };
+                        }
+                        match query.execute(&mut stream.conn).await {
+                            Ok(result) => {
+                                match control_sql(sql) {
+                                    Some("BEGIN IMMEDIATE") => stream.active = true,
+                                    Some("COMMIT" | "ROLLBACK") => stream.active = false,
+                                    _ => {}
+                                }
+                                results.push(json!({"cols":[],"rows":[],"affected_row_count":result.rows_affected(),"last_insert_rowid":null}));
+                                errors.push(Value::Null);
+                            }
+                            Err(error) => {
+                                model.sqlite_errors.push(format!("{error:?}"));
+                                results.push(Value::Null);
+                                errors.push(
+                                    json!({"message":error.to_string(),"code":"SQLITE_ERROR"}),
+                                );
+                            }
+                        }
+                    }
+                    json!({"type":"batch","result":{"step_results":results,"step_errors":errors}})
+                }
+                "get_autocommit" => json!({"type":"get_autocommit","is_autocommit":!stream.active}),
+                "close" => {
+                    // The actual original SQLite transaction is settled here,
+                    // independently of the SDK's later flattened SQL error.
+                    if stream.active {
+                        sqlx::query("ROLLBACK")
+                            .execute(&mut stream.conn)
+                            .await
+                            .unwrap();
+                        stream.active = false;
+                    }
+                    close = true;
+                    json!({"type":"close"})
+                }
+                other => panic!("unsupported fixture request {other}"),
+            };
+            responses.push(json!({"type":"ok","response":response}));
+        }
+        if close {
+            stream.conn.close().await.unwrap();
+        } else {
+            model.streams.insert(baton.clone(), stream);
+        }
+        let response = json!({"baton":if close { None } else { Some(baton) },"base_url":null,"results":responses});
+        if model.mode.load(Ordering::SeqCst) == 1 && has_sql("COMMIT") {
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        if model.mode.load(Ordering::SeqCst) == 3 && has_sql("COMMIT") {
+            let (entered, go) = model.loss_pause.take().unwrap();
+            let first = futures_util::stream::once(async move {
+                let _ = entered.send(());
+                Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"{\"baton\":"))
+            });
+            let lost = futures_util::stream::once(async move {
+                let _ = go.await;
+                Err::<bytes::Bytes, _>(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "fixture reply lost after headers/body prefix",
+                ))
+            });
+            return axum::response::Response::new(axum::body::Body::from_stream(first.chain(lost)));
+        }
+        Json(response).into_response()
+    }
+    struct Fixture {
+        root: PathBuf,
+        endpoint: String,
+        model: Arc<tokio::sync::Mutex<Model>>,
+        backend: Backend,
+        stop: tokio::sync::oneshot::Sender<()>,
+        server: tokio::task::JoinHandle<std::io::Result<()>>,
+        mode: Arc<AtomicU8>,
+    }
+    impl Fixture {
+        async fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("fvoci-s16-driver-{}", Uuid::now_v7()));
+            std::fs::create_dir_all(&root).unwrap();
+            let path = root.join("app.sqlite");
+            crate::db::migrate::run_sqlite_migrations(&path)
+                .await
+                .unwrap();
+            let pool = crate::db::pool::connect_sqlite_app(&path, 3).await.unwrap();
+            let mode = Arc::new(AtomicU8::new(0));
+            let model = Arc::new(tokio::sync::Mutex::new(Model {
+                pool,
+                streams: HashMap::new(),
+                requests: Vec::new(),
+                sqlite_errors: Vec::new(),
+                mode: mode.clone(),
+                loss_pause: None,
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (stop, wait) = tokio::sync::oneshot::channel();
+            let app = Router::new()
+                .route("/v3/pipeline", post(pipeline))
+                .with_state(model.clone());
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = wait.await;
+                    })
+                    .await
+            });
+            // Test-only plain HTTP transport. Production connect's TLS URL
+            // validation is unchanged and is NOT qualified by this fixture.
+            let endpoint = format!("http://{addr}");
+            let database = libsql::Builder::new_remote(endpoint.clone(), "fixture-only".into())
+                .build()
+                .await
+                .unwrap();
+            let backend = Backend::LibsqlRemote(Arc::new(RemoteDatabase {
+                database,
+                max_connections: 1,
+                admission: Arc::new(Semaphore::new(1)),
+                cleanup: Mutex::new(JoinSet::new()),
+                lifecycle: Mutex::new(RemoteLifecycle {
+                    closing: false,
+                    active: 0,
+                    cleanup_failed: false,
+                    failure: None,
+                    unconfirmed_finish: false,
+                }),
+                idle: Notify::new(),
+                close_serial: tokio::sync::Mutex::new(()),
+            }));
+            println!(
+                "S16 pinned SDK HTTP finish fixture {} {addr}",
+                root.display()
+            );
+            Self {
+                root,
+                endpoint,
+                model,
+                backend,
+                stop,
+                server,
+                mode,
+            }
+        }
+        async fn writer(&self) -> RemoteTx {
+            let Backend::LibsqlRemote(owner) = &self.backend else {
+                unreachable!()
+            };
+            let permit = owner.admission.clone().acquire_owned().await.unwrap();
+            owner.lifecycle.lock().unwrap().active += 1;
+            let tx = RemoteTx {
+                write_reserved: true,
+                tenant: None,
+                system_context: false,
+                connection: Some(owner.database.connect().unwrap()),
+                lease: Some(RemoteLease {
+                    _permit: permit,
+                    owner: owner.clone(),
+                }),
+                owner: owner.clone(),
+                finish_started: false,
+                cleanup_pause: None,
+            };
+            // Actual SDK BEGIN and FK-on; the test targets finish directly and
+            // does not pretend to execute the product query/cursor admission.
+            tx.connection()
+                .execute_batch("PRAGMA foreign_keys=ON; BEGIN IMMEDIATE")
+                .await
+                .unwrap();
+            tx
+        }
+        async fn fault(tx: &RemoteTx) {
+            tx.connection()
+                .execute_batch("PRAGMA defer_foreign_keys=ON")
+                .await
+                .unwrap();
+            tx.connection()
+                .execute(
+                    "INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')",
+                    vec![
+                        libsql::Value::Blob(Uuid::now_v7().as_bytes().to_vec()),
+                        libsql::Value::Blob(Uuid::now_v7().as_bytes().to_vec()),
+                    ],
+                )
+                .await
+                .unwrap();
+        }
+        async fn no_wrong_rollback(&self) {
+            let model = self.model.lock().await;
+            assert!(
+                model
+                    .requests
+                    .iter()
+                    .all(|r| r["requests"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|q| q["batch"]["steps"].as_array().is_none_or(|steps| steps
+                            .iter()
+                            .all(|s| control_sql(s["stmt"]["sql"].as_str().unwrap())
+                                != Some("ROLLBACK"))))),
+                "failed finish must never submit a possible new-stream rollback"
+            );
+            let commits: Vec<_> = model
+                .requests
+                .iter()
+                .filter(|r| {
+                    r["requests"].as_array().unwrap().iter().any(|q| {
+                        q["batch"]["steps"].as_array().is_some_and(|s| {
+                            s.iter().any(|s| {
+                                control_sql(s["stmt"]["sql"].as_str().unwrap()) == Some("COMMIT")
+                            })
+                        })
+                    })
+                })
+                .collect();
+            assert!(!commits.is_empty());
+            assert!(
+                commits.iter().all(|r| r["baton"].is_string()
+                    && r["requests"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|q| q["type"] == "close")),
+                "pinned driver actually emitted original baton COMMIT plus Close"
+            );
+        }
+        async fn close(self) {
+            let error = self.backend.close().await.unwrap_err();
+            if self.mode.load(Ordering::SeqCst) != 2 {
+                assert!(matches!(error,sqlx::Error::AnyDriverError(ref error) if error.downcast_ref::<RemoteSettlementUnconfirmed>().is_some()), "unconfirmed settlement is a distinct service state, not a cleanup-attempt error");
+            }
+            let _ = self.stop.send(());
+            self.server.await.unwrap().unwrap();
+            let mut model = self.model.lock().await;
+            for (_, mut stream) in model.streams.drain() {
+                if stream.active {
+                    sqlx::query("ROLLBACK")
+                        .execute(&mut stream.conn)
+                        .await
+                        .unwrap();
+                }
+                stream.conn.close().await.unwrap();
+            }
+            model.pool.close().await;
+            drop(model);
+            std::fs::remove_dir_all(self.root).unwrap();
+        }
+    }
+    fn unconfirmed(error: &CommitCleanupUnknown) {
+        let sqlx::Error::AnyDriverError(original) = &error.source.source else {
+            panic!("original pinned SDK error retained")
+        };
+        assert!(original.downcast_ref::<libsql::Error>().is_some());
+        assert_eq!(error.settlement, CommitSettlement::RemoteUnconfirmed);
+        assert!(
+            error.cleanup_error.is_none(),
+            "no cleanup attempt error was fabricated"
+        );
+        assert!(
+            !error.permits_reconciliation(),
+            "Ok disposal/None attempt error must not permit fresh observation"
+        );
+    }
+    #[tokio::test]
+    async fn maintenance_claim_driver_fk_close_does_not_rollback_new_stream() {
+        for (sql, expected) in [
+            ("BEGIN IMMEDIATE", "BEGIN IMMEDIATE"),
+            (" BEGIN IMMEDIATE; ", "BEGIN IMMEDIATE"),
+            ("COMMIT", "COMMIT"),
+            (" COMMIT; ", "COMMIT"),
+            ("ROLLBACK", "ROLLBACK"),
+            (" ROLLBACK; ", "ROLLBACK"),
+        ] {
+            assert_eq!(control_sql(sql), Some(expected));
+        }
+        for sql in [
+            "COMMIT;;",
+            "COMMIT; SELECT 1",
+            "ROLLBACK TO savepoint;",
+            "SELECT 'COMMIT';",
+            "BEGIN DEFERRED;",
+        ] {
+            assert_eq!(control_sql(sql), None);
+        }
+        let f = Fixture::new().await;
+        let malformed = reqwest::Client::new()
+            .post(format!("{}/v3/pipeline", f.endpoint))
+            .body("{")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(malformed.status(), reqwest::StatusCode::BAD_REQUEST);
+        let model = f.model.lock().await;
+        assert!(model.requests.is_empty() && model.streams.is_empty());
+        drop(model);
+        let owner = Uuid::now_v7();
+        let tx = f.writer().await;
+        assert!(f.model.lock().await.requests.iter().any(|r| {
+            r["requests"].as_array().unwrap().iter().any(|q| {
+                q["batch"]["steps"].as_array().is_some_and(|steps| {
+                    steps.iter().any(|s| {
+                        control_sql(s["stmt"]["sql"].as_str().unwrap()) == Some("BEGIN IMMEDIATE")
+                    })
+                })
+            })
+        }));
+        println!("S16 malformed JSON rejected400; actual unmodified SDK BEGIN reached");
+        tx.connection().execute("UPDATE maintenance_job_claims SET owner_token=?1,generation=1,expires_at=unixepoch()*1000000+60000000 WHERE job_key=1",vec![libsql::Value::Blob(owner.as_bytes().to_vec())]).await.unwrap();
+        DbTransaction::SqliteFamily(FamilyTx::Remote(tx))
+            .commit_with_cleanup()
+            .await
+            .unwrap();
+        let tx = f.writer().await;
+        Fixture::fault(&tx).await;
+        let error = DbTransaction::SqliteFamily(FamilyTx::Remote(tx))
+            .commit_with_cleanup()
+            .await
+            .unwrap_err();
+        unconfirmed(&error);
+        f.no_wrong_rollback().await;
+        let model = f.model.lock().await;
+        assert!(
+            model.sqlite_errors.iter().any(|e| e.contains("787")),
+            "real maintained SQLite FK COMMIT rejection"
+        );
+        let row: (Vec<u8>, i64) = sqlx::query_as(
+            "SELECT owner_token,generation FROM maintenance_job_claims WHERE job_key=1",
+        )
+        .fetch_one(&model.pool)
+        .await
+        .unwrap();
+        assert_eq!(row, (owner.as_bytes().to_vec(), 1));
+        drop(model);
+        f.close().await;
+    }
+    #[tokio::test]
+    async fn maintenance_claim_driver_commit_reply_loss_retains_uncertainty() {
+        for mode in [1, 3] {
+            let f = Fixture::new().await;
+            let tx = f.writer().await;
+            tx.connection()
+                .execute(
+                    "UPDATE maintenance_job_claims SET generation=1 WHERE job_key=8",
+                    (),
+                )
+                .await
+                .unwrap();
+            f.mode.store(mode, Ordering::SeqCst);
+            let error = if mode == 3 {
+                let (entered, receive) = tokio::sync::oneshot::channel();
+                let (go, wait) = tokio::sync::oneshot::channel();
+                f.model.lock().await.loss_pause = Some((entered, wait));
+                let finish =
+                    DbTransaction::SqliteFamily(FamilyTx::Remote(tx)).commit_with_cleanup();
+                tokio::pin!(finish);
+                tokio::select! { result=receive=>result.unwrap(), _=&mut finish=>panic!("body-loss barrier must be reached") }
+                go.send(()).unwrap();
+                finish.await.unwrap_err()
+            } else {
+                DbTransaction::SqliteFamily(FamilyTx::Remote(tx))
+                    .commit_with_cleanup()
+                    .await
+                    .unwrap_err()
+            };
+            unconfirmed(&error);
+            f.no_wrong_rollback().await;
+            let model = f.model.lock().await;
+            let generation: i64 =
+                sqlx::query_scalar("SELECT generation FROM maintenance_job_claims WHERE job_key=8")
+                    .fetch_one(&model.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                generation, 1,
+                "server actually committed before reply was lost"
+            );
+            drop(model);
+            f.close().await;
+        }
+    }
+    #[tokio::test]
+    async fn maintenance_claim_driver_cancelled_receiver_retains_owned_cleanup() {
+        let f = Fixture::new().await;
+        let mut tx = f.writer().await;
+        Fixture::fault(&tx).await;
+        let (entered, receive) = tokio::sync::oneshot::channel();
+        let (go, wait) = tokio::sync::oneshot::channel();
+        tx.cleanup_pause = Some((entered, wait));
+        // Drop only the waiting receiver/future; no arbitrary task abort or
+        // claim-release assertion. The original service-owned job stays live.
+        tokio::select! { result=receive=>result.unwrap(), _=tx.commit_with_cleanup()=>panic!("cleanup must stay paused") }
+        assert_eq!(f.backend.connection_stats().unwrap().size, 1);
+        go.send(()).unwrap();
+        f.no_wrong_rollback().await;
+        f.close().await;
+    }
+    #[tokio::test]
+    async fn maintenance_claim_driver_real_rollback_transport_failure_is_retained() {
+        let f = Fixture::new().await;
+        let tx = f.writer().await;
+        f.mode.store(2, Ordering::SeqCst);
+        drop(tx); // Ordinary pre-finish Drop still owns a tracked rollback.
+        let error = f.backend.close().await.unwrap_err();
+        assert!(
+            matches!(error,sqlx::Error::AnyDriverError(ref e) if e.downcast_ref::<SharedCleanupError>().is_some())
+        );
+        let model = f.model.lock().await;
+        let rollback = model
+            .requests
+            .iter()
+            .find(|r| {
+                r["requests"].as_array().unwrap().iter().any(|q| {
+                    q["batch"]["steps"].as_array().is_some_and(|s| {
+                        s.iter().any(|s| {
+                            control_sql(s["stmt"]["sql"].as_str().unwrap()) == Some("ROLLBACK")
+                        })
+                    })
+                })
+            })
+            .expect("actual rollback transport request");
+        assert!(
+            rollback["baton"].is_string(),
+            "ordinary rollback used its existing stream"
+        );
+        drop(model);
+        f.close().await;
     }
 }
