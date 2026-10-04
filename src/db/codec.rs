@@ -45,6 +45,9 @@ impl Cell {
             _ => Err(invalid("expected SQLite integer")),
         }
     }
+    pub(crate) fn int32(&self) -> Result<i32, sqlx::Error> {
+        i32::try_from(self.integer()?).map_err(|_| invalid("SQLite integer exceeds i32"))
+    }
     pub(crate) fn boolean(&self) -> Result<bool, sqlx::Error> {
         match self.integer()? {
             0 => Ok(false),

@@ -7,6 +7,9 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use super::backend::{Backend, OperationTx};
+use super::codec::{Cell, FamilyRow};
+
 use crate::db::context::{
     begin_read, lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
 };
@@ -16,9 +19,7 @@ use crate::db::group_grants::{
 };
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::projects::{lock_project, project_permission, visible_project_sql};
-use crate::db::workspace::{
-    membership_role, membership_role_for_update, workspace_is_live, WorkspaceRole,
-};
+use crate::db::workspace::{membership_role, workspace_is_live, WorkspaceRole};
 use crate::projects::{workspace_base_permission, ProjectMemberRole, ProjectPermission};
 
 pub const MAX_TREE_DEPTH: i32 = 20;
@@ -238,30 +239,41 @@ pub async fn document_permission(
     document_id: Uuid,
     require_live: bool,
 ) -> Result<ProjectPermission, sqlx::Error> {
-    let role = membership_role(tx, workspace_id, user_id).await?;
-    let Some(role) = role else {
-        return Ok(ProjectPermission::None);
-    };
-    let row: Option<(Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(
-        r#"
-        SELECT project_id, deleted_at
-        FROM fvoci.documents
-        WHERE workspace_id = $1 AND id = $2
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some((project_id, deleted_at)) = row else {
-        return Ok(ProjectPermission::None);
-    };
-    if !wiki_document_eligible(project_id, deleted_at, require_live) {
-        return Ok(ProjectPermission::None);
+    OperationTx::Postgres(tx)
+        .document_permission(workspace_id, user_id, document_id, require_live)
+        .await
+}
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn document_permission(
+        &mut self,
+        workspace_id: Uuid,
+        user_id: Uuid,
+        document_id: Uuid,
+        require_live: bool,
+    ) -> Result<ProjectPermission, sqlx::Error> {
+        let role = self.membership_role(workspace_id, user_id, false).await?;
+        let Some(role) = role else {
+            return Ok(ProjectPermission::None);
+        };
+        let row = self.document_affiliation(workspace_id, document_id).await?;
+        let Some((project_id, deleted_at)) = row else {
+            return Ok(ProjectPermission::None);
+        };
+        if !wiki_document_eligible(project_id, deleted_at, require_live) {
+            return Ok(ProjectPermission::None);
+        }
+        let base = workspace_base_permission(role);
+        let roles = self
+            .wiki_group_roles(workspace_id, document_id, user_id)
+            .await?;
+        let granted = roles
+            .iter()
+            .map(|r| grant_role_permission(r))
+            .max()
+            .unwrap_or(ProjectPermission::None);
+        Ok(base.max(granted))
     }
-    let base = workspace_base_permission(role);
-    let granted = wiki_group_permission(tx, workspace_id, document_id, user_id).await?;
-    Ok(base.max(granted))
 }
 
 /// (document id, project id, deleted_at, one group-grant role or none).
@@ -341,12 +353,12 @@ fn grant_role_permission(role: &str) -> ProjectPermission {
         .unwrap_or(ProjectPermission::None)
 }
 
-async fn wiki_group_permission(
+async fn wiki_group_roles(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     document_id: Uuid,
     user_id: Uuid,
-) -> Result<ProjectPermission, sqlx::Error> {
+) -> Result<Vec<String>, sqlx::Error> {
     let rows = sqlx::query_as::<_, (String,)>(&format!(
         r#"
         {}
@@ -358,11 +370,7 @@ async fn wiki_group_permission(
     .bind(user_id)
     .fetch_all(&mut **tx)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(role,)| grant_role_permission(&role))
-        .max()
-        .unwrap_or(ProjectPermission::None))
+    Ok(rows.into_iter().map(|(role,)| role).collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -541,10 +549,32 @@ pub async fn create_wiki_document_command(
     input: CreateDocumentInput<'_>,
     client_ip: Option<&str>,
 ) -> Result<Result<DocumentMeta, CreateCommandError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
+    create_wiki_document_command_backend(
+        &Backend::Postgres(pool.clone()),
+        workspace_id,
+        actor_user_id,
+        session_id,
+        command_id,
+        input,
+        client_ip,
+    )
+    .await
+}
+
+pub async fn create_wiki_document_command_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    command_id: Uuid,
+    input: CreateDocumentInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<DocumentMeta, CreateCommandError>, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    let mut operation = tx.operation();
+    operation.set_tenant(workspace_id).await?;
     let result = create_wiki_command_in_tx(
-        &mut tx,
+        &mut operation,
         workspace_id,
         actor_user_id,
         session_id,
@@ -554,7 +584,9 @@ pub async fn create_wiki_document_command(
     )
     .await?;
     if result.is_ok() {
-        tx.commit().await?;
+        tx.commit()
+            .await
+            .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
     } else {
         tx.rollback().await?;
     }
@@ -562,7 +594,7 @@ pub async fn create_wiki_document_command(
 }
 
 async fn create_wiki_command_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut OperationTx<'_, '_>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
@@ -572,25 +604,26 @@ async fn create_wiki_command_in_tx(
 ) -> Result<Result<DocumentMeta, CreateCommandError>, sqlx::Error> {
     // The current credential and membership precede even a successful receipt
     // replay. The tenant tree lock serializes absence with all wiki creators.
-    lock_membership_users(tx, &[actor_user_id]).await?;
-    if !recheck_session(tx, actor_user_id, session_id).await? {
+    tx.lock_membership_users(&[actor_user_id]).await?;
+    if !tx.recheck_session(actor_user_id, session_id).await? {
         return Ok(Err(CreateCommandError::Document(
             DocumentDbError::Forbidden,
         )));
     }
-    lock_tree(tx, workspace_id).await?;
-    if !workspace_is_live(tx, workspace_id).await? {
+    tx.lock_tree(workspace_id).await?;
+    if !tx.workspace_is_live(workspace_id).await? {
         return Ok(Err(CreateCommandError::Document(DocumentDbError::NotFound)));
     }
-    if !wiki_can_edit(membership_role_for_update(tx, workspace_id, actor_user_id).await?) {
+    if !wiki_can_edit(
+        tx.membership_role(workspace_id, actor_user_id, true)
+            .await?,
+    ) {
         return Ok(Err(CreateCommandError::Document(
             DocumentDbError::Forbidden,
         )));
     }
     let hash = wiki_create_command_hash(workspace_id, actor_user_id, &input)?;
-    let receipt: Option<(Uuid, String, Option<Uuid>, Value)> = sqlx::query_as(
-        "SELECT actor_user_id, request_hash, document_id, result_json FROM fvoci.wiki_create_commands WHERE workspace_id=$1 AND command_id=$2"
-    ).bind(workspace_id).bind(command_id).fetch_optional(&mut **tx).await?;
+    let receipt = tx.wiki_create_receipt(workspace_id, command_id).await?;
     if let Some((actor, original_hash, target_id, original_result)) = receipt {
         if actor != actor_user_id || original_hash != hash {
             return Ok(Err(CreateCommandError::RequestMismatch));
@@ -598,9 +631,10 @@ async fn create_wiki_command_in_tx(
         let Some(target_id) = target_id else {
             return Ok(Err(CreateCommandError::Document(DocumentDbError::NotFound)));
         };
-        let permission =
-            document_permission(tx, workspace_id, actor_user_id, target_id, true).await?;
-        let current = fetch_document_row(tx, workspace_id, target_id).await?;
+        let permission = tx
+            .document_permission(workspace_id, actor_user_id, target_id, true)
+            .await?;
+        let current = tx.document_row(workspace_id, target_id).await?;
         if !permission_can_view(permission) || current.is_none() {
             return Ok(Err(CreateCommandError::Document(DocumentDbError::NotFound)));
         }
@@ -613,7 +647,7 @@ async fn create_wiki_command_in_tx(
         }
         return Ok(Ok(original));
     }
-    let created = create_wiki_document_tx(
+    let created = create_wiki_document_operation(
         tx,
         workspace_id,
         actor_user_id,
@@ -633,9 +667,15 @@ async fn create_wiki_command_in_tx(
         Err(err) => return Ok(Err(CreateCommandError::Document(err))),
     };
     let result = serde_json::to_value(&meta).map_err(|err| sqlx::Error::Encode(Box::new(err)))?;
-    sqlx::query("INSERT INTO fvoci.wiki_create_commands (workspace_id, command_id, actor_user_id, request_hash, document_id, result_json) VALUES ($1,$2,$3,$4,$5,$6)")
-        .bind(workspace_id).bind(command_id).bind(actor_user_id).bind(hash).bind(meta.id).bind(result)
-        .execute(&mut **tx).await?;
+    tx.insert_wiki_create_receipt(
+        workspace_id,
+        command_id,
+        actor_user_id,
+        &hash,
+        meta.id,
+        &result,
+    )
+    .await?;
     Ok(Ok(meta))
 }
 
@@ -728,16 +768,44 @@ pub(crate) async fn create_wiki_document_tx(
     client_ip: Option<&str>,
     fence: Option<ImportFence>,
 ) -> Result<Result<Option<DocumentMeta>, DocumentDbError>, sqlx::Error> {
+    create_wiki_document_operation(
+        &mut OperationTx::Postgres(tx),
+        workspace_id,
+        actor_user_id,
+        session_id,
+        input,
+        client_ip,
+        fence,
+    )
+    .await
+}
+
+pub(crate) async fn create_wiki_document_operation(
+    tx: &mut OperationTx<'_, '_>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    input: CreateDocumentInput<'_>,
+    client_ip: Option<&str>,
+    fence: Option<ImportFence>,
+) -> Result<Result<Option<DocumentMeta>, DocumentDbError>, sqlx::Error> {
+    if fence.is_some() && matches!(tx, OperationTx::SqliteFamily(_)) {
+        return Err(sqlx::Error::Protocol(
+            "SQLite-family import event deferral is pending W2 producer integration".into(),
+        ));
+    }
     let document_id = Uuid::now_v7();
-    lock_membership_users(tx, &[actor_user_id]).await?;
-    if !recheck_session(tx, actor_user_id, session_id).await? {
+    tx.lock_membership_users(&[actor_user_id]).await?;
+    if !tx.recheck_session(actor_user_id, session_id).await? {
         return Ok(Err(DocumentDbError::Forbidden));
     }
-    lock_tree(tx, workspace_id).await?;
-    if !workspace_is_live(tx, workspace_id).await? {
+    tx.lock_tree(workspace_id).await?;
+    if !tx.workspace_is_live(workspace_id).await? {
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let role = membership_role_for_update(tx, workspace_id, actor_user_id).await?;
+    let role = tx
+        .membership_role(workspace_id, actor_user_id, true)
+        .await?;
     if !wiki_can_edit(role) {
         return Ok(Err(DocumentDbError::Forbidden));
     }
@@ -747,17 +815,7 @@ pub(crate) async fn create_wiki_document_tx(
 
     let mut parent_path = String::new();
     if let Some(parent_id) = input.parent_id {
-        let parent: Option<(Option<Uuid>, String, Option<DateTime<Utc>>)> = sqlx::query_as(
-            r#"
-            SELECT project_id, path, deleted_at
-            FROM fvoci.documents
-            WHERE workspace_id = $1 AND id = $2
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(parent_id)
-        .fetch_optional(&mut **tx)
-        .await?;
+        let parent = tx.wiki_parent(workspace_id, parent_id).await?;
         let Some((project_id, path, deleted_at)) = parent else {
             return Ok(Err(DocumentDbError::NotFound));
         };
@@ -779,22 +837,8 @@ pub(crate) async fn create_wiki_document_tx(
         return Ok(Err(DocumentDbError::DepthLimit));
     }
 
-    let last_sort: Option<(String,)> = sqlx::query_as(
-        r#"
-        SELECT sort_key
-        FROM fvoci.documents
-        WHERE workspace_id = $1
-          AND parent_id IS NOT DISTINCT FROM $2
-          AND deleted_at IS NULL
-        ORDER BY sort_key COLLATE "C" DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(input.parent_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let sort_key = match between(last_sort.as_ref().map(|(k,)| k.as_str()), None) {
+    let last_sort = tx.last_wiki_sort_key(workspace_id, input.parent_id).await?;
+    let sort_key = match between(last_sort.as_deref(), None) {
         Ok(key) => key,
         Err(err) => {
             tracing::error!("{err}");
@@ -810,40 +854,18 @@ pub(crate) async fn create_wiki_document_tx(
         Some(value) => value.map(str::to_string),
         None => None,
     };
-    let number: (i32,) = sqlx::query_as(
-        r#"
-        UPDATE fvoci.workspaces
-        SET next_document_number = next_document_number + 1, updated_at = now()
-        WHERE id = $1 AND deleted_at IS NULL
-        RETURNING next_document_number
-        "#,
+    let number = tx.allocate_wiki_number(workspace_id).await?;
+    tx.insert_wiki_document(
+        workspace_id,
+        document_id,
+        actor_user_id,
+        input.title,
+        icon.as_deref(),
+        &path,
+        input.parent_id,
+        &sort_key,
+        number,
     )
-    .bind(workspace_id)
-    .fetch_one(&mut **tx)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO fvoci.documents (
-            id, workspace_id, title, icon, path, parent_id, sort_key, project_id,
-            number, status, schema_version, content_json, created_by, kind
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, NULL,
-            $8, 'draft', $9, $10, $11, 'doc'
-        )
-        "#,
-    )
-    .bind(document_id)
-    .bind(workspace_id)
-    .bind(input.title)
-    .bind(icon)
-    .bind(&path)
-    .bind(input.parent_id)
-    .bind(&sort_key)
-    .bind(number.0)
-    .bind(DOCUMENT_SCHEMA_VERSION)
-    .bind(empty_document_json())
-    .bind(actor_user_id)
-    .execute(&mut **tx)
     .await?;
 
     let payload = json!({
@@ -852,8 +874,7 @@ pub(crate) async fn create_wiki_document_tx(
         "title": input.title,
         "projectId": null,
     });
-    record_document_event_and_audit(
-        tx,
+    tx.record_document_event_and_audit(
         workspace_id,
         actor_user_id,
         "document.created",
@@ -864,20 +885,15 @@ pub(crate) async fn create_wiki_document_tx(
     .await?;
 
     if let Some(fence) = fence {
-        if !crate::db::import_jobs::append_import_document_ref(
-            tx,
-            workspace_id,
-            fence.job_id,
-            fence.lease_token,
-            document_id,
-        )
-        .await?
+        if !tx
+            .append_import_document_ref(workspace_id, fence.job_id, fence.lease_token, document_id)
+            .await?
         {
             return Ok(Ok(None));
         }
     }
 
-    let row = fetch_document_row(tx, workspace_id, document_id).await?;
+    let row = tx.document_row(workspace_id, document_id).await?;
     match row {
         Some(row) => Ok(Ok(Some(row_to_meta(row, true)))),
         None => Ok(Err(DocumentDbError::NotFound)),
@@ -891,24 +907,50 @@ pub async fn get_wiki_document(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
+    get_wiki_document_backend(
+        &Backend::Postgres(pool.clone()),
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+    )
+    .await
+}
+
+pub async fn get_wiki_document_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+    // Preserve the current PG route's READ COMMITTED transaction. Family reads
+    // use one snapshot for current credential, affiliation, grants and body.
+    let mut tx = match backend {
+        Backend::Postgres(pool) => super::backend::DbTransaction::Postgres(pool.begin().await?),
+        _ => backend.begin_read().await?,
+    };
+    let mut operation = tx.operation();
+    operation.set_tenant(workspace_id).await?;
+    if !operation.session_is_live(actor_user_id, session_id).await? {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::Forbidden));
     }
-    if !workspace_is_live(&mut tx, workspace_id).await? {
+    if !operation.workspace_is_live(workspace_id).await? {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let permission =
-        document_permission(&mut tx, workspace_id, actor_user_id, document_id, true).await?;
+    let permission = operation
+        .document_permission(workspace_id, actor_user_id, document_id, true)
+        .await?;
     if !permission_can_view(permission) {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let row = fetch_document_row(&mut tx, workspace_id, document_id).await?;
-    tx.commit().await?;
+    let row = operation.document_row(workspace_id, document_id).await?;
+    tx.commit()
+        .await
+        .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
     match row {
         Some(row) if row.8.is_some() => Ok(Err(DocumentDbError::NotFound)),
         Some(row) => Ok(Ok(row_to_meta(row, false))),
@@ -1277,6 +1319,253 @@ pub(crate) async fn fetch_document_row(
     .bind(document_id)
     .fetch_optional(&mut **tx)
     .await
+}
+
+fn family_document_row(row: &FamilyRow) -> Result<DocumentRow, sqlx::Error> {
+    Ok((
+        row.cell(0)?.id()?,
+        row.cell(1)?.id()?,
+        row.cell(2)?.string()?,
+        row.cell(3)?.int32()?,
+        row.cell(4)?.optional(Cell::string)?,
+        row.cell(5)?.string()?,
+        row.cell(6)?.optional(Cell::id)?,
+        row.cell(7)?.string()?,
+        row.cell(8)?.optional(Cell::id)?,
+        row.cell(9)?.string()?,
+        row.cell(10)?.int32()?,
+        row.cell(11)?.int32()?,
+        row.cell(12)?.id()?,
+        row.cell(13)?.datetime()?,
+        row.cell(14)?.datetime()?,
+        row.cell(15)?.value()?,
+    ))
+}
+
+type WikiReceipt = (Uuid, String, Option<Uuid>, Value);
+type WikiParent = (Option<Uuid>, String, Option<DateTime<Utc>>);
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn document_row(
+        &mut self,
+        workspace: Uuid,
+        document: Uuid,
+    ) -> Result<Option<DocumentRow>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => fetch_document_row(tx, workspace, document).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let rows=tx.query("SELECT id,workspace_id,title,number,icon,path,parent_id,sort_key,project_id,status,schema_version,version,created_by,created_at,updated_at,content_json FROM documents WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL", &[Cell::uuid(workspace),Cell::uuid(document)]).await?;
+                rows.first().map(family_document_row).transpose()
+            }
+        }
+    }
+
+    async fn document_affiliation(
+        &mut self,
+        workspace: Uuid,
+        document: Uuid,
+    ) -> Result<Option<(Option<Uuid>, Option<DateTime<Utc>>)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_as(
+                "SELECT project_id,deleted_at FROM fvoci.documents WHERE workspace_id=$1 AND id=$2",
+            )
+            .bind(workspace)
+            .bind(document)
+            .fetch_optional(&mut ***tx)
+            .await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let rows=tx.query("SELECT project_id,deleted_at FROM documents WHERE workspace_id=?1 AND id=?2", &[Cell::uuid(workspace),Cell::uuid(document)]).await?;
+                rows.first()
+                    .map(|row| {
+                        Ok((
+                            row.cell(0)?.optional(Cell::id)?,
+                            row.cell(1)?.optional(Cell::datetime)?,
+                        ))
+                    })
+                    .transpose()
+            }
+        }
+    }
+
+    async fn wiki_group_roles(
+        &mut self,
+        workspace: Uuid,
+        document: Uuid,
+        user: Uuid,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => wiki_group_roles(tx, workspace, document, user).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let rows=tx.query("SELECT dm.role FROM document_members dm JOIN group_members gm ON gm.workspace_id=dm.workspace_id AND gm.group_id=dm.group_id WHERE dm.workspace_id=?1 AND dm.document_id=?2 AND gm.user_id=?3 AND dm.group_id IS NOT NULL", &[Cell::uuid(workspace),Cell::uuid(document),Cell::uuid(user)]).await?;
+                rows.iter().map(|row| row.cell(0)?.string()).collect()
+            }
+        }
+    }
+
+    async fn wiki_parent(
+        &mut self,
+        workspace: Uuid,
+        parent: Uuid,
+    ) -> Result<Option<WikiParent>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_as("SELECT project_id,path::text,deleted_at FROM fvoci.documents WHERE workspace_id=$1 AND id=$2").bind(workspace).bind(parent).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let rows=tx.query("SELECT project_id,path,deleted_at FROM documents WHERE workspace_id=?1 AND id=?2", &[Cell::uuid(workspace),Cell::uuid(parent)]).await?;
+                rows.first().map(|row|Ok((row.cell(0)?.optional(Cell::id)?,row.cell(1)?.string()?,row.cell(2)?.optional(Cell::datetime)?))).transpose()
+            }
+        }
+    }
+
+    async fn last_wiki_sort_key(
+        &mut self,
+        workspace: Uuid,
+        parent: Option<Uuid>,
+    ) -> Result<Option<String>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_scalar("SELECT sort_key FROM fvoci.documents WHERE workspace_id=$1 AND parent_id IS NOT DISTINCT FROM $2 AND deleted_at IS NULL ORDER BY sort_key COLLATE \"C\" DESC LIMIT 1").bind(workspace).bind(parent).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let rows=tx.query("SELECT sort_key FROM documents WHERE workspace_id=?1 AND parent_id IS ?2 AND deleted_at IS NULL ORDER BY sort_key COLLATE BINARY DESC LIMIT 1", &[Cell::uuid(workspace),Cell::optional_uuid(parent)]).await?;
+                rows.first().map(|row|row.cell(0)?.string()).transpose()
+            }
+        }
+    }
+
+    async fn allocate_wiki_number(&mut self, workspace: Uuid) -> Result<i32, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_scalar("UPDATE fvoci.workspaces SET next_document_number=next_document_number+1,updated_at=now() WHERE id=$1 AND deleted_at IS NULL RETURNING next_document_number").bind(workspace).fetch_one(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                let rows=tx.query("UPDATE workspaces SET next_document_number=next_document_number+1,updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE id=?1 AND deleted_at IS NULL AND next_document_number<2147483647 RETURNING next_document_number", &[Cell::uuid(workspace)]).await?;
+                rows.first().ok_or(sqlx::Error::RowNotFound)?.cell(0)?.int32()
+            }
+        }
+    }
+
+    async fn insert_wiki_document(
+        &mut self,
+        workspace: Uuid,
+        document: Uuid,
+        actor: Uuid,
+        title: &str,
+        icon: Option<&str>,
+        path: &str,
+        parent: Option<Uuid>,
+        sort: &str,
+        number: i32,
+    ) -> Result<(), sqlx::Error> {
+        let body = empty_document_json();
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query("INSERT INTO fvoci.documents(id,workspace_id,title,icon,path,parent_id,sort_key,project_id,number,status,schema_version,content_json,created_by,kind) VALUES($1,$2,$3,$4,$5,$6,$7,NULL,$8,'draft',$9,$10,$11,'doc')")
+                    .bind(document).bind(workspace).bind(title).bind(icon).bind(path).bind(parent).bind(sort).bind(number).bind(DOCUMENT_SCHEMA_VERSION).bind(body).bind(actor).execute(&mut ***tx).await?;
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                tx.execute("INSERT INTO documents(id,workspace_id,title,icon,path,parent_id,sort_key,project_id,number,status,schema_version,content_json,created_by,kind) VALUES(?1,?2,?3,?4,?5,?6,?7,NULL,?8,'draft',?9,?10,?11,'doc')", &[Cell::uuid(document),Cell::uuid(workspace),Cell::text(title),Cell::optional_text(icon),Cell::text(path),Cell::optional_uuid(parent),Cell::text(sort),Cell::Integer(i64::from(number)),Cell::Integer(i64::from(DOCUMENT_SCHEMA_VERSION)),Cell::json(&body)?,Cell::uuid(actor)]).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn wiki_create_receipt(
+        &mut self,
+        workspace: Uuid,
+        command: Uuid,
+    ) -> Result<Option<WikiReceipt>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_as("SELECT actor_user_id,request_hash,document_id,result_json FROM fvoci.wiki_create_commands WHERE workspace_id=$1 AND command_id=$2").bind(workspace).bind(command).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let rows=tx.query("SELECT actor_user_id,request_hash,document_id,result_json FROM wiki_create_commands WHERE workspace_id=?1 AND command_id=?2", &[Cell::uuid(workspace),Cell::uuid(command)]).await?;
+                rows.first().map(|row|Ok((row.cell(0)?.id()?,row.cell(1)?.string()?,row.cell(2)?.optional(Cell::id)?,row.cell(3)?.value()?))).transpose()
+            }
+        }
+    }
+
+    async fn insert_wiki_create_receipt(
+        &mut self,
+        workspace: Uuid,
+        command: Uuid,
+        actor: Uuid,
+        hash: &str,
+        document: Uuid,
+        result: &Value,
+    ) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query("INSERT INTO fvoci.wiki_create_commands(workspace_id,command_id,actor_user_id,request_hash,document_id,result_json) VALUES($1,$2,$3,$4,$5,$6)").bind(workspace).bind(command).bind(actor).bind(hash).bind(document).bind(result).execute(&mut ***tx).await?;
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                tx.execute("INSERT INTO wiki_create_commands(workspace_id,command_id,actor_user_id,request_hash,document_id,result_json) VALUES(?1,?2,?3,?4,?5,?6)", &[Cell::uuid(workspace),Cell::uuid(command),Cell::uuid(actor),Cell::text(hash),Cell::uuid(document),Cell::json(result)?]).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn record_document_event_and_audit(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        verb: &str,
+        target: Uuid,
+        payload: Value,
+        ip: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        self.append_event(EventAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace),
+            actor_user_id: Some(actor),
+            verb: verb.into(),
+            target_type: Some("document".into()),
+            target_id: Some(target),
+            payload: payload.clone(),
+        })
+        .await?;
+        self.append_audit(AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace),
+            actor_user_id: Some(actor),
+            verb: verb.into(),
+            target_type: Some("document".into()),
+            target_id: Some(target),
+            payload,
+            ip: ip.map(str::to_string),
+        })
+        .await
+    }
+
+    async fn append_import_document_ref(
+        &mut self,
+        workspace: Uuid,
+        job: Uuid,
+        owner: Uuid,
+        document: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                crate::db::import_jobs::append_import_document_ref(
+                    tx, workspace, job, owner, document,
+                )
+                .await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                Err(sqlx::Error::Protocol(
+                    "SQLite-family import progress is pending W2 producer integration".into(),
+                ))
+            }
+        }
+    }
 }
 
 fn alphabet_char(index: usize) -> char {
