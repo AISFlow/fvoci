@@ -42,8 +42,9 @@ test("queued attachments survive complete loss/retry and cannot insert after can
   if (!workspace) throw new Error("setup workspace missing");
   const ws = `/api/v1/workspaces/${workspace.id}`;
   const createDoc = async (title: string) => {
+    const commandId = crypto.randomUUID();
     const response = await page.request.post(`${ws}/documents`, {
-      data: { parentId: null, title },
+      data: { commandId, parentId: null, title },
     });
     expect(response.status()).toBe(201);
     return readJson(response, flowSchemas.document);

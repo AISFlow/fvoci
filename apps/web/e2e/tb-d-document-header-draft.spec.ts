@@ -71,7 +71,12 @@ async function fixtures(page: Page, kind: Kind) {
   }
   const base = `/api/v1/workspaces/${ws}${projectId ? `/projects/${projectId}` : ""}/documents`;
   const create = async (title: string): Promise<Document> => {
-    const response = await page.request.post(base, { data: { parentId: root, title } });
+    // The ordinary wiki API requires a command; the project API has a
+    // separate DTO which rejects that field.
+    const data = projectId
+      ? { parentId: root, title }
+      : { commandId: crypto.randomUUID(), parentId: root, title };
+    const response = await page.request.post(base, { data });
     expect(response.status()).toBe(201);
     const doc = await readJson(response, metaSchema);
     return {

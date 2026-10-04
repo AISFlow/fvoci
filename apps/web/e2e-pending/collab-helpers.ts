@@ -246,10 +246,16 @@ export type WikiDoc = {
   workspaceId: string;
 };
 
-export async function createWikiDoc(page: Page, title: string): Promise<WikiDoc> {
+// One invocation is one logical create. A caller replaying after response loss
+// must retain and supply the original commandId.
+export async function createWikiDoc(
+  page: Page,
+  title: string,
+  commandId: string = crypto.randomUUID(),
+): Promise<WikiDoc> {
   const id = await workspaceId(page, admin.workspaceSlug);
   const res = await page.request.post(`/api/v1/workspaces/${id}/documents`, {
-    data: { parentId: null, title },
+    data: { commandId, parentId: null, title },
   });
   expect(res.ok()).toBe(true);
   const body = (await res.json()) as components["schemas"]["DocumentMetaResponse"];
