@@ -3099,8 +3099,16 @@ async fn selected_compaction_effect_counts(
         Backend::Postgres(pool) => {
             let mut tx = pool.begin().await.unwrap();
             fvoci_server::db::context::set_tenant(&mut tx, workspace).await.unwrap();
+            // This fixture observer needs audit SELECT visibility; actual
+            // compaction still runs under ordinary restricted app authority.
+            let previous = fvoci_server::db::context::set_system(&mut tx).await.unwrap();
+            assert_ne!(previous, "on", "ordinary app pool must not leak system context");
             let counts = sqlx::query_as("SELECT (SELECT count(*) FROM fvoci.events WHERE workspace_id=$1 AND target_id=$2 AND verb='document.collab_snapshot_compacted'),(SELECT count(*) FROM fvoci.audit_log WHERE workspace_id=$1 AND target_id=$2 AND verb='document.collab_snapshot_compacted')")
                 .bind(workspace).bind(document).fetch_one(&mut *tx).await.unwrap();
+            fvoci_server::db::context::restore_system(&mut tx, &previous).await.unwrap();
+            let restored: Option<String> = sqlx::query_scalar("SELECT current_setting('app.system_ctx', true)")
+                .fetch_one(&mut *tx).await.unwrap();
+            assert_eq!(restored.unwrap_or_default(), previous);
             tx.commit().await.unwrap();
             counts
         }
