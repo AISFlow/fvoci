@@ -6,7 +6,7 @@ set -euo pipefail
 : "${CARGO_TARGET_DIR:?CARGO_TARGET_DIR is required}"
 
 # The timer's full suite exceeds the ordinary login budget in one fresh app.
-# Keep its original cases and newer controls in complementary fresh groups.
+# Keep original cases, later recovery cases and newer controls in fresh groups.
 # Explicit selection keeps the caller's arguments and runtime scope intact.
 TIMER_SPEC_COUNT=0
 TIMER_OTHER_SPEC=false
@@ -24,7 +24,9 @@ for arg in "$@"; do
 done
 if ((TIMER_SPEC_COUNT == 1)) && [[ "$TIMER_OTHER_SPEC" == false && "$TIMER_EXPLICIT_SELECTION" == false && "${FVOCI_E2E_PENDING:-}" != 1 ]]; then
   TIMER_NEW_CONTROL_FILTER='ordinary research plan persists|task widget retires|a late task-widget R1|owner releases opaque legacy reservations|a late legacy release'
-  bash "$ROOT/scripts/web-e2e-run-group.sh" "$@" --grep-invert "$TIMER_NEW_CONTROL_FILTER"
+  TIMER_RECOVERY_FILTER='real browser offline start|a native committed pause|a planner A-B-A|an estimate A-B-A|a genuine new session retires|transient browser 429|native same-database restart|one ordinary task restore'
+  bash "$ROOT/scripts/web-e2e-run-group.sh" "$@" --grep-invert "$TIMER_NEW_CONTROL_FILTER|$TIMER_RECOVERY_FILTER"
+  bash "$ROOT/scripts/web-e2e-run-group.sh" "$@" --grep "$TIMER_RECOVERY_FILTER"
   bash "$ROOT/scripts/web-e2e-run-group.sh" "$@" --grep "$TIMER_NEW_CONTROL_FILTER"
   exit 0
 fi
