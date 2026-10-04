@@ -2697,8 +2697,10 @@ async fn digest_sweep_serves_every_due_row_beyond_one_batch() {
     let pool = app_pool(&harness).await;
     seed_digest_recipients(&admin, workspace_id, 150).await;
 
+    let sink = SmtpSink::spawn().await;
+    let mailer = mailer_for(sink.port);
     let now = Utc::now();
-    let sent = send_due_digests(&pool, &Mailer::disabled(), now, &CancellationToken::new())
+    let sent = send_due_digests(&pool, &mailer, now, &CancellationToken::new())
         .await
         .expect("first sweep");
     assert_eq!(sent, 150, "every due row is served in one sweep");
@@ -2711,6 +2713,11 @@ async fn digest_sweep_serves_every_due_row_beyond_one_batch() {
     .await
     .unwrap();
     assert_eq!(claimed_now, 150);
+    assert_eq!(
+        sink.count(),
+        150,
+        "every first-sweep digest was accepted by actual SMTP"
+    );
 
     // A new unread notification for everyone, then the next day's sweep.
     sqlx::query(
@@ -2725,15 +2732,15 @@ async fn digest_sweep_serves_every_due_row_beyond_one_batch() {
     .await
     .expect("next day's notifications");
     let next_day = now + ChronoDuration::hours(25);
-    let sent = send_due_digests(
-        &pool,
-        &Mailer::disabled(),
-        next_day,
-        &CancellationToken::new(),
-    )
-    .await
-    .expect("next sweep");
+    let sent = send_due_digests(&pool, &mailer, next_day, &CancellationToken::new())
+        .await
+        .expect("next sweep");
     assert_eq!(sent, 150, "the next day serves every row again");
+    assert_eq!(
+        sink.count(),
+        300,
+        "the next sweep delivered another150 actual digests"
+    );
     assert_eq!(digest_rows_due(&admin, next_day).await, 0);
 
     admin.close().await;

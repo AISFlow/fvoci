@@ -1,7 +1,8 @@
 //! Outbox relay: delivers committed `fvoci.events` to each consumer in
-//! `(xact, seq)` order, one cursor per consumer. An event is read only once
-//! its xact is below the snapshot xmin, so no earlier event can still commit
-//! behind the cursor.
+//! `(xact, seq)` order for PostgreSQL, one cursor per consumer. A PG event
+//! is read only once its xact is below snapshot xmin. SQLite-family events
+//! use their real committed writer-transaction sequence, with no XID/xmin
+//! surrogate; readers cannot skip a later commit behind their cursor.
 //!
 //! Each server runs one dispatcher task that serves every registered
 //! consumer in turn, with one lease per consumer. Only the lease holder
@@ -9,7 +10,8 @@
 //! releases them on shutdown; after a crash they expire on their own.
 //!
 //! Order per event:
-//! - `PgOnly`: one transaction writes the processed mark (where the consumer
+//! - `DatabaseAtomic` (legacy spelling `PgOnly`): one transaction writes the
+//!   processed mark (where the consumer
 //!   keeps marks), applies the effect only when that mark is new, and
 //!   advances the cursor; a rejected advance rolls it all back.
 //! - `External`: the effect, then the processed mark (it needs no lease),
@@ -38,6 +40,6 @@
 mod dispatcher;
 
 pub use dispatcher::{
-    spawn_outbox_dispatcher, DeliveryMode, OutboxConsumer, OutboxDispatcherHandle,
-    OutboxDispatcherSettings, OutboxProcessError,
+    spawn_outbox_dispatcher, spawn_outbox_dispatcher_backend, DeliveryMode, OutboxConsumer,
+    OutboxDispatcherHandle, OutboxDispatcherSettings, OutboxProcessError,
 };

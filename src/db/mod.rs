@@ -29,6 +29,7 @@ pub mod labels;
 pub mod legal;
 pub mod lookup;
 pub mod magic;
+pub(crate) mod mail_digest;
 pub mod mfa;
 pub mod migrate;
 pub mod milestones;

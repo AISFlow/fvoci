@@ -6,10 +6,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::db::context::{set_system, set_tenant};
-use crate::db::outbox::OutboxEvent;
+use crate::db::backend::Backend;
+use crate::db::outbox::{BackendOutboxEvent, OutboxEvent};
 use crate::mail::{smtp, Mailer};
-use crate::notifications::{identity_mail_for_event, list_immediate_comment_mails, OutboundMail};
+use crate::notifications::{
+    identity_mail_for_event_backend, list_immediate_comment_mails_backend, OutboundMail,
+};
 use crate::outbox::{DeliveryMode, OutboxConsumer, OutboxProcessError};
 
 pub const MAIL_CONSUMER: &str = "mail";
@@ -153,6 +155,40 @@ impl OutboxConsumer for MailConsumer {
             (run, None)
         })
     }
+    fn deliver_backend<'a>(
+        &'a self,
+        backend: &'a Backend,
+        _owner: Uuid,
+        event: &'a BackendOutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(
+            async move { deliver_mail_backend(backend, &self.mailer, &self.accepted, event).await },
+        )
+    }
+    fn deliver_batch_backend<'a>(
+        &'a self,
+        backend: &'a Backend,
+        _owner: Uuid,
+        events: &'a [BackendOutboxEvent],
+    ) -> Pin<Box<dyn Future<Output = (usize, Option<OutboxProcessError>)> + Send + 'a>> {
+        Box::pin(async move {
+            let Some(first) = events.first() else {
+                return (0, None);
+            };
+            if is_mail_verb(&first.verb) {
+                return match deliver_mail_backend(backend, &self.mailer, &self.accepted, first)
+                    .await
+                {
+                    Ok(()) => (1, None),
+                    Err(err) => (0, Some(err)),
+                };
+            }
+            (
+                events.iter().take_while(|e| !is_mail_verb(&e.verb)).count(),
+                None,
+            )
+        })
+    }
 }
 
 pub fn mail_consumer(mailer: Arc<Mailer>) -> Arc<dyn OutboxConsumer> {
@@ -163,23 +199,23 @@ fn is_mail_verb(verb: &str) -> bool {
     MAIL_VERBS.contains(&verb)
 }
 
-async fn collect_mails(
-    pool: &PgPool,
-    event: &OutboxEvent,
-) -> Result<Vec<OutboundMail>, OutboxProcessError> {
-    let mut tx = pool.begin().await?;
-    set_system(&mut tx).await?;
+async fn collect_mails_backend(
+    backend: &Backend,
+    event: &BackendOutboxEvent,
+) -> Result<Vec<OutboundMail>, sqlx::Error> {
+    let mut tx = backend.begin_read().await?;
+    let previous = tx.operation().set_system().await?;
     if let Some(workspace_id) = event.workspace_id {
-        set_tenant(&mut tx, workspace_id).await?;
+        tx.operation().set_tenant(workspace_id).await?;
     }
-    let mut mails = Vec::new();
-    if event.verb == "comment.created" {
-        mails.extend(list_immediate_comment_mails(&mut tx, event).await?);
+    let mut mails = list_immediate_comment_mails_backend(&mut tx.operation(), event).await?;
+    if let Some(mail) = identity_mail_for_event_backend(&mut tx.operation(), event).await? {
+        mails.push(mail);
     }
-    if let Some(identity) = identity_mail_for_event(&mut tx, event).await? {
-        mails.push(identity);
-    }
-    tx.commit().await?;
+    tx.operation().restore_system(previous).await?;
+    tx.commit()
+        .await
+        .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
     Ok(mails)
 }
 
@@ -189,10 +225,25 @@ async fn deliver_mail(
     accepted: &Mutex<AcceptedRecipients>,
     event: &OutboxEvent,
 ) -> Result<(), OutboxProcessError> {
+    deliver_mail_backend(
+        &Backend::Postgres(pool.clone()),
+        mailer,
+        accepted,
+        &event.clone().into(),
+    )
+    .await
+}
+
+async fn deliver_mail_backend(
+    backend: &Backend,
+    mailer: &Mailer,
+    accepted: &Mutex<AcceptedRecipients>,
+    event: &BackendOutboxEvent,
+) -> Result<(), OutboxProcessError> {
     if !is_mail_verb(&event.verb) {
         return Ok(());
     }
-    let mails = collect_mails(pool, event).await?;
+    let mails = collect_mails_backend(backend, event).await?;
     let mut any_accepted = false;
     let mut rejected = 0usize;
     // 5xx refusals not known to be about their recipient that no send
@@ -294,5 +345,218 @@ mod tests {
             "the oldest event is pushed out"
         );
         assert!(accepted.contains(second, "a@example.com"));
+    }
+}
+
+#[cfg(test)]
+mod backend_delivery_regressions {
+    use super::*;
+    use crate::db::notifications::family_runtime_fixture::Fixture;
+    use crate::mail::SmtpConfig;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[tokio::test]
+    async fn backend_batch_confirms_only_nonmail_prefix_or_one_mail_event() {
+        let f = Fixture::new().await;
+        f.grant_wiki().await;
+        let event = f.append_comment_event("comment.created").await;
+        let consumer = MailConsumer::new(Arc::new(Mailer::disabled()));
+        let mut wiki = event.clone();
+        wiki.verb = "document.updated".into();
+        let owner = Uuid::now_v7();
+        let (done, error) = consumer
+            .deliver_batch_backend(
+                &f.backend,
+                owner,
+                &[wiki.clone(), wiki.clone(), event.clone(), wiki.clone()],
+            )
+            .await;
+        assert_eq!(done, 2);
+        assert!(error.is_none());
+        let (done, error) = consumer
+            .deliver_batch_backend(&f.backend, owner, &[event.clone(), event.clone(), wiki])
+            .await;
+        assert_eq!(done, 1);
+        assert!(error.is_none());
+        assert_eq!(
+            lock(&consumer.accepted).events.len(),
+            1,
+            "unset SMTP preserves the actual configured no-op"
+        );
+        let marks: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM processed_events WHERE consumer='mail'")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            marks, 0,
+            "External consumer cannot mark or advance before dispatcher confirmation"
+        );
+        f.finish().await;
+    }
+
+    // A synthetic local SMTP peer: no TLS/AUTH advertised, no real address or
+    // external endpoint. Only the existing transport sends the actual message.
+    async fn smtp_sink(
+        listener: tokio::net::TcpListener,
+        accepted: Arc<Mutex<Vec<String>>>,
+        mut drop_first_confirmation: bool,
+    ) {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let accepted = accepted.clone();
+            {
+                let mut stream = BufReader::new(stream);
+                stream
+                    .get_mut()
+                    .write_all(b"220 fixture ESMTP\r\n")
+                    .await
+                    .unwrap();
+                let mut line = String::new();
+                let mut data = false;
+                let mut recipient = String::new();
+                let mut body = String::new();
+                loop {
+                    line.clear();
+                    if stream.read_line(&mut line).await.unwrap() == 0 {
+                        break;
+                    }
+                    if data {
+                        if line == ".\r\n" {
+                            assert!(body.contains("Subject:"));
+                            accepted.lock().unwrap().push(recipient.clone());
+                            if drop_first_confirmation {
+                                drop_first_confirmation = false;
+                                break;
+                            }
+                            data = false;
+                            stream
+                                .get_mut()
+                                .write_all(b"250 2.0.0 accepted\r\n")
+                                .await
+                                .unwrap();
+                        } else {
+                            body.push_str(&line);
+                        }
+                        continue;
+                    }
+                    let upper = line.to_ascii_uppercase();
+                    let reply = if upper.starts_with("EHLO") || upper.starts_with("HELO") {
+                        "250 fixture\r\n"
+                    } else if upper.starts_with("RCPT TO:") {
+                        recipient = line.trim().to_string();
+                        "250 2.1.5 recipient\r\n"
+                    } else if upper == "DATA\r\n" {
+                        data = true;
+                        body.clear();
+                        "354 data\r\n"
+                    } else if upper == "QUIT\r\n" {
+                        stream.get_mut().write_all(b"221 bye\r\n").await.unwrap();
+                        break;
+                    } else {
+                        "250 ok\r\n"
+                    };
+                    stream.get_mut().write_all(reply.as_bytes()).await.unwrap();
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_actual_smtp_confirmation_cache_and_restart_are_at_least_once() {
+        let f = Fixture::new().await;
+        f.grant_wiki().await;
+        let event = f.append_comment_event("comment.created").await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let sink = tokio::spawn(smtp_sink(listener, received.clone(), false));
+        let mailer = Arc::new(Mailer::from_smtp(Some(SmtpConfig {
+            host: "127.0.0.1".into(),
+            port,
+            from: "sender@notification.invalid".into(),
+        })));
+        let consumer = MailConsumer::new(mailer.clone());
+        let owner = Uuid::now_v7();
+        consumer
+            .deliver_backend(&f.backend, owner, &event)
+            .await
+            .unwrap();
+        assert_eq!(
+            received.lock().unwrap().len(),
+            1,
+            "actual SMTP DATA acceptance is required"
+        );
+        consumer
+            .deliver_backend(&f.backend, owner, &event)
+            .await
+            .unwrap();
+        assert_eq!(
+            received.lock().unwrap().len(),
+            1,
+            "same-process replay skips accepted recipient"
+        );
+        let restarted = MailConsumer::new(mailer);
+        restarted
+            .deliver_backend(&f.backend, owner, &event)
+            .await
+            .unwrap();
+        assert_eq!(
+            received.lock().unwrap().len(),
+            2,
+            "restart permits documented at-least-once redelivery"
+        );
+        sink.abort();
+        assert!(sink.await.unwrap_err().is_cancelled());
+        f.finish().await;
+    }
+    #[tokio::test]
+    async fn backend_smtp_unknown_response_retries_without_false_confirmation() {
+        let f = Fixture::new().await;
+        f.grant_wiki().await;
+        let event = f.append_comment_event("comment.created").await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let sink = tokio::spawn(smtp_sink(listener, received.clone(), true));
+        let mailer = Arc::new(Mailer::from_smtp(Some(SmtpConfig {
+            host: "127.0.0.1".into(),
+            port,
+            from: "sender@notification.invalid".into(),
+        })));
+        let consumer = MailConsumer::new(mailer);
+        let owner = Uuid::now_v7();
+        let (done, error) = consumer
+            .deliver_batch_backend(&f.backend, owner, &[event.clone()])
+            .await;
+        assert_eq!(
+            done, 0,
+            "DATA without a received acceptance cannot confirm the event"
+        );
+        assert!(error.is_some());
+        assert_eq!(received.lock().unwrap().len(), 1);
+        assert!(lock(&consumer.accepted).events.is_empty());
+        let (done, error) = consumer
+            .deliver_batch_backend(&f.backend, owner, &[event.clone()])
+            .await;
+        assert_eq!(done, 1);
+        assert!(error.is_none());
+        assert_eq!(
+            received.lock().unwrap().len(),
+            2,
+            "unknown acceptance permits at-least-once redelivery"
+        );
+        consumer
+            .deliver_backend(&f.backend, owner, &event)
+            .await
+            .unwrap();
+        assert_eq!(
+            received.lock().unwrap().len(),
+            2,
+            "only the confirmed retry is cached"
+        );
+        sink.abort();
+        assert!(sink.await.unwrap_err().is_cancelled());
+        f.finish().await;
     }
 }

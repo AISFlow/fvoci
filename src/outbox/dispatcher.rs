@@ -10,11 +10,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
+use crate::db::backend::Backend;
 use crate::db::outbox::{
-    advance_cursor, claim_retries, clear_failure, fetch_event_by_id, fetch_failure_state,
-    is_outbox_xid_epoch_mismatch, is_processed, lease_consumer, mark_processed, read_events,
-    record_failure, release_consumer, OutboxEvent, OUTBOX_DEFAULT_BATCH, OUTBOX_FAILURE_BACKOFF_MS,
-    OUTBOX_LEASE_SECS, OUTBOX_MAX_ATTEMPTS,
+    advance_cursor_backend, claim_retries_backend, clear_failure_backend,
+    fetch_event_by_id_backend, fetch_failure_state_backend, is_outbox_xid_epoch_mismatch,
+    is_processed_backend, lease_consumer_backend, mark_processed_backend, read_events_backend,
+    record_failure_backend, release_consumer_backend, BackendOutboxEvent, EventVisibility,
+    OutboxEvent, OUTBOX_DEFAULT_BATCH, OUTBOX_FAILURE_BACKOFF_MS, OUTBOX_LEASE_SECS,
+    OUTBOX_MAX_ATTEMPTS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +25,8 @@ pub enum DeliveryMode {
     /// The effect is written to this database in one transaction with the
     /// processed mark and the cursor advance, so it is applied once.
     PgOnly,
+    /// Driver-neutral spelling for effects committed atomically with mark/cursor.
+    DatabaseAtomic,
     /// The effect reaches outside this database and is delivered at least
     /// once: a repeat must be harmless (search re-upserts from current rows,
     /// GitHub sets the issue's current state) or accepted (mail, see
@@ -31,6 +36,11 @@ pub enum DeliveryMode {
 
 #[derive(Debug, thiserror::Error)]
 pub enum OutboxProcessError {
+    #[error("consumer {consumer} has no delivery implementation for backend {backend}")]
+    UnsupportedBackend {
+        consumer: String,
+        backend: &'static str,
+    },
     #[error("delivery failed: {0}")]
     Delivery(String),
     #[error("database error: {0}")]
@@ -89,6 +99,56 @@ pub trait OutboxConsumer: Send + Sync {
         })
     }
 
+    /// Staged compatibility: existing domain consumers retain their actual PG
+    /// implementation. A family consumer must implement this method; there is
+    /// no synthetic PG event or successful fallback for an unported consumer.
+    fn deliver_backend<'a>(
+        &'a self,
+        backend: &'a Backend,
+        lease_owner: Uuid,
+        event: &'a BackendOutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(async move {
+            let Backend::Postgres(pool) = backend else {
+                return Err(OutboxProcessError::UnsupportedBackend {
+                    consumer: self.name().to_owned(),
+                    backend: backend.kind(),
+                });
+            };
+            let event = actual_postgres_event(event)?;
+            self.deliver(pool, lease_owner, &event).await
+        })
+    }
+
+    fn deliver_batch_backend<'a>(
+        &'a self,
+        backend: &'a Backend,
+        lease_owner: Uuid,
+        events: &'a [BackendOutboxEvent],
+    ) -> Pin<Box<dyn Future<Output = (usize, Option<OutboxProcessError>)> + Send + 'a>> {
+        Box::pin(async move {
+            if let Backend::Postgres(pool) = backend {
+                let events = match events
+                    .iter()
+                    .map(actual_postgres_event)
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    Ok(events) => events,
+                    Err(error) => return (0, Some(error)),
+                };
+                return self.deliver_batch(pool, lease_owner, &events).await;
+            }
+            let mut done = 0;
+            for event in events {
+                match self.deliver_backend(backend, lease_owner, event).await {
+                    Ok(()) => done += 1,
+                    Err(error) => return (done, Some(error)),
+                }
+            }
+            (done, None)
+        })
+    }
+
     /// Wall-clock budget for one `deliver_batch` call, independent of event count.
     /// When `Some(budget)` exceeds the dispatcher lease, at most one event is
     /// passed. `None` means the call is bounded only by the lease timeout and
@@ -107,6 +167,33 @@ pub trait OutboxConsumer: Send + Sync {
     fn batch_event_cap(&self) -> usize {
         usize::MAX
     }
+}
+
+fn actual_postgres_event(event: &BackendOutboxEvent) -> Result<OutboxEvent, OutboxProcessError> {
+    let EventVisibility::Postgres {
+        snapshot_xmin,
+        xact,
+    } = &event.visibility
+    else {
+        return Err(sqlx::Error::Protocol(
+            "family event cannot be delivered as a PostgreSQL event".into(),
+        )
+        .into());
+    };
+    Ok(OutboxEvent {
+        snapshot_xmin: snapshot_xmin.clone(),
+        xact: xact.clone(),
+        id: event.id,
+        seq: event.seq,
+        workspace_id: event.workspace_id,
+        actor_user_id: event.actor_user_id,
+        verb: event.verb.clone(),
+        target_type: event.target_type.clone(),
+        target_id: event.target_id,
+        payload: event.payload.clone(),
+        channel: event.channel.clone(),
+        created_at: event.created_at,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +258,14 @@ pub fn spawn_outbox_dispatcher(
     pool: PgPool,
     consumers: Vec<Arc<dyn OutboxConsumer>>,
 ) -> Option<OutboxDispatcherHandle> {
+    spawn_outbox_dispatcher_backend(settings, Backend::Postgres(pool), consumers)
+}
+
+pub fn spawn_outbox_dispatcher_backend(
+    settings: OutboxDispatcherSettings,
+    pool: Backend,
+    consumers: Vec<Arc<dyn OutboxConsumer>>,
+) -> Option<OutboxDispatcherHandle> {
     if consumers.is_empty() {
         return None;
     }
@@ -189,7 +284,7 @@ pub fn spawn_outbox_dispatcher(
 
 async fn run_dispatcher_loop(
     settings: OutboxDispatcherSettings,
-    pool: PgPool,
+    pool: Backend,
     consumers: Vec<Arc<dyn OutboxConsumer>>,
     cancel: CancellationToken,
     wake: Arc<Notify>,
@@ -232,7 +327,7 @@ async fn run_dispatcher_loop(
     // This task owns the leases. Releasing them lets the next start take
     // over without waiting out the TTL; after a crash they expire on their own.
     for (consumer, owner) in owners {
-        if let Err(err) = release_consumer(&pool, consumer.name(), owner).await {
+        if let Err(err) = release_consumer_backend(&pool, consumer.name(), owner).await {
             warn!(
                 consumer = consumer.name(),
                 error = %err,
@@ -244,18 +339,18 @@ async fn run_dispatcher_loop(
 
 async fn process_consumer_cycle(
     settings: &OutboxDispatcherSettings,
-    pool: &PgPool,
+    pool: &Backend,
     consumer: &Arc<dyn OutboxConsumer>,
     owner: Uuid,
     cancel: &CancellationToken,
 ) -> Result<bool, sqlx::Error> {
     let ttl_secs = settings.lease_ttl.as_secs().clamp(1, 3600) as i64;
-    if !lease_consumer(pool, consumer.name(), owner, ttl_secs).await? {
+    if !lease_consumer_backend(pool, consumer.name(), owner, ttl_secs).await? {
         return Ok(false);
     }
 
     if cancel.is_cancelled() {
-        let _ = release_consumer(pool, consumer.name(), owner).await?;
+        let _ = release_consumer_backend(pool, consumer.name(), owner).await?;
         return Ok(true);
     }
 
@@ -263,7 +358,7 @@ async fn process_consumer_cycle(
     // epoch delivers neither retries nor new events until --recover-outbox.
     // `app_outbox_read` compares the cursor and events with the snapshot
     // taken in the same statement.
-    let events = match read_events(pool, consumer.name(), settings.batch_limit).await {
+    let events = match read_events_backend(pool, consumer.name(), settings.batch_limit).await {
         Ok(events) => events,
         Err(err) if is_outbox_xid_epoch_mismatch(&err) => {
             tracing::error!(
@@ -284,17 +379,17 @@ async fn process_consumer_cycle(
     } else {
         for event in events {
             if cancel.is_cancelled() {
-                let _ = release_consumer(pool, consumer.name(), owner).await?;
+                let _ = release_consumer_backend(pool, consumer.name(), owner).await?;
                 return Ok(true);
             }
-            if !lease_consumer(pool, consumer.name(), owner, ttl_secs).await? {
+            if !lease_consumer_backend(pool, consumer.name(), owner, ttl_secs).await? {
                 return Ok(worked);
             }
 
-            let failure = fetch_failure_state(pool, consumer.name(), event.id).await?;
+            let failure = fetch_failure_state_backend(pool, consumer.name(), event.id).await?;
             if failure.as_ref().is_some_and(|row| row.dead_at.is_some()) {
                 let _ =
-                    advance_cursor(pool, consumer.name(), owner, &event.xact, event.seq).await?;
+                    advance_cursor_backend(pool, consumer.name(), owner, &event.cursor()).await?;
                 worked = true;
                 continue;
             }
@@ -316,7 +411,7 @@ async fn process_consumer_cycle(
                 handle_failure(settings, pool, consumer, owner, &event, &err.to_string()).await?;
                 break;
             }
-            let _ = clear_failure(pool, consumer.name(), event.id).await?;
+            let _ = clear_failure_backend(pool, consumer.name(), event.id).await?;
         }
     }
 
@@ -325,31 +420,31 @@ async fn process_consumer_cycle(
 
 async fn process_external_events(
     settings: &OutboxDispatcherSettings,
-    pool: &PgPool,
+    pool: &Backend,
     consumer: &Arc<dyn OutboxConsumer>,
     owner: Uuid,
     cancel: &CancellationToken,
     ttl_secs: i64,
-    events: Vec<OutboxEvent>,
+    events: Vec<BackendOutboxEvent>,
 ) -> Result<bool, sqlx::Error> {
     let mut worked = false;
-    let mut pending: Vec<OutboxEvent> = Vec::new();
+    let mut pending: Vec<BackendOutboxEvent> = Vec::new();
 
     for event in events {
         if cancel.is_cancelled() {
             // Nothing in `pending` is delivered or marked yet, and the cursor
             // has not passed it: the next dispatcher delivers it.
-            let _ = release_consumer(pool, consumer.name(), owner).await?;
+            let _ = release_consumer_backend(pool, consumer.name(), owner).await?;
             return Ok(true);
         }
 
-        let failure = fetch_failure_state(pool, consumer.name(), event.id).await?;
+        let failure = fetch_failure_state_backend(pool, consumer.name(), event.id).await?;
         if failure.as_ref().is_some_and(|row| row.dead_at.is_some()) {
             if !pending.is_empty() {
                 // Do not advance the cursor past undelivered pending events.
                 break;
             }
-            let _ = advance_cursor(pool, consumer.name(), owner, &event.xact, event.seq).await?;
+            let _ = advance_cursor_backend(pool, consumer.name(), owner, &event.cursor()).await?;
             worked = true;
             continue;
         }
@@ -360,11 +455,11 @@ async fn process_external_events(
             break;
         }
 
-        if is_processed(pool, consumer.name(), event.id).await? {
+        if is_processed_backend(pool, consumer.name(), event.id).await? {
             if !pending.is_empty() {
                 break;
             }
-            if !advance_cursor(pool, consumer.name(), owner, &event.xact, event.seq).await? {
+            if !advance_cursor_backend(pool, consumer.name(), owner, &event.cursor()).await? {
                 warn!(
                     consumer = consumer.name(),
                     event_id = %event.id,
@@ -375,7 +470,7 @@ async fn process_external_events(
             debug!(
                 consumer = consumer.name(),
                 event_id = %event.id,
-                xact = %event.xact,
+                cursor = ?event.cursor(),
                 seq = event.seq,
                 "outbox event already processed"
             );
@@ -440,12 +535,12 @@ fn lease_batch_timeout(lease: Duration) -> Duration {
 /// the default `deliver_batch` would lose the progress it made.
 async fn deliver_external_pending(
     settings: &OutboxDispatcherSettings,
-    pool: &PgPool,
+    pool: &Backend,
     consumer: &Arc<dyn OutboxConsumer>,
     owner: Uuid,
     cancel: &CancellationToken,
     ttl_secs: i64,
-    pending: &[OutboxEvent],
+    pending: &[BackendOutboxEvent],
 ) -> Result<bool, sqlx::Error> {
     let started = Instant::now();
     let budget = lease_batch_timeout(settings.lease_ttl);
@@ -455,7 +550,7 @@ async fn deliver_external_pending(
         if cancel.is_cancelled() || (offset > 0 && started.elapsed() >= budget) {
             break;
         }
-        if !lease_consumer(pool, consumer.name(), owner, ttl_secs).await? {
+        if !lease_consumer_backend(pool, consumer.name(), owner, ttl_secs).await? {
             return Ok(worked);
         }
         let remaining = &pending[offset..];
@@ -482,11 +577,11 @@ struct ExternalChunkOutcome {
 
 async fn deliver_external_chunk(
     settings: &OutboxDispatcherSettings,
-    pool: &PgPool,
+    pool: &Backend,
     consumer: &Arc<dyn OutboxConsumer>,
     owner: Uuid,
     ttl_secs: i64,
-    chunk: &[OutboxEvent],
+    chunk: &[BackendOutboxEvent],
 ) -> Result<ExternalChunkOutcome, sqlx::Error> {
     if chunk.is_empty() {
         return Ok(ExternalChunkOutcome {
@@ -497,7 +592,7 @@ async fn deliver_external_chunk(
 
     let (done, err) = match tokio::time::timeout(
         lease_batch_timeout(settings.lease_ttl),
-        consumer.deliver_batch(pool, owner, chunk),
+        consumer.deliver_batch_backend(pool, owner, chunk),
     )
     .await
     {
@@ -517,9 +612,9 @@ async fn deliver_external_chunk(
     // again. The batch may have used up most of the lease: renew it before
     // the cursor moves or a failure is recorded.
     for event in chunk.iter().take(done) {
-        let _ = mark_processed(pool, consumer.name(), event.id).await?;
+        let _ = mark_processed_backend(pool, consumer.name(), event.id).await?;
     }
-    let leased = lease_consumer(pool, consumer.name(), owner, ttl_secs).await?;
+    let leased = lease_consumer_backend(pool, consumer.name(), owner, ttl_secs).await?;
     if !leased {
         warn!(
             consumer = consumer.name(),
@@ -532,7 +627,7 @@ async fn deliver_external_chunk(
     }
     if let Some(last) = done.checked_sub(1).and_then(|last| chunk.get(last)) {
         // The whole delivered prefix is marked, so one advance covers it.
-        if !advance_cursor(pool, consumer.name(), owner, &last.xact, last.seq).await? {
+        if !advance_cursor_backend(pool, consumer.name(), owner, &last.cursor()).await? {
             warn!(
                 consumer = consumer.name(),
                 event_id = %last.id,
@@ -541,11 +636,11 @@ async fn deliver_external_chunk(
             return Ok(ExternalChunkOutcome { done, stop: true });
         }
         for event in chunk.iter().take(done) {
-            let _ = clear_failure(pool, consumer.name(), event.id).await?;
+            let _ = clear_failure_backend(pool, consumer.name(), event.id).await?;
             debug!(
                 consumer = consumer.name(),
                 event_id = %event.id,
-                xact = %event.xact,
+                cursor = ?event.cursor(),
                 seq = event.seq,
                 "outbox event delivered"
             );
@@ -583,65 +678,67 @@ async fn deliver_external_chunk(
 
 async fn process_retries(
     settings: &OutboxDispatcherSettings,
-    pool: &PgPool,
+    pool: &Backend,
     consumer: &Arc<dyn OutboxConsumer>,
     owner: Uuid,
     cancel: &CancellationToken,
 ) -> Result<bool, sqlx::Error> {
-    let retries = claim_retries(pool, consumer.name(), settings.batch_limit).await?;
+    let retries = claim_retries_backend(pool, consumer.name(), settings.batch_limit).await?;
     let mut worked = false;
     let ttl_secs = settings.lease_ttl.as_secs().clamp(1, 3600) as i64;
     for retry in retries {
         if cancel.is_cancelled() {
             return Ok(worked);
         }
-        if !lease_consumer(pool, consumer.name(), owner, ttl_secs).await? {
+        if !lease_consumer_backend(pool, consumer.name(), owner, ttl_secs).await? {
             return Ok(worked);
         }
-        let Some(event) = fetch_event_by_id(pool, retry.event_id).await? else {
-            let _ = clear_failure(pool, consumer.name(), retry.event_id).await?;
+        let Some(event) = fetch_event_by_id_backend(pool, retry.event_id).await? else {
+            let _ = clear_failure_backend(pool, consumer.name(), retry.event_id).await?;
             continue;
         };
         worked = true;
         if let Err(err) = deliver_retry(pool, consumer, owner, &event).await {
             handle_failure(settings, pool, consumer, owner, &event, &err.to_string()).await?;
         } else {
-            let _ = clear_failure(pool, consumer.name(), event.id).await?;
+            let _ = clear_failure_backend(pool, consumer.name(), event.id).await?;
         }
     }
     Ok(worked)
 }
 
 async fn deliver_retry(
-    pool: &PgPool,
+    pool: &Backend,
     consumer: &Arc<dyn OutboxConsumer>,
     owner: Uuid,
-    event: &OutboxEvent,
+    event: &BackendOutboxEvent,
 ) -> Result<(), OutboxProcessError> {
     match consumer.delivery_mode() {
-        DeliveryMode::PgOnly => consumer.deliver(pool, owner, event).await?,
+        DeliveryMode::PgOnly | DeliveryMode::DatabaseAtomic => {
+            consumer.deliver_backend(pool, owner, event).await?
+        }
         DeliveryMode::External => {
-            if is_processed(pool, consumer.name(), event.id).await? {
+            if is_processed_backend(pool, consumer.name(), event.id).await? {
                 return Ok(());
             }
-            consumer.deliver(pool, owner, event).await?;
-            let _ = mark_processed(pool, consumer.name(), event.id).await?;
+            consumer.deliver_backend(pool, owner, event).await?;
+            let _ = mark_processed_backend(pool, consumer.name(), event.id).await?;
         }
     }
     Ok(())
 }
 
 async fn deliver_one(
-    pool: &PgPool,
+    pool: &Backend,
     consumer: &Arc<dyn OutboxConsumer>,
     owner: Uuid,
-    event: &OutboxEvent,
+    event: &BackendOutboxEvent,
 ) -> Result<(), OutboxProcessError> {
-    consumer.deliver(pool, owner, event).await?;
+    consumer.deliver_backend(pool, owner, event).await?;
     debug!(
         consumer = consumer.name(),
         event_id = %event.id,
-        xact = %event.xact,
+        cursor = ?event.cursor(),
         seq = event.seq,
         "outbox event delivered"
     );
@@ -650,13 +747,13 @@ async fn deliver_one(
 
 async fn handle_failure(
     settings: &OutboxDispatcherSettings,
-    pool: &PgPool,
+    pool: &Backend,
     consumer: &Arc<dyn OutboxConsumer>,
     owner: Uuid,
-    event: &OutboxEvent,
+    event: &BackendOutboxEvent,
     error: &str,
 ) -> Result<(), sqlx::Error> {
-    let attempts = record_failure(
+    let attempts = record_failure_backend(
         pool,
         consumer.name(),
         owner,
@@ -673,7 +770,7 @@ async fn handle_failure(
             attempts,
             "outbox event dead-lettered; advancing cursor"
         );
-        let _ = advance_cursor(pool, consumer.name(), owner, &event.xact, event.seq).await?;
+        let _ = advance_cursor_backend(pool, consumer.name(), owner, &event.cursor()).await?;
     }
     Ok(())
 }
@@ -693,4 +790,45 @@ fn parse_positive_u64(name: &str, raw: Option<&str>, default: u64) -> Result<u64
         return Err(format!("{name} must be a positive integer"));
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod event_compatibility_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn pg_event() -> OutboxEvent {
+        OutboxEvent {
+            id: Uuid::now_v7(),
+            snapshot_xmin: "9223372036854775808".into(),
+            xact: "9223372036854775807".into(),
+            seq: 41,
+            workspace_id: Some(Uuid::now_v7()),
+            actor_user_id: Some(Uuid::now_v7()),
+            verb: "document.updated".into(),
+            target_type: Some("document".into()),
+            target_id: Some(Uuid::now_v7()),
+            payload: json!({"oldProjectId":null,"text":"한글🙂"}),
+            channel: "system".into(),
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn legacy_delivery_preserves_actual_pg_visibility_and_payload() {
+        let original = pg_event();
+        let adapted = actual_postgres_event(&original.clone().into()).unwrap();
+        assert_eq!(adapted, original);
+    }
+
+    #[test]
+    fn family_event_cannot_be_forged_into_pg_delivery() {
+        let mut family: BackendOutboxEvent = pg_event().into();
+        family.visibility = EventVisibility::SqliteFamily;
+        assert!(matches!(
+            family.cursor(),
+            crate::db::outbox::OutboxCursor::SqliteFamily { seq: 41 }
+        ));
+        assert!(actual_postgres_event(&family).is_err());
+    }
 }
