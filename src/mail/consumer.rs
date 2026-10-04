@@ -397,7 +397,11 @@ mod backend_delivery_regressions {
 
     // A synthetic local SMTP peer: no TLS/AUTH advertised, no real address or
     // external endpoint. Only the existing transport sends the actual message.
-    async fn smtp_sink(listener: tokio::net::TcpListener, accepted: Arc<Mutex<Vec<String>>>) {
+    async fn smtp_sink(
+        listener: tokio::net::TcpListener,
+        accepted: Arc<Mutex<Vec<String>>>,
+        mut drop_first_confirmation: bool,
+    ) {
         loop {
             let (stream, _) = listener.accept().await.unwrap();
             let accepted = accepted.clone();
