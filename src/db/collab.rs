@@ -352,6 +352,53 @@ pub async fn claim_family_document_room(
     owner: Uuid,
     lease: std::time::Duration,
 ) -> Result<Result<FamilyRoomClaim, CollabDbError>, sqlx::Error> {
+    claim_family_document_room_mode(
+        backend,
+        workspace,
+        actor,
+        credential,
+        document,
+        owner,
+        lease,
+        NativeLoadMode::Writer,
+    )
+    .await
+}
+
+/// A reader room owns the real family guard without claiming native writer
+/// generation. Its first authorized writer activates that same guard later.
+pub async fn acquire_family_document_room(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    document: Uuid,
+    owner: Uuid,
+    lease: std::time::Duration,
+) -> Result<Result<FamilyRoomClaim, CollabDbError>, sqlx::Error> {
+    claim_family_document_room_mode(
+        backend,
+        workspace,
+        actor,
+        credential,
+        document,
+        owner,
+        lease,
+        NativeLoadMode::Reader,
+    )
+    .await
+}
+
+async fn claim_family_document_room_mode(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    document: Uuid,
+    owner: Uuid,
+    lease: std::time::Duration,
+    mode: NativeLoadMode,
+) -> Result<Result<FamilyRoomClaim, CollabDbError>, sqlx::Error> {
     if matches!(backend, Backend::Postgres(_)) {
         return Err(sqlx::Error::Protocol(
             "PostgreSQL rooms require the session guard".into(),
@@ -366,7 +413,7 @@ pub async fn claim_family_document_room(
             actor,
             credential,
             document,
-            NativeLoadMode::Writer,
+            mode,
         )
         .await?;
     let mut native = match native {
@@ -387,7 +434,7 @@ pub async fn claim_family_document_room(
             return Ok(Err(error));
         }
     };
-    if new_owner {
+    if new_owner && matches!(mode, NativeLoadMode::Writer) {
         let generation = tx
             .operation()
             .bump_native_writer_generation(
@@ -409,6 +456,90 @@ pub async fn claim_family_document_room(
     }
     tx.commit().await.map_err(|error| error.source)?;
     Ok(Ok(FamilyRoomClaim { fence, native }))
+}
+
+/// Stable activation receipt is a fresh owner token chosen once by the room.
+/// A failed commit reply is reconciled under current edit authority using that
+/// same token; a reader guard never advances generation by itself.
+pub async fn activate_family_document_writer(
+    backend: &Backend,
+    guard: FamilyRoomFence,
+    actor: Uuid,
+    credential: Uuid,
+    writer_owner: Uuid,
+) -> Result<Result<FamilyRoomClaim, CollabDbError>, sqlx::Error> {
+    if matches!(backend, Backend::Postgres(_)) {
+        return Err(sqlx::Error::Protocol(
+            "PostgreSQL writer activation retains its session guard".into(),
+        ));
+    }
+    if writer_owner == guard.owner_token {
+        return Err(sqlx::Error::Protocol(
+            "writer activation must retain a distinct stable owner token".into(),
+        ));
+    }
+    let mut tx = backend.begin_write().await?;
+    let native = tx
+        .operation()
+        .load_collab_native(
+            CollabKind::Document,
+            guard.workspace_id,
+            actor,
+            credential,
+            guard.document_id,
+            NativeLoadMode::Writer,
+        )
+        .await?;
+    let mut native = match native {
+        Ok(native) => native,
+        Err(error) => {
+            tx.rollback().await?;
+            return Ok(Err(error));
+        }
+    };
+    let mut activated = guard;
+    activated.owner_token = writer_owner;
+    let already_activated = tx.operation().verify_family_room_fence(activated).await?;
+    if !already_activated {
+        if !tx.operation().verify_family_room_fence(guard).await? {
+            tx.rollback().await?;
+            return Ok(Err(CollabDbError::StaleWriter));
+        }
+        let OperationTx::SqliteFamily(family) = tx.operation() else {
+            return Err(sqlx::Error::Protocol(
+                "family writer activation requires SQLite family".into(),
+            ));
+        };
+        let now = family_room_now(family).await?;
+        let changed=family.execute("UPDATE collab_room_fences SET owner_token=?5 WHERE workspace_id=?1 AND document_id=?2 AND owner_token=?3 AND fence=?4 AND expires_at>?6",&[Cell::uuid(guard.workspace_id),Cell::uuid(guard.document_id),Cell::uuid(guard.owner_token),Cell::Integer(guard.fence),Cell::uuid(writer_owner),Cell::Integer(now)]).await?;
+        if changed != 1 {
+            tx.rollback().await?;
+            return Ok(Err(CollabDbError::StaleWriter));
+        }
+        let generation = tx
+            .operation()
+            .bump_native_writer_generation(
+                CollabTables::for_kind(CollabKind::Document),
+                guard.workspace_id,
+                guard.document_id,
+            )
+            .await?;
+        let Some(generation) = generation else {
+            tx.rollback().await?;
+            return Ok(Err(CollabDbError::NotFound));
+        };
+        native.writer_generation = generation;
+        native.load.writer_generation = generation;
+    }
+    if !tx.operation().verify_family_room_fence(activated).await? {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::StaleWriter));
+    }
+    tx.commit().await.map_err(|unknown| unknown.source)?;
+    Ok(Ok(FamilyRoomClaim {
+        fence: activated,
+        native,
+    }))
 }
 
 /// An expired original owner cannot renew or release another owner's lease.
@@ -2082,25 +2213,42 @@ pub async fn append_family_document_room_update(
     fence: FamilyRoomFence,
     input: AppendCollabInput<'_>,
 ) -> Result<Result<AppendCollabResult, CollabDbError>, sqlx::Error> {
+    append_family_document_room_update_timed(backend, fence, input)
+        .await
+        .map(|(result, _)| result)
+}
+
+pub(crate) async fn append_family_document_room_update_timed(
+    backend: &Backend,
+    fence: FamilyRoomFence,
+    input: AppendCollabInput<'_>,
+) -> Result<
+    (
+        Result<AppendCollabResult, CollabDbError>,
+        CollabDbStageTimings,
+    ),
+    sqlx::Error,
+> {
     if matches!(backend, Backend::Postgres(_)) {
         return Err(sqlx::Error::Protocol(
             "PostgreSQL room append requires its detached session connection".into(),
         ));
     }
     if input.payload.is_empty() || input.payload.len() > MAX_COLLAB_UPDATE_BYTES {
-        return Ok(Err(CollabDbError::PayloadTooLarge));
+        return Ok((
+            Err(CollabDbError::PayloadTooLarge),
+            CollabDbStageTimings::default(),
+        ));
     }
+    let acquire_started = Instant::now();
     let tx = backend.begin_write().await?;
-    append_collab_update_in_tx(
-        tx,
-        CollabKind::Document,
-        input,
-        CollabDbStageTimings::default(),
-        None,
-        Some(fence),
-    )
-    .await
-    .map(|(result, _)| result.map(|(appended, _)| appended))
+    let timings = CollabDbStageTimings {
+        pool_wait_us: acquire_started.elapsed().as_micros() as u64,
+        ..Default::default()
+    };
+    append_collab_update_in_tx(tx, CollabKind::Document, input, timings, None, Some(fence))
+        .await
+        .map(|(result, timings)| (result.map(|(appended, _)| appended), timings))
 }
 
 impl OperationTx<'_, '_> {

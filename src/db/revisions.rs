@@ -6,9 +6,7 @@ use uuid::Uuid;
 use crate::collab::derived_body::PreparedDerivedBody;
 use crate::db::backend::{Backend, OperationTx};
 use crate::db::codec::{Cell, FamilyRow};
-use crate::db::context::{
-    begin_read, lock_membership_users, recheck_session, set_system, set_tenant,
-};
+use crate::db::context::{set_system, set_tenant};
 use crate::db::projects::{load_live_project, project_permission};
 use crate::db::workspace::workspace_is_live;
 use crate::projects::ProjectPermission;
