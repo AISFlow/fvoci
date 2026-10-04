@@ -531,7 +531,7 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(gate.applied_steps, 3);
             let count: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'",
+                "SELECT count(*) FROM sqlite_schema",
             )
             .fetch_one(&pool)
             .await
