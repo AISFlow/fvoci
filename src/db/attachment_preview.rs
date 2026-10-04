@@ -586,9 +586,17 @@ pub(crate) mod tests {
         pub async fn task_attachment(&self) -> (Uuid, Uuid) {
             let project = Uuid::now_v7();
             let status = Uuid::now_v7();
+            let workflow = Uuid::now_v7();
             let task = Uuid::now_v7();
             sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'S31','S31','workspace',?3)").bind(project.as_bytes().as_slice()).bind(self.workspace.as_bytes().as_slice()).bind(self.user.as_bytes().as_slice()).execute(&self.pool).await.unwrap();
-            sqlx::query("INSERT INTO statuses(id,workspace_id,project_id,name,category,sort_key) VALUES(?1,?2,?3,'Todo','todo','V')").bind(status.as_bytes().as_slice()).bind(self.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).execute(&self.pool).await.unwrap();
+            sqlx::query("INSERT INTO workflows(id,workspace_id,project_id) VALUES(?1,?2,?3)")
+                .bind(workflow.as_bytes().as_slice())
+                .bind(self.workspace.as_bytes().as_slice())
+                .bind(project.as_bytes().as_slice())
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO statuses(id,workspace_id,project_id,workflow_id,name,category,sort_key) VALUES(?1,?2,?3,?4,'Todo','todo','V')").bind(status.as_bytes().as_slice()).bind(self.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(workflow.as_bytes().as_slice()).execute(&self.pool).await.unwrap();
             sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,content_json,created_by) VALUES(?1,?2,?3,1,'S31',?4,'{}',?5)").bind(task.as_bytes().as_slice()).bind(self.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(status.as_bytes().as_slice()).bind(self.user.as_bytes().as_slice()).execute(&self.pool).await.unwrap();
             let (id, _) = self.attachment(10, "image/png").await;
             sqlx::query("UPDATE attachments SET document_id=NULL,task_id=?2 WHERE id=?1")
@@ -806,6 +814,56 @@ pub(crate) mod tests {
                 .unwrap()
         );
         assert_eq!(before, f.row(id).await);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn preview_selected_cancel_during_publication_writer_wait_rolls_back() {
+        let f = Fixture::new().await;
+        let (id, _) = f.attachment(10, "image/png").await;
+        let claim = claim_preview_backend(&f.backend).await.unwrap().unwrap();
+        let key = Uuid::now_v7().to_string();
+        let journal = journal_preview_key_backend(&f.backend, &claim, &key)
+            .await
+            .unwrap()
+            .unwrap();
+        let before = f.row(id).await;
+        let journals = f.journals().await;
+        let holder = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        let lock = holder.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let backend = f.backend.clone();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            publish_preview_backend_with_cancel(
+                &backend,
+                &claim,
+                journal,
+                &key,
+                1,
+                1,
+                10,
+                Some(&task_cancel),
+            )
+            .await
+        });
+        // The app connection is owned by BEGIN, waiting for the other writer.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while f.pool.num_idle() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!task.is_finished());
+        cancel.cancel();
+        lock.rollback().await.unwrap();
+        assert!(!task.await.unwrap().unwrap());
+        assert_eq!(before, f.row(id).await);
+        assert_eq!(journals, f.journals().await);
+        holder.close().await;
         f.close().await;
     }
 
