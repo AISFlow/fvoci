@@ -1110,8 +1110,15 @@ impl OperationTx<'_, '_> {
         }
     }
     pub(crate) async fn append_event(&mut self, row: EventAppend) -> Result<(), sqlx::Error> {
+        self.append_event_channel(row, "web").await
+    }
+    pub(crate) async fn append_event_channel(
+        &mut self,
+        row: EventAppend,
+        channel: &str,
+    ) -> Result<(), sqlx::Error> {
         match self {
-            Self::Postgres(tx) => append_event(tx, row).await,
+            Self::Postgres(tx) => append_event_channel(tx, row, channel).await,
             Self::SqliteFamily(tx) => {
                 tx.require_writer()?;
                 if let Some(workspace) = row.workspace_id {
@@ -1120,7 +1127,7 @@ impl OperationTx<'_, '_> {
                     tx.require_system_context()?;
                 }
                 let seq = allocate_family_event_sequence(tx).await?;
-                tx.execute("INSERT INTO events (id,seq,workspace_id,actor_user_id,verb,target_type,target_id,payload,channel) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'web')", &[Cell::uuid(row.id),Cell::Integer(seq),Cell::optional_uuid(row.workspace_id),Cell::optional_uuid(row.actor_user_id),Cell::text(row.verb),Cell::optional_text(row.target_type.as_deref()),Cell::optional_uuid(row.target_id),Cell::json(&row.payload)?]).await?;
+                tx.execute("INSERT INTO events (id,seq,workspace_id,actor_user_id,verb,target_type,target_id,payload,channel) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)", &[Cell::uuid(row.id),Cell::Integer(seq),Cell::optional_uuid(row.workspace_id),Cell::optional_uuid(row.actor_user_id),Cell::text(row.verb),Cell::optional_text(row.target_type.as_deref()),Cell::optional_uuid(row.target_id),Cell::json(&row.payload)?,Cell::text(channel)]).await?;
                 Ok(())
             }
         }
