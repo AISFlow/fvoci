@@ -288,6 +288,47 @@ async fn workspace_kind(
     }
 }
 
+#[cfg(feature = "db-tests")]
+static WORKSPACE_CARD_BARRIERS: std::sync::LazyLock<
+    tokio::sync::Mutex<
+        std::collections::HashMap<
+            Uuid,
+            (
+                tokio::sync::oneshot::Sender<()>,
+                tokio::sync::oneshot::Receiver<()>,
+            ),
+        >,
+    >,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Pause this actor only, after the self-list transaction has actually committed
+/// and before any card transaction reserves its writer/current authority.
+#[cfg(feature = "db-tests")]
+pub async fn arm_workspace_card_barrier(
+    user: Uuid,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+    assert!(WORKSPACE_CARD_BARRIERS
+        .lock()
+        .await
+        .insert(user, (reached_tx, proceed_rx))
+        .is_none());
+    (reached_rx, proceed_tx)
+}
+
+#[cfg(feature = "db-tests")]
+async fn pause_before_workspace_cards(user: Uuid) {
+    let barrier = WORKSPACE_CARD_BARRIERS.lock().await.remove(&user);
+    if let Some((reached, proceed)) = barrier {
+        let _ = reached.send(());
+        let _ = proceed.await;
+    }
+}
+
 pub async fn list_workspaces_for_user(
     pool: &PgPool,
     user_id: Uuid,
@@ -303,6 +344,8 @@ pub async fn list_workspaces_for_user_backend(
     let mut tx = backend.begin_write().await?;
     let memberships = tx.operation().self_workspace_memberships(user_id).await?;
     tx.commit().await.map_err(|unknown| unknown.source)?;
+    #[cfg(feature = "db-tests")]
+    pause_before_workspace_cards(user_id).await;
     let mut items = Vec::new();
     for (workspace_id, role_str) in memberships {
         let role = WorkspaceRole::parse(&role_str).unwrap_or(WorkspaceRole::Guest);

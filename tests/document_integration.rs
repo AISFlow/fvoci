@@ -2777,17 +2777,314 @@ async fn wiki_create_command_requires_identity_and_receipt_failure_rolls_back_ev
 
 /// Early executable common fixture. Native editor/ACK/revision/browser proof
 /// is a separate required tracer; this does not claim that acceptance.
+// Synthetic data setup only. The product login/session/permission readers below
+// run through the real selected app connection; this is not a port of user/admin
+// mutation APIs or a claim that SQLite has PostgreSQL's app-role boundary.
+async fn selected_fixture_actor(
+    backend: &fvoci_server::db::backend::Backend,
+    harness: &TestDb,
+    app: &axum::Router,
+    workspace: Uuid,
+    role: &str,
+    label: &str,
+) -> (fvoci_server::db::identity::LiveSession, String) {
+    use fvoci_server::db::backend::Backend;
+    let user = Uuid::now_v7();
+    let email = format!("{label}@example.com");
+    let password = fvoci_server::auth::password::hash_password(
+        "supersecret1",
+        &Keyring::parse(PEPPER, "test").unwrap(),
+    )
+    .await
+    .unwrap();
+    match backend {
+        Backend::Postgres(_) => {
+            let admin = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&harness.admin_url)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO fvoci.users(id,email,password_hash,given_name) VALUES($1,$2,$3,$4)",
+            )
+            .bind(user)
+            .bind(&email)
+            .bind(&password)
+            .bind(label)
+            .execute(&admin)
+            .await
+            .unwrap();
+            admin.close().await;
+        }
+        Backend::Sqlite(pool) => {
+            let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+            sqlx::query("INSERT INTO users(id,email,password_hash,given_name) VALUES(?1,?2,?3,?4)")
+                .bind(user.as_bytes().to_vec())
+                .bind(&email)
+                .bind(&password)
+                .bind(label)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+        Backend::LibsqlRemote(_) => unreachable!("actual remote primary is separately required"),
+    }
+    selected_fixture_membership(backend, harness, workspace, user, Some(role)).await;
+    let (status, body, cookie, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/login",
+        Some(json!({"email":email,"password":"supersecret1"})),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "actual {label} login: {body}");
+    let cookie = extract_session_cookie(cookie.as_ref().unwrap());
+    let live = fvoci_server::db::identity::find_live_session_backend(backend, &hash_token(&cookie))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(live.user_id, user);
+    (live, cookie)
+}
+
+async fn selected_fixture_membership(
+    backend: &fvoci_server::db::backend::Backend,
+    harness: &TestDb,
+    workspace: Uuid,
+    user: Uuid,
+    role: Option<&str>,
+) {
+    use fvoci_server::db::backend::Backend;
+    match backend {
+        Backend::Postgres(_) => {
+            let admin = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&harness.admin_url)
+                .await
+                .unwrap();
+            let mut tx = admin.begin().await.unwrap();
+            match role {
+                Some(role) => {
+                    sqlx::query("INSERT INTO fvoci.memberships(workspace_id,user_id,role) VALUES($1,$2,$3) ON CONFLICT(workspace_id,user_id) DO UPDATE SET role=EXCLUDED.role").bind(workspace).bind(user).bind(role).execute(&mut *tx).await.unwrap();
+                }
+                None => {
+                    assert_eq!(
+                        sqlx::query(
+                            "DELETE FROM fvoci.memberships WHERE workspace_id=$1 AND user_id=$2"
+                        )
+                        .bind(workspace)
+                        .bind(user)
+                        .execute(&mut *tx)
+                        .await
+                        .unwrap()
+                        .rows_affected(),
+                        1
+                    );
+                }
+            }
+            tx.commit().await.unwrap();
+            admin.close().await;
+        }
+        Backend::Sqlite(pool) => {
+            let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+            match role {
+                Some(role) => {
+                    sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,?3) ON CONFLICT(workspace_id,user_id) DO UPDATE SET role=excluded.role").bind(workspace.as_bytes().to_vec()).bind(user.as_bytes().to_vec()).bind(role).execute(&mut *tx).await.unwrap();
+                }
+                None => {
+                    assert_eq!(
+                        sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+                            .bind(workspace.as_bytes().to_vec())
+                            .bind(user.as_bytes().to_vec())
+                            .execute(&mut *tx)
+                            .await
+                            .unwrap()
+                            .rows_affected(),
+                        1
+                    );
+                }
+            }
+            tx.commit().await.unwrap();
+        }
+        Backend::LibsqlRemote(_) => unreachable!("actual remote primary is separately required"),
+    }
+}
+
+async fn selected_fixture_view_grant(
+    backend: &fvoci_server::db::backend::Backend,
+    harness: &TestDb,
+    workspace: Uuid,
+    user: Uuid,
+    document: Uuid,
+) {
+    use fvoci_server::db::backend::Backend;
+    let group = Uuid::now_v7();
+    let grant = Uuid::now_v7();
+    match backend {
+        Backend::Postgres(_) => {
+            let admin = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&harness.admin_url)
+                .await
+                .unwrap();
+            let mut tx = admin.begin().await.unwrap();
+            sqlx::query("INSERT INTO fvoci.groups(id,workspace_id,name) VALUES($1,$2,'View only')")
+                .bind(group)
+                .bind(workspace)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO fvoci.group_members(workspace_id,group_id,user_id) VALUES($1,$2,$3)",
+            )
+            .bind(workspace)
+            .bind(group)
+            .bind(user)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO fvoci.document_members(id,workspace_id,document_id,group_id,role) VALUES($1,$2,$3,$4,'viewer')").bind(grant).bind(workspace).bind(document).bind(group).execute(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+            admin.close().await;
+        }
+        Backend::Sqlite(pool) => {
+            let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+            sqlx::query("INSERT INTO groups(id,workspace_id,name) VALUES(?1,?2,'View only')")
+                .bind(group.as_bytes().to_vec())
+                .bind(workspace.as_bytes().to_vec())
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO group_members(workspace_id,group_id,user_id) VALUES(?1,?2,?3)",
+            )
+            .bind(workspace.as_bytes().to_vec())
+            .bind(group.as_bytes().to_vec())
+            .bind(user.as_bytes().to_vec())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO document_members(id,workspace_id,document_id,group_id,role) VALUES(?1,?2,?3,?4,'viewer')").bind(grant.as_bytes().to_vec()).bind(workspace.as_bytes().to_vec()).bind(document.as_bytes().to_vec()).bind(group.as_bytes().to_vec()).execute(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+        Backend::LibsqlRemote(_) => unreachable!("actual remote primary is separately required"),
+    }
+}
+
+async fn selected_family_fence_snapshot(
+    backend: &fvoci_server::db::backend::Backend,
+    workspace: Uuid,
+    document: Uuid,
+) -> (Vec<u8>, i64, i64, i64) {
+    let fvoci_server::db::backend::Backend::Sqlite(pool) = backend else {
+        panic!("actual local family control")
+    };
+    sqlx::query_as("SELECT f.owner_token,f.fence,s.writer_generation,s.tail_seq FROM collab_room_fences f JOIN document_states s ON s.workspace_id=f.workspace_id AND s.document_id=f.document_id WHERE f.workspace_id=?1 AND f.document_id=?2")
+        .bind(workspace.as_bytes().to_vec()).bind(document.as_bytes().to_vec()).fetch_one(pool).await.unwrap()
+}
+
+async fn selected_workspace_race_controls(
+    backend: &fvoci_server::db::backend::Backend,
+    harness: &TestDb,
+    app: &axum::Router,
+    workspace: Uuid,
+) -> Vec<String> {
+    let (actor, cookie) =
+        selected_fixture_actor(backend, harness, app, workspace, "member", "race-member").await;
+    let mut failures = Vec::new();
+    for new_role in [Some("guest"), None] {
+        selected_fixture_membership(backend, harness, workspace, actor.user_id, Some("member"))
+            .await;
+        let (reached, proceed) =
+            fvoci_server::db::workspace::arm_workspace_card_barrier(actor.user_id).await;
+        let pending = tokio::spawn({
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                json_request(
+                    app,
+                    "GET",
+                    "/api/v1/me/workspaces",
+                    None,
+                    Some(&cookie),
+                    &[],
+                )
+                .await
+            }
+        });
+        reached.await.unwrap();
+        // Real second writer commits BEFORE the card transaction begins.
+        selected_fixture_membership(backend, harness, workspace, actor.user_id, new_role).await;
+        proceed.send(()).unwrap();
+        let (status, listed, _, _) = pending.await.unwrap();
+        assert_eq!(status, StatusCode::OK, "race self-list: {listed}");
+        let id = workspace.to_string();
+        let card = listed["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id);
+        let valid = match new_role {
+            None => card.is_none(),
+            Some("guest") => card.is_some_and(|card| {
+                card["role"] == "guest" && card["documentCount"] == 0 && card["assignedCount"] == 0
+            }),
+            _ => unreachable!(),
+        };
+        eprintln!("workspace_race backend={} committed_role={new_role:?} authority_current={valid} response={listed}",backend.kind());
+        if !valid {
+            failures.push(format!(
+                "{} committed {new_role:?} returned stale card {listed}",
+                backend.kind()
+            ));
+        }
+        let (status, fresh, _, _) = json_request(
+            app.clone(),
+            "GET",
+            "/api/v1/me/workspaces",
+            None,
+            Some(&cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let card = fresh["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id);
+        match new_role {
+            None => assert!(card.is_none()),
+            Some("guest") => {
+                let card = card.unwrap();
+                assert_eq!(card["role"], "guest");
+                assert_eq!(card["documentCount"], 0);
+            }
+            _ => unreachable!(),
+        }
+    }
+    failures
+}
+
 #[tokio::test]
 async fn selected_backend_setup_cookie_wiki_command_readback() {
-    selected_backend_wiki_fixture(false).await;
+    selected_backend_wiki_fixture(false, false).await;
 }
 
 #[tokio::test]
 async fn selected_backend_native_append_fresh_child_readback() {
-    selected_backend_wiki_fixture(true).await;
+    selected_backend_wiki_fixture(true, false).await;
 }
 
-async fn selected_backend_wiki_fixture(with_native: bool) {
+#[tokio::test]
+async fn selected_backend_workspace_current_membership_race() {
+    selected_backend_wiki_fixture(false, true).await;
+}
+
+async fn selected_backend_wiki_fixture(with_native: bool, membership_races: bool) {
     use fvoci_server::db::backend::Backend;
     async fn claim_native(
         backend: &Backend,
@@ -2889,7 +3186,9 @@ async fn selected_backend_wiki_fixture(with_native: bool) {
     assert_eq!(capability.applied_steps, 3);
     let command = Uuid::now_v7();
     let room_owner = Uuid::now_v7();
+    let mut membership_failures = Vec::new();
     for backend in [pg_backend, sqlite_backend] {
+        let mut pending_activation_revoke = None;
         match &backend {
             Backend::Postgres(pool) => {
                 let role: (String,bool,bool,bool,Option<String>) = sqlx::query_as(
@@ -3614,6 +3913,41 @@ async fn selected_backend_wiki_fixture(with_native: bool) {
                 StatusCode::NOT_FOUND,
                 "wrong tenant cannot read revision"
             );
+            let (viewer, _viewer_cookie) =
+                selected_fixture_actor(&backend, &pg, &app, workspace_id, "guest", "native-viewer")
+                    .await;
+            selected_fixture_view_grant(&backend, &pg, workspace_id, viewer.user_id, document_id)
+                .await;
+            let view_load = load_collab_readonly_kind_backend(
+                &backend,
+                CollabKind::Document,
+                workspace_id,
+                viewer.user_id,
+                viewer.session_id,
+                document_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                view_load.tail_seq, 1,
+                "real View-only actor reads durable native history"
+            );
+            assert_eq!(
+                claim_native(
+                    &backend,
+                    workspace_id,
+                    viewer.user_id,
+                    viewer.session_id,
+                    document_id,
+                    Uuid::now_v7()
+                )
+                .await
+                .unwrap()
+                .unwrap_err(),
+                CollabDbError::Forbidden,
+                "real View-only actor cannot claim a writer"
+            );
             if let Some(fence) = room_fence {
                 use fvoci_server::db::collab::{
                     claim_family_document_room, release_family_document_room,
@@ -3764,6 +4098,46 @@ async fn selected_backend_wiki_fixture(with_native: bool) {
                 use fvoci_server::db::collab::{
                     acquire_family_document_room, activate_family_document_writer,
                 };
+                let view_reader = acquire_family_document_room(
+                    &backend,
+                    workspace_id,
+                    viewer.user_id,
+                    viewer.session_id,
+                    document_id,
+                    Uuid::now_v7(),
+                    std::time::Duration::from_secs(30),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    view_reader.native.writer_generation, 2,
+                    "actual View-only reader must not need Edit or advance generation"
+                );
+                let protected =
+                    selected_family_fence_snapshot(&backend, workspace_id, document_id).await;
+                assert_eq!(
+                    activate_family_document_writer(
+                        &backend,
+                        view_reader.fence,
+                        viewer.user_id,
+                        viewer.session_id,
+                        Uuid::now_v7()
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::Forbidden,
+                    "actual View-only reader cannot activate a writer"
+                );
+                assert_eq!(
+                    selected_family_fence_snapshot(&backend, workspace_id, document_id).await,
+                    protected,
+                    "refused activation preserves owner/fence/generation/tail"
+                );
+                assert!(release_family_document_room(&backend, view_reader.fence)
+                    .await
+                    .unwrap());
                 let reader = acquire_family_document_room(
                     &backend,
                     workspace_id,
@@ -3812,6 +4186,53 @@ async fn selected_backend_wiki_fixture(with_native: bool) {
                     "same activation token reconciles without a second generation bump"
                 );
                 assert_eq!(replay.fence, writer.fence);
+                let protected =
+                    selected_family_fence_snapshot(&backend, workspace_id, document_id).await;
+                // Keep a real second owner so this synthetic downgrade does
+                // not manufacture an ownerless workspace invariant violation.
+                let _backup_owner = selected_fixture_actor(
+                    &backend,
+                    &pg,
+                    &app,
+                    workspace_id,
+                    "owner",
+                    "backup-owner",
+                )
+                .await;
+                selected_fixture_membership(
+                    &backend,
+                    &pg,
+                    workspace_id,
+                    live.user_id,
+                    Some("guest"),
+                )
+                .await;
+                assert_eq!(
+                    activate_family_document_writer(
+                        &backend,
+                        reader.fence,
+                        live.user_id,
+                        live.session_id,
+                        writer_owner
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::Forbidden,
+                    "committed owner downgrade precedes known-token activation replay"
+                );
+                assert_eq!(
+                    selected_family_fence_snapshot(&backend, workspace_id, document_id).await,
+                    protected
+                );
+                selected_fixture_membership(
+                    &backend,
+                    &pg,
+                    workspace_id,
+                    live.user_id,
+                    Some("owner"),
+                )
+                .await;
                 assert_eq!(
                     activate_family_document_writer(
                         &backend,
@@ -3874,9 +4295,7 @@ async fn selected_backend_wiki_fixture(with_native: bool) {
                     .unwrap(),
                     ProjectDerivedBodyResult::Unchanged
                 );
-                assert!(release_family_document_room(&backend, writer.fence)
-                    .await
-                    .unwrap());
+                pending_activation_revoke = Some((reader.fence, writer_owner, writer.fence));
             }
         }
         let (status, _, _, _) = json_request(
@@ -3912,6 +4331,53 @@ async fn selected_backend_wiki_fixture(with_native: bool) {
             "{} anonymous body",
             backend.kind()
         );
+        if membership_races {
+            membership_failures
+                .extend(selected_workspace_race_controls(&backend, &pg, &app, workspace_id).await);
+        }
+        if let Some((original, writer_owner, current)) = pending_activation_revoke {
+            let protected =
+                selected_family_fence_snapshot(&backend, workspace_id, document_id).await;
+            let Backend::Sqlite(pool) = &backend else {
+                unreachable!()
+            };
+            let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+            assert_eq!(sqlx::query("UPDATE sessions SET revoked_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE id=?1 AND user_id=?2 AND revoked_at IS NULL").bind(live.session_id.as_bytes().to_vec()).bind(live.user_id.as_bytes().to_vec()).execute(&mut *tx).await.unwrap().rows_affected(),1);
+            tx.commit().await.unwrap();
+            assert!(
+                fvoci_server::db::identity::find_live_session_backend(
+                    &backend,
+                    &hash_token(&fresh_cookie)
+                )
+                .await
+                .unwrap()
+                .is_none(),
+                "actual live credential was durably revoked"
+            );
+            assert_eq!(
+                fvoci_server::db::collab::activate_family_document_writer(
+                    &backend,
+                    original,
+                    live.user_id,
+                    live.session_id,
+                    writer_owner
+                )
+                .await
+                .unwrap()
+                .unwrap_err(),
+                CollabDbError::Forbidden,
+                "committed credential revoke precedes known-token activation replay"
+            );
+            assert_eq!(
+                selected_family_fence_snapshot(&backend, workspace_id, document_id).await,
+                protected
+            );
+            assert!(
+                fvoci_server::db::collab::release_family_document_room(&backend, current)
+                    .await
+                    .unwrap()
+            );
+        }
         drop(app);
         let storage_root = match &storage {
             fvoci_server::attachments::ObjectStorage::Local(local) => local.root().to_path_buf(),
@@ -3926,6 +4392,10 @@ async fn selected_backend_wiki_fixture(with_native: bool) {
     migrate::run_sqlite_migrations(&sqlite_path).await.unwrap();
     pg.cleanup().await;
     std::fs::remove_dir_all(directory).unwrap();
+    assert!(
+        membership_failures.is_empty(),
+        "current authority violations after committed changes: {membership_failures:#?}"
+    );
 }
 
 struct MigrationCommitPause(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
