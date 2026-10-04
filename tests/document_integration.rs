@@ -3055,6 +3055,9 @@ async fn sqlite_migration_cancelled_commit_retains_admission_until_drain() {
                 .expect("old request-owned guard releases before the paused worker drains");
             drop(wrongly_admitted);
             old_pause.release();
+            // The old request has no cleanup owner. The control itself must
+            // obtain its actual worker-shutdown receipt before closing the pool.
+            old_pool.acquire().await.unwrap().close().await.unwrap();
             old_pool.close().await;
             assert!(old_pool.is_closed());
             assert_eq!(old_pool.size(), 0);
