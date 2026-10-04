@@ -236,8 +236,13 @@ fn native_archive_witness_allocation_and_range_oracle() {
     );
     let (boxed, one) = measure(|| Box::new([7u8; 4096]));
     assert_eq!(
-        (one.cumulative, one.allocations, one.retained_delta),
-        (4096, 1, 4096),
+        (
+            one.cumulative,
+            one.allocations,
+            one.peak_live_delta,
+            one.retained_delta
+        ),
+        (4096, 1, 4096, 4096),
         "{one:?}"
     );
     let ((), freed) = measure(|| drop(boxed));
@@ -267,7 +272,7 @@ fn native_archive_witness_allocation_and_range_oracle() {
     let update = Update::decode_v1(&bytes).unwrap();
     let mut ids = Vec::new();
     let l = Limits::default();
-    retained::visit_input(
+    let completion = retained::visit_input(
         &update,
         VisitLimits {
             max_blocks: l.max_project_nodes as usize,
@@ -287,6 +292,7 @@ fn native_archive_witness_allocation_and_range_oracle() {
         },
     )
     .unwrap();
+    assert_eq!(completion, ControlFlow::Continue(()));
     let mut set = IdSet::default();
     let (mut tail, mut general, mut pushes, mut grew_allocs, mut grew_bytes) = (0, 0, 0, 0, 0);
     let mut max_len = 0usize;
