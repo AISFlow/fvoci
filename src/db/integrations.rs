@@ -1067,10 +1067,7 @@ pub(crate) mod webhook_family_fixture {
         tx.operation().restore_system(p).await.unwrap();
         tx.commit().await.unwrap();
     }
-    pub(crate) async fn duplicate_counts(
-        tx: &mut OperationTx<'_, '_>,
-        event: Uuid,
-    ) -> (i64, i64) {
+    pub(crate) async fn duplicate_counts(tx: &mut OperationTx<'_, '_>, event: Uuid) -> (i64, i64) {
         let OperationTx::SqliteFamily(family) = tx else {
             unreachable!()
         };

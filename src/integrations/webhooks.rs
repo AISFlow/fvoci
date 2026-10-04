@@ -952,7 +952,10 @@ mod backend_regressions {
                 .unwrap(),
             1
         );
-        assert_eq!(duplicate_counts(&mut tx.operation(), current.id).await, (1, 1));
+        assert_eq!(
+            duplicate_counts(&mut tx.operation(), current.id).await,
+            (1, 1)
+        );
         assert!(
             advance_cursor_backend_tx(&mut tx, WEBHOOKS_CONSUMER, owner, &current.cursor())
                 .await
