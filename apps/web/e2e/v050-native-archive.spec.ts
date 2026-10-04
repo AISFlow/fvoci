@@ -4134,9 +4134,7 @@ test("native archive restores a same-ID personal MOVE graph after a lost restore
     );
     await waitDurable(sourceApp, personal.id, "task", pair.taskId, expectedTask, actorA.userId);
     await okJson(
-      page.request.post(
-        `/api/v1/workspaces/${personal.id}/projects/${pair.projectId}/documents/${pair.documentId}/revisions`,
-      ),
+      page.request.post(`/api/v1/workspaces/${personal.id}/documents/${pair.documentId}/revisions`),
       idOf,
     );
     await okJson(
