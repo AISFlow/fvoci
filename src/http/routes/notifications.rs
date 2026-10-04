@@ -315,3 +315,445 @@ async fn list_me_notifications_route(
         Err(err) => Err(err.into()),
     }
 }
+
+#[cfg(test)]
+mod family_http_regressions {
+    use super::*;
+    use crate::db::notifications::family_runtime_fixture::Fixture;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+
+    const PEPPER: &str =
+        r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
+    const PASSWORD: &str = "notification-fixture-password1";
+
+    fn app(f: &Fixture) -> axum::Router {
+        let state = AppState {
+            auth: std::sync::Arc::new(crate::auth::AuthService {
+                db: crate::db::Db::from_backend(f.backend.clone()),
+                password_keys: crate::auth::password::Keyring::parse(PEPPER, "test").unwrap(),
+            }),
+            branding_name: "FVOCI".into(),
+            public_origin: "http://localhost".into(),
+            cookie_secure: false,
+            rate_limiter: crate::http::rate_limit::RateLimiter::new(),
+            storage: crate::attachments::LocalStorage::new(f.dir.join("storage")).into(),
+            upload: crate::attachments::UploadLimits {
+                part_size_bytes: crate::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+                max_file_size_bytes: crate::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+                create_rate_per_5min: crate::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+                part_put_slots: crate::attachments::PartPutSlots::new(
+                    crate::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+                ),
+            },
+            collab: None,
+            meili: None,
+            search_embedder: None,
+            markdown: None,
+            import_wake: None,
+            import_extractor_available: false,
+            preview_extract: None,
+            quota: Default::default(),
+            streams: AppState::fresh_streams(),
+            mailer: std::sync::Arc::new(crate::mail::Mailer::disabled()),
+        };
+        crate::http::router(state, None)
+    }
+
+    async fn request(
+        app: &axum::Router,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        cookie: Option<&str>,
+        pat: Option<&str>,
+    ) -> (StatusCode, Value, HeaderMap) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("origin", "http://localhost");
+        if let Some(cookie) = cookie {
+            builder = builder.header("cookie", format!("fvoci_session={cookie}"));
+        }
+        if let Some(pat) = pat {
+            builder = builder.header("authorization", format!("Bearer {pat}"));
+        }
+        let mut req = if let Some(body) = body {
+            builder
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap()
+        } else {
+            builder.body(Body::empty()).unwrap()
+        };
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [203, 0, 113, 10],
+                42424,
+            ))));
+        let response = app.clone().oneshot(req).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, value, headers)
+    }
+
+    async fn prepare_inbox(f: &Fixture) -> Uuid {
+        f.grant_wiki().await;
+        crate::db::outbox::ensure_consumer_backend(
+            &f.backend,
+            crate::notifications::NOTIFICATIONS_CONSUMER,
+        )
+        .await
+        .unwrap();
+        let owner = Uuid::now_v7();
+        assert!(crate::db::outbox::lease_consumer_backend(
+            &f.backend,
+            crate::notifications::NOTIFICATIONS_CONSUMER,
+            owner,
+            60
+        )
+        .await
+        .unwrap());
+        let event = f.append_comment_event("comment.created").await;
+        crate::notifications::process_notification_event_backend(&f.backend, owner, &event)
+            .await
+            .unwrap();
+        event.id
+    }
+
+    async fn login(app: &axum::Router, email: &str) -> String {
+        let (status, body, headers) = request(
+            app,
+            "POST",
+            "/api/v1/auth/login",
+            Some(json!({"email":email,"password":PASSWORD})),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert!(body["userId"].is_string());
+        let cookie = axum_extra::extract::cookie::Cookie::parse(
+            headers
+                .get(axum::http::header::SET_COOKIE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cookie.name(), "fvoci_session");
+        cookie.value().to_owned()
+    }
+
+    #[tokio::test]
+    async fn actual_family_http_new_login_cookie_inbox_flags_prefs_and_current_credential() {
+        let f = Fixture::new().await;
+        let event = prepare_inbox(&f).await;
+        let ring = crate::auth::password::Keyring::parse(PEPPER, "test").unwrap();
+        let hash = crate::auth::password::hash_password(PASSWORD, &ring)
+            .await
+            .unwrap();
+        for user in [f.user, f.other_user] {
+            sqlx::query("UPDATE users SET password_hash=?2 WHERE id=?1")
+                .bind(user.as_bytes().as_slice())
+                .bind(&hash)
+                .execute(&f.pool)
+                .await
+                .unwrap();
+        }
+        let router = app(&f);
+        let base = format!("/api/v1/workspaces/{}/notifications", f.workspace);
+        let prefs = format!("/api/v1/workspaces/{}/notification-prefs", f.workspace);
+        assert_eq!(
+            request(&router, "GET", &base, None, None, None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let cookie = login(&router, "reader@notification.invalid").await;
+        let (status, page, _) = request(&router, "GET", &base, None, Some(&cookie), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page["items"][0]["eventId"], event.to_string());
+        let id = page["items"][0]["id"].as_str().unwrap();
+        let fresh_router = app(&f);
+        assert_eq!(
+            request(
+                &fresh_router,
+                "GET",
+                "/api/v1/me/notifications",
+                None,
+                Some(&cookie),
+                None
+            )
+            .await
+            .1["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            request(
+                &fresh_router,
+                "GET",
+                &format!("{base}/unread-count"),
+                None,
+                Some(&cookie),
+                None
+            )
+            .await
+            .1["count"],
+            1
+        );
+        let outsider = login(&fresh_router, "other@notification.invalid").await;
+        assert_eq!(
+            request(&fresh_router, "GET", &base, None, Some(&outsider), None)
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(
+                &fresh_router,
+                "PATCH",
+                &format!("{base}/{id}"),
+                Some(json!({"read":true})),
+                Some(&outsider),
+                None
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        for read in [true, false] {
+            assert_eq!(
+                request(
+                    &fresh_router,
+                    "PATCH",
+                    &format!("{base}/{id}"),
+                    Some(json!({"read":read})),
+                    Some(&cookie),
+                    None
+                )
+                .await
+                .0,
+                StatusCode::OK
+            );
+        }
+        let (status, all, _) = request(
+            &fresh_router,
+            "POST",
+            &format!("{base}/read-all"),
+            None,
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(all["updated"], 1);
+        assert_eq!(
+            request(
+                &fresh_router,
+                "GET",
+                &format!("{base}/unread-count"),
+                None,
+                Some(&cookie),
+                None
+            )
+            .await
+            .1["count"],
+            0
+        );
+        assert_eq!(
+            request(
+                &fresh_router,
+                "PUT",
+                &prefs,
+                Some(json!({"inApp":false,"mailImmediate":false,"mailDigest":true})),
+                Some(&cookie),
+                None
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let stored = request(&fresh_router, "GET", &prefs, None, Some(&cookie), None).await;
+        assert_eq!(stored.0, StatusCode::OK);
+        assert_eq!(stored.1["inApp"], false);
+        assert_eq!(stored.1["mailDigest"], true);
+        assert!(
+            request(&fresh_router, "GET", &base, None, Some(&cookie), None)
+                .await
+                .1["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        sqlx::query("UPDATE sessions SET revoked_at=?2 WHERE token_hash=?1")
+            .bind(crate::auth::token::hash_token(&cookie))
+            .bind(chrono::Utc::now().timestamp_micros())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            request(&fresh_router, "GET", &base, None, Some(&cookie), None)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            request(
+                &fresh_router,
+                "POST",
+                &format!("{base}/read-all"),
+                None,
+                Some(&cookie),
+                None
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        drop(fresh_router);
+        drop(router);
+        f.finish().await;
+    }
+
+    async fn pat(f: &Fixture, scope: &str) -> String {
+        let token = crate::auth::token::new_token();
+        sqlx::query("INSERT INTO api_tokens(id,workspace_id,user_id,token_hash,name,scopes) VALUES(?1,?2,?3,?4,'notification fixture',?5)")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(token.hash).bind(serde_json::to_string(&[scope]).unwrap()).execute(&f.pool).await.unwrap();
+        token.token
+    }
+
+    #[tokio::test]
+    async fn actual_family_http_pat_scope_tenant_stale_cookie_and_membership() {
+        let f = Fixture::new().await;
+        prepare_inbox(&f).await;
+        let router = app(&f);
+        let documents = pat(&f, "documents.read").await;
+        let projects = pat(&f, "projects.read").await;
+        let base = format!("/api/v1/workspaces/{}/notifications", f.workspace);
+        let visible = request(&router, "GET", &base, None, None, Some(&documents)).await;
+        assert_eq!(visible.0, StatusCode::OK);
+        assert_eq!(visible.1["items"].as_array().unwrap().len(), 1);
+        let empty = request(&router, "GET", &base, None, None, Some(&projects)).await;
+        assert_eq!(empty.0, StatusCode::OK);
+        assert!(empty.1["items"].as_array().unwrap().is_empty());
+        assert_eq!(
+            request(
+                &router,
+                "GET",
+                &format!("{base}/unread-count"),
+                None,
+                None,
+                Some(&projects)
+            )
+            .await
+            .1["count"],
+            0
+        );
+        let no_read = request(
+            &router,
+            "POST",
+            &format!("{base}/read-all"),
+            None,
+            None,
+            Some(&projects),
+        )
+        .await;
+        assert_eq!(no_read.0, StatusCode::OK);
+        assert_eq!(no_read.1["updated"], 0);
+        assert_eq!(
+            request(
+                &router,
+                "GET",
+                "/api/v1/me/notifications",
+                None,
+                None,
+                Some(&documents)
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(
+                &router,
+                "GET",
+                &format!("/api/v1/workspaces/{}/notifications", f.other_workspace),
+                None,
+                None,
+                Some(&documents)
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(
+                &router,
+                "GET",
+                &base,
+                None,
+                Some("stale-fixture-cookie"),
+                Some(&documents)
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let read = request(
+            &router,
+            "POST",
+            &format!("{base}/read-all"),
+            None,
+            None,
+            Some(&documents),
+        )
+        .await;
+        assert_eq!(read.0, StatusCode::OK);
+        assert_eq!(read.1["updated"], 1);
+        sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            request(&router, "GET", &base, None, None, Some(&documents))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            request(
+                &router,
+                "POST",
+                &format!("{base}/read-all"),
+                None,
+                None,
+                Some(&projects)
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let used: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_tokens")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(used, 0);
+        drop(router);
+        f.finish().await;
+    }
+}
