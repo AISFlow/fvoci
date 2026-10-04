@@ -32,7 +32,7 @@ pub struct FamilyMaintenanceLeasePolicy {
 impl FamilyMaintenanceLeasePolicy {
     pub fn new(lease: Duration, renew: Duration) -> Result<Self, sqlx::Error> {
         fn checked(duration: Duration) -> Result<i64, sqlx::Error> {
-            if duration.is_zero() || duration.subsec_nanos() % 1000 != 0 {
+            if duration.is_zero() || !duration.subsec_nanos().is_multiple_of(1000) {
                 return Err(invalid(
                     "maintenance duration must be positive whole microseconds",
                 ));
@@ -398,6 +398,7 @@ impl OperationTx<'_, '_> {
     }
     /// Metadata only. Does not set system/tenant or authorize business writes.
     /// Caller keeps this actual writer through effects and repeats before COMMIT.
+    #[cfg(test)]
     pub(crate) async fn check_family_maintenance_claim(
         &mut self,
         proof: &FamilyMaintenanceProof,
