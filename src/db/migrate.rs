@@ -1419,9 +1419,10 @@ mod sqlite_rollback_tests {
     #[test]
     fn unconfirmed_primary_survives_failed_rollback() {
         // The original rollback-first `?` loses the typed quarantine reason.
+        let legacy_primary = unconfirmed_reference();
         let legacy = Err::<(), _>(schema_error("rollback failed"))
             .err()
-            .unwrap_or_else(unconfirmed_reference);
+            .unwrap_or(legacy_primary);
         assert!(!cleanup_is_unconfirmed(&legacy));
         let fixed = sqlite_validation_error_after_rollback(
             unconfirmed_reference(),
