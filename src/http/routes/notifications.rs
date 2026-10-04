@@ -455,6 +455,18 @@ mod family_http_regressions {
         cookie.value().to_owned()
     }
 
+    async fn flag_snapshot(
+        f: &Fixture,
+        id: &str,
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>, Option<i64>, Option<i64>) {
+        sqlx::query_as("SELECT id,workspace_id,user_id,read_at,archived_at FROM notifications WHERE workspace_id=?1 AND user_id=?2 AND id=?3")
+            .bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(Uuid::parse_str(id).unwrap().as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap()
+    }
+    async fn prefs_snapshot(f: &Fixture) -> Option<(bool, bool, bool)> {
+        sqlx::query_as("SELECT in_app,mail_immediate,mail_digest FROM notification_prefs WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).fetch_optional(&f.pool).await.unwrap()
+    }
+
     #[tokio::test]
     async fn actual_family_http_new_login_cookie_inbox_flags_prefs_and_current_credential() {
         let f = Fixture::new().await;
@@ -514,6 +526,7 @@ mod family_http_regressions {
             .1["count"],
             1
         );
+        let before_other_account = flag_snapshot(&f, id).await;
         let outsider = login(&fresh_router, "other@notification.invalid").await;
         assert_eq!(
             request(&fresh_router, "GET", &base, None, Some(&outsider), None)
@@ -534,6 +547,11 @@ mod family_http_regressions {
             .0,
             StatusCode::NOT_FOUND
         );
+        assert_eq!(
+            flag_snapshot(&f, id).await,
+            before_other_account,
+            "denied other-account PATCH must not mutate owner row before owner writes"
+        );
         for read in [true, false] {
             assert_eq!(
                 request(
@@ -548,6 +566,24 @@ mod family_http_regressions {
                 .0,
                 StatusCode::OK
             );
+            let snapshot = flag_snapshot(&f, id).await;
+            assert_eq!(
+                snapshot.3.is_some(),
+                read,
+                "successful per-item PATCH must persist its effect"
+            );
+            assert_eq!(snapshot.4, None);
+            let unread = request(
+                &fresh_router,
+                "GET",
+                &format!("{base}/unread-count"),
+                None,
+                Some(&cookie),
+                None,
+            )
+            .await;
+            assert_eq!(unread.0, StatusCode::OK);
+            assert_eq!(unread.1["count"], if read { 0 } else { 1 });
         }
         let (status, all, _) = request(
             &fresh_router,
@@ -590,6 +626,8 @@ mod family_http_regressions {
         assert_eq!(stored.0, StatusCode::OK);
         assert_eq!(stored.1["inApp"], false);
         assert_eq!(stored.1["mailDigest"], true);
+        assert_eq!(stored.1["mailImmediate"], false);
+        assert_eq!(prefs_snapshot(&f).await, Some((false, false, true)));
         assert!(
             request(&fresh_router, "GET", &base, None, Some(&cookie), None)
                 .await
@@ -598,6 +636,37 @@ mod family_http_regressions {
                 .unwrap()
                 .is_empty()
         );
+        // Keep a live unread target so a denied mutation has an observable effect.
+        assert_eq!(
+            request(
+                &fresh_router,
+                "PUT",
+                &prefs,
+                Some(json!({"inApp":true,"mailImmediate":false,"mailDigest":true})),
+                Some(&cookie),
+                None
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            request(
+                &fresh_router,
+                "PATCH",
+                &format!("{base}/{id}"),
+                Some(json!({"read":false})),
+                Some(&cookie),
+                None
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let before_revocation_flags = flag_snapshot(&f, id).await;
+        assert_eq!(before_revocation_flags.3, None);
+        let before_revocation_prefs = prefs_snapshot(&f).await;
+        assert_eq!(before_revocation_prefs, Some((true, false, true)));
         sqlx::query("UPDATE sessions SET revoked_at=?2 WHERE token_hash=?1")
             .bind(crate::auth::token::hash_token(&cookie))
             .bind(chrono::Utc::now().timestamp_micros())
@@ -623,6 +692,35 @@ mod family_http_regressions {
             .0,
             StatusCode::UNAUTHORIZED
         );
+        assert_eq!(
+            request(
+                &fresh_router,
+                "PUT",
+                &prefs,
+                Some(json!({"inApp":false,"mailImmediate":true,"mailDigest":false})),
+                Some(&cookie),
+                None
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            request(&fresh_router, "GET", &prefs, None, Some(&cookie), None)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            prefs_snapshot(&f).await,
+            before_revocation_prefs,
+            "revoked-cookie preferences write cannot change stored values"
+        );
+        assert_eq!(
+            flag_snapshot(&f, id).await,
+            before_revocation_flags,
+            "revoked-cookie read-all cannot change unread target"
+        );
         drop(fresh_router);
         drop(router);
         f.finish().await;
@@ -646,6 +744,67 @@ mod family_http_regressions {
         let visible = request(&router, "GET", &base, None, None, Some(&documents)).await;
         assert_eq!(visible.0, StatusCode::OK);
         assert_eq!(visible.1["items"].as_array().unwrap().len(), 1);
+        let id = visible.1["items"][0]["id"].as_str().unwrap();
+        let before_scoped_patch = flag_snapshot(&f, id).await;
+        assert_eq!(
+            request(
+                &router,
+                "PATCH",
+                &format!("{base}/{id}"),
+                Some(json!({"read":true})),
+                None,
+                Some(&projects)
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            flag_snapshot(&f, id).await,
+            before_scoped_patch,
+            "project-only PAT cannot mutate a document notification"
+        );
+        assert_eq!(
+            request(
+                &router,
+                "PATCH",
+                &format!(
+                    "/api/v1/workspaces/{}/notifications/{id}",
+                    f.other_workspace
+                ),
+                Some(json!({"read":true})),
+                None,
+                Some(&documents)
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            flag_snapshot(&f, id).await,
+            before_scoped_patch,
+            "wrong tenant cannot mutate owning row"
+        );
+        for read in [true, false] {
+            assert_eq!(
+                request(
+                    &router,
+                    "PATCH",
+                    &format!("{base}/{id}"),
+                    Some(json!({"read":read})),
+                    None,
+                    Some(&documents)
+                )
+                .await
+                .0,
+                StatusCode::OK
+            );
+            assert_eq!(
+                flag_snapshot(&f, id).await.3.is_some(),
+                read,
+                "document-scoped PAT must persist per-item flags"
+            );
+        }
         let empty = request(&router, "GET", &base, None, None, Some(&projects)).await;
         assert_eq!(empty.0, StatusCode::OK);
         assert!(empty.1["items"].as_array().unwrap().is_empty());
@@ -723,6 +882,36 @@ mod family_http_regressions {
         .await;
         assert_eq!(read.0, StatusCode::OK);
         assert_eq!(read.1["updated"], 1);
+        let prefs = format!("/api/v1/workspaces/{}/notification-prefs", f.workspace);
+        assert_eq!(
+            request(
+                &router,
+                "PUT",
+                &prefs,
+                Some(json!({"inApp":true,"mailImmediate":false,"mailDigest":true})),
+                None,
+                Some(&documents)
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(prefs_snapshot(&f).await, Some((true, false, true)));
+        assert_eq!(
+            request(
+                &router,
+                "PATCH",
+                &format!("{base}/{id}"),
+                Some(json!({"read":false})),
+                None,
+                Some(&documents)
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let before_membership_loss = flag_snapshot(&f, id).await;
+        assert_eq!(before_membership_loss.3, None);
         sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
             .bind(f.workspace.as_bytes().as_slice())
             .bind(f.user.as_bytes().as_slice())
@@ -747,6 +936,40 @@ mod family_http_regressions {
             .await
             .0,
             StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            prefs_snapshot(&f).await,
+            None,
+            "membership delete cascades preferences"
+        );
+        assert_eq!(
+            request(
+                &router,
+                "PUT",
+                &prefs,
+                Some(json!({"inApp":false,"mailImmediate":true,"mailDigest":false})),
+                None,
+                Some(&documents)
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            request(&router, "GET", &prefs, None, None, Some(&documents))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            prefs_snapshot(&f).await,
+            None,
+            "denied write cannot recreate cascaded preferences"
+        );
+        assert_eq!(
+            flag_snapshot(&f, id).await,
+            before_membership_loss,
+            "lost-member read-all cannot mutate notification flags"
         );
         let used: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_tokens")
             .fetch_one(&f.pool)
