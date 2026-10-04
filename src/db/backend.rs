@@ -797,7 +797,10 @@ mod maintenance_claim_driver_tests {
         bytes: axum::body::Bytes,
     ) -> axum::response::Response {
         // The pinned SDK sends JSON without an application/json header.
-        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let body: Value = match serde_json::from_slice(&bytes) {
+            Ok(body) => body,
+            Err(_) => return axum::http::StatusCode::BAD_REQUEST.into_response(),
+        };
         let mut model = state.lock().await;
         model.requests.push(body.clone());
         let requests = body["requests"].as_array().unwrap();
@@ -923,6 +926,7 @@ mod maintenance_claim_driver_tests {
     }
     struct Fixture {
         root: PathBuf,
+        endpoint: String,
         model: Arc<tokio::sync::Mutex<Model>>,
         backend: Backend,
         stop: tokio::sync::oneshot::Sender<()>,
@@ -962,11 +966,11 @@ mod maintenance_claim_driver_tests {
             });
             // Test-only plain HTTP transport. Production connect's TLS URL
             // validation is unchanged and is NOT qualified by this fixture.
-            let database =
-                libsql::Builder::new_remote(format!("http://{addr}"), "fixture-only".into())
-                    .build()
-                    .await
-                    .unwrap();
+            let endpoint = format!("http://{addr}");
+            let database = libsql::Builder::new_remote(endpoint.clone(), "fixture-only".into())
+                .build()
+                .await
+                .unwrap();
             let backend = Backend::LibsqlRemote(Arc::new(RemoteDatabase {
                 database,
                 max_connections: 1,
@@ -988,6 +992,7 @@ mod maintenance_claim_driver_tests {
             );
             Self {
                 root,
+                endpoint,
                 model,
                 backend,
                 stop,
@@ -1112,8 +1117,26 @@ mod maintenance_claim_driver_tests {
     #[tokio::test]
     async fn maintenance_claim_driver_fk_close_does_not_rollback_new_stream() {
         let f = Fixture::new().await;
+        let malformed = reqwest::Client::new()
+            .post(format!("{}/v3/pipeline", f.endpoint))
+            .body("{")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(malformed.status(), reqwest::StatusCode::BAD_REQUEST);
+        let model = f.model.lock().await;
+        assert!(model.requests.is_empty() && model.streams.is_empty());
+        drop(model);
         let owner = Uuid::now_v7();
         let tx = f.writer().await;
+        assert!(f.model.lock().await.requests.iter().any(|r| {
+            r["requests"].as_array().unwrap().iter().any(|q| {
+                q["batch"]["steps"].as_array().is_some_and(|steps| {
+                    steps.iter().any(|s| s["stmt"]["sql"] == "BEGIN IMMEDIATE")
+                })
+            })
+        }));
+        println!("S16 malformed JSON rejected400; actual unmodified SDK BEGIN reached");
         tx.connection().execute("UPDATE maintenance_job_claims SET owner_token=?1,generation=1,expires_at=unixepoch()*1000000+60000000 WHERE job_key=1",vec![libsql::Value::Blob(owner.as_bytes().to_vec())]).await.unwrap();
         DbTransaction::SqliteFamily(FamilyTx::Remote(tx))
             .commit_with_cleanup()
