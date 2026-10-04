@@ -4484,7 +4484,12 @@ test("native archive restores a same-ID personal MOVE graph after a lost restore
       await importer.getByRole("button", { name: "확인한 내용 복원" }).click();
       await intercepted;
       await dpage.unroute("**/native-archive/restore");
-      await expect(importer.getByRole("status")).not.toContainText("복원이 완료되었습니다");
+      await expect(importer.getByRole("alert")).toHaveText("불러오지 못했습니다.");
+      await expect(importer.getByRole("status")).toHaveCount(0);
+      await expect(importer.getByRole("button", { name: "확인한 내용 복원" })).toBeEnabled();
+      await expect(importer.getByRole("checkbox")).toBeChecked();
+      for (const value of [archiveHash, workspaceB.id, actorB.userId])
+        await expect(importer.getByText(value)).toBeVisible();
     } finally {
       try {
         await initial.close();
