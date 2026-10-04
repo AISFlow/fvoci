@@ -347,10 +347,19 @@ pub async fn list_workspaces_for_user_backend(
     #[cfg(feature = "db-tests")]
     pause_before_workspace_cards(user_id).await;
     let mut items = Vec::new();
-    for (workspace_id, role_str) in memberships {
-        let role = WorkspaceRole::parse(&role_str).unwrap_or(WorkspaceRole::Guest);
+    for (workspace_id, _) in memberships {
         let mut tx = backend.begin_write().await?;
         tx.operation().set_tenant(workspace_id).await?;
+        // Enumeration only identifies candidates. Hold current membership
+        // authority through this card's read/count transaction.
+        let Some(role) = tx
+            .operation()
+            .membership_role(workspace_id, user_id, true)
+            .await?
+        else {
+            tx.rollback().await?;
+            continue;
+        };
         let row = tx.operation().live_workspace_card(workspace_id).await?;
         if let Some((id, name, slug, kind)) = row {
             let (document_count, assigned_count) = tx
