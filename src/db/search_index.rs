@@ -2,6 +2,7 @@ use super::backend::{Backend, OperationTx};
 use super::codec::Cell;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::db::context::{restore_system, set_system, set_tenant};
@@ -829,16 +830,40 @@ pub async fn store_chunk_embeddings_backend(
     attachment_id: Uuid,
     rows: &[(PendingEmbeddingChunk, Vec<f32>)],
 ) -> Result<u64, sqlx::Error> {
+    // Standalone/legacy PG APIs have no caller cancellation scope.
+    store_chunk_embeddings_backend_with_cancel(backend, workspace_id, attachment_id, rows, None)
+        .await
+}
+
+pub(crate) async fn store_chunk_embeddings_backend_with_cancel(
+    backend: &Backend,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+    rows: &[(PendingEmbeddingChunk, Vec<f32>)],
+    cancel: Option<&CancellationToken>,
+) -> Result<u64, sqlx::Error> {
     if rows.is_empty() {
         return Ok(0);
     }
     let mut tx = backend.begin_write().await?;
     tx.operation().set_system().await?;
     tx.operation().set_tenant(workspace_id).await?;
+    // Await the fully owned acquisition; dropping a cancellation-selected
+    // BEGIN future would outsource transaction cleanup to a different owner.
+    // Current cancellation is checked after acquisition/context and before
+    // any vector/event effects. A cancelled batch never publishes its rows.
+    if cancel.is_some_and(CancellationToken::is_cancelled) {
+        tx.rollback().await?;
+        return Ok(0);
+    }
     let written = tx
         .operation()
         .store_attachment_chunk_embeddings(workspace_id, attachment_id, rows)
         .await?;
+    if cancel.is_some_and(CancellationToken::is_cancelled) {
+        tx.rollback().await?;
+        return Ok(0);
+    }
     tx.commit().await.map_err(|e| e.source)?;
     Ok(written)
 }

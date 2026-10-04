@@ -24,7 +24,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::db::search_index::{
-    list_pending_embedding_backend, next_pending_embedding_backend, store_chunk_embeddings_backend,
+    list_pending_embedding_backend, next_pending_embedding_backend,
+    store_chunk_embeddings_backend_with_cancel,
 };
 use crate::search::embed::{EmbedError, Embedder, EMBED_BATCH};
 
@@ -155,8 +156,14 @@ pub async fn embed_attachment_chunks_backend(
             result = embedder.embed(&texts) => result.map_err(EmbedPassError::Embed)?,
         };
         let rows: Vec<_> = pending.into_iter().zip(vectors).collect();
-        let stored =
-            store_chunk_embeddings_backend(backend, workspace_id, attachment_id, &rows).await?;
+        let stored = store_chunk_embeddings_backend_with_cancel(
+            backend,
+            workspace_id,
+            attachment_id,
+            &rows,
+            Some(cancel),
+        )
+        .await?;
         written += stored;
         if stored == 0 {
             // Every chunk changed under us (re-extracted); the next pass sees
