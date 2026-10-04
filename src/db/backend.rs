@@ -628,7 +628,9 @@ impl RemoteDatabase {
             ));
         }
         if state.unconfirmed_finish {
-            return Err(sqlx::Error::AnyDriverError(Box::new(RemoteSettlementUnconfirmed)));
+            return Err(sqlx::Error::AnyDriverError(Box::new(
+                RemoteSettlementUnconfirmed,
+            )));
         }
         Ok(())
     }
