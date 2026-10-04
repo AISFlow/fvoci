@@ -64,6 +64,23 @@ impl Backend {
                 .map(|tx| DbTx::SqliteFamily(FamilyTx::Remote(tx))),
         }
     }
+    /// Serialize current source reads and the ordered external search enqueue.
+    /// The caller borrows this transaction for every named source operation,
+    /// then releases it after enqueue and before waiting for confirmation.
+    /// SQLite reserves its writer across this bounded step, including remote
+    /// stream ownership; it does not claim PostgreSQL per-workspace concurrency.
+    pub async fn begin_search_refresh(&self, workspace: uuid::Uuid) -> Result<DbTx, sqlx::Error> {
+        let mut tx = self.begin_write().await?;
+        if let DbTransaction::Postgres(pg) = &mut tx {
+            sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+                .bind(super::context::SEARCH_INDEX_LOCK_NAMESPACE)
+                .bind(super::context::lock_key_from_uuid(workspace))
+                .execute(&mut **pg)
+                .await?;
+        }
+        tx.operation().set_tenant(workspace).await?;
+        Ok(tx)
+    }
     pub async fn close(&self) -> Result<(), sqlx::Error> {
         match self {
             Self::Postgres(pool) => {

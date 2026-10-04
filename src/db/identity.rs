@@ -1119,7 +1119,8 @@ impl OperationTx<'_, '_> {
                 } else {
                     tx.require_system_context()?;
                 }
-                tx.execute("INSERT INTO events (id,workspace_id,actor_user_id,verb,target_type,target_id,payload,channel) VALUES (?1,?2,?3,?4,?5,?6,?7,'web')", &[Cell::uuid(row.id),Cell::optional_uuid(row.workspace_id),Cell::optional_uuid(row.actor_user_id),Cell::text(row.verb),Cell::optional_text(row.target_type.as_deref()),Cell::optional_uuid(row.target_id),Cell::json(&row.payload)?]).await?;
+                let seq = allocate_family_event_sequence(tx).await?;
+                tx.execute("INSERT INTO events (id,seq,workspace_id,actor_user_id,verb,target_type,target_id,payload,channel) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'web')", &[Cell::uuid(row.id),Cell::Integer(seq),Cell::optional_uuid(row.workspace_id),Cell::optional_uuid(row.actor_user_id),Cell::text(row.verb),Cell::optional_text(row.target_type.as_deref()),Cell::optional_uuid(row.target_id),Cell::json(&row.payload)?]).await?;
                 Ok(())
             }
         }
@@ -1139,4 +1140,32 @@ impl OperationTx<'_, '_> {
             }
         }
     }
+}
+
+/// SQLite-family visible event order is allocated only inside the owning
+/// serialized writer transaction. Rolled-back values never reach a reader;
+/// the counter survives retention/purge, including an empty events table.
+async fn allocate_family_event_sequence(
+    tx: &mut super::backend::FamilyTx,
+) -> Result<i64, sqlx::Error> {
+    tx.require_writer()?;
+    let rows = tx
+        .query("SELECT last_seq FROM event_sequence WHERE id=1", &[])
+        .await?;
+    let current = rows
+        .first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .cell(0)?
+        .integer()?;
+    let next = current
+        .checked_add(1)
+        .filter(|next| current >= 0 && *next > 0)
+        .ok_or_else(|| sqlx::Error::Protocol("event sequence is invalid or exhausted".into()))?;
+    let changed=tx.execute("UPDATE event_sequence SET last_seq=?2 WHERE id=1 AND typeof(last_seq)='integer' AND last_seq=?1 AND last_seq<9223372036854775807", &[Cell::Integer(current),Cell::Integer(next)]).await?;
+    if changed != 1 {
+        return Err(sqlx::Error::Protocol(
+            "event sequence allocation rejected".into(),
+        ));
+    }
+    Ok(next)
 }
