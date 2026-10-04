@@ -191,6 +191,29 @@ pub struct CommitCleanupUnknown {
     pub settlement: CommitSettlement,
     pub cleanup_error: Option<sqlx::Error>,
 }
+
+/// An actual awaited rollback failed. The original domain/driver refusal is
+/// retained separately; neither a failed rollback nor Drop proves settlement.
+/// Named consumers create this only from their returned rollback error.
+#[derive(Debug, thiserror::Error)]
+#[error("database rollback settlement is unknown")]
+pub(crate) struct RollbackCleanupUnknown {
+    pub(crate) original: Option<Box<dyn std::error::Error + Send + Sync>>,
+    #[source]
+    pub(crate) cleanup: sqlx::Error,
+}
+
+pub(crate) fn rollback_cleanup_unknown(
+    original: Option<Box<dyn std::error::Error + Send + Sync>>,
+    cleanup: sqlx::Error,
+) -> sqlx::Error {
+    sqlx::Error::AnyDriverError(Box::new(RollbackCleanupUnknown { original, cleanup }))
+}
+
+pub(crate) fn is_rollback_cleanup_unknown(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::AnyDriverError(source)
+        if source.downcast_ref::<RollbackCleanupUnknown>().is_some())
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommitSettlement {
     LocalWriterReconcile,
@@ -449,6 +472,27 @@ impl Drop for RemoteLease {
 }
 
 impl RemoteDatabase {
+    /// Isolated test-driver admission using the existing lifecycle. This does
+    /// not bypass production endpoint/token checks or attest remote settlement.
+    #[cfg(feature = "db-tests")]
+    pub fn from_test_driver(database: libsql::Database, max: std::num::NonZeroU32) -> Self {
+        Self {
+            database,
+            max_connections: max.get(),
+            admission: Arc::new(Semaphore::new(max.get() as usize)),
+            cleanup: Mutex::new(JoinSet::new()),
+            lifecycle: Mutex::new(RemoteLifecycle {
+                closing: false,
+                active: 0,
+                cleanup_failed: false,
+                failure: None,
+                unconfirmed_finish: false,
+            }),
+            idle: Notify::new(),
+            close_serial: tokio::sync::Mutex::new(()),
+        }
+    }
+
     pub async fn connect(
         url: String,
         token: String,
