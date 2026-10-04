@@ -2277,3 +2277,38 @@ pub(crate) async fn notification_document_project(
         }
     }
 }
+
+// Immediate-mail data reads stay in the caller's current operation transaction.
+pub(crate) async fn mail_user(
+    tx: &mut OperationTx<'_, '_>,
+    user: Uuid,
+) -> Result<Option<(String, String, Option<String>)>, sqlx::Error> {
+    match tx {
+        OperationTx::Postgres(tx) => sqlx::query_as("SELECT email,given_name,family_name FROM fvoci.users WHERE id=$1 AND deleted_at IS NULL").bind(user).fetch_optional(&mut ***tx).await,
+        OperationTx::SqliteFamily(tx) => {
+            tx.require_system_context()?;
+            let rows=tx.query("SELECT email,given_name,family_name FROM users WHERE id=?1 AND deleted_at IS NULL", &[Cell::uuid(user)]).await?;
+            rows.first().map(|r| Ok((r.cell(0)?.string()?,r.cell(1)?.string()?,r.cell(2)?.optional(Cell::string)?))).transpose()
+        }
+    }
+}
+
+pub(crate) async fn mail_messages(
+    tx: &mut OperationTx<'_, '_>,
+) -> Result<crate::settings::messages::Messages, sqlx::Error> {
+    let raw: Option<Value> = match tx {
+        OperationTx::Postgres(tx) => {
+            sqlx::query_scalar("SELECT value FROM fvoci.instance_settings WHERE key='i18n'")
+                .fetch_optional(&mut ***tx)
+                .await?
+        }
+        OperationTx::SqliteFamily(tx) => {
+            tx.require_system_context()?;
+            let rows = tx
+                .query("SELECT value FROM instance_settings WHERE key='i18n'", &[])
+                .await?;
+            rows.first().map(|r| r.cell(0)?.value()).transpose()?
+        }
+    };
+    Ok(crate::settings::messages::Messages::from_row(raw.as_ref()))
+}
