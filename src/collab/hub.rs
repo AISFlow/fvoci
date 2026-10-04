@@ -15,14 +15,20 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::collab::admission::{warn_join_db_error, MemoryLedger};
-use crate::collab::config::CollabConfig;
-use crate::collab::guard::RoomGuard;
+use crate::collab::config::{CollabConfig, FamilyRoomTimings};
+use crate::collab::guard::{
+    BackendRoomGuard, FamilyRoomOwnerRecord, FamilyRoomOwnerRecords, RoomGuard,
+};
 use crate::collab::room::{
     BodyWriteError, CapturedRevision, ConnectionLease, JoinDelivery, JoinError, LiveProjection,
     RevisionCaptureError, RevisionRestoreError, RoomHandle, RoomJoin, RoomKey,
 };
+use crate::db::backend::Backend;
 use crate::db::collab::estimate_persisted_collab_bytes_kind;
-use crate::db::collab::resolve_collab_admission_kind;
+use crate::db::collab::{
+    abandon_family_document_room_start, acquire_family_document_room_for_start,
+    estimate_family_document_bytes, resolve_collab_admission_kind_backend,
+};
 
 #[cfg(feature = "db-tests")]
 pub const HUB_JOIN_BARRIER_BEFORE_ACTOR_JOIN: u8 = 0;
@@ -42,6 +48,8 @@ pub const HUB_JOIN_BARRIER_AFTER_RECLAIM_SCAN: u8 = 4;
 /// room (a join admitted before a concurrent same-ID MOVE commits).
 #[cfg(feature = "db-tests")]
 pub const HUB_JOIN_BARRIER_AFTER_ADMISSION: u8 = 5;
+#[cfg(feature = "db-tests")]
+pub const HUB_FAMILY_START_BEFORE_BEGIN: u8 = 6;
 
 /// One pre-enqueue retry after a proven undelivered join or a Closing race.
 const MAX_PRE_ENQUEUE_RETRIES: u8 = 1;
@@ -301,7 +309,11 @@ impl Drop for CollabSocketPermit {
 #[derive(Clone)]
 pub struct CollabHub {
     config: CollabConfig,
-    pool: PgPool,
+    backend: Backend,
+    family_timings: Option<FamilyRoomTimings>,
+    // Unconfirmed startup owners remain service-owned; a later attempt cannot
+    // overwrite or adopt one after an unknown original stream cleanup.
+    pending_family_starts: FamilyRoomOwnerRecords,
     rooms: Arc<RwLock<HashMap<RoomKey, Arc<RoomSlot>>>>,
     room_permits: Arc<Semaphore>,
     socket_permits: Arc<Semaphore>,
@@ -319,6 +331,25 @@ pub struct CollabHub {
 
 impl CollabHub {
     pub fn new(config: CollabConfig, pool: PgPool) -> Self {
+        Self::build(config, Backend::Postgres(pool), None)
+    }
+
+    pub fn new_backend(
+        config: CollabConfig,
+        backend: Backend,
+        family_timings: Option<FamilyRoomTimings>,
+    ) -> Result<Self, String> {
+        if !matches!(backend, Backend::Postgres(_)) && family_timings.is_none() {
+            return Err("family collab requires explicit room lease and renewal timings".into());
+        }
+        Ok(Self::build(config, backend, family_timings))
+    }
+
+    fn build(
+        config: CollabConfig,
+        backend: Backend,
+        family_timings: Option<FamilyRoomTimings>,
+    ) -> Self {
         config.apply_runtime_limits();
         let room_cap = config.max_rooms;
         let rooms = Arc::new(RwLock::new(HashMap::new()));
@@ -339,7 +370,9 @@ impl CollabHub {
         let memory_ledger = MemoryLedger::new(config.memory_budget_bytes);
         Self {
             config,
-            pool,
+            backend,
+            family_timings,
+            pending_family_starts: Arc::new(std::sync::Mutex::new(HashMap::new())),
             rooms,
             room_permits,
             socket_permits,
@@ -443,8 +476,8 @@ impl CollabHub {
         self.socket_permits.available_permits()
     }
 
-    pub fn pool(&self) -> &PgPool {
-        &self.pool
+    pub fn backend(&self) -> &Backend {
+        &self.backend
     }
 
     pub fn engine_bin(&self) -> std::path::PathBuf {
@@ -484,12 +517,22 @@ impl CollabHub {
         Some(handle.capture_revision(actor_user_id, session_id).await)
     }
 
+    pub(crate) async fn capture_if_live_guarded(
+        &self,
+        key: impl Into<RoomKey>,
+        actor: Uuid,
+        credential: Uuid,
+    ) -> Option<Result<crate::collab::room::GuardedCapturedRevision, RevisionCaptureError>> {
+        let (handle, _lease) = self.live_handle(key.into()).await?;
+        Some(handle.capture_revision_guarded(actor, credential).await)
+    }
+
     /// Tests only: drops the joining lease, so idle eviction or admission
     /// reclaim may close the room under the returned handle. Production
     /// borrows go through `borrow_live_room`, which keeps the lease.
     #[cfg(feature = "db-tests")]
     pub async fn ensure_live_room(&self, key: impl Into<RoomKey>) -> Result<RoomHandle, JoinError> {
-        self.borrow_live_room(key)
+        self.borrow_live_room(key, None)
             .await
             .map(|(handle, _lease)| handle)
     }
@@ -500,6 +543,7 @@ impl CollabHub {
     async fn borrow_live_room(
         &self,
         key: impl Into<RoomKey>,
+        identity: Option<(Uuid, Uuid)>,
     ) -> Result<(RoomHandle, JoiningLease), JoinError> {
         let key: RoomKey = key.into();
         let mut retries = 0u8;
@@ -507,7 +551,7 @@ impl CollabHub {
             if self.shutting_down.load(Ordering::Acquire) {
                 return Err(JoinError::EngineUnavailable);
             }
-            let LiveSlot { slot, lease } = self.get_or_create_room(key).await?;
+            let LiveSlot { slot, lease } = self.get_or_create_room(key, identity).await?;
             #[cfg(feature = "db-tests")]
             pause_for_hub_join_barrier(key.1, HUB_BORROW_BARRIER_AFTER_SLOT_READY).await;
             let borrow = {
@@ -544,7 +588,7 @@ impl CollabHub {
     ) -> Result<Uuid, RevisionRestoreError> {
         let key: RoomKey = key.into();
         let (handle, _lease) = self
-            .borrow_live_room(key)
+            .borrow_live_room(key, Some((actor_user_id, session_id)))
             .await
             .map_err(|_| RevisionRestoreError::Unavailable)?;
         handle
@@ -563,7 +607,7 @@ impl CollabHub {
     ) -> Result<(), BodyWriteError> {
         let key: RoomKey = key.into();
         let (handle, _lease) = self
-            .borrow_live_room(key)
+            .borrow_live_room(key, Some((actor_user_id, session_id)))
             .await
             .map_err(join_to_body_write_error)?;
         handle
@@ -580,10 +624,34 @@ impl CollabHub {
     ) -> Result<LiveProjection, BodyWriteError> {
         let key: RoomKey = key.into();
         let (handle, _lease) = self
-            .borrow_live_room(key)
+            .borrow_live_room(key, Some((actor_user_id, session_id)))
             .await
             .map_err(join_to_body_write_error)?;
         handle.project_live(actor_user_id, session_id).await
+    }
+
+    #[cfg(feature = "db-tests")]
+    pub fn pending_family_start_count(&self) -> usize {
+        self.pending_family_starts
+            .lock()
+            .expect("family startup owner mutex")
+            .len()
+    }
+
+    #[cfg(feature = "db-tests")]
+    pub fn unresolved_family_owner(&self, key: RoomKey) -> Option<Uuid> {
+        self.pending_family_starts
+            .lock()
+            .expect("family room owner mutex")
+            .get(&key)
+            .map(|record| match record {
+                FamilyRoomOwnerRecord::Startup { owner, .. } => *owner,
+                FamilyRoomOwnerRecord::NativeWrite { fence, .. } => fence.owner_token,
+            })
+    }
+    #[cfg(feature = "db-tests")]
+    pub fn can_reserve_room_memory(&self) -> bool {
+        self.memory_ledger.try_reserve(0).is_some()
     }
 
     #[cfg(feature = "db-tests")]
@@ -798,8 +866,8 @@ impl CollabHub {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(JoinError::EngineUnavailable);
         }
-        let admission = resolve_collab_admission_kind(
-            &self.pool,
+        let admission = resolve_collab_admission_kind_backend(
+            &self.backend,
             key.2,
             key.0,
             join.conn.session.user_id,
@@ -823,7 +891,12 @@ impl CollabHub {
             let LiveSlot {
                 slot,
                 lease: joining_lease,
-            } = self.get_or_create_room(key).await?;
+            } = self
+                .get_or_create_room(
+                    key,
+                    Some((join.conn.session.user_id, join.conn.session.session_id)),
+                )
+                .await?;
             #[cfg(feature = "db-tests")]
             pause_for_hub_join_barrier(key.1, HUB_JOIN_BARRIER_AFTER_SLOT_READY).await;
 
@@ -1073,6 +1146,28 @@ impl CollabHub {
                 drop(held);
             }
         }
+        for (key, record) in self
+            .pending_family_starts
+            .lock()
+            .expect("family room owner mutex")
+            .iter()
+        {
+            match record {
+                FamilyRoomOwnerRecord::Startup {
+                    owner,
+                    error,
+                    deadline_expired,
+                } => {
+                    start_task_failures = start_task_failures.saturating_add(1);
+                    tracing::error!(workspace_id=%key.0,document_id=%key.1,owner=%owner,deadline_expired,
+                        error=?error.as_ref().map(|error|error.source_error()), "family startup owner remains unconfirmed");
+                }
+                FamilyRoomOwnerRecord::NativeWrite { fence, error } => {
+                    tracing::error!(workspace_id=%key.0,document_id=%key.1,fence=fence.fence,%error,
+                        "family native writer original remote outcome remains unconfirmed");
+                }
+            }
+        }
         let actor_failures = self.abnormal_actor_completions.load(Ordering::Acquire);
         ShutdownStatus {
             idle_task_failed,
@@ -1085,7 +1180,11 @@ impl CollabHub {
         self.rooms.read().await.get(&key).cloned()
     }
 
-    async fn get_or_create_room(&self, key: RoomKey) -> Result<LiveSlot, JoinError> {
+    async fn get_or_create_room(
+        &self,
+        key: RoomKey,
+        identity: Option<(Uuid, Uuid)>,
+    ) -> Result<LiveSlot, JoinError> {
         let mut reclaims = 0u8;
         loop {
             if self.shutting_down.load(Ordering::Acquire) {
@@ -1131,7 +1230,7 @@ impl CollabHub {
                             let startup_slot = slot.clone();
                             starts.push(tokio::spawn(async move {
                                 let outcome = std::panic::AssertUnwindSafe(
-                                    hub.start_room(key, startup_slot.clone()),
+                                    hub.start_room(key, startup_slot.clone(), identity),
                                 )
                                 .catch_unwind()
                                 .await;
@@ -1366,8 +1465,21 @@ impl CollabHub {
                 rooms.get(&key).expect("key present").clone(),
             ));
         }
-        if rooms.len() >= self.config.max_rooms {
-            return Err(JoinError::RoomFull);
+        {
+            let owners = self
+                .pending_family_starts
+                .lock()
+                .expect("family room owner mutex");
+            if owners.contains_key(&key) {
+                return Err(JoinError::CapacityRetry);
+            }
+            let unresolved = owners
+                .keys()
+                .filter(|owned| !rooms.contains_key(*owned))
+                .count();
+            if rooms.len().saturating_add(unresolved) >= self.config.max_rooms {
+                return Err(JoinError::RoomFull);
+            }
         }
 
         let slot = Arc::new(RoomSlot {
@@ -1402,7 +1514,12 @@ impl CollabHub {
         }
     }
 
-    async fn start_room(&self, key: RoomKey, slot: Arc<RoomSlot>) -> Result<LiveSlot, JoinError> {
+    async fn start_room(
+        &self,
+        key: RoomKey,
+        slot: Arc<RoomSlot>,
+        identity: Option<(Uuid, Uuid)>,
+    ) -> Result<LiveSlot, JoinError> {
         #[cfg(feature = "db-tests")]
         increment_room_start_count(key.1).await;
         if self.shutting_down.load(Ordering::Acquire) {
@@ -1439,83 +1556,197 @@ impl CollabHub {
             return Err(JoinError::EngineUnavailable);
         }
 
-        let mut pooled = tokio::select! {
-            biased;
-            result = self.pool.acquire() => match result {
-                Ok(pooled) => pooled,
-                Err(err) => {
-                    warn_join_db_error("hub.start_room.acquire", key.0, key.1, &err);
-                    self.cleanup_starting(key, &slot).await;
-                    return Err(JoinError::DbError);
+        let prepared = async {
+            match &self.backend {
+                Backend::Postgres(pool) => {
+                    let mut pooled = tokio::select! {
+                        biased;
+                        result = pool.acquire() => match result {
+                            Ok(pooled) => pooled,
+                            Err(err) => {
+                                warn_join_db_error("hub.start_room.acquire", key.0, key.1, &err);
+                                        return Err(JoinError::DbError);
+                            }
+                        },
+                        () = self.wait_if_shutting_down() => {
+                                return Err(JoinError::EngineUnavailable);
+                        }
+                    };
+                    if self.shutting_down.load(Ordering::Acquire) {
+                        drop(pooled);
+                        return Err(JoinError::EngineUnavailable);
+                    }
+                    let persisted_bytes = match estimate_persisted_collab_bytes_kind(
+                        &mut pooled,
+                        key.2,
+                        key.0,
+                        key.1,
+                    )
+                    .await
+                    {
+                        Ok(bytes) => bytes,
+                        Err(err) => {
+                            warn_join_db_error("hub.start_room.estimate_bytes", key.0, key.1, &err);
+                            drop(pooled);
+                            return Err(JoinError::DbError);
+                        }
+                    };
+                    let Some(memory_reservation) = self.memory_ledger.try_reserve(persisted_bytes)
+                    else {
+                        drop(pooled);
+                        return Err(JoinError::CapacityRetry);
+                    };
+                    let guard = match RoomGuard::try_lock_pooled(pooled, key.1).await {
+                        Ok(Some(guard)) => guard,
+                        Ok(None) => {
+                            return Err(JoinError::WriterStale);
+                        }
+                        Err(err) => {
+                            warn_join_db_error("hub.start_room.room_guard", key.0, key.1, &err);
+                            return Err(JoinError::DbError);
+                        }
+                    };
+                    if self.shutting_down.load(Ordering::Acquire) {
+                        guard.release().await;
+                        return Err(JoinError::EngineUnavailable);
+                    }
+                    // Under the guard: the resource must still belong to this room's
+                    // workspace. A join admitted before a same-ID MOVE committed would
+                    // otherwise start a source room that keeps the guard from the
+                    // destination room until idle eviction.
+                    match resource_in_room_workspace(pool, key).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            guard.release().await;
+                            return Err(JoinError::AdmissionDenied);
+                        }
+                        Err(err) => {
+                            warn_join_db_error("hub.start_room.resource", key.0, key.1, &err);
+                            guard.release().await;
+                            return Err(JoinError::DbError);
+                        }
+                    }
+
+                    Ok((BackendRoomGuard::Postgres(guard), memory_reservation, None))
                 }
-            },
-            () = self.wait_if_shutting_down() => {
+                Backend::Sqlite(_) | Backend::LibsqlRemote(_) => {
+                    if key.2 != crate::collab::wire::CollabKind::Document {
+                        return Err(JoinError::UnsupportedKind);
+                    }
+                    let (actor, credential) = identity.ok_or(JoinError::AdmissionDenied)?;
+                    let timings = self.family_timings.ok_or(JoinError::EngineUnavailable)?;
+                    let bytes = estimate_family_document_bytes(
+                        &self.backend,
+                        key.0,
+                        actor,
+                        credential,
+                        key.1,
+                    )
+                    .await
+                    .map_err(|err| {
+                        warn_join_db_error("hub.start_room.estimate_bytes", key.0, key.1, &err);
+                        JoinError::DbError
+                    })?
+                    .map_err(|_| JoinError::AdmissionDenied)?;
+                    let reservation = self
+                        .memory_ledger
+                        .try_reserve(bytes)
+                        .ok_or(JoinError::CapacityRetry)?;
+                    let acquisition_owner=Uuid::now_v7();
+                    self.pending_family_starts.lock().expect("family startup owner mutex").insert(key,FamilyRoomOwnerRecord::Startup { owner: acquisition_owner, error: None, deadline_expired: false });
+                    #[cfg(feature = "db-tests")]
+                    pause_for_hub_join_barrier(key.1,HUB_FAMILY_START_BEFORE_BEGIN).await;
+                    let acquired = tokio::time::timeout(
+                        Duration::from_millis(self.config.rpc_timeout_ms),
+                        acquire_family_document_room_for_start(
+                        &self.backend,
+                        key.0,
+                        actor,
+                        credential,
+                        key.1,
+                        acquisition_owner,
+                        timings.lease(),
+                    )).await;
+                    let acquired = match acquired {
+                        Ok(acquired) => acquired,
+                        Err(_) => {
+                            // Dropping the unfinished remote future starts owned
+                            // stream quarantine, but is not a cleanup receipt.
+                            // Retain its exact owner, refuse fresh reconciliation.
+                            self.pending_family_starts.lock().expect("family room owner mutex").insert(key,
+                                FamilyRoomOwnerRecord::Startup { owner: acquisition_owner, error: None, deadline_expired: true });
+                            self.abnormal_actor_completions.fetch_add(1,Ordering::Relaxed);
+                            tracing::error!(workspace_id=%key.0,document_id=%key.1,
+                                "room startup deadline expired; original stream cleanup unconfirmed");
+                            return Err(JoinError::DbError);
+                        }
+                    };
+                    let claim=match acquired {
+                        Ok(result)=>{
+                            // Success transfers the known token to the guard;
+                            // a domain refusal follows explicit rollback.
+                            self.pending_family_starts.lock().expect("family startup owner mutex").remove(&key);
+                            result.map_err(|error| match error {
+                                crate::db::collab::CollabDbError::StaleWriter=>JoinError::WriterStale,
+                                _=>JoinError::AdmissionDenied,
+                            })?
+                        },
+                        Err(error)=>{
+                            warn_join_db_error("hub.start_room.room_guard",key.0,key.1,error.source_error());
+                            let cleaned = if error.may_reconcile() {
+                                matches!(tokio::time::timeout(Duration::from_millis(self.config.rpc_timeout_ms),
+                                    abandon_family_document_room_start(&self.backend,key.0,key.1,acquisition_owner)).await, Ok(Ok(())))
+                            } else {
+                                // No exact original-stream cleanup receipt means
+                                // neither driver failure nor Drop proves cleanup.
+                                false
+                            };
+                            if cleaned {
+                                self.pending_family_starts.lock().expect("family startup owner mutex").remove(&key);
+                            } else {
+                                self.pending_family_starts.lock().expect("family room owner mutex").insert(key,
+                                    FamilyRoomOwnerRecord::Startup { owner: acquisition_owner, error: Some(Arc::new(error)), deadline_expired: false });
+                                self.abnormal_actor_completions.fetch_add(1,Ordering::Relaxed);
+                                tracing::error!(workspace_id=%key.0,document_id=%key.1,
+                                    "room startup cleanup unconfirmed; backend drain/quarantine required");
+                            }
+                            return Err(JoinError::DbError);
+                        }
+                    };
+                    let guard =
+                        BackendRoomGuard::family(self.backend.clone(), claim.fence, timings, self.pending_family_starts.clone());
+                    Ok((guard, reservation, Some(claim.native.load)))
+                }
+            }
+        }
+        .await;
+        let (guard, memory_reservation, initial_load) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
                 self.cleanup_starting(key, &slot).await;
-                return Err(JoinError::EngineUnavailable);
+                return Err(error);
             }
         };
         if self.shutting_down.load(Ordering::Acquire) {
-            drop(pooled);
+            if let Err(err) = guard
+                .release_bounded(Duration::from_millis(self.config.rpc_timeout_ms))
+                .await
+            {
+                self.abnormal_actor_completions
+                    .fetch_add(1, Ordering::Relaxed);
+                warn_join_db_error("hub.start_room.release", key.0, key.1, &err);
+            }
             self.cleanup_starting(key, &slot).await;
             return Err(JoinError::EngineUnavailable);
-        }
-        let persisted_bytes =
-            match estimate_persisted_collab_bytes_kind(&mut pooled, key.2, key.0, key.1).await {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    warn_join_db_error("hub.start_room.estimate_bytes", key.0, key.1, &err);
-                    drop(pooled);
-                    self.cleanup_starting(key, &slot).await;
-                    return Err(JoinError::DbError);
-                }
-            };
-        let Some(memory_reservation) = self.memory_ledger.try_reserve(persisted_bytes) else {
-            drop(pooled);
-            self.cleanup_starting(key, &slot).await;
-            return Err(JoinError::CapacityRetry);
-        };
-        let guard = match RoomGuard::try_lock_pooled(pooled, key.1).await {
-            Ok(Some(guard)) => guard,
-            Ok(None) => {
-                self.cleanup_starting(key, &slot).await;
-                return Err(JoinError::WriterStale);
-            }
-            Err(err) => {
-                warn_join_db_error("hub.start_room.room_guard", key.0, key.1, &err);
-                self.cleanup_starting(key, &slot).await;
-                return Err(JoinError::DbError);
-            }
-        };
-        if self.shutting_down.load(Ordering::Acquire) {
-            guard.release().await;
-            self.cleanup_starting(key, &slot).await;
-            return Err(JoinError::EngineUnavailable);
-        }
-        // Under the guard: the resource must still belong to this room's
-        // workspace. A join admitted before a same-ID MOVE committed would
-        // otherwise start a source room that keeps the guard from the
-        // destination room until idle eviction.
-        match resource_in_room_workspace(&self.pool, key).await {
-            Ok(true) => {}
-            Ok(false) => {
-                guard.release().await;
-                self.cleanup_starting(key, &slot).await;
-                return Err(JoinError::AdmissionDenied);
-            }
-            Err(err) => {
-                warn_join_db_error("hub.start_room.resource", key.0, key.1, &err);
-                guard.release().await;
-                self.cleanup_starting(key, &slot).await;
-                return Err(JoinError::DbError);
-            }
         }
 
         let live_conns = Arc::new(AtomicUsize::new(0));
-        let spawn = crate::collab::room::spawn_room(
+        let spawn = crate::collab::room::spawn_room_backend(
             key,
             self.config.clone(),
-            self.pool.clone(),
+            self.backend.clone(),
             guard,
+            initial_load,
             live_conns.clone(),
             memory_reservation,
         )
@@ -1558,6 +1789,10 @@ impl CollabHub {
                 })
             }
             Err(err) => {
+                if err == JoinError::DbError {
+                    self.abnormal_actor_completions
+                        .fetch_add(1, Ordering::Relaxed);
+                }
                 self.cleanup_starting(key, &slot).await;
                 Err(err)
             }

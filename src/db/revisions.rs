@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::collab::derived_body::PreparedDerivedBody;
 use crate::db::backend::{Backend, OperationTx};
 use crate::db::codec::{Cell, FamilyRow};
+use crate::db::collab::{CollabKind, FamilyNativeConsumerProof, FamilyRoomFence};
 use crate::db::context::{set_system, set_tenant};
 use crate::db::projects::{load_live_project, project_permission};
 use crate::db::workspace::workspace_is_live;
@@ -775,11 +776,39 @@ pub async fn create_manual_revision_backend(
     scope: impl Into<RevisionScope>,
     input: CreateRevisionInput,
 ) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
+    create_manual_revision_with_room_proof(
+        backend,
+        workspace,
+        actor,
+        credential,
+        scope.into(),
+        input,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn create_manual_revision_with_room_proof(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    scope: RevisionScope,
+    input: CreateRevisionInput,
+    proof: Option<FamilyNativeConsumerProof>,
+) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
     let mut tx = backend.begin_write().await?;
-    let result = tx
-        .operation()
-        .create_manual_revision(workspace, actor, credential, scope.into(), input)
-        .await?;
+    let result = if proof.is_some() {
+        tx.operation()
+            .create_manual_revision_with_room_proof(
+                workspace, actor, credential, scope, input, proof,
+            )
+            .await?
+    } else {
+        tx.operation()
+            .create_manual_revision(workspace, actor, credential, scope, input)
+            .await?
+    };
     if result.is_ok() {
         tx.commit().await.map_err(|unknown| unknown.source)?;
     } else {
@@ -888,6 +917,21 @@ impl OperationTx<'_, '_> {
         scope: RevisionScope,
         input: CreateRevisionInput,
     ) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
+        self.create_manual_revision_with_room_proof(
+            workspace, actor, credential, scope, input, None,
+        )
+        .await
+    }
+
+    async fn create_manual_revision_with_room_proof(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+        scope: RevisionScope,
+        input: CreateRevisionInput,
+        proof: Option<FamilyNativeConsumerProof>,
+    ) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
         self.set_tenant(workspace).await?;
         self.lock_membership_users(&[actor]).await?;
         if !self.recheck_session(actor, credential).await? {
@@ -899,6 +943,14 @@ impl OperationTx<'_, '_> {
         {
             return Ok(Err(error));
         }
+        if let Some(proof) = proof {
+            if proof.room.workspace_id != workspace
+                || scope.target != RevisionTarget::Document(proof.room.document_id)
+                || !self.verify_family_native_consumer_proof(proof).await?
+            {
+                return Ok(Err(RevisionDbError::NotFound));
+            }
+        }
         let recent = self
             .revision_latest_snapshot(workspace, scope.target)
             .await?;
@@ -907,12 +959,29 @@ impl OperationTx<'_, '_> {
                 if is_automatic_revision_reason(&reason) {
                     self.promote_manual_revision(workspace, id, actor).await?;
                 }
+                if let Some(proof) = proof {
+                    if !self.verify_family_native_consumer_proof(proof).await? {
+                        return Ok(Err(RevisionDbError::NotFound));
+                    }
+                }
                 return Ok(Ok(id));
             }
         }
         let id = Uuid::now_v7();
-        self.insert_manual_revision(workspace, scope.target, id, actor, &input)
-            .await?;
+        self.insert_revision(
+            workspace,
+            scope.target,
+            id,
+            Some(actor),
+            &input,
+            MANUAL_REASON,
+        )
+        .await?;
+        if let Some(proof) = proof {
+            if !self.verify_family_native_consumer_proof(proof).await? {
+                return Ok(Err(RevisionDbError::NotFound));
+            }
+        }
         Ok(Ok(id))
     }
     async fn revision_latest_snapshot(
@@ -958,16 +1027,17 @@ impl OperationTx<'_, '_> {
         }
         Ok(())
     }
-    async fn insert_manual_revision(
+    async fn insert_revision(
         &mut self,
         workspace: Uuid,
         target: RevisionTarget,
         id: Uuid,
-        actor: Uuid,
+        actor: Option<Uuid>,
         input: &CreateRevisionInput,
+        default_reason: &str,
     ) -> Result<(), sqlx::Error> {
         let reason = if input.reason.is_empty() {
-            MANUAL_REASON
+            default_reason
         } else {
             &input.reason
         };
@@ -980,19 +1050,18 @@ impl OperationTx<'_, '_> {
                 tx.require_writer()?;
                 tx.require_tenant(workspace)?;
                 tx.execute("INSERT INTO revisions(id,workspace_id,target_kind,target_id,y_snapshot,encoding,content_json,text,reason,created_by) VALUES(?1,?2,?3,?4,?5,1,?6,?7,?8,?9)",
-                    &[Cell::uuid(id),Cell::uuid(workspace),Cell::text(target.kind_str()),Cell::uuid(target.id()),Cell::Blob(input.y_snapshot.clone()),Cell::json(&input.content_json)?,Cell::text(&input.text),Cell::text(reason),Cell::uuid(actor)]).await?;
+                    &[Cell::uuid(id),Cell::uuid(workspace),Cell::text(target.kind_str()),Cell::uuid(target.id()),Cell::Blob(input.y_snapshot.clone()),Cell::json(&input.content_json)?,Cell::text(&input.text),Cell::text(reason),Cell::optional_uuid(actor)]).await?;
             }
         }
         Ok(())
     }
 }
 
-async fn lock_system_revision_target(
+async fn load_system_revision_generation_pg(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     target: RevisionTarget,
-    expected_writer_generation: Option<i64>,
-) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
+) -> Result<Result<i64, RevisionDbError>, sqlx::Error> {
     if !workspace_is_live(&mut *tx, workspace_id).await? {
         return Ok(Err(RevisionDbError::NotFound));
     }
@@ -1120,12 +1189,83 @@ async fn lock_system_revision_target(
     let Some(writer_generation) = writer_generation else {
         return Ok(Err(RevisionDbError::NotFound));
     };
-    if let Some(expected) = expected_writer_generation {
-        if writer_generation != expected {
+    Ok(Ok(writer_generation))
+}
+
+impl OperationTx<'_, '_> {
+    async fn lock_system_revision_target(
+        &mut self,
+        workspace: Uuid,
+        target: RevisionTarget,
+        expected: Option<i64>,
+    ) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
+        let generation = match self {
+            Self::Postgres(tx) => load_system_revision_generation_pg(tx, workspace, target).await?,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                let statement = match target {
+                    RevisionTarget::Document(_) => "SELECT s.writer_generation FROM documents d INNER JOIN workspaces w ON w.id=d.workspace_id AND w.deleted_at IS NULL INNER JOIN document_states s ON s.workspace_id=d.workspace_id AND s.document_id=d.id LEFT JOIN projects p ON p.workspace_id=d.workspace_id AND p.id=d.project_id WHERE d.workspace_id=?1 AND d.id=?2 AND d.deleted_at IS NULL AND (d.project_id IS NULL OR (p.id IS NOT NULL AND p.deleted_at IS NULL))",
+                    RevisionTarget::Task(_) => "SELECT s.writer_generation FROM tasks t INNER JOIN workspaces w ON w.id=t.workspace_id AND w.deleted_at IS NULL INNER JOIN task_states s ON s.workspace_id=t.workspace_id AND s.task_id=t.id INNER JOIN projects p ON p.workspace_id=t.workspace_id AND p.id=t.project_id AND p.deleted_at IS NULL WHERE t.workspace_id=?1 AND t.id=?2 AND t.deleted_at IS NULL",
+                };
+                match tx
+                    .query(statement, &[Cell::uuid(workspace), Cell::uuid(target.id())])
+                    .await?
+                    .first()
+                {
+                    Some(row) => Ok(row.cell(0)?.integer()?),
+                    None => Err(RevisionDbError::NotFound),
+                }
+            }
+        };
+        let generation = match generation {
+            Ok(generation) => generation,
+            Err(error) => return Ok(Err(error)),
+        };
+        if expected.is_some_and(|expected| expected != generation) {
             return Ok(Err(RevisionDbError::NotFound));
         }
+        Ok(Ok(()))
     }
-    Ok(Ok(()))
+
+    async fn latest_revision_head(
+        &mut self,
+        workspace: Uuid,
+        target: RevisionTarget,
+    ) -> Result<Option<(Uuid, Vec<u8>)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => latest_revision_in_tx(tx, workspace, target).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                tx.query("SELECT id,y_snapshot FROM revisions WHERE workspace_id=?1 AND target_kind=?2 AND target_id=?3 ORDER BY created_at DESC,id DESC LIMIT 1",&[Cell::uuid(workspace),Cell::text(target.kind_str()),Cell::uuid(target.id())]).await?.first()
+                    .map(|row| Ok((row.cell(0)?.id()?,row.cell(1)?.bytes()?))).transpose()
+            }
+        }
+    }
+
+    async fn current_room_revision_scope(
+        &mut self,
+        workspace: Uuid,
+        target: RevisionTarget,
+        fence: Option<FamilyRoomFence>,
+        expected: Option<i64>,
+    ) -> Result<bool, sqlx::Error> {
+        let Some(fence) = fence else {
+            return Ok(false);
+        };
+        if target != RevisionTarget::Document(fence.document_id) || workspace != fence.workspace_id
+        {
+            return Ok(false);
+        }
+        if !self.verify_family_room_fence(fence).await? {
+            return Ok(false);
+        }
+        Ok(self
+            .lock_system_revision_target(workspace, target, expected)
+            .await?
+            .is_ok())
+    }
 }
 
 async fn latest_revision_in_tx(
@@ -1183,58 +1323,154 @@ pub async fn create_system_revision(
     expected_writer_generation: i64,
     head_fence: SystemRevisionHead,
 ) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    match lock_system_revision_target(
-        &mut tx,
+    create_system_revision_for_room_backend(
+        &Backend::Postgres(pool.clone()),
         workspace_id,
         target,
-        Some(expected_writer_generation),
+        input,
+        expected_writer_generation,
+        head_fence,
+        None,
     )
-    .await?
-    {
-        Ok(()) => {}
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
-        }
+    .await
+}
+
+/// Room-owned system consumers keep the family lease around the complete
+/// operation. PG callers retain their original SQL, role and lock order.
+pub(crate) async fn load_durable_collab_for_room_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    target: RevisionTarget,
+    fence: Option<FamilyRoomFence>,
+) -> Result<Result<DurableCollabSnapshot, RevisionDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return load_durable_collab_for_system(pool, workspace, target).await;
     }
-    let recent = latest_revision_in_tx(&mut tx, workspace_id, target).await?;
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(workspace).await?;
+    if !tx
+        .operation()
+        .current_room_revision_scope(workspace, target, fence, None)
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(RevisionDbError::NotFound));
+    }
+    let load = tx
+        .operation()
+        .load_durable_native_source(CollabKind::Document, workspace, target.id())
+        .await?;
+    let load = match load {
+        Ok(load) => load,
+        Err(_) => {
+            tx.rollback().await?;
+            return Ok(Err(RevisionDbError::NotFound));
+        }
+    };
+    if !tx
+        .operation()
+        .current_room_revision_scope(workspace, target, fence, Some(load.writer_generation))
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(RevisionDbError::NotFound));
+    }
+    tx.commit().await.map_err(|unknown| unknown.source)?;
+    Ok(Ok(DurableCollabSnapshot {
+        snapshot: load.snapshot,
+        tail: load.tail.into_iter().map(|row| row.payload).collect(),
+        tail_seq: load.tail_seq,
+        snapshot_cutoff_seq: load.snapshot_cutoff_seq,
+    }))
+}
+
+pub(crate) async fn latest_revision_y_snapshot_for_room_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    target: RevisionTarget,
+    fence: Option<FamilyRoomFence>,
+) -> Result<Option<(Uuid, Vec<u8>)>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return latest_revision_y_snapshot(pool, workspace, target).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(workspace).await?;
+    if !tx
+        .operation()
+        .current_room_revision_scope(workspace, target, fence, None)
+        .await?
+    {
+        tx.rollback().await?;
+        return Err(sqlx::Error::Protocol("room revision scope lost".into()));
+    }
+    let head = tx
+        .operation()
+        .latest_revision_head(workspace, target)
+        .await?;
+    if !tx
+        .operation()
+        .current_room_revision_scope(workspace, target, fence, None)
+        .await?
+    {
+        tx.rollback().await?;
+        return Err(sqlx::Error::Protocol("room revision scope lost".into()));
+    }
+    tx.commit().await.map_err(|unknown| unknown.source)?;
+    Ok(head)
+}
+
+pub(crate) async fn create_system_revision_for_room_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    target: RevisionTarget,
+    input: CreateRevisionInput,
+    expected_generation: i64,
+    head_fence: SystemRevisionHead,
+    room_fence: Option<FamilyRoomFence>,
+) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(workspace).await?;
+    let current = if matches!(backend, Backend::Postgres(_)) {
+        tx.operation()
+            .lock_system_revision_target(workspace, target, Some(expected_generation))
+            .await?
+            .is_ok()
+    } else {
+        tx.operation()
+            .current_room_revision_scope(workspace, target, room_fence, Some(expected_generation))
+            .await?
+    };
+    if !current {
+        tx.rollback().await?;
+        return Ok(Err(RevisionDbError::NotFound));
+    }
+    let recent = tx
+        .operation()
+        .latest_revision_head(workspace, target)
+        .await?;
     if !head_fence.matches_current(recent.clone()) {
         tx.rollback().await?;
         return Ok(Err(RevisionDbError::StaleRevisionHead));
     }
-    if let Some((id, prev_snap)) = recent {
-        if prev_snap == input.y_snapshot {
-            tx.commit().await?;
-            return Ok(Ok(id));
-        }
-    }
-    let id = Uuid::now_v7();
-    let reason = if input.reason.is_empty() {
-        SESSION_REASON
+    let id = if let Some((id, _)) = recent.filter(|(_, bytes)| bytes == &input.y_snapshot) {
+        id
     } else {
-        input.reason.as_str()
+        let id = Uuid::now_v7();
+        tx.operation()
+            .insert_revision(workspace, target, id, None, &input, SESSION_REASON)
+            .await?;
+        id
     };
-    sqlx::query(
-        r#"
-        INSERT INTO fvoci.revisions (
-            id, workspace_id, target_kind, target_id, y_snapshot, encoding,
-            content_json, text, reason, created_by
-        ) VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8, NULL)
-        "#,
-    )
-    .bind(id)
-    .bind(workspace_id)
-    .bind(target.kind_str())
-    .bind(target.id())
-    .bind(&input.y_snapshot)
-    .bind(&input.content_json)
-    .bind(&input.text)
-    .bind(reason)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
+    if !matches!(backend, Backend::Postgres(_))
+        && !tx
+            .operation()
+            .current_room_revision_scope(workspace, target, room_fence, Some(expected_generation))
+            .await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(RevisionDbError::NotFound));
+    }
+    tx.commit().await.map_err(|unknown| unknown.source)?;
     Ok(Ok(id))
 }
 

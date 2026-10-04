@@ -25,9 +25,9 @@ use crate::collab::room::{
     BodyWriteError, CapturedRevision, RevisionCaptureError, RevisionRestoreError,
 };
 use crate::db::revisions::{
-    authorize_revision_target, authorize_revision_target_backend, create_manual_revision_backend,
-    decode_revision_cursor, get_revision as get_revision_for,
-    get_revision_backend as get_selected_revision_for,
+    authorize_revision_target, authorize_revision_target_backend,
+    create_manual_revision_with_room_proof, decode_revision_cursor,
+    get_revision as get_revision_for, get_revision_backend as get_selected_revision_for,
     list_revisions_backend as list_revisions_for, load_persisted_target_source_backend,
     resolve_restore, CreateRevisionInput, RestoreRevisionInput, RevisionDbError, RevisionDetail,
     RevisionMeta, RevisionScope, RevisionTarget,
@@ -352,9 +352,16 @@ async fn create_target_revision(
         Ok(()) => {}
         Err(err) => return Err(map_revision_error(err)),
     }
-    let captured = capture_for_create(&state, workspace_id, user_id, credential_id, scope).await?;
+    let (captured, room_proof) =
+        capture_for_create(&state, workspace_id, user_id, credential_id, scope).await?;
+    #[cfg(feature = "db-tests")]
+    crate::collab::room::pause_native_consumer_barrier(
+        scope.target().id(),
+        crate::collab::room::MANUAL_REVISION_BEFORE_WRITE,
+    )
+    .await;
     let text = prepare_revision_text(&captured.content_json).map_err(|_| collab_unavailable())?;
-    let result = create_manual_revision_backend(
+    let result = create_manual_revision_with_room_proof(
         &state.auth.db.pool,
         workspace_id,
         user_id,
@@ -366,6 +373,7 @@ async fn create_target_revision(
             text,
             reason: "manual".into(),
         },
+        room_proof,
     )
     .await
     .map_err(internal)?;
@@ -741,13 +749,21 @@ async fn capture_for_create(
     user_id: Uuid,
     session_id: Uuid,
     scope: RevisionScope,
-) -> Result<CapturedRevision, RevisionApiError> {
+) -> Result<
+    (
+        CapturedRevision,
+        Option<crate::db::collab::FamilyNativeConsumerProof>,
+    ),
+    RevisionApiError,
+> {
     if let Some(hub) = state.collab.as_ref() {
         if let Some(live) = hub
-            .capture_if_live(room_key(workspace_id, scope.target()), user_id, session_id)
+            .capture_if_live_guarded(room_key(workspace_id, scope.target()), user_id, session_id)
             .await
         {
-            return live.map_err(|_| collab_unavailable());
+            return live
+                .map(|result| (result.captured, result.proof))
+                .map_err(|_| collab_unavailable());
         }
     }
     let persisted = load_persisted_target_source_backend(
@@ -775,6 +791,7 @@ async fn capture_for_create(
     })
     .await
     .map_err(|_| collab_unavailable())?
+    .map(|captured| (captured, None))
     .map_err(|err| match err {
         RevisionCaptureError::Unavailable => collab_unavailable(),
     })

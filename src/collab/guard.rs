@@ -3,6 +3,7 @@ use sqlx::postgres::PgConnection;
 use sqlx::Postgres;
 use uuid::Uuid;
 
+use crate::collab::config::FamilyRoomTimings;
 use crate::db::backend::Backend;
 use crate::db::collab::COLLAB_ROOM_SESSION_LOCK_NAMESPACE;
 use crate::db::collab::{
@@ -10,7 +11,7 @@ use crate::db::collab::{
     append_family_document_room_update_timed, claim_writer_and_load_kind_backend,
     release_family_document_room, renew_family_document_room, AppendCollabInput,
     AppendCollabResult, ClaimWriterResult, CollabDbError, CollabDbStageTimings, CollabKind,
-    FamilyRoomFence,
+    FamilyRoomDeliveryFence, FamilyRoomFence,
 };
 use crate::db::context::lock_key_from_uuid;
 
@@ -84,6 +85,23 @@ impl RoomGuard {
 
 /// Closed room ownership handle. PostgreSQL continues to hold its dedicated
 /// session connection; a family room retains its opaque authoritative lease.
+pub(crate) enum FamilyRoomOwnerRecord {
+    Startup {
+        owner: Uuid,
+        error: Option<std::sync::Arc<crate::db::collab::FamilyRoomStartError>>,
+        deadline_expired: bool,
+    },
+    NativeWrite {
+        fence: FamilyRoomFence,
+        error: std::sync::Arc<sqlx::Error>,
+    },
+}
+pub(crate) type FamilyRoomOwnerRecords = std::sync::Arc<
+    std::sync::Mutex<
+        std::collections::HashMap<crate::collab::room::RoomKey, FamilyRoomOwnerRecord>,
+    >,
+>;
+
 pub(crate) enum BackendRoomGuard {
     Postgres(RoomGuard),
     Family {
@@ -91,7 +109,8 @@ pub(crate) enum BackendRoomGuard {
         original: FamilyRoomFence,
         current: FamilyRoomFence,
         writer_owner: Uuid,
-        lease: std::time::Duration,
+        timings: FamilyRoomTimings,
+        owner_records: FamilyRoomOwnerRecords,
     },
 }
 
@@ -99,14 +118,65 @@ impl BackendRoomGuard {
     pub(crate) fn family(
         backend: Backend,
         fence: FamilyRoomFence,
-        lease: std::time::Duration,
+        timings: FamilyRoomTimings,
+        owner_records: FamilyRoomOwnerRecords,
     ) -> Self {
         Self::Family {
             backend,
             original: fence,
             current: fence,
             writer_owner: Uuid::now_v7(),
-            lease,
+            timings,
+            owner_records,
+        }
+    }
+
+    /// Preserve this exact remote writer's uncertain fate without a new DB
+    /// observer/release. The hub refuses another start for this bounded key.
+    pub(crate) fn retain_remote_write_unknown(self, error: sqlx::Error) {
+        if let Self::Family {
+            current,
+            owner_records,
+            ..
+        } = self
+        {
+            let key = crate::collab::room::RoomKey(
+                current.workspace_id,
+                current.document_id,
+                crate::collab::wire::CollabKind::Document,
+            );
+            let previous = owner_records
+                .lock()
+                .expect("family room owner mutex")
+                .insert(
+                    key,
+                    FamilyRoomOwnerRecord::NativeWrite {
+                        fence: current,
+                        error: std::sync::Arc::new(error),
+                    },
+                );
+            assert!(previous.is_none(), "one unresolved family owner per room");
+        }
+    }
+
+    pub(crate) fn delivery_fence(&self) -> Option<FamilyRoomDeliveryFence> {
+        match self {
+            Self::Postgres(_) => None,
+            Self::Family {
+                original,
+                writer_owner,
+                ..
+            } => Some(FamilyRoomDeliveryFence {
+                original: *original,
+                writer_owner: *writer_owner,
+            }),
+        }
+    }
+
+    pub(crate) fn renew_interval(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Postgres(_) => None,
+            Self::Family { timings, .. } => Some(timings.renew()),
         }
     }
 
@@ -199,12 +269,13 @@ impl BackendRoomGuard {
             original,
             current,
             writer_owner,
-            lease,
+            timings,
+            ..
         } = self
         else {
             return Ok(true);
         };
-        if renew_family_document_room(backend, *current, *lease).await? {
+        if renew_family_document_room(backend, *current, timings.lease()).await? {
             return Ok(true);
         }
         let mut activated = *original;
@@ -212,11 +283,27 @@ impl BackendRoomGuard {
         if activated == *current {
             return Ok(false);
         }
-        if renew_family_document_room(backend, activated, *lease).await? {
+        if renew_family_document_room(backend, activated, timings.lease()).await? {
             *current = activated;
             return Ok(true);
         }
         Ok(false)
+    }
+
+    /// Cancellation hands any unfinished remote transaction to its owned
+    /// cleanup/quarantine lifecycle. A deadline expiry is uncertainty, never
+    /// a successful unlock or a reusable stream receipt.
+    pub(crate) async fn release_bounded(
+        self,
+        deadline: std::time::Duration,
+    ) -> Result<(), sqlx::Error> {
+        tokio::time::timeout(deadline, self.release())
+            .await
+            .map_err(|_| {
+                sqlx::Error::Protocol(
+                    "room guard release deadline expired; cleanup unconfirmed".into(),
+                )
+            })?
     }
 
     pub(crate) async fn release(self) -> Result<(), sqlx::Error> {

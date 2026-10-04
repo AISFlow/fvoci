@@ -19,6 +19,9 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+#[path = "support/collab_projection.rs"]
+mod selected_room_support;
+
 const PEPPER: &str =
     r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
 
@@ -2974,6 +2977,213 @@ async fn selected_fixture_view_grant(
     }
 }
 
+// Trusted synthetic preparation, then the real selected app transaction checks
+// the same ON body scope/credential/project rules on PG and SQLite.
+async fn selected_body_scope_authorization_controls(
+    backend: &fvoci_server::db::backend::Backend,
+    pg_admin_url: &str,
+    target: (Uuid, Uuid),
+    actor: Uuid,
+    credential: Uuid,
+) {
+    use fvoci_server::db::backend::Backend;
+    use fvoci_server::db::document_ops::{authorize_document_backend, DocumentScope};
+    use fvoci_server::db::documents::DocumentDbError;
+    use fvoci_server::projects::ProjectPermission;
+    let (workspace, wiki) = target;
+    let project = Uuid::now_v7();
+    let document = Uuid::now_v7();
+    let lead = Uuid::now_v7();
+    let lead_email = format!("body-lead-{lead}@example.com");
+    let pg = match backend {
+        Backend::Postgres(_) => Some(
+            PgPoolOptions::new()
+                .max_connections(1)
+                .connect(pg_admin_url)
+                .await
+                .unwrap(),
+        ),
+        _ => None,
+    };
+    match backend {
+        Backend::Postgres(_) => {
+            let mut tx = pg.as_ref().unwrap().begin().await.unwrap();
+            sqlx::query("INSERT INTO fvoci.projects(id,workspace_id,key,name,visibility,created_by) VALUES($1,$2,'BODY','Body scope','workspace',$3)")
+                .bind(project).bind(workspace).bind(actor).execute(&mut *tx).await.unwrap();
+            assert_eq!(sqlx::query("INSERT INTO fvoci.users(id,email,password_hash,given_name) SELECT $1,$2,password_hash,'Body lead' FROM fvoci.users WHERE id=$3")
+                .bind(lead).bind(&lead_email).bind(actor).execute(&mut *tx).await.unwrap().rows_affected(), 1);
+            sqlx::query(
+                "INSERT INTO fvoci.memberships(workspace_id,user_id,role) VALUES($1,$2,'member')",
+            )
+            .bind(workspace)
+            .bind(lead)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO fvoci.project_members(id,workspace_id,project_id,user_id,role) VALUES($1,$2,$3,$4,'lead')")
+                .bind(Uuid::now_v7()).bind(workspace).bind(project).bind(lead).execute(&mut *tx).await.unwrap();
+            sqlx::query("INSERT INTO fvoci.documents(id,workspace_id,project_id,title,path,sort_key,number,status,schema_version,content_json,created_by) VALUES($1,$2,$3,'Body scope',$4,'a0',1,'draft',2,$5,$6)")
+                .bind(document).bind(workspace).bind(project).bind(document.simple().to_string()).bind(fvoci_server::db::documents::empty_document_json()).bind(actor).execute(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+        Backend::Sqlite(pool) => {
+            let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+            sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'BODY','Body scope','workspace',?3)")
+                .bind(project.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(actor.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
+            assert_eq!(sqlx::query("INSERT INTO users(id,email,password_hash,given_name) SELECT ?1,?2,password_hash,'Body lead' FROM users WHERE id=?3")
+                .bind(lead.as_bytes().as_slice()).bind(&lead_email).bind(actor.as_bytes().as_slice()).execute(&mut *tx).await.unwrap().rows_affected(), 1);
+            sqlx::query(
+                "INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'member')",
+            )
+            .bind(workspace.as_bytes().as_slice())
+            .bind(lead.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')")
+                .bind(Uuid::now_v7().as_bytes().to_vec()).bind(workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(lead.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
+            sqlx::query("INSERT INTO documents(id,workspace_id,project_id,title,path,sort_key,number,status,schema_version,content_json,created_by) VALUES(?1,?2,?3,'Body scope',?4,'a0',1,'draft',2,?5,?6)")
+                .bind(document.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(document.simple().to_string()).bind(fvoci_server::db::documents::empty_document_json().to_string()).bind(actor.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+        Backend::LibsqlRemote(_) => {
+            unreachable!("actual remote primary proof remains separately required")
+        }
+    }
+    let read = |tenant, session, scope, target, min| {
+        authorize_document_backend(backend, tenant, actor, session, scope, target, min)
+    };
+    let meta = read(
+        workspace,
+        credential,
+        DocumentScope::Wiki,
+        wiki,
+        ProjectPermission::Edit,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(meta.id, wiki);
+    assert_eq!(meta.display_id, None);
+    assert!(matches!(
+        read(
+            workspace,
+            Uuid::now_v7(),
+            DocumentScope::Wiki,
+            wiki,
+            ProjectPermission::Edit
+        )
+        .await
+        .unwrap(),
+        Err(DocumentDbError::Forbidden)
+    ));
+    for (tenant, scope, target) in [
+        (Uuid::now_v7(), DocumentScope::Wiki, wiki),
+        (workspace, DocumentScope::Project(project), wiki),
+        (workspace, DocumentScope::Wiki, document),
+        (workspace, DocumentScope::Project(Uuid::now_v7()), document),
+    ] {
+        assert!(matches!(
+            read(tenant, credential, scope, target, ProjectPermission::View)
+                .await
+                .unwrap(),
+            Err(DocumentDbError::NotFound)
+        ));
+    }
+    for (phase, view, edit) in [
+        ("active", true, true),
+        ("archived", true, false),
+        ("private", false, false),
+        ("grant", true, true),
+        ("deleted", false, false),
+    ] {
+        match backend {
+            Backend::Postgres(_) => {
+                let mut tx = pg.as_ref().unwrap().begin().await.unwrap();
+                match phase {
+                    "archived" => {
+                        sqlx::query("UPDATE fvoci.projects SET status='archived' WHERE workspace_id=$1 AND id=$2").bind(workspace).bind(project).execute(&mut *tx).await.unwrap();
+                    }
+                    "private" => {
+                        sqlx::query("UPDATE fvoci.projects SET status='active',visibility='private' WHERE workspace_id=$1 AND id=$2").bind(workspace).bind(project).execute(&mut *tx).await.unwrap();
+                    }
+                    "grant" => {
+                        sqlx::query("INSERT INTO fvoci.project_members(id,workspace_id,project_id,user_id,role) VALUES($1,$2,$3,$4,'lead')").bind(Uuid::now_v7()).bind(workspace).bind(project).bind(actor).execute(&mut *tx).await.unwrap();
+                    }
+                    "deleted" => {
+                        sqlx::query("UPDATE fvoci.projects SET deleted_at=now() WHERE workspace_id=$1 AND id=$2").bind(workspace).bind(project).execute(&mut *tx).await.unwrap();
+                    }
+                    _ => {}
+                }
+                tx.commit().await.unwrap();
+            }
+            Backend::Sqlite(pool) => {
+                let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+                match phase {
+                    "archived" => {
+                        sqlx::query(
+                            "UPDATE projects SET status='archived' WHERE workspace_id=?1 AND id=?2",
+                        )
+                        .bind(workspace.as_bytes().as_slice())
+                        .bind(project.as_bytes().as_slice())
+                        .execute(&mut *tx)
+                        .await
+                        .unwrap();
+                    }
+                    "private" => {
+                        sqlx::query("UPDATE projects SET status='active',visibility='private' WHERE workspace_id=?1 AND id=?2").bind(workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
+                    }
+                    "grant" => {
+                        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')").bind(Uuid::now_v7().as_bytes().to_vec()).bind(workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(actor.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
+                    }
+                    "deleted" => {
+                        sqlx::query(
+                            "UPDATE projects SET deleted_at=1 WHERE workspace_id=?1 AND id=?2",
+                        )
+                        .bind(workspace.as_bytes().as_slice())
+                        .bind(project.as_bytes().as_slice())
+                        .execute(&mut *tx)
+                        .await
+                        .unwrap();
+                    }
+                    _ => {}
+                }
+                tx.commit().await.unwrap();
+            }
+            Backend::LibsqlRemote(_) => unreachable!(),
+        }
+        for (min, allowed) in [
+            (ProjectPermission::View, view),
+            (ProjectPermission::Edit, edit),
+        ] {
+            let result = read(
+                workspace,
+                credential,
+                DocumentScope::Project(project),
+                document,
+                min,
+            )
+            .await
+            .unwrap();
+            if allowed {
+                let meta = result.unwrap();
+                assert_eq!(meta.id, document);
+                assert_eq!(meta.project_id, Some(project));
+                assert_eq!(meta.display_id.as_deref(), Some("BODY-1"));
+            } else {
+                assert!(
+                    matches!(result, Err(DocumentDbError::NotFound)),
+                    "{phase} {min:?}"
+                );
+            }
+        }
+    }
+    if let Some(pg) = pg {
+        pg.close().await;
+    }
+    eprintln!("selected_body_scope_authorization backend={} current_credential=true tenant_scope=true wiki_project_affiliation=true archived_edit_denied=true private_grant_current=true live_project_required=true",backend.kind());
+}
+
 async fn selected_family_fence_snapshot(
     backend: &fvoci_server::db::backend::Backend,
     workspace: Uuid,
@@ -3071,22 +3281,1543 @@ async fn selected_workspace_race_controls(
 
 #[tokio::test]
 async fn selected_backend_setup_cookie_wiki_command_readback() {
-    selected_backend_wiki_fixture(false, false, false).await;
+    selected_backend_wiki_fixture(false, false, false, false).await;
 }
 
 #[tokio::test]
 async fn selected_backend_native_append_fresh_child_readback() {
-    selected_backend_wiki_fixture(true, false, false).await;
+    selected_backend_wiki_fixture(true, false, false, false).await;
 }
 
 #[tokio::test]
 async fn selected_backend_workspace_current_membership_race() {
-    selected_backend_wiki_fixture(false, true, false).await;
+    selected_backend_wiki_fixture(false, true, false, false).await;
 }
 
 #[tokio::test]
 async fn selected_backend_native_compaction_receipt_readback() {
-    selected_backend_wiki_fixture(true, false, true).await;
+    selected_backend_wiki_fixture(true, false, true, false).await;
+}
+
+/// Real socket/actor/native helper receipt. The normal process + actual Vue
+/// browser tracer is still a separate required acceptance, not this test.
+#[tokio::test]
+async fn selected_backend_room_transport_persist_revision_readback() {
+    selected_backend_wiki_fixture(false, false, false, true).await;
+}
+
+/// Actual SQLite writer/fence controls for cached native consumers and cleanup.
+/// PostgreSQL keeps its session/advisory-lock path and unchanged regression suite.
+#[tokio::test]
+async fn selected_family_cached_native_fence_and_blocked_release_controls() {
+    use fvoci_server::collab::room::{
+        arm_native_consumer_barrier, RoomKey, MANUAL_REVISION_BEFORE_WRITE,
+        NATIVE_CAPTURE_FINAL_PROOF, NATIVE_PROJECT_FINAL_PROOF,
+    };
+    use fvoci_server::db::backend::Backend;
+    use selected_room_support as room;
+    let directory =
+        std::env::temp_dir().join(format!("fvoci-family-consumer-fence-{}", Uuid::now_v7()));
+    std::fs::create_dir(&directory).unwrap();
+    let database = directory.join("app.db");
+    migrate::run_sqlite_migrations(&database).await.unwrap();
+    let admission = migrate::SqliteAdmission::server(&database).unwrap();
+    let sqlite = pool::connect_sqlite_app(&database, 4).await.unwrap();
+    let backend = Backend::Sqlite(sqlite.clone());
+    let mut config = room::test_collab_config(4, 30_000);
+    config.rpc_timeout_ms = 500;
+    let hub = Arc::new(
+        fvoci_server::collab::CollabHub::new_backend(
+            config,
+            backend.clone(),
+            Some(fvoci_server::collab::config::FamilyRoomTimings::new(6_000, 1_000).unwrap()),
+        )
+        .unwrap(),
+    );
+    let mut state = app_state_backend(backend.clone()).await;
+    let storage = state.storage.clone();
+    state.collab = Some(hub.clone());
+    let app = document_app(state);
+    let server = room::spawn_server(app.clone(), hub.clone()).await;
+    let (status, setup, cookie, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/setup",
+        Some(
+            json!({"email":"admin@example.com","password":"supersecret1","givenName":"Admin",
+            "workspaceSlug":"acme","workspaceName":"Acme"}),
+        ),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let cookie = extract_session_cookie(cookie.as_ref().unwrap());
+    let workspace = Uuid::parse_str(setup["workspaceId"].as_str().unwrap()).unwrap();
+    let path = format!("/api/v1/workspaces/{workspace}/documents");
+    let live =
+        fvoci_server::db::identity::find_live_session_backend(&backend, &hash_token(&cookie))
+            .await
+            .unwrap()
+            .unwrap();
+    for committed in [false, true] {
+        let (status, created, _, _) = json_request(app.clone(), "POST", &path,
+            Some(json!({"commandId":Uuid::now_v7(),"parentId":null,"title":format!("Unknown startup {committed}")})), Some(&cookie), &[]).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let document = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+        let key = RoomKey(
+            workspace,
+            document,
+            fvoci_server::collab::wire::CollabKind::Document,
+        );
+        let (reached, proceed) =
+            fvoci_server::db::collab::arm_family_room_start_reply_fault(document, committed).await;
+        let pending = tokio::spawn({
+            let hub = hub.clone();
+            async move { hub.project_live(key, live.user_id, live.session_id).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), reached)
+            .await
+            .unwrap()
+            .unwrap();
+        let owned: Option<(Vec<u8>,i64)> = sqlx::query_as("SELECT owner_token,fence FROM collab_room_fences WHERE workspace_id=?1 AND document_id=?2")
+            .bind(workspace.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).fetch_optional(&sqlite).await.unwrap();
+        assert_eq!(
+            owned.is_some(),
+            committed,
+            "observe actual COMMIT versus actual rollback"
+        );
+        // Current membership can disappear while an actual committed reply is
+        // lost. Cleanup remains restricted to the retained owner token and
+        // cannot turn this startup into a live room under stale authority.
+        sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+            .bind(workspace.as_bytes().as_slice())
+            .bind(live.user_id.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        proceed.send(()).unwrap();
+        assert!(pending.await.unwrap().is_err());
+        let after: Option<(Vec<u8>,i64,bool)> = sqlx::query_as("SELECT owner_token,fence,expires_at<=unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000 FROM collab_room_fences WHERE workspace_id=?1 AND document_id=?2")
+            .bind(workspace.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).fetch_optional(&sqlite).await.unwrap();
+        match (owned, after) {
+            (Some((owner, fence)), Some((after_owner, after_fence, expired))) => {
+                assert_eq!((after_owner, after_fence), (owner, fence));
+                assert!(
+                    expired,
+                    "cleanup must expire exactly the retained committed owner"
+                );
+            }
+            (None, None) => (),
+            other => panic!("startup reconciliation changed identity {other:?}"),
+        }
+        assert!(!hub.room_occupies_slot(key).await);
+        assert_eq!(hub.available_room_slots(), 4);
+        assert_eq!(
+            hub.pending_family_start_count(),
+            0,
+            "known owner is retired only after confirmed reconciliation"
+        );
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')")
+            .bind(workspace.as_bytes().as_slice())
+            .bind(live.user_id.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+    }
+    for (index, point) in [
+        NATIVE_CAPTURE_FINAL_PROOF,
+        NATIVE_PROJECT_FINAL_PROOF,
+        MANUAL_REVISION_BEFORE_WRITE,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (status, created, _, _) = json_request(app.clone(), "POST", &path,
+            Some(json!({"commandId":Uuid::now_v7(),"parentId":null,"title":format!("Fence {index}")})), Some(&cookie), &[]).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let document = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+        let key = RoomKey(
+            workspace,
+            document,
+            fvoci_server::collab::wire::CollabKind::Document,
+        );
+        let routing = format!("{workspace}:document:{document}");
+        let mut socket = room::connect_member(server.addr, &cookie).await;
+        room::auth_and_join(&mut socket, &routing, 1800 + index as u32).await;
+        room::complete_sync_handshake(&mut socket, &routing).await;
+        let (reached, proceed) = arm_native_consumer_barrier(document, point).await;
+        let pending = tokio::spawn({
+            let hub = hub.clone();
+            let app = app.clone();
+            let path = path.clone();
+            let cookie = cookie.clone();
+            async move {
+                match point {
+                    NATIVE_CAPTURE_FINAL_PROOF => assert!(
+                        hub.capture_if_live(key, live.user_id, live.session_id)
+                            .await
+                            .unwrap()
+                            .is_err(),
+                        "expired cached capture cannot return success"
+                    ),
+                    NATIVE_PROJECT_FINAL_PROOF => assert!(
+                        hub.project_live(key, live.user_id, live.session_id)
+                            .await
+                            .is_err(),
+                        "expired cached projection cannot return success"
+                    ),
+                    _ => {
+                        let (status, body, _, _) = json_request(
+                            app,
+                            "POST",
+                            &format!("{path}/{document}/revisions"),
+                            None,
+                            Some(&cookie),
+                            &[],
+                        )
+                        .await;
+                        assert_eq!(
+                            status,
+                            StatusCode::NOT_FOUND,
+                            "manual write must reject captured old room proof: {body}"
+                        );
+                    }
+                }
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), reached)
+            .await
+            .unwrap()
+            .unwrap();
+        // Actual committed replacement, with a different opaque owner and
+        // higher global fence. The old actor is suspended across native work.
+        let replacement = Uuid::now_v7();
+        let before = selected_family_fence_snapshot(&backend, workspace, document).await;
+        sqlx::query("UPDATE collab_room_fences SET owner_token=?3,fence=fence+1,expires_at=9223372036854775807 WHERE workspace_id=?1 AND document_id=?2")
+            .bind(workspace.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).bind(replacement.as_bytes().as_slice())
+            .execute(&sqlite).await.unwrap();
+        proceed.send(()).unwrap();
+        pending.await.unwrap();
+        room::wait_for_ws_close_code(
+            &mut socket,
+            1013,
+            Duration::from_secs(5),
+            true,
+            Some("try again later"),
+        )
+        .await;
+        drop(socket);
+        let after = selected_family_fence_snapshot(&backend, workspace, document).await;
+        assert_eq!(after.0, replacement.as_bytes());
+        assert_eq!(after.1, before.1 + 1);
+        assert_eq!(
+            (after.2, after.3),
+            (before.2, before.3),
+            "old cached consumer cannot advance native head"
+        );
+        let revisions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM revisions WHERE workspace_id=?1 AND target_id=?2",
+        )
+        .bind(workspace.as_bytes().as_slice())
+        .bind(document.as_bytes().as_slice())
+        .fetch_one(&sqlite)
+        .await
+        .unwrap();
+        assert_eq!(
+            revisions, 0,
+            "stale manual/session capture cannot insert a revision"
+        );
+    }
+    let (status, created, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(json!({"commandId":Uuid::now_v7(),"parentId":null,"title":"Blocked release"})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let document = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+    let routing = format!("{workspace}:document:{document}");
+    let mut socket = room::connect_member(server.addr, &cookie).await;
+    room::auth_and_join(&mut socket, &routing, 1803).await;
+    room::complete_sync_handshake(&mut socket, &routing).await;
+    let mut blocker = sqlite.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let (fk,): (i64,) = sqlx::query_as("PRAGMA foreign_keys")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    assert_eq!(fk, 1);
+    // The real writer reservation blocks both renewal and release. Transport
+    // must close while the blocker remains held, before cleanup can finish.
+    room::wait_for_ws_close_code(
+        &mut socket,
+        1013,
+        Duration::from_secs(5),
+        true,
+        Some("try again later"),
+    )
+    .await;
+    drop(socket);
+    let shutdown = tokio::time::timeout(Duration::from_secs(5), hub.shutdown())
+        .await
+        .unwrap();
+    assert!(
+        !shutdown.is_clean(),
+        "unconfirmed blocked cleanup cannot report a clean hub"
+    );
+    assert!(shutdown.actor_failures >= 1);
+    blocker.rollback().await.unwrap();
+    // The canceled local transaction is never accepted as a cleanup receipt;
+    // actual subsequent reservation/FK checks establish usable local pool.
+    let mut after = sqlite.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let (fk,): (i64,) = sqlx::query_as("PRAGMA foreign_keys")
+        .fetch_one(&mut *after)
+        .await
+        .unwrap();
+    assert_eq!(fk, 1);
+    after.rollback().await.unwrap();
+    server.shutdown().await.unwrap();
+    let root = match &storage {
+        fvoci_server::attachments::ObjectStorage::Local(local) => local.root().to_path_buf(),
+        _ => unreachable!(),
+    };
+    drop(app);
+    drop(storage);
+    std::fs::remove_dir_all(root).unwrap();
+    drop(admission);
+    std::fs::remove_dir_all(directory).unwrap();
+    eprintln!("selected_family_cached_consumers capture_stale=true project_stale=true manual_same_tx_proof=true socket_cancel_before_blocked_release=true cleanup_unknown_not_clean=true");
+}
+
+struct SelectedFamilyRoomFixture {
+    directory: std::path::PathBuf,
+    admission: migrate::SqliteAdmission,
+    sqlite: sqlx::SqlitePool,
+    backend: fvoci_server::db::backend::Backend,
+    hub: Arc<fvoci_server::collab::CollabHub>,
+    app: axum::Router,
+    server: selected_room_support::TestServer,
+    storage: fvoci_server::attachments::ObjectStorage,
+    live: fvoci_server::db::identity::LiveSession,
+    cookie: String,
+    workspace: Uuid,
+}
+impl SelectedFamilyRoomFixture {
+    async fn new(config: fvoci_server::collab::config::CollabConfig) -> Self {
+        let directory =
+            std::env::temp_dir().join(format!("fvoci-family-fence-oracle-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).unwrap();
+        let database = directory.join("app.db");
+        migrate::run_sqlite_migrations(&database).await.unwrap();
+        let admission = migrate::SqliteAdmission::server(&database).unwrap();
+        let sqlite = pool::connect_sqlite_app(&database, 4).await.unwrap();
+        let backend = fvoci_server::db::backend::Backend::Sqlite(sqlite.clone());
+        let hub = Arc::new(
+            fvoci_server::collab::CollabHub::new_backend(
+                config,
+                backend.clone(),
+                Some(fvoci_server::collab::config::FamilyRoomTimings::new(30_000, 5_000).unwrap()),
+            )
+            .unwrap(),
+        );
+        let mut state = app_state_backend(backend.clone()).await;
+        let storage = state.storage.clone();
+        state.collab = Some(hub.clone());
+        let app = document_app(state);
+        let server = selected_room_support::spawn_server(app.clone(), hub.clone()).await;
+        let (status,setup,cookie,_) = json_request(app.clone(),"POST","/api/v1/setup",Some(json!({
+            "email":"admin@example.com","password":"supersecret1","givenName":"Admin","workspaceSlug":"acme","workspaceName":"Acme"
+        })),None,&[]).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let cookie = extract_session_cookie(cookie.as_ref().unwrap());
+        let workspace = Uuid::parse_str(setup["workspaceId"].as_str().unwrap()).unwrap();
+        let live =
+            fvoci_server::db::identity::find_live_session_backend(&backend, &hash_token(&cookie))
+                .await
+                .unwrap()
+                .unwrap();
+        Self {
+            directory,
+            admission,
+            sqlite,
+            backend,
+            hub,
+            app,
+            server,
+            storage,
+            live,
+            cookie,
+            workspace,
+        }
+    }
+    fn path(&self) -> String {
+        format!("/api/v1/workspaces/{}/documents", self.workspace)
+    }
+    async fn create(&self, title: &str) -> Uuid {
+        let (status, created, _, _) = json_request(
+            self.app.clone(),
+            "POST",
+            &self.path(),
+            Some(json!({
+                "commandId":Uuid::now_v7(),"parentId":null,"title":title
+            })),
+            Some(&self.cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        Uuid::parse_str(created["id"].as_str().unwrap()).unwrap()
+    }
+    async fn finish(self, clean: bool) {
+        let status = self.hub.shutdown().await;
+        assert_eq!(
+            status.is_clean(),
+            clean,
+            "actual fixture shutdown {status:?}"
+        );
+        let port = self.server.addr;
+        self.server.shutdown().await.unwrap();
+        self.sqlite.close().await;
+        let root = match &self.storage {
+            fvoci_server::attachments::ObjectStorage::Local(local) => local.root().to_path_buf(),
+            _ => unreachable!(),
+        };
+        drop(self.app);
+        drop(self.storage);
+        drop(self.backend);
+        drop(self.sqlite);
+        drop(self.admission);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(self.directory).unwrap();
+        assert!(
+            tokio::net::TcpStream::connect(port).await.is_err(),
+            "owned fixture port closed"
+        );
+        eprintln!("selected_family_fence_fixture_cleanup port={port} clean={clean} actual_pool_closed=true");
+    }
+}
+
+#[tokio::test]
+async fn selected_family_startup_uncertainty_bounds_admission() {
+    use fvoci_server::collab::room::RoomKey;
+    let mut config = selected_room_support::test_collab_config(2, 30_000);
+    config.rpc_timeout_ms = 500;
+    config.memory_budget_bytes = collab_engine::limits::room_memory_reservation_bytes(2);
+    let fixture = SelectedFamilyRoomFixture::new(config.clone()).await;
+    let mut retained = Vec::new();
+    for committed in [true, false] {
+        let document = fixture.create(&format!("Deadline {committed}")).await;
+        let key = RoomKey(
+            fixture.workspace,
+            document,
+            fvoci_server::collab::wire::CollabKind::Document,
+        );
+        let (reached, proceed) =
+            fvoci_server::db::collab::arm_family_room_start_reply_fault(document, committed).await;
+        let pending = tokio::spawn({
+            let hub = fixture.hub.clone();
+            let actor = fixture.live.user_id;
+            let credential = fixture.live.session_id;
+            async move { hub.project_live(key, actor, credential).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), reached)
+            .await
+            .unwrap()
+            .unwrap();
+        let actual: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT owner_token FROM collab_room_fences WHERE workspace_id=?1 AND document_id=?2",
+        )
+        .bind(fixture.workspace.as_bytes().as_slice())
+        .bind(document.as_bytes().as_slice())
+        .fetch_optional(&fixture.sqlite)
+        .await
+        .unwrap();
+        assert_eq!(
+            actual.is_some(),
+            committed,
+            "actual committed versus rollback reply-loss boundary"
+        );
+        assert!(tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err());
+        assert!(
+            proceed.send(()).is_err(),
+            "deadline canceled reply receiver; never invent a received outcome"
+        );
+        let owner = fixture
+            .hub
+            .unresolved_family_owner(key)
+            .expect("exact unresolved owner retained");
+        if let Some(actual) = actual {
+            assert_eq!(Uuid::from_slice(&actual).unwrap(), owner);
+        }
+        retained.push((key, owner));
+        for _ in 0..12 {
+            assert!(fixture
+                .hub
+                .project_live(key, fixture.live.user_id, fixture.live.session_id)
+                .await
+                .is_err());
+            assert_eq!(fixture.hub.unresolved_family_owner(key), Some(owner));
+        }
+        assert_eq!(fixture.hub.pending_family_start_count(), retained.len());
+        assert_eq!(
+            fvoci_server::collab::hub::room_start_count(document).await,
+            1,
+            "repeated same key cannot allocate another owner"
+        );
+        assert!(!fixture.hub.room_occupies_slot(key).await);
+        assert_eq!(fixture.hub.available_room_slots(), 2);
+        assert!(
+            fixture.hub.can_reserve_room_memory(),
+            "failed startup released actual memory reservation"
+        );
+    }
+    let document = fixture.create("Global unresolved capacity").await;
+    let key = RoomKey(
+        fixture.workspace,
+        document,
+        fvoci_server::collab::wire::CollabKind::Document,
+    );
+    for _ in 0..12 {
+        assert!(fixture
+            .hub
+            .project_live(key, fixture.live.user_id, fixture.live.session_id)
+            .await
+            .is_err());
+    }
+    assert_eq!(fixture.hub.pending_family_start_count(), 2);
+    assert_eq!(
+        fvoci_server::collab::hub::room_start_count(document).await,
+        0,
+        "unresolved room union consumes global capacity"
+    );
+    for (key, owner) in retained {
+        assert_eq!(fixture.hub.unresolved_family_owner(key), Some(owner));
+    }
+    fixture.finish(false).await;
+    // A real closed SQLx pool causes failure before BEGIN/business SQL; an
+    // observer connection proves no lease row, never a fabricated commit loss.
+    let fixture = SelectedFamilyRoomFixture::new(config).await;
+    let document = fixture.create("Before BEGIN failure").await;
+    let key = RoomKey(
+        fixture.workspace,
+        document,
+        fvoci_server::collab::wire::CollabKind::Document,
+    );
+    let (reached, proceed) = fvoci_server::collab::hub::arm_hub_join_barrier(
+        document,
+        fvoci_server::collab::hub::HUB_FAMILY_START_BEFORE_BEGIN,
+    )
+    .await;
+    let pending = tokio::spawn({
+        let hub = fixture.hub.clone();
+        let actor = fixture.live.user_id;
+        let credential = fixture.live.session_id;
+        async move { hub.project_live(key, actor, credential).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), reached)
+        .await
+        .unwrap()
+        .unwrap();
+    fixture.sqlite.close().await;
+    proceed.send(()).unwrap();
+    assert!(pending.await.unwrap().is_err());
+    let owner = fixture.hub.unresolved_family_owner(key).unwrap();
+    for _ in 0..12 {
+        assert!(fixture
+            .hub
+            .project_live(key, fixture.live.user_id, fixture.live.session_id)
+            .await
+            .is_err());
+        assert_eq!(fixture.hub.unresolved_family_owner(key), Some(owner));
+    }
+    assert_eq!(fixture.hub.pending_family_start_count(), 1);
+    assert_eq!(
+        fvoci_server::collab::hub::room_start_count(document).await,
+        1
+    );
+    assert_eq!(fixture.hub.available_room_slots(), 2);
+    assert!(fixture.hub.can_reserve_room_memory());
+    let observer = pool::connect_sqlite_app(&fixture.directory.join("app.db"), 1)
+        .await
+        .unwrap();
+    let absent: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM collab_room_fences WHERE workspace_id=?1 AND document_id=?2",
+    )
+    .bind(fixture.workspace.as_bytes().as_slice())
+    .bind(document.as_bytes().as_slice())
+    .fetch_one(&observer)
+    .await
+    .unwrap();
+    assert_eq!(absent, 0);
+    observer.close().await;
+    fixture.finish(false).await;
+}
+
+#[tokio::test]
+async fn selected_family_forward_noop_rechecks_native_proof() {
+    use fvoci_server::collab::room::{arm_native_consumer_barrier, NATIVE_FORWARD_FINAL_PROOF};
+    let fixture =
+        SelectedFamilyRoomFixture::new(selected_room_support::test_collab_config(3, 30_000)).await;
+    for (index, control) in ["owner", "generation", "tail"].into_iter().enumerate() {
+        let document = fixture.create(&format!("Empty forward {control}")).await;
+        let routing = format!("{}:document:{document}", fixture.workspace);
+        let mut socket =
+            selected_room_support::connect_member(fixture.server.addr, &fixture.cookie).await;
+        selected_room_support::auth_and_join(&mut socket, &routing, 2000 + index as u32).await;
+        selected_room_support::complete_sync_handshake(&mut socket, &routing).await;
+        let before =
+            selected_family_fence_snapshot(&fixture.backend, fixture.workspace, document).await;
+        let body_path = format!("{}/{document}/body", fixture.path());
+        let body = json!({"contentJson":{"type":"doc","content":[]}});
+        let (status, current, _, _) = json_request(
+            fixture.app.clone(),
+            "PUT",
+            &body_path,
+            Some(body.clone()),
+            Some(&fixture.cookie),
+            &[("origin", "http://localhost")],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "actual current ON HTTP no-op: {current}"
+        );
+        assert_eq!(current["id"], document.to_string());
+        let (reached, proceed) =
+            arm_native_consumer_barrier(document, NATIVE_FORWARD_FINAL_PROOF).await;
+        let pending = tokio::spawn({
+            let app = fixture.app.clone();
+            let cookie = fixture.cookie.clone();
+            async move {
+                json_request(
+                    app,
+                    "PUT",
+                    &body_path,
+                    Some(body),
+                    Some(&cookie),
+                    &[("origin", "http://localhost")],
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), reached)
+            .await
+            .unwrap()
+            .unwrap();
+        match control {
+            "owner" => {
+                sqlx::query("UPDATE collab_room_fences SET owner_token=?3,fence=fence+1,expires_at=9223372036854775807 WHERE workspace_id=?1 AND document_id=?2")
+                .bind(fixture.workspace.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).bind(Uuid::now_v7().as_bytes().as_slice()).execute(&fixture.sqlite).await.unwrap();
+            }
+            "generation" => {
+                sqlx::query("UPDATE document_states SET writer_generation=writer_generation+1 WHERE workspace_id=?1 AND document_id=?2")
+                .bind(fixture.workspace.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).execute(&fixture.sqlite).await.unwrap();
+            }
+            "tail" => {
+                use fvoci_server::db::collab::{
+                    acquire_family_document_room, AppendCollabInput, AppendCollabResult,
+                };
+                let claim = acquire_family_document_room(
+                    &fixture.backend,
+                    fixture.workspace,
+                    fixture.live.user_id,
+                    fixture.live.session_id,
+                    document,
+                    Uuid::from_slice(&before.0).unwrap(),
+                    Duration::from_secs(30),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(claim.native.writer_generation, before.2);
+                assert_eq!(claim.native.load.tail_seq, before.3);
+                assert_eq!(
+                    selected_family_fence_snapshot(&fixture.backend, fixture.workspace, document)
+                        .await,
+                    before,
+                    "actual same-owner reader acquisition preserves fence and native head"
+                );
+                let committed = fvoci_server::db::collab::append_family_document_room_update(
+                    &fixture.backend,
+                    claim.fence,
+                    AppendCollabInput {
+                        workspace_id: fixture.workspace,
+                        actor_user_id: fixture.live.user_id,
+                        session_id: fixture.live.session_id,
+                        document_id: document,
+                        writer_generation: before.2,
+                        expected_tail_seq: before.3,
+                        op_id: Uuid::now_v7(),
+                        payload: &[0, 0],
+                        client_ip: None,
+                    },
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    committed,
+                    AppendCollabResult::Committed { seq: before.3 + 1 }
+                );
+            }
+            _ => unreachable!(),
+        }
+        proceed.send(()).unwrap();
+        let (status, response, _, _) = pending.await.unwrap();
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "actual HTTP native no-op cannot succeed with old {control}: {response}"
+        );
+        selected_room_support::wait_for_ws_close_code(
+            &mut socket,
+            1013,
+            Duration::from_secs(5),
+            true,
+            Some("try again later"),
+        )
+        .await;
+        drop(socket);
+        let after =
+            selected_family_fence_snapshot(&fixture.backend, fixture.workspace, document).await;
+        assert_eq!(
+            after.3,
+            before.3 + i64::from(control == "tail"),
+            "no-op refusal adds no native operation"
+        );
+        let count:i64=sqlx::query_scalar("SELECT count(*) FROM document_collab_op_receipts WHERE workspace_id=?1 AND document_id=?2")
+            .bind(fixture.workspace.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).fetch_one(&fixture.sqlite).await.unwrap();
+        assert_eq!(count, i64::from(control == "tail"));
+        assert_eq!(
+            selected_compaction_effect_counts(&fixture.backend, fixture.workspace, document).await,
+            (0, 0)
+        );
+    }
+    fixture.finish(true).await;
+}
+
+/// Test oracle uses the official isolated native engine and explicitly reaps it.
+async fn selected_native_history(
+    engine: &std::path::Path,
+    snapshot: Vec<u8>,
+    tail: Vec<Vec<u8>>,
+) -> (Value, Vec<u8>) {
+    let bin = engine.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        use collab_engine::outcome::EngineStatus;
+        use collab_engine::process::{ChildSlotKind, EngineSession, SpawnRequest};
+        use collab_engine::protocol::Request;
+        let mut child = EngineSession::spawn(SpawnRequest {
+            engine_bin: bin.clone(),
+            limits: collab_engine::Limits::default(),
+            slot_kind: ChildSlotKind::Primary,
+            slot_wait: None,
+            test_hang_ms: None,
+            test_exit_after_read: None,
+            test_close_stdout_hang_ms: None,
+            test_exit_after_write: None,
+        })
+        .unwrap();
+        let pid = child.pid().unwrap();
+        assert_eq!(
+            std::fs::read_link(format!("/proc/{pid}/exe")).unwrap(),
+            std::fs::canonicalize(&bin).unwrap()
+        );
+        assert!(child
+            .call(&Request::Load {
+                snapshot_b64: Some(snapshot),
+                tail_b64: tail,
+                encoding: 1
+            })
+            .outcome
+            .is_applied_ok());
+        let content = match child.call(&Request::Project { encoding: 1 }).outcome {
+            EngineStatus::Ok {
+                content_json: Some(value),
+                ..
+            } => value,
+            other => panic!("independent native projection {other:?}"),
+        };
+        let history = match child.call(&Request::RevisionSnapshot).outcome {
+            EngineStatus::Ok {
+                update_b64: Some(bytes),
+                ..
+            } => collab_engine::b64::decode(&bytes).unwrap(),
+            other => panic!("independent native history {other:?}"),
+        };
+        child.kill_and_reap();
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+        eprintln!("selected_room_history_oracle_child pid={pid} reaped=true");
+        (content, history)
+    })
+    .await
+    .unwrap()
+}
+
+async fn selected_room_queued_delivery_controls(
+    app: &axum::Router,
+    addr: std::net::SocketAddr,
+    backend: &fvoci_server::db::backend::Backend,
+    workspace: Uuid,
+    document: Uuid,
+    pg_admin_url: &str,
+) {
+    use futures_util::{SinkExt, StreamExt};
+    use fvoci_server::collab::wire::{DocumentMessage, SyncMessage, SyncStep, WireFrame};
+    use fvoci_server::db::backend::Backend;
+    use selected_room_support as room;
+    use tokio_tungstenite::tungstenite::Message;
+    for (index, control) in ["member", "session", "fence"].into_iter().enumerate() {
+        if control == "fence" && matches!(backend, Backend::Postgres(_)) {
+            // PG is fenced by its dedicated advisory guard, not a family row.
+            continue;
+        }
+        let (status, _, cookie, _) = json_request(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/login",
+            Some(json!({"email":"admin@example.com","password":"supersecret1"})),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let cookie = extract_session_cookie(cookie.as_ref().unwrap());
+        let live =
+            fvoci_server::db::identity::find_live_session_backend(backend, &hash_token(&cookie))
+                .await
+                .unwrap()
+                .unwrap();
+        let routing = format!("{workspace}:document:{document}");
+        let mut client = room::connect_member(addr, &cookie).await;
+        room::auth_and_join(&mut client, &routing, 1900 + index as u32).await;
+        room::complete_sync_handshake(&mut client, &routing).await;
+        let (reached, proceed) =
+            fvoci_server::db::collab_delivery::arm_delivery_read_barrier(live.session_id);
+        client
+            .send(Message::Binary(
+                room::sync_step1_frame(&routing, &[0]).into(),
+            ))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), reached)
+            .await
+            .unwrap()
+            .unwrap();
+        match backend {
+            Backend::Postgres(_) => {
+                // Fixture operator writes are separate from the restricted app
+                // role performing queued-frame delivery authorization.
+                let operator = PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(pg_admin_url)
+                    .await
+                    .unwrap();
+                match control {
+                    "member" => {
+                        sqlx::query(
+                            "DELETE FROM fvoci.memberships WHERE workspace_id=$1 AND user_id=$2",
+                        )
+                        .bind(workspace)
+                        .bind(live.user_id)
+                        .execute(&operator)
+                        .await
+                        .unwrap();
+                    }
+                    "session" => {
+                        sqlx::query(
+                            "UPDATE fvoci.sessions SET revoked_at=clock_timestamp() WHERE id=$1",
+                        )
+                        .bind(live.session_id)
+                        .execute(&operator)
+                        .await
+                        .unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                operator.close().await;
+            }
+            Backend::Sqlite(pool) => match control {
+                "member" => {
+                    sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+                        .bind(workspace.as_bytes().as_slice())
+                        .bind(live.user_id.as_bytes().as_slice())
+                        .execute(pool)
+                        .await
+                        .unwrap();
+                }
+                "session" => {
+                    sqlx::query("UPDATE sessions SET revoked_at=unixepoch()*1000000 WHERE id=?1")
+                        .bind(live.session_id.as_bytes().as_slice())
+                        .execute(pool)
+                        .await
+                        .unwrap();
+                }
+                "fence" => {
+                    sqlx::query("UPDATE collab_room_fences SET owner_token=?3,fence=fence+1,expires_at=9223372036854775807 WHERE workspace_id=?1 AND document_id=?2").bind(workspace.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).bind(Uuid::now_v7().as_bytes().as_slice()).execute(pool).await.unwrap();
+                }
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        }
+        proceed.send(()).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let message = tokio::time::timeout(
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+                client.next(),
+            )
+            .await
+            .unwrap()
+            .expect("revocation close")
+            .unwrap();
+            match message {
+                Message::Close(Some(frame)) => {
+                    assert_eq!(u16::from(frame.code), 1008);
+                    assert_eq!(frame.reason, "permission revoked");
+                    break;
+                }
+                Message::Binary(bytes) => {
+                    assert!(
+                        !matches!(
+                            fvoci_server::collab::wire::decode(&bytes),
+                            Ok(WireFrame::Document {
+                                message: DocumentMessage::Sync(SyncMessage {
+                                    step: SyncStep::Step2 | SyncStep::Update,
+                                    ..
+                                }),
+                                ..
+                            })
+                        ),
+                        "queued native data must not escape after committed {control} revoke"
+                    );
+                }
+                Message::Close(None) => panic!("revocation close must include code"),
+                _ => (),
+            }
+        }
+        drop(client);
+        if control == "member" {
+            match backend {
+                Backend::Postgres(_) => {
+                    let operator = PgPoolOptions::new()
+                        .max_connections(1)
+                        .connect(pg_admin_url)
+                        .await
+                        .unwrap();
+                    sqlx::query("INSERT INTO fvoci.memberships(workspace_id,user_id,role) VALUES($1,$2,'owner')").bind(workspace).bind(live.user_id).execute(&operator).await.unwrap();
+                    operator.close().await;
+                }
+                Backend::Sqlite(pool) => {
+                    sqlx::query(
+                        "INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')",
+                    )
+                    .bind(workspace.as_bytes().as_slice())
+                    .bind(live.user_id.as_bytes().as_slice())
+                    .execute(pool)
+                    .await
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+        }
+        eprintln!("selected_room_queued_delivery backend={} control={control} denied_before_native_data=true", backend.kind());
+    }
+}
+
+async fn selected_socket_native_history(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    routing: &str,
+    engine: &std::path::Path,
+) -> (Value, Vec<u8>) {
+    use futures_util::SinkExt;
+    use fvoci_server::collab::wire::{DocumentMessage, SyncMessage, SyncStep, WireFrame};
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Binary(
+            selected_room_support::sync_step1_frame(routing, &[0]).into(),
+        ))
+        .await
+        .unwrap();
+    for _ in 0..16 {
+        if let WireFrame::Document {
+            message:
+                DocumentMessage::Sync(SyncMessage {
+                    step: SyncStep::Step2,
+                    y_protocol,
+                }),
+            ..
+        } = selected_room_support::recv_document_frame(socket, 1)
+            .await
+            .expect("fresh Hub client frame")
+        {
+            let (step, native) =
+                fvoci_server::collab::y_sync::parse_sync_payload(&y_protocol, 4 * 1024 * 1024)
+                    .unwrap();
+            assert_eq!(step, SyncStep::Step2);
+            return selected_native_history(engine, native, vec![]).await;
+        }
+    }
+    panic!("new Hub/client must receive canonical native Step2");
+}
+
+async fn selected_room_durable_ack(
+    backend: &fvoci_server::db::backend::Backend,
+    target: (Uuid, Uuid),
+    credential: (Uuid, Uuid),
+    engine: &std::path::Path,
+    payloads: &[&[u8]],
+    head: (i64, i64),
+    expected_history: &[u8],
+) {
+    let (workspace, document) = target;
+    let (actor, session) = credential;
+    let (cutoff, generation) = head;
+    use fvoci_server::db::backend::Backend;
+    use fvoci_server::db::collab::{load_collab_readonly_kind_backend, CollabKind};
+    use sha2::{Digest, Sha256};
+    let native = load_collab_readonly_kind_backend(
+        backend,
+        CollabKind::Document,
+        workspace,
+        actor,
+        session,
+        document,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        native.snapshot_cutoff_seq, cutoff,
+        "ACK requires durable native compaction"
+    );
+    assert_eq!(native.tail_seq, cutoff);
+    assert!(
+        native.tail.is_empty(),
+        "ACK cannot leave uncompacted native tail"
+    );
+    assert_eq!(
+        native.writer_generation, generation,
+        "native generation follows real writer activation"
+    );
+    let (_, history) = selected_native_history(engine, native.snapshot, vec![]).await;
+    assert_eq!(
+        history, expected_history,
+        "durable canonical state retains original native identity/delete set"
+    );
+    let receipts: Vec<(Uuid, i64, i64, Vec<u8>, Uuid)> = match backend {
+        Backend::Postgres(pool) => {
+            let mut tx = pool.begin().await.unwrap();
+            fvoci_server::db::context::set_tenant(&mut tx, workspace)
+                .await
+                .unwrap();
+            let rows = sqlx::query_as("SELECT op_id,seq,payload_len,payload_sha256,actor_user_id FROM fvoci.document_collab_op_receipts WHERE workspace_id=$1 AND document_id=$2 ORDER BY seq")
+                .bind(workspace).bind(document).fetch_all(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+            rows
+        }
+        Backend::Sqlite(pool) => {
+            type FamilyReceiptRow = (Vec<u8>, i64, i64, Vec<u8>, Vec<u8>);
+            let rows: Vec<FamilyReceiptRow> = sqlx::query_as("SELECT op_id,seq,payload_len,payload_sha256,actor_user_id FROM document_collab_op_receipts WHERE workspace_id=?1 AND document_id=?2 ORDER BY seq")
+                .bind(workspace.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).fetch_all(pool).await.unwrap();
+            rows.into_iter()
+                .map(|(id, seq, len, hash, actor)| {
+                    (
+                        Uuid::from_slice(&id).unwrap(),
+                        seq,
+                        len,
+                        hash,
+                        Uuid::from_slice(&actor).unwrap(),
+                    )
+                })
+                .collect()
+        }
+        _ => unreachable!(),
+    };
+    assert_eq!(receipts.len(), payloads.len());
+    let mut ids = std::collections::HashSet::new();
+    for (index, (op, seq, length, hash, receipt_actor)) in receipts.iter().enumerate() {
+        assert!(
+            ids.insert(*op),
+            "one stable native command per logical edit"
+        );
+        assert_eq!(*seq, index as i64 + 1);
+        assert_eq!(*length, payloads[index].len() as i64);
+        assert_eq!(*hash, Sha256::digest(payloads[index]).to_vec());
+        assert_eq!(*receipt_actor, actor);
+    }
+    assert_eq!(
+        selected_compaction_effect_counts(backend, workspace, document).await,
+        (cutoff, cutoff),
+        "ACK requires committed event and audit effects in same durable compaction"
+    );
+}
+
+async fn selected_room_transport_flow(
+    app: axum::Router,
+    hub: Arc<fvoci_server::collab::CollabHub>,
+    backend: &fvoci_server::db::backend::Backend,
+    route: (&str, &str, &str),
+    cookie: &str,
+    native: (&std::path::Path, &Value, &[u8]),
+    databases: (&str, &str, &std::path::Path),
+) {
+    let (path, document, workspace) = route;
+    let (engine, content, update) = native;
+    let (pg_url, pg_admin_url, sqlite_path) = databases;
+    use futures_util::SinkExt;
+    use fvoci_server::collab::wire::{DocumentMessage, SyncMessage, SyncStep, WireFrame};
+    use selected_room_support as room;
+    use tokio_tungstenite::tungstenite::Message;
+    let workspace_id = Uuid::parse_str(workspace).unwrap();
+    let document_id = Uuid::parse_str(document).unwrap();
+    let live = fvoci_server::db::identity::find_live_session_backend(backend, &hash_token(cookie))
+        .await
+        .unwrap()
+        .unwrap();
+    let expected_before = selected_native_history(engine, update.to_vec(), vec![]).await;
+    assert_eq!(&expected_before.0, content);
+    let deletion = room::delete_only_update();
+    let expected_after =
+        selected_native_history(engine, update.to_vec(), vec![deletion.clone()]).await;
+    let after_content = room::delete_only_json_after();
+    assert_eq!(expected_after.0, after_content);
+    assert_ne!(
+        expected_before.1, expected_after.1,
+        "delete set changes history despite unchanged state vector"
+    );
+    assert_eq!(
+        room::engine_fixture("sv_before_delete.bin"),
+        room::engine_fixture("sv_after_delete.bin")
+    );
+    let server = room::spawn_server(app.clone(), hub.clone()).await;
+    let addr = server.addr;
+    let routing = format!("{workspace}:document:{document}");
+    let mut writer = room::connect_member(addr, cookie).await;
+    room::auth_and_join(&mut writer, &routing, 1701).await;
+    room::complete_sync_handshake(&mut writer, &routing).await;
+    writer
+        .send(Message::Binary(
+            room::sync_update_frame(&routing, update).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        room::wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
+        "{} actual actor must acknowledge native commit",
+        backend.kind()
+    );
+    let request = Uuid::now_v7();
+    writer
+        .send(Message::Binary(
+            room::stateless_frame(&routing, &format!("persist:{request}")).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        room::wait_for_stateless_exact(
+            &mut writer,
+            &format!("persisted:{request}"),
+            Duration::from_secs(5)
+        )
+        .await,
+        "{} exact persist request ACK is required",
+        backend.kind()
+    );
+    selected_room_durable_ack(
+        backend,
+        (workspace_id, document_id),
+        (live.user_id, live.session_id),
+        engine,
+        &[update],
+        (1, 1),
+        &expected_before.1,
+    )
+    .await;
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{path}/{document}/body"),
+        None,
+        Some(cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body["contentJson"], content);
+    let revisions = format!("{path}/{document}/revisions");
+    let (status, created, _, _) =
+        json_request(app.clone(), "POST", &revisions, None, Some(cookie), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{} actual live manual revision {created}",
+        backend.kind()
+    );
+    let revision = created["id"].as_str().unwrap();
+    writer
+        .send(Message::Binary(
+            room::sync_update_frame(&routing, &deletion).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(room::wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await);
+    let delete_request = Uuid::now_v7();
+    writer
+        .send(Message::Binary(
+            room::stateless_frame(&routing, &format!("persist:{delete_request}")).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        room::wait_for_stateless_exact(
+            &mut writer,
+            &format!("persisted:{delete_request}"),
+            Duration::from_secs(5)
+        )
+        .await
+    );
+    selected_room_durable_ack(
+        backend,
+        (workspace_id, document_id),
+        (live.user_id, live.session_id),
+        engine,
+        &[update, &deletion],
+        (2, 1),
+        &expected_after.1,
+    )
+    .await;
+
+    let (status, login, session, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/login",
+        Some(json!({"email":"admin@example.com","password":"supersecret1"})),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "fresh actor login: {login}");
+    let fresh_cookie = extract_session_cookie(session.as_ref().unwrap());
+    assert_ne!(fresh_cookie, cookie);
+    let mut fresh = room::connect_member(addr, &fresh_cookie).await;
+    room::auth_and_join(&mut fresh, &routing, 1702).await;
+    fresh
+        .send(Message::Binary(
+            room::sync_step1_frame(&routing, &[0]).into(),
+        ))
+        .await
+        .unwrap();
+    let mut native = None;
+    for _ in 0..16 {
+        match room::recv_document_frame(&mut fresh, 1)
+            .await
+            .expect("fresh socket frame")
+        {
+            WireFrame::Document {
+                message:
+                    DocumentMessage::Sync(SyncMessage {
+                        step: SyncStep::Step2,
+                        y_protocol,
+                    }),
+                ..
+            } => {
+                let (step, bytes) =
+                    fvoci_server::collab::y_sync::parse_sync_payload(&y_protocol, 4 * 1024 * 1024)
+                        .unwrap();
+                assert_eq!(step, SyncStep::Step2);
+                native = Some(bytes);
+                break;
+            }
+            WireFrame::Document {
+                message: DocumentMessage::SyncStatus { applied: false },
+                ..
+            } => panic!("fresh client native read refused"),
+            _ => {}
+        }
+    }
+    let native = native.expect("fresh client must receive native Step2 within bounded handshake");
+    let bin = engine.to_path_buf();
+    let (projected, fresh_history) = tokio::task::spawn_blocking(move || {
+        use collab_engine::outcome::EngineStatus;
+        use collab_engine::process::{ChildSlotKind, EngineSession, SpawnRequest};
+        use collab_engine::protocol::Request;
+        let mut child = EngineSession::spawn(SpawnRequest {
+            engine_bin: bin.clone(),
+            limits: collab_engine::Limits::default(),
+            slot_kind: ChildSlotKind::Primary,
+            slot_wait: None,
+            test_hang_ms: None,
+            test_exit_after_read: None,
+            test_close_stdout_hang_ms: None,
+            test_exit_after_write: None,
+        })
+        .unwrap();
+        let pid = child.pid().unwrap();
+        assert_eq!(
+            std::fs::read_link(format!("/proc/{pid}/exe")).unwrap(),
+            std::fs::canonicalize(&bin).unwrap()
+        );
+        assert!(child
+            .call(&Request::Load {
+                snapshot_b64: Some(native),
+                tail_b64: vec![],
+                encoding: 1
+            })
+            .outcome
+            .is_applied_ok());
+        let projected = match child.call(&Request::Project { encoding: 1 }).outcome {
+            EngineStatus::Ok {
+                content_json: Some(content),
+                ..
+            } => content,
+            outcome => panic!("fresh transport native projection {outcome:?}"),
+        };
+        let history = match child.call(&Request::RevisionSnapshot).outcome {
+            EngineStatus::Ok {
+                update_b64: Some(bytes),
+                ..
+            } => collab_engine::b64::decode(&bytes).unwrap(),
+            other => panic!("fresh transport native history {other:?}"),
+        };
+        child.kill_and_reap();
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+        eprintln!("selected_room_fresh_client_child pid={pid} reaped=true");
+        (projected, history)
+    })
+    .await
+    .unwrap();
+    assert_eq!(projected, after_content);
+    assert_eq!(
+        fresh_history, expected_after.1,
+        "fresh transport preserves native IDs and delete set"
+    );
+    let (status, meta, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{path}/{document}"),
+        None,
+        Some(&fresh_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(meta["id"], document);
+    let (status, detail, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{revisions}/{revision}"),
+        None,
+        Some(&fresh_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["id"], revision);
+    assert_eq!(detail["targetId"], document);
+    assert_eq!(detail["targetKind"], "document");
+    assert_eq!(detail["reason"], "manual");
+    assert_eq!(&detail["contentJson"], content);
+    assert_eq!(
+        collab_engine::b64::decode(detail["ySnapshot"].as_str().unwrap()).unwrap(),
+        expected_before.1,
+        "manual revision retains independent pre-deletion native history"
+    );
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{path}/{document}/body"),
+        None,
+        Some(&fresh_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["contentJson"], after_content);
+    let (status, _, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{}/documents/{document}/body",
+            Uuid::now_v7()
+        ),
+        None,
+        Some(&fresh_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    fresh.close(None).await.unwrap();
+    writer.close(None).await.unwrap();
+    drop(fresh);
+    drop(writer);
+    // Probe drains real socket lease drops before observing no remaining clients.
+    let key = fvoci_server::collab::room::RoomKey(
+        Uuid::parse_str(workspace).unwrap(),
+        Uuid::parse_str(document).unwrap(),
+        fvoci_server::collab::wire::CollabKind::Document,
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if hub.probe_actor(key).await.connections == 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "actual socket lease cleanup deadline"
+        );
+        tokio::task::yield_now().await;
+    }
+    // Last disconnect must produce real automatic session history; the manual
+    // snapshot differs, so semantic dedupe cannot hide a missing insertion.
+    let session_revision = loop {
+        let (status, list, _, _) = json_request(
+            app.clone(),
+            "GET",
+            &revisions,
+            None,
+            Some(&fresh_cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        if let Some(row) = list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["reason"] == "session")
+        {
+            assert_eq!(row["createdBy"], Value::Null);
+            break row["id"].as_str().unwrap().to_owned();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "actual last-disconnect session revision deadline"
+        );
+        tokio::task::yield_now().await;
+    };
+    let (status, session_detail, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{revisions}/{session_revision}"),
+        None,
+        Some(&fresh_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(session_detail["contentJson"], after_content);
+    assert_eq!(
+        collab_engine::b64::decode(session_detail["ySnapshot"].as_str().unwrap()).unwrap(),
+        expected_after.1
+    );
+    let status = hub.shutdown().await;
+    assert!(
+        status.is_clean(),
+        "{} actual room cleanup {status:?}",
+        backend.kind()
+    );
+    server.shutdown().await.unwrap();
+    // A fresh pool and hub must reload committed native history, not the old
+    // actor cache. This remains an integration server, not normal main/Vue.
+    let restarted_backend = match backend {
+        fvoci_server::db::backend::Backend::Postgres(_) => {
+            fvoci_server::db::backend::Backend::Postgres(pool::connect_app(pg_url).await.unwrap())
+        }
+        fvoci_server::db::backend::Backend::Sqlite(_) => {
+            fvoci_server::db::backend::Backend::Sqlite(
+                pool::connect_sqlite_app(sqlite_path, 4).await.unwrap(),
+            )
+        }
+        _ => unreachable!(),
+    };
+    let restarted_hub = Arc::new(
+        fvoci_server::collab::CollabHub::new_backend(
+            room::test_collab_config(2, 30_000),
+            restarted_backend.clone(),
+            Some(fvoci_server::collab::config::FamilyRoomTimings::new(30_000, 5_000).unwrap()),
+        )
+        .unwrap(),
+    );
+    let mut state = app_state_backend(restarted_backend.clone()).await;
+    let restarted_storage = state.storage.clone();
+    state.collab = Some(restarted_hub.clone());
+    let restarted_app = document_app(state);
+    let restarted_server = room::spawn_server(restarted_app.clone(), restarted_hub.clone()).await;
+    let mut restarted_client = room::connect_member(restarted_server.addr, &fresh_cookie).await;
+    room::auth_and_join(&mut restarted_client, &routing, 1703).await;
+    room::complete_sync_handshake(&mut restarted_client, &routing).await;
+    let restarted_native =
+        selected_socket_native_history(&mut restarted_client, &routing, engine).await;
+    assert_eq!(restarted_native.0, after_content);
+    assert_eq!(
+        restarted_native.1, expected_after.1,
+        "new Hub/client native wire retains original history"
+    );
+    // Real fresh actor has loaded canonical state; the independent official
+    // helper proves unchanged history after restart and no native tail loss.
+    selected_room_durable_ack(
+        &restarted_backend,
+        (workspace_id, document_id),
+        (live.user_id, live.session_id),
+        engine,
+        &[update, &deletion],
+        (2, 2),
+        &expected_after.1,
+    )
+    .await;
+    for (id, expected) in [
+        (revision, &expected_before.1),
+        (session_revision.as_str(), &expected_after.1),
+    ] {
+        let (status, detail, _, _) = json_request(
+            restarted_app.clone(),
+            "GET",
+            &format!("{revisions}/{id}"),
+            None,
+            Some(&fresh_cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["id"], id);
+        assert_eq!(
+            collab_engine::b64::decode(detail["ySnapshot"].as_str().unwrap()).unwrap(),
+            *expected
+        );
+    }
+    restarted_client.close(None).await.unwrap();
+    drop(restarted_client);
+    selected_room_queued_delivery_controls(
+        &restarted_app,
+        restarted_server.addr,
+        &restarted_backend,
+        workspace_id,
+        document_id,
+        pg_admin_url,
+    )
+    .await;
+    let restarted_port = restarted_server.addr;
+    assert!(restarted_hub.shutdown().await.is_clean());
+    restarted_server.shutdown().await.unwrap();
+    let restarted_root = match &restarted_storage {
+        fvoci_server::attachments::ObjectStorage::Local(local) => local.root().to_path_buf(),
+        _ => unreachable!(),
+    };
+    drop(restarted_app);
+    drop(restarted_storage);
+    std::fs::remove_dir_all(restarted_root).unwrap();
+    eprintln!("selected_room_restart backend={} port={restarted_port} native_history=true session_revision={session_revision} actual_new_hub=true", backend.kind());
+    eprintln!("selected_room_transport backend={} actual_socket=true persist_ack={} manual_revision={} fresh_cookie=true fresh_native_body=true room_cleanup=true port={addr}",backend.kind(),request,revision);
 }
 
 async fn selected_compaction_effect_counts(
@@ -3122,6 +4853,7 @@ async fn selected_backend_wiki_fixture(
     with_native: bool,
     membership_races: bool,
     with_compaction: bool,
+    with_room: bool,
 ) {
     use fvoci_server::db::backend::Backend;
     async fn claim_native(
@@ -3192,17 +4924,25 @@ async fn selected_backend_wiki_fixture(
             }
         }
     }
-    let native_fixture = if with_native {
+    let native_fixture = if with_native || with_room {
         let engine_bin = std::path::PathBuf::from(
             std::env::var_os("FVOCI_COLLAB_ENGINE")
                 .expect("native fixture requires freshly built FVOCI_COLLAB_ENGINE"),
         );
-        let content = json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Selected native durable text"}]}]});
+        let content = if with_room {
+            selected_room_support::delete_only_json_before()
+        } else {
+            json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Selected native durable text"}]}]})
+        };
         let seed = fvoci_server::collab::seed::SeedEngine::new(
             engine_bin.clone(),
             collab_engine::limits::Limits::default(),
         );
-        let update = seed.tiptap_to_yjs_update(&content).await.unwrap();
+        let update = if with_room {
+            selected_room_support::delete_only_base_update()
+        } else {
+            seed.tiptap_to_yjs_update(&content).await.unwrap()
+        };
         Some((engine_bin, content, update))
     } else {
         None
@@ -3252,7 +4992,24 @@ async fn selected_backend_wiki_fixture(
             }
             Backend::LibsqlRemote(_) => unreachable!("remote primary is a separate actual proof"),
         }
-        let state = app_state_backend(backend.clone()).await;
+        let mut state = app_state_backend(backend.clone()).await;
+        let room_hub = if with_room {
+            let config = selected_room_support::test_collab_config(2, 30_000);
+            let timings =
+                fvoci_server::collab::config::FamilyRoomTimings::new(30_000, 5_000).unwrap();
+            let hub = Arc::new(
+                fvoci_server::collab::CollabHub::new_backend(
+                    config,
+                    backend.clone(),
+                    Some(timings),
+                )
+                .unwrap(),
+            );
+            state.collab = Some(hub.clone());
+            Some(hub)
+        } else {
+            None
+        };
         let storage = state.storage.clone();
         let app = document_app(state);
         let (status, instance, _, _) =
@@ -3449,6 +5206,48 @@ async fn selected_backend_wiki_fixture(
             fvoci_server::db::documents::empty_document_json()
         );
         assert_eq!(body["version"], created["version"]);
+        let scope_actor = fvoci_server::db::identity::find_live_session_backend(
+            &backend,
+            &hash_token(&fresh_cookie),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        selected_body_scope_authorization_controls(
+            &backend,
+            &pg.admin_url,
+            (
+                Uuid::parse_str(workspace).unwrap(),
+                Uuid::parse_str(document).unwrap(),
+            ),
+            scope_actor.user_id,
+            scope_actor.session_id,
+        )
+        .await;
+        if let Some(hub) = room_hub {
+            let (engine, content, update) = native_fixture.as_ref().unwrap();
+            selected_room_transport_flow(
+                app.clone(),
+                hub,
+                &backend,
+                (&path, document, workspace),
+                &fresh_cookie,
+                (engine, content, update),
+                (&pg.app_url, &pg.admin_url, &sqlite_path),
+            )
+            .await;
+            drop(app);
+            let root = match &storage {
+                fvoci_server::attachments::ObjectStorage::Local(local) => {
+                    local.root().to_path_buf()
+                }
+                _ => unreachable!(),
+            };
+            drop(storage);
+            backend.close().await.unwrap();
+            std::fs::remove_dir_all(root).unwrap();
+            continue;
+        }
         // Exercise the existing native authorization/empty-only seed through
         // the real cookie identity and restricted selected-backend connection.
         // Room transport, persist ACK and revisions remain separate acceptance.
@@ -3952,7 +5751,7 @@ async fn selected_backend_wiki_fixture(
                 };
                 use sha2::{Digest, Sha256};
                 let full_snapshot = native_compaction_snapshot.as_ref().unwrap();
-                let digest = Sha256::digest(&payload).to_vec();
+                let digest = Sha256::digest(payload).to_vec();
                 let verify = |scope, credential, op, stored_actor| VerifyCollabInput {
                     workspace_id: scope,
                     actor_user_id: live.user_id,
