@@ -3625,6 +3625,19 @@ async fn selected_backend_wiki_fixture(with_native: bool) {
                     CollabDbError::StaleWriter,
                     "old owner cannot project against replacement generation"
                 );
+                assert_eq!(
+                    project_derived_body_kind_backend(
+                        &backend,
+                        CollabKind::Document,
+                        project_input(2, 1, live.session_id),
+                        Some(replacement.fence),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                    ProjectDerivedBodyResult::Unchanged,
+                    "current replacement owner can project the unchanged native head"
+                );
                 assert!(!renew_family_document_room(
                     &backend,
                     fence,
