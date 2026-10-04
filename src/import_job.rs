@@ -1475,15 +1475,16 @@ mod tests {
     }
 }
 
-fn is_commit_unknown(error: &sqlx::Error) -> bool {
-    matches!(error,sqlx::Error::AnyDriverError(source) if source.is::<crate::db::backend::CommitUnknown>() || source.is::<crate::db::backend::CommitCleanupUnknown>())
+fn is_import_finish_unknown(error: &sqlx::Error) -> bool {
+    crate::db::backend::is_rollback_cleanup_unknown(error)
+        || matches!(error,sqlx::Error::AnyDriverError(source) if source.is::<crate::db::backend::CommitUnknown>() || source.is::<crate::db::backend::CommitCleanupUnknown>())
 }
 
 /// Daily scheduler recognition: preserve/downcast the original typed error;
 /// remote failures conservatively stop before any other stream/write/purge.
 /// Recognition does not establish settlement or authorize reconciliation.
 pub fn import_database_error_stops_scheduler(backend: &Backend, error: &sqlx::Error) -> bool {
-    matches!(backend, Backend::LibsqlRemote(_)) || is_commit_unknown(error)
+    matches!(backend, Backend::LibsqlRemote(_)) || is_import_finish_unknown(error)
 }
 
 pub async fn sweep_orphan_imports_with_maintenance_claim_backend(
@@ -1507,7 +1508,9 @@ pub async fn sweep_orphan_imports_with_maintenance_claim_backend(
     .await
     {
         Ok(stale) => swept += u32::try_from(stale).unwrap_or(u32::MAX),
-        Err(error) if is_commit_unknown(&error) || matches!(backend, Backend::LibsqlRemote(_)) => {
+        Err(error)
+            if is_import_finish_unknown(&error) || matches!(backend, Backend::LibsqlRemote(_)) =>
+        {
             return Err(error)
         }
         Err(error) => warn!(error=%error,"import.sync_stale_sweep_failed"),
@@ -1538,7 +1541,8 @@ pub async fn sweep_orphan_imports_with_maintenance_claim_backend(
                 warn!(workspace_id=%job.workspace_id,import_job_id=%job.job_id,skipped=undo.skipped,"import.swept")
             }
             Err(error)
-                if is_commit_unknown(&error) || matches!(backend, Backend::LibsqlRemote(_)) =>
+                if is_import_finish_unknown(&error)
+                    || matches!(backend, Backend::LibsqlRemote(_)) =>
             {
                 return Err(error)
             }

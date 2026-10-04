@@ -928,6 +928,10 @@ pub async fn purge_imported_task(
 use crate::db::backend::{Backend, FamilyTx, OperationTx};
 use crate::db::codec::{Cell, FamilyRow};
 
+#[derive(Debug, thiserror::Error)]
+#[error("import request refused: {0:?}")]
+struct ImportRollbackRefusal(ImportDbError);
+
 fn import_protocol(message: &str) -> sqlx::Error {
     sqlx::Error::Protocol(format!("import_jobs: {message}"))
 }
@@ -1168,7 +1172,12 @@ async fn create_import_job_backend(
         .require_import_admin(workspace, actor, credential)
         .await?
     {
-        tx.rollback().await?;
+        if let Err(cleanup) = tx.rollback().await {
+            return Err(crate::db::backend::rollback_cleanup_unknown(
+                Some(Box::new(ImportRollbackRefusal(error))),
+                cleanup,
+            ));
+        }
         return Ok(Err(error));
     }
     let status = if input.is_some() {
@@ -1209,7 +1218,12 @@ pub async fn get_import_job_backend(
         .require_import_admin(workspace, actor, credential)
         .await?
     {
-        tx.rollback().await?;
+        if let Err(cleanup) = tx.rollback().await {
+            return Err(crate::db::backend::rollback_cleanup_unknown(
+                Some(Box::new(ImportRollbackRefusal(error))),
+                cleanup,
+            ));
+        }
         return Ok(Err(error));
     }
     let rows = match &mut op {
@@ -1217,7 +1231,9 @@ pub async fn get_import_job_backend(
         OperationTx::Postgres(_) => unreachable!(),
     };
     let row = rows.first().map(job_from_family).transpose()?;
-    tx.rollback().await?;
+    tx.rollback()
+        .await
+        .map_err(|cleanup| crate::db::backend::rollback_cleanup_unknown(None, cleanup))?;
     Ok(row.ok_or(ImportDbError::NotFound))
 }
 
@@ -1268,7 +1284,9 @@ pub async fn claim_next_import_job_backend(
     if row.is_some() {
         tx.commit().await.map_err(unknown_commit)?;
     } else {
-        tx.rollback().await?;
+        tx.rollback()
+            .await
+            .map_err(|cleanup| crate::db::backend::rollback_cleanup_unknown(None, cleanup))?;
     }
     Ok(row)
 }
@@ -1294,7 +1312,9 @@ pub async fn load_import_payload_backend(
         }
         OperationTx::Postgres(_) => unreachable!(),
     };
-    tx.rollback().await?;
+    tx.rollback()
+        .await
+        .map_err(|cleanup| crate::db::backend::rollback_cleanup_unknown(None, cleanup))?;
     Ok(result)
 }
 
@@ -1312,7 +1332,9 @@ pub async fn extend_import_lease_backend(
     if result {
         tx.commit().await.map_err(unknown_commit)?;
     } else {
-        tx.rollback().await?;
+        tx.rollback()
+            .await
+            .map_err(|cleanup| crate::db::backend::rollback_cleanup_unknown(None, cleanup))?;
     }
     Ok(result)
 }
@@ -1414,7 +1436,9 @@ pub async fn finish_import_job_backend(
     if moved {
         tx.commit().await.map_err(unknown_commit)?;
     } else {
-        tx.rollback().await?;
+        tx.rollback()
+            .await
+            .map_err(|cleanup| crate::db::backend::rollback_cleanup_unknown(None, cleanup))?;
     }
     Ok(moved)
 }
@@ -1466,7 +1490,9 @@ async fn release_or_reset_family(
     if moved {
         tx.commit().await.map_err(unknown_commit)?;
     } else {
-        tx.rollback().await?;
+        tx.rollback()
+            .await
+            .map_err(|cleanup| crate::db::backend::rollback_cleanup_unknown(None, cleanup))?;
     }
     Ok(moved)
 }
@@ -1495,7 +1521,9 @@ pub async fn finish_sync_import_job_backend(
                 .await?
                 .is_err())
     {
-        tx.rollback().await?;
+        tx.rollback()
+            .await
+            .map_err(|cleanup| crate::db::backend::rollback_cleanup_unknown(None, cleanup))?;
         return Ok(false);
     }
     let moved = match &mut op {
@@ -1508,7 +1536,9 @@ pub async fn finish_sync_import_job_backend(
     if moved {
         tx.commit().await.map_err(unknown_commit)?;
     } else {
-        tx.rollback().await?;
+        tx.rollback()
+            .await
+            .map_err(|cleanup| crate::db::backend::rollback_cleanup_unknown(None, cleanup))?;
     }
     Ok(moved)
 }
@@ -1550,7 +1580,9 @@ pub async fn claim_expired_import_job_backend(
     if expired.is_some() {
         tx.commit().await.map_err(unknown_commit)?;
     } else {
-        tx.rollback().await?;
+        tx.rollback()
+            .await
+            .map_err(|cleanup| crate::db::backend::rollback_cleanup_unknown(None, cleanup))?;
     }
     Ok(expired)
 }
@@ -1574,7 +1606,9 @@ pub async fn fail_stale_sync_import_jobs_backend(backend: &Backend) -> Result<u6
     if moved > 0 {
         tx.commit().await.map_err(unknown_commit)?;
     } else {
-        tx.rollback().await?;
+        tx.rollback()
+            .await
+            .map_err(|cleanup| crate::db::backend::rollback_cleanup_unknown(None, cleanup))?;
     }
     Ok(moved)
 }
@@ -1602,7 +1636,7 @@ async fn cleanup_refs(
     let now = import_now(family).await?;
     let rows = match owner {
         ImportCleanupOwner::Runner(claim) => family.query("SELECT created_refs FROM import_jobs WHERE workspace_id=?1 AND id=?2 AND status='running' AND lease_token=?3 AND lease_until>?4", &claim_args(claim,now)).await?,
-        ImportCleanupOwner::Expired(_) => family.query("SELECT created_refs FROM import_jobs WHERE workspace_id=?1 AND id=?2 AND status='failed' AND lease_token IS NULL", &[Cell::uuid(workspace),Cell::uuid(job)]).await?,
+        ImportCleanupOwner::Expired(_) => family.query("SELECT created_refs FROM import_jobs WHERE workspace_id=?1 AND id=?2 AND source<>'markdown-zip' AND status='failed' AND lease_token IS NULL", &[Cell::uuid(workspace),Cell::uuid(job)]).await?,
     };
     rows.first()
         .map(|r| checked_refs(r.cell(0)?.value()?))
@@ -1611,6 +1645,9 @@ async fn cleanup_refs(
 
 #[cfg(test)]
 tokio::task_local! {
+    // Propagation control only: injection follows a real acknowledged local
+    // rollback. This is not an actual provider rollback-response loss oracle.
+    pub(crate) static IMPORT_ROLLBACK_AFTER_ACK_CONTROL: bool;
     static IMPORT_CLEANUP_AFTER_PURGE: std::sync::Arc<(tokio::sync::Notify,tokio::sync::Notify)>;
 }
 
@@ -1644,7 +1681,27 @@ pub(crate) async fn compensate_family_import(
             Ok(outcome)
         }
         Err(error) => {
-            tx.rollback().await?;
+            let cleanup = tx.rollback().await;
+            #[cfg(test)]
+            let cleanup = cleanup.and_then(|()| {
+                if IMPORT_ROLLBACK_AFTER_ACK_CONTROL
+                    .try_with(|enabled| *enabled)
+                    .unwrap_or(false)
+                {
+                    Err(sqlx::Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        "after-real-rollback propagation control",
+                    )))
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(cleanup) = cleanup {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(error)),
+                    cleanup,
+                ));
+            }
             Err(error)
         }
     }
@@ -1834,7 +1891,7 @@ async fn compensate_family_import_tx(
     if let Some(context) = maintenance {
         renew_import_maintenance(family, context, cancel).await?;
         let (workspace, job) = owner.identity();
-        let changed=family.execute("UPDATE import_jobs SET created_refs=?3 WHERE workspace_id=?1 AND id=?2 AND status='failed' AND lease_token IS NULL AND json(created_refs)=json(?4)", &[
+        let changed=family.execute("UPDATE import_jobs SET created_refs=?3 WHERE workspace_id=?1 AND id=?2 AND source<>'markdown-zip' AND status='failed' AND lease_token IS NULL AND json(created_refs)=json(?4)", &[
                 Cell::uuid(workspace),Cell::uuid(job),Cell::json(&json!(ImportJobRefs::default()))?,Cell::json(&json!(durable))?
             ]).await?;
         if changed != 1 {
@@ -1862,11 +1919,18 @@ pub(crate) async fn import_cleanup_candidates_backend(
         renew_import_maintenance(family,context,cancel).await?;
         family.require_system_context()?;
         let now=import_now(family).await?;
-        let rows=family.query("SELECT workspace_id,id,created_by,created_refs FROM import_jobs WHERE (status='running' AND lease_until<?1) OR (status='failed' AND lease_token IS NULL AND (json_array_length(created_refs,'$.documentIds')>0 OR json_array_length(created_refs,'$.taskIds')>0 OR json_array_length(created_refs,'$.storedKeys')>0)) ORDER BY coalesce(lease_until,updated_at),id LIMIT ?2", &[Cell::Integer(now),Cell::Integer(IMPORT_SWEEP_MAX as i64)]).await?;
+        let rows=family.query("SELECT workspace_id,id,created_by,created_refs FROM import_jobs WHERE source<>'markdown-zip' AND ((status='running' AND lease_until<?1) OR (status='failed' AND lease_token IS NULL AND (json_array_length(created_refs,'$.documentIds')>0 OR json_array_length(created_refs,'$.taskIds')>0 OR json_array_length(created_refs,'$.storedKeys')>0))) ORDER BY coalesce(lease_until,updated_at),id LIMIT ?2", &[Cell::Integer(now),Cell::Integer(IMPORT_SWEEP_MAX as i64)]).await?;
         rows.iter().map(|row|Ok(ExpiredImport{workspace_id:row.cell(0)?.id()?,job_id:row.cell(1)?.id()?,created_by:row.cell(2)?.id()?,created_refs:checked_refs(row.cell(3)?.value()?)?})).collect::<Result<Vec<_>,sqlx::Error>>()
     }.await;
     op.restore_system(previous).await?;
-    tx.rollback().await?;
+    if let Err(cleanup) = tx.rollback().await {
+        return Err(crate::db::backend::rollback_cleanup_unknown(
+            result
+                .err()
+                .map(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>),
+            cleanup,
+        ));
+    }
     result
 }
 
@@ -1885,7 +1949,7 @@ pub(crate) async fn prepare_import_cleanup_backend(
         let OperationTx::SqliteFamily(family)=&mut op else{return Err(import_protocol("family cleanup prep requires selected family"));};
         renew_import_maintenance(family,context,cancel).await?;
         let now=import_now(family).await?;
-        let rows=family.query("SELECT created_by,created_refs,status FROM import_jobs WHERE workspace_id=?1 AND id=?2 AND ((status='running' AND lease_until<?3) OR (status='failed' AND lease_token IS NULL))", &[Cell::uuid(job.workspace_id),Cell::uuid(job.job_id),Cell::Integer(now)]).await?;
+        let rows=family.query("SELECT created_by,created_refs,status FROM import_jobs WHERE workspace_id=?1 AND id=?2 AND source<>'markdown-zip' AND ((status='running' AND lease_until<?3) OR (status='failed' AND lease_token IS NULL))", &[Cell::uuid(job.workspace_id),Cell::uuid(job.job_id),Cell::Integer(now)]).await?;
         let Some(row)=rows.first() else{return Ok(false);};
         if row.cell(0)?.id()?!=job.created_by || checked_refs(row.cell(1)?.value()?)?!=job.created_refs{return Ok(false);}
         if row.cell(2)?.string()?=="running"{
@@ -1901,11 +1965,18 @@ pub(crate) async fn prepare_import_cleanup_backend(
             Ok(true)
         }
         Ok(false) => {
-            tx.rollback().await?;
+            tx.rollback()
+                .await
+                .map_err(|cleanup| crate::db::backend::rollback_cleanup_unknown(None, cleanup))?;
             Ok(false)
         }
         Err(error) => {
-            let _ = tx.rollback().await;
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(error)),
+                    cleanup,
+                ));
+            }
             Err(error)
         }
     }
@@ -1941,7 +2012,12 @@ pub(crate) async fn cleanup_failed_import_backend(
             Ok(outcome)
         }
         Err(error) => {
-            let _ = tx.rollback().await;
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(error)),
+                    cleanup,
+                ));
+            }
             Err(error)
         }
     }
@@ -1971,7 +2047,12 @@ pub(crate) async fn fail_stale_sync_imports_with_maintenance_backend(
             Ok(moved)
         }
         Err(error) => {
-            let _ = tx.rollback().await;
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(error)),
+                    cleanup,
+                ));
+            }
             Err(error)
         }
     }
@@ -2843,6 +2924,216 @@ mod selected_import_tests {
                 .unwrap()
         );
         c
+    }
+    #[tokio::test]
+    async fn import_selected_daily_retains_actual_failed_sync_document_and_refs() {
+        let f = Fixture::new().await;
+        let literal = b"actual failed sync retained bytes";
+        let (_, key) = f.attachment(literal.len() as i64, "text/plain").await;
+        let storage =
+            crate::attachments::ObjectStorage::local(f.root.join("actual-sync-retention"));
+        storage.put_bytes(&key, literal.to_vec()).await.unwrap();
+        let credential = session(&f).await;
+        let job = create_sync_import_job_backend(&f.backend, f.workspace, f.user, credential)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        tx.operation().set_tenant(f.workspace).await.unwrap();
+        assert!(tx
+            .operation()
+            .append_sync_import_document_ref(f.workspace, job.id, f.user, f.document)
+            .await
+            .unwrap());
+        tx.commit().await.unwrap();
+        assert!(finish_sync_import_job_backend(
+            &f.backend,
+            f.workspace,
+            job.id,
+            f.user,
+            credential,
+            ImportStatus::Failed
+        )
+        .await
+        .unwrap());
+        let before = get_import_job_backend(&f.backend, f.workspace, f.user, credential, job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.source, ImportSource::MarkdownZip);
+        assert_eq!(before.status, ImportStatus::Failed);
+        assert_eq!(before.created_refs.document_ids, vec![f.document]);
+        let daily = daily(&f).await;
+        assert_eq!(
+            crate::import_job::sweep_orphan_imports_with_maintenance_claim_backend(
+                &f.backend,
+                &storage,
+                &CancellationToken::new(),
+                daily.proof(),
+                daily.policy()
+            )
+            .await
+            .unwrap(),
+            0
+        );
+        let after = get_import_job_backend(&f.backend, f.workspace, f.user, credential, job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.created_refs, before.created_refs);
+        assert_eq!(
+            std::fs::read(
+                f.root
+                    .join("actual-sync-retention/objects")
+                    .join(&key)
+                    .join("payload")
+            )
+            .unwrap(),
+            literal
+        );
+        let retained: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM documents WHERE id=?1),(SELECT count(*) FROM attachments WHERE document_id=?1 AND storage_key=?2)")
+            .bind(f.document.as_bytes().as_slice()).bind(&key).fetch_one(&f.pool).await.unwrap();
+        assert_eq!(retained, (1, 1));
+        daily.release().await.unwrap();
+        f.close().await;
+    }
+    #[tokio::test]
+    async fn import_selected_daily_retains_failed_markdown_zip_and_rechecks_source() {
+        let f = Fixture::new().await;
+        let literal = b"retained synchronous import attachment";
+        let (_, key) = f.attachment(literal.len() as i64, "text/plain").await;
+        let storage = crate::attachments::ObjectStorage::local(f.root.join("sync-retention"));
+        storage.put_bytes(&key, literal.to_vec()).await.unwrap();
+        let c = failed_with_refs(&f, &key).await;
+        let daily = daily(&f).await;
+        let context = ImportMaintenanceContext {
+            proof: daily.proof(),
+            policy: daily.policy(),
+        };
+        let candidates =
+            import_cleanup_candidates_backend(&f.backend, context, &CancellationToken::new())
+                .await
+                .unwrap();
+        assert_eq!(candidates.len(), 1);
+        // Real catalog change after candidate observation: mutation must check
+        // the source again before row deletion or any physical storage purge.
+        sqlx::query("UPDATE import_jobs SET source='markdown-zip' WHERE id=?1")
+            .bind(c.job_id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let seed = b"retained document state bytes";
+        sqlx::query("INSERT INTO document_states(workspace_id,document_id,state) VALUES(?1,?2,?3) ON CONFLICT(workspace_id,document_id) DO UPDATE SET state=excluded.state")
+            .bind(f.workspace.as_bytes().as_slice()).bind(f.document.as_bytes().as_slice()).bind(seed.as_slice()).execute(&f.pool).await.unwrap();
+        let revision = Uuid::now_v7();
+        sqlx::query("INSERT INTO revisions(id,workspace_id,target_kind,target_id,y_snapshot,content_json,text,reason,created_by) VALUES(?1,?2,'document',?3,?4,?5,?6,'manual',?7)")
+            .bind(revision.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.document.as_bytes().as_slice()).bind(seed.as_slice())
+            .bind(r#"{"type":"doc","content":[]}"#).bind("retained synchronous history").bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let before: (String, String, i64, i64) = sqlx::query_as("SELECT status,created_refs,attempts,(SELECT count(*) FROM events) FROM import_jobs WHERE id=?1")
+            .bind(c.job_id.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+        assert!(!prepare_import_cleanup_backend(
+            &f.backend,
+            &candidates[0],
+            context,
+            &CancellationToken::new()
+        )
+        .await
+        .unwrap());
+        assert!(cleanup_failed_import_backend(
+            &f.backend,
+            &storage,
+            &candidates[0],
+            context,
+            &CancellationToken::new()
+        )
+        .await
+        .is_err());
+        assert!(
+            import_cleanup_candidates_backend(&f.backend, context, &CancellationToken::new())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            crate::import_job::sweep_orphan_imports_with_maintenance_claim_backend(
+                &f.backend,
+                &storage,
+                &CancellationToken::new(),
+                daily.proof(),
+                daily.policy()
+            )
+            .await
+            .unwrap(),
+            0
+        );
+        let after: (String, String, i64, i64) = sqlx::query_as("SELECT status,created_refs,attempts,(SELECT count(*) FROM events) FROM import_jobs WHERE id=?1")
+            .bind(c.job_id.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            std::fs::read(
+                f.root
+                    .join("sync-retention/objects")
+                    .join(&key)
+                    .join("payload")
+            )
+            .unwrap(),
+            literal
+        );
+        let state: Vec<u8> = sqlx::query_scalar(
+            "SELECT state FROM document_states WHERE workspace_id=?1 AND document_id=?2",
+        )
+        .bind(f.workspace.as_bytes().as_slice())
+        .bind(f.document.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(state, seed);
+        let history: (Vec<u8>, String, String) =
+            sqlx::query_as("SELECT y_snapshot,content_json,text FROM revisions WHERE id=?1")
+                .bind(revision.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            history,
+            (
+                seed.to_vec(),
+                r#"{"type":"doc","content":[]}"#.into(),
+                "retained synchronous history".into()
+            )
+        );
+        let retained: i64 = sqlx::query_scalar("SELECT count(*) FROM attachments WHERE workspace_id=?1 AND document_id=?2 AND storage_key=?3")
+            .bind(f.workspace.as_bytes().as_slice()).bind(f.document.as_bytes().as_slice()).bind(&key).fetch_one(&f.pool).await.unwrap();
+        assert_eq!(retained, 1);
+        // Eligible async jobs remain cleanable; the original cleanup tests also
+        // retain their real I/O failure, cancellation and healthy retry oracles.
+        sqlx::query("UPDATE import_jobs SET source='notion-zip' WHERE id=?1")
+            .bind(c.job_id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::import_job::sweep_orphan_imports_with_maintenance_claim_backend(
+                &f.backend,
+                &storage,
+                &CancellationToken::new(),
+                daily.proof(),
+                daily.policy()
+            )
+            .await
+            .unwrap(),
+            1
+        );
+        assert!(storage.head(&key).await.unwrap().is_none());
+        let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM documents WHERE id=?1")
+            .bind(f.document.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0);
+        daily.release().await.unwrap();
+        f.close().await;
     }
     #[tokio::test]
     async fn import_selected_failed_cleanup_actual_io_failure_then_automatic_healthy_sweep() {
