@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
 NAMES = {'SQLITE3_LIB_DIR', 'SQLITE3_INCLUDE_DIR', 'SQLITE3_STATIC', 'SQLITE3_NO_PKG_CONFIG'}
@@ -291,7 +292,7 @@ exit "${PREREQ_EXIT:-0}"
                 del self.env['PREREQ_EXIT']
 
     def test_workflow_root_cache_preparation_order_and_independent_crates(self):
-        consumers = {'rust': {'fast', 'postgres', 'collaboration'},
+        consumers = {'rust': {'fast', 'native-arm64', 'postgres', 'collaboration'},
                      'web': {'web-checks', 'workspace-browser-shard', 'collaboration-flow'},
                      'documents': {'native-extraction'}}
         for workflow, expected in consumers.items():
@@ -321,6 +322,42 @@ exit "${PREREQ_EXIT:-0}"
         self.assertIn('prepare-sqlite-ci.sh --parent /sqlite-build -- cargo build', builder)
         for tool in ('libclang', 'python3', 'gcc', '/sqlite-build'):
             self.assertNotIn(tool, runtime)
+
+    def test_native_arm64_preparation_mutations_fail_same_wiring_contract(self):
+        fixture = self.root / 'workflow-mutations'
+        (fixture / '.github/workflows').mkdir(parents=True)
+        (fixture / 'infra/rust').mkdir(parents=True)
+        for workflow in ('rust', 'web', 'documents', 'collab-engine', 'install'):
+            shutil.copy(ROOT / '.github/workflows' / (workflow+'.yml'),
+                        fixture / '.github/workflows' / (workflow+'.yml'))
+        shutil.copy(ROOT / 'infra/rust/Dockerfile', fixture / 'infra/rust/Dockerfile')
+        rust = fixture / '.github/workflows/rust.yml'
+        original = rust.read_text()
+        native = re.search(r'^  native-arm64:\n(.*?)(?=^  [a-z][\w-]*:|\Z)',
+                           original, re.M | re.S)
+        self.assertIsNotNone(native)
+        body = native.group(1)
+        prep = body.index('      - name: Prepare pinned SQLite root build inputs')
+        cache = body.index('      - name: Restore server build outputs')
+        fetch = body.index('      - run: cargo fetch --locked')
+        mutations = {
+            'missing preparation': (body[:prep] + body[cache:], 'native-arm64'),
+            'cache before preparation': (body[:prep] + body[cache:fetch] + body[prep:cache] + body[fetch:],
+                                         'not less than'),
+            'unqualified cache': (body.replace('steps.sqlite.outputs.cache_identity', 'fixture_static_identity'),
+                                  r'steps\.sqlite\.outputs\.cache_identity'),
+        }
+        # Challenge the exact original assertions, on copies only. Every other
+        # workflow and every existing consumer remains part of that contract.
+        with mock.patch.dict(globals(), ROOT=fixture):
+            self.test_workflow_root_cache_preparation_order_and_independent_crates()
+        for label, (changed, error) in mutations.items():
+            with self.subTest(mutation=label):
+                self.assertNotEqual(body, changed)
+                rust.write_text(original[:native.start(1)] + changed + original[native.end(1):])
+                with mock.patch.dict(globals(), ROOT=fixture):
+                    with self.assertRaisesRegex(AssertionError, error):
+                        self.test_workflow_root_cache_preparation_order_and_independent_crates()
 
     def test_web_build_stops_on_preflight_failure(self):
         shutil.copy(ROOT / 'scripts/run-web-e2e.sh', self.scripts)
