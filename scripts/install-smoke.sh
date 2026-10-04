@@ -285,7 +285,9 @@ if ! grep -Eq '^FVOCI_MEILI_KEY_FILE=' <<<"$SERVER_ENV"; then
 fi
 log_assert "server holds Meili URL and key file, not the master key: ok"
 SETTINGS_JSON="$(docker exec "$SERVER_CID" sh -c 'curl -fsS -H "Authorization: Bearer $(cat /run/fvoci/meili/api_key)" http://meilisearch:7700/indexes/fvoci/settings')"
-python3 -c 'import json,sys; s=json.load(sys.stdin); assert s.get("searchableAttributes")==["title","body","chosung","stem"], s; assert "resourceKey" in s.get("filterableAttributes",[]), s' <<<"$SETTINGS_JSON"
+# Literal current index settings (src/search/meili.rs index_settings): seven
+# searchable attributes and identifier-only displayed attributes.
+python3 -c 'import json,sys; s=json.load(sys.stdin); assert s.get("searchableAttributes")==["title","body","chosung","stem","bibliographyBody","bibliographyChosung","bibliographyStem"], s; assert s.get("displayedAttributes")==["id","kind","workspaceId","projectId","documentId","taskId","commentId","attachmentId","chunkNo","updatedAt"], s; assert "resourceKey" in s.get("filterableAttributes",[]), s' <<<"$SETTINGS_JSON"
 log_assert "meili index settings ensured: ok"
 
 STORAGE_SAMPLE="$(docker exec "$SERVER_CID" sh -c 'find /data/storage -type f | head -1')"

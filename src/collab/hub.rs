@@ -38,6 +38,10 @@ pub const HUB_BORROW_BARRIER_AFTER_SLOT_READY: u8 = 3;
 /// scan chose a candidate, before the locked re-check of that candidate.
 #[cfg(feature = "db-tests")]
 pub const HUB_JOIN_BARRIER_AFTER_RECLAIM_SCAN: u8 = 4;
+/// A join after its admission check passed, before it reserves or starts a
+/// room (a join admitted before a concurrent same-ID MOVE commits).
+#[cfg(feature = "db-tests")]
+pub const HUB_JOIN_BARRIER_AFTER_ADMISSION: u8 = 5;
 
 /// One pre-enqueue retry after a proven undelivered join or a Closing race.
 const MAX_PRE_ENQUEUE_RETRIES: u8 = 1;
@@ -536,14 +540,15 @@ impl CollabHub {
         actor_user_id: Uuid,
         session_id: Uuid,
         snap: Vec<u8>,
-    ) -> Result<(), RevisionRestoreError> {
+        intent: crate::db::revisions::RestoreRevisionInput,
+    ) -> Result<Uuid, RevisionRestoreError> {
         let key: RoomKey = key.into();
         let (handle, _lease) = self
             .borrow_live_room(key)
             .await
             .map_err(|_| RevisionRestoreError::Unavailable)?;
         handle
-            .restore_from_snapshot(actor_user_id, session_id, snap)
+            .restore_from_snapshot(actor_user_id, session_id, snap, intent)
             .await
     }
 
@@ -807,6 +812,8 @@ impl CollabHub {
             JoinError::DbError
         })?;
         admission.map_err(|_| JoinError::AdmissionDenied)?;
+        #[cfg(feature = "db-tests")]
+        pause_for_hub_join_barrier(key.1, HUB_JOIN_BARRIER_AFTER_ADMISSION).await;
 
         let mut retries = 0u8;
         loop {
@@ -1484,6 +1491,24 @@ impl CollabHub {
             self.cleanup_starting(key, &slot).await;
             return Err(JoinError::EngineUnavailable);
         }
+        // Under the guard: the resource must still belong to this room's
+        // workspace. A join admitted before a same-ID MOVE committed would
+        // otherwise start a source room that keeps the guard from the
+        // destination room until idle eviction.
+        match resource_in_room_workspace(&self.pool, key).await {
+            Ok(true) => {}
+            Ok(false) => {
+                guard.release().await;
+                self.cleanup_starting(key, &slot).await;
+                return Err(JoinError::AdmissionDenied);
+            }
+            Err(err) => {
+                warn_join_db_error("hub.start_room.resource", key.0, key.1, &err);
+                guard.release().await;
+                self.cleanup_starting(key, &slot).await;
+                return Err(JoinError::DbError);
+            }
+        }
 
         let live_conns = Arc::new(AtomicUsize::new(0));
         let spawn = crate::collab::room::spawn_room(
@@ -1555,6 +1580,107 @@ impl CollabHub {
         };
         drop(permit);
         retire_slot(&self.rooms, key, slot).await;
+    }
+
+    /// Close the room of a resource that a committed personal MOVE took out
+    /// of `key`'s workspace, and return only once no room for `key` holds the
+    /// resource guard. Rooms are fenced by a guard keyed by the resource
+    /// alone, so the source room would otherwise keep the destination room
+    /// from starting until idle eviction. A Live room is closed through a
+    /// hub-owned cleanup task (connections close, the actor finishes and
+    /// releases the guard); a starting or closing room is left to its owner
+    /// and awaited. A start that begins later finds the resource gone under
+    /// its guard (see `start_room`). No room is a no-op; no other room is
+    /// touched.
+    pub async fn retire_moved_resource_room(&self, key: impl Into<RoomKey>) {
+        let key: RoomKey = key.into();
+        loop {
+            let Some(slot) = self.room_slot(key).await else {
+                return;
+            };
+            // Registered before the phase is read, so a starter or closer that
+            // finishes in between cannot be missed.
+            let notified = slot.ready.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let live = {
+                let mut phase = slot.phase.lock().await;
+                // Failed is terminal: set only after the actor finished (guard
+                // released) or before a guard existed. Starting, Booting and
+                // Closing are owned by their starter or closer, which notify
+                // `ready` when they publish Live or retire the slot.
+                if matches!(*phase, RoomPhase::Failed) {
+                    return;
+                }
+                if matches!(*phase, RoomPhase::Live(_)) {
+                    match std::mem::replace(&mut *phase, RoomPhase::Closing) {
+                        RoomPhase::Live(live) => Some(live),
+                        _ => unreachable!("phase was Live under the lock"),
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some(live) = live {
+                // The hub owns the Closing room from here (as at the room cap):
+                // a cancelled caller cannot leave it Closing. The caller waits
+                // until the actor finished and the guard was released.
+                let rooms = self.rooms.clone();
+                let abnormal_actor_completions = self.abnormal_actor_completions.clone();
+                let owned = slot.clone();
+                let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+                {
+                    let mut starts = self.starts.lock().expect("room start task list");
+                    starts.retain(|task| !task.is_finished());
+                    starts.push(tokio::spawn(async move {
+                        complete_owned_room_cleanup(
+                            rooms,
+                            key,
+                            owned,
+                            live,
+                            abnormal_actor_completions,
+                        )
+                        .await;
+                        let _ = done_tx.send(());
+                    }));
+                }
+                let _ = done_rx.await;
+                return;
+            }
+            #[cfg(feature = "db-tests")]
+            let _waiting = {
+                struct Waiting(Arc<RoomSlot>);
+                impl Drop for Waiting {
+                    fn drop(&mut self) {
+                        self.0.waiters.fetch_sub(1, Ordering::AcqRel);
+                    }
+                }
+                slot.waiters.fetch_add(1, Ordering::AcqRel);
+                Waiting(slot.clone())
+            };
+            notified.await;
+        }
+    }
+
+    /// Retire the source rooms of every resource a committed MOVE moved, each
+    /// as [`Self::retire_moved_resource_room`], in ONE hub-owned task enrolled
+    /// before this method's first await (as the room-cap reclaim): a caller
+    /// cancelled while one room is still starting or closing does not leave
+    /// the others unretired. The caller waits for the whole pair.
+    pub async fn retire_moved_resource_rooms(&self, keys: Vec<RoomKey>) {
+        let hub = self.clone();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        {
+            let mut starts = self.starts.lock().expect("room start task list");
+            starts.retain(|task| !task.is_finished());
+            starts.push(tokio::spawn(async move {
+                for key in keys {
+                    hub.retire_moved_resource_room(key).await;
+                }
+                let _ = done_tx.send(());
+            }));
+        }
+        let _ = done_rx.await;
     }
 
     async fn force_close_slot(&self, key: RoomKey, slot: Arc<RoomSlot>) {
@@ -1654,6 +1780,29 @@ fn note_abnormal_actor_completion(
             "collaboration actor exited without completion"
         );
     }
+}
+
+/// Whether the room's resource row exists in the room's workspace (deleted
+/// rows included: only a resource that left the workspace is absent).
+async fn resource_in_room_workspace(
+    pool: &sqlx::PgPool,
+    key: RoomKey,
+) -> Result<bool, sqlx::Error> {
+    let table = match key.2 {
+        crate::collab::wire::CollabKind::Document => "documents",
+        crate::collab::wire::CollabKind::Task => "tasks",
+    };
+    let mut tx = pool.begin().await?;
+    crate::db::context::set_tenant(&mut tx, key.0).await?;
+    let exists: bool = sqlx::query_scalar(&format!(
+        "SELECT EXISTS(SELECT 1 FROM fvoci.{table} WHERE workspace_id=$1 AND id=$2)"
+    ))
+    .bind(key.0)
+    .bind(key.1)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(exists)
 }
 
 async fn complete_owned_room_cleanup(

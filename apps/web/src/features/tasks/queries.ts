@@ -122,16 +122,34 @@ export function taskAttachmentsQuery(workspaceId: string, taskId: string) {
   });
 }
 
-export function taskTimeEntriesQuery(workspaceId: string, taskId: string) {
+export function taskTimeEntriesQuery(
+  workspaceId: string,
+  taskId: string,
+  context?: { expectedActorId: string; expectedSessionId: string },
+) {
   return queryOptions({
-    queryKey: ["task-time-entries", workspaceId, taskId] as const,
-    queryFn: async () =>
+    queryKey: context
+      ? ([
+          "task-time-entries",
+          workspaceId,
+          taskId,
+          context.expectedActorId,
+          context.expectedSessionId,
+        ] as const)
+      : (["task-time-entries", workspaceId, taskId] as const),
+    queryFn: async ({ signal }) =>
       ensureOk(
         await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/time-entries", {
-          params: { path: { workspace_id: workspaceId, task_id: taskId } },
+          params: {
+            path: { workspace_id: workspaceId, task_id: taskId },
+            ...(context ? { query: context } : {}),
+          },
+          signal,
         }),
       ),
-    enabled: Boolean(workspaceId) && Boolean(taskId),
+    enabled:
+      Boolean(workspaceId && taskId) &&
+      (!context || Boolean(context.expectedActorId && context.expectedSessionId)),
     retry: false,
   });
 }

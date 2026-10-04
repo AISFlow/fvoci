@@ -96,6 +96,15 @@ export interface CollabRoom {
   readonly session: ComputedRef<CollabRoomSession | null>;
 }
 
+/** HTTP permission changes request fresh server admission; they never grant a socket write. */
+export interface CollabRoomAuthorization {
+  readonly roomName: string;
+  readonly actorId: string;
+  readonly sessionId: string;
+  /** null while current resource metadata is unavailable. */
+  readonly writable: boolean | null;
+}
+
 function roomNameOf(provider: HocuspocusProvider): string {
   const name = provider.configuration.name;
   return typeof name === "string" ? name : "";
@@ -110,7 +119,11 @@ export function collabRoomName(workspaceId: string, kind: "document" | "task", i
  * signed-in user's awareness identity; the room connects without it, but
  * presence and awareness wait for it.
  */
-export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | null>): CollabRoom {
+export function useCollabRoom(
+  name: string,
+  user: MaybeRefOrGetter<CollabUser | null>,
+  authorization?: MaybeRefOrGetter<CollabRoomAuthorization | null>,
+): CollabRoom {
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
   const url = `${proto}://${window.location.host}/collab`;
   const doc = markRaw(new Y.Doc({ gc: false }));
@@ -139,6 +152,8 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
     session: ComputedRef<CollabRoomSession>;
   }
   const current = shallowRef<Generation | null>(null);
+  const reauthorizing = new WeakSet<HocuspocusProvider>();
+  const retiredAuthorization = new WeakSet<HocuspocusProvider>();
   let disposed = false;
 
   function bindGeneration(state: RoomConnectionState<RefusalAwareSocket>): void {
@@ -165,7 +180,10 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
         connection.authenticated();
       };
       const onAuthenticationFailed = () => {
-        connection.reclaim();
+        // Reauthorization is not a clientID collision claim. A refused fresh
+        // admission stays unauthorized, preserving the existing document ID.
+        if (!retiredAuthorization.has(provider) && !reauthorizing.delete(provider))
+          connection.reclaim();
       };
       provider.on("authenticated", onAuthenticated);
       provider.on("authenticationFailed", onAuthenticationFailed);
@@ -210,6 +228,13 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
     });
     const persistAborts = new Set<AbortController>();
     let persistActive = true;
+    let reconnectAfterClose: (() => void) | null = null;
+    const socket = provider.configuration.websocketProvider;
+    let oldAuthorizationSocket: typeof socket.webSocket | undefined;
+    function cancelReconnect(): void {
+      if (reconnectAfterClose) socket.off("disconnect", reconnectAfterClose);
+      reconnectAfterClose = null;
+    }
     function abortPersists(): void {
       for (const abort of persistAborts) abort.abort();
       persistAborts.clear();
@@ -217,6 +242,8 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
     onScopeDispose(() => {
       persistActive = false;
       abortPersists();
+      cancelReconnect();
+      reauthorizing.delete(provider);
     });
     // A provider was authenticated for one actor. Changing awareness does not
     // authenticate that socket for another user, including A → B → A.
@@ -225,7 +252,11 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
       (_next, previous) => {
         if (previous !== undefined) {
           persistActive = false;
+          retiredAuthorization.add(provider);
+          readOnly.value = true;
+          unauthorized.value = true;
           abortPersists();
+          cancelReconnect();
         }
       },
       { flush: "sync" },
@@ -251,14 +282,24 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
       if (state) synced.value = true;
     });
     listen("authenticated", ({ scope }) => {
+      if (!persistActive) return;
+      if (
+        oldAuthorizationSocket !== undefined &&
+        (!socket.webSocket || socket.webSocket === oldAuthorizationSocket)
+      )
+        return;
+      oldAuthorizationSocket = undefined;
+      reauthorizing.delete(provider);
       readOnly.value = scope === "readonly";
       unauthorized.value = false;
       if (readOnly.value) abortPersists();
     });
     listen("authenticationFailed", () => {
+      if (reauthorizing.has(provider)) retiredAuthorization.add(provider);
       unauthorized.value = true;
       persistActive = false;
       abortPersists();
+      cancelReconnect();
     });
     listen("unsyncedChanges", ({ number }) => {
       unsent.value = number > 0;
@@ -282,6 +323,75 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
     watch(() => `${bind.value.ack.documentId}\0${bind.value.ack.connectionId}`, abortPersists, {
       flush: "sync",
     });
+
+    // A readonly grant is frozen for the server connection. Reuse the SDK's
+    // socket close/connect handshake once for a real permission edge, retaining
+    // the provider, Y.Doc and clientID. Only authenticated(scope) changes readOnly.
+    let credential: string | null = null;
+    let previousWritable: boolean | null = null;
+    let grantPending = false;
+    const authenticationEpoch = shallowRef(0);
+    listen("authenticated", () => {
+      authenticationEpoch.value++;
+    });
+    watch(
+      () => {
+        const next = authorization ? toValue(authorization) : null;
+        return [
+          next?.actorId,
+          next?.sessionId,
+          next?.writable,
+          next?.roomName,
+          toValue(user)?.id,
+          authenticationEpoch.value,
+          connectionStatus.value,
+        ] as const;
+      },
+      ([actorId, sessionId, writable, targetName, userId]) => {
+        if (!authorization) return;
+        const nextCredential = actorId && sessionId ? `${actorId}\0${sessionId}` : null;
+        if (
+          (credential !== null && nextCredential !== credential) ||
+          (targetName !== undefined && targetName !== name)
+        ) {
+          persistActive = false;
+          retiredAuthorization.add(provider);
+          readOnly.value = true;
+          unauthorized.value = true;
+          abortPersists();
+          cancelReconnect();
+        }
+        if (!persistActive || !nextCredential || actorId !== userId) {
+          grantPending = false;
+          return;
+        }
+        credential = nextCredential;
+        if (writable === false) {
+          abortPersists();
+        }
+        if (writable === true && previousWritable === false) grantPending = true;
+        if (writable !== true) grantPending = false;
+        previousWritable = writable ?? null;
+        if (!grantPending || !provider.isAuthenticated || connectionStatus.value !== "connected")
+          return;
+        grantPending = false;
+        if (!readOnly.value || reconnectAfterClose) return;
+        abortPersists();
+        bind.value = syncPersistBind(bind.value, { provider, status: "disconnected", documentId });
+        reauthorizing.add(provider);
+        oldAuthorizationSocket = socket.webSocket;
+        reconnectAfterClose = () => {
+          cancelReconnect();
+          if (disposed || !persistActive || room.value.generation !== generation) return;
+          // The SDK cleans up the old WebSocket before emitting disconnect.
+          // Starting its existing retry loop here also avoids a second loop.
+          void socket.connect().catch(() => {});
+        };
+        socket.on("disconnect", reconnectAfterClose);
+        socket.disconnect();
+      },
+      { immediate: true, flush: "sync" },
+    );
 
     const onUpdate = () => {
       bind.value = reducePersistBind(bind.value, { type: "edit" });
@@ -342,6 +452,7 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
         !persistActive ||
         readOnly.value ||
         unauthorized.value ||
+        (authorization && toValue(authorization)?.writable !== true) ||
         connectionStatus.value !== "connected"
       )
         return Promise.reject(new Error("collab persist unavailable"));

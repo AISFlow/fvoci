@@ -18,6 +18,17 @@ pub enum Request {
         #[serde(default = "encoding_v1")]
         encoding: u8,
     },
+    /// One-shot archive load and retained inventory in the isolated worker.
+    ArchiveLoad {
+        #[serde(default, with = "b64::option")]
+        snapshot_b64: Option<Vec<u8>>,
+        #[serde(default, with = "b64::vec_of")]
+        tail_b64: Vec<Vec<u8>>,
+        #[serde(default = "encoding_v1")]
+        encoding: u8,
+        /// Parent SHA256 binds exact capture/cut/ordered tails/revisions/kind/ID.
+        capture_binding: String,
+    },
     /// Apply a candidate updateV1. Parent must not treat success as durable.
     Apply {
         #[serde(with = "b64")]
@@ -60,6 +71,14 @@ pub enum Request {
         #[serde(default = "encoding_v1")]
         encoding: u8,
     },
+    /// Archive-only strict saved-snapshot/captured-history proof, followed by
+    /// the existing validation-only scratch restoration. No durable edit.
+    ArchiveRestoreFromSnapshot {
+        #[serde(with = "b64")]
+        snap_b64: Vec<u8>,
+        #[serde(default = "encoding_v1")]
+        encoding: u8,
+    },
     /// Compute a forward updateV1 that replaces the live `prosemirror` fragment
     /// with the fragment of a standalone Doc built from `update_b64` (an external
     /// body write seeded from Tiptap JSON). Does not mutate the live Doc; the
@@ -89,10 +108,12 @@ impl Request {
     pub fn encoding(&self) -> u8 {
         match self {
             Self::Load { encoding, .. }
+            | Self::ArchiveLoad { encoding, .. }
             | Self::Apply { encoding, .. }
             | Self::Sync { encoding, .. }
             | Self::Project { encoding }
             | Self::RestoreFromSnapshot { encoding, .. }
+            | Self::ArchiveRestoreFromSnapshot { encoding, .. }
             | Self::ReplaceFromUpdate { encoding, .. }
             | Self::SeedFromTiptap { encoding, .. } => *encoding,
             Self::Ping
@@ -120,10 +141,16 @@ impl Request {
             Self::Sync {
                 state_vector_b64, ..
             } => state_vector_b64.len() as u64,
-            Self::RestoreFromSnapshot { snap_b64, .. } => snap_b64.len() as u64,
+            Self::RestoreFromSnapshot { snap_b64, .. }
+            | Self::ArchiveRestoreFromSnapshot { snap_b64, .. } => snap_b64.len() as u64,
             Self::ReplaceFromUpdate { update_b64, .. } => update_b64.len() as u64,
             Self::SeedFromTiptap { content_json, .. } => content_json.len() as u64,
             Self::Load {
+                snapshot_b64,
+                tail_b64,
+                ..
+            }
+            | Self::ArchiveLoad {
                 snapshot_b64,
                 tail_b64,
                 ..
@@ -133,16 +160,35 @@ impl Request {
 
     pub fn tail_rows(&self) -> usize {
         match self {
-            Self::Load { tail_b64, .. } => tail_b64.len(),
+            Self::Load { tail_b64, .. } | Self::ArchiveLoad { tail_b64, .. } => tail_b64.len(),
             _ => 0,
         }
     }
 
     /// Cap blobs/rows before `serde_json::to_vec` allocates a base64 copy.
     pub fn preflight(&self, limits: &Limits) -> Result<(), EngineStatus> {
+        if let Self::ArchiveLoad {
+            capture_binding, ..
+        } = self
+        {
+            if capture_binding.len() != 64
+                || !capture_binding
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            {
+                return Err(EngineStatus::Malformed {
+                    detail: "archive capture binding".into(),
+                });
+            }
+        }
         cap_load_parts(
             match self {
                 Self::Load {
+                    snapshot_b64,
+                    tail_b64,
+                    ..
+                }
+                | Self::ArchiveLoad {
                     snapshot_b64,
                     tail_b64,
                     ..
@@ -216,7 +262,23 @@ pub fn preflight_wire_json(v: &Value, limits: &Limits) -> Result<(), EngineStatu
     let Some(obj) = v.as_object() else {
         return Ok(());
     };
-    if obj.get("op").and_then(Value::as_str) != Some("load") {
+    let op = obj.get("op").and_then(Value::as_str);
+    if op == Some("archive_load")
+        && obj
+            .get("capture_binding")
+            .and_then(Value::as_str)
+            .is_none_or(|s| {
+                s.len() != 64
+                    || !s
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            })
+    {
+        return Err(EngineStatus::Malformed {
+            detail: "archive capture binding".into(),
+        });
+    }
+    if !matches!(op, Some("load" | "archive_load")) {
         if let Some(s) = obj.get("update_b64").and_then(Value::as_str) {
             cap_b64_field("update_b64", s, limits)?;
         }

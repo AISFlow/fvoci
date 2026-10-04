@@ -61,6 +61,8 @@ pub struct SecretsVerifyReport {
     pub webhooks: SealedTableReport,
     /// VAPID private key sealed as `vapid:1`.
     pub vapid: SealedTableReport,
+    /// Owner-private Zotero connector credentials, never serialized values.
+    pub zotero: SealedTableReport,
     /// How many sealed values name each key id (rotation: a key id still in
     /// use here must stay in the keyring).
     pub key_ids_in_use: BTreeMap<String, u64>,
@@ -74,6 +76,7 @@ impl SecretsVerifyReport {
             + self.workspace_oidc.failed()
             + self.webhooks.failed()
             + self.vapid.failed()
+            + self.zotero.failed()
     }
 
     pub fn is_complete(&self) -> bool {
@@ -133,6 +136,9 @@ pub async fn verify_sealed_secrets(
     let vapid: Option<String> = sqlx::query_scalar("SELECT fvoci.app_vapid_private_key()")
         .fetch_one(&mut *tx)
         .await?;
+    let zotero: Vec<(Uuid, Uuid, Uuid, String)> = sqlx::query_as(
+        "SELECT connector_id, workspace_id, owner_user_id, sealed_key FROM fvoci.zotero_credentials ORDER BY connector_id"
+    ).fetch_all(&mut *tx).await?;
     tx.commit().await?;
 
     let mut report = SecretsVerifyReport {
@@ -141,6 +147,17 @@ pub async fn verify_sealed_secrets(
         ..Default::default()
     };
     let in_use = &mut report.key_ids_in_use;
+    for (id, tenant, owner, sealed) in &zotero {
+        check(
+            keys,
+            &mut report.zotero,
+            in_use,
+            *id,
+            sealed,
+            &crate::integrations::zotero::secret_context(*tenant, *owner, *id),
+        );
+    }
+
     for (user_id, sealed) in &mfa {
         let context = user_mfa_context(*user_id);
         check(

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { expect, test, type BrowserContext, type Page, type Response } from "@playwright/test";
 import { login } from "./helpers";
 import { createHash } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const workspaceListSchema = z
@@ -48,18 +48,27 @@ const collectionQuerySchema = z
 
 test.describe.configure({ mode: "serial" });
 async function fixture(page: Page, key: string) {
-  const served: Promise<{ path: string; sha256: string }>[] = [];
+  const observedAssets: { url: string; path: string; status: number }[] = [];
+  const bodylessAssets: { path: string; status: number; redirectedFrom: string | null }[] = [];
   const captureAsset = (response: Response) => {
     const path = new URL(response.url()).pathname;
     if (path.startsWith("/assets/") && /\.(js|css)$/.test(path)) {
-      served.push(
-        response.body().then((body) => ({
-          path: path.slice(1),
-          sha256: createHash("sha256").update(body).digest("hex"),
-        })),
-      );
+      const status = response.status();
+      if (status >= 300 && status < 400) {
+        const previous = response.request().redirectedFrom();
+        bodylessAssets.push({
+          path,
+          status,
+          redirectedFrom: previous ? new URL(previous.url()).pathname : null,
+        });
+        return;
+      }
+      // Only retain transport metadata here. Setup/auth can replace the
+      // document before Chromium's deferred getResponseBody completes.
+      observedAssets.push({ url: response.url(), path, status });
     }
   };
+  page.on("response", captureAsset);
   await page.goto("/");
   await expect(
     page
@@ -112,25 +121,68 @@ async function fixture(page: Page, key: string) {
     return taskDatesSchema.parse(await res.json());
   }
   async function open(month = "2027-05") {
-    page.on("response", captureAsset);
     await page.goto(`/w/caltemplate/${key}/calendar`);
     await expect(page).toHaveURL(`/w/caltemplate/${key}/calendar`);
     await expect(page.locator("[data-v-app]")).toHaveCount(1);
     await page.locator('input[type="month"]').fill(month);
     await expect(page.locator('table[data-testid="collection-calendar"]')).toBeVisible();
+    page.off("response", captureAsset);
+    const assets: { path: string; sha256: string; bytes: number; loadedStatus: number }[] = [];
+    const measured = new Set<string>();
+    for (const asset of observedAssets) {
+      expect(new URL(asset.url).origin, `loaded asset ${asset.path} origin`).toBe(
+        new URL(page.url()).origin,
+      );
+      expect(asset.status, `loaded asset ${asset.path} status`).toBeGreaterThanOrEqual(200);
+      expect(asset.status, `loaded asset ${asset.path} status`).toBeLessThan(300);
+      if (measured.has(asset.url)) continue;
+      // This measures a fresh HTTP response for an observed loaded URL, not
+      // the original browser body. APIRequestContext owns these bytes across
+      // page navigation and bypasses Chromium's cache/CDP retention.
+      const response = await page.request.get(asset.url, { maxRedirects: 0 });
+      expect(response.ok(), `served asset ${asset.path} status ${String(response.status())}`).toBe(
+        true,
+      );
+      const body = await response.body();
+      expect(body.length, `served asset ${asset.path} has a body`).toBeGreaterThan(0);
+      const sha256 = createHash("sha256").update(body).digest("hex");
+      const candidate = readFileSync(new URL(`../dist${asset.path}`, import.meta.url));
+      expect(sha256, `served asset ${asset.path} matches candidate dist`).toBe(
+        createHash("sha256").update(candidate).digest("hex"),
+      );
+      assets.push({
+        path: asset.path.slice(1),
+        sha256,
+        bytes: body.length,
+        loadedStatus: asset.status,
+      });
+      measured.add(asset.url);
+      await response.dispose();
+    }
+    expect(assets.length, "successful terminal asset responses were captured").toBeGreaterThan(0);
+    expect(
+      assets.some((asset) => asset.path.endsWith(".js")),
+      "candidate JS was served",
+    ).toBe(true);
+    expect(
+      assets.some((asset) => asset.path.endsWith(".css")),
+      "candidate CSS was served",
+    ).toBe(true);
     writeFileSync(
       `/tmp/fvoci-front272-calendar-served-${key}.json`,
       JSON.stringify(
         {
           head: process.env.FVOCI_CALENDAR_VERIFY_HEAD ?? "unbound",
           url: new URL(page.url()).pathname,
-          assets: await Promise.all(served),
+          assets,
+          bodylessAssets,
+          measurement: "http-refetch-of-observed-loaded-url",
+          originalBrowserBody: "NOTMEASURED",
         },
         null,
         2,
       ),
     );
-    page.off("response", captureAsset);
   }
   return { base, project, task, stored, open };
 }
@@ -279,6 +331,21 @@ test("offline fields retry interaction keeps the Calendar draft through reconnec
   await offlineCalendarScenario(page, context, "OFFLINERETRY", true, true);
 });
 
+for (const metadata of ["collection", "views"] as const)
+  test(`cached ${metadata} transport failure keeps the Calendar draft through owned retry and reconnect`, async ({
+    page,
+    context,
+  }) => {
+    await offlineCalendarScenario(
+      page,
+      context,
+      metadata === "collection" ? "COLREFRESH" : "VIEWREFRESH",
+      true,
+      true,
+      metadata,
+    );
+  });
+
 test("online fields transport failure keeps the Calendar draft while visible retry initiates a real GET", async ({
   page,
 }) => {
@@ -344,7 +411,12 @@ test("online fields transport failure keeps the Calendar draft while visible ret
 });
 
 function fieldsErrorLocator(page: Page) {
-  return page.locator('section[data-testid="collection-calendar"] > [role="alert"]');
+  // CollectionContents renders the cached-fields error immediately before its
+  // toolbar. Rows can independently fail offline and render another direct alert;
+  // target the fields retry owner without hiding or conflating those two errors.
+  return page.locator(
+    'section[data-testid="collection-calendar"] > [role="alert"]:has(+ .collection-toolbar)',
+  );
 }
 
 async function offlineCalendarScenario(
@@ -353,6 +425,7 @@ async function offlineCalendarScenario(
   key: string,
   fieldsBarrier = false,
   offlineRetry = false,
+  metadata: "fields" | "collection" | "views" = "fields",
 ): Promise<void> {
   const f = await fixture(page, key);
   const point = await f.task("DST point", {});
@@ -389,7 +462,10 @@ async function offlineCalendarScenario(
     const collection = idSchema.parse(
       await (await page.request.get(`${f.base}/projects/${f.project.id}/collection`)).json(),
     );
-    const fieldsPath = `${f.base}/collections/${collection.id}/fields`;
+    const fieldsPath =
+      metadata === "collection"
+        ? `${f.base}/projects/${f.project.id}/collection`
+        : `${f.base}/collections/${collection.id}/${metadata}`;
     const { promise: fieldsStarted, resolve: markFieldsStarted } = deferred();
     const { promise: fieldsGate, resolve: releaseFields } = deferred();
     await page.route(`**${fieldsPath}`, async (route) => {
@@ -397,13 +473,26 @@ async function offlineCalendarScenario(
       await fieldsGate;
       await route.continue();
     });
-    // A real peer write reaches the mounted project's SSE subscription. Its
-    // metadata refetch begins online; only fields crosses the offline boundary.
-    const siblings = [
+    // Correlate requests intercepted after these gates are installed, not any
+    // historical200. Siblings always fetch genuine Rust responses, including a
+    // later invalidation round: only the selected request uses browser offline.
+    const siblingPaths = [
+      `${f.base}/collections/${collection.id}/fields`,
       `${f.base}/projects/${f.project.id}/collection`,
       `${f.base}/collections/${collection.id}/views`,
       `${f.base}/collections/${collection.id}/query`,
-    ].map((path) => page.waitForResponse((r) => r.url().endsWith(path) && r.ok()));
+    ].filter((path) => path !== fieldsPath);
+    const siblings = siblingPaths.map((path) => {
+      const { promise, resolve } = deferred();
+      return { path, promise, resolve };
+    });
+    for (const sibling of siblings)
+      await page.route(`**${sibling.path}`, async (route) => {
+        const response = await route.fetch();
+        expect(response.status()).toBe(200);
+        await route.fulfill({ response });
+        sibling.resolve();
+      });
     expect(
       (
         await page.request.patch(`${f.base}/tasks/${point.id}`, {
@@ -412,7 +501,7 @@ async function offlineCalendarScenario(
       ).ok(),
     ).toBe(true);
     await fieldsStarted;
-    await Promise.all(siblings);
+    await Promise.all(siblings.map((sibling) => sibling.promise));
     const fieldsFailed = page.waitForEvent("requestfailed", {
       predicate: (request) => request.url().endsWith(fieldsPath),
     });
@@ -423,11 +512,15 @@ async function offlineCalendarScenario(
       await expect(popover).toHaveAttribute("data-state", "open");
       await expect(editor).toBeVisible();
       expect(await input.evaluate((node, previous) => node === previous, draftNode)).toBe(true);
-      const fieldsError = fieldsErrorLocator(page);
+      const fieldsError =
+        metadata === "collection"
+          ? page.locator('[role="alert"]:has(+ section[data-testid="collection-calendar"])')
+          : fieldsErrorLocator(page);
       await expect(fieldsError).toBeVisible();
       await expect(fieldsError.getByRole("button", { name: "다시 시도" })).toBeVisible();
       expect(patches).toBe(0);
       await page.unroute(`**${fieldsPath}`);
+      for (const sibling of siblings) await page.unroute(`**${sibling.path}`);
       const recovered = page.waitForResponse(
         (response) => response.url().endsWith(fieldsPath) && response.ok(),
       );
@@ -481,6 +574,24 @@ async function offlineCalendarScenario(
   await expect(
     page.locator('td[data-date="2026-11-02"]').getByTestId(`collection-preview-${point.displayId}`),
   ).toBeVisible();
+  const browser = required(context.browser());
+  const fresh = await browser.newContext({ storageState: await context.storageState() });
+  try {
+    const freshPage = await fresh.newPage();
+    await freshPage.goto(page.url());
+    await freshPage.locator('input[type="month"]').fill("2026-11");
+    await expect(freshPage.getByTestId(`collection-preview-${point.displayId}`)).toBeVisible();
+    const response = await fresh.request.get(
+      `${new URL(page.url()).origin}${f.base}/tasks/${point.id}`,
+    );
+    expect(response.status()).toBe(200);
+    expect(taskDatesSchema.parse(await response.json())).toMatchObject({
+      id: point.id,
+      dueAt: "2026-11-02T14:30:00Z",
+    });
+  } finally {
+    await fresh.close();
+  }
 }
 
 test("custom date editor retains stale item guard, rolls back conflict and preserves draft for explicit retry", async ({

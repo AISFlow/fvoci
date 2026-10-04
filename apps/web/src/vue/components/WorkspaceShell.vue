@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
+import { ProblemError } from "@/lib/api";
 import UButton from "@nuxt/ui/components/Button.vue";
 import UDashboardGroup from "@nuxt/ui/components/DashboardGroup.vue";
 import UDashboardPanel from "@nuxt/ui/components/DashboardPanel.vue";
 import UDashboardNavbar from "@nuxt/ui/components/DashboardNavbar.vue";
 import UNavigationMenu from "@nuxt/ui/components/NavigationMenu.vue";
 import { useQuery } from "@tanstack/vue-query";
-import { computed } from "vue";
+import { computed, onScopeDispose, provide, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import AppLink from "./AppLink.vue";
-import { followAppHref } from "../session/navigation";
+import { followAppHref, redirectTo } from "../session/navigation";
 import { landingPath, type WorkspaceNav } from "@/features/workspace/workspace-nav";
 import {
   myTasksPath,
@@ -19,9 +20,18 @@ import {
   wikiPath,
   workspaceHomePath,
 } from "@/lib/href";
-import { workspacesQuery } from "@/lib/queries";
+import { meQuery, workspacesQuery } from "@/lib/queries";
+import { logout as logoutRequest } from "@/features/notifications/push-logout";
+import {
+  createSourceDraftRetirement,
+  sourceDraftAuthRetiredKey,
+  type SourceDraftAuthScope,
+} from "../composables/useSourceDraftGuard";
+import { projectsQuery } from "@/features/projects/queries";
+import { useTaskStreams } from "../composables/useTaskStream";
 import LegalNav from "../features/shell/LegalNav.vue";
 import NotificationBell from "../features/shell/NotificationBell.vue";
+import PersonalInputDialog from "../features/capture/PersonalInputDialog.vue";
 import SearchPalette from "../features/shell/SearchPalette.vue";
 import { useLogout } from "../features/shell/useLogout";
 import { usePushSessionRebind } from "../features/shell/usePushSessionRebind";
@@ -42,6 +52,11 @@ const props = withDefaults(
 
 const router = useRouter();
 const workspaces = useQuery(workspacesQuery);
+const projects = useQuery(() => projectsQuery(props.workspaceId));
+useTaskStreams(
+  () => props.workspaceId,
+  () => projects.data.value?.items.map((project) => project.id) ?? [],
+);
 const items = computed(() => workspaces.data.value?.items ?? []);
 // Nuxt UI Dashboard template, fixed 57e8a76e: layouts/default.vue menu
 // and pages/index.vue panel/header slots, connected to the existing FVOCI paths.
@@ -55,7 +70,50 @@ const navigation = computed(() =>
     { label: t("nav.settings"), to: settingsPath(props.slug), active: props.active === "settings" },
   ].map((item) => ({ ...item, exact: true })),
 );
-const { error: logoutError, logout } = useLogout();
+const me = useQuery(meQuery);
+const logoutLifetime = ref(0);
+watch(
+  [
+    () => props.workspaceId,
+    () => me.data.value?.userId,
+    () => me.data.value?.sessionId,
+    () => me.error.value instanceof ProblemError && me.error.value.status === 401,
+  ],
+  () => {
+    logoutLifetime.value++;
+  },
+  { flush: "sync" },
+);
+onScopeDispose(() => {
+  logoutLifetime.value++;
+});
+const retirement = createSourceDraftRetirement(() => ({
+  actorId: me.data.value?.userId ?? null,
+  credentialId: me.data.value?.sessionId ?? null,
+  workspaceId: props.workspaceId,
+  lifetime: logoutLifetime.value,
+}));
+provide(sourceDraftAuthRetiredKey, retirement.denied);
+let logoutScope: SourceDraftAuthScope | null = null;
+const logoutPending = ref(false);
+const { error: logoutError, logout: performLogout } = useLogout({
+  request: () => {
+    logoutScope = retirement.capture();
+    return logoutRequest();
+  },
+  redirect: (path) => {
+    if (logoutScope && retirement.retire(logoutScope)) redirectTo(path);
+  },
+});
+async function logout(): Promise<void> {
+  if (logoutPending.value) return;
+  logoutPending.value = true;
+  try {
+    await performLogout();
+  } finally {
+    logoutPending.value = false;
+  }
+}
 usePushSessionRebind(() => props.workspaceId);
 
 function onSwitch(event: Event): void {
@@ -118,14 +176,20 @@ function onSwitch(event: Event): void {
                 data-slot="workspace-name"
                 >{{ workspaceName }}</span
               >
+              <PersonalInputDialog :workspace-id="workspaceId" />
               <SearchPalette :slug="slug" :workspace-id="workspaceId" />
               <NotificationBell :slug="slug" :workspace-id="workspaceId" />
               <AppLink to="/settings/account" class="underline underline-offset-2">
                 {{ t("settings.account") }}
               </AppLink>
-              <UButton size="sm" variant="outline" color="neutral" @click="logout">{{
-                t("nav.logout")
-              }}</UButton>
+              <UButton
+                size="sm"
+                variant="outline"
+                color="neutral"
+                :disabled="logoutPending"
+                @click="logout"
+                >{{ t("nav.logout") }}</UButton
+              >
             </div>
           </template>
         </UDashboardNavbar>

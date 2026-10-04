@@ -413,10 +413,10 @@ test("grouped board pages each column and moves cards by drag or select through 
     }
   });
 
-  // Hold the project stream until the column's "load more" is in flight, and that
+  // Hold the pooled workspace task stream until the column's "load more" is in flight, and that
   // page until the stream has opened, so the stream's `open` resync lands while the
   // page loads: the order that dropped the requested page.
-  const streamPath = `${base}/projects/${project.id}/stream`;
+  const streamPath = `${base}/task-stream`;
   const { promise: loadMoreInFlight, resolve: loadMoreSent } = deferred();
   await page.route(
     (url) => url.pathname === streamPath,
@@ -433,10 +433,13 @@ test("grouped board pages each column and moves cards by drag or select through 
       if (nextPageHeld || !body.cursor) return route.continue();
       nextPageHeld = true;
       const streamOpened = page.waitForResponse(
-        (response) => new URL(response.url()).pathname === streamPath,
+        (response) =>
+          new URL(response.url()).pathname === streamPath && response.request().method() === "GET",
       );
       loadMoreSent();
-      await streamOpened;
+      const streamResponse = await streamOpened;
+      expect(streamResponse.status()).toBe(200);
+      expect(streamResponse.headers()["content-type"] ?? "").toContain("text/event-stream");
       await route.continue();
     },
   );

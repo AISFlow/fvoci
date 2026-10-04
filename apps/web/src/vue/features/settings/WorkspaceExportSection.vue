@@ -4,6 +4,7 @@ import UButton from "@nuxt/ui/components/Button.vue";
 import { ref } from "vue";
 import { api, ensureOk, loadErrorMessage } from "@/lib/api";
 import "@/features/settings/settings-shell.css";
+import NativeArchiveSection from "./NativeArchiveSection.vue";
 
 const props = defineProps<{ workspaceId: string; canManage: boolean }>();
 const pending = ref(false);
@@ -48,4 +49,5 @@ async function download(): Promise<void> {
     }}</UButton>
     <p v-if="error" role="alert" class="settings-notice settings-notice--danger">{{ error }}</p>
   </section>
+  <NativeArchiveSection :workspace-id="workspaceId" :can-manage="canManage" mode="export" />
 </template>

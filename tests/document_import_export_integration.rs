@@ -7,6 +7,9 @@ mod project_harness;
 #[path = "support/import_harness.rs"]
 mod import_harness;
 
+#[path = "document_import_export_integration/native_archive.rs"]
+mod native_archive;
+
 use std::io::Write;
 use std::time::Duration;
 

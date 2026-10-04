@@ -92,6 +92,37 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/044_email_change_auth_generation.sql"),
         44,
     ),
+    (
+        include_str!("../../migrations/045_personal_input_commands.sql"),
+        45,
+    ),
+    (include_str!("../../migrations/046_native_archives.sql"), 46),
+    (
+        include_str!("../../migrations/047_personal_transfer_commands.sql"),
+        47,
+    ),
+    (include_str!("../../migrations/048_task_timers.sql"), 48),
+    (
+        include_str!("../../migrations/049_task_estimate_unit.sql"),
+        49,
+    ),
+    (
+        include_str!("../../migrations/050_revision_restore_metadata.sql"),
+        50,
+    ),
+    (include_str!("../../migrations/051_zotero_readonly.sql"), 51),
+    (
+        include_str!("../../migrations/052_timer_receipt_restore_provenance.sql"),
+        52,
+    ),
+    (
+        include_str!("../../migrations/053_timer_receipt_historical_run.sql"),
+        53,
+    ),
+    (
+        include_str!("../../migrations/054_timer_audit_actor_index.sql"),
+        54,
+    ),
 ];
 
 pub(crate) const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -732,6 +763,46 @@ mod tests {
         (
             44,
             "bfabdbe0270e7275212aa45489405d2651526b34108c6d50ff718e243c363d5d",
+        ),
+        (
+            45,
+            "34ba8efcdc7d13f9921611aba74a1a9bc13c88c25d8ffcb35282de4919b9f561",
+        ),
+        (
+            46,
+            "28a0fcfd7b95711c7bd6e17d49c331a26411046551c0ce3bf6509fb48120a1ad",
+        ),
+        (
+            47,
+            "2ec47baddc7570820e2101a8c7dbce72ca7678d84dbf2683e4a463c0b05ac47b",
+        ),
+        (
+            48,
+            "b7f943996e9cc9918c90ceb780db285708a31c165368064cd17eb0a5f14ed787",
+        ),
+        (
+            49,
+            "ea1cc0783489ce6866a46c6b1363e5bfd89e76f026f27d0ca7615b02c2ece219",
+        ),
+        (
+            50,
+            "201e77d18302c25e2b933168d4678a6bb27e251454f1d9d42e5f3aa0ceda09bf",
+        ),
+        (
+            51,
+            "aa9315e174e62a101045fd5f254bf98e9f2ca70a08e801e2862d7c0aaaf50008",
+        ),
+        (
+            52,
+            "7472a27beda41856d5c93e6a428a0913571696c2727759a6dcf5eabcf78253f3",
+        ),
+        (
+            53,
+            "1fac26baa0b5ebaaf97312131dfd10cfb024ad4e516307a95dea5a3653fe5a89",
+        ),
+        (
+            54,
+            "53a6ed1058565b61305ed34c41b90a80a2d3f0dd55a4d818813672b1ac43afbc",
         ),
     ];
 

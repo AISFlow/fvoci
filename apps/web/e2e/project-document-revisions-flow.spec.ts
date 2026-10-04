@@ -241,7 +241,9 @@ test("project long title wraps and remains readable after archive without hiding
   await options.click();
   await expect(page.getByLabel("아이콘")).toBeDisabled();
   await expect(page.getByLabel("문서 상태")).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Markdown", exact: true })).toBeEnabled();
+  await expect(
+    page.locator(".document-export-menu").getByRole("button", { name: "Markdown", exact: true }),
+  ).toBeEnabled();
   await options.press("Escape");
   await expect(options).toBeFocused();
   await expect(options).toHaveAttribute("aria-expanded", "false");

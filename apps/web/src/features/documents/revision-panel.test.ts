@@ -127,13 +127,30 @@ function hostPersist(file: string, available: boolean, delayed = false) {
     t: (key: string) => key,
     Error,
   };
-  const lifetimeStart = script.indexOf("let persistLifecycle =");
-  assert.ok(lifetimeStart > 0);
+  // Execute only the actual persist owner and its retirement subscriptions.
+  // Unrelated source-draft/export helpers between these declarations are not
+  // dependencies of persistBody and must not become accidental VM imports.
+  const lifetime = parsed.statements.filter((node) => {
+    if (ts.isVariableStatement(node))
+      return node.declarationList.declarations.some(
+        (declaration) =>
+          ts.isIdentifier(declaration.name) && declaration.name.text === "persistLifecycle",
+      );
+    return (
+      ts.isExpressionStatement(node) &&
+      ts.isCallExpression(node.expression) &&
+      ["watch", "onScopeDispose"].includes(node.expression.expression.getText(parsed)) &&
+      node.expression.arguments.some((argument) =>
+        argument.getText(parsed).includes("persistLifecycle.value++"),
+      )
+    );
+  });
+  assert.equal(lifetime.length, 3, "actual lifetime ref, synchronous watcher and disposal");
   const owner = Vue.effectScope();
   const callable: unknown = owner.run((): unknown =>
     runInNewContext(
       new Bun.Transpiler({ loader: "ts" }).transformSync(
-        `(() => {${script.slice(lifetimeStart, fn.end)}; return persistBody;})()`,
+        `(() => {${lifetime.map((node) => node.getText(parsed)).join("\n")};${fn.getText(parsed)}; return persistBody;})()`,
       ),
       context,
     ),

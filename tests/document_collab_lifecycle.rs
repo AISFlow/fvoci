@@ -619,12 +619,16 @@ async fn project_document_revision_create_and_forward_restore() {
         assert_ne!(edited["contentJson"], original["contentJson"]);
 
         let before = document_tail_seq(&owner.pool, workspace_id, document_id).await;
+        let (preview_status, preview) = collab_http_json(addr, reqwest::Method::GET,
+            &format!("{base}/{revision_id}/restore-preview"), &token, None).await;
+        assert_eq!(preview_status, reqwest::StatusCode::OK, "{preview}");
+        let restore_body = serde_json::json!({"correlationId": Uuid::now_v7(), "expectedTailSeq": preview["currentTailSeq"]});
         let (status, restored) = collab_http_json(
             addr,
             reqwest::Method::POST,
             &format!("{base}/{revision_id}/restore"),
             &token,
-            Some(json!({})),
+            Some(restore_body.clone()),
         )
         .await;
         assert_eq!(status, reqwest::StatusCode::OK, "{restored}");
@@ -664,7 +668,7 @@ async fn project_document_revision_create_and_forward_restore() {
             reqwest::Method::POST,
             &format!("{base}/{revision_id}/restore"),
             &token,
-            Some(json!({})),
+            Some(restore_body.clone()),
         )
         .await;
         assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");

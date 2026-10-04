@@ -180,6 +180,9 @@ fn integrations(outbound: Outbound) -> Arc<Integrations> {
     Arc::new(Integrations {
         encryption_keys: Some(keys()),
         outbound,
+        zotero: fvoci_server::integrations::zotero::ZoteroClient::system(
+            fvoci_server::integrations::outbound::Outbound::system(Default::default()),
+        ),
         github: None,
         ai: None,
     })
@@ -1287,6 +1290,9 @@ fn github_config(addr: SocketAddr) -> GithubConfig {
 
 fn github_integrations(addr: SocketAddr) -> Arc<Integrations> {
     Arc::new(Integrations {
+        zotero: fvoci_server::integrations::zotero::ZoteroClient::system(
+            fvoci_server::integrations::outbound::Outbound::system(Default::default()),
+        ),
         github: Some(github_config(addr)),
         ..(*integrations(outbound("", &[]))).clone()
     })
@@ -1967,6 +1973,9 @@ async fn ai_routes_are_member_gated_and_use_the_document_markdown() {
     let admin = admin_pool(&harness).await;
     let state = app_state(&harness.app_url).await;
     let enabled = Arc::new(Integrations {
+        zotero: fvoci_server::integrations::zotero::ZoteroClient::system(
+            fvoci_server::integrations::outbound::Outbound::system(Default::default()),
+        ),
         ai: Some(AiConfig::new("ai-secret")),
         ..(*integrations(outbound("", &[]))).clone()
     });
@@ -2826,6 +2835,9 @@ async fn ai_routes_follow_document_permission_and_rate_limit() {
     let admin = admin_pool(&harness).await;
     let state = app_state(&harness.app_url).await;
     let enabled = Arc::new(Integrations {
+        zotero: fvoci_server::integrations::zotero::ZoteroClient::system(
+            fvoci_server::integrations::outbound::Outbound::system(Default::default()),
+        ),
         ai: Some(AiConfig::new("ai-secret")),
         ..(*integrations(outbound("", &[]))).clone()
     });

@@ -20,6 +20,7 @@ pub const YJS_VERSION: &str = "13.6.32";
 pub const FRAGMENT: &str = "prosemirror";
 pub const ENCODING_V1: u8 = 1;
 
+pub mod archive_history;
 pub mod b64;
 pub mod frame;
 pub mod limits;

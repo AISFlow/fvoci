@@ -2,17 +2,28 @@
 import { formatPersonName, t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useQuery } from "@tanstack/vue-query";
-import { computed, ref } from "vue";
+import { computed, ref, useTemplateRef, watch } from "vue";
 import type { WorkflowStatus } from "@/features/projects/queries";
-import { runArchiveWithBodyPersist } from "@/features/tasks/task-archive-persist";
+import { taskOriginsQuery } from "@/features/collections/origin-api";
+import {
+  persistTaskBodyBeforeArchive,
+  runArchiveWithBodyPersist,
+} from "@/features/tasks/task-archive-persist";
 import type { LabelItem, MilestoneItem, TaskDetail, TaskListItem } from "@/features/tasks/queries";
 import { collabUserOf } from "@/features/documents/collab-model";
 import type { MemberOutput } from "@/lib/contracts";
+import { ProblemError } from "@/lib/api";
 import { projectTasksPath } from "@/lib/href";
-import { meQuery } from "@/lib/queries";
+import { meQuery, workspacesQuery } from "@/lib/queries";
 import { useCollabRoom, collabRoomName } from "../../collab/useCollabRoom";
 import AppLink from "../../components/AppLink.vue";
 import ConfirmActionButton from "../../components/ConfirmActionButton.vue";
+import PersonalTransferDialog from "../capture/PersonalTransferDialog.vue";
+import {
+  taskTransferDocument,
+  taskTransferPrepare,
+  type TaskHostSnapshot,
+} from "../capture/personal-transfer-command";
 import TaskCollectionProperties from "../collections/TaskCollectionProperties.vue";
 import TaskActivityPanel from "../comments/TaskActivityPanel.vue";
 import OriginPanel from "../documents/OriginPanel.vue";
@@ -22,6 +33,7 @@ import TaskBacklinks from "./TaskBacklinks.vue";
 import TaskBodyEditor from "./TaskBodyEditor.vue";
 import TaskDetailForm from "./TaskDetailForm.vue";
 import TaskTimeEntries from "./TaskTimeEntries.vue";
+import TaskStopwatch from "./TaskStopwatch.vue";
 import "@/features/projects/projects.css";
 
 const props = defineProps<{
@@ -77,7 +89,26 @@ const collabUser = computed(() => {
   const data = me.data.value;
   return data ? collabUserOf(data.userId, formatPersonName(data, data.locale)) : null;
 });
-const room = useCollabRoom(collabRoomName(props.workspaceId, "task", props.task.id), collabUser);
+const room = useCollabRoom(
+  collabRoomName(props.workspaceId, "task", props.task.id),
+  collabUser,
+  () => {
+    const actor = me.data.value;
+    if (
+      !actor ||
+      (me.error.value instanceof ProblemError && [401, 403].includes(me.error.value.status))
+    )
+      return null;
+    return {
+      roomName: collabRoomName(props.workspaceId, "task", props.task.id),
+      actorId: actor.userId,
+      sessionId: actor.sessionId,
+      writable: me.isError.value
+        ? null
+        : props.canEdit && !props.readOnly && props.task.archivedAt == null,
+    };
+  },
+);
 const session = room.session;
 
 const archivePersisting = ref(false);
@@ -92,6 +123,79 @@ const bodyReadOnly = computed(
 );
 const pageEditable = computed(() => !pageReadOnly.value && props.task.archivedAt == null);
 const archiveBusy = computed(() => props.archivePending || archivePersisting.value);
+
+// Transfer from the task page: only a personal task with its single origin
+// document. The mounted form's getter supplies its metadata drafts; the host
+// fences its own identity, auth session and pending flags around the body's
+// existing durable save (the archive barrier). Nothing is saved or discarded.
+const workspaces = useQuery(workspacesQuery);
+const taskOrigins = useQuery(() =>
+  taskOriginsQuery(props.workspaceId, { taskId: props.task.id }, null),
+);
+const transferDocumentId = computed(() =>
+  taskTransferDocument(
+    workspaces.data.value?.items,
+    props.workspaceId,
+    props.task.id,
+    taskOrigins.data.value,
+  ),
+);
+// The mounted form's exposed getter (W5 TaskDetailForm getMetadataDraftState).
+const form = useTemplateRef<{
+  getMetadataDraftState: () => NonNullable<TaskHostSnapshot["draft"]>;
+}>("form");
+const authRetired = computed(
+  () => me.error.value instanceof ProblemError && me.error.value.status === 401,
+);
+let hostGeneration = 0;
+watch(
+  [
+    () => props.workspaceId,
+    () => props.task.id,
+    () => props.formEpoch,
+    () => me.data.value?.userId,
+    () => me.data.value?.sessionId,
+    authRetired,
+  ],
+  () => {
+    hostGeneration += 1;
+  },
+  { flush: "sync" },
+);
+function readTaskHost(): TaskHostSnapshot {
+  return {
+    workspaceId: props.workspaceId,
+    taskId: props.task.id,
+    actorId: authRetired.value ? "" : (me.data.value?.userId ?? ""),
+    sessionId: authRetired.value ? "" : (me.data.value?.sessionId ?? ""),
+    generation: hostGeneration,
+    busy:
+      props.pending ||
+      archiveBusy.value ||
+      archiveInFlight ||
+      props.trashPending ||
+      props.clonePending ||
+      props.deletePending,
+    draft: form.value?.getMetadataDraftState() ?? null,
+    bodyGeneration: session.value?.generation ?? null,
+    bodyPending: session.value?.pending ?? false,
+  };
+}
+async function persistTransferBody(): Promise<boolean> {
+  try {
+    await persistTaskBodyBeforeArchive({
+      pageEditable: pageEditable.value,
+      session: session.value,
+      collabUser: collabUser.value,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function prepareTransfer(): Promise<boolean> {
+  return taskTransferPrepare(readTaskHost, persistTransferBody);
+}
 
 async function handleArchiveToggle(archived: boolean): Promise<void> {
   if (archiveInFlight || props.archivePending || archivePersisting.value) return;
@@ -141,8 +245,15 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
     <h1 class="task-detail__title">{{ task.title }}</h1>
     <div>
       <StarToggle :workspace-id="workspaceId" type="task" :target-id="task.id" />
+      <PersonalTransferDialog
+        v-if="!readOnly && transferDocumentId"
+        :workspace-id="workspaceId"
+        :document-id="transferDocumentId"
+        :prepare="prepareTransfer"
+      />
     </div>
     <TaskDetailForm
+      ref="form"
       :key="`${task.id}:${formEpoch ?? 0}`"
       :slug="slug"
       :workspace-id="workspaceId"
@@ -220,6 +331,12 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :workspace-id="workspaceId"
       :task-id="task.id"
       :members="members"
+      :read-only="metadataReadOnly"
+    />
+    <TaskStopwatch
+      :workspace-id="workspaceId"
+      :task-id="task.id"
+      :estimate="task.estimate"
       :read-only="metadataReadOnly"
     />
     <TaskActivityPanel

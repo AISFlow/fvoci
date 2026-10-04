@@ -916,6 +916,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/me/task-timer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["owner_state"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/task-timer/legacy-release": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["legacy_release"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/task-timer/stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["owner_cleanup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me/workspaces": {
         parameters: {
             query?: never;
@@ -1912,6 +1960,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/restore-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["preview_restore_revision"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/documents/{document_id}/sort": {
         parameters: {
             query?: never;
@@ -1922,6 +1986,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["sort_document"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/study-plan/task": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["study_plan_targets"];
+        put?: never;
+        post: operations["study_plan_task"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2312,6 +2392,54 @@ export interface paths {
         patch: operations["patch_member"];
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/native-archive/jobs/{job_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["status_native"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/native-archive/preflight": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["preflight_native"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/native-archive/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["restore_native"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/notification-prefs": {
         parameters: {
             query?: never;
@@ -2403,6 +2531,54 @@ export interface paths {
         put: operations["workspace_oidc_put"];
         post?: never;
         delete: operations["workspace_oidc_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/personal-input": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["create_personal_input"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/personal-transfers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["transfer_personal_item"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/personal-transfers/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["preview_personal_transfer"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -2792,6 +2968,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/revisions/{revision_id}/restore-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["preview_restore_project_document_revision"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/sort": {
         parameters: {
             query?: never;
@@ -2998,6 +3190,22 @@ export interface paths {
         options?: never;
         head?: never;
         patch: operations["update_milestone"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/projects/{project_id}/native-archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["export_native"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/workspaces/{workspace_id}/projects/{project_id}/restore": {
@@ -3512,6 +3720,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/revisions/{revision_id}/restore-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["preview_restore_task_revision"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/time-entries": {
         parameters: {
             query?: never;
@@ -3536,6 +3760,86 @@ export interface paths {
             cookie?: never;
         };
         get: operations["time_entries_rollup"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["task_state"];
+        put?: never;
+        post: operations["task_command"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/estimate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["task_estimate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["personal_history"];
+        put?: never;
+        post: operations["personal_manual"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/records/{record_id}/correct": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["personal_correction"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["personal_summary"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3750,6 +4054,70 @@ export interface paths {
         options?: never;
         head?: never;
         patch: operations["update_status"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/zotero": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list"];
+        put?: never;
+        post: operations["connect"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/zotero/libraries/{connector_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["read"];
+        put?: never;
+        post?: never;
+        delete: operations["disconnect"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/zotero/libraries/{connector_id}/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["sync"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/zotero/references/{reference_id}/links": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["link"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
 }
@@ -4059,6 +4427,18 @@ export interface components {
         BacklinkListResponse: {
             items: components["schemas"]["BacklinkItemResponse"][];
         };
+        Bibliography: {
+            creators: components["schemas"]["Creator"][];
+            fields: {
+                [key: string]: string;
+            };
+            itemType: string;
+            relations?: {
+                [key: string]: string[];
+            };
+            tags: components["schemas"]["Tag"][];
+            title: string;
+        };
         /** @description `GET …/body?format=md` (source `documentBodyMdOutput`). */
         BodyMdResponse: {
             contentMd: string;
@@ -4354,6 +4734,31 @@ export interface components {
         CompleteAttachmentUploadBody: {
             parts: components["schemas"]["AttachmentCompletePartBody"][];
         };
+        ConnectBody: {
+            apiKey: string;
+            libraryType: components["schemas"]["LibraryType"];
+            /** @description Verified against every imported alternate URL. User names differ from IDs. */
+            libraryUrl: string;
+            remoteLibraryId: string;
+        };
+        ConnectorListOutput: {
+            connectors: components["schemas"]["ConnectorOutput"][];
+        };
+        ConnectorOutput: {
+            /** Format: int32 */
+            committedPages: number;
+            completedVersion: string;
+            generation: string;
+            /** Format: uuid */
+            id: string;
+            libraryType: components["schemas"]["LibraryType"];
+            libraryUrl: string;
+            progressVersion?: string | null;
+            reconciliationRequired: boolean;
+            remoteLibraryId: string;
+            retryAt?: string | null;
+            state: string;
+        };
         /** @description Items are non-strict objects in the source (extra keys are ignored). */
         ConsentItemBody: {
             kind: string;
@@ -4454,6 +4859,12 @@ export interface components {
         CreateWorkspaceBody: {
             name: string;
             slug: string;
+        };
+        Creator: {
+            creatorType: string;
+            firstName?: string | null;
+            lastName?: string | null;
+            name?: string | null;
         };
         DashboardProjectOutput: {
             id: string;
@@ -4576,6 +4987,7 @@ export interface components {
             projectId: string;
             /** Format: uuid */
             requestId: string;
+            selfAssign?: boolean;
             task: components["schemas"]["CreateTaskBody"];
         };
         DocumentTaskCreateOutput: {
@@ -4863,6 +5275,23 @@ export interface components {
             name: string;
             projectId: string;
         };
+        LegacyReleaseBody: {
+            /** Format: uuid */
+            expectedActorId: string;
+            /** Format: uuid */
+            expectedSessionId: string;
+            /** Format: uuid */
+            requestId: string;
+            /** Format: uuid */
+            timeEntryId: string;
+        };
+        LegacyReleaseOutput: {
+            released: boolean;
+            /** Format: date-time */
+            serverNow: string;
+            /** Format: uuid */
+            timeEntryId: string;
+        };
         LegalDocumentOutput: {
             bodyHtml: string;
             /** Format: date-time */
@@ -4896,6 +5325,29 @@ export interface components {
         };
         LegalVersionsResponse: {
             versions: components["schemas"]["LegalVersionMetaOutput"][];
+        };
+        LibraryOutput: {
+            collections: components["schemas"]["ZoteroCollectionOutput"][];
+            connector: components["schemas"]["ConnectorOutput"];
+            references: components["schemas"]["ReferenceOutput"][];
+        };
+        /** @enum {string} */
+        LibraryType: "user" | "group";
+        LinkBody: {
+            anchor?: string | null;
+            /** Format: uuid */
+            documentId?: string | null;
+            expectedVersion: string;
+            /** Format: uuid */
+            taskId?: string | null;
+        };
+        LinkOutput: {
+            anchor?: string | null;
+            displayId: string;
+            /** Format: uuid */
+            documentId?: string | null;
+            /** Format: uuid */
+            taskId?: string | null;
         };
         LoginBody: {
             email: string;
@@ -5028,6 +5480,47 @@ export interface components {
             /** Format: uuid */
             statusId: string;
         };
+        NativeJobOutput: {
+            archiveHash: string;
+            diagnostic?: string | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            projectId?: string | null;
+            status: string;
+        };
+        NativePreflightBody: {
+            archiveBase64: string;
+        };
+        NativePreflightOutput: {
+            archiveHash: string;
+            attachmentCount: number;
+            complete: boolean;
+            /** Format: uuid */
+            destinationActorId: string;
+            /** Format: uuid */
+            destinationWorkspaceId: string;
+            diagnostics: string[];
+            documentCount: number;
+            preservedContentIds: boolean;
+            /** Format: uuid */
+            projectId: string;
+            projectName: string;
+            requiresCollisionFreeInstallation: boolean;
+            revisionCount: number;
+            /** Format: uuid */
+            sourceWorkspaceId: string;
+            taskCount: number;
+        };
+        NativeRestoreBody: {
+            archiveBase64: string;
+            archiveHash: string;
+            confirm: boolean;
+            /** Format: uuid */
+            destinationActorId: string;
+            /** Format: uuid */
+            requestId: string;
+        };
         NotificationItemOutput: {
             actorFamilyName: string | null;
             actorGivenName: string | null;
@@ -5107,6 +5600,21 @@ export interface components {
             registrationNumber?: string | null;
             representative?: string | null;
             supportEmail?: string | null;
+        };
+        OwnerTimerState: {
+            legacyOpen: boolean;
+            legacyOpenIds: string[];
+            /**
+             * Format: uuid
+             * @description Own opaque run identity/version allow explicit cleanup after revocation.
+             */
+            runId: string | null;
+            /** Format: date-time */
+            serverNow: string;
+            status: components["schemas"]["TimerStatus"] | null;
+            /** Format: int32 */
+            version: number | null;
+            visibleRun: components["schemas"]["TimerRunOutput"] | null;
         };
         PasswordChangeBody: {
             /** @description `null` only for password-less accounts. */
@@ -5195,6 +5703,108 @@ export interface components {
         };
         PatchWorkspaceBody: {
             name: string;
+        };
+        PersonalInputBody: {
+            intent: components["schemas"]["PersonalInputIntent"];
+            /** Format: uuid */
+            projectId?: string | null;
+            /** Format: uuid */
+            requestId: string;
+            source?: components["schemas"]["PersonalInputSource"] | null;
+            title: string;
+        };
+        /** @enum {string} */
+        PersonalInputIntent: "quick" | "note" | "task";
+        PersonalInputOutput: {
+            documentDisplayId: string;
+            documentId: string;
+            projectId?: string | null;
+            replayed: boolean;
+            taskDisplayId?: string | null;
+            taskId?: string | null;
+        };
+        PersonalInputSource: {
+            anchor?: string | null;
+            /** Format: uuid */
+            documentId: string;
+        };
+        /** @enum {string} */
+        PersonalTransferAction: "copy" | "move";
+        /**
+         * @description Why an authorized transfer cannot run yet. Sent as the problem's
+         *     `params.code` with `personal_transfer_incomplete`; the title is only a
+         *     diagnostic. Each value is a known unsupported model, never a quiet subset.
+         * @enum {string}
+         */
+        PersonalTransferBlocker: "native_history" | "outgoing_reference" | "incoming_reference" | "file" | "hierarchy" | "assignee" | "dependent_graph" | "wip_reservation" | "inventory_budget" | "block_identity" | "body_encoding" | "native_state_missing" | "timer_busy";
+        PersonalTransferBody: {
+            confirmed: boolean;
+            previewDigest: string;
+            /** Format: uuid */
+            requestId: string;
+            selection: components["schemas"]["PersonalTransferSelection"];
+        };
+        /**
+         * @description `params.code` of `personal_transfer_conflict`.
+         * @enum {string}
+         */
+        PersonalTransferConflict: "command_changed" | "preview_stale";
+        /** @description One observed part of the disclosure graph and what the command does to it. */
+        PersonalTransferDisposition: {
+            /** Format: int32 */
+            count: number;
+            item: components["schemas"]["PersonalTransferItem"];
+            outcome: components["schemas"]["PersonalTransferOutcome"];
+        };
+        /** @enum {string} */
+        PersonalTransferItem: "document" | "task" | "activity" | "history" | "attachment" | "time_entry" | "timer";
+        /** @enum {string} */
+        PersonalTransferOutcome: "moved" | "copied_new_id" | "retained_private" | "not_included";
+        PersonalTransferOutput: {
+            /** Format: uuid */
+            documentId: string;
+            /** Format: int32 */
+            documentNumber: number;
+            /** Format: uuid */
+            projectId: string;
+            replayed: boolean;
+            /** Format: uuid */
+            taskId?: string | null;
+            /** Format: int32 */
+            taskNumber?: number | null;
+            /** Format: uuid */
+            workspaceId: string;
+        };
+        PersonalTransferPreview: {
+            /** Format: int32 */
+            activityCount: number;
+            /** Format: int32 */
+            attachmentCount: number;
+            digest: string;
+            dispositions: components["schemas"]["PersonalTransferDisposition"][];
+            documentTitle: string;
+            projectName: string;
+            projectVisibility: string;
+            sourceRetained: boolean;
+            taskTitle?: string | null;
+            workspaceName: string;
+        };
+        PersonalTransferSelection: {
+            action: components["schemas"]["PersonalTransferAction"];
+            /** Format: uuid */
+            destinationProjectId: string;
+            /** Format: uuid */
+            destinationStatusId?: string | null;
+            /** Format: uuid */
+            destinationWorkspaceId: string;
+            /** Format: uuid */
+            documentId: string;
+            /** Format: int32 */
+            expectedDocumentVersion: number;
+            /** Format: int32 */
+            expectedTaskVersion?: number | null;
+            /** Format: uuid */
+            taskId?: string | null;
         };
         ProblemResponse: {
             code: string;
@@ -5366,6 +5976,21 @@ export interface components {
         RecentListResponse: {
             items: components["schemas"]["RecentItemOutput"][];
         };
+        ReferenceOutput: {
+            availability: string;
+            bibliography: components["schemas"]["Bibliography"];
+            collectionKeys: string[];
+            /** Format: uuid */
+            connectorId: string;
+            documentDisplayId: string;
+            /** Format: uuid */
+            id: string;
+            itemKey: string;
+            links: components["schemas"]["LinkOutput"][];
+            localVersion: string;
+            remoteVersion: string;
+            returnUrl: string;
+        };
         ResumeAttachmentUploadResponse: {
             attachmentId: string;
             /** Format: int64 */
@@ -5390,6 +6015,7 @@ export interface components {
             createdBy: string | null;
             id: string;
             reason: string;
+            restoredFromId: string | null;
             targetId: string;
             targetKind: string;
             ySnapshot: string;
@@ -5404,15 +6030,25 @@ export interface components {
             createdBy: string | null;
             id: string;
             reason: string;
+            restoredFromId: string | null;
             targetId: string;
             targetKind: string;
         };
         RevisionRestoreBody: {
             /** Format: uuid */
-            correlationId?: string | null;
+            correlationId: string;
+            /** @description Opaque canonical decimal tail sequence; never a JavaScript number. */
+            expectedTailSeq: string;
+        };
+        RevisionRestorePreviewResponse: {
+            currentContentJson: unknown;
+            /** @description Captured with current_content_json in the same room actor operation. */
+            currentTailSeq: string;
+            source: components["schemas"]["RevisionDetailResponse"];
         };
         RevisionRestoreResponse: {
             restored: boolean;
+            revisionId: string;
         };
         ScaleTickOutput: {
             date: components["schemas"]["String"];
@@ -5609,6 +6245,37 @@ export interface components {
             wipLimit?: number | null;
         };
         String: string;
+        /**
+         * @description Creates one ordinary task linked to an existing material/notes document.
+         *     The planner keeps goal/reading steps as ordinary task hierarchy and origins.
+         */
+        StudyPlanTaskBody: {
+            anchor?: string | null;
+            /** Format: uuid */
+            expectedActorId: string;
+            /** Format: uuid */
+            expectedSessionId: string;
+            /** Format: int32 */
+            minutes?: number | null;
+            /** Format: uuid */
+            projectId: string;
+            /** Format: uuid */
+            requestId: string;
+            selfAssign?: boolean;
+            task: components["schemas"]["CreateTaskBody"];
+        };
+        StudyPlanTaskOutput: {
+            /** Format: int32 */
+            number: number;
+            projectKey: string;
+            /** Format: uuid */
+            taskId: string;
+        };
+        Tag: {
+            tag: string;
+            /** Format: int32 */
+            type?: number;
+        };
         TaskChildOutput: {
             id: string;
             /** Format: int32 */
@@ -5636,6 +6303,31 @@ export interface components {
             /** Format: int32 */
             lagDays: number;
             type: string;
+        };
+        /**
+         * @description Raw database timestamp preserves microseconds for compare-and-set; the
+         *     ordinary task DTO's millisecond timestamp is not an estimate write token.
+         */
+        TaskEstimate: {
+            unit: string | null;
+            /** Format: date-time */
+            updatedAt: string;
+            value: string | null;
+        };
+        TaskEstimateCommandBody: {
+            expected: components["schemas"]["TaskEstimate"];
+            /** Format: uuid */
+            expectedActorId: string;
+            /** Format: uuid */
+            expectedSessionId: string;
+            /**
+             * Format: int32
+             * @description Null explicitly clears both the value and the unit.
+             */
+            minutes: number | null;
+            reason: string;
+            /** Format: uuid */
+            requestId: string;
         };
         TaskListItemOutput: components["schemas"]["TaskMetaOutput"] & {
             assigneeIds: string[];
@@ -5724,6 +6416,7 @@ export interface components {
             id: string;
             key: string;
             name: string;
+            visibility: string;
         };
         TaskProjectPickerResponse: {
             canCreateProject: boolean;
@@ -5734,6 +6427,19 @@ export interface components {
             /** Format: int64 */
             count: number;
             statusId: string;
+        };
+        TaskTimerState: {
+            /** Format: int64 */
+            actualMilliseconds: number;
+            /** @description A different unfinished run, without its tenant, task id or title. */
+            busyElsewhere: boolean;
+            /** @description Current existing time-entry Edit/archive capability, in this snapshot. */
+            canControl: boolean;
+            estimate: components["schemas"]["TaskEstimate"];
+            legacyOpen: boolean;
+            run: components["schemas"]["TimerRunOutput"] | null;
+            /** Format: date-time */
+            serverNow: string;
         };
         TemplateApplyBody: {
             /** Format: uuid */
@@ -5762,6 +6468,31 @@ export interface components {
             payload: unknown;
             title: string;
             workspaceId: string;
+        };
+        TimeCorrectionBody: {
+            /** Format: date-time */
+            endedAt: string;
+            /** Format: uuid */
+            expectedActorId: string;
+            /** Format: date-time */
+            expectedEndedAt?: string | null;
+            expectedNote?: string | null;
+            /** Format: int64 */
+            expectedRevision: number;
+            /** Format: uuid */
+            expectedSessionId: string;
+            /**
+             * Format: date-time
+             * @description Original range as seen by this form; null end means a legacy open row.
+             */
+            expectedStartedAt: string;
+            kind: components["schemas"]["TimeRecordKind"];
+            note?: string | null;
+            reason: string;
+            /** Format: uuid */
+            requestId: string;
+            /** Format: date-time */
+            startedAt: string;
         };
         /**
          * @description Source `timeEntryCreateInput`: UTC ISO timestamps, `endedAt` after
@@ -5793,6 +6524,131 @@ export interface components {
             open: boolean;
             /** Format: int64 */
             totalSeconds: number;
+        };
+        TimeRecord: {
+            /** Format: date-time */
+            endedAt: string | null;
+            /** Format: uuid */
+            id: string;
+            kind: components["schemas"]["TimeRecordKind"];
+            note: string | null;
+            reservedLegacy: boolean;
+            /** Format: int64 */
+            revision: number;
+            /** Format: uuid */
+            runId: string | null;
+            /** Format: date-time */
+            startedAt: string;
+        };
+        /**
+         * @description Own task history includes unresolved manual rows explicitly, never guesses
+         *     their end. Projected timer rows occur once as canonical segments.
+         * @enum {string}
+         */
+        TimeRecordKind: "manual" | "segment";
+        TimerCleanupBody: {
+            /** Format: uuid */
+            expectedActorId: string;
+            /** Format: uuid */
+            expectedSessionId: string;
+            /** Format: int32 */
+            expectedVersion: number;
+            /** Format: uuid */
+            requestId: string;
+            /** Format: uuid */
+            runId: string;
+        };
+        TimerCommandBody: {
+            /**
+             * Format: uuid
+             * @description Intent guards, never authorization: authoritative authentication wins.
+             */
+            expectedActorId: string;
+            /** Format: uuid */
+            expectedSessionId: string;
+            /** Format: int32 */
+            expectedVersion: number;
+            note?: string | null;
+            operation: components["schemas"]["TimerOperation"];
+            /** Format: uuid */
+            requestId: string;
+            /** Format: uuid */
+            runId?: string | null;
+        };
+        TimerCommandOutput: {
+            /** Format: uuid */
+            runId: string;
+            /** Format: date-time */
+            serverNow: string;
+            status: components["schemas"]["TimerStatus"];
+            /** Format: int32 */
+            version: number;
+        };
+        TimerDayTotal: {
+            /** Format: date */
+            date: string;
+            /** Format: int64 */
+            milliseconds: number;
+        };
+        TimerHistory: {
+            items: components["schemas"]["TimeRecord"][];
+            nextCursor: string | null;
+            /** Format: date-time */
+            serverNow: string;
+        };
+        TimerManualBody: {
+            /** Format: date-time */
+            endedAt: string;
+            /** Format: uuid */
+            expectedActorId: string;
+            /** Format: uuid */
+            expectedSessionId: string;
+            note?: string | null;
+            reason: string;
+            /** Format: uuid */
+            requestId: string;
+            /** Format: date-time */
+            startedAt: string;
+        };
+        /** @enum {string} */
+        TimerOperation: "start" | "pause" | "resume" | "stop";
+        TimerRecordOutput: {
+            record: components["schemas"]["TimeRecord"];
+            /** Format: date-time */
+            serverNow: string;
+        };
+        TimerRunOutput: {
+            /**
+             * Format: int64
+             * @description Closed intervals only. Add the serverNow/runningSince delta for display.
+             */
+            elapsedMilliseconds: number;
+            /** Format: uuid */
+            id: string;
+            note: string | null;
+            /** Format: date-time */
+            runningSince: string | null;
+            /** Format: date-time */
+            startedAt: string;
+            status: components["schemas"]["TimerStatus"];
+            /** Format: uuid */
+            taskId: string;
+            /** Format: int32 */
+            version: number;
+            /** Format: uuid */
+            workspaceId: string;
+        };
+        /** @enum {string} */
+        TimerStatus: "running" | "paused" | "stopped";
+        TimerSummary: {
+            days: components["schemas"]["TimerDayTotal"][];
+            /** Format: date-time */
+            serverNow: string;
+            timeZone: string;
+            /** Format: int64 */
+            totalMilliseconds: number;
+            unfinished: boolean;
+            unresolvedManual: boolean;
         };
         TokenBody: {
             token: string;
@@ -5984,6 +6840,13 @@ export interface components {
             /** Format: int32 */
             wipLimit: number | null;
             workflowId: string;
+        };
+        ZoteroCollectionOutput: {
+            availability: string;
+            key: string;
+            name: string;
+            parentKey?: string | null;
+            remoteVersion: string;
         };
     };
     responses: never;
@@ -9115,6 +9978,138 @@ export interface operations {
             };
             /** @description Authentication required */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    owner_state: {
+        parameters: {
+            query?: {
+                expectedActorId?: string;
+                expectedSessionId?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OwnerTimerState"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    legacy_release: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LegacyReleaseBody"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyReleaseOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    owner_cleanup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TimerCleanupBody"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimerCommandOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -13832,6 +14827,78 @@ export interface operations {
             };
         };
     };
+    preview_restore_revision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Document id */
+                document_id: string;
+                /** @description Revision id */
+                revision_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Immutable source and current body with a coherent opaque tail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevisionRestorePreviewResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Target or revision unavailable or not editable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Archived target */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Collaboration unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Collaboration timeout */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
     sort_document: {
         parameters: {
             query?: never;
@@ -13861,6 +14928,129 @@ export interface operations {
             };
             /** @description Not found or forbidden */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    study_plan_targets: {
+        parameters: {
+            query?: {
+                expectedActorId?: string;
+                expectedSessionId?: string;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskProjectPickerResponse"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    study_plan_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StudyPlanTaskBody"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StudyPlanTaskOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -15460,6 +16650,120 @@ export interface operations {
             };
         };
     };
+    status_native: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NativeJobOutput"];
+                };
+            };
+            /** @description Denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Generic content collision */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    preflight_native: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NativePreflightBody"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NativePreflightOutput"];
+                };
+            };
+            /** @description Target conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid, incomplete or unsupported archive */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    restore_native: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NativeRestoreBody"];
+            };
+        };
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NativeJobOutput"];
+                };
+            };
+            /** @description Target or command conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid, incomplete or unsupported archive */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     get_notification_prefs: {
         parameters: {
             query?: never;
@@ -15940,6 +17244,231 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    create_personal_input: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Own personal workspace id */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PersonalInputBody"];
+            };
+        };
+        responses: {
+            /** @description Ordinary document and optional self-assigned task; exact retry returns the same UUIDs */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonalInputOutput"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Session required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not own personal workspace or target unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Command key reused with changed payload */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    transfer_personal_item: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Owner's personal source workspace */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PersonalTransferBody"];
+            };
+        };
+        responses: {
+            /** @description Committed copy or move, or currently authorized command replay */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonalTransferOutput"];
+                };
+            };
+            /** @description Explicit confirmation and valid command required */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Session required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Transfer authority required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Source or destination unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description personal_transfer_conflict (params.code PersonalTransferConflict) or personal_transfer_incomplete (params.code PersonalTransferBlocker) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Transient transfer failure; no successful receipt */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    preview_personal_transfer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Owner's personal source workspace */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PersonalTransferSelection"];
+            };
+        };
+        responses: {
+            /** @description Authorized disclosure preview without writes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonalTransferPreview"];
+                };
+            };
+            /** @description Invalid selection */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Session required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Transfer authority required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Source or destination unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description personal_transfer_conflict (params.code PersonalTransferConflict) or personal_transfer_incomplete (params.code PersonalTransferBlocker) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Transient transfer failure */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -17747,6 +19276,80 @@ export interface operations {
             };
         };
     };
+    preview_restore_project_document_revision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Project id */
+                project_id: string;
+                /** @description Document id */
+                document_id: string;
+                /** @description Revision id */
+                revision_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Immutable source and current body with a coherent opaque tail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevisionRestorePreviewResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Target or revision unavailable or not editable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Archived target */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Collaboration unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Collaboration timeout */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
     sort_project_document: {
         parameters: {
             query?: never;
@@ -18940,6 +20543,46 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ProblemResponse"];
                 };
+            };
+        };
+    };
+    export_native: {
+        parameters: {
+            query?: {
+                /** @description Selected own Zotero connector; repeat the key for each (at most 8, distinct) */
+                zoteroConnector?: string[];
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Persisted complete native archive */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/zip": string;
+                };
+            };
+            /** @description Denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Incomplete or unsupported archive */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -21021,9 +22664,86 @@ export interface operations {
             };
         };
     };
-    list_time_entries: {
+    preview_restore_task_revision: {
         parameters: {
             query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Task id */
+                task_id: string;
+                /** @description Revision id */
+                revision_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Immutable source and current body with a coherent opaque tail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevisionRestorePreviewResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Target or revision unavailable or not editable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Archived target */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Collaboration unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Collaboration timeout */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    list_time_entries: {
+        parameters: {
+            query?: {
+                /** @description Captured actor UUID; when present must match the authenticated actor */
+                expectedActorId?: string;
+                /** @description Captured credential UUID; when present must match the authenticated session or API token */
+                expectedSessionId?: string;
+            };
             header?: never;
             path: {
                 /** @description Workspace id */
@@ -21044,6 +22764,15 @@ export interface operations {
                     "application/json": components["schemas"]["TimeEntryListResponse"];
                 };
             };
+            /** @description Malformed captured context */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
             /** @description Authentication required */
             401: {
                 headers: {
@@ -21055,6 +22784,15 @@ export interface operations {
             };
             /** @description Not found or forbidden */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Captured actor or credential changed (timer_context_changed) */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -21163,6 +22901,447 @@ export interface operations {
             };
             /** @description Not found or forbidden */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    task_state: {
+        parameters: {
+            query?: {
+                expectedActorId?: string;
+                expectedSessionId?: string;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskTimerState"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    task_command: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TimerCommandBody"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimerCommandOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    task_estimate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TaskEstimateCommandBody"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskEstimate"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    personal_history: {
+        parameters: {
+            query: {
+                expectedActorId?: string;
+                expectedSessionId?: string;
+                from: string;
+                to: string;
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimerHistory"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    personal_manual: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TimerManualBody"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimerRecordOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    personal_correction: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                task_id: string;
+                record_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TimeCorrectionBody"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimerRecordOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    personal_summary: {
+        parameters: {
+            query: {
+                expectedActorId?: string;
+                expectedSessionId?: string;
+                from: string;
+                to: string;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimerSummary"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -22072,6 +24251,360 @@ export interface operations {
             };
             /** @description project_archived */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorListOutput"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    connect: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConnectBody"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    read: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                connector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LibraryOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    disconnect: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                connector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    sync: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                connector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LibraryOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    link: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                reference_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LinkBody"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LibraryOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

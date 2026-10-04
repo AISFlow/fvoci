@@ -5,6 +5,35 @@ set -euo pipefail
 : "${ROOT:?ROOT is required}"
 : "${CARGO_TARGET_DIR:?CARGO_TARGET_DIR is required}"
 
+# The timer's full suite exceeds the ordinary login budget in one fresh app.
+# Keep recovery/control login budgets and the restart fixture's fresh DB/server
+# lifecycle in independent groups alongside the original cases.
+# Explicit selection keeps the caller's arguments and runtime scope intact.
+TIMER_SPEC_COUNT=0
+TIMER_OTHER_SPEC=false
+TIMER_EXPLICIT_SELECTION=false
+for arg in "$@"; do
+  case "$arg" in
+    v050-task-timer.spec.ts|e2e/v050-task-timer.spec.ts)
+      TIMER_SPEC_COUNT=$((TIMER_SPEC_COUNT + 1))
+      ;;
+    *.spec.ts) TIMER_OTHER_SPEC=true ;;
+    --grep|--grep=*|--grep-invert|--grep-invert=*|-g|-g?*|--shard|--shard=*|--list|--)
+      TIMER_EXPLICIT_SELECTION=true
+      ;;
+  esac
+done
+if ((TIMER_SPEC_COUNT == 1)) && [[ "$TIMER_OTHER_SPEC" == false && "$TIMER_EXPLICIT_SELECTION" == false && "${FVOCI_E2E_PENDING:-}" != 1 ]]; then
+  TIMER_NEW_CONTROL_FILTER='ordinary research plan persists|task widget retires|a late task-widget R1|owner releases opaque legacy reservations|a late legacy release'
+  TIMER_RECOVERY_FILTER='real browser offline start|a native committed pause|a planner A-B-A|an estimate A-B-A|a genuine new session retires|transient browser 429|one ordinary task restore'
+  TIMER_RESTART_FILTER='native same-database restart'
+  bash "$ROOT/scripts/web-e2e-run-group.sh" "$@" --grep-invert "$TIMER_NEW_CONTROL_FILTER|$TIMER_RECOVERY_FILTER|$TIMER_RESTART_FILTER"
+  bash "$ROOT/scripts/web-e2e-run-group.sh" "$@" --grep "$TIMER_RECOVERY_FILTER"
+  bash "$ROOT/scripts/web-e2e-run-group.sh" "$@" --grep "$TIMER_RESTART_FILTER"
+  bash "$ROOT/scripts/web-e2e-run-group.sh" "$@" --grep "$TIMER_NEW_CONTROL_FILTER"
+  exit 0
+fi
+
 # The label names the spec arguments; Playwright options (arguments that
 # start with "-", such as --config=... after the spec; give option values in
 # the same argument) are passed on but not named.
@@ -28,6 +57,9 @@ if ((${#LABEL_SPECS[@]} >= 1)); then
 fi
 
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-web-e2e.XXXXXX")"
+# Keep default timer screenshots/proofs in the group's retained output tree;
+# an explicit caller namespace remains unchanged outside runtime cleanup.
+export FVOCI_W5_EVIDENCE_DIR="${FVOCI_W5_EVIDENCE_DIR:-$RUN_DIR/playwright-output/w5-evidence}"
 SERVER_LOG="$RUN_DIR/server.log"
 PEPPER='{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
 # Host netlink address/link events (only `ip monitor` writes this file, so its

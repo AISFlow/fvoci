@@ -19,6 +19,9 @@ import QueryError from "../components/QueryError.vue";
 import QueryLoading from "../components/QueryLoading.vue";
 import WorkspaceShell from "../components/WorkspaceShell.vue";
 import MyTaskRow from "../features/tasks/MyTaskRow.vue";
+import TaskStopwatch from "../features/tasks/TaskStopwatch.vue";
+import TaskStopwatchOwner from "../features/tasks/TaskStopwatchOwner.vue";
+import StudyPlanBuilder from "../features/tasks/StudyPlanBuilder.vue";
 import { useWorkspaceSession } from "../session/useWorkspaceSession";
 import "@/features/projects/projects.css";
 
@@ -88,6 +91,12 @@ async function onLoadMore(): Promise<void> {
       <div class="task-home__head">
         <h1 class="task-home__title">{{ t("task.mine") }}</h1>
       </div>
+      <TaskStopwatchOwner />
+      <StudyPlanBuilder
+        :workspace-id="workspace.id"
+        :slug="slug"
+        :personal="workspace.kind === 'personal'"
+      />
       <QueryLoading v-if="tasks.isLoading.value" />
       <QueryError
         v-else-if="tasks.isError.value && items.length === 0"
@@ -135,6 +144,13 @@ async function onLoadMore(): Promise<void> {
                 "
                 :assignee-ids="item.assigneeIds"
                 :members="members.data.value?.items ?? []"
+              />
+              <TaskStopwatch
+                :workspace-id="workspace.id"
+                :task-id="item.id"
+                :estimate="item.estimate"
+                :read-only="false"
+                compact
               />
             </li>
           </ul>

@@ -247,7 +247,22 @@ if [[ "${FVOCI_E2E_PENDING:-}" == "1" ]]; then
   exit 0
 fi
 
-"$SERVER_BIN" >"$SERVER_LOG" 2>&1 &
+# The normal server runs with runtime settings only: the setup/admin/test
+# database URLs and the Meilisearch master key stay with the setup and test
+# drivers. Search uses the scoped key the existing preparation command writes.
+server_env=(env -u FVOCI_E2E_ADMIN_DATABASE_URL -u TEST_DATABASE_URL -u FVOCI_TEST_DATABASE_URL
+  -u MEILI_MASTER_KEY -u FVOCI_MEILI_MASTER_KEY -u FVOCI_MEILI_KEY)
+if [[ -n "${FVOCI_MEILI_URL:-}" && -n "${MEILI_MASTER_KEY:-}" ]]; then
+  MEILI_SERVER_KEY_FILE="$RUN_DIR/meili-search.key"
+  "$MIGRATE_BIN" --ensure-meili-key "$MEILI_SERVER_KEY_FILE" >/dev/null
+  server_env+=("FVOCI_MEILI_KEY_FILE=$MEILI_SERVER_KEY_FILE")
+fi
+# Launch proof, names only: the variables present under the exact server env
+# prefix (values are never written). Specs may read this file.
+SERVER_ENV_NAMES="$RUN_DIR/server-env-names.txt"
+( umask 077 && "${server_env[@]}" bash -c 'compgen -e' | LC_ALL=C sort >"$SERVER_ENV_NAMES" )
+export FVOCI_E2E_SERVER_ENV_NAMES="$SERVER_ENV_NAMES"
+"${server_env[@]}" "$SERVER_BIN" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
 BASE_URL=""

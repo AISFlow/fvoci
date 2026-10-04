@@ -3928,6 +3928,190 @@
         ]
       }
     },
+    "/api/v1/me/task-timer": {
+      "get": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "owner_state",
+        "parameters": [
+          {
+            "name": "expectedActorId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "expectedSessionId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerTimerState"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/me/task-timer/legacy-release": {
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "legacy_release",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LegacyReleaseBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LegacyReleaseOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/me/task-timer/stop": {
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "owner_cleanup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TimerCleanupBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimerCommandOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
     "/api/v1/me/workspaces": {
       "get": {
         "tags": [
@@ -10725,6 +10909,110 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/restore-preview": {
+      "get": {
+        "tags": [
+          "documents"
+        ],
+        "operationId": "preview_restore_revision",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "document_id",
+            "in": "path",
+            "description": "Document id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "revision_id",
+            "in": "path",
+            "description": "Revision id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Immutable source and current body with a coherent opaque tail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevisionRestorePreviewResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Target or revision unavailable or not editable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Archived target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collaboration unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Collaboration timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/documents/{document_id}/sort": {
       "post": {
         "tags": [
@@ -10774,6 +11062,201 @@
           },
           "404": {
             "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/study-plan/task": {
+      "get": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "study_plan_targets",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "expectedActorId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "expectedSessionId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskProjectPickerResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "study_plan_task",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StudyPlanTaskBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StudyPlanTaskOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
             "content": {
               "application/json": {
                 "schema": {
@@ -13159,6 +13642,152 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/native-archive/jobs/{job_id}": {
+      "get": {
+        "tags": [],
+        "operationId": "status_native",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeJobOutput"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Denied"
+          },
+          "409": {
+            "description": "Generic content collision"
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/native-archive/preflight": {
+      "post": {
+        "tags": [],
+        "operationId": "preflight_native",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativePreflightBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativePreflightOutput"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Target conflict"
+          },
+          "422": {
+            "description": "Invalid, incomplete or unsupported archive"
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/native-archive/restore": {
+      "post": {
+        "tags": [],
+        "operationId": "restore_native",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeRestoreBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeJobOutput"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Target or command conflict"
+          },
+          "422": {
+            "description": "Invalid, incomplete or unsupported archive"
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/notification-prefs": {
       "get": {
         "tags": [
@@ -13857,6 +14486,306 @@
           },
           {
             "bearer_api_token": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/personal-input": {
+      "post": {
+        "tags": [
+          "documents"
+        ],
+        "operationId": "create_personal_input",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Own personal workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonalInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Ordinary document and optional self-assigned task; exact retry returns the same UUIDs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalInputOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Session required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not own personal workspace or target unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Command key reused with changed payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/personal-transfers": {
+      "post": {
+        "tags": [
+          "personal-transfers"
+        ],
+        "operationId": "transfer_personal_item",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Owner's personal source workspace",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonalTransferBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Committed copy or move, or currently authorized command replay",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalTransferOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Explicit confirmation and valid command required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Session required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Transfer authority required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Source or destination unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "personal_transfer_conflict (params.code PersonalTransferConflict) or personal_transfer_incomplete (params.code PersonalTransferBlocker)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Transient transfer failure; no successful receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/personal-transfers/preview": {
+      "post": {
+        "tags": [
+          "personal-transfers"
+        ],
+        "operationId": "preview_personal_transfer",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Owner's personal source workspace",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonalTransferSelection"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Authorized disclosure preview without writes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalTransferPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid selection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Session required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Transfer authority required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Source or destination unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "personal_transfer_conflict (params.code PersonalTransferConflict) or personal_transfer_incomplete (params.code PersonalTransferBlocker)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Transient transfer failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
           }
         ]
       }
@@ -16718,6 +17647,119 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/revisions/{revision_id}/restore-preview": {
+      "get": {
+        "tags": [
+          "documents"
+        ],
+        "operationId": "preview_restore_project_document_revision",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "document_id",
+            "in": "path",
+            "description": "Document id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "revision_id",
+            "in": "path",
+            "description": "Revision id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Immutable source and current body with a coherent opaque tail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevisionRestorePreviewResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Target or revision unavailable or not editable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Archived target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collaboration unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Collaboration timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/sort": {
       "post": {
         "tags": [
@@ -18612,6 +19654,71 @@
                 }
               }
             }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/projects/{project_id}/native-archive": {
+      "get": {
+        "tags": [],
+        "operationId": "export_native",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "zoteroConnector",
+            "in": "query",
+            "description": "Selected own Zotero connector; repeat the key for each (at most 8, distinct)",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "maxItems": 8
+            },
+            "style": "form",
+            "explode": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persisted complete native archive",
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Denied"
+          },
+          "422": {
+            "description": "Incomplete or unsupported archive"
           }
         },
         "security": [
@@ -21953,6 +23060,110 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/revisions/{revision_id}/restore-preview": {
+      "get": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "preview_restore_task_revision",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "Task id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "revision_id",
+            "in": "path",
+            "description": "Revision id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Immutable source and current body with a coherent opaque tail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevisionRestorePreviewResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Target or revision unavailable or not editable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Archived target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collaboration unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Collaboration timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/time-entries": {
       "get": {
         "tags": [
@@ -21977,6 +23188,24 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "expectedActorId",
+            "in": "query",
+            "description": "Captured actor UUID; when present must match the authenticated actor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "expectedSessionId",
+            "in": "query",
+            "description": "Captured credential UUID; when present must match the authenticated session or API token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -21986,6 +23215,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TimeEntryListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed captured context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
                 }
               }
             }
@@ -22002,6 +23241,16 @@
           },
           "404": {
             "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Captured actor or credential changed (timer_context_changed)",
             "content": {
               "application/json": {
                 "schema": {
@@ -22160,6 +23409,745 @@
           },
           "404": {
             "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer": {
+      "get": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "task_state",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "expectedActorId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "expectedSessionId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskTimerState"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "task_command",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TimerCommandBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimerCommandOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/estimate": {
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "task_estimate",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskEstimateCommandBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskEstimate"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/history": {
+      "get": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "personal_history",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "expectedActorId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "expectedSessionId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimerHistory"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "personal_manual",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TimerManualBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimerRecordOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/records/{record_id}/correct": {
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "personal_correction",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TimeCorrectionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimerRecordOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/summary": {
+      "get": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "personal_summary",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "expectedActorId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "expectedSessionId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimerSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
             "content": {
               "application/json": {
                 "schema": {
@@ -23517,6 +25505,501 @@
           }
         ]
       }
+    },
+    "/api/v1/workspaces/{workspace_id}/zotero": {
+      "get": {
+        "tags": [
+          "zotero"
+        ],
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorListOutput"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "zotero"
+        ],
+        "operationId": "connect",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/zotero/libraries/{connector_id}": {
+      "get": {
+        "tags": [
+          "zotero"
+        ],
+        "operationId": "read",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "zotero"
+        ],
+        "operationId": "disconnect",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/zotero/libraries/{connector_id}/sync": {
+      "post": {
+        "tags": [
+          "zotero"
+        ],
+        "operationId": "sync",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/zotero/references/{reference_id}/links": {
+      "post": {
+        "tags": [
+          "zotero"
+        ],
+        "operationId": "link",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "reference_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -24626,6 +27109,58 @@
             }
           }
         }
+      },
+      "Bibliography": {
+        "type": "object",
+        "required": [
+          "itemType",
+          "title",
+          "fields",
+          "creators",
+          "tags"
+        ],
+        "properties": {
+          "creators": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Creator"
+            }
+          },
+          "fields": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "itemType": {
+            "type": "string"
+          },
+          "relations": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Tag"
+            }
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "BodyMdResponse": {
         "type": "object",
@@ -25789,6 +28324,102 @@
         },
         "additionalProperties": false
       },
+      "ConnectBody": {
+        "type": "object",
+        "required": [
+          "libraryType",
+          "remoteLibraryId",
+          "apiKey",
+          "libraryUrl"
+        ],
+        "properties": {
+          "apiKey": {
+            "type": "string"
+          },
+          "libraryType": {
+            "$ref": "#/components/schemas/LibraryType"
+          },
+          "libraryUrl": {
+            "type": "string",
+            "description": "Verified against every imported alternate URL. User names differ from IDs."
+          },
+          "remoteLibraryId": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConnectorListOutput": {
+        "type": "object",
+        "required": [
+          "connectors"
+        ],
+        "properties": {
+          "connectors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConnectorOutput"
+            }
+          }
+        }
+      },
+      "ConnectorOutput": {
+        "type": "object",
+        "required": [
+          "id",
+          "libraryType",
+          "remoteLibraryId",
+          "libraryUrl",
+          "state",
+          "generation",
+          "completedVersion",
+          "committedPages",
+          "reconciliationRequired"
+        ],
+        "properties": {
+          "committedPages": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "completedVersion": {
+            "type": "string"
+          },
+          "generation": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "libraryType": {
+            "$ref": "#/components/schemas/LibraryType"
+          },
+          "libraryUrl": {
+            "type": "string"
+          },
+          "progressVersion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reconciliationRequired": {
+            "type": "boolean"
+          },
+          "remoteLibraryId": {
+            "type": "string"
+          },
+          "retryAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string"
+          }
+        }
+      },
       "ConsentItemBody": {
         "type": "object",
         "description": "Items are non-strict objects in the source (extra keys are ignored).",
@@ -26148,6 +28779,36 @@
           },
           "slug": {
             "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Creator": {
+        "type": "object",
+        "required": [
+          "creatorType"
+        ],
+        "properties": {
+          "creatorType": {
+            "type": "string"
+          },
+          "firstName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false
@@ -26582,6 +29243,9 @@
           "requestId": {
             "type": "string",
             "format": "uuid"
+          },
+          "selfAssign": {
+            "type": "boolean"
           },
           "task": {
             "$ref": "#/components/schemas/CreateTaskBody"
@@ -27617,6 +30281,55 @@
           }
         }
       },
+      "LegacyReleaseBody": {
+        "type": "object",
+        "required": [
+          "expectedActorId",
+          "expectedSessionId",
+          "requestId",
+          "timeEntryId"
+        ],
+        "properties": {
+          "expectedActorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expectedSessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "timeEntryId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
+      "LegacyReleaseOutput": {
+        "type": "object",
+        "required": [
+          "serverNow",
+          "timeEntryId",
+          "released"
+        ],
+        "properties": {
+          "released": {
+            "type": "boolean"
+          },
+          "serverNow": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "timeEntryId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "LegalDocumentOutput": {
         "type": "object",
         "required": [
@@ -27729,6 +30442,101 @@
             "items": {
               "$ref": "#/components/schemas/LegalVersionMetaOutput"
             }
+          }
+        }
+      },
+      "LibraryOutput": {
+        "type": "object",
+        "required": [
+          "connector",
+          "references",
+          "collections"
+        ],
+        "properties": {
+          "collections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ZoteroCollectionOutput"
+            }
+          },
+          "connector": {
+            "$ref": "#/components/schemas/ConnectorOutput"
+          },
+          "references": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReferenceOutput"
+            }
+          }
+        }
+      },
+      "LibraryType": {
+        "type": "string",
+        "enum": [
+          "user",
+          "group"
+        ]
+      },
+      "LinkBody": {
+        "type": "object",
+        "required": [
+          "expectedVersion"
+        ],
+        "properties": {
+          "anchor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "documentId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "expectedVersion": {
+            "type": "string"
+          },
+          "taskId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
+      "LinkOutput": {
+        "type": "object",
+        "required": [
+          "displayId"
+        ],
+        "properties": {
+          "anchor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "displayId": {
+            "type": "string"
+          },
+          "documentId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "taskId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           }
         }
       },
@@ -28233,6 +31041,155 @@
         },
         "additionalProperties": false
       },
+      "NativeJobOutput": {
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "archiveHash"
+        ],
+        "properties": {
+          "archiveHash": {
+            "type": "string"
+          },
+          "diagnostic": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "NativePreflightBody": {
+        "type": "object",
+        "required": [
+          "archiveBase64"
+        ],
+        "properties": {
+          "archiveBase64": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "NativePreflightOutput": {
+        "type": "object",
+        "required": [
+          "archiveHash",
+          "sourceWorkspaceId",
+          "destinationWorkspaceId",
+          "destinationActorId",
+          "projectId",
+          "projectName",
+          "documentCount",
+          "taskCount",
+          "attachmentCount",
+          "revisionCount",
+          "complete",
+          "diagnostics",
+          "preservedContentIds",
+          "requiresCollisionFreeInstallation"
+        ],
+        "properties": {
+          "archiveHash": {
+            "type": "string"
+          },
+          "attachmentCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "complete": {
+            "type": "boolean"
+          },
+          "destinationActorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "destinationWorkspaceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "diagnostics": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "documentCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "preservedContentIds": {
+            "type": "boolean"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectName": {
+            "type": "string"
+          },
+          "requiresCollisionFreeInstallation": {
+            "type": "boolean"
+          },
+          "revisionCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sourceWorkspaceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "taskCount": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "NativeRestoreBody": {
+        "type": "object",
+        "required": [
+          "archiveBase64",
+          "archiveHash",
+          "requestId",
+          "destinationActorId",
+          "confirm"
+        ],
+        "properties": {
+          "archiveBase64": {
+            "type": "string"
+          },
+          "archiveHash": {
+            "type": "string"
+          },
+          "confirm": {
+            "type": "boolean"
+          },
+          "destinationActorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
       "NotificationItemOutput": {
         "type": "object",
         "required": [
@@ -28507,6 +31464,70 @@
           }
         },
         "additionalProperties": false
+      },
+      "OwnerTimerState": {
+        "type": "object",
+        "required": [
+          "serverNow",
+          "runId",
+          "version",
+          "status",
+          "visibleRun",
+          "legacyOpen",
+          "legacyOpenIds"
+        ],
+        "properties": {
+          "legacyOpen": {
+            "type": "boolean"
+          },
+          "legacyOpenIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "runId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Own opaque run identity/version allow explicit cleanup after revocation."
+          },
+          "serverNow": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TimerStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "visibleRun": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TimerRunOutput",
+                "description": "Present only after current task View permission is checked."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
       },
       "PasswordChangeBody": {
         "type": "object",
@@ -28847,6 +31868,364 @@
         "properties": {
           "name": {
             "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PersonalInputBody": {
+        "type": "object",
+        "required": [
+          "requestId",
+          "intent",
+          "title"
+        ],
+        "properties": {
+          "intent": {
+            "$ref": "#/components/schemas/PersonalInputIntent"
+          },
+          "projectId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PersonalInputSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PersonalInputIntent": {
+        "type": "string",
+        "enum": [
+          "quick",
+          "note",
+          "task"
+        ]
+      },
+      "PersonalInputOutput": {
+        "type": "object",
+        "required": [
+          "documentId",
+          "documentDisplayId",
+          "replayed"
+        ],
+        "properties": {
+          "documentDisplayId": {
+            "type": "string"
+          },
+          "documentId": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "taskDisplayId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "taskId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PersonalInputSource": {
+        "type": "object",
+        "required": [
+          "documentId"
+        ],
+        "properties": {
+          "anchor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "documentId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PersonalTransferAction": {
+        "type": "string",
+        "enum": [
+          "copy",
+          "move"
+        ]
+      },
+      "PersonalTransferBlocker": {
+        "type": "string",
+        "description": "Why an authorized transfer cannot run yet. Sent as the problem's\n`params.code` with `personal_transfer_incomplete`; the title is only a\ndiagnostic. Each value is a known unsupported model, never a quiet subset.",
+        "enum": [
+          "native_history",
+          "outgoing_reference",
+          "incoming_reference",
+          "file",
+          "hierarchy",
+          "assignee",
+          "dependent_graph",
+          "wip_reservation",
+          "inventory_budget",
+          "block_identity",
+          "body_encoding",
+          "native_state_missing",
+          "timer_busy"
+        ]
+      },
+      "PersonalTransferBody": {
+        "type": "object",
+        "required": [
+          "requestId",
+          "selection",
+          "previewDigest",
+          "confirmed"
+        ],
+        "properties": {
+          "confirmed": {
+            "type": "boolean"
+          },
+          "previewDigest": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "selection": {
+            "$ref": "#/components/schemas/PersonalTransferSelection"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PersonalTransferConflict": {
+        "type": "string",
+        "description": "`params.code` of `personal_transfer_conflict`.",
+        "enum": [
+          "command_changed",
+          "preview_stale"
+        ]
+      },
+      "PersonalTransferDisposition": {
+        "type": "object",
+        "description": "One observed part of the disclosure graph and what the command does to it.",
+        "required": [
+          "item",
+          "outcome",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "item": {
+            "$ref": "#/components/schemas/PersonalTransferItem"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/PersonalTransferOutcome"
+          }
+        }
+      },
+      "PersonalTransferItem": {
+        "type": "string",
+        "enum": [
+          "document",
+          "task",
+          "activity",
+          "history",
+          "attachment",
+          "time_entry",
+          "timer"
+        ]
+      },
+      "PersonalTransferOutcome": {
+        "type": "string",
+        "enum": [
+          "moved",
+          "copied_new_id",
+          "retained_private",
+          "not_included"
+        ]
+      },
+      "PersonalTransferOutput": {
+        "type": "object",
+        "required": [
+          "workspaceId",
+          "projectId",
+          "documentId",
+          "documentNumber",
+          "replayed"
+        ],
+        "properties": {
+          "documentId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "documentNumber": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "taskId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "taskNumber": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "PersonalTransferPreview": {
+        "type": "object",
+        "required": [
+          "digest",
+          "documentTitle",
+          "workspaceName",
+          "projectName",
+          "projectVisibility",
+          "sourceRetained",
+          "attachmentCount",
+          "activityCount",
+          "dispositions"
+        ],
+        "properties": {
+          "activityCount": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "attachmentCount": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "digest": {
+            "type": "string"
+          },
+          "dispositions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PersonalTransferDisposition"
+            }
+          },
+          "documentTitle": {
+            "type": "string"
+          },
+          "projectName": {
+            "type": "string"
+          },
+          "projectVisibility": {
+            "type": "string"
+          },
+          "sourceRetained": {
+            "type": "boolean"
+          },
+          "taskTitle": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspaceName": {
+            "type": "string"
+          }
+        }
+      },
+      "PersonalTransferSelection": {
+        "type": "object",
+        "required": [
+          "action",
+          "documentId",
+          "expectedDocumentVersion",
+          "destinationWorkspaceId",
+          "destinationProjectId"
+        ],
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/PersonalTransferAction"
+          },
+          "destinationProjectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "destinationStatusId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "destinationWorkspaceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "documentId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expectedDocumentVersion": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "expectedTaskVersion": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "taskId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           }
         },
         "additionalProperties": false
@@ -29472,6 +32851,65 @@
           }
         }
       },
+      "ReferenceOutput": {
+        "type": "object",
+        "required": [
+          "id",
+          "documentDisplayId",
+          "connectorId",
+          "itemKey",
+          "remoteVersion",
+          "localVersion",
+          "bibliography",
+          "returnUrl",
+          "availability",
+          "collectionKeys",
+          "links"
+        ],
+        "properties": {
+          "availability": {
+            "type": "string"
+          },
+          "bibliography": {
+            "$ref": "#/components/schemas/Bibliography"
+          },
+          "collectionKeys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "connectorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "documentDisplayId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "itemKey": {
+            "type": "string"
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinkOutput"
+            }
+          },
+          "localVersion": {
+            "type": "string"
+          },
+          "remoteVersion": {
+            "type": "string"
+          },
+          "returnUrl": {
+            "type": "string"
+          }
+        }
+      },
       "ResumeAttachmentUploadResponse": {
         "type": "object",
         "required": [
@@ -29537,7 +32975,8 @@
           "createdBy",
           "createdAt",
           "contentJson",
-          "ySnapshot"
+          "ySnapshot",
+          "restoredFromId"
         ],
         "properties": {
           "contentJson": {},
@@ -29556,6 +32995,12 @@
           },
           "reason": {
             "type": "string"
+          },
+          "restoredFromId": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "targetId": {
             "type": "string"
@@ -29597,7 +33042,8 @@
           "targetId",
           "reason",
           "createdBy",
-          "createdAt"
+          "createdAt",
+          "restoredFromId"
         ],
         "properties": {
           "createdAt": {
@@ -29616,6 +33062,12 @@
           "reason": {
             "type": "string"
           },
+          "restoredFromId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "targetId": {
             "type": "string"
           },
@@ -29626,25 +33078,52 @@
       },
       "RevisionRestoreBody": {
         "type": "object",
+        "required": [
+          "correlationId",
+          "expectedTailSeq"
+        ],
         "properties": {
           "correlationId": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": "string",
             "format": "uuid"
+          },
+          "expectedTailSeq": {
+            "type": "string",
+            "description": "Opaque canonical decimal tail sequence; never a JavaScript number."
           }
         },
         "additionalProperties": false
       },
+      "RevisionRestorePreviewResponse": {
+        "type": "object",
+        "required": [
+          "source",
+          "currentContentJson",
+          "currentTailSeq"
+        ],
+        "properties": {
+          "currentContentJson": {},
+          "currentTailSeq": {
+            "type": "string",
+            "description": "Captured with current_content_json in the same room actor operation."
+          },
+          "source": {
+            "$ref": "#/components/schemas/RevisionDetailResponse"
+          }
+        }
+      },
       "RevisionRestoreResponse": {
         "type": "object",
         "required": [
-          "restored"
+          "restored",
+          "revisionId"
         ],
         "properties": {
           "restored": {
             "type": "boolean"
+          },
+          "revisionId": {
+            "type": "string"
           }
         }
       },
@@ -30380,6 +33859,92 @@
       "String": {
         "type": "string"
       },
+      "StudyPlanTaskBody": {
+        "type": "object",
+        "description": "Creates one ordinary task linked to an existing material/notes document.\nThe planner keeps goal/reading steps as ordinary task hierarchy and origins.",
+        "required": [
+          "expectedActorId",
+          "expectedSessionId",
+          "projectId",
+          "requestId",
+          "task"
+        ],
+        "properties": {
+          "anchor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expectedActorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expectedSessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "selfAssign": {
+            "type": "boolean"
+          },
+          "task": {
+            "$ref": "#/components/schemas/CreateTaskBody"
+          }
+        },
+        "additionalProperties": false
+      },
+      "StudyPlanTaskOutput": {
+        "type": "object",
+        "required": [
+          "taskId",
+          "number",
+          "projectKey"
+        ],
+        "properties": {
+          "number": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "projectKey": {
+            "type": "string"
+          },
+          "taskId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "Tag": {
+        "type": "object",
+        "required": [
+          "tag"
+        ],
+        "properties": {
+          "tag": {
+            "type": "string"
+          },
+          "type": {
+            "type": "integer",
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false
+      },
       "TaskChildOutput": {
         "type": "object",
         "required": [
@@ -30481,6 +34046,74 @@
             "type": "string"
           }
         }
+      },
+      "TaskEstimate": {
+        "type": "object",
+        "description": "Raw database timestamp preserves microseconds for compare-and-set; the\nordinary task DTO's millisecond timestamp is not an estimate write token.",
+        "required": [
+          "value",
+          "unit",
+          "updatedAt"
+        ],
+        "properties": {
+          "unit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "TaskEstimateCommandBody": {
+        "type": "object",
+        "required": [
+          "expectedActorId",
+          "expectedSessionId",
+          "requestId",
+          "expected",
+          "minutes",
+          "reason"
+        ],
+        "properties": {
+          "expected": {
+            "$ref": "#/components/schemas/TaskEstimate"
+          },
+          "expectedActorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expectedSessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Null explicitly clears both the value and the unit."
+          },
+          "reason": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
       },
       "TaskListItemOutput": {
         "allOf": [
@@ -30866,7 +34499,8 @@
         "required": [
           "id",
           "name",
-          "key"
+          "key",
+          "visibility"
         ],
         "properties": {
           "id": {
@@ -30876,6 +34510,9 @@
             "type": "string"
           },
           "name": {
+            "type": "string"
+          },
+          "visibility": {
             "type": "string"
           }
         }
@@ -30917,6 +34554,52 @@
           },
           "statusId": {
             "type": "string"
+          }
+        }
+      },
+      "TaskTimerState": {
+        "type": "object",
+        "required": [
+          "serverNow",
+          "run",
+          "busyElsewhere",
+          "legacyOpen",
+          "canControl",
+          "actualMilliseconds",
+          "estimate"
+        ],
+        "properties": {
+          "actualMilliseconds": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "busyElsewhere": {
+            "type": "boolean",
+            "description": "A different unfinished run, without its tenant, task id or title."
+          },
+          "canControl": {
+            "type": "boolean",
+            "description": "Current existing time-entry Edit/archive capability, in this snapshot."
+          },
+          "estimate": {
+            "$ref": "#/components/schemas/TaskEstimate"
+          },
+          "legacyOpen": {
+            "type": "boolean"
+          },
+          "run": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TimerRunOutput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "serverNow": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -31023,6 +34706,77 @@
             "type": "string"
           }
         }
+      },
+      "TimeCorrectionBody": {
+        "type": "object",
+        "required": [
+          "expectedActorId",
+          "expectedSessionId",
+          "requestId",
+          "kind",
+          "expectedRevision",
+          "expectedStartedAt",
+          "startedAt",
+          "endedAt",
+          "reason"
+        ],
+        "properties": {
+          "endedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expectedActorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expectedEndedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "expectedNote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "expectedSessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expectedStartedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Original range as seen by this form; null end means a legacy open row."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/TimeRecordKind"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
       },
       "TimeEntryCreateBody": {
         "type": "object",
@@ -31131,6 +34885,384 @@
           "totalSeconds": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "TimeRecord": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "startedAt",
+          "endedAt",
+          "runId",
+          "note",
+          "revision",
+          "reservedLegacy"
+        ],
+        "properties": {
+          "endedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/TimeRecordKind"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reservedLegacy": {
+            "type": "boolean"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "runId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "TimeRecordKind": {
+        "type": "string",
+        "description": "Own task history includes unresolved manual rows explicitly, never guesses\ntheir end. Projected timer rows occur once as canonical segments.",
+        "enum": [
+          "manual",
+          "segment"
+        ]
+      },
+      "TimerCleanupBody": {
+        "type": "object",
+        "required": [
+          "expectedActorId",
+          "expectedSessionId",
+          "requestId",
+          "runId",
+          "expectedVersion"
+        ],
+        "properties": {
+          "expectedActorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expectedSessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "runId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TimerCommandBody": {
+        "type": "object",
+        "required": [
+          "expectedActorId",
+          "expectedSessionId",
+          "requestId",
+          "operation",
+          "expectedVersion"
+        ],
+        "properties": {
+          "expectedActorId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Intent guards, never authorization: authoritative authentication wins."
+          },
+          "expectedSessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operation": {
+            "$ref": "#/components/schemas/TimerOperation"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "runId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TimerCommandOutput": {
+        "type": "object",
+        "required": [
+          "runId",
+          "version",
+          "status",
+          "serverNow"
+        ],
+        "properties": {
+          "runId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "serverNow": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TimerStatus"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "TimerDayTotal": {
+        "type": "object",
+        "required": [
+          "date",
+          "milliseconds"
+        ],
+        "properties": {
+          "date": {
+            "type": "string",
+            "format": "date"
+          },
+          "milliseconds": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "TimerHistory": {
+        "type": "object",
+        "required": [
+          "serverNow",
+          "items",
+          "nextCursor"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TimeRecord"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "serverNow": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "TimerManualBody": {
+        "type": "object",
+        "required": [
+          "expectedActorId",
+          "expectedSessionId",
+          "requestId",
+          "startedAt",
+          "endedAt",
+          "reason"
+        ],
+        "properties": {
+          "endedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expectedActorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expectedSessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TimerOperation": {
+        "type": "string",
+        "enum": [
+          "start",
+          "pause",
+          "resume",
+          "stop"
+        ]
+      },
+      "TimerRecordOutput": {
+        "type": "object",
+        "required": [
+          "serverNow",
+          "record"
+        ],
+        "properties": {
+          "record": {
+            "$ref": "#/components/schemas/TimeRecord"
+          },
+          "serverNow": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "TimerRunOutput": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspaceId",
+          "taskId",
+          "status",
+          "version",
+          "startedAt",
+          "runningSince",
+          "elapsedMilliseconds",
+          "note"
+        ],
+        "properties": {
+          "elapsedMilliseconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Closed intervals only. Add the serverNow/runningSince delta for display."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runningSince": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TimerStatus"
+          },
+          "taskId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "TimerStatus": {
+        "type": "string",
+        "enum": [
+          "running",
+          "paused",
+          "stopped"
+        ]
+      },
+      "TimerSummary": {
+        "type": "object",
+        "required": [
+          "serverNow",
+          "timeZone",
+          "days",
+          "totalMilliseconds",
+          "unfinished",
+          "unresolvedManual"
+        ],
+        "properties": {
+          "days": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TimerDayTotal"
+            }
+          },
+          "serverNow": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "timeZone": {
+            "type": "string"
+          },
+          "totalMilliseconds": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "unfinished": {
+            "type": "boolean"
+          },
+          "unresolvedManual": {
+            "type": "boolean"
           }
         }
       },
@@ -31849,6 +35981,35 @@
             "format": "int32"
           },
           "workflowId": {
+            "type": "string"
+          }
+        }
+      },
+      "ZoteroCollectionOutput": {
+        "type": "object",
+        "required": [
+          "key",
+          "remoteVersion",
+          "name",
+          "availability"
+        ],
+        "properties": {
+          "availability": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parentKey": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remoteVersion": {
             "type": "string"
           }
         }

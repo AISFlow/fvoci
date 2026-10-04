@@ -88,7 +88,7 @@ pub use crate::collab::wire::CollabKind;
 /// Per-kind collab tables. The task tables (037) mirror the document tables
 /// (004/005) column for column; the closed [`CollabKind`] selects them.
 #[derive(Debug, Clone, Copy)]
-struct CollabTables {
+pub(crate) struct CollabTables {
     states: &'static str,
     updates: &'static str,
     receipts: &'static str,
@@ -122,7 +122,7 @@ const TASK_TABLES: CollabTables = CollabTables {
 };
 
 impl CollabTables {
-    fn for_kind(kind: CollabKind) -> &'static Self {
+    pub(crate) fn for_kind(kind: CollabKind) -> &'static Self {
         match kind {
             CollabKind::Document => &DOCUMENT_TABLES,
             CollabKind::Task => &TASK_TABLES,
@@ -617,7 +617,7 @@ async fn fetch_append_fence_for_update(
     .await
 }
 
-async fn fetch_state_for_update(
+pub(crate) async fn fetch_state_for_update(
     tx: &mut Transaction<'_, Postgres>,
     t: &CollabTables,
     workspace_id: Uuid,
@@ -637,7 +637,7 @@ async fn fetch_state_for_update(
     .await
 }
 
-async fn load_tail_updates(
+pub(crate) async fn load_tail_updates(
     tx: &mut Transaction<'_, Postgres>,
     t: &CollabTables,
     workspace_id: Uuid,
@@ -899,6 +899,37 @@ async fn record_collab_event_and_audit(
     Ok(())
 }
 
+/// Test fixtures only (`db-tests`): the unchanged per-append event and audit
+/// write of [`append_collab_update_kind`], for a fixture that writes a batch
+/// of genuine appends in one transaction. No policy is copied here.
+#[cfg(feature = "db-tests")]
+#[allow(clippy::too_many_arguments)]
+pub async fn record_collab_append_for_tests(
+    tx: &mut Transaction<'_, Postgres>,
+    kind: CollabKind,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    document_id: Uuid,
+    op_id: Uuid,
+    seq: i64,
+    writer_generation: i64,
+) -> Result<(), sqlx::Error> {
+    record_collab_event_and_audit(
+        tx,
+        CollabTables::for_kind(kind),
+        CollabAuditRecord {
+            workspace_id,
+            actor_user_id,
+            document_id,
+            op_id,
+            seq,
+            writer_generation,
+            client_ip: None,
+        },
+    )
+    .await
+}
+
 pub async fn claim_writer_and_load(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1098,9 +1129,37 @@ pub async fn append_collab_update_kind(
     }
     let timings = CollabDbStageTimings::default();
     let tx = pool.begin().await?;
-    append_collab_update_in_tx(tx, kind, input, timings)
+    append_collab_update_in_tx(tx, kind, input, timings, None)
         .await
-        .map(|(result, _)| result)
+        .map(|(result, _)| result.map(|(append, _)| append))
+}
+
+/// A restore commits its new revision in the existing forward append tx.
+pub async fn append_collab_restore_kind(
+    pool: &PgPool,
+    kind: CollabKind,
+    input: AppendCollabInput<'_>,
+    restore: &crate::db::revisions::RestoreRevisionAppend,
+) -> Result<Result<(AppendCollabResult, Uuid), CollabDbError>, sqlx::Error> {
+    if input.payload.is_empty() || input.payload.len() > MAX_COLLAB_UPDATE_BYTES {
+        return Ok(Err(CollabDbError::PayloadTooLarge));
+    }
+    let tx = pool.begin().await?;
+    append_collab_update_in_tx(
+        tx,
+        kind,
+        input,
+        CollabDbStageTimings::default(),
+        Some(restore),
+    )
+    .await
+    .map(|(result, _)| {
+        result.and_then(|(append, revision_id)| {
+            revision_id
+                .map(|id| (append, id))
+                .ok_or(CollabDbError::OpIdConflict)
+        })
+    })
 }
 
 /// Append on a room's dedicated session connection (no pool acquire).
@@ -1120,7 +1179,9 @@ pub async fn append_collab_update_on_conn_timed(
         return Ok((Err(CollabDbError::PayloadTooLarge), timings));
     }
     let tx = conn.begin().await?;
-    append_collab_update_in_tx(tx, kind, input, timings).await
+    append_collab_update_in_tx(tx, kind, input, timings, None)
+        .await
+        .map(|(result, timings)| (result.map(|(append, _)| append), timings))
 }
 
 async fn append_collab_update_in_tx(
@@ -1128,9 +1189,10 @@ async fn append_collab_update_in_tx(
     kind: CollabKind,
     input: AppendCollabInput<'_>,
     mut timings: CollabDbStageTimings,
+    restore: Option<&crate::db::revisions::RestoreRevisionAppend>,
 ) -> Result<
     (
-        Result<AppendCollabResult, CollabDbError>,
+        Result<(AppendCollabResult, Option<Uuid>), CollabDbError>,
         CollabDbStageTimings,
     ),
     sqlx::Error,
@@ -1161,6 +1223,75 @@ async fn append_collab_update_in_tx(
     {
         tx.rollback().await?;
         return Ok((Err(err), timings));
+    }
+    if let Some(restore) = restore {
+        use crate::db::revisions::{
+            authorize_restore_in_tx, lookup_restored_revision_in_tx, RevisionDbError,
+        };
+        if restore.intent.scope.target().id() != document_id
+            || restore.intent.scope.target().kind_str() != t.target_type
+            || restore.intent.expected_tail_seq != expected_tail_seq
+        {
+            tx.rollback().await?;
+            return Ok((Err(CollabDbError::OpIdConflict), timings));
+        }
+        if let Err(err) = authorize_restore_in_tx(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            restore.intent,
+        )
+        .await?
+        {
+            tx.rollback().await?;
+            return Ok((
+                Err(if err == RevisionDbError::RestoreConflict {
+                    CollabDbError::OpIdConflict
+                } else {
+                    CollabDbError::Forbidden
+                }),
+                timings,
+            ));
+        }
+        // Serialize accidental cross-target correlation reuse after current
+        // authorization. This transaction lock has no permanent cache owner.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "revision-restore:{workspace_id}:{}",
+                restore.intent.correlation_id
+            ))
+            .execute(&mut *tx)
+            .await?;
+        match lookup_restored_revision_in_tx(&mut tx, workspace_id, actor_user_id, restore.intent)
+            .await?
+        {
+            Ok(Some(record)) => {
+                tx.commit().await?;
+                return Ok((
+                    Ok((
+                        AppendCollabResult::DuplicateAck {
+                            seq: record.committed_tail_seq,
+                        },
+                        Some(record.revision_id),
+                    )),
+                    timings,
+                ));
+            }
+            Ok(None) => {}
+            Err(_) => {
+                tx.rollback().await?;
+                return Ok((Err(CollabDbError::OpIdConflict), timings));
+            }
+        }
+        let source_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM fvoci.revisions WHERE workspace_id = $1 AND id = $2 AND target_kind = $3 AND target_id = $4 FOR SHARE",
+        ).bind(workspace_id).bind(restore.intent.source_revision_id).bind(t.target_type).bind(document_id)
+            .fetch_optional(&mut *tx).await?;
+        if source_id.is_none() {
+            tx.rollback().await?;
+            return Ok((Err(CollabDbError::NotFound), timings));
+        }
     }
     let state_started = Instant::now();
     let mut fence = fetch_append_fence_for_update(&mut tx, t, workspace_id, document_id).await?;
@@ -1211,7 +1342,13 @@ async fn append_collab_update_in_tx(
             tx.commit().await?;
             timings.commit_us = commit_started.elapsed().as_micros() as u64;
             timings.stmt_us = stmt_started.elapsed().as_micros() as u64 - timings.commit_us;
-            return Ok((Ok(AppendCollabResult::DuplicateAck { seq }), timings));
+            return Ok((
+                Ok((
+                    AppendCollabResult::DuplicateAck { seq },
+                    restore.map(|value| value.revision_id),
+                )),
+                timings,
+            ));
         }
         tx.rollback().await?;
         return Ok((Err(CollabDbError::OpIdConflict), timings));
@@ -1305,11 +1442,90 @@ async fn append_collab_update_in_tx(
     )
     .await?;
 
+    if let Some(restore) = restore {
+        sqlx::query(
+            "INSERT INTO fvoci.revisions (id, workspace_id, target_kind, target_id, y_snapshot, encoding, content_json, text, reason, created_by, restored_from_id, restore_correlation_id, restore_base_tail_seq, restore_committed_tail_seq) VALUES ($1,$2,$3,$4,$5,1,$6,$7,'restore',$8,$9,$10,$11,$12)",
+        )
+        .bind(restore.revision_id).bind(workspace_id).bind(t.target_type).bind(document_id)
+        .bind(&restore.y_snapshot).bind(restore.prepared_body.content_json()).bind(restore.prepared_body.text()).bind(actor_user_id)
+        .bind(restore.intent.source_revision_id).bind(restore.intent.correlation_id)
+        .bind(restore.intent.expected_tail_seq).bind(seq).execute(&mut *tx).await?;
+        let mut payload = serde_json::json!({
+            "restoreRequested": restore.intent.source_revision_id,
+            "restoredFromRevisionId": restore.intent.source_revision_id,
+            "restoredRevisionId": restore.revision_id,
+            "correlationId": restore.intent.correlation_id,
+        });
+        payload[t.payload_key] = serde_json::json!(document_id);
+        append_event(
+            &mut tx,
+            EventAppend {
+                id: Uuid::now_v7(),
+                workspace_id: Some(workspace_id),
+                actor_user_id: Some(actor_user_id),
+                verb: t.verb("updated"),
+                target_type: Some(t.target_type.into()),
+                target_id: Some(document_id),
+                payload,
+            },
+        )
+        .await?;
+
+        // This exact future canonical body belongs to the already-authorized
+        // restore commit. Project it while the actor/resource/state locks are
+        // held: post-commit revocation can deny recovery without leaving the
+        // durable body API on the content that the committed restore replaced.
+        // Correlation/receipt replays returned above and never project again.
+        let updated: Option<(Uuid,)> = sqlx::query_as(&t.sql(
+            r#"
+            UPDATE {resource}
+            SET content_json = $3,
+                text = $4,
+                chosung = $5,
+                updated_at = now()
+            WHERE workspace_id = $1
+              AND id = $2
+              AND content_json IS DISTINCT FROM $3::jsonb
+            RETURNING id
+            "#,
+        ))
+        .bind(workspace_id)
+        .bind(document_id)
+        .bind(restore.prepared_body.content_json())
+        .bind(restore.prepared_body.text())
+        .bind(restore.prepared_body.chosung())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if updated.is_some() {
+            append_system_updated_event(&mut tx, t, workspace_id, document_id).await?;
+        }
+    }
     timings.stmt_us = stmt_started.elapsed().as_micros() as u64;
     let commit_started = Instant::now();
     tx.commit().await?;
     timings.commit_us = commit_started.elapsed().as_micros() as u64;
-    Ok((Ok(AppendCollabResult::Committed { seq }), timings))
+    #[cfg(feature = "db-tests")]
+    if restore.is_some() {
+        let barrier = RESTORE_COMMIT_AMBIGUITY
+            .lock()
+            .await
+            .remove(&(workspace_id, document_id));
+        if let Some((reached, proceed)) = barrier {
+            let _ = reached.send(());
+            let _ = proceed.await;
+            return Err(sqlx::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "fixture restore committed; reply lost",
+            )));
+        }
+    }
+    Ok((
+        Ok((
+            AppendCollabResult::Committed { seq },
+            restore.map(|value| value.revision_id),
+        )),
+        timings,
+    ))
 }
 
 pub async fn lookup_collab_operation(
@@ -1519,67 +1735,37 @@ pub async fn compact_collab_snapshot_kind(
         return Ok(Err(CollabDbError::InvalidCutoff));
     }
 
-    sqlx::query(&t.sql(
+    // Saving the already committed snapshot again (same locked cutoff, no
+    // compactable rows, byte-identical bytes) changes nothing. Skip the row
+    // rewrite, tail delete, event and audit; every check above still applied.
+    let compactable: bool = sqlx::query_scalar(&t.sql(
         r#"
-        UPDATE {states}
-        SET state = $3,
-            snapshot_cutoff_seq = $4,
-            updated_at = now()
-        WHERE workspace_id = $1 AND {id} = $2 AND writer_generation = $5
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .bind(new_snapshot)
-    .bind(cutoff_seq)
-    .bind(writer_generation)
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query(&t.sql(
-        r#"
-        DELETE FROM {updates}
-        WHERE workspace_id = $1 AND {id} = $2 AND seq <= $3
+        SELECT EXISTS(
+            SELECT 1 FROM {updates}
+            WHERE workspace_id = $1 AND {id} = $2 AND seq <= $3
+        )
         "#,
     ))
     .bind(workspace_id)
     .bind(document_id)
     .bind(cutoff_seq)
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
-
-    let payload = json!({
-        t.payload_key: document_id.to_string(),
-        "cutoffSeq": cutoff_seq,
-        "writerGeneration": writer_generation,
-    });
-    append_event(
-        &mut tx,
-        EventAppend {
-            id: Uuid::now_v7(),
-            workspace_id: Some(workspace_id),
-            actor_user_id: Some(actor_user_id),
-            verb: t.verb("collab_snapshot_compacted"),
-            target_type: Some(t.target_type.to_string()),
-            target_id: Some(document_id),
-            payload: payload.clone(),
-        },
-    )
-    .await?;
-    append_audit(
-        &mut tx,
-        AuditAppend {
-            id: Uuid::now_v7(),
-            workspace_id: Some(workspace_id),
-            actor_user_id: Some(actor_user_id),
-            verb: t.verb("collab_snapshot_compacted"),
-            target_type: Some(t.target_type.to_string()),
-            target_id: Some(document_id),
-            payload,
-            ip: client_ip.map(str::to_string),
-        },
-    )
-    .await?;
+    let unchanged = cutoff_seq == state.3 && !compactable && state.0.as_slice() == new_snapshot;
+    if !unchanged {
+        compact_rows(
+            &mut tx,
+            t,
+            workspace_id,
+            actor_user_id,
+            document_id,
+            writer_generation,
+            cutoff_seq,
+            new_snapshot,
+            client_ip,
+        )
+        .await?;
+    }
 
     let refreshed = fetch_state_for_update(&mut tx, t, workspace_id, document_id).await?;
     let Some(refreshed) = refreshed else {
@@ -1605,6 +1791,85 @@ pub async fn compact_collab_snapshot_kind(
     let load = state_row_to_load(refreshed, tail);
     tx.commit().await?;
     Ok(Ok(load))
+}
+
+/// The committing half of a compaction: new snapshot and cutoff, compacted
+/// tail removal, and the collab_snapshot_compacted event and audit.
+#[allow(clippy::too_many_arguments)]
+async fn compact_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    t: &CollabTables,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    document_id: Uuid,
+    writer_generation: i64,
+    cutoff_seq: i64,
+    new_snapshot: &[u8],
+    client_ip: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(&t.sql(
+        r#"
+        UPDATE {states}
+        SET state = $3,
+            snapshot_cutoff_seq = $4,
+            updated_at = now()
+        WHERE workspace_id = $1 AND {id} = $2 AND writer_generation = $5
+        "#,
+    ))
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(new_snapshot)
+    .bind(cutoff_seq)
+    .bind(writer_generation)
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(&t.sql(
+        r#"
+        DELETE FROM {updates}
+        WHERE workspace_id = $1 AND {id} = $2 AND seq <= $3
+        "#,
+    ))
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(cutoff_seq)
+    .execute(&mut **tx)
+    .await?;
+
+    let payload = json!({
+        t.payload_key: document_id.to_string(),
+        "cutoffSeq": cutoff_seq,
+        "writerGeneration": writer_generation,
+    });
+    append_event(
+        &mut *tx,
+        EventAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace_id),
+            actor_user_id: Some(actor_user_id),
+            verb: t.verb("collab_snapshot_compacted"),
+            target_type: Some(t.target_type.to_string()),
+            target_id: Some(document_id),
+            payload: payload.clone(),
+        },
+    )
+    .await?;
+    append_audit(
+        &mut *tx,
+        AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace_id),
+            actor_user_id: Some(actor_user_id),
+            verb: t.verb("collab_snapshot_compacted"),
+            target_type: Some(t.target_type.to_string()),
+            target_id: Some(document_id),
+            payload,
+            ip: client_ip.map(str::to_string),
+        },
+    )
+    .await?;
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1729,6 +1994,34 @@ pub async fn load_collab_readonly_kind(
     let load = state_row_to_load(state, tail);
     tx.commit().await?;
     Ok(Ok(load))
+}
+
+/// One-shot, per-fixture fault after a real restore commit. No production hook.
+#[cfg(feature = "db-tests")]
+type RestoreCommitBarrier = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+#[cfg(feature = "db-tests")]
+static RESTORE_COMMIT_AMBIGUITY: std::sync::LazyLock<
+    tokio::sync::Mutex<std::collections::HashMap<(Uuid, Uuid), RestoreCommitBarrier>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
+#[cfg(feature = "db-tests")]
+pub async fn arm_restore_committed_ambiguity(
+    workspace_id: Uuid,
+    document_id: Uuid,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+    assert!(RESTORE_COMMIT_AMBIGUITY
+        .lock()
+        .await
+        .insert((workspace_id, document_id), (reached_tx, proceed_rx))
+        .is_none());
+    (reached_rx, proceed_tx)
 }
 
 /// Documents whose persisted-bytes estimate fails while armed. Keyed by document so a

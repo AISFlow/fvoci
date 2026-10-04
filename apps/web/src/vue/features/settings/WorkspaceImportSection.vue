@@ -20,6 +20,7 @@ import {
   type ImportSource,
 } from "./import-source";
 import "@/features/settings/settings-shell.css";
+import NativeArchiveSection from "./NativeArchiveSection.vue";
 
 class PollStopped extends Error {
   readonly kind: "cancelled" | "budget";
@@ -225,4 +226,5 @@ function sourceLabel(value: ImportSource): string {
       <p v-if="error" role="alert" class="text-error">{{ error }}</p>
     </div>
   </section>
+  <NativeArchiveSection :workspace-id="workspaceId" :can-manage="canManage" mode="restore" />
 </template>

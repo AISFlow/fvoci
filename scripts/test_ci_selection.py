@@ -976,6 +976,52 @@ class RustSuiteRegistryTest(unittest.TestCase):
         self.assertIn("search_meili", joined)
         self.assertIn("postgres matrix missing", joined)
 
+    def _collab_script_inventory(self, fx: "RustSuiteRegistryFixture", body: str):
+        (fx.root / SEL.RUST_COLLAB_CI_SCRIPT).write_text(
+            "#!/usr/bin/env bash\n" + body, encoding="utf-8"
+        )
+        return SEL.collaboration_script_inventory(fx.root)
+
+    def test_collaboration_script_two_invocations_union_all_targets(self) -> None:
+        with RustSuiteRegistryFixture() as fx:
+            tests, err = SEL.collaboration_script_inventory(fx.root)
+        self.assertIsNone(err)
+        self.assertEqual(len(tests), 10)
+        self.assertIn("task_collab_integration", tests)
+        self.assertIn("collab_product", tests)
+
+    def test_collaboration_script_target_in_two_invocations_fails(self) -> None:
+        prefix = "cargo test --locked --offline --no-fail-fast --features db-tests \\\n"
+        body = (
+            prefix + "  --test collab_product \\\n  --test task_collab_integration \\\n  | tee log\n"
+            + prefix + "  --test task_collab_integration \\\n  -- --test-threads=1 \\\n  | tee -a log\n"
+        )
+        with RustSuiteRegistryFixture() as fx:
+            tests, err = self._collab_script_inventory(fx, body)
+        self.assertEqual(tests, set())
+        self.assertIn("more than once", err or "")
+        self.assertIn("task_collab_integration", err or "")
+
+    def test_collaboration_script_libtest_suffix_allows_only_scheduling(self) -> None:
+        prefix = "cargo test --locked --offline --no-fail-fast --features db-tests \\\n"
+        for suffix, allowed in (
+            ("--test-threads=1", True),
+            ("--nocapture", True),
+            ("some_filter", False),
+            ("--skip personal_transfer", False),
+            ("--ignored", False),
+            ("--test-threads=4", False),
+        ):
+            body = prefix + "  --test task_collab_integration \\\n  -- " + suffix + " \\\n  | tee log\n"
+            with self.subTest(suffix=suffix), RustSuiteRegistryFixture() as fx:
+                tests, err = self._collab_script_inventory(fx, body)
+                if allowed:
+                    self.assertIsNone(err)
+                    self.assertEqual(tests, {"task_collab_integration"})
+                else:
+                    self.assertEqual(tests, set())
+                    self.assertIn("libtest filter", err or "")
+
     def test_trimmed_inventory_with_real_workflow_passes(self) -> None:
         with RustSuiteRegistryFixture() as fx:
             fx.write_cargo()

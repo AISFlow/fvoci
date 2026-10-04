@@ -6,6 +6,7 @@ pub mod github;
 pub mod outbound;
 pub mod unfurl;
 pub mod webhooks;
+pub mod zotero;
 
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ pub struct Integrations {
     /// pending deliveries fail closed.
     pub encryption_keys: Option<Arc<Keyring>>,
     pub outbound: outbound::Outbound,
+    pub zotero: zotero::ZoteroClient,
     pub github: Option<github::GithubConfig>,
     pub ai: Option<ai::AiConfig>,
 }
@@ -40,6 +42,9 @@ impl Integrations {
         Self {
             encryption_keys: None,
             outbound: outbound::Outbound::system(outbound::OutboundPolicy::default()),
+            zotero: zotero::ZoteroClient::system(outbound::Outbound::system(
+                outbound::OutboundPolicy::default(),
+            )),
             github: None,
             ai: None,
         }
@@ -68,6 +73,9 @@ impl Integrations {
         Ok(Self {
             encryption_keys,
             outbound: outbound::Outbound::system(outbound::OutboundPolicy::from_env()?),
+            zotero: zotero::ZoteroClient::system(outbound::Outbound::system(
+                outbound::OutboundPolicy::default(),
+            )),
             github,
             ai: ai::AiConfig::from_env(),
         })

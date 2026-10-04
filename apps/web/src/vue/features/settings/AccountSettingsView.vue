@@ -34,6 +34,7 @@ import {
 } from "@/lib/ui-preferences";
 import { optionKey, SETTING_ENUM_OPTIONS } from "@/features/settings/settings-catalog";
 import "@/features/settings/settings-shell.css";
+import ZoteroSection from "./ZoteroSection.vue";
 
 const props = defineProps<{
   me: SessionUserOutput;
@@ -275,6 +276,7 @@ async function handleExport(): Promise<void> {
 
 <template>
   <div class="settings-stack">
+    <ZoteroSection :user-id="props.me.userId" :session-id="props.me.sessionId" />
     <UPageCard
       as="section"
       variant="subtle"

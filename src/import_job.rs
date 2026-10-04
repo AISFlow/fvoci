@@ -249,6 +249,10 @@ async fn run_claimed(
     cancel: &CancellationToken,
     claim: &ImportClaim,
 ) {
+    if claim.source == ImportSource::NativeArchive {
+        run_native_claimed(pool, settings, storage, cancel, claim).await;
+        return;
+    }
     let mut created = ImportJobRefs::default();
     let result = run_claimed_inner(pool, settings, storage, cancel, claim, &mut created).await;
     match result {
@@ -368,6 +372,9 @@ async fn run_claimed_inner(
         lease_token: claim.lease_token,
     };
     match claim.source {
+        ImportSource::NativeArchive => Err(RunError::Failed(
+            "native archive requires atomic runner".into(),
+        )),
         ImportSource::OfficeFile => {
             run_office_import(pool, settings, cancel, claim, fence, payload, created).await
         }
@@ -383,6 +390,110 @@ async fn run_claimed_inner(
             .await
         }
         ImportSource::MarkdownZip => Err(RunError::Failed("markdown-zip is synchronous".into())),
+    }
+}
+
+/// Native publication has no partially created graph to compensate. Storage
+/// keys remain in the durable cleanup journal until the single publication
+/// transaction hands them off. In particular a lost commit response must
+/// never purge keys from a successfully committed graph.
+async fn run_native_claimed(
+    pool: &PgPool,
+    settings: &ImportJobSettings,
+    storage: &ObjectStorage,
+    cancel: &CancellationToken,
+    claim: &ImportClaim,
+) {
+    use crate::db::native_archive::{self as db, NativeDbError};
+    use crate::native_archive::{self as native, ArchiveError};
+    let run = async {
+        if cancel.is_cancelled() {
+            return Err(NativeDbError::Archive(ArchiveError::Cancelled));
+        }
+        db::preflight_destination(pool, claim.workspace_id, claim.created_by, claim.session_id)
+            .await?;
+        let payload = load_import_payload(pool, claim)
+            .await?
+            .ok_or(NativeDbError::Fenced)?;
+        let helper = settings
+            .office_helper
+            .as_ref()
+            .ok_or(ArchiveError::Worker)?;
+        let archive = native::parse(helper, payload, cancel).await?;
+        let cfg = crate::collab::CollabConfig::from_env().ok_or(ArchiveError::Worker)?;
+        let archive = native::validate_native(archive, cfg, cancel).await?;
+        if !extend_import_lease(pool, claim).await? {
+            return Err(NativeDbError::Fenced);
+        }
+        let mut keys = std::collections::BTreeMap::new();
+        for file in &archive.graph.attachments {
+            if cancel.is_cancelled() {
+                return Err(NativeDbError::Archive(ArchiveError::Cancelled));
+            }
+            // Every attempt has new keys; stale prior keys stay journaled. The
+            // object stores accept only bare UUID keys, like ordinary uploads.
+            let key = Uuid::now_v7().to_string();
+            db::stage_key(pool, claim, file.id, &key).await?;
+            let bytes = archive.bytes(&file.payload_entry)?;
+            let expected = native::digest(&bytes);
+            storage
+                .put_bytes(&key, bytes)
+                .await
+                .map_err(|_| ArchiveError::Invalid("storage write".into()))?;
+            let readback = native::read_file(storage, &key, file.size_bytes).await?;
+            if native::digest(&readback) != expected {
+                return Err(NativeDbError::Archive(ArchiveError::Invalid(
+                    "storage readback hash".into(),
+                )));
+            }
+            keys.insert(file.id, key);
+        }
+        if cancel.is_cancelled() {
+            return Err(NativeDbError::Archive(ArchiveError::Cancelled));
+        }
+        db::publish(pool, claim, &archive, &keys, &settings.quota).await
+    };
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(300), run).await;
+    let diagnostic = match outcome {
+        Ok(Ok(())) => {
+            info!(import_job_id=%claim.job_id,"native_archive.completed");
+            return;
+        }
+        Ok(Err(NativeDbError::Fenced)) => {
+            warn!(import_job_id=%claim.job_id,"native_archive.fenced");
+            return;
+        }
+        Ok(Err(NativeDbError::Forbidden)) => "authorization_revoked",
+        Ok(Err(NativeDbError::Conflict)) => "conflict",
+        Ok(Err(NativeDbError::Archive(ArchiveError::Unsupported(_)))) => {
+            "unsupported_native_archive"
+        }
+        Ok(Err(NativeDbError::Archive(ArchiveError::Cancelled))) => "cancelled",
+        Ok(Err(NativeDbError::Archive(ref error))) => {
+            warn!(import_job_id=%claim.job_id, reason=native::log_reason(error), "native_archive.invalid");
+            "invalid_or_incomplete_archive"
+        }
+        Ok(Err(NativeDbError::Sql(ref error)))
+            if error
+                .as_database_error()
+                .is_some_and(|e| e.is_unique_violation()) =>
+        {
+            "conflict"
+        }
+        Ok(Err(NativeDbError::Sql(error))) => {
+            error!(error=%error,import_job_id=%claim.job_id,"native_archive.db_failed");
+            "database_failure"
+        }
+        Err(_) => "native_archive_timeout",
+    };
+    match db::fail_native(pool, claim, diagnostic).await {
+        Ok(true) => warn!(import_job_id=%claim.job_id,diagnostic,"native_archive.failed"),
+        Ok(false) => {
+            warn!(import_job_id=%claim.job_id,"native_archive.failure_after_fence_or_commit")
+        }
+        Err(error) => {
+            error!(error=%error,import_job_id=%claim.job_id,"native_archive.fail_transition")
+        }
     }
 }
 

@@ -2277,3 +2277,611 @@ async fn open_room_fence_with_the_workspace_key_does_not_block_indexing() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+// A test-local forwarding gate observes real CE requests without recording
+// content or credentials. A held acknowledgement exercises the actual PG fence.
+#[derive(Debug, Clone)]
+struct IndexWrite {
+    method: String,
+    path: String,
+    task_uid: Option<u64>,
+    ids: Vec<String>,
+    kinds: Vec<String>,
+    workspaces: Vec<String>,
+    filter: Option<String>,
+}
+
+struct IndexGateState {
+    upstream: MeiliConfig,
+    http: reqwest::Client,
+    writes: Mutex<Vec<IndexWrite>>,
+    hold_next: std::sync::atomic::AtomicBool,
+    reject_tasks: std::sync::atomic::AtomicBool,
+    arrived: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+struct IndexGate {
+    meili: MeiliConfig,
+    state: std::sync::Arc<IndexGateState>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl IndexGate {
+    async fn start(upstream: MeiliConfig) -> Self {
+        use axum::Router;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("index gate bind");
+        let addr = listener.local_addr().expect("index gate address");
+        let state = std::sync::Arc::new(IndexGateState {
+            upstream: upstream.clone(),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_millis(
+                    fvoci_server::search::meili::MEILI_OP_TIMEOUT_MS,
+                ))
+                .build()
+                .expect("gate client"),
+            writes: Mutex::new(Vec::new()),
+            hold_next: std::sync::atomic::AtomicBool::new(false),
+            reject_tasks: std::sync::atomic::AtomicBool::new(false),
+            arrived: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+        });
+        let app = Router::new()
+            .fallback(index_gate_request)
+            .with_state(state.clone());
+        let cancel = state.cancel.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(cancel.cancelled_owned())
+                .await
+                .expect("index gate serve");
+        });
+        let meili = MeiliConfig::new(
+            format!("http://{addr}"),
+            upstream.api_key().to_string(),
+            upstream.index_uid.clone(),
+        );
+        ensure_meili_index(&meili).await.expect("ensure gate");
+        state.writes.lock().await.clear();
+        Self {
+            meili,
+            state,
+            server,
+        }
+    }
+
+    async fn stop(mut self) {
+        self.state.cancel.cancel();
+        (&mut self.server).await.expect("index gate join");
+    }
+}
+
+impl Drop for IndexGate {
+    fn drop(&mut self) {
+        self.state.cancel.cancel();
+        self.server.abort();
+    }
+}
+
+async fn index_gate_request(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<IndexGateState>>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::body::{to_bytes, Body};
+    use std::sync::atomic::Ordering;
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let uri = request
+        .uri()
+        .path_and_query()
+        .expect("gate URI")
+        .to_string();
+    let mut headers = request.headers().clone();
+    headers.remove("host");
+    let body = to_bytes(request.into_body(), 8 * 1024 * 1024)
+        .await
+        .expect("bounded gate body");
+    let mut write_slot = None;
+    if method == reqwest::Method::POST && path.ends_with("/documents") {
+        let docs: Vec<Value> = serde_json::from_slice(&body).expect("gate documents");
+        let strings = |key: &str| {
+            docs.iter()
+                .map(|d| d[key].as_str().expect("document field").to_string())
+                .collect()
+        };
+        let mut writes = state.writes.lock().await;
+        write_slot = Some(writes.len());
+        writes.push(IndexWrite {
+            method: method.to_string(),
+            task_uid: None,
+            path: path.clone(),
+            ids: strings("id"),
+            kinds: strings("kind"),
+            workspaces: strings("workspaceId"),
+            filter: None,
+        });
+        drop(writes);
+        if state.hold_next.swap(false, Ordering::SeqCst) {
+            state.arrived.notify_one();
+            tokio::select! {
+                () = state.release.notified() => {},
+                () = state.cancel.cancelled() => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            }
+        }
+    } else if method == reqwest::Method::POST && path.ends_with("/documents/delete") {
+        let value: Value = serde_json::from_slice(&body).expect("gate filter");
+        let mut writes = state.writes.lock().await;
+        write_slot = Some(writes.len());
+        writes.push(IndexWrite {
+            method: method.to_string(),
+            task_uid: None,
+            path: path.clone(),
+            ids: Vec::new(),
+            kinds: Vec::new(),
+            workspaces: Vec::new(),
+            filter: Some(value["filter"].as_str().expect("filter").to_string()),
+        });
+    }
+    use axum::response::IntoResponse;
+    let forwarded = state
+        .http
+        .request(method.clone(), format!("{}{}", state.upstream.url, uri))
+        .headers(headers)
+        .body(body)
+        .send();
+    let response = tokio::select! {
+        r = forwarded => r.expect("gate upstream"),
+        () = state.cancel.cancelled() => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let status = response.status();
+    let mut bytes = response.bytes().await.expect("gate response").to_vec();
+    if let Some(slot) = write_slot {
+        let value: Value = serde_json::from_slice(&bytes).expect("enqueue metadata");
+        state.writes.lock().await[slot].task_uid = value.get("taskUid").and_then(Value::as_u64);
+    }
+    if method == reqwest::Method::GET
+        && path == "/tasks"
+        && state.reject_tasks.load(Ordering::SeqCst)
+    {
+        let mut value: Value = serde_json::from_slice(&bytes).expect("tasks JSON");
+        for task in value["results"].as_array_mut().expect("task results") {
+            task["status"] = json!("failed");
+        }
+        bytes = serde_json::to_vec(&value).expect("task response");
+    }
+    axum::http::Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(Body::from(bytes))
+        .expect("gate response")
+}
+
+async fn assert_index_app_role(app: &PgPool) {
+    let limited: bool = sqlx::query_scalar(
+        "SELECT NOT r.rolsuper AND NOT r.rolbypassrls AND c.relowner<>r.oid AND c.relrowsecurity AND row_security_active(c.oid) FROM pg_roles r CROSS JOIN pg_class c WHERE r.rolname=current_user AND c.oid='fvoci.tasks'::regclass",
+    ).fetch_one(app).await.expect("index app role witness");
+    assert!(limited, "index test must use the nonowner limited app role");
+}
+
+#[tokio::test]
+async fn mixed_upsert_pair_uses_one_request_and_flushes_at_fifty() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    assert_index_app_role(&app).await;
+    let fixture = seed(&admin, "qvoxmixpair").await;
+    let doc = Uuid::now_v7();
+    insert_project_document(
+        &admin,
+        fixture.workspace_id,
+        fixture.project_id,
+        fixture.owner_id,
+        doc,
+        None,
+        &path_label(doc),
+        "qvoxmixpair-doc",
+        21,
+    )
+    .await;
+    let gate = IndexGate::start(test_meili()).await;
+    let events = vec![
+        insert_event(
+            &admin,
+            fixture.workspace_id,
+            "task.created",
+            "task",
+            fixture.task_id,
+        )
+        .await,
+        insert_event(
+            &admin,
+            fixture.workspace_id,
+            "document.created",
+            "document",
+            doc,
+        )
+        .await,
+    ];
+    let consumer = search_index_consumer(gate.meili.clone());
+    let (done, err) = consumer.deliver_batch(&app, Uuid::now_v7(), &events).await;
+    assert_eq!(done, 2);
+    assert!(err.is_none(), "{err:?}");
+    let writes = gate.state.writes.lock().await.clone();
+    assert_eq!(
+        writes.len(),
+        1,
+        "two small mixed resources must share one POST: {writes:?}"
+    );
+    assert_eq!(writes[0].method, "POST");
+    assert!(
+        writes[0].task_uid.is_some(),
+        "real enqueue acknowledgement metadata"
+    );
+    assert_eq!(writes[0].kinds, ["task", "document"]);
+    assert_eq!(
+        writes[0].ids,
+        [
+            search_source_id(SearchSourceKind::Task, &fixture.task_id.to_string(), None),
+            search_source_id(SearchSourceKind::Document, &doc.to_string(), None)
+        ]
+    );
+    assert!(writes[0]
+        .workspaces
+        .iter()
+        .all(|ws| ws == &fixture.workspace_id.to_string()));
+    assert_eq!(meili_ids(&gate.meili).await.len(), 2);
+    gate.state.writes.lock().await.clear();
+    let mut burst = Vec::new();
+    for n in 0..55 {
+        let id = Uuid::now_v7();
+        insert_project_document(
+            &admin,
+            fixture.workspace_id,
+            fixture.project_id,
+            fixture.owner_id,
+            id,
+            None,
+            &path_label(id),
+            "qvoxmixcap",
+            100 + n,
+        )
+        .await;
+        burst.push(
+            insert_event(
+                &admin,
+                fixture.workspace_id,
+                "document.created",
+                "document",
+                id,
+            )
+            .await,
+        );
+    }
+    let (done, err) = consumer.deliver_batch(&app, Uuid::now_v7(), &burst).await;
+    assert_eq!(done, 55);
+    assert!(err.is_none(), "{err:?}");
+    let writes = gate.state.writes.lock().await.clone();
+    assert_eq!(
+        writes.iter().map(|w| w.ids.len()).collect::<Vec<_>>(),
+        [50, 5]
+    );
+    assert_eq!(meili_ids(&gate.meili).await.len(), 57);
+    eprintln!("MIXED_UPSERT_PROOF pair_requests=1 pair_resources=2 cap_requests=2 cap_sizes=50,5 limited_role=true");
+    gate.stop().await;
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn mixed_upsert_keeps_fence_until_ack_and_newer_refresh_wins() {
+    use std::sync::atomic::Ordering;
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    assert_index_app_role(&app).await;
+    let fixture = seed(&admin, "qvoxmixfence").await;
+    let gate = IndexGate::start(test_meili()).await;
+    gate.state.hold_next.store(true, Ordering::SeqCst);
+    let event = insert_event(
+        &admin,
+        fixture.workspace_id,
+        "document.collab_update_appended",
+        "document",
+        fixture.wiki_id,
+    )
+    .await;
+    let first = tokio::spawn({
+        let app = app.clone();
+        let meili = gate.meili.clone();
+        let event = event.clone();
+        async move { process_search_index_event(&app, &meili, &event).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.state.arrived.notified())
+        .await
+        .expect("enqueue gate reached");
+    let ns = fvoci_server::db::context::SEARCH_INDEX_LOCK_NAMESPACE;
+    let key = fvoci_server::db::context::lock_key_from_uuid(fixture.workspace_id);
+    let mut observer = admin.begin().await.expect("observer transaction");
+    let got: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1,$2)")
+        .bind(ns)
+        .bind(key)
+        .fetch_one(&mut *observer)
+        .await
+        .expect("direct lock observation");
+    observer.rollback().await.expect("observer rollback");
+    assert!(!got, "read/enqueue fence released before acknowledgement");
+    sqlx::query(
+        "UPDATE fvoci.documents SET title='qvoxmix-newest',text='qvoxmix-newest' WHERE id=$1",
+    )
+    .bind(fixture.wiki_id)
+    .execute(&admin)
+    .await
+    .expect("new current title");
+    let newer = tokio::spawn({
+        let app = app.clone();
+        let meili = gate.meili.clone();
+        async move { process_search_index_event(&app, &meili, &event).await }
+    });
+    gate.state.release.notify_one();
+    first.await.expect("first join").expect("first refresh");
+    newer.await.expect("newer join").expect("newer refresh");
+    let id = search_source_id(
+        SearchSourceKind::Document,
+        &fixture.wiki_id.to_string(),
+        None,
+    );
+    assert_eq!(meili_doc(&gate.meili, &id).await["title"], "qvoxmix-newest");
+    eprintln!(
+        "MIXED_UPSERT_PROOF lock_available_before_ack=false final_title=current limited_role=true"
+    );
+    gate.stop().await;
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn mixed_upsert_preserves_delete_and_a_b_a_workspace_barriers() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    assert_index_app_role(&app).await;
+    let a = seed(&admin, "qvoxmix-a").await;
+    let b = seed(&admin, "qvoxmix-b").await;
+    let second = Uuid::now_v7();
+    insert_project_document(
+        &admin,
+        a.workspace_id,
+        a.project_id,
+        a.owner_id,
+        second,
+        None,
+        &path_label(second),
+        "qvoxmix-return-a",
+        21,
+    )
+    .await;
+    let gate = IndexGate::start(test_meili()).await;
+    // The same task ID is absent in the source A and live in destination B.
+    let events = vec![
+        insert_event(
+            &admin,
+            a.workspace_id,
+            "document.collab_update_appended",
+            "document",
+            a.wiki_id,
+        )
+        .await,
+        insert_event(&admin, a.workspace_id, "task.deleted", "task", b.task_id).await,
+        insert_event(&admin, b.workspace_id, "task.created", "task", b.task_id).await,
+        insert_event(
+            &admin,
+            a.workspace_id,
+            "document.created",
+            "document",
+            second,
+        )
+        .await,
+        insert_event(
+            &admin,
+            a.workspace_id,
+            "attachment.updated",
+            "attachment",
+            a.attachment_id,
+        )
+        .await,
+    ];
+    let consumer = search_index_consumer(gate.meili.clone());
+    let (done, err) = consumer.deliver_batch(&app, Uuid::now_v7(), &events).await;
+    assert_eq!(done, events.len());
+    assert!(err.is_none(), "{err:?}");
+    let writes = gate.state.writes.lock().await.clone();
+    assert_eq!(
+        writes.len(),
+        5,
+        "barriers must keep the ordered operation stream: {writes:?}"
+    );
+    assert!(writes[0].path.ends_with("/documents"));
+    assert!(writes[1]
+        .filter
+        .as_deref()
+        .expect("source delete")
+        .contains(&b.task_id.to_string()));
+    assert_eq!(writes[2].workspaces, [b.workspace_id.to_string()]);
+    assert_eq!(
+        writes[3].workspaces,
+        [a.workspace_id.to_string(), a.workspace_id.to_string()]
+    );
+    assert!(writes[4]
+        .filter
+        .as_deref()
+        .expect("obsolete chunk delete")
+        .contains("chunkNo"));
+    let task = search_source_id(SearchSourceKind::Task, &b.task_id.to_string(), None);
+    assert_eq!(
+        meili_doc(&gate.meili, &task).await["workspaceId"],
+        b.workspace_id.to_string()
+    );
+    assert!(meili_ids(&gate.meili).await.contains(&search_source_id(
+        SearchSourceKind::Document,
+        &second.to_string(),
+        None
+    )));
+    eprintln!("MIXED_UPSERT_PROOF operations=upsert,source_delete,destination_upsert,return_upsert,obsolete_delete same_id_destination_preserved=true");
+    gate.stop().await;
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn mixed_upsert_failed_confirmation_keeps_marks_zero_and_retries_current_rows() {
+    use std::sync::atomic::Ordering;
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    assert_index_app_role(&app).await;
+    let fixture = seed(&admin, "qvoxmixretry").await;
+    let doc = Uuid::now_v7();
+    insert_project_document(
+        &admin,
+        fixture.workspace_id,
+        fixture.project_id,
+        fixture.owner_id,
+        doc,
+        None,
+        &path_label(doc),
+        "qvoxmixretry-old",
+        21,
+    )
+    .await;
+    let gate = IndexGate::start(test_meili()).await;
+    let events = vec![
+        insert_event(
+            &admin,
+            fixture.workspace_id,
+            "task.created",
+            "task",
+            fixture.task_id,
+        )
+        .await,
+        insert_event(
+            &admin,
+            fixture.workspace_id,
+            "document.created",
+            "document",
+            doc,
+        )
+        .await,
+    ];
+    gate.state.reject_tasks.store(true, Ordering::SeqCst);
+    let settings = OutboxDispatcherSettings {
+        poll_interval: Duration::from_millis(20),
+        lease_ttl: Duration::from_secs(30),
+        batch_limit: 10,
+        failure_backoff: Duration::from_millis(50),
+    };
+    let dispatcher = spawn_outbox_dispatcher(
+        settings.clone(),
+        app.clone(),
+        vec![search_index_consumer(gate.meili.clone())],
+    )
+    .expect("dispatcher");
+    wait_until(
+        Duration::from_secs(15),
+        "failed confirmation recorded",
+        || {
+            let app = app.clone();
+            let id = events[0].id;
+            Box::pin(async move {
+                fetch_failure_state(&app, SEARCH_INDEX_CONSUMER, id)
+                    .await
+                    .expect("failure state")
+                    .is_some()
+            })
+        },
+    )
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("failure dispatcher join");
+    for event in &events {
+        assert!(!is_processed(&app, SEARCH_INDEX_CONSUMER, event.id)
+            .await
+            .expect("unconfirmed mark"));
+    }
+    let cursor = fetch_cursor(&admin, SEARCH_INDEX_CONSUMER)
+        .await
+        .expect("cursor");
+    assert!(
+        cursor.is_none() || cursor == Some(("0".into(), 0)),
+        "unconfirmed effects must not advance cursor: {cursor:?}"
+    );
+    assert!(
+        !gate.state.writes.lock().await.is_empty(),
+        "failure must be after enqueue, not an unreachable endpoint"
+    );
+    sqlx::query("UPDATE fvoci.documents SET title='qvoxmixretry-current',text='qvoxmixretry-current' WHERE id=$1")
+        .bind(doc).execute(&admin).await.expect("current retry source");
+    gate.state.reject_tasks.store(false, Ordering::SeqCst);
+    let dispatcher = spawn_outbox_dispatcher(
+        settings,
+        app.clone(),
+        vec![search_index_consumer(gate.meili.clone())],
+    )
+    .expect("retry dispatcher");
+    wait_until(Duration::from_secs(15), "all retry marks confirmed", || {
+        let app = app.clone();
+        let ids = events.iter().map(|e| e.id).collect::<Vec<_>>();
+        Box::pin(async move {
+            for id in ids {
+                if !is_processed(&app, SEARCH_INDEX_CONSUMER, id)
+                    .await
+                    .expect("confirmed mark")
+                {
+                    return false;
+                }
+            }
+            true
+        })
+    })
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("retry dispatcher join");
+    let id = search_source_id(SearchSourceKind::Document, &doc.to_string(), None);
+    assert_eq!(
+        meili_doc(&gate.meili, &id).await["title"],
+        "qvoxmixretry-current"
+    );
+    for event in &events {
+        assert!(fetch_failure_state(&app, SEARCH_INDEX_CONSUMER, event.id)
+            .await
+            .expect("cleared failure")
+            .is_none());
+    }
+    eprintln!("MIXED_UPSERT_PROOF unconfirmed_marks=0 unconfirmed_cursor=0 retry_marks=2 retry_title=current limited_role=true");
+    gate.stop().await;
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}

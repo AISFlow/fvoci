@@ -562,26 +562,50 @@ async fn create_wiki_document_inner(
     client_ip: Option<&str>,
     fence: Option<ImportFence>,
 ) -> Result<Result<Option<DocumentMeta>, DocumentDbError>, sqlx::Error> {
-    let document_id = Uuid::now_v7();
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    lock_membership_users(&mut tx, &[actor_user_id]).await?;
-    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
+    let result = create_wiki_document_tx(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        input,
+        client_ip,
+        fence,
+    )
+    .await?;
+    if matches!(result, Ok(Some(_))) {
+        tx.commit().await?;
+    } else {
         tx.rollback().await?;
+    }
+    Ok(result)
+}
+
+/// Reuses wiki creation and import fencing without taking commit ownership.
+pub(crate) async fn create_wiki_document_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    input: CreateDocumentInput<'_>,
+    client_ip: Option<&str>,
+    fence: Option<ImportFence>,
+) -> Result<Result<Option<DocumentMeta>, DocumentDbError>, sqlx::Error> {
+    let document_id = Uuid::now_v7();
+    lock_membership_users(tx, &[actor_user_id]).await?;
+    if !recheck_session(tx, actor_user_id, session_id).await? {
         return Ok(Err(DocumentDbError::Forbidden));
     }
-    lock_tree(&mut tx, workspace_id).await?;
-    if !workspace_is_live(&mut tx, workspace_id).await? {
-        tx.rollback().await?;
+    lock_tree(tx, workspace_id).await?;
+    if !workspace_is_live(tx, workspace_id).await? {
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let role = membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
+    let role = membership_role_for_update(tx, workspace_id, actor_user_id).await?;
     if !wiki_can_edit(role) {
-        tx.rollback().await?;
         return Ok(Err(DocumentDbError::Forbidden));
     }
     if fence.is_some() && !role.is_some_and(|r| r.at_least(WorkspaceRole::Admin)) {
-        tx.rollback().await?;
         return Ok(Err(DocumentDbError::Forbidden));
     }
 
@@ -596,18 +620,15 @@ async fn create_wiki_document_inner(
         )
         .bind(workspace_id)
         .bind(parent_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
         let Some((project_id, path, deleted_at)) = parent else {
-            tx.rollback().await?;
             return Ok(Err(DocumentDbError::NotFound));
         };
         if deleted_at.is_some() {
-            tx.rollback().await?;
             return Ok(Err(DocumentDbError::NotFound));
         }
         if project_id.is_some() {
-            tx.rollback().await?;
             return Ok(Err(DocumentDbError::AffiliationMismatch));
         }
         parent_path = path;
@@ -619,7 +640,6 @@ async fn create_wiki_document_inner(
         1
     };
     if depth > MAX_TREE_DEPTH {
-        tx.rollback().await?;
         return Ok(Err(DocumentDbError::DepthLimit));
     }
 
@@ -636,13 +656,12 @@ async fn create_wiki_document_inner(
     )
     .bind(workspace_id)
     .bind(input.parent_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
     let sort_key = match between(last_sort.as_ref().map(|(k,)| k.as_str()), None) {
         Ok(key) => key,
         Err(err) => {
             tracing::error!("{err}");
-            tx.rollback().await?;
             return Ok(Err(DocumentDbError::InvalidSortKey));
         }
     };
@@ -664,7 +683,7 @@ async fn create_wiki_document_inner(
         "#,
     )
     .bind(workspace_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
     sqlx::query(
         r#"
@@ -688,7 +707,7 @@ async fn create_wiki_document_inner(
     .bind(DOCUMENT_SCHEMA_VERSION)
     .bind(empty_document_json())
     .bind(actor_user_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     let payload = json!({
@@ -698,7 +717,7 @@ async fn create_wiki_document_inner(
         "projectId": null,
     });
     record_document_event_and_audit(
-        &mut tx,
+        tx,
         workspace_id,
         actor_user_id,
         "document.created",
@@ -710,7 +729,7 @@ async fn create_wiki_document_inner(
 
     if let Some(fence) = fence {
         if !crate::db::import_jobs::append_import_document_ref(
-            &mut tx,
+            tx,
             workspace_id,
             fence.job_id,
             fence.lease_token,
@@ -718,13 +737,11 @@ async fn create_wiki_document_inner(
         )
         .await?
         {
-            tx.rollback().await?;
             return Ok(Ok(None));
         }
     }
 
-    let row = fetch_document_row(&mut tx, workspace_id, document_id).await?;
-    tx.commit().await?;
+    let row = fetch_document_row(tx, workspace_id, document_id).await?;
     match row {
         Some(row) => Ok(Ok(Some(row_to_meta(row, true)))),
         None => Ok(Err(DocumentDbError::NotFound)),

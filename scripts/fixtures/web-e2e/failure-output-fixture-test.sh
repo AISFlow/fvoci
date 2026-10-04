@@ -79,8 +79,10 @@ STUB
 cat >"$FIXTURE_ROOT/target/debug/fvoci-server" <<'STUB'
 #!/usr/bin/env bash
 echo "fvoci-server listening on http://127.0.0.1:9"
-# Redaction probe: credentials a real server must never log.
-echo "probe DATABASE_APP_URL=${DATABASE_APP_URL:-} admin ${FVOCI_E2E_ADMIN_DATABASE_URL:-}"
+# Redaction probe: the app-role URL the server does receive (credentials a
+# real server must never log), and the admin URL web-e2e-inner.sh withholds
+# from the server environment ("unset" only when truly absent).
+echo "probe DATABASE_APP_URL=${DATABASE_APP_URL:-} admin ${FVOCI_E2E_ADMIN_DATABASE_URL-unset}"
 exec sleep 600
 STUB
 # Only the calls the inner script needs are allowed; anything else fails closed.
@@ -209,7 +211,7 @@ for pending in 0 1; do
   [[ "$(head -n1 "${summaries[0]}")" == "browser summary: "* ]] || fail "$label: browser-summary.txt is not a summary" "$log"
   if [[ "$pending" == "0" ]]; then
     [[ -f "$retained/server.log" ]] || fail "$label: the group server.log was not retained" "$log"
-    grep -qx 'probe DATABASE_APP_URL=redacted admin postgres://redacted' "$retained/server.log" \
+    grep -qx 'probe DATABASE_APP_URL=redacted admin unset' "$retained/server.log" \
       || fail "$label: redaction probe missing from server.log" "$log"
     ! grep -q -e 'fixture-secret' -e '://[^/[:space:]]*:[^@[:space:]]*@' "$retained/server.log" || fail "$label: credentials in retained server.log" "$log"
   fi

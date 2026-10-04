@@ -238,7 +238,10 @@ test("export menu downloads markdown", async ({ page }) => {
   await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15000 });
   const downloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "문서 옵션", exact: true }).click();
-  await page.getByRole("button", { name: "Markdown" }).click();
+  await page
+    .locator(".document-export-menu")
+    .getByRole("button", { name: "Markdown", exact: true })
+    .click();
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toBe("보내기 문서.md");
   const text = await download.createReadStream().then(async (stream) => {

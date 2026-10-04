@@ -9,6 +9,7 @@ import {
 import Collaboration, { isChangeOrigin } from "@tiptap/extension-collaboration";
 import CollaborationCaret from "@tiptap/extension-collaboration-caret";
 import { FileHandler } from "@tiptap/extension-file-handler";
+import type { UniqueIDOptions } from "@tiptap/extension-unique-id";
 import {
   type EditorState,
   Plugin,
@@ -382,6 +383,13 @@ export function createFvociEditorExtensions(opts: FvociEditorExtensionOptions): 
       // Mention is re-added after this list with its label view, so it is
       // the last schema node (the order the editor has always had).
       if (ext.name === "mention") return [];
+      if (ext.name === "uniqueID") {
+        // Hosts mount after sync. The SDK create hook waits for the next
+        // provider sync and then assigns IDs even to a readonly editor.
+        // Viewing/reconnect must stay observational; its existing filtered
+        // appendTransaction assigns IDs on the first actual local edit.
+        return [(ext as Extension<UniqueIDOptions>).extend({ onCreate() {} })];
+      }
       if (ext.name === "mermaid") {
         return [Mermaid.extend({ addNodeView: nodeViews.mermaid })];
       }

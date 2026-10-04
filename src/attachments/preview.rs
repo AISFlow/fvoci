@@ -238,6 +238,12 @@ pub fn maybe_run_helper() -> Option<i32> {
         .take(limits.input_bytes.saturating_add(1))
         .read_to_end(&mut source);
     if let Err(err) = read {
+        // Buffering the input past RLIMIT_AS is the address-space ceiling,
+        // not a rejection of the input: exit with the resource code.
+        if err.kind() == std::io::ErrorKind::OutOfMemory {
+            let _ = writeln!(std::io::stderr(), "stdin: {err}");
+            return Some(CHILD_RESOURCE_EXIT);
+        }
         return Some(child_fail(&format!("stdin: {err}")));
     }
     match render_preview(&source, &limits) {
@@ -256,6 +262,10 @@ pub fn maybe_run_helper() -> Option<i32> {
         Err(msg) => Some(child_fail(&msg)),
     }
 }
+
+/// Child exit code for an allocation refused by its own resource limits; the
+/// parent types every failure other than exit 2 as a resource limit.
+const CHILD_RESOURCE_EXIT: i32 = 3;
 
 fn child_fail(msg: &str) -> i32 {
     let _ = writeln!(std::io::stderr(), "{msg}");
@@ -354,7 +364,8 @@ pub async fn run_preview_helper(
         return Err(if status.code() == Some(2) {
             PreviewError::Rejected(message)
         } else {
-            // Killed by a signal (RLIMIT_CPU, allocation abort) or crashed.
+            // Killed by a signal (RLIMIT_CPU, allocation abort), the
+            // resource exit, or crashed.
             PreviewError::ResourceLimit(format!("child exited {status}: {message}"))
         });
     }

@@ -121,6 +121,9 @@ async fn start_import(
     }
     let source = ImportSource::parse(&body.source)
         .ok_or_else(|| AppError::with_source(ProblemCode::InvalidInput, "/source"))?;
+    if source == ImportSource::NativeArchive {
+        return Err(AppError::with_source(ProblemCode::InvalidInput, "/source"));
+    }
     let file_bytes = match &body.zip_base64 {
         Some(b64) => B64
             .decode(b64.as_bytes())

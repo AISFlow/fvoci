@@ -425,7 +425,7 @@ pub struct DuplicateBody {
     pub seed: Vec<u8>,
 }
 
-async fn load_source_body(
+pub(crate) async fn load_source_body(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     document_id: Uuid,

@@ -4,6 +4,7 @@
  * engine fixtures, persist barrier, and return the projected HTTP body JSON.
  */
 import { strict as assert } from "node:assert";
+import { isDeepStrictEqual } from "node:util";
 import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -103,6 +104,10 @@ function decodeDocumentFrame(buffer) {
       const scope = readVarString(buffer, offset);
       return { routingKey, type, auth: "authenticated", scope };
     }
+    if (authType === 1) {
+      const reason = readVarString(buffer, offset);
+      return { routingKey, type, auth: "denied", reason };
+    }
   }
   if (type === 0) {
     const step = Number(readVarUint(buffer, offset));
@@ -119,8 +124,8 @@ function decodeDocumentFrame(buffer) {
   return { routingKey, type };
 }
 
-function routingKey(workspaceId, documentId) {
-  return `${workspaceId}:document:${documentId}`;
+function routingKey(workspaceId, kind, resourceId) {
+  return `${workspaceId}:${kind}:${resourceId}`;
 }
 
 function fixtureBytes(name) {
@@ -213,16 +218,26 @@ async function completeSyncHandshake(ws, routingKey) {
   }
 }
 
+// The server answers the token with Authenticated (scope) or PermissionDenied
+// (reason); a denial fails at once with the server's reason.
 async function authAndJoin(ws, routingKey, clientId) {
   ws.send(encodeAuthToken(routingKey, clientId));
-  const frame = await waitForMessage(ws, (f) => f.type === 2 && f.auth === "authenticated", 10_000);
+  const frame = await waitForMessage(
+    ws,
+    (f) => f.type === 2 && (f.auth === "authenticated" || f.auth === "denied"),
+    10_000,
+  );
   if (!frame) {
     throw new Error("collab auth did not return authenticated");
   }
+  if (frame.auth === "denied") {
+    throw new Error(`collab auth denied: ${frame.reason}`);
+  }
+  console.error(`collab auth scope: ${frame.scope}`);
 }
 
-async function sendUpdates(ws, routingKey, updates) {
-  await authAndJoin(ws, routingKey, 42);
+async function sendUpdates(ws, routingKey, updates, clientId) {
+  await authAndJoin(ws, routingKey, clientId);
   await completeSyncHandshake(ws, routingKey);
   for (const update of updates) {
     ws.send(encodeSync(routingKey, 2, update));
@@ -251,16 +266,15 @@ function parseArgs(argv) {
   return args;
 }
 
-async function fetchBody(baseUrl, origin, sessionCookie, workspaceId, documentId) {
-  const response = await fetch(
-    `${baseUrl}/api/v1/workspaces/${workspaceId}/documents/${documentId}/body`,
-    {
-      headers: {
-        cookie: `fvoci_session=${sessionCookie}`,
-        origin,
-      },
+// A document's body route, or a task's detail (which carries contentJson).
+async function fetchBody(baseUrl, origin, sessionCookie, workspaceId, kind, resourceId) {
+  const path = kind === "task" ? `tasks/${resourceId}` : `documents/${resourceId}/body`;
+  const response = await fetch(`${baseUrl}/api/v1/workspaces/${workspaceId}/${path}`, {
+    headers: {
+      cookie: `fvoci_session=${sessionCookie}`,
+      origin,
     },
-  );
+  });
   if (!response.ok) {
     throw new Error(`GET body failed: ${response.status} ${await response.text()}`);
   }
@@ -274,12 +288,32 @@ async function main() {
   const session = args.session;
   const workspaceId = args["workspace-id"];
   const documentId = args["document-id"];
+  const taskId = args["task-id"];
+  // Exactly one target: a document (default) or a task (--task-id).
+  if (Boolean(documentId) === Boolean(taskId)) {
+    throw new Error("pass exactly one of --document-id or --task-id");
+  }
+  const kind = taskId ? "task" : "document";
+  const resourceId = taskId ?? documentId;
+  // Pinned fixture set: delete_only (default; exact body) on a fresh body,
+  // or pending_u1 (a self-contained paragraph from another client) as a
+  // distinct later edit whose readback must contain its marker text.
+  // Collab client id (uint32): two people must not claim the same id in one
+  // room (the server refuses a recently used id of another user).
+  const clientIdArg = args["client-id"] ?? "42";
+  if (!/^\d+$/.test(clientIdArg) || Number(clientIdArg) > 4294967295) {
+    throw new Error(`invalid --client-id ${clientIdArg}`);
+  }
+  const clientId = Number(clientIdArg);
+  const fixture = args.fixture ?? "delete_only";
+  if (!["delete_only", "pending_u1"].includes(fixture)) {
+    throw new Error(`unknown --fixture ${fixture}`);
+  }
   for (const [name, value] of Object.entries({
     baseUrl,
     origin,
     session,
     workspaceId,
-    documentId,
   })) {
     if (!value) {
       throw new Error(`missing required argument for ${name}`);
@@ -287,7 +321,7 @@ async function main() {
   }
 
   const wsUrl = `${baseUrl.replace(/^http/, "ws")}/collab`;
-  const key = routingKey(workspaceId, documentId);
+  const key = routingKey(workspaceId, kind, resourceId);
   const ws = new WebSocket(wsUrl, {
     headers: {
       cookie: `fvoci_session=${session}`,
@@ -300,16 +334,26 @@ async function main() {
   });
   frameInbox(ws);
 
-  const base = fixtureBytes("delete_only_base.v1");
-  const deleteOnly = fixtureBytes("delete_only.v1");
-  await sendUpdates(ws, key, [base, deleteOnly]);
+  const updates =
+    fixture === "pending_u1"
+      ? [fixtureBytes("pending_u1.v1")]
+      : [fixtureBytes("delete_only_base.v1"), fixtureBytes("delete_only.v1")];
+  await sendUpdates(ws, key, updates, clientId);
   ws.close();
 
-  const body = await fetchBody(baseUrl, origin, session, workspaceId, documentId);
-  const expected = JSON.parse(
+  const body = await fetchBody(baseUrl, origin, session, workspaceId, kind, resourceId);
+  const expectations = JSON.parse(
     readFileSync(join(ROOT, "crates/collab-engine/fixtures/expectations.json"), "utf8"),
-  ).delete_only.prosemirror_json_after;
-  assert.deepEqual(body.contentJson, expected);
+  );
+  if (fixture === "pending_u1") {
+    const paragraph = expectations.pending.prosemirror_json_u1.content[0];
+    assert.ok(
+      (body.contentJson.content ?? []).some((node) => isDeepStrictEqual(node, paragraph)),
+      "readback lacks the pending_u1 paragraph",
+    );
+  } else {
+    assert.deepEqual(body.contentJson, expectations.delete_only.prosemirror_json_after);
+  }
   process.stdout.write(JSON.stringify(body));
 }
 

@@ -290,7 +290,7 @@ pub(crate) async fn copy_task_assignees_and_labels(
     Ok(())
 }
 
-async fn replace_task_assignees(
+pub(crate) async fn replace_task_assignees(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
@@ -2602,6 +2602,8 @@ pub async fn patch_task_meta(
     }
     if input.estimate != crate::tasks::patch::FieldUpdate::Unchanged {
         sets.push(format!("estimate = ${bind_idx}::numeric"));
+        // This existing generic field does not declare a time unit.
+        sets.push("estimate_unit = NULL".to_string());
         bind_idx += 1;
         bind_estimate = Some(match &input.estimate {
             crate::tasks::patch::FieldUpdate::Clear => None,

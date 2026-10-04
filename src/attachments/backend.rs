@@ -329,6 +329,32 @@ impl ObjectStorage {
         result
     }
 
+    /// Streams exactly `len` bytes as one complete object at a fresh `key`
+    /// through the same single-part multipart path as [`Self::put_bytes`],
+    /// without holding the object in memory. On failure every upload handle
+    /// and any partial object for the key is purged.
+    pub async fn put_stream<S, E>(&self, key: &str, stream: S, len: u64) -> Result<(), StorageError>
+    where
+        S: Stream<Item = Result<Bytes, E>> + Unpin + Send + 'static,
+        E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
+    {
+        let upload_ref = self.create_multipart(key).await?;
+        let result = async {
+            let mut staged = self
+                .stage_part_stream(key, upload_ref.as_deref(), 1, stream, Some(len), len)
+                .await?;
+            let part = self.publish_staged_part(key, 1, &mut staged).await?;
+            self.assemble_multipart(key, upload_ref.as_deref(), &[(1, part.etag)])
+                .await?;
+            self.finalize_multipart(key).await
+        }
+        .await;
+        if result.is_err() {
+            let _ = self.purge_key(key).await;
+        }
+        result
+    }
+
     /// MIME type sniffed from the object's first 4 KiB; an empty or missing
     /// object is `application/octet-stream`.
     pub async fn sniff_mime(&self, key: &str) -> Result<String, StorageError> {

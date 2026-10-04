@@ -8,6 +8,8 @@
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
+include!("task_ops_integration/task_timer.rs");
+
 use std::time::Duration;
 
 use axum::http::StatusCode;

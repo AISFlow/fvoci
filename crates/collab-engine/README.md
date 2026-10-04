@@ -10,11 +10,27 @@ isolate resource/failure, not the filesystem or network.
 
 | Item | Value |
 | --- | --- |
-| yrs | `=0.28.0` checksum `52c70dc8beca8666c77612a96889106ca3cd65318609721f464624ff79685da9` feature `small-client` |
+| yrs | FVOCI-owned source patch at `../vendor/yrs-0.28.0`, version `=0.28.0`, feature `small-client` |
 | Yjs (fixtures only) | 13.6.32 |
 | Doc | `skip_gc=true`, `OffsetKind::Utf16` |
 | fragment | `prosemirror` |
 | Platforms | Linux x86_64 and aarch64. Other OS refuse closed. |
+
+Yrs is a direct optional path dependency. Its original registry crate checksum
+is `52c70dc8beca8666c77612a96889106ca3cd65318609721f464624ff79685da9`;
+this identifies the upstream base, **not the patched source**. The local patch
+adds read-only retained-item/input accessors. It does not change the engine,
+decoder, integrator, GC or native encoding. Upstream has not accepted this patch.
+See [`PATCHES.md`](../vendor/yrs-0.28.0/PATCHES.md) and
+[`PROVENANCE.json`](../vendor/yrs-0.28.0/PROVENANCE.json) for exact source hashes,
+the four-file source review and the separate unreviewed test status. The archive
+consumer and real paired restore are still pending.
+
+The FVOCI coordinator owns reconciliation of this delta with upstream maintenance
+and security updates, with fresh fixed-source review and relevant compatibility
+and restore validation before adoption. The complete original package is retained,
+plus the pinned upstream [MIT notice](../vendor/yrs-0.28.0/LICENSE). Install images
+carry that notice at `/opt/fvoci/share/licenses/yrs-0.28.0/LICENSE`.
 
 Parent adapters depend with `default-features = false` (process + protocol only).
 Feature `worker` compiles Yrs and the helper binary (`required-features`).

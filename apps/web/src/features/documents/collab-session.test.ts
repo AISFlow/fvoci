@@ -120,7 +120,10 @@ await test("Vue collab room sends authentication results to the state machine an
   const src = stripComments(readFileSync(sessionPath, "utf8"));
   const binding = between(src, "function bindGeneration(", "function retire(");
   assert.match(binding, /onAuthenticated = \(\) => \{\s*connection\.authenticated\(\);\s*\};/);
-  assert.match(binding, /onAuthenticationFailed = \(\) => \{\s*connection\.reclaim\(\);\s*\};/);
+  assert.match(
+    binding,
+    /onAuthenticationFailed = \(\) => \{\s*if \(!retiredAuthorization\.has\(provider\) && !reauthorizing\.delete\(provider\)\)\s*connection\.reclaim\(\);\s*\};/,
+  );
   assert.match(binding, /provider\.on\("authenticated", onAuthenticated\)/);
   assert.match(binding, /provider\.on\("authenticationFailed", onAuthenticationFailed\)/);
   assert.match(binding, /provider\.off\("authenticated", onAuthenticated\)/);

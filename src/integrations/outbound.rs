@@ -432,7 +432,7 @@ impl Outbound {
     }
 }
 
-fn pinned_client(
+pub(crate) fn pinned_client(
     url: &Url,
     pinned: SocketAddr,
     timeout: Duration,

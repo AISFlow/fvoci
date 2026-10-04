@@ -29,6 +29,8 @@ pub struct SearchIndexRow {
     pub chunk_no: Option<i32>,
     pub title: String,
     pub body: String,
+    /// Owner-private bibliography is never merged into authored recall fields.
+    pub bibliographic_text: Option<String>,
     pub chosung: String,
     pub updated_at: DateTime<Utc>,
     /// Attachment chunk vector (`attachment_text.embedding`); `None` otherwise.
@@ -83,6 +85,7 @@ fn map_row(row: sqlx::postgres::PgRow) -> Option<SearchIndexRow> {
         chunk_no: row.get("chunk_no"),
         title: row.get("title"),
         body: row.get("body"),
+        bibliographic_text: None,
         chosung: row.get("chosung"),
         updated_at: row.get("ua"),
         embedding: embedding_from_json(row.get("embedding")),
@@ -224,9 +227,21 @@ pub async fn load_sources(
         .bind(id)
         .fetch_all(&mut *tx)
         .await?;
+    let mut rows: Vec<_> = rows.into_iter().filter_map(map_row).collect();
+    if kind == SearchSourceKind::Document {
+        let ids: Vec<_> = rows.iter().map(|r| r.resource_id).collect();
+        let metadata =
+            crate::db::zotero::private_search_texts(&mut tx, workspace_id, None, &ids).await?;
+        for row in &mut rows {
+            row.bibliographic_text = metadata
+                .get(&row.resource_id)
+                .filter(|v| !v.is_empty())
+                .cloned();
+        }
+    }
     restore_system(&mut tx, &previous).await?;
     tx.commit().await?;
-    Ok(rows.into_iter().filter_map(map_row).collect())
+    Ok(rows)
 }
 
 fn after_pred(kind: SearchSourceKind, after: Option<&SearchIndexCursor>) -> (bool, Uuid, i32) {
@@ -339,7 +354,16 @@ async fn query_documents(
     .bind(limit)
     .fetch_all(&mut **tx)
     .await?;
-    Ok(rows.into_iter().filter_map(map_row).collect())
+    let mut rows: Vec<_> = rows.into_iter().filter_map(map_row).collect();
+    let ids: Vec<_> = rows.iter().map(|r| r.resource_id).collect();
+    let metadata = crate::db::zotero::private_search_texts(tx, workspace_id, None, &ids).await?;
+    for row in &mut rows {
+        row.bibliographic_text = metadata
+            .get(&row.resource_id)
+            .filter(|v| !v.is_empty())
+            .cloned();
+    }
+    Ok(rows)
 }
 
 async fn query_tasks(

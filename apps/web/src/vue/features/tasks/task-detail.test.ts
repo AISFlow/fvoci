@@ -3,11 +3,18 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { compileScript, compileTemplate, parse } from "@vue/compiler-sfc";
+import ts from "typescript";
 import * as Vue from "vue";
 import { renderToString } from "vue/server-renderer";
 import { formatPersonName, t } from "@fvoci/i18n";
 import { collabUserOf } from "@/features/documents/collab-model";
-import { runArchiveWithBodyPersist } from "@/features/tasks/task-archive-persist";
+import { taskOriginsQuery } from "@/features/collections/origin-api";
+import {
+  persistTaskBodyBeforeArchive,
+  runArchiveWithBodyPersist,
+} from "@/features/tasks/task-archive-persist";
+import { ProblemError } from "@/lib/api";
+import { taskTransferDocument, taskTransferPrepare } from "../capture/personal-transfer-command";
 import { projectTasksPath } from "@/lib/href";
 import {
   compiledComponent,
@@ -188,17 +195,52 @@ await test("task body uses collab kind task; project document uses kind document
   const taskView = source("./TaskDetailView.vue");
   const page = source("../../pages/WorkspaceItemPage.vue");
   const docView = source("../documents/ProjectDocumentView.vue");
-  assert.match(
-    taskView,
-    /useCollabRoom\(collabRoomName\(props\.workspaceId, "task", props\.task\.id\)/,
-  );
+  function assertRoom(input: string, kind: string, target: string): void {
+    const script = parse(input).descriptor.scriptSetup?.content;
+    assert.ok(script);
+    const tree = ts.createSourceFile("host.ts", script, ts.ScriptTarget.Latest, true);
+    const calls: ts.CallExpression[] = [];
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === "useCollabRoom"
+      )
+        calls.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(tree);
+    assert.equal(calls.length, 1, "one owned collaboration room");
+    const name = calls[0]?.arguments[0];
+    assert.ok(name && ts.isCallExpression(name));
+    assert.equal(name.expression.getText(tree), "collabRoomName");
+    assert.equal(name.arguments.length, 3);
+    assert.equal(name.arguments[0]?.getText(tree), "props.workspaceId");
+    const actualKind = name.arguments[1];
+    assert.ok(actualKind && ts.isStringLiteral(actualKind));
+    assert.equal(actualKind.text, kind);
+    assert.equal(name.arguments[2]?.getText(tree), target);
+  }
+  assertRoom(taskView, "task", "props.task.id");
   assert.equal((taskView.match(/useCollabRoom\(/g) ?? []).length, 1);
   assert.match(page, /collabRoomName\(workspace\.id, ['"]task['"]/);
   assert.match(page, /collabRoomName\(workspace\.id, ['"]document['"]/);
-  assert.match(
-    docView,
-    /useCollabRoom\(\s*collabRoomName\(props\.workspaceId, "document", props\.documentId\)/,
-  );
+  assertRoom(docView, "document", "props.documentId");
+  const taskRoom = 'collabRoomName(props.workspaceId, "task", props.task.id)';
+  assert.throws(() => {
+    assertRoom(
+      taskView.replace(taskRoom, taskRoom.replace('"task"', '"document"')),
+      "task",
+      "props.task.id",
+    );
+  });
+  assert.throws(() => {
+    assertRoom(
+      taskView.replace(taskRoom, taskRoom.replace("props.task.id", "props.documentId")),
+      "task",
+      "props.task.id",
+    );
+  });
   const room = readFileSync(
     path.join(import.meta.dirname, "../../collab/useCollabRoom.ts"),
     "utf8",
@@ -234,6 +276,8 @@ async function detailGrants(options: {
   canEdit?: boolean;
   restoring?: boolean;
   archiving?: boolean;
+  /** The task is in the actor's personal workspace with its single origin. */
+  transferOrigin?: boolean;
 }) {
   const filename = path.join(import.meta.dirname, "TaskDetailView.vue");
   const { descriptor } = parse(readFileSync(filename, "utf8"), { filename });
@@ -271,11 +315,32 @@ async function detailGrants(options: {
       runArchiveWithBodyPersist: options.archiving
         ? ({ archive }: { archive: () => Promise<void> }) => archive()
         : runArchiveWithBodyPersist,
+      persistTaskBodyBeforeArchive,
     },
+    "@/features/collections/origin-api": { taskOriginsQuery },
+    "@/lib/api": { ProblemError },
+    "../capture/personal-transfer-command": { taskTransferDocument, taskTransferPrepare },
     "@/features/documents/collab-model": { collabUserOf },
     "@/lib/href": { projectTasksPath },
-    "@/lib/queries": { meQuery: {} },
-    "@tanstack/vue-query": { useQuery: () => ({ data: Vue.ref(null) }) },
+    "@/lib/queries": { meQuery: {}, workspacesQuery: { queryKey: ["workspaces"] } },
+    "@tanstack/vue-query": {
+      // Controlled shapes only: the personal workspace and this task's single
+      // origin when asked for, otherwise nothing loaded and no error.
+      useQuery: (input: unknown) => {
+        const query = (typeof input === "function" ? (input as () => unknown)() : input) as {
+          queryKey?: readonly unknown[];
+        };
+        const family = query.queryKey?.[0];
+        const data = !options.transferOrigin
+          ? null
+          : family === "workspaces"
+            ? { items: [{ id: "w", kind: "personal" }] }
+            : family === "task-origins"
+              ? { count: 1, items: [{ documentId: "d", taskId: "t" }] }
+              : null;
+        return { data: Vue.ref(data), error: Vue.ref(null) };
+      },
+    },
     "../../collab/useCollabRoom": {
       collabRoomName: () => "w:task:t",
       useCollabRoom: () => ({ session: Vue.ref({ readOnly: options.sessionReadOnly }) }),
@@ -285,6 +350,7 @@ async function detailGrants(options: {
   for (const name of [
     "@nuxt/ui/components/Button.vue",
     "../../components/AppLink.vue",
+    "../capture/PersonalTransferDialog.vue",
     "../../components/ConfirmActionButton.vue",
     "../collections/TaskCollectionProperties.vue",
     "../comments/TaskActivityPanel.vue",
@@ -295,6 +361,7 @@ async function detailGrants(options: {
     "./TaskBodyEditor.vue",
     "./TaskDetailForm.vue",
     "./TaskTimeEntries.vue",
+    "./TaskStopwatch.vue",
   ]) {
     imports[name] = { default: leaf(path.basename(name, ".vue")) };
   }
@@ -380,6 +447,7 @@ await test("readonly body admission leaves HTTP metadata editable without granti
     "TaskDetailForm",
     "TaskCollectionProperties",
     "TaskTimeEntries",
+    "TaskStopwatch",
     "TaskActivityPanel",
   ]) {
     assert.equal(grants.get(name)?.readOnly, false, name);
@@ -387,6 +455,7 @@ await test("readonly body admission leaves HTTP metadata editable without granti
   assert.equal(grants.has("Clone"), true);
   assert.equal(grants.get("TaskBodyEditor")?.readOnly, true);
   assert.equal(grants.get("TaskAttachmentsPanel")?.readOnly, true);
+  assert.equal(grants.has("PersonalTransferDialog"), false);
 });
 
 await test("archived and permission-denied page rights keep metadata and body readonly", async () => {
@@ -400,6 +469,7 @@ await test("archived and permission-denied page rights keep metadata and body re
       "TaskDetailForm",
       "TaskCollectionProperties",
       "TaskTimeEntries",
+      "TaskStopwatch",
       "TaskActivityPanel",
     ]) {
       assert.equal(grants.get(name)?.readOnly, true, name);
@@ -422,6 +492,7 @@ await test("in-flight archive and restore hold REST panels and body readonly and
       "TaskDetailForm",
       "TaskCollectionProperties",
       "TaskTimeEntries",
+      "TaskStopwatch",
       "TaskActivityPanel",
     ]) {
       assert.equal(grants.get(name)?.readOnly, true, name);
@@ -431,5 +502,24 @@ await test("in-flight archive and restore hold REST panels and body readonly and
     assert.equal(grants.get("TaskDetailForm")?.archivePending, true);
     assert.equal(grants.get("TaskBodyEditor")?.readOnly, true);
     assert.equal(restoreCalls, 1);
+  }
+});
+
+await test("a personal task with its own origin mounts the transfer only on an editable page", async () => {
+  const editable = await detailGrants({
+    pageReadOnly: false,
+    sessionReadOnly: false,
+    transferOrigin: true,
+  });
+  assert.equal(editable.grants.has("PersonalTransferDialog"), true);
+  for (const options of [{ archived: true }, { canEdit: false }]) {
+    const { grants } = await detailGrants({
+      pageReadOnly: true,
+      sessionReadOnly: false,
+      transferOrigin: true,
+      ...options,
+    });
+    assert.equal(grants.has("PersonalTransferDialog"), false);
+    assert.equal(grants.get("TaskDetailForm")?.readOnly, true);
   }
 });

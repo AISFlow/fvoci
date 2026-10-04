@@ -16,6 +16,8 @@ COPY infra/rust/.env.example ./infra/rust/.env.example
 COPY apps/web/openapi.json ./apps/web/openapi.json
 COPY scripts ./scripts
 COPY crates/collab-engine ./crates/collab-engine
+# FVOCI-owned same-version read-only Yrs accessor patch (direct path dependency).
+COPY crates/vendor/yrs-0.28.0 ./crates/vendor/yrs-0.28.0
 COPY crates/document-extract ./crates/document-extract
 COPY crates/document-extract-client ./crates/document-extract-client
 # markdown-rs with one local fix, wired by `[patch.crates-io]` (vendor/markdown/PATCHES.md).
@@ -72,6 +74,7 @@ RUN apt-get update \
 WORKDIR /opt/fvoci
 COPY --from=rust-build --chown=root:root /src/target/release/fvoci-server /src/target/release/fvoci-migrate ./bin/
 COPY --from=rust-build --chown=root:root /src/target/release/collab-engine ./bin/
+COPY --from=rust-build --chown=root:root /src/crates/vendor/yrs-0.28.0/LICENSE ./share/licenses/yrs-0.28.0/
 COPY --from=rust-build --chown=root:root /src/target/release/document-extract ./bin/
 # PDF export fonts (SIL OFL 1.1), read by the export child at run time (FVOCI_EXPORT_FONT_DIR).
 COPY --chown=root:root packages/editor/src/fonts/*.ttf ./share/fonts/
