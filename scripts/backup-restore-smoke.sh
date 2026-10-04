@@ -733,6 +733,9 @@ VIEW_CONFIG='{"query":{"filters":{}},"groupBy":null,"dateBy":null}'
 WIKI_COLLECTION_ID="$(json_field "$(api "$SOURCE_BASE" "$COOKIE_JAR" POST /collections '{"name":"팀 위키 모음","kind":"document","projectId":null}')" id)"
 CHOICE_FIELD="$(api "$SOURCE_BASE" "$COOKIE_JAR" POST "/collections/${WIKI_COLLECTION_ID}/fields" '{"name":"검토 상태","type":"select","options":["초안","검토"]}')"
 PERSON_FIELD="$(api "$SOURCE_BASE" "$COOKIE_JAR" POST "/collections/${WIKI_COLLECTION_ID}/fields" '{"name":"위키 담당","type":"user","options":[]}')"
+# A scalar value (stored in collection_values; choice/person values are not).
+TEXT_FIELD="$(api "$SOURCE_BASE" "$COOKIE_JAR" POST "/collections/${WIKI_COLLECTION_ID}/fields" '{"name":"위키 메모","type":"text","options":[]}')"
+WIKI_TEXT="복원 확인 메모 🙂"
 api "$SOURCE_BASE" "$COOKIE_JAR" POST "/collections/${WIKI_COLLECTION_ID}/items" "{\"documentId\":\"${DOCUMENT_ID}\"}" >/dev/null
 # put_wiki_value FIELD VALUE: one value on the shared wiki document's item.
 put_wiki_value() {
@@ -743,6 +746,7 @@ put_wiki_value() {
 }
 put_wiki_value "$CHOICE_FIELD" "{\"options\":[\"$(json_field "$CHOICE_FIELD" options 1 id)\"]}"
 put_wiki_value "$PERSON_FIELD" "{\"users\":[\"${MEMBER_ID}\"]}"
+put_wiki_value "$TEXT_FIELD" "{\"text\":\"${WIKI_TEXT}\"}"
 SHARED_VIEW_ID="$(json_field "$(api "$SOURCE_BASE" "$COOKIE_JAR" POST "/collections/${WIKI_COLLECTION_ID}/views" "{\"name\":\"팀 공유 보기\",\"type\":\"table\",\"visibility\":\"shared\",\"config\":${VIEW_CONFIG}}")" id)"
 PRIVATE_VIEW_ID="$(json_field "$(api "$SOURCE_BASE" "$MEMBER_JAR" POST "/collections/${WIKI_COLLECTION_ID}/views" "{\"name\":\"내 비공개 보기\",\"type\":\"table\",\"visibility\":\"private\",\"config\":${VIEW_CONFIG}}")" id)"
 log_assert "wiki collection with choice and person values, shared (owner) and private (member) views: ok"
@@ -831,10 +835,12 @@ for view in (owner, member):
 ' "$SOURCE_OWNER_ORACLE" "$SOURCE_MEMBER_ORACLE" "$PRV_ID" "$HID_ID" "$MEMBER_ID" "$MEMBER_TASK_ID" "$DOCUMENT_ID"
 log_assert "per-user source reads (member sees PRV, HID 404; owner sees both; member revisions by the member): ok"
 python3 - "$SOURCE_OWNER_ORACLE" "$SOURCE_MEMBER_ORACLE" "$MOVED_DOC_ID" "$MOVED_TASK_ID" "$MOVED_ATTACHMENT_ID" \
-  "$REF_DOC_ID" "$OWNER_RUN_ID" "$MEMBER_RUN_ID" "$SHARED_VIEW_ID" "$PRIVATE_VIEW_ID" "$ZOTERO_CONNECTOR_ID" <<'PY'
+  "$REF_DOC_ID" "$OWNER_RUN_ID" "$MEMBER_RUN_ID" "$SHARED_VIEW_ID" "$PRIVATE_VIEW_ID" "$ZOTERO_CONNECTOR_ID" \
+  "$(json_field "$TEXT_FIELD" id)" "$WIKI_TEXT" <<'PY'
 import json, sys
 owner, member = json.loads(sys.argv[1]), json.loads(sys.argv[2])
 moved_doc, moved_task, attachment, ref_doc, owner_run, member_run, shared, private, connector = sys.argv[3:12]
+text_field, wiki_text = sys.argv[12:14]
 def froms(listing):
     return {item["from"]["id"] for item in listing["items"]}
 def runs(history):
@@ -846,7 +852,8 @@ for view in (owner, member):
     assert {moved_doc, ref_doc} <= froms(view["movedBacklinks"]), view["movedBacklinks"]
     assert ref_doc in froms(view["documentBacklinks"]) and ref_doc in froms(view["memberTaskBacklinks"])
     assert all(r["items"] for r in view["movedRevisions"]), "moved document/task revisions missing"
-    assert len(view["wikiItems"]) == 1 and len(view["wikiFields"]["items"]) == 2, (view["wikiItems"], view["wikiFields"])
+    assert len(view["wikiItems"]) == 1 and len(view["wikiFields"]["items"]) == 3, (view["wikiItems"], view["wikiFields"])
+    assert view["wikiItems"][0]["values"][text_field] == {"text": wiki_text}, view["wikiItems"][0]["values"]
 assert owner_run in runs(owner["movedTimerHistory"]) and owner_run not in runs(member["movedTimerHistory"])
 assert member_run in runs(member["memberTaskTimerHistory"]) and member_run not in runs(owner["memberTaskTimerHistory"])
 owner_views = {v["id"] for v in owner["wikiViews"]["items"]}
