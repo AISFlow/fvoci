@@ -516,7 +516,7 @@ pub fn inspect_native_target(
             ..
         } => {
             accept(&report)?;
-            report
+            *report
         }
         EngineStatus::ResourceLimit { .. } => return Err(ArchiveError::Limit),
         _ => {

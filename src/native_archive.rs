@@ -4985,7 +4985,7 @@ pub(crate) mod tests {
             work: InventoryWork::default(),
         };
         assert!(same_inventory_semantics(&report, &report));
-        assert!(inventory_index(Some(&[report.clone()]), 2).is_err());
+        assert!(inventory_index(Some(std::slice::from_ref(&report)), 2).is_err());
         assert!(inventory_index(Some(&[report.clone(), report.clone()]), 2).is_err());
         let mut rebound = report.clone();
         rebound.binding = "1111111111111111111111111111111111111111111111111111111111111111".into();

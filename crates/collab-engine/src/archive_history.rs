@@ -96,11 +96,7 @@ pub(crate) mod worker {
         limits::Limits,
         outcome::{EngineStatus, LimitKind},
     };
-    use std::{
-        collections::{BTreeMap, BTreeSet},
-        ops::ControlFlow,
-        time::Instant,
-    };
+    use std::{collections::BTreeMap, ops::ControlFlow, time::Instant};
     use yrs::retained::{
         self, BranchIdentity, BranchView, InputEntry, InputParent, OwnerView, ParentView,
         RetainedContent, RetainedEntry, RetainedEvent, TypeKind, VisitLimits,
@@ -887,7 +883,7 @@ pub(crate) mod worker {
             let Identity::Nested(owner_id) = z.parent else {
                 continue;
             };
-            let bits = match one_string(&z.payload, b)?.as_deref() {
+            let bits = match one_string(&z.payload, b)? {
                 Some("document") => 1,
                 Some("task") => 2,
                 _ => 4,
@@ -1472,7 +1468,7 @@ pub(crate) mod worker {
                 z.id,
                 ReferenceKind::Attachment,
                 ReferenceCertainty::FixedKind,
-                &value,
+                value,
                 b,
             );
         }
@@ -1506,7 +1502,7 @@ pub(crate) mod worker {
                 z.id,
                 ReferenceKind::Document,
                 certainty,
-                &value,
+                value,
                 b,
             )?;
         }
@@ -1517,7 +1513,7 @@ pub(crate) mod worker {
                 z.id,
                 ReferenceKind::Task,
                 certainty,
-                &value,
+                value,
                 b,
             )?;
         }
@@ -1602,18 +1598,20 @@ pub(crate) mod worker {
             let update = Update::decode_v1(&bytes).unwrap();
             let mut entries = 0usize;
             let mut text_bytes = 0usize;
-            retained::visit_input(&update, visit_limits(&Budget::new(unbounded())), |e| {
-                entries += 1;
-                if let InputEntry::Item {
-                    content: RetainedContent::String(s),
-                    ..
-                } = e
-                {
-                    text_bytes += s.len();
-                }
-                ControlFlow::<()>::Continue(())
-            })
-            .unwrap();
+            let completion =
+                retained::visit_input(&update, visit_limits(&Budget::new(unbounded())), |e| {
+                    entries += 1;
+                    if let InputEntry::Item {
+                        content: RetainedContent::String(s),
+                        ..
+                    } = e
+                    {
+                        text_bytes += s.len();
+                    }
+                    ControlFlow::<()>::Continue(())
+                })
+                .unwrap();
+            assert_eq!(completion, std::ops::ControlFlow::Continue(()));
             let defaults = Limits::default();
             println!(
                 "corpus: update {} bytes, input entries {entries}, text {text_bytes} bytes; product budget owned<={} inspected<={} steps<={}",
@@ -2172,6 +2170,37 @@ mod wire_tests {
         };
         assert!(!report_wire_fits(&report, 1));
         assert!(report_wire_fits(&report, 1024));
+        let expected_report = serde_json::json!({
+            "binding": BINDING,
+            "schema_version": 1,
+            "complete": false,
+            "references": [],
+            "unavailable": [],
+            "diagnostics": [{"reason": "unknown_input_structure", "id": null}],
+            "work": {"blocks": 0, "steps": 0, "inspected_bytes": 0, "owned_bytes": 0}
+        });
+        assert_eq!(serde_json::to_value(&report).unwrap(), expected_report);
+        let mut populated = crate::outcome::EngineStatus::ping_ok();
+        let crate::outcome::EngineStatus::Ok {
+            native_archive_inventory,
+            ..
+        } = &mut populated
+        else {
+            panic!("ping result");
+        };
+        *native_archive_inventory = Some(Box::new(report));
+        let wire = serde_json::to_value(&populated).unwrap();
+        assert_eq!(wire["native_archive_inventory"], expected_report);
+        assert!(wire.get("content_json").is_none());
+        assert_eq!(
+            serde_json::from_value::<crate::outcome::EngineStatus>(wire).unwrap(),
+            populated
+        );
+        println!(
+            "inventory header={} status={} bytes",
+            std::mem::size_of::<NativeArchiveInventory>(),
+            std::mem::size_of::<crate::outcome::EngineStatus>()
+        );
     }
 }
 
@@ -2516,9 +2545,11 @@ mod native_tests {
             EngineStatus::Malformed { detail } if detail.contains("unavailable required"))
         );
         let (d, _) = snapshot_document();
-        let mut options = Options::default();
-        options.client_id = ClientID::new(11);
-        options.skip_gc = true;
+        let options = Options {
+            client_id: ClientID::new(11),
+            skip_gc: true,
+            ..Options::default()
+        };
         let peer = Doc::with_options(options);
         peer.transact_mut()
             .apply_update(yrs::Update::decode_v1(&encode(&d)).unwrap())
@@ -2595,7 +2626,8 @@ mod native_tests {
                 branch.push_back(&mut tx, XmlTextPrelim::new("한글🙂"));
                 drop(tx);
                 let mut seen = false;
-                d.transact()
+                let completion = d
+                    .transact()
                     .visit_retained(yrs::retained::VisitLimits::default(), |event| {
                         if let yrs::retained::RetainedEvent::Block(
                             yrs::retained::RetainedEntry::Item {
@@ -2617,6 +2649,7 @@ mod native_tests {
                         std::ops::ControlFlow::<()>::Continue(())
                     })
                     .unwrap();
+                assert_eq!(completion, std::ops::ControlFlow::Continue(()));
                 assert!(seen);
                 let baseline = encode(&d);
                 let mut tails = vec![];
@@ -2669,7 +2702,7 @@ mod native_tests {
                 pending: false,
                 native_archive_inventory: Some(v),
                 ..
-            } => v,
+            } => *v,
             other => panic!("expected typed inventory, got {other:?}"),
         }
     }
@@ -2748,24 +2781,26 @@ mod native_tests {
             let tx = d.transact();
             let mut literal_a = false;
             let mut format = Vec::new();
-            tx.visit_retained(VisitLimits::default(), |event| {
-                if let RetainedEvent::Block(RetainedEntry::Item {
-                    id,
-                    deleted,
-                    content,
-                    ..
-                }) = event
-                {
-                    if id.client.get() == 10 && id.clock == 2 {
-                        literal_a = deleted && matches!(content, RetainedContent::String("A"));
+            let completion = tx
+                .visit_retained(VisitLimits::default(), |event| {
+                    if let RetainedEvent::Block(RetainedEntry::Item {
+                        id,
+                        deleted,
+                        content,
+                        ..
+                    }) = event
+                    {
+                        if id.client.get() == 10 && id.clock == 2 {
+                            literal_a = deleted && matches!(content, RetainedContent::String("A"));
+                        }
+                        if let RetainedContent::Format { key: "bold", value } = content {
+                            format.push((id.clock, value.clone()));
+                        }
                     }
-                    if let RetainedContent::Format { key: "bold", value } = content {
-                        format.push((id.clock, value.clone()));
-                    }
-                }
-                ControlFlow::<()>::Continue(())
-            })
-            .unwrap();
+                    ControlFlow::<()>::Continue(())
+                })
+                .unwrap();
+            assert_eq!(completion, std::ops::ControlFlow::Continue(()));
             assert!(literal_a);
             assert_eq!(
                 format,

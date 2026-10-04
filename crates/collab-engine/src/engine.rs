@@ -259,7 +259,9 @@ impl CollabEngine {
             ..
         } = &mut status
         {
-            *native_archive_inventory = Some(inventory);
+            // start_report already charges the fixed inventory header; moving it
+            // into this Box keeps the typed wire result and owned vectors intact.
+            *native_archive_inventory = Some(Box::new(inventory));
         }
         status
     }

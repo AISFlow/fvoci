@@ -50,104 +50,6 @@ const MODELS: &[&str] = &[
 ];
 const POLICY: &str = "preserve-content-ids-fresh-private-workspace";
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn native_archive_container_keeps_literal_unicode_and_content_ids() {
-        let archive = crate::native_archive::tests::policy_fixture();
-        let bytes = pack_archive(&archive).unwrap();
-        let decoded = read_archive(&bytes).unwrap();
-        assert_eq!(decoded.graph.project.name, "원본 프로젝트 🧪");
-        assert_eq!(
-            decoded.graph.documents[0].id.to_string(),
-            "10000000-0000-4000-8000-000000000002"
-        );
-        assert_eq!(
-            decoded.graph.activity[0].id.to_string(),
-            "10000000-0000-4000-8000-000000000006"
-        );
-        assert_eq!(decoded.entries, archive.entries);
-        // This tests the typed container only, never native history restoration.
-    }
-
-    #[test]
-    fn native_archive_container_denies_alias_unknown_entry_and_manifest_version() {
-        fn container(entries: &[(&str, &[u8])]) -> Vec<u8> {
-            let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
-            for (name, data) in entries {
-                zip.start_file(*name, SimpleFileOptions::default()).unwrap();
-                zip.write_all(data).unwrap();
-            }
-            zip.finish().unwrap().into_inner()
-        }
-        for name in [
-            "../graph.json",
-            "graph\\json",
-            "/graph.json",
-            "unknown.json",
-        ] {
-            assert!(read_archive(&container(&[(name, b"{}")])).is_err());
-        }
-        let archive = crate::native_archive::tests::policy_fixture();
-        let valid = pack_archive(&archive).unwrap();
-        let mut original = ZipArchive::new(Cursor::new(valid)).unwrap();
-        let mut entries = Vec::new();
-        for index in 0..original.len() {
-            let mut file = original.by_index(index).unwrap();
-            let name = file.name().to_string();
-            let mut data = Vec::new();
-            file.read_to_end(&mut data).unwrap();
-            if name == "manifest.json" {
-                let mut manifest: serde_json::Value = serde_json::from_slice(&data).unwrap();
-                manifest["format_version"] = serde_json::json!(99);
-                data = serde_json::to_vec(&manifest).unwrap();
-            }
-            entries.push((name, data));
-        }
-        let refs: Vec<_> = entries
-            .iter()
-            .map(|(name, data)| (name.as_str(), data.as_slice()))
-            .collect();
-        assert!(read_archive(&container(&refs)).is_err());
-    }
-
-    #[test]
-    fn native_archive_container_denies_duplicate_records_hidden_by_name_index() {
-        let archive = crate::native_archive::tests::policy_fixture();
-        let valid = pack_archive(&archive).unwrap();
-        let mut original = ZipArchive::new(Cursor::new(valid)).unwrap();
-        let mut entries = Vec::new();
-        let mut manifest = Vec::new();
-        for index in 0..original.len() {
-            let mut file = original.by_index(index).unwrap();
-            let name = file.name().to_string();
-            let mut data = Vec::new();
-            file.read_to_end(&mut data).unwrap();
-            if name == "manifest.json" {
-                manifest = data.clone();
-            }
-            entries.push((name, data));
-        }
-        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
-        entries.push(("manifest.jsoN".to_owned(), manifest));
-        for (name, data) in entries {
-            zip.start_file(name, SimpleFileOptions::default()).unwrap();
-            zip.write_all(&data).unwrap();
-        }
-        let mut bytes = zip.finish().unwrap().into_inner();
-        // Deliberately malformed fixture only: equal-length local and central
-        // names alias an additional record. Payloads/CRC remain unchanged.
-        for offset in 0..bytes.len().saturating_sub(12) {
-            if &bytes[offset..offset + 13] == b"manifest.jsoN" {
-                bytes[offset + 12] = b'n';
-            }
-        }
-        assert!(read_archive(&bytes).is_err());
-    }
-}
-
 pub(super) fn process(
     source: &[u8],
     pack: bool,
@@ -429,4 +331,102 @@ fn verify_record_inventory(
 
 fn invalid() -> ArchiveError {
     ArchiveError::Invalid("container, entry or hash".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_archive_container_keeps_literal_unicode_and_content_ids() {
+        let archive = crate::native_archive::tests::policy_fixture();
+        let bytes = pack_archive(&archive).unwrap();
+        let decoded = read_archive(&bytes).unwrap();
+        assert_eq!(decoded.graph.project.name, "원본 프로젝트 🧪");
+        assert_eq!(
+            decoded.graph.documents[0].id.to_string(),
+            "10000000-0000-4000-8000-000000000002"
+        );
+        assert_eq!(
+            decoded.graph.activity[0].id.to_string(),
+            "10000000-0000-4000-8000-000000000006"
+        );
+        assert_eq!(decoded.entries, archive.entries);
+        // This tests the typed container only, never native history restoration.
+    }
+
+    #[test]
+    fn native_archive_container_denies_alias_unknown_entry_and_manifest_version() {
+        fn container(entries: &[(&str, &[u8])]) -> Vec<u8> {
+            let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+            for (name, data) in entries {
+                zip.start_file(*name, SimpleFileOptions::default()).unwrap();
+                zip.write_all(data).unwrap();
+            }
+            zip.finish().unwrap().into_inner()
+        }
+        for name in [
+            "../graph.json",
+            "graph\\json",
+            "/graph.json",
+            "unknown.json",
+        ] {
+            assert!(read_archive(&container(&[(name, b"{}")])).is_err());
+        }
+        let archive = crate::native_archive::tests::policy_fixture();
+        let valid = pack_archive(&archive).unwrap();
+        let mut original = ZipArchive::new(Cursor::new(valid)).unwrap();
+        let mut entries = Vec::new();
+        for index in 0..original.len() {
+            let mut file = original.by_index(index).unwrap();
+            let name = file.name().to_string();
+            let mut data = Vec::new();
+            file.read_to_end(&mut data).unwrap();
+            if name == "manifest.json" {
+                let mut manifest: serde_json::Value = serde_json::from_slice(&data).unwrap();
+                manifest["format_version"] = serde_json::json!(99);
+                data = serde_json::to_vec(&manifest).unwrap();
+            }
+            entries.push((name, data));
+        }
+        let refs: Vec<_> = entries
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
+        assert!(read_archive(&container(&refs)).is_err());
+    }
+
+    #[test]
+    fn native_archive_container_denies_duplicate_records_hidden_by_name_index() {
+        let archive = crate::native_archive::tests::policy_fixture();
+        let valid = pack_archive(&archive).unwrap();
+        let mut original = ZipArchive::new(Cursor::new(valid)).unwrap();
+        let mut entries = Vec::new();
+        let mut manifest = Vec::new();
+        for index in 0..original.len() {
+            let mut file = original.by_index(index).unwrap();
+            let name = file.name().to_string();
+            let mut data = Vec::new();
+            file.read_to_end(&mut data).unwrap();
+            if name == "manifest.json" {
+                manifest = data.clone();
+            }
+            entries.push((name, data));
+        }
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        entries.push(("manifest.jsoN".to_owned(), manifest));
+        for (name, data) in entries {
+            zip.start_file(name, SimpleFileOptions::default()).unwrap();
+            zip.write_all(&data).unwrap();
+        }
+        let mut bytes = zip.finish().unwrap().into_inner();
+        // Deliberately malformed fixture only: equal-length local and central
+        // names alias an additional record. Payloads/CRC remain unchanged.
+        for offset in 0..bytes.len().saturating_sub(12) {
+            if &bytes[offset..offset + 13] == b"manifest.jsoN" {
+                bytes[offset + 12] = b'n';
+            }
+        }
+        assert!(read_archive(&bytes).is_err());
+    }
 }
