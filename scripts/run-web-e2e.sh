@@ -50,6 +50,16 @@ require_prepared() {
 }
 
 build_current_artifacts() {
+  local sqlite_env
+  sqlite_env="$(mktemp "${TMPDIR:-/tmp}/fvoci-sqlite-env.XXXXXX")"
+  if ! bash "$ROOT/scripts/prepare-sqlite-ci.sh" --env-file "$sqlite_env"; then
+    rm -f "$sqlite_env"
+    return 1
+  fi
+  # Only the reviewed helper's verified four exports, written after success.
+  # shellcheck disable=SC1090
+  source "$sqlite_env"
+  rm -f "$sqlite_env"
   bash "$ROOT/scripts/generate-api.sh"
 
   cd "$ROOT/apps/web"

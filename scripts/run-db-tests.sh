@@ -9,4 +9,4 @@ if [[ -z "${TEST_DATABASE_URL:-}" ]]; then
 fi
 
 cd "$ROOT"
-cargo test --locked --offline --features db-tests --test db_integration -- --nocapture
+bash "$ROOT/scripts/prepare-sqlite-ci.sh" -- cargo test --locked --offline --features db-tests --test db_integration -- --nocapture

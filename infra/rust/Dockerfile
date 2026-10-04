@@ -29,10 +29,17 @@ RUN cargo fetch --locked \
  && cd crates/document-extract && bash fetch-rhwp.sh && cargo fetch --locked
 
 FROM rust-deps AS rust-build
+# Native bindgen/C prerequisites exist only in the builder (both GNU arches).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 gcc binutils curl ca-certificates libclang-14-dev=1:14.0.6-12 \
+ && mkdir /sqlite-build \
+ && dpkg-query -W > /sqlite-build/build-packages.txt \
+ && rm -rf /var/lib/apt/lists/*
+ENV LIBCLANG_PATH=/usr/lib/llvm-14/lib
 # Release builds pass the tagged commit so `fvoci-server --version` can report it.
 ARG FVOCI_BUILD_SHA=
 ENV CARGO_TARGET_DIR=/src/target FVOCI_BUILD_SHA=${FVOCI_BUILD_SHA}
-RUN cargo build --locked --release --bin fvoci-server --bin fvoci-migrate \
+RUN bash scripts/prepare-sqlite-ci.sh --parent /sqlite-build -- cargo build --locked --release --bin fvoci-server --bin fvoci-migrate \
  && cargo build --locked --release --manifest-path crates/collab-engine/Cargo.toml --features worker --bin collab-engine \
  && cargo build --locked --release --manifest-path crates/document-extract/Cargo.toml --bin document-extract
 
