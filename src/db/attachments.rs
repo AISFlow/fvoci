@@ -2048,6 +2048,13 @@ pub(crate) async fn reclaim_attachment_objects_backend_with_cancel(
         match reclaim_family_object(backend, storage, &row, cancel).await {
             Ok(CleanupDisposition::Reclaimed) => stats.reclaimed += 1,
             Ok(CleanupDisposition::Cancelled) => break,
+            // The owned purge and rollback have settled. Cancellation that
+            // arrived during either must retain the exact retry pointer.
+            Ok(CleanupDisposition::Retry) | Err(CleanupFailure::Known(_))
+                if cancel.is_cancelled() =>
+            {
+                break;
+            }
             Ok(CleanupDisposition::Busy) => {
                 stats.busy += 1;
                 reschedule_family_object(backend, &row, false).await?;
