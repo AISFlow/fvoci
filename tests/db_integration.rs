@@ -2143,99 +2143,58 @@ async fn logout_revoked_token_does_not_emit_duplicate_event() {
 }
 
 #[tokio::test]
-async fn migration_001_002_database_upgrades_to_003() {
+async fn current_empty_database_install_preserves_schema_data_and_session_on_rerun() {
     let harness = TestDb::bootstrap().await;
-    let (_, _, owner_id) = setup_session(&harness).await;
+    let (app, cookie, owner_id) = setup_session(&harness).await;
     let admin = PgPoolOptions::new()
         .max_connections(2)
         .connect(&harness.admin_url)
         .await
         .unwrap();
-    // This isolated fixture removes 003's objects from the current schema.
-    // Remove all later 048 timer objects explicitly before its self policies'
-    // function dependency; replay 048 afterwards rather than leaving it applied
-    // with missing policies. Keep the original time_entries and actor rows.
-    sqlx::query("DROP TRIGGER task_timer_legacy_tracking ON fvoci.time_entries")
-        .execute(&admin)
-        .await
-        .unwrap();
-    sqlx::query("DROP FUNCTION fvoci.track_legacy_time_entry()")
-        .execute(&admin)
-        .await
-        .unwrap();
-    for table in [
-        "task_timer_segments",
-        "task_timer_commands",
-        "task_timer_legacy_open",
-        "task_timer_audit",
-        "task_timer_runs",
-    ] {
-        sqlx::query(&format!("DROP TABLE fvoci.{table}"))
-            .execute(&admin)
-            .await
-            .unwrap();
-    }
-    sqlx::query("DELETE FROM fvoci.schema_migrations WHERE version = 48")
-        .execute(&admin)
-        .await
-        .unwrap();
-    sqlx::query("DROP POLICY IF EXISTS memberships_select_self ON fvoci.memberships")
-        .execute(&admin)
-        .await
-        .unwrap();
-    sqlx::query("DROP POLICY IF EXISTS owner_isolation ON fvoci.notifications")
-        .execute(&admin)
-        .await
-        .unwrap();
-    sqlx::query("DROP POLICY IF EXISTS owner_isolation ON fvoci.notification_prefs")
-        .execute(&admin)
-        .await
-        .unwrap();
-    for policy in ["user_consents_select", "user_consents_insert"] {
-        sqlx::query(&format!(
-            "DROP POLICY IF EXISTS {policy} ON fvoci.user_consents"
-        ))
-        .execute(&admin)
-        .await
-        .unwrap();
-    }
-    for table in ["user_mfa", "identity_links"] {
-        sqlx::query(&format!(
-            "DROP POLICY IF EXISTS owner_isolation ON fvoci.{table}"
-        ))
-        .execute(&admin)
-        .await
-        .unwrap();
-    }
-    sqlx::query("ALTER TABLE fvoci.users DROP CONSTRAINT IF EXISTS users_personal_workspace_fk")
-        .execute(&admin)
-        .await
-        .unwrap();
-    sqlx::query("DROP INDEX IF EXISTS fvoci.users_personal_workspace_id_unique")
-        .execute(&admin)
-        .await
-        .unwrap();
-    sqlx::query("DROP FUNCTION IF EXISTS public.app_self_user_id()")
-        .execute(&admin)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM fvoci.schema_migrations WHERE version = 3")
-        .execute(&admin)
-        .await
-        .unwrap();
-    let removed: (bool,) = sqlx::query_as(
-        "SELECT to_regprocedure('public.app_self_user_id()') IS NULL
-         AND to_regprocedure('fvoci.track_legacy_time_entry()') IS NULL
-         AND NOT EXISTS (SELECT 1 FROM pg_tables
-                         WHERE schemaname = 'fvoci' AND tablename LIKE 'task_timer_%')",
+    // TestDb bootstraps an empty isolated database through every current migration.
+    // Rerunning the current installer must preserve the applied ledger and real
+    // setup data/session, without synthesizing an excluded pre048 schema.
+    const CURRENT_ROWS: &str = "SELECT jsonb_build_object(
+        'migrations', (SELECT md5(coalesce(jsonb_agg(to_jsonb(t) ORDER BY version)::text, '[]')) FROM fvoci.schema_migrations t),
+        'users', (SELECT md5(coalesce(jsonb_agg(to_jsonb(t) ORDER BY id)::text, '[]')) FROM fvoci.users t),
+        'workspaces', (SELECT md5(coalesce(jsonb_agg(to_jsonb(t) ORDER BY id)::text, '[]')) FROM fvoci.workspaces t),
+        'memberships', (SELECT md5(coalesce(jsonb_agg(to_jsonb(t) ORDER BY workspace_id, user_id)::text, '[]')) FROM fvoci.memberships t),
+        'sessions', (SELECT md5(coalesce(jsonb_agg(to_jsonb(t) ORDER BY id)::text, '[]')) FROM fvoci.sessions t)
+    )";
+    let populated: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM fvoci.users), (SELECT count(*) FROM fvoci.sessions)",
     )
     .fetch_one(&admin)
     .await
     .unwrap();
-    assert!(removed.0, "legacy fixture actually removes the new objects");
+    assert!(populated.0 > 0 && populated.1 > 0);
+    let before: Value = sqlx::query_scalar(CURRENT_ROWS)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
     migrate::run_migrations(&harness.admin_url)
         .await
-        .expect("upgrade to 003");
+        .expect("rerun current install");
+    let after: Value = sqlx::query_scalar(CURRENT_ROWS)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(
+        after, before,
+        "current migration rerun preserves ledger and setup rows"
+    );
+    let applied: Vec<(i32,)> =
+        sqlx::query_as("SELECT version FROM fvoci.schema_migrations ORDER BY version")
+            .fetch_all(&admin)
+            .await
+            .unwrap();
+    assert_eq!(
+        applied
+            .into_iter()
+            .map(|(version,)| version)
+            .collect::<Vec<_>>(),
+        migrate::compiled_migration_versions()
+    );
     let has_fn: (bool,) =
         sqlx::query_as("SELECT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'app_self_user_id')")
             .fetch_one(&admin)
@@ -2273,8 +2232,10 @@ async fn migration_001_002_database_upgrades_to_003() {
     .fetch_one(&admin)
     .await
     .unwrap();
-    assert_eq!(timer_policies.0, 5, "048 restores every timer self policy");
-    reapply_app_grants(&harness.admin_url, &harness.role_name).await;
+    assert_eq!(
+        timer_policies.0, 5,
+        "current install retains every timer self policy"
+    );
     let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
     let mut tx = app_pool.begin().await.unwrap();
     sqlx::query("SELECT set_config('app.self_user_id', $1, true)")
@@ -2290,6 +2251,19 @@ async fn migration_001_002_database_upgrades_to_003() {
     assert!(visible.iter().all(|(user_id,)| *user_id == owner_id));
     tx.rollback().await.unwrap();
     app_pool.close().await;
+    let (status, body, _, _) = json_request(
+        app,
+        "GET",
+        "/api/v1/auth/me",
+        None,
+        Some(&cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["id"], owner_id.to_string());
+    assert_eq!(body["email"], "admin@example.com");
     admin.close().await;
     harness.cleanup().await;
 }
