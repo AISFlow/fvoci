@@ -1,5 +1,8 @@
+use super::backend::{Backend, OperationTx};
+use super::codec::Cell;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::db::context::{restore_system, set_system, set_tenant};
@@ -652,8 +655,22 @@ pub async fn list_pending_embedding(
     attachment_id: Uuid,
     limit: i64,
 ) -> Result<Vec<PendingEmbeddingChunk>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
+    list_pending_embedding_backend(
+        &Backend::Postgres(pool.clone()),
+        workspace_id,
+        attachment_id,
+        limit,
+    )
+    .await
+}
+
+async fn list_pending_embedding_pg(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+    limit: i64,
+) -> Result<Vec<PendingEmbeddingChunk>, sqlx::Error> {
+    set_tenant(tx, workspace_id).await?;
     let rows: Vec<(i32, String)> = sqlx::query_as(
         r#"
         SELECT x.chunk_no, x.text
@@ -678,9 +695,8 @@ pub async fn list_pending_embedding(
     .bind(workspace_id)
     .bind(attachment_id)
     .bind(limit)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
-    tx.commit().await?;
     Ok(rows
         .into_iter()
         .map(|(chunk_no, text)| PendingEmbeddingChunk { chunk_no, text })
@@ -696,8 +712,318 @@ pub async fn next_pending_embedding(
     for workspace_id in list_live_workspace_ids(pool).await? {
         let mut tx = pool.begin().await?;
         set_tenant(&mut tx, workspace_id).await?;
-        let found: Option<(Uuid,)> = sqlx::query_as(
+        let found = list_pending_attachment_pg(&mut tx, workspace_id, excluded).await?;
+        tx.commit().await?;
+        if let Some(attachment_id) = found {
+            return Ok(Some((workspace_id, attachment_id)));
+        }
+    }
+    Ok(None)
+}
+
+/// Source `setEmbeddings`. A vector is stored only while the chunk still has
+/// the embedded text and no vector (a re-extract in between replaced the row),
+/// and an `attachment.embedded` event in the same transaction makes the
+/// search-index consumer copy the vectors into Meili. Returns rows written.
+pub async fn store_chunk_embeddings(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+    rows: &[(PendingEmbeddingChunk, Vec<f32>)],
+) -> Result<u64, sqlx::Error> {
+    store_chunk_embeddings_backend(
+        &Backend::Postgres(pool.clone()),
+        workspace_id,
+        attachment_id,
+        rows,
+    )
+    .await
+}
+
+async fn store_chunk_embeddings_pg(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+    rows: &[(PendingEmbeddingChunk, Vec<f32>)],
+) -> Result<u64, sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    set_tenant(tx, workspace_id).await?;
+    let mut written = 0u64;
+    for (chunk, vector) in rows {
+        written += sqlx::query(
             r#"
+            UPDATE fvoci.attachment_text
+            SET embedding = $5::jsonb, updated_at = now()
+            WHERE workspace_id = $1 AND attachment_id = $2 AND chunk_no = $3
+              AND text = $4 AND embedding IS NULL
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(attachment_id)
+        .bind(chunk.chunk_no)
+        .bind(&chunk.text)
+        .bind(crate::search::embed::embedding_to_json_text(vector))
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+    }
+    if written > 0 {
+        crate::db::identity::append_event(
+            tx,
+            crate::db::identity::EventAppend {
+                id: Uuid::now_v7(),
+                workspace_id: Some(workspace_id),
+                actor_user_id: None,
+                verb: "attachment.embedded".into(),
+                target_type: Some("attachment".into()),
+                target_id: Some(attachment_id),
+                payload: serde_json::json!({
+                    "attachmentId": attachment_id.to_string(),
+                    "chunks": written,
+                }),
+            },
+        )
+        .await?;
+    }
+    Ok(written)
+}
+
+pub async fn list_pending_embedding_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+    limit: i64,
+) -> Result<Vec<PendingEmbeddingChunk>, sqlx::Error> {
+    let mut tx = backend.begin_read().await?;
+    tx.operation().set_system().await?;
+    tx.operation().set_tenant(workspace_id).await?;
+    let chunks = tx
+        .operation()
+        .list_attachment_pending_embeddings(workspace_id, attachment_id, limit)
+        .await?;
+    tx.commit().await.map_err(|e| e.source)?;
+    Ok(chunks)
+}
+
+pub async fn next_pending_embedding_backend(
+    backend: &Backend,
+    excluded: &[Uuid],
+) -> Result<Option<(Uuid, Uuid)>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return next_pending_embedding(pool, excluded).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    tx.operation().set_system().await?;
+    let next = tx
+        .operation()
+        .next_attachment_pending_embedding(excluded)
+        .await?;
+    tx.commit().await.map_err(|e| e.source)?;
+    Ok(next)
+}
+
+pub async fn store_chunk_embeddings_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+    rows: &[(PendingEmbeddingChunk, Vec<f32>)],
+) -> Result<u64, sqlx::Error> {
+    // Standalone/legacy PG APIs have no caller cancellation scope.
+    store_chunk_embeddings_backend_with_cancel(backend, workspace_id, attachment_id, rows, None)
+        .await
+}
+
+pub(crate) async fn store_chunk_embeddings_backend_with_cancel(
+    backend: &Backend,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+    rows: &[(PendingEmbeddingChunk, Vec<f32>)],
+    cancel: Option<&CancellationToken>,
+) -> Result<u64, sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_system().await?;
+    tx.operation().set_tenant(workspace_id).await?;
+    // Await the fully owned acquisition; dropping a cancellation-selected
+    // BEGIN future would outsource transaction cleanup to a different owner.
+    // Current cancellation is checked after acquisition/context and before
+    // any vector/event effects. A cancelled batch never publishes its rows.
+    if cancel.is_some_and(CancellationToken::is_cancelled) {
+        tx.rollback().await?;
+        return Ok(0);
+    }
+    let written = tx
+        .operation()
+        .store_attachment_chunk_embeddings(workspace_id, attachment_id, rows)
+        .await?;
+    if cancel.is_some_and(CancellationToken::is_cancelled) {
+        tx.rollback().await?;
+        return Ok(0);
+    }
+    tx.commit().await.map_err(|e| e.source)?;
+    Ok(written)
+}
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn replace_attachment_chunks(
+        &mut self,
+        workspace_id: Uuid,
+        attachment_id: Uuid,
+        status: &str,
+        chunks: &[TextChunk],
+    ) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                replace_attachment_chunks(tx, workspace_id, attachment_id, status, chunks).await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_system_context()?;
+                tx.require_tenant(workspace_id)?;
+                tx.execute(
+                    "DELETE FROM attachment_text WHERE workspace_id=?1 AND attachment_id=?2",
+                    &[Cell::uuid(workspace_id), Cell::uuid(attachment_id)],
+                )
+                .await?;
+                if status != "ok" && status != "partial" {
+                    return Ok(());
+                }
+                for chunk in chunks {
+                    tx.execute("INSERT INTO attachment_text (workspace_id,attachment_id,chunk_no,start_offset,end_offset,text,chosung,status) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", &[Cell::uuid(workspace_id),Cell::uuid(attachment_id),Cell::Integer(i64::from(chunk.chunk_no)),Cell::Integer(i64::from(chunk.start)),Cell::Integer(i64::from(chunk.end)),Cell::text(&chunk.text),Cell::text(to_chosung(&chunk.text)),Cell::text(status)]).await?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) async fn list_attachment_pending_embeddings(
+        &mut self,
+        workspace_id: Uuid,
+        attachment_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<PendingEmbeddingChunk>, sqlx::Error> {
+        if !(1..=crate::search::embed::EMBED_BATCH as i64).contains(&limit) {
+            return Err(sqlx::Error::Protocol(
+                "embedding batch exceeds bound".into(),
+            ));
+        }
+        match self {
+            Self::Postgres(tx) => {
+                list_pending_embedding_pg(tx, workspace_id, attachment_id, limit).await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_system_context()?;
+                tx.require_tenant(workspace_id)?;
+                let rows = tx.query("SELECT x.chunk_no,x.text FROM attachment_text x JOIN attachments a ON a.workspace_id=x.workspace_id AND a.id=x.attachment_id JOIN workspaces w ON w.id=a.workspace_id AND w.deleted_at IS NULL LEFT JOIN documents d ON d.workspace_id=a.workspace_id AND d.id=a.document_id LEFT JOIN tasks t ON t.workspace_id=a.workspace_id AND t.id=a.task_id WHERE x.workspace_id=?1 AND x.attachment_id=?2 AND x.embedding IS NULL AND x.text<>'' AND x.status IN ('ok','partial') AND a.status='stored' AND a.scan_status<>'infected' AND ((a.document_id IS NOT NULL AND d.id IS NOT NULL AND d.deleted_at IS NULL) OR (a.task_id IS NOT NULL AND t.id IS NOT NULL AND t.deleted_at IS NULL AND t.archived_at IS NULL)) ORDER BY x.chunk_no LIMIT ?3", &[Cell::uuid(workspace_id),Cell::uuid(attachment_id),Cell::Integer(limit)]).await?;
+                rows.iter()
+                    .map(|row| {
+                        let chunk_no = row.cell(0)?.int32()?;
+                        if chunk_no < 0 {
+                            return Err(sqlx::Error::Protocol("negative embedding chunk".into()));
+                        }
+                        Ok(PendingEmbeddingChunk {
+                            chunk_no,
+                            text: row.cell(1)?.string()?,
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// A system read, with a bounded candidate list: excluded contains at most
+    /// 1000 distinct failed attachments, so 1001 candidates suffice to find the
+    /// first eligible one without unbounded memory or dynamic SQL parameters.
+    pub(crate) async fn next_attachment_pending_embedding(
+        &mut self,
+        excluded: &[Uuid],
+    ) -> Result<Option<(Uuid, Uuid)>, sqlx::Error> {
+        if excluded.len() > 1000 {
+            return Err(sqlx::Error::Protocol(
+                "embedding exclusions exceed bound".into(),
+            ));
+        }
+        match self {
+            Self::Postgres(tx) => {
+                // Preserve the existing per-tenant PG RLS traversal and query.
+                let workspaces: Vec<Uuid> = sqlx::query_scalar(
+                    "SELECT id FROM fvoci.workspaces WHERE deleted_at IS NULL ORDER BY id",
+                )
+                .fetch_all(&mut ***tx)
+                .await?;
+                for workspace_id in workspaces {
+                    set_tenant(tx, workspace_id).await?;
+                    let rows = list_pending_attachment_pg(tx, workspace_id, excluded).await?;
+                    if let Some(attachment_id) = rows {
+                        return Ok(Some((workspace_id, attachment_id)));
+                    }
+                }
+                Ok(None)
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_system_context()?;
+                let rows = tx.query("SELECT DISTINCT x.workspace_id,x.attachment_id FROM attachment_text x JOIN attachments a ON a.workspace_id=x.workspace_id AND a.id=x.attachment_id JOIN workspaces w ON w.id=a.workspace_id AND w.deleted_at IS NULL LEFT JOIN documents d ON d.workspace_id=a.workspace_id AND d.id=a.document_id LEFT JOIN tasks t ON t.workspace_id=a.workspace_id AND t.id=a.task_id WHERE x.embedding IS NULL AND x.text<>'' AND x.status IN ('ok','partial') AND a.status='stored' AND a.scan_status<>'infected' AND ((a.document_id IS NOT NULL AND d.id IS NOT NULL AND d.deleted_at IS NULL) OR (a.task_id IS NOT NULL AND t.id IS NOT NULL AND t.deleted_at IS NULL AND t.archived_at IS NULL)) ORDER BY x.workspace_id,x.attachment_id LIMIT 1001", &[]).await?;
+                for row in rows {
+                    let workspace = row.cell(0)?.id()?;
+                    let attachment = row.cell(1)?.id()?;
+                    if !excluded.contains(&attachment) {
+                        return Ok(Some((workspace, attachment)));
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    pub(crate) async fn store_attachment_chunk_embeddings(
+        &mut self,
+        workspace_id: Uuid,
+        attachment_id: Uuid,
+        rows: &[(PendingEmbeddingChunk, Vec<f32>)],
+    ) -> Result<u64, sqlx::Error> {
+        if rows.len() > crate::search::embed::EMBED_BATCH {
+            return Err(sqlx::Error::Protocol(
+                "embedding write exceeds batch bound".into(),
+            ));
+        }
+        match self {
+            Self::Postgres(tx) => {
+                store_chunk_embeddings_pg(tx, workspace_id, attachment_id, rows).await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_system_context()?;
+                tx.require_tenant(workspace_id)?;
+                let mut written = 0;
+                for (chunk, vector) in rows {
+                    if chunk.chunk_no < 0
+                        || vector.len() != crate::search::meili::EMBEDDING_DIMENSIONS as usize
+                        || vector.iter().any(|v| !v.is_finite())
+                    {
+                        return Err(sqlx::Error::Protocol("invalid embedding row".into()));
+                    }
+                    written+=tx.execute("UPDATE attachment_text SET embedding=?5,updated_at=unixepoch()*1000000 + CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND attachment_id=?2 AND chunk_no=?3 AND text=?4 AND embedding IS NULL", &[Cell::uuid(workspace_id),Cell::uuid(attachment_id),Cell::Integer(i64::from(chunk.chunk_no)),Cell::text(&chunk.text),Cell::text(crate::search::embed::embedding_to_json_text(vector))]).await?;
+                }
+                if written > 0 {
+                    self.append_event(crate::db::identity::EventAppend {id:Uuid::now_v7(),workspace_id:Some(workspace_id),actor_user_id:None,verb:"attachment.embedded".into(),target_type:Some("attachment".into()),target_id:Some(attachment_id),payload:serde_json::json!({"attachmentId":attachment_id.to_string(),"chunks":written})}).await?;
+                }
+                Ok(written)
+            }
+        }
+    }
+}
+
+async fn list_pending_attachment_pg(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    excluded: &[Uuid],
+) -> Result<Option<Uuid>, sqlx::Error> {
+    let found: Option<(Uuid,)> = sqlx::query_as(
+        r#"
             SELECT x.attachment_id
             FROM fvoci.attachment_text x
             JOIN fvoci.attachments a
@@ -717,71 +1043,104 @@ pub async fn next_pending_embedding(
             ORDER BY x.attachment_id
             LIMIT 1
             "#,
-        )
-        .bind(workspace_id)
-        .bind(excluded)
-        .fetch_optional(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        if let Some((attachment_id,)) = found {
-            return Ok(Some((workspace_id, attachment_id)));
-        }
-    }
-    Ok(None)
+    )
+    .bind(workspace_id)
+    .bind(excluded)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    Ok(found.map(|(id,)| id))
 }
 
-/// Source `setEmbeddings`. A vector is stored only while the chunk still has
-/// the embedded text and no vector (a re-extract in between replaced the row),
-/// and an `attachment.embedded` event in the same transaction makes the
-/// search-index consumer copy the vectors into Meili. Returns rows written.
-pub async fn store_chunk_embeddings(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    attachment_id: Uuid,
-    rows: &[(PendingEmbeddingChunk, Vec<f32>)],
-) -> Result<u64, sqlx::Error> {
-    if rows.is_empty() {
-        return Ok(0);
-    }
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    let mut written = 0u64;
-    for (chunk, vector) in rows {
-        written += sqlx::query(
-            r#"
-            UPDATE fvoci.attachment_text
-            SET embedding = $5::jsonb, updated_at = now()
-            WHERE workspace_id = $1 AND attachment_id = $2 AND chunk_no = $3
-              AND text = $4 AND embedding IS NULL
-            "#,
+#[cfg(test)]
+mod embedding_backend_tests {
+    use super::*;
+    use crate::db::attachment_extract::backend_tests::Fixture;
+
+    #[tokio::test]
+    async fn embedding_named_operations_require_current_tenant_system_and_writer() {
+        let f = Fixture::new().await;
+        f.extracted("Embedding authority fixture").await;
+        let mut tx = f.backend.begin_read().await.unwrap();
+        tx.operation().set_tenant(f.workspace).await.unwrap();
+        assert!(tx
+            .operation()
+            .list_attachment_pending_embeddings(f.workspace, f.attachment, 1)
+            .await
+            .is_err());
+        tx.rollback().await.unwrap();
+        let mut tx = f.backend.begin_read().await.unwrap();
+        tx.operation().set_system().await.unwrap();
+        tx.operation().set_tenant(Uuid::now_v7()).await.unwrap();
+        assert!(tx
+            .operation()
+            .list_attachment_pending_embeddings(f.workspace, f.attachment, 1)
+            .await
+            .is_err());
+        tx.rollback().await.unwrap();
+        let pending = list_pending_embedding_backend(&f.backend, f.workspace, f.attachment, 1)
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        let rows = vec![(pending[0].clone(), vec![1.0; 1536])];
+        let mut tx = f.backend.begin_read().await.unwrap();
+        tx.operation().set_system().await.unwrap();
+        tx.operation().set_tenant(f.workspace).await.unwrap();
+        assert!(tx
+            .operation()
+            .store_attachment_chunk_embeddings(f.workspace, f.attachment, &rows)
+            .await
+            .is_err());
+        tx.rollback().await.unwrap();
+        assert!(
+            list_pending_embedding_backend(&f.backend, f.workspace, f.attachment, 33)
+                .await
+                .is_err()
+        );
+        assert!(
+            next_pending_embedding_backend(&f.backend, &vec![Uuid::nil(); 1001])
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            next_pending_embedding_backend(&f.backend, &[f.attachment])
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(store_chunk_embeddings_backend(
+            &f.backend,
+            f.workspace,
+            f.attachment,
+            &[(pending[0].clone(), vec![f32::NAN; 1536])]
         )
-        .bind(workspace_id)
-        .bind(attachment_id)
-        .bind(chunk.chunk_no)
-        .bind(&chunk.text)
-        .bind(crate::search::embed::embedding_to_json_text(vector))
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-    }
-    if written > 0 {
-        crate::db::identity::append_event(
-            &mut tx,
-            crate::db::identity::EventAppend {
-                id: Uuid::now_v7(),
-                workspace_id: Some(workspace_id),
-                actor_user_id: None,
-                verb: "attachment.embedded".into(),
-                target_type: Some("attachment".into()),
-                target_id: Some(attachment_id),
-                payload: serde_json::json!({
-                    "attachmentId": attachment_id.to_string(),
-                    "chunks": written,
-                }),
-            },
+        .await
+        .is_err());
+        assert!(store_chunk_embeddings_backend(
+            &f.backend,
+            f.workspace,
+            f.attachment,
+            &[(pending[0].clone(), vec![1.0; 1])]
         )
-        .await?;
+        .await
+        .is_err());
+        assert_eq!(f.event_count("attachment.embedded").await, 0);
+        sqlx::query("UPDATE documents SET deleted_at=unixepoch()*1000000")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(
+            list_pending_embedding_backend(&f.backend, f.workspace, f.attachment, 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(next_pending_embedding_backend(&f.backend, &[])
+            .await
+            .unwrap()
+            .is_none());
+        // The read filter excludes dead parents; late vectors use the same
+        // existing text/NULL fence as PG, rather than claiming delivery ACL.
+        f.finish().await;
     }
-    tx.commit().await?;
-    Ok(written)
 }
