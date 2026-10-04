@@ -43,11 +43,11 @@ use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::collab::derived_body::PreparedDerivedBody;
-use crate::db::context::{lock_key_from_uuid, lock_membership_users, recheck_session, set_tenant};
-use crate::db::documents::{document_permission, empty_document_json};
+use crate::db::backend::OperationTx;
+use crate::db::codec::Cell;
+use crate::db::context::{lock_key_from_uuid, set_tenant};
+use crate::db::documents::empty_document_json;
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
-use crate::db::projects::share_lock_project_permission;
-use crate::db::workspace::{membership_role_for_update, workspace_is_live};
 use crate::projects::ProjectPermission;
 
 pub use crate::collab::derived_body::DOCUMENT_MAX_BODY_BYTES;
@@ -358,10 +358,10 @@ async fn lock_collab_init(
 }
 
 /// Result of the single collab access check (wiki/project document or task).
-struct CollabDocumentAccess {
-    permission: ProjectPermission,
+pub(crate) struct CollabDocumentAccess {
+    pub(crate) permission: ProjectPermission,
     /// Document status `archived` or the owning project archived: the room is read-only.
-    archived: bool,
+    pub(crate) archived: bool,
 }
 
 /// Locks and authorizes a live wiki or project document for collab.
@@ -372,127 +372,184 @@ struct CollabDocumentAccess {
 /// mutations. Wiki documents use `document_permission`. Returns `None` when the
 /// document is missing, trashed, in a trashed project, or changed affiliation
 /// between the unlocked read and the row lock.
-async fn lock_collab_document_access(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    document_id: Uuid,
-) -> Result<Option<CollabDocumentAccess>, sqlx::Error> {
-    let affiliation: Option<(Option<Uuid>,)> = sqlx::query_as(
-        "SELECT project_id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
-    )
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some((expected_project_id,)) = affiliation else {
-        return Ok(None);
-    };
-    let project_access = match expected_project_id {
-        Some(project_id) => {
-            match share_lock_project_permission(tx, workspace_id, actor_user_id, project_id).await?
-            {
-                Some(access) => Some(access),
-                None => return Ok(None),
+impl OperationTx<'_, '_> {
+    async fn lock_collab_document_access(
+        &mut self,
+        workspace_id: Uuid,
+        actor_user_id: Uuid,
+        document_id: Uuid,
+    ) -> Result<Option<CollabDocumentAccess>, sqlx::Error> {
+        let affiliation = self
+            .collab_document_affiliation(workspace_id, document_id)
+            .await?;
+        let Some((expected_project_id,)) = affiliation else {
+            return Ok(None);
+        };
+        let project_access = match expected_project_id {
+            Some(project_id) => {
+                match self
+                    .share_lock_project_permission(workspace_id, actor_user_id, project_id)
+                    .await?
+                {
+                    Some(access) => Some(access),
+                    None => return Ok(None),
+                }
+            }
+            None => None,
+        };
+        let row = self.collab_document_lock(workspace_id, document_id).await?;
+        let Some((project_id, status, deleted_at)) = row else {
+            return Ok(None);
+        };
+        if deleted_at.is_some() || project_id != expected_project_id {
+            return Ok(None);
+        }
+        let (permission, project_archived) = match project_access {
+            Some(access) => access,
+            None => (
+                self.document_permission(workspace_id, actor_user_id, document_id, true)
+                    .await?,
+                false,
+            ),
+        };
+        Ok(Some(CollabDocumentAccess {
+            permission,
+            archived: project_archived || status == "archived",
+        }))
+    }
+
+    /// Locks and authorizes a live task for collab: the owning project `FOR SHARE`
+    /// (effective project permission) and then the task row `FOR NO KEY UPDATE`,
+    /// the same project → task order as task mutations. Returns `None` when the
+    /// task is missing or trashed, its project is trashed, or the task moved to
+    /// another project between the unlocked read and the row lock. An archived
+    /// task or project yields a read-only room.
+    async fn lock_collab_task_access(
+        &mut self,
+        workspace_id: Uuid,
+        actor_user_id: Uuid,
+        task_id: Uuid,
+    ) -> Result<Option<CollabDocumentAccess>, sqlx::Error> {
+        let expected = self.collab_task_affiliation(workspace_id, task_id).await?;
+        let Some((expected_project_id,)) = expected else {
+            return Ok(None);
+        };
+        let Some((permission, project_archived)) = self
+            .share_lock_project_permission(workspace_id, actor_user_id, expected_project_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let row = self.collab_task_lock(workspace_id, task_id).await?;
+        let Some((project_id, archived_at, deleted_at)) = row else {
+            return Ok(None);
+        };
+        if deleted_at.is_some() || project_id != expected_project_id {
+            return Ok(None);
+        }
+        Ok(Some(CollabDocumentAccess {
+            permission,
+            archived: project_archived || archived_at.is_some(),
+        }))
+    }
+
+    async fn lock_collab_access(
+        &mut self,
+        kind: CollabKind,
+        workspace_id: Uuid,
+        actor_user_id: Uuid,
+        resource_id: Uuid,
+    ) -> Result<Option<CollabDocumentAccess>, sqlx::Error> {
+        match kind {
+            CollabKind::Document => {
+                self.lock_collab_document_access(workspace_id, actor_user_id, resource_id)
+                    .await
+            }
+            CollabKind::Task => {
+                self.lock_collab_task_access(workspace_id, actor_user_id, resource_id)
+                    .await
             }
         }
-        None => None,
-    };
-    let row: Option<(Option<Uuid>, String, Option<DateTime<Utc>>)> = sqlx::query_as(
-        r#"
-        SELECT project_id, status, deleted_at
-        FROM fvoci.documents
-        WHERE workspace_id = $1 AND id = $2
-        FOR UPDATE
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some((project_id, status, deleted_at)) = row else {
-        return Ok(None);
-    };
-    if deleted_at.is_some() || project_id != expected_project_id {
-        return Ok(None);
     }
-    let (permission, project_archived) = match project_access {
-        Some(access) => access,
-        None => (
-            document_permission(tx, workspace_id, actor_user_id, document_id, true).await?,
-            false,
-        ),
-    };
-    Ok(Some(CollabDocumentAccess {
-        permission,
-        archived: project_archived || status == "archived",
-    }))
-}
 
-/// Locks and authorizes a live task for collab: the owning project `FOR SHARE`
-/// (effective project permission) and then the task row `FOR NO KEY UPDATE`,
-/// the same project → task order as task mutations. Returns `None` when the
-/// task is missing or trashed, its project is trashed, or the task moved to
-/// another project between the unlocked read and the row lock. An archived
-/// task or project yields a read-only room.
-async fn lock_collab_task_access(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    task_id: Uuid,
-) -> Result<Option<CollabDocumentAccess>, sqlx::Error> {
-    let expected: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT project_id FROM fvoci.tasks WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL",
-    )
-    .bind(workspace_id)
-    .bind(task_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some((expected_project_id,)) = expected else {
-        return Ok(None);
-    };
-    let Some((permission, project_archived)) =
-        share_lock_project_permission(tx, workspace_id, actor_user_id, expected_project_id).await?
-    else {
-        return Ok(None);
-    };
-    let row: Option<TaskLockRow> = sqlx::query_as(
-        r#"
-        SELECT project_id, archived_at, deleted_at
-        FROM fvoci.tasks
-        WHERE workspace_id = $1 AND id = $2
-        FOR NO KEY UPDATE
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(task_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some((project_id, archived_at, deleted_at)) = row else {
-        return Ok(None);
-    };
-    if deleted_at.is_some() || project_id != expected_project_id {
-        return Ok(None);
-    }
-    Ok(Some(CollabDocumentAccess {
-        permission,
-        archived: project_archived || archived_at.is_some(),
-    }))
-}
-
-async fn lock_collab_access(
-    tx: &mut Transaction<'_, Postgres>,
-    kind: CollabKind,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    resource_id: Uuid,
-) -> Result<Option<CollabDocumentAccess>, sqlx::Error> {
-    match kind {
-        CollabKind::Document => {
-            lock_collab_document_access(tx, workspace_id, actor_user_id, resource_id).await
+    async fn collab_document_affiliation(
+        &mut self,
+        workspace: Uuid,
+        document: Uuid,
+    ) -> Result<Option<(Option<Uuid>,)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query_as(
+                    "SELECT project_id FROM fvoci.documents WHERE workspace_id=$1 AND id=$2",
+                )
+                .bind(workspace)
+                .bind(document)
+                .fetch_optional(&mut ***tx)
+                .await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                tx.query(
+                    "SELECT project_id FROM documents WHERE workspace_id=?1 AND id=?2",
+                    &[Cell::uuid(workspace), Cell::uuid(document)],
+                )
+                .await?
+                .first()
+                .map(|row| Ok((row.cell(0)?.optional(Cell::id)?,)))
+                .transpose()
+            }
         }
-        CollabKind::Task => {
-            lock_collab_task_access(tx, workspace_id, actor_user_id, resource_id).await
+    }
+    async fn collab_document_lock(
+        &mut self,
+        workspace: Uuid,
+        document: Uuid,
+    ) -> Result<Option<(Option<Uuid>, String, Option<DateTime<Utc>>)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_as(
+                "SELECT project_id,status,deleted_at FROM fvoci.documents WHERE workspace_id=$1 AND id=$2 FOR UPDATE"
+            ).bind(workspace).bind(document).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?; tx.require_tenant(workspace)?;
+                tx.query("SELECT project_id,status,deleted_at FROM documents WHERE workspace_id=?1 AND id=?2",
+                    &[Cell::uuid(workspace),Cell::uuid(document)]).await?.first()
+                    .map(|row| Ok((row.cell(0)?.optional(Cell::id)?,row.cell(1)?.string()?,row.cell(2)?.optional(Cell::datetime)?))).transpose()
+            }
+        }
+    }
+    async fn collab_task_affiliation(
+        &mut self,
+        workspace: Uuid,
+        task: Uuid,
+    ) -> Result<Option<(Uuid,)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_as(
+                "SELECT project_id FROM fvoci.tasks WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL"
+            ).bind(workspace).bind(task).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?; tx.require_tenant(workspace)?;
+                tx.query("SELECT project_id FROM tasks WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",
+                    &[Cell::uuid(workspace),Cell::uuid(task)]).await?.first()
+                    .map(|row| Ok((row.cell(0)?.id()?,))).transpose()
+            }
+        }
+    }
+    async fn collab_task_lock(
+        &mut self,
+        workspace: Uuid,
+        task: Uuid,
+    ) -> Result<Option<TaskLockRow>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_as(
+                "SELECT project_id,archived_at,deleted_at FROM fvoci.tasks WHERE workspace_id=$1 AND id=$2 FOR NO KEY UPDATE"
+            ).bind(workspace).bind(task).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?; tx.require_tenant(workspace)?;
+                tx.query("SELECT project_id,archived_at,deleted_at FROM tasks WHERE workspace_id=?1 AND id=?2",
+                    &[Cell::uuid(workspace),Cell::uuid(task)]).await?.first()
+                    .map(|row| Ok((row.cell(0)?.id()?,row.cell(1)?.optional(Cell::datetime)?,row.cell(2)?.optional(Cell::datetime)?))).transpose()
+            }
         }
     }
 }
@@ -705,7 +762,7 @@ enum ActorAccess {
     WorkspaceGone,
     NotMember,
     /// Missing, trashed, in a trashed project, or moved between the unlocked
-    /// read and the row lock (see [`lock_collab_access`]).
+    /// read and the row lock (see [`OperationTx::lock_collab_access`]).
     ResourceGone,
     Access(CollabDocumentAccess),
 }
@@ -716,38 +773,43 @@ enum ActorAccess {
 /// Records `advisory_lock_us` for the advisory lock and `row_lock_us` for the
 /// rest. Callers map the result with [`authorize_collab_write`] or
 /// [`authorize_collab_read`].
-async fn lock_collab_actor(
-    tx: &mut Transaction<'_, Postgres>,
-    kind: CollabKind,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    resource_id: Uuid,
-    timings: &mut CollabDbStageTimings,
-) -> Result<ActorAccess, sqlx::Error> {
-    let advisory_started = Instant::now();
-    lock_membership_users(tx, &[actor_user_id]).await?;
-    timings.advisory_lock_us = advisory_started.elapsed().as_micros() as u64;
-    let row_started = Instant::now();
-    let access = async {
-        if !recheck_session(tx, actor_user_id, session_id).await? {
-            return Ok(ActorAccess::SessionInactive);
+impl OperationTx<'_, '_> {
+    async fn lock_collab_actor(
+        &mut self,
+        kind: CollabKind,
+        workspace_id: Uuid,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        resource_id: Uuid,
+        timings: &mut CollabDbStageTimings,
+    ) -> Result<ActorAccess, sqlx::Error> {
+        let advisory_started = Instant::now();
+        self.lock_membership_users(&[actor_user_id]).await?;
+        timings.advisory_lock_us = advisory_started.elapsed().as_micros() as u64;
+        let row_started = Instant::now();
+        let access = async {
+            if !self.recheck_session(actor_user_id, session_id).await? {
+                return Ok(ActorAccess::SessionInactive);
+            }
+            if !self.workspace_is_live(workspace_id).await? {
+                return Ok(ActorAccess::WorkspaceGone);
+            }
+            if self
+                .membership_role(workspace_id, actor_user_id, true)
+                .await?
+                .is_none()
+            {
+                return Ok(ActorAccess::NotMember);
+            }
+            let access = self
+                .lock_collab_access(kind, workspace_id, actor_user_id, resource_id)
+                .await?;
+            Ok::<_, sqlx::Error>(access.map_or(ActorAccess::ResourceGone, ActorAccess::Access))
         }
-        if !workspace_is_live(tx, workspace_id).await? {
-            return Ok(ActorAccess::WorkspaceGone);
-        }
-        if membership_role_for_update(tx, workspace_id, actor_user_id)
-            .await?
-            .is_none()
-        {
-            return Ok(ActorAccess::NotMember);
-        }
-        let access = lock_collab_access(tx, kind, workspace_id, actor_user_id, resource_id).await?;
-        Ok::<_, sqlx::Error>(access.map_or(ActorAccess::ResourceGone, ActorAccess::Access))
+        .await;
+        timings.row_lock_us = row_started.elapsed().as_micros() as u64;
+        access
     }
-    .await;
-    timings.row_lock_us = row_started.elapsed().as_micros() as u64;
-    access
 }
 
 /// Writer check (claim, load, append, compaction, derived-body write): the
@@ -763,26 +825,48 @@ async fn authorize_collab_write(
     document_id: Uuid,
     timings: &mut CollabDbStageTimings,
 ) -> Result<Result<(), CollabDbError>, sqlx::Error> {
-    let access = lock_collab_actor(
-        tx,
-        kind,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        document_id,
-        timings,
-    )
-    .await?;
-    Ok(match access {
-        ActorAccess::SessionInactive | ActorAccess::NotMember => Err(CollabDbError::Forbidden),
-        ActorAccess::WorkspaceGone | ActorAccess::ResourceGone => Err(CollabDbError::NotFound),
-        ActorAccess::Access(access)
-            if access.permission.at_least(ProjectPermission::Edit) && !access.archived =>
-        {
-            Ok(())
-        }
-        ActorAccess::Access(_) => Err(CollabDbError::Forbidden),
-    })
+    OperationTx::Postgres(tx)
+        .authorize_collab_write(
+            kind,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            document_id,
+            timings,
+        )
+        .await
+}
+impl OperationTx<'_, '_> {
+    pub(crate) async fn authorize_collab_write(
+        &mut self,
+        kind: CollabKind,
+        workspace_id: Uuid,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        document_id: Uuid,
+        timings: &mut CollabDbStageTimings,
+    ) -> Result<Result<(), CollabDbError>, sqlx::Error> {
+        let access = self
+            .lock_collab_actor(
+                kind,
+                workspace_id,
+                actor_user_id,
+                session_id,
+                document_id,
+                timings,
+            )
+            .await?;
+        Ok(match access {
+            ActorAccess::SessionInactive | ActorAccess::NotMember => Err(CollabDbError::Forbidden),
+            ActorAccess::WorkspaceGone | ActorAccess::ResourceGone => Err(CollabDbError::NotFound),
+            ActorAccess::Access(access)
+                if access.permission.at_least(ProjectPermission::Edit) && !access.archived =>
+            {
+                Ok(())
+            }
+            ActorAccess::Access(_) => Err(CollabDbError::Forbidden),
+        })
+    }
 }
 
 /// Reader check (admission, receipt lookup and verify, read-only load): the
@@ -797,26 +881,48 @@ async fn authorize_collab_read(
     document_id: Uuid,
     timings: &mut CollabDbStageTimings,
 ) -> Result<Result<CollabDocumentAccess, CollabDbError>, sqlx::Error> {
-    let access = lock_collab_actor(
-        tx,
-        kind,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        document_id,
-        timings,
-    )
-    .await?;
-    Ok(match access {
-        ActorAccess::SessionInactive => Err(CollabDbError::Forbidden),
-        ActorAccess::WorkspaceGone | ActorAccess::NotMember | ActorAccess::ResourceGone => {
-            Err(CollabDbError::NotFound)
-        }
-        ActorAccess::Access(access) if access.permission.at_least(ProjectPermission::View) => {
-            Ok(access)
-        }
-        ActorAccess::Access(_) => Err(CollabDbError::NotFound),
-    })
+    OperationTx::Postgres(tx)
+        .authorize_collab_read(
+            kind,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            document_id,
+            timings,
+        )
+        .await
+}
+impl OperationTx<'_, '_> {
+    pub(crate) async fn authorize_collab_read(
+        &mut self,
+        kind: CollabKind,
+        workspace_id: Uuid,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        document_id: Uuid,
+        timings: &mut CollabDbStageTimings,
+    ) -> Result<Result<CollabDocumentAccess, CollabDbError>, sqlx::Error> {
+        let access = self
+            .lock_collab_actor(
+                kind,
+                workspace_id,
+                actor_user_id,
+                session_id,
+                document_id,
+                timings,
+            )
+            .await?;
+        Ok(match access {
+            ActorAccess::SessionInactive => Err(CollabDbError::Forbidden),
+            ActorAccess::WorkspaceGone | ActorAccess::NotMember | ActorAccess::ResourceGone => {
+                Err(CollabDbError::NotFound)
+            }
+            ActorAccess::Access(access) if access.permission.at_least(ProjectPermission::View) => {
+                Ok(access)
+            }
+            ActorAccess::Access(_) => Err(CollabDbError::NotFound),
+        })
+    }
 }
 
 /// System `document.updated` / `task.updated` event (`collab: true`) after a

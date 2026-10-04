@@ -561,29 +561,45 @@ pub(crate) async fn share_lock_project_permission(
     actor_user_id: Uuid,
     project_id: Uuid,
 ) -> Result<Option<(ProjectPermission, bool)>, sqlx::Error> {
-    let row: Option<(String, String)> = sqlx::query_as(
-        r#"
-        SELECT visibility, status
-        FROM fvoci.projects
-        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-        FOR SHARE
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(project_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some((visibility, status)) = row else {
-        return Ok(None);
-    };
-    let workspace_role = membership_role(tx, workspace_id, actor_user_id)
-        .await?
-        .unwrap_or(WorkspaceRole::Guest);
-    let member_role = project_member_role(tx, workspace_id, project_id, actor_user_id).await?;
-    Ok(Some((
-        effective_permission(workspace_role, &visibility, member_role),
-        status == "archived",
-    )))
+    OperationTx::Postgres(tx)
+        .share_lock_project_permission(workspace_id, actor_user_id, project_id)
+        .await
+}
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn share_lock_project_permission(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        project: Uuid,
+    ) -> Result<Option<(ProjectPermission, bool)>, sqlx::Error> {
+        let row: Option<(String, String)> = match self {
+            Self::Postgres(tx) => sqlx::query_as(
+                "SELECT visibility,status FROM fvoci.projects WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL FOR SHARE"
+            ).bind(workspace).bind(project).fetch_optional(&mut ***tx).await?,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                tx.query(
+                    "SELECT visibility,status FROM projects WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",
+                    &[Cell::uuid(workspace),Cell::uuid(project)],
+                ).await?.first().map(|row| Ok::<_, sqlx::Error>((row.cell(0)?.string()?,row.cell(1)?.string()?)))
+                    .transpose()?
+            }
+        };
+        let Some((visibility, status)) = row else {
+            return Ok(None);
+        };
+        let workspace_role = self
+            .membership_role(workspace, actor, false)
+            .await?
+            .unwrap_or(WorkspaceRole::Guest);
+        let member_role = self.project_member_role(workspace, project, actor).await?;
+        Ok(Some((
+            effective_permission(workspace_role, &visibility, member_role),
+            status == "archived",
+        )))
+    }
 }
 
 async fn record_project_event_and_audit(
