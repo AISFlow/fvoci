@@ -30,7 +30,10 @@ verify_native_admission_log() {
 }
 
 cd "$ROOT"
-cargo test --locked --offline --no-fail-fast --features db-tests \
+# One isolated Meilisearch for the whole run (FVOCI_MEILI_URL/KEY exported by the
+# wrapper, container removed on exit): the Zotero real-search case requires it.
+bash "$ROOT/scripts/start-test-meili.sh" \
+  cargo test --locked --offline --no-fail-fast --features db-tests \
   --test collab_product \
   --test collab_projection \
   --test collab_lifecycle \
