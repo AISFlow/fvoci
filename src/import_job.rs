@@ -29,6 +29,7 @@ use crate::attachments::{sniff_mime_from_bytes, ObjectStorage};
 use crate::collab::seed::SeedEngine;
 use crate::db::attachment_extract::default_extract_limits;
 use crate::db::attachments::{create_import_attachment, mark_import_attachment_stored};
+use crate::db::backend::Backend;
 use crate::db::context::defer_import_events;
 use crate::db::documents::ImportFence;
 use crate::db::import_jobs::{
@@ -1472,4 +1473,77 @@ mod tests {
         assert_eq!(match_member(&members, "someone"), None);
         assert_eq!(match_member(&members, ""), None);
     }
+}
+
+fn is_commit_unknown(error: &sqlx::Error) -> bool {
+    matches!(error,sqlx::Error::AnyDriverError(source) if source.is::<crate::db::backend::CommitUnknown>() || source.is::<crate::db::backend::CommitCleanupUnknown>())
+}
+
+/// Daily scheduler recognition: preserve/downcast the original typed error;
+/// remote failures conservatively stop before any other stream/write/purge.
+/// Recognition does not establish settlement or authorize reconciliation.
+pub fn import_database_error_stops_scheduler(backend: &Backend, error: &sqlx::Error) -> bool {
+    matches!(backend, Backend::LibsqlRemote(_)) || is_commit_unknown(error)
+}
+
+pub async fn sweep_orphan_imports_with_maintenance_claim_backend(
+    backend: &Backend,
+    storage: &ObjectStorage,
+    cancel: &CancellationToken,
+    proof: &crate::db::maintenance_claim::FamilyMaintenanceProof,
+    policy: crate::db::maintenance_claim::FamilyMaintenanceLeasePolicy,
+) -> Result<u32, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return sweep_orphan_imports(pool, storage, cancel).await;
+    }
+    if cancel.is_cancelled() {
+        return Ok(0);
+    }
+    let context = crate::db::import_jobs::ImportMaintenanceContext { proof, policy };
+    let mut swept = 0;
+    match crate::db::import_jobs::fail_stale_sync_imports_with_maintenance_backend(
+        backend, context, cancel,
+    )
+    .await
+    {
+        Ok(stale) => swept += u32::try_from(stale).unwrap_or(u32::MAX),
+        Err(error) if is_commit_unknown(&error) || matches!(backend, Backend::LibsqlRemote(_)) => {
+            return Err(error)
+        }
+        Err(error) => warn!(error=%error,"import.sync_stale_sweep_failed"),
+    }
+    if cancel.is_cancelled() {
+        return Ok(swept);
+    }
+    let candidates =
+        crate::db::import_jobs::import_cleanup_candidates_backend(backend, context, cancel).await?;
+    for job in candidates {
+        if cancel.is_cancelled() {
+            break;
+        }
+        // FAILED prep is durable before external I/O. Commit uncertainty returns
+        // immediately; neither cleanup nor a fresh observer follows it.
+        if !crate::db::import_jobs::prepare_import_cleanup_backend(backend, &job, context, cancel)
+            .await?
+        {
+            continue;
+        }
+        swept += 1;
+        match crate::db::import_jobs::cleanup_failed_import_backend(
+            backend, storage, &job, context, cancel,
+        )
+        .await
+        {
+            Ok(undo) => {
+                warn!(workspace_id=%job.workspace_id,import_job_id=%job.job_id,skipped=undo.skipped,"import.swept")
+            }
+            Err(error)
+                if is_commit_unknown(&error) || matches!(backend, Backend::LibsqlRemote(_)) =>
+            {
+                return Err(error)
+            }
+            Err(error) => error!(error=%error,import_job_id=%job.job_id,"import.compensate_failed"),
+        }
+    }
+    Ok(swept)
 }
