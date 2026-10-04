@@ -2980,3 +2980,249 @@ async fn selected_backend_setup_cookie_wiki_command_readback() {
     pg.cleanup().await;
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+struct MigrationCommitPause(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+impl MigrationCommitPause {
+    fn release(&self) {
+        *self.0 .0.lock().unwrap() = true;
+        self.0 .1.notify_all();
+    }
+}
+impl Drop for MigrationCommitPause {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+async fn pause_actual_sqlite_commit(
+    pool: &sqlx::SqlitePool,
+) -> (MigrationCommitPause, tokio::sync::oneshot::Receiver<()>) {
+    let pause = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let callback_pause = pause.clone();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let mut entered_tx = Some(entered_tx);
+    let mut conn = pool.acquire().await.unwrap();
+    {
+        let mut native = conn.lock_handle().await.unwrap();
+        // Supported SQLx hook blocks its actual SQLite worker at COMMIT,
+        // after real DDL/marker operations, without faking a driver result.
+        native.set_commit_hook(move || {
+            if let Some(entered) = entered_tx.take() {
+                let _ = entered.send(());
+            }
+            let mut released = callback_pause.0.lock().unwrap();
+            while !*released {
+                released = callback_pause.1.wait(released).unwrap();
+            }
+            true // SQLx maps true to SQLite's zero/allow-commit callback result
+        });
+    }
+    drop(conn);
+    (MigrationCommitPause(pause), entered_rx)
+}
+
+#[tokio::test]
+async fn sqlite_migration_cancelled_commit_retains_admission_until_drain() {
+    use migrate::{SqliteAdmission, SqliteMigrationDrain, SqliteMigrationTestControl};
+    let directory = std::env::temp_dir().join(format!("fvoci-migration-cancel-{}", Uuid::now_v7()));
+    std::fs::create_dir(&directory).unwrap();
+    // Old c961 lifecycle control on the same real SQLite/COMMIT barrier.
+    // It decisively admits a server while its original worker is still paused.
+    let old_path = directory.join("legacy.db");
+    let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
+    let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+    let old_request_path = old_path.clone();
+    let old_request = tokio::spawn(async move {
+        migrate::run_sqlite_migrations_legacy_control(
+            &old_request_path,
+            SqliteMigrationTestControl {
+                connected: connected_tx,
+                proceed: proceed_rx,
+                cleanup_started: None,
+            },
+        )
+        .await
+    });
+    let old_pool = connected_rx.await.unwrap();
+    let (old_pause, old_entered) = pause_actual_sqlite_commit(&old_pool).await;
+    proceed_tx.send(()).unwrap();
+    old_entered.await.unwrap();
+    old_request.abort();
+    assert!(old_request.await.unwrap_err().is_cancelled());
+    let wrongly_admitted = SqliteAdmission::server(&old_path)
+        .expect("old request-owned guard releases before the paused worker drains");
+    drop(wrongly_admitted);
+    old_pause.release();
+    old_pool.close().await;
+    assert!(old_pool.is_closed());
+    assert_eq!(old_pool.size(), 0);
+    drop(old_pause);
+
+    // New finite cleanup owner survives both request and request-runtime Drop.
+    let new_path = directory.join("owned.db");
+    let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
+    let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+    let run = migrate::start_sqlite_migration_controlled(
+        &new_path,
+        SqliteMigrationTestControl {
+            connected: connected_tx,
+            proceed: proceed_rx,
+            cleanup_started: None,
+        },
+    )
+    .unwrap();
+    let observer = run.observer();
+    let (drop_runtime_tx, drop_runtime_rx) = tokio::sync::oneshot::channel();
+    let caller = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.spawn(run.wait());
+        runtime.block_on(async {
+            drop_runtime_rx.await.unwrap();
+        });
+        drop(runtime); // aborts/drops the waiting request, never the cleanup owner's runtime
+    });
+    let new_pool = connected_rx.await.unwrap();
+    let (new_pause, new_entered) = pause_actual_sqlite_commit(&new_pool).await;
+    proceed_tx.send(()).unwrap();
+    new_entered.await.unwrap();
+    drop_runtime_tx.send(()).unwrap();
+    caller.join().unwrap();
+    assert!(
+        SqliteAdmission::server(&new_path).is_err(),
+        "server refused while cancelled COMMIT is unsettled"
+    );
+    assert!(
+        migrate::run_sqlite_migrations(&new_path).await.is_err(),
+        "second migrator refused while cleanup owns admission"
+    );
+    new_pause.release();
+    assert_eq!(observer.wait().await.unwrap(), SqliteMigrationDrain::Closed);
+    assert!(new_pool.is_closed());
+    assert_eq!(new_pool.size(), 0);
+    let after_drain =
+        SqliteAdmission::server(&new_path).expect("admission available only after confirmed drain");
+    drop(after_drain);
+    drop(new_pause);
+
+    for path in [old_path, new_path] {
+        let db = pool::connect_sqlite_app(&path, 1).await.unwrap();
+        let prefix: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM schema_migrations ORDER BY version")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            prefix,
+            vec![1],
+            "paused COMMIT settled one whole DDL/marker step, with no next step after cancellation"
+        );
+        db.close().await;
+        migrate::run_sqlite_migrations(&path).await.unwrap();
+        let db = pool::connect_sqlite_app(&path, 1).await.unwrap();
+        let backend = fvoci_server::db::backend::Backend::Sqlite(db);
+        assert_eq!(
+            migrate::assert_sqlite_schema_current(&backend)
+                .await
+                .unwrap()
+                .applied_steps,
+            3
+        );
+        backend.close().await.unwrap();
+    }
+    // Cancellation during preparation proceeds to a close that is physically
+    // blocked by this real leased connection. Aborting the waiting request
+    // during that close must not release admission either.
+    let close_path = directory.join("closing.db");
+    migrate::run_sqlite_migrations(&close_path).await.unwrap();
+    let db = pool::connect_sqlite_app(&close_path, 1).await.unwrap();
+    let before: Vec<(i64, String, i64)> = sqlx::query_as(
+        "SELECT version,sql_sha256,applied_at FROM schema_migrations ORDER BY version",
+    )
+    .fetch_all(&db)
+    .await
+    .unwrap();
+    db.close().await;
+    let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
+    let (_proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+    let (cleanup_started_tx, cleanup_started_rx) = tokio::sync::oneshot::channel();
+    let run = migrate::start_sqlite_migration_controlled(
+        &close_path,
+        SqliteMigrationTestControl {
+            connected: connected_tx,
+            proceed: proceed_rx,
+            cleanup_started: Some(cleanup_started_tx),
+        },
+    )
+    .unwrap();
+    let close_observer = run.observer();
+    let closing_pool = connected_rx.await.unwrap();
+    let held_connection = closing_pool.acquire().await.unwrap();
+    run.cancel();
+    let request = tokio::spawn(run.wait());
+    cleanup_started_rx.await.unwrap();
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    assert!(
+        SqliteAdmission::server(&close_path).is_err(),
+        "caller cancellation cannot release blocked close admission"
+    );
+    drop(held_connection);
+    assert_eq!(
+        close_observer.wait().await.unwrap(),
+        SqliteMigrationDrain::Closed
+    );
+    assert_eq!(closing_pool.size(), 0);
+    let db = pool::connect_sqlite_app(&close_path, 1).await.unwrap();
+    let after: Vec<(i64, String, i64)> = sqlx::query_as(
+        "SELECT version,sql_sha256,applied_at FROM schema_migrations ORDER BY version",
+    )
+    .fetch_all(&db)
+    .await
+    .unwrap();
+    assert_eq!(
+        after, before,
+        "cancelled preparation leaves the existing complete prefix unchanged"
+    );
+    db.close().await;
+    migrate::run_sqlite_migrations(&close_path).await.unwrap();
+    // Pool-level shutdown hides retirement errors. An owner that never
+    // received the original worker's close result must quarantine, even if
+    // acquiring a replacement succeeds and that replacement closes cleanly.
+    let replaced_path = directory.join("replaced.db");
+    let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
+    let (_proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+    let run = migrate::start_sqlite_migration_controlled(
+        &replaced_path,
+        SqliteMigrationTestControl {
+            connected: connected_tx,
+            proceed: proceed_rx,
+            cleanup_started: None,
+        },
+    )
+    .unwrap();
+    let observer = run.observer();
+    let replaced_pool = connected_rx.await.unwrap();
+    // This real close receipt belongs to the test, not the migration owner.
+    // The owner's later acquire must not bless this replacement as its drain.
+    replaced_pool
+        .acquire()
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+    run.cancel();
+    let error = run.wait().await.unwrap_err();
+    assert!(error.to_string().contains("cleanup is unconfirmed"));
+    assert_eq!(
+        observer.wait().await.unwrap(),
+        SqliteMigrationDrain::Quarantined
+    );
+    assert!(SqliteAdmission::server(&replaced_path).is_err());
+    assert_eq!(replaced_pool.size(), 0);
+    // Only the fail-closed inode lock remains until this test process exits;
+    // both real worker connections were explicitly closed above/by the owner.
+    std::fs::remove_dir_all(directory).unwrap();
+}

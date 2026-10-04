@@ -21,8 +21,58 @@ pub async fn connect_sqlite_app(
 
 /// Preparation alone may create a database. Normal startup never interprets
 /// a misspelled path as a new, empty installation.
-pub(crate) async fn connect_sqlite_prepare(path: &Path) -> Result<SqlitePool, sqlx::Error> {
-    connect_sqlite(path, 1, true).await
+pub(crate) struct SqlitePreparationPool {
+    pub(crate) pool: SqlitePool,
+    opened: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+impl SqlitePreparationPool {
+    /// Pool::close suppresses raw shutdown errors. Close the sole preparation
+    /// connection explicitly and retain its worker-shutdown result instead.
+    /// A silently retired/replaced connection has no such receipt: fail closed.
+    pub(crate) async fn close_confirmed(self) -> Result<(), sqlx::Error> {
+        let result = match self.pool.acquire().await {
+            Ok(connection) => connection.close().await,
+            Err(error) => Err(error),
+        };
+        self.pool.close().await;
+        result?;
+        if self.opened.load(std::sync::atomic::Ordering::SeqCst) != 1 {
+            return Err(sqlx::Error::Protocol(
+                "preparation connection replaced without an explicit shutdown receipt".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+pub(crate) async fn connect_sqlite_prepare(
+    path: &Path,
+) -> Result<SqlitePreparationPool, sqlx::Error> {
+    if !path.is_absolute() || path.file_name().is_none() {
+        return Err(sqlx::Error::Protocol(
+            "SQLite requires an absolute persistent database file".into(),
+        ));
+    }
+    let opened = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let connect_count = opened.clone();
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Full)
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .test_before_acquire(false)
+        .after_connect(move |conn, _| {
+            connect_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(assert_sqlite_runtime(conn))
+        })
+        .before_acquire(|conn, _| Box::pin(sqlite_idle_clean(conn)))
+        .connect_with(options)
+        .await?;
+    Ok(SqlitePreparationPool { pool, opened })
 }
 
 async fn connect_sqlite(

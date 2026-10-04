@@ -953,21 +953,245 @@ fn schema_error(message: impl Into<String>) -> sqlx::Error {
 /// Cancellation cannot publish a partial step. Restart checks actual receipts
 /// and schema before deciding whether another step is needed.
 pub async fn run_sqlite_migrations(path: &std::path::Path) -> Result<(), sqlx::Error> {
-    let _admission = SqliteAdmission::migration(path)?;
-    let pool = super::pool::connect_sqlite_prepare(path).await?;
-    let backend = super::backend::Backend::Sqlite(pool);
-    let result = apply_sqlite_migrations(&backend).await;
-    let closed = backend.close().await;
-    closed?;
+    start_sqlite_migration(path)?.wait().await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SqliteMigrationDrain {
+    Pending,
+    Closed,
+    Quarantined,
+}
+
+struct MigrationOwnerState {
+    drain: tokio::sync::watch::Receiver<SqliteMigrationDrain>,
+    join: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+/// A cancellation observer can wait for the finite cleanup owner after the
+/// request future is gone. Closed means all owned pool/worker closure finished.
+#[derive(Clone)]
+pub struct SqliteMigrationObserver(std::sync::Arc<MigrationOwnerState>);
+impl SqliteMigrationObserver {
+    pub async fn wait(&self) -> Result<SqliteMigrationDrain, sqlx::Error> {
+        let mut drain = self.0.drain.clone();
+        loop {
+            let state = *drain.borrow();
+            if state != SqliteMigrationDrain::Pending {
+                let join = self
+                    .0
+                    .join
+                    .lock()
+                    .map_err(|_| schema_error("migration join lock poisoned"))?
+                    .take();
+                if let Some(join) = join {
+                    join.join()
+                        .map_err(|_| schema_error("migration owner thread panicked"))?;
+                }
+                return Ok(state);
+            }
+            drain
+                .changed()
+                .await
+                .map_err(|_| schema_error("migration owner ended without a drain receipt"))?;
+        }
+    }
+}
+
+pub struct SqliteMigration {
+    cancel: tokio_util::sync::CancellationToken,
+    result: Option<tokio::sync::oneshot::Receiver<Result<(), sqlx::Error>>>,
+    observer: SqliteMigrationObserver,
+}
+impl SqliteMigration {
+    pub fn observer(&self) -> SqliteMigrationObserver {
+        self.observer.clone()
+    }
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+    pub async fn wait(mut self) -> Result<(), sqlx::Error> {
+        let result = self
+            .result
+            .take()
+            .expect("one migration result receiver")
+            .await
+            .map_err(|_| schema_error("migration owner ended without a result"))?;
+        self.observer.wait().await?;
+        result
+    }
+}
+impl Drop for SqliteMigration {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+#[cfg(feature = "db-tests")]
+pub struct SqliteMigrationTestControl {
+    pub connected: tokio::sync::oneshot::Sender<sqlx::SqlitePool>,
+    pub proceed: tokio::sync::oneshot::Receiver<()>,
+    pub cleanup_started: Option<tokio::sync::oneshot::Sender<()>>,
+}
+#[cfg(feature = "db-tests")]
+type MigrationControl = Option<SqliteMigrationTestControl>;
+#[cfg(not(feature = "db-tests"))]
+type MigrationControl = ();
+
+pub fn start_sqlite_migration(path: &std::path::Path) -> Result<SqliteMigration, sqlx::Error> {
+    start_sqlite_migration_owned(path, Default::default())
+}
+#[cfg(feature = "db-tests")]
+pub fn start_sqlite_migration_controlled(
+    path: &std::path::Path,
+    control: SqliteMigrationTestControl,
+) -> Result<SqliteMigration, sqlx::Error> {
+    start_sqlite_migration_owned(path, Some(control))
+}
+
+// Unconfirmed connection initialization or a panicked cleanup cannot authorize
+// another owner. Keep that inode quarantined for this process, rather than
+// treating SQLx signal-only Drop as shutdown. A CLI restart ends this process.
+static QUARANTINED_SQLITE_MIGRATIONS: std::sync::Mutex<Vec<std::sync::Arc<SqliteAdmission>>> =
+    std::sync::Mutex::new(Vec::new());
+fn quarantine_sqlite_admission(admission: std::sync::Arc<SqliteAdmission>) {
+    match QUARANTINED_SQLITE_MIGRATIONS.lock() {
+        Ok(mut quarantined) => quarantined.push(admission),
+        Err(_) => std::mem::forget(admission), // fail closed even if quarantine bookkeeping poisoned
+    }
+}
+#[derive(Debug, thiserror::Error)]
+#[error("SQLite migration cleanup is unconfirmed; admission quarantined until process restart")]
+struct MigrationCleanupUnconfirmed(#[source] sqlx::Error);
+fn unconfirmed_migration_cleanup(error: sqlx::Error) -> sqlx::Error {
+    sqlx::Error::AnyDriverError(Box::new(MigrationCleanupUnconfirmed(error)))
+}
+fn cleanup_is_unconfirmed(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::AnyDriverError(source) if source.downcast_ref::<MigrationCleanupUnconfirmed>().is_some())
+}
+
+fn start_sqlite_migration_owned(
+    path: &std::path::Path,
+    control: MigrationControl,
+) -> Result<SqliteMigration, sqlx::Error> {
+    let admission = std::sync::Arc::new(SqliteAdmission::migration(path)?);
+    let path = path.to_path_buf();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let owned_cancel = cancel.clone();
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let (drain_tx, drain_rx) = tokio::sync::watch::channel(SqliteMigrationDrain::Pending);
+    let state = std::sync::Arc::new(MigrationOwnerState {
+        drain: drain_rx,
+        join: std::sync::Mutex::new(None),
+    });
+    // This finite owner has its own runtime: aborting a caller or shutting down
+    // its Tokio runtime cannot abort an in-flight COMMIT or skip worker close.
+    // No scheduler/daemon or external orchestration process is involved.
+    let join = std::thread::Builder::new()
+        .name("fvoci-sqlite-migrate".into())
+        .spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(sqlx::Error::Io)?;
+                runtime.block_on(run_sqlite_migration_owned(&path, &owned_cancel, control))
+            }));
+            let result = match outcome {
+                Ok(result) => result,
+                Err(_) => Err(unconfirmed_migration_cleanup(schema_error(
+                    "migration execution/cleanup panicked",
+                ))),
+            };
+            let drain = if result.as_ref().err().is_some_and(cleanup_is_unconfirmed) {
+                quarantine_sqlite_admission(admission);
+                SqliteMigrationDrain::Quarantined
+            } else {
+                drop(admission);
+                SqliteMigrationDrain::Closed
+            };
+            drain_tx.send_replace(drain);
+            let _ = result_tx.send(result);
+        })
+        .map_err(sqlx::Error::Io)?;
+    *state
+        .join
+        .lock()
+        .map_err(|_| schema_error("migration join lock poisoned"))? = Some(join);
+    Ok(SqliteMigration {
+        cancel,
+        result: Some(result_rx),
+        observer: SqliteMigrationObserver(state),
+    })
+}
+
+async fn run_sqlite_migration_owned(
+    path: &std::path::Path,
+    cancel: &tokio_util::sync::CancellationToken,
+    control: MigrationControl,
+) -> Result<(), sqlx::Error> {
+    let preparation = super::pool::connect_sqlite_prepare(path)
+        .await
+        .map_err(unconfirmed_migration_cleanup)?;
+    let backend = super::backend::Backend::Sqlite(preparation.pool.clone());
+    #[cfg(feature = "db-tests")]
+    let mut cleanup_started = None;
+    #[cfg(feature = "db-tests")]
+    if let Some(control) = control {
+        let _ = control.connected.send(preparation.pool.clone());
+        cleanup_started = control.cleanup_started;
+        tokio::select! {
+            _ = control.proceed => {},
+            _ = cancel.cancelled() => {},
+        }
+    }
+    #[cfg(not(feature = "db-tests"))]
+    let _ = control;
+    let result = apply_sqlite_migrations(&backend, Some(cancel)).await;
+    // Request cancellation does not cancel any operation above or this drain.
+    #[cfg(feature = "db-tests")]
+    if let Some(started) = cleanup_started {
+        let _ = started.send(());
+    }
+    preparation
+        .close_confirmed()
+        .await
+        .map_err(unconfirmed_migration_cleanup)?;
     result
 }
 
-async fn apply_sqlite_migrations(backend: &super::backend::Backend) -> Result<(), sqlx::Error> {
+/// Exact old guard-in-request lifecycle, only for the barrier regression.
+/// The test pauses a real SQLite COMMIT and observes its premature admission;
+/// this is never a production backend/fallback or a new migration policy.
+#[cfg(feature = "db-tests")]
+pub async fn run_sqlite_migrations_legacy_control(
+    path: &std::path::Path,
+    control: SqliteMigrationTestControl,
+) -> Result<(), sqlx::Error> {
+    let _admission = SqliteAdmission::migration(path)?;
+    let preparation = super::pool::connect_sqlite_prepare(path).await?;
+    let backend = super::backend::Backend::Sqlite(preparation.pool.clone());
+    let _ = control.connected.send(preparation.pool.clone());
+    let _ = control.proceed.await;
+    let result = apply_sqlite_migrations(&backend, None).await;
+    backend.close().await?;
+    result
+}
+
+async fn apply_sqlite_migrations(
+    backend: &super::backend::Backend,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<(), sqlx::Error> {
     use super::backend::DbTransaction;
     use super::codec::Cell;
     for (index, (sql, digest)) in SQLITE_MIGRATIONS.iter().enumerate() {
+        if cancel.is_some_and(|token| token.is_cancelled()) {
+            return Err(schema_error(
+                "SQLite migration cancelled after in-flight work settled",
+            ));
+        }
         let mut tx = backend.begin_write().await?;
         let result = async {
+            if cancel.is_some_and(|token| token.is_cancelled()) { return Err(schema_error("SQLite migration cancelled before new step")); }
             let DbTransaction::SqliteFamily(family) = &mut tx else {
                 return Err(schema_error("SQLite migrations require an actual SQLite-family handle"));
             };
@@ -977,7 +1201,9 @@ async fn apply_sqlite_migrations(backend: &super::backend::Backend) -> Result<()
             if index < applied.len() { return Ok(false); }
             if index != applied.len() { return Err(schema_error("SQLite migration gap")); }
             verify_compiled_sqlite_digest(sql, digest)?;
+            if cancel.is_some_and(|token| token.is_cancelled()) { return Err(schema_error("SQLite migration cancelled before DDL")); }
             family.apply_migration_batch(sql).await?;
+            if cancel.is_some_and(|token| token.is_cancelled()) { return Err(schema_error("SQLite migration cancelled after DDL; rollback before marker/commit")); }
             family.execute(
                 "INSERT INTO schema_migrations(version,lineage,sql_sha256,applied_at) VALUES(?1,?2,?3,unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)",
                 &[Cell::Integer((index + 1) as i64), Cell::text(SQLITE_LINEAGE), Cell::text(*digest)],
@@ -986,10 +1212,15 @@ async fn apply_sqlite_migrations(backend: &super::backend::Backend) -> Result<()
             Ok(true)
         }.await;
         match result {
-            Ok(true) => tx
-                .commit()
-                .await
-                .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?,
+            Ok(true) => {
+                if cancel.is_some_and(|token| token.is_cancelled()) {
+                    tx.rollback().await?;
+                    return Err(schema_error("SQLite migration cancelled before commit"));
+                }
+                tx.commit()
+                    .await
+                    .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+            }
             Ok(false) => tx.rollback().await?,
             Err(error) => {
                 tx.rollback().await?;
@@ -1109,7 +1340,8 @@ async fn verify_sqlite_objects(
             .in_memory(true)
             .foreign_keys(true),
     )
-    .await?;
+    .await
+    .map_err(unconfirmed_migration_cleanup)?;
     let expected = async {
         let pin: (String, String) = sqlx::query_as("SELECT sqlite_version(),sqlite_source_id()")
             .fetch_one(&mut reference)
@@ -1126,7 +1358,10 @@ async fn verify_sqlite_objects(
             .await
     }
     .await;
-    reference.close().await?;
+    reference
+        .close()
+        .await
+        .map_err(unconfirmed_migration_cleanup)?;
     let expected = expected?;
     let actual = family
         .query(SQLITE_OBJECTS, &[])
