@@ -19,10 +19,11 @@ use crate::api::dto::{
 use crate::attachments::content_disposition_attachment;
 use crate::auth::session::SessionUser;
 use crate::db::documents::{
-    create_wiki_document, get_wiki_document, list_trashed_wiki_documents, list_wiki_ancestors,
-    list_wiki_tree, list_workspace_wiki_discovery, move_wiki_document, reorder_wiki_document,
-    restore_wiki_document, trash_wiki_document, update_wiki_document_meta, CreateDocumentInput,
-    DocumentDbError, DocumentMeta, TrashChildrenMode, UpdateDocumentMetaInput, MAX_TREE_DEPTH,
+    create_wiki_document_command, get_wiki_document, list_trashed_wiki_documents,
+    list_wiki_ancestors, list_wiki_tree, list_workspace_wiki_discovery, move_wiki_document,
+    reorder_wiki_document, restore_wiki_document, trash_wiki_document, update_wiki_document_meta,
+    CreateCommandError, CreateDocumentInput, DocumentDbError, DocumentMeta, TrashChildrenMode,
+    UpdateDocumentMetaInput, MAX_TREE_DEPTH,
 };
 use crate::documents::export::{
     export_filename, render_document_export, ExportFormat, ExportRenderError,
@@ -199,11 +200,12 @@ async fn create_document(
     )
     .await?;
     let ip = peer_ip(peer.ip());
-    let result = create_wiki_document(
+    let result = create_wiki_document_command(
         &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,
+        body.command_id,
         CreateDocumentInput {
             parent_id,
             title,
@@ -215,7 +217,13 @@ async fn create_document(
     .map_err(internal)?;
     match result {
         Ok(meta) => Ok((StatusCode::CREATED, Json(meta_response(&meta, true))).into_response()),
-        Err(err) => Err(map_document_error(err)),
+        Err(CreateCommandError::Document(err)) => Err(map_document_error(err)),
+        Err(CreateCommandError::RequestMismatch) => Err(DocumentApiError::Coded {
+            status: StatusCode::CONFLICT,
+            code: "request_mismatch",
+            title: "creation command does not match the original request".into(),
+            params: None,
+        }),
     }
 }
 
@@ -881,13 +889,18 @@ mod tests {
 
     #[test]
     fn create_parent_id_is_required_nullable() {
-        let omitted: CreateDocumentBody = serde_json::from_str(r#"{"title":"X"}"#).unwrap();
+        let omitted: CreateDocumentBody = serde_json::from_str(
+            r#"{"commandId":"11111111-1111-4111-8111-111111111111","title":"X"}"#,
+        )
+        .unwrap();
         assert_eq!(omitted.parent_id, RequiredNullable::Missing);
-        let null_parent: CreateDocumentBody =
-            serde_json::from_str(r#"{"parentId":null,"title":"X"}"#).unwrap();
+        let null_parent: CreateDocumentBody = serde_json::from_str(
+            r#"{"commandId":"11111111-1111-4111-8111-111111111111","parentId":null,"title":"X"}"#,
+        )
+        .unwrap();
         assert_eq!(null_parent.parent_id, RequiredNullable::Null);
         let with_parent: CreateDocumentBody = serde_json::from_str(
-            r#"{"parentId":"11111111-1111-4111-8111-111111111111","title":"X"}"#,
+            r#"{"commandId":"11111111-1111-4111-8111-111111111111","parentId":"11111111-1111-4111-8111-111111111111","title":"X"}"#,
         )
         .unwrap();
         assert_eq!(

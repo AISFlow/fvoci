@@ -333,7 +333,7 @@ async fn create_document(app: &axum::Router, cookie: &str, workspace_id: Uuid) -
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Doc"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Doc"})),
         Some(cookie),
     )
     .await;
@@ -3553,7 +3553,7 @@ async fn transfer_mode_env_lock_restart_and_startup_refusals() {
         .call(
             reqwest::Method::POST,
             &format!("/api/v1/workspaces/{workspace_id}/documents"),
-            Some(json!({"parentId": null, "title": "Doc"})),
+            Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Doc"})),
         )
         .await;
     assert_eq!(status, 201, "{doc:?}");

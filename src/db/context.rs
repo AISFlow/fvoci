@@ -40,8 +40,80 @@
 //!   reading transaction, and the instance-settings read route runs it in a
 //!   transaction of its own before and again after loading the settings.
 
+use super::backend::OperationTx;
+use super::codec::Cell;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn set_tenant(&mut self, workspace: Uuid) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => set_tenant(tx, workspace).await,
+            Self::SqliteFamily(tx) => tx.set_tenant(workspace),
+        }
+    }
+    pub(crate) async fn lock_membership_users(
+        &mut self,
+        users: &[Uuid],
+    ) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => lock_membership_users(tx, users).await,
+            Self::SqliteFamily(tx) => tx.require_writer(),
+        }
+    }
+    pub(crate) async fn lock_tree(&mut self, workspace: Uuid) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => lock_tree(tx, workspace).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)
+            }
+        }
+    }
+    pub(crate) async fn recheck_session(
+        &mut self,
+        actor: Uuid,
+        credential: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => recheck_session(tx, actor, credential).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                family_credential_live(tx, actor, credential).await
+            }
+        }
+    }
+    pub(crate) async fn session_is_live(
+        &mut self,
+        actor: Uuid,
+        credential: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => session_is_live(tx, actor, credential).await,
+            Self::SqliteFamily(tx) => family_credential_live(tx, actor, credential).await,
+        }
+    }
+}
+
+async fn family_credential_live(
+    tx: &mut super::backend::FamilyTx,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let tenant = tx.tenant().ok_or_else(|| {
+        sqlx::Error::Protocol("credential check requires transaction tenant".into())
+    })?;
+    // BEGIN IMMEDIATE precedes writer authorization. Both credential sources
+    // retain the current user and expiry policy, with explicit PAT tenant scope.
+    let row = tx.query(
+        "SELECT EXISTS(SELECT 1 FROM users u JOIN sessions s ON s.user_id=u.id WHERE u.id=?1 AND s.id=?2 AND u.deleted_at IS NULL AND u.suspended_at IS NULL AND s.revoked_at IS NULL AND s.expires_at > (unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)) OR EXISTS(SELECT 1 FROM users u JOIN api_tokens t ON t.user_id=u.id WHERE u.id=?1 AND t.id=?2 AND t.workspace_id=?3 AND u.deleted_at IS NULL AND u.suspended_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > (unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)))",
+        &[Cell::uuid(actor), Cell::uuid(credential), Cell::uuid(tenant)],
+    ).await?;
+    row.first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .cell(0)?
+        .boolean()
+}
 
 // Advisory-lock namespaces: two-int locks are (namespace, key), one-bigint
 // locks a separate key space. Every fixed namespace and bigint key in the

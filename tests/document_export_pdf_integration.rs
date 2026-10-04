@@ -101,7 +101,7 @@ async fn wiki_and_project_pdf_without_the_node_helper() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "회의록"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "회의록"})),
         Some(&cookie),
     )
     .await;
@@ -173,7 +173,7 @@ async fn pdf_without_the_export_child_is_a_server_error() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "없음"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "없음"})),
         Some(&cookie),
     )
     .await;

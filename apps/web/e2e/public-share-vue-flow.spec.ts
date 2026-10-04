@@ -97,7 +97,7 @@ test("public Vue document URL renders readonly content, hands off attachments an
   const ws = await setup(page);
   const create = async (title: string, parentId: string | null = null) => {
     const response = await page.request.post(`/api/v1/workspaces/${ws}/documents`, {
-      data: { title, parentId },
+      data: { commandId: crypto.randomUUID(), title, parentId },
     });
     expect(response.status()).toBe(201);
     return (await readJson(response, flowSchemas.document)).id;

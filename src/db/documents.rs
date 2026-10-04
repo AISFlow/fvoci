@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -75,7 +77,7 @@ impl std::fmt::Display for FractionalError {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentMeta {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -520,6 +522,140 @@ pub async fn create_wiki_document(
     )
     .await?;
     Ok(created.map(|meta| meta.expect("unfenced create always returns the document")))
+}
+
+#[derive(Debug)]
+pub enum CreateCommandError {
+    Document(DocumentDbError),
+    RequestMismatch,
+}
+
+/// Ordinary wiki creation has a stable command identity. Import/template and
+/// personal-input callers keep their own command/fence and commit owner.
+pub async fn create_wiki_document_command(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    command_id: Uuid,
+    input: CreateDocumentInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<DocumentMeta, CreateCommandError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let result = create_wiki_command_in_tx(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        command_id,
+        input,
+        client_ip,
+    )
+    .await?;
+    if result.is_ok() {
+        tx.commit().await?;
+    } else {
+        tx.rollback().await?;
+    }
+    Ok(result)
+}
+
+async fn create_wiki_command_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    command_id: Uuid,
+    input: CreateDocumentInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<DocumentMeta, CreateCommandError>, sqlx::Error> {
+    // The current credential and membership precede even a successful receipt
+    // replay. The tenant tree lock serializes absence with all wiki creators.
+    lock_membership_users(tx, &[actor_user_id]).await?;
+    if !recheck_session(tx, actor_user_id, session_id).await? {
+        return Ok(Err(CreateCommandError::Document(
+            DocumentDbError::Forbidden,
+        )));
+    }
+    lock_tree(tx, workspace_id).await?;
+    if !workspace_is_live(tx, workspace_id).await? {
+        return Ok(Err(CreateCommandError::Document(DocumentDbError::NotFound)));
+    }
+    if !wiki_can_edit(membership_role_for_update(tx, workspace_id, actor_user_id).await?) {
+        return Ok(Err(CreateCommandError::Document(
+            DocumentDbError::Forbidden,
+        )));
+    }
+    let hash = wiki_create_command_hash(workspace_id, actor_user_id, &input)?;
+    let receipt: Option<(Uuid, String, Option<Uuid>, Value)> = sqlx::query_as(
+        "SELECT actor_user_id, request_hash, document_id, result_json FROM fvoci.wiki_create_commands WHERE workspace_id=$1 AND command_id=$2"
+    ).bind(workspace_id).bind(command_id).fetch_optional(&mut **tx).await?;
+    if let Some((actor, original_hash, target_id, original_result)) = receipt {
+        if actor != actor_user_id || original_hash != hash {
+            return Ok(Err(CreateCommandError::RequestMismatch));
+        }
+        let Some(target_id) = target_id else {
+            return Ok(Err(CreateCommandError::Document(DocumentDbError::NotFound)));
+        };
+        let permission =
+            document_permission(tx, workspace_id, actor_user_id, target_id, true).await?;
+        let current = fetch_document_row(tx, workspace_id, target_id).await?;
+        if !permission_can_view(permission) || current.is_none() {
+            return Ok(Err(CreateCommandError::Document(DocumentDbError::NotFound)));
+        }
+        let original: DocumentMeta = serde_json::from_value(original_result)
+            .map_err(|err| sqlx::Error::Decode(Box::new(err)))?;
+        if original.id != target_id || original.workspace_id != workspace_id {
+            return Err(sqlx::Error::Protocol(
+                "invalid wiki creation receipt target".into(),
+            ));
+        }
+        return Ok(Ok(original));
+    }
+    let created = create_wiki_document_tx(
+        tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        input,
+        client_ip,
+        None,
+    )
+    .await?;
+    let meta = match created {
+        Ok(Some(meta)) => meta,
+        Ok(None) => {
+            return Err(sqlx::Error::Protocol(
+                "unfenced wiki create lost its target".into(),
+            ))
+        }
+        Err(err) => return Ok(Err(CreateCommandError::Document(err))),
+    };
+    let result = serde_json::to_value(&meta).map_err(|err| sqlx::Error::Encode(Box::new(err)))?;
+    sqlx::query("INSERT INTO fvoci.wiki_create_commands (workspace_id, command_id, actor_user_id, request_hash, document_id, result_json) VALUES ($1,$2,$3,$4,$5,$6)")
+        .bind(workspace_id).bind(command_id).bind(actor_user_id).bind(hash).bind(meta.id).bind(result)
+        .execute(&mut **tx).await?;
+    Ok(Ok(meta))
+}
+
+fn wiki_create_command_hash(
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    input: &CreateDocumentInput<'_>,
+) -> Result<String, sqlx::Error> {
+    // Only creation semantics are bound: omitted and null icons both create
+    // SQL NULL. Fixed tuple encoding avoids map order and concatenation aliases.
+    let bytes = serde_json::to_vec(&(
+        "wiki-create-v1",
+        workspace_id,
+        actor_user_id,
+        input.parent_id,
+        input.title,
+        input.icon.flatten(),
+    ))
+    .map_err(|err| sqlx::Error::Encode(Box::new(err)))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 /// Lease of the import job a document is created for.

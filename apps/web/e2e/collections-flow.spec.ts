@@ -137,7 +137,7 @@ test("document tags, project collection fields/views and saved task views round-
 
   // 1. Workspace settings → 문서 태그: create a tag.
   const docRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
-    data: { parentId: null, title: "태그 문서" },
+    data: { commandId: crypto.randomUUID(), parentId: null, title: "태그 문서" },
   });
   expect(docRes.status()).toBe(201);
   const doc = taskSchema.parse(await docRes.json());

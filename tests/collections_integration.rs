@@ -49,7 +49,7 @@ async fn create_wiki_doc(app: &axum::Router, cookie: &str, ws: Uuid, title: &str
         app,
         "POST",
         &format!("/api/v1/workspaces/{ws}/documents"),
-        Some(json!({"parentId": null, "title": title})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": title})),
         cookie,
     )
     .await;

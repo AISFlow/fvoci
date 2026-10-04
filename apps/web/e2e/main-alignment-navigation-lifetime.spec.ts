@@ -190,7 +190,7 @@ function expectReleasedTransport(status: number, holderStates: number[]): void {
 
 async function createWiki(request: APIRequestContext, workspaceId: string, title: string) {
   const response = await request.post(`/api/v1/workspaces/${workspaceId}/documents`, {
-    data: { parentId: null, title },
+    data: { commandId: crypto.randomUUID(), parentId: null, title },
   });
   expect(response.status()).toBe(201);
   return readJson(response, flowSchemas.document);

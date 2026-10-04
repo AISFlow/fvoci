@@ -272,7 +272,7 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
   }
   const wsId = required9.id;
   const docRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
-    data: { parentId: null, title: "DOCX 첨부" },
+    data: { commandId: crypto.randomUUID(), parentId: null, title: "DOCX 첨부" },
   });
   expect(docRes.ok(), await docRes.text()).toBeTruthy();
   const documentId = (

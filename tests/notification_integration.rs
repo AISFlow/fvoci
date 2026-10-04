@@ -405,7 +405,7 @@ async fn comment_mention_notifies_member_not_actor() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "멘션 문서"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "멘션 문서"})),
         Some(&owner_cookie),
     )
     .await;

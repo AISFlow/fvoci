@@ -123,6 +123,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/054_timer_audit_actor_index.sql"),
         54,
     ),
+    (
+        include_str!("../../migrations/055_wiki_create_commands.sql"),
+        55,
+    ),
 ];
 
 pub(crate) const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -803,6 +807,10 @@ mod tests {
         (
             54,
             "53a6ed1058565b61305ed34c41b90a80a2d3f0dd55a4d818813672b1ac43afbc",
+        ),
+        (
+            55,
+            "dc60f939985a5c000d57a7f266c12c247373601f92759630b324b22b4a29af45",
         ),
     ];
 

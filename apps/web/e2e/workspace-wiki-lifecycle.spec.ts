@@ -74,7 +74,7 @@ test("rename, move, trash, and restore wiki documents", async ({ page }) => {
   await expect(page.getByLabel("문서 제목")).toHaveValue("라이프사이클 문서");
 
   const parentRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
-    data: { parentId: null, title: "이동 대상 부모" },
+    data: { commandId: crypto.randomUUID(), parentId: null, title: "이동 대상 부모" },
   });
   expect(parentRes.ok()).toBe(true);
   const targetParent = await readJson(parentRes, flowSchemas.document);

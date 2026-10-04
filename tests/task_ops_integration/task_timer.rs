@@ -4234,7 +4234,7 @@ mod task_timer {
             app.clone(),
             "POST",
             &format!("/api/v1/workspaces/{workspace}/documents"),
-            Some(json!({"parentId":null,"title":"Goal and research notes"})),
+            Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId":null,"title":"Goal and research notes"})),
             Some(&cookie),
         )
         .await;
@@ -4244,7 +4244,7 @@ mod task_timer {
             app.clone(),
             "POST",
             &format!("/api/v1/workspaces/{workspace}/documents"),
-            Some(json!({"parentId":null,"title":"Reading material"})),
+            Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId":null,"title":"Reading material"})),
             Some(&cookie),
         )
         .await;

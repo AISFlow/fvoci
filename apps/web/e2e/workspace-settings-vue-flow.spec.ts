@@ -90,7 +90,7 @@ test("Vue settings commit identity, groups, tokens, holidays, preferences and re
   expect(
     (
       await tokenClient.post(`/api/v1/workspaces/${workspaceId}/documents`, {
-        data: { title: "Denied", parentId: null },
+        data: { commandId: crypto.randomUUID(), title: "Denied", parentId: null },
       })
     ).status(),
   ).toBe(404);

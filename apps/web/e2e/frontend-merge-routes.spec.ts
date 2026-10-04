@@ -62,7 +62,7 @@ test("merged viewer guards auth, wiki and project destinations within the same V
     );
   const wsId = fixtureValue1.id;
   const created = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
-    data: { parentId: null, title: "Merged wiki" },
+    data: { commandId: crypto.randomUUID(), parentId: null, title: "Merged wiki" },
   });
   expect(created.ok(), await created.text()).toBe(true);
   const document = await readJson(created, flowSchemas.createdDocument);

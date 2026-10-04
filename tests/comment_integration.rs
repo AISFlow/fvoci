@@ -63,7 +63,7 @@ async fn wiki_document_comment_create_list_resolve_and_react() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "댓글 문서"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "댓글 문서"})),
         Some(&cookie),
     )
     .await;
@@ -310,7 +310,7 @@ async fn mentioned_group_ids_expand_into_event() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "그룹 멘션"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "그룹 멘션"})),
         Some(&cookie),
     )
     .await;
@@ -380,7 +380,7 @@ async fn comment_create_audit_failure_rolls_back_event() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "감사"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "감사"})),
         Some(&cookie),
     )
     .await;
@@ -413,7 +413,7 @@ async fn concurrent_reaction_toggles_leave_single_membership() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "반응"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "반응"})),
         Some(&cookie),
     )
     .await;
@@ -487,7 +487,7 @@ async fn wiki_comment_delete_is_author_or_manage() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "권한"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "권한"})),
         Some(&owner_cookie),
     )
     .await;
@@ -606,7 +606,7 @@ async fn comment_body_limit_counts_utf16_code_units() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "길이"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "길이"})),
         Some(&cookie),
     )
     .await;
@@ -667,7 +667,7 @@ async fn resolve_and_unresolve_reject_cross_origin() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "출처"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "출처"})),
         Some(&cookie),
     )
     .await;
@@ -818,7 +818,7 @@ async fn wiki_comment_refuses_document_moved_into_project_meanwhile() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "이동 중 문서"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "이동 중 문서"})),
         Some(&cookie),
     )
     .await;
@@ -879,7 +879,7 @@ async fn comment_pat_scopes_match_parent_kind() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "PAT 문서"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "PAT 문서"})),
         Some(&cookie),
     )
     .await;
@@ -1084,7 +1084,7 @@ async fn comment_create_unknown_fields_and_empty_group_ids() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "필드"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "필드"})),
         Some(&cookie),
     )
     .await;
@@ -1183,7 +1183,7 @@ async fn wiki_comment_fixture(
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "경합 문서"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "경합 문서"})),
         Some(cookie),
     )
     .await;

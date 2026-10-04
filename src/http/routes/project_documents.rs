@@ -10,8 +10,8 @@ use axum_extra::extract::CookieJar;
 use uuid::Uuid;
 
 use crate::api::dto::{
-    CreateDocumentBody, DocumentMetaResponse, MoveDocumentBody, OkResponse, PatchDocumentBody,
-    RequiredNullable, SortDocumentBody, TreeNodeResponse, TreeResponse,
+    CreateProjectDocumentBody, DocumentMetaResponse, MoveDocumentBody, OkResponse,
+    PatchDocumentBody, RequiredNullable, SortDocumentBody, TreeNodeResponse, TreeResponse,
 };
 use crate::auth::session::SessionUser;
 use crate::db::documents::{CreateDocumentInput, UpdateDocumentMetaInput};
@@ -177,7 +177,7 @@ async fn create_document(
     headers: HeaderMap,
     jar: CookieJar,
     Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
-    body: Result<Json<CreateDocumentBody>, JsonRejection>,
+    body: Result<Json<CreateProjectDocumentBody>, JsonRejection>,
 ) -> Result<Response, DocumentApiError> {
     let Json(body) = body.map_err(AppError::from)?;
     check_origin(&headers, &state.public_origin)?;

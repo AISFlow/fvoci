@@ -435,7 +435,7 @@ async fn trash_rows_past_retention_are_not_restorable() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{ws}/documents"),
-        Some(json!({"title": "old wiki", "parentId": null})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "title": "old wiki", "parentId": null})),
         Some(&cookie),
     )
     .await;

@@ -34,7 +34,7 @@ async fn create_wiki(
         app,
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"title": title, "parentId": null})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "title": title, "parentId": null})),
         Some(cookie),
     )
     .await;

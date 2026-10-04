@@ -27,7 +27,7 @@ async fn wiki_subtree_move_renumbers_affiliation_atomically() {
             app.clone(),
             "POST",
             &format!("/api/v1/workspaces/{ws}/documents"),
-            Some(serde_json::json!({"title": "Wiki move", "parentId": parent.map(|i| &docs[i])})),
+            Some(serde_json::json!({"commandId": uuid::Uuid::now_v7(), "title": "Wiki move", "parentId": parent.map(|i| &docs[i])})),
             Some(&cookie),
         )
         .await;
@@ -606,7 +606,7 @@ async fn contract_wiki_affiliation_rejects_project_root_parent() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": root_id, "title":"Mismatch"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": root_id, "title":"Mismatch"})),
         Some(&cookie),
     )
     .await;
@@ -1705,7 +1705,7 @@ async fn contract_display_id_lookup_respects_acl() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Wiki root"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Wiki root"})),
         Some(&owner_cookie),
     )
     .await;
@@ -3468,7 +3468,7 @@ async fn project_document_count_root_statuses_lifecycle_affiliation_and_tenant()
         &cookie,
         "POST",
         &format!("/api/v1/workspaces/{ws}/documents"),
-        Some(json!({"parentId": null, "title": "Wiki"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Wiki"})),
     )
     .await;
     assert_document_count(&app, &cookie, ws, &a, 4).await;

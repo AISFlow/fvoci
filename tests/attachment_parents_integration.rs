@@ -72,7 +72,7 @@ async fn create_wiki_document(app: &axum::Router, cookie: &str, ws: Uuid) -> Str
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{ws}/documents"),
-        Some(json!({"parentId": null, "title": "Doc"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Doc"})),
         Some(cookie),
     )
     .await;

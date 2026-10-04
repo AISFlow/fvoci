@@ -151,14 +151,17 @@ const createDocument = useMutation({
     slug: string;
     lifetime: number;
     operation: number;
+    commandId: string;
+    title: string;
   }) =>
     ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/documents", {
         params: { path: { workspace_id: scope.workspaceId } },
-        body: { parentId: null, title: t("doc.title.untitled") },
+        body: { commandId: scope.commandId, parentId: null, title: scope.title },
       }),
     ),
   onSuccess: async (doc, scope) => {
+    if (pendingCreate?.commandId === scope.commandId) pendingCreate = null;
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["tree", scope.workspaceId] }),
       queryClient.invalidateQueries({ queryKey: ["wiki-discovery", scope.workspaceId] }),
@@ -173,17 +176,52 @@ const createDocument = useMutation({
       await router.push(documentPath(scope.slug, doc.displayId));
     }
   },
+  onError: (error, scope) => {
+    // A transport error or server failure may have lost a committed response.
+    // The next deliberate attempt uses the original command and title.
+    if (
+      error instanceof ProblemError &&
+      error.status >= 400 &&
+      error.status < 500 &&
+      pendingCreate?.commandId === scope.commandId
+    ) pendingCreate = null;
+  },
 });
+
+let pendingCreate: {
+  commandId: string;
+  workspaceId: string;
+  userId: string;
+  sessionId: string;
+  title: string;
+} | null = null;
+watch(
+  [workspaceId, () => session.me.value?.userId, () => session.me.value?.sessionId],
+  () => { pendingCreate = null; },
+  { flush: "sync" },
+);
 
 function onCreateDocument(): void {
   const id = workspaceId.value;
-  if (id)
+  const userId = session.me.value?.userId;
+  const sessionId = session.me.value?.sessionId;
+  if (id && userId && sessionId) {
+    if (
+      !pendingCreate || pendingCreate.workspaceId !== id ||
+      pendingCreate.userId !== userId || pendingCreate.sessionId !== sessionId
+    ) pendingCreate = {
+      commandId: crypto.randomUUID(), workspaceId: id, userId, sessionId,
+      title: t("doc.title.untitled"),
+    };
     createDocument.mutate({
       workspaceId: id,
       slug: slug.value,
       lifetime: lifetime.value,
       operation: ++createVersion,
+      commandId: pendingCreate.commandId,
+      title: pendingCreate.title,
     });
+  }
 }
 
 const canCreate = computed(() =>

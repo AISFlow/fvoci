@@ -72,7 +72,7 @@ test("editor URL embed shows authenticated unfurl card", async ({ page }) => {
     );
   const wsId = fixtureValue1.id;
   const created = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
-    data: { parentId: null, title: "링크 미리보기" },
+    data: { commandId: crypto.randomUUID(), parentId: null, title: "링크 미리보기" },
   });
   expect(created.status()).toBe(201);
   const document = (await readJson(created, flowSchemas.document)) as {

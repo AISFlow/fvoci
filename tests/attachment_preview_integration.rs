@@ -134,7 +134,7 @@ impl Ctx {
             self.app.clone(),
             "POST",
             &format!("/api/v1/workspaces/{}/documents", self.ws),
-            Some(json!({"parentId": null, "title": "Doc"})),
+            Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Doc"})),
             Some(&self.cookie),
         )
         .await;

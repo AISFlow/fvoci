@@ -404,7 +404,7 @@ async fn document_create_get_tree_parent_rename_status_and_nulls() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "  Root  "})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "  Root  "})),
         Some(&cookie),
         &[],
     )
@@ -430,7 +430,7 @@ async fn document_create_get_tree_parent_rename_status_and_nulls() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": root_id, "title": "Child", "icon": "📄"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": root_id, "title": "Child", "icon": "📄"})),
         Some(&cookie),
         &[],
     )
@@ -450,7 +450,7 @@ async fn document_create_get_tree_parent_rename_status_and_nulls() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Second root"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Second root"})),
         Some(&cookie),
         &[],
     )
@@ -584,7 +584,7 @@ async fn guest_tree_is_empty_and_get_create_are_not_found() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Hidden"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Hidden"})),
         Some(&owner_cookie),
         &[],
     )
@@ -632,7 +632,7 @@ async fn guest_tree_is_empty_and_get_create_are_not_found() {
         app,
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Guest write"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Guest write"})),
         Some(&guest_cookie),
         &[],
     )
@@ -663,7 +663,7 @@ async fn member_can_create_and_instance_admin_without_membership_cannot() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Member doc"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Member doc"})),
         Some(&member_cookie),
         &[],
     )
@@ -697,7 +697,9 @@ async fn member_can_create_and_instance_admin_without_membership_cannot() {
         app,
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Admin override"})),
+        Some(
+            json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Admin override"}),
+        ),
         Some(&owner_cookie),
         &[],
     )
@@ -755,7 +757,7 @@ async fn foreign_parent_affiliation_depth_and_unsupported_queries_are_rejected()
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": foreign_parent, "title": "Cross"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": foreign_parent, "title": "Cross"})),
         Some(&cookie),
         &[],
     )
@@ -813,7 +815,9 @@ async fn foreign_parent_affiliation_depth_and_unsupported_queries_are_rejected()
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": affiliated, "title": "Mismatch"})),
+        Some(
+            json!({"commandId": uuid::Uuid::now_v7(), "parentId": affiliated, "title": "Mismatch"}),
+        ),
         Some(&cookie),
         &[],
     )
@@ -840,7 +844,7 @@ async fn foreign_parent_affiliation_depth_and_unsupported_queries_are_rejected()
             app.clone(),
             "POST",
             &format!("/api/v1/workspaces/{workspace_id}/documents"),
-            Some(json!({"parentId": parent, "title": format!("D{depth}")})),
+            Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": parent, "title": format!("D{depth}")})),
             Some(&cookie),
             &[],
         )
@@ -853,7 +857,7 @@ async fn foreign_parent_affiliation_depth_and_unsupported_queries_are_rejected()
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": last_id, "title": "Too deep"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": last_id, "title": "Too deep"})),
         Some(&cookie),
         &[],
     )
@@ -930,7 +934,7 @@ async fn invalid_auth_and_input_are_source_errors() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Null regression"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Null regression"})),
         Some(&cookie),
         &[],
     )
@@ -957,7 +961,7 @@ async fn invalid_auth_and_input_are_source_errors() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Nope"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Nope"})),
         None,
         &[],
     )
@@ -969,7 +973,7 @@ async fn invalid_auth_and_input_are_source_errors() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": Uuid::now_v7(), "title": "Missing parent"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": Uuid::now_v7(), "title": "Missing parent"})),
         Some(&cookie),
         &[],
     )
@@ -981,7 +985,7 @@ async fn invalid_auth_and_input_are_source_errors() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"title": "Missing parentId"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "title": "Missing parentId"})),
         Some(&cookie),
         &[],
     )
@@ -993,7 +997,7 @@ async fn invalid_auth_and_input_are_source_errors() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": ""})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": ""})),
         Some(&cookie),
         &[],
     )
@@ -1005,7 +1009,7 @@ async fn invalid_auth_and_input_are_source_errors() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "X"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "X"})),
         Some(&cookie),
         &[("origin", "http://evil.example.com")],
     )
@@ -1035,7 +1039,7 @@ async fn patch_icon_set_omit_preserves_then_null_clears() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Iconed", "icon": "📄"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Iconed", "icon": "📄"})),
         Some(&cookie),
         &[],
     )
@@ -1131,7 +1135,7 @@ async fn invalid_stored_sort_key_returns_internal_error() {
         app,
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Sibling of corrupt"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Sibling of corrupt"})),
         Some(&cookie),
         &[],
     )
@@ -1211,7 +1215,7 @@ async fn product_membership_revoke_races_document_write_under_lock_barrier() {
                 app,
                 "POST",
                 &format!("/api/v1/workspaces/{workspace_id}/documents"),
-                Some(json!({"parentId": null, "title": "After product demote"})),
+                Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "After product demote"})),
                 Some(&member_a_cookie),
                 &[],
             )
@@ -1263,7 +1267,7 @@ async fn product_membership_revoke_races_document_write_under_lock_barrier() {
                 app,
                 "POST",
                 &format!("/api/v1/workspaces/{workspace_id}/documents"),
-                Some(json!({"parentId": null, "title": "Before product remove"})),
+                Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Before product remove"})),
                 Some(&member_b_cookie),
                 &[],
             )
@@ -1359,7 +1363,7 @@ async fn suspend_and_guest_demotion_deny_write_after_shared_locks() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "After demote"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "After demote"})),
         Some(&member_cookie),
         &[],
     )
@@ -1385,7 +1389,7 @@ async fn suspend_and_guest_demotion_deny_write_after_shared_locks() {
                 app,
                 "POST",
                 &format!("/api/v1/workspaces/{workspace_id}/documents"),
-                Some(json!({"parentId": null, "title": "After suspend"})),
+                Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "After suspend"})),
                 Some(&owner_cookie),
                 &[],
             )
@@ -1463,7 +1467,7 @@ async fn membership_removal_and_session_revoke_share_locks_before_write() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "After remove"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "After remove"})),
         Some(&member_cookie),
         &[],
     )
@@ -1489,7 +1493,9 @@ async fn membership_removal_and_session_revoke_share_locks_before_write() {
                 app,
                 "POST",
                 &format!("/api/v1/workspaces/{workspace_id}/documents"),
-                Some(json!({"parentId": null, "title": "Raced"})),
+                Some(
+                    json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Raced"}),
+                ),
                 Some(&owner_cookie),
                 &[],
             )
@@ -1541,7 +1547,9 @@ async fn event_and_audit_failure_roll_back_document_and_allocated_number() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Blocked event"})),
+        Some(
+            json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Blocked event"}),
+        ),
         Some(&cookie),
         &[],
     )
@@ -1571,7 +1579,9 @@ async fn event_and_audit_failure_roll_back_document_and_allocated_number() {
         app,
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Blocked audit"})),
+        Some(
+            json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Blocked audit"}),
+        ),
         Some(&cookie),
         &[],
     )
@@ -1912,9 +1922,10 @@ async fn create_doc(
     parent_id: Option<&str>,
     title: &str,
 ) -> Value {
+    let command_id = Uuid::now_v7();
     let body = match parent_id {
-        Some(parent) => json!({"parentId": parent, "title": title}),
-        None => json!({"parentId": null, "title": title}),
+        Some(parent) => json!({"commandId": command_id, "parentId": parent, "title": title}),
+        None => json!({"commandId": command_id, "parentId": null, "title": title}),
     };
     let (status, body, _, _) = json_request(
         app.clone(),
@@ -2502,6 +2513,260 @@ async fn document_move_into_project_denies_unauthorized() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["projectId"], lab["id"]);
 
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn wiki_create_command_replays_original_result_and_rejects_hash_actor_purge() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner, ws) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let path = format!("/api/v1/workspaces/{ws}/documents");
+    let command = Uuid::now_v7();
+    let input =
+        json!({"commandId":command,"parentId":null,"title":"한글 日本語 中文 🙂 가","icon":null});
+    let (first, second) = tokio::join!(
+        json_request(
+            app.clone(),
+            "POST",
+            &path,
+            Some(input.clone()),
+            Some(&cookie),
+            &[]
+        ),
+        json_request(
+            app.clone(),
+            "POST",
+            &path,
+            Some(input.clone()),
+            Some(&cookie),
+            &[]
+        ),
+    );
+    assert_eq!(first.0, StatusCode::CREATED, "{}", first.1);
+    assert_eq!(second.0, StatusCode::CREATED, "{}", second.1);
+    assert_eq!(
+        first.1, second.1,
+        "same command returns the original response"
+    );
+    let original = first.1;
+    let id = Uuid::parse_str(original["id"].as_str().unwrap()).unwrap();
+    let inventory: (i64, i32, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM fvoci.documents WHERE workspace_id=$1), next_document_number, (SELECT count(*) FROM fvoci.events WHERE workspace_id=$1 AND verb='document.created'), (SELECT count(*) FROM fvoci.audit_log WHERE workspace_id=$1 AND verb='document.created'), (SELECT count(*) FROM fvoci.wiki_create_commands WHERE workspace_id=$1) FROM fvoci.workspaces WHERE id=$1"
+    ).bind(ws).fetch_one(&admin).await.unwrap();
+    assert_eq!(inventory, (1, 1, 1, 1, 1));
+    let restricted = pool::connect_app(&harness.app_url).await.unwrap();
+    migrate::assert_app_role(&restricted)
+        .await
+        .expect("actual restricted application role");
+    let receipt_rls: (bool, bool) = sqlx::query_as(
+        "SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid='fvoci.wiki_create_commands'::regclass"
+    ).fetch_one(&restricted).await.unwrap();
+    assert_eq!(receipt_rls, (true, true));
+    let mut scoped = restricted.begin().await.unwrap();
+    fvoci_server::db::context::set_tenant(&mut scoped, Uuid::now_v7())
+        .await
+        .unwrap();
+    let hidden: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.wiki_create_commands WHERE workspace_id=$1")
+            .bind(ws)
+            .fetch_one(&mut *scoped)
+            .await
+            .unwrap();
+    assert_eq!(
+        hidden, 0,
+        "actual RLS hides receipts under the wrong tenant"
+    );
+    fvoci_server::db::context::set_tenant(&mut scoped, ws)
+        .await
+        .unwrap();
+    let visible: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.wiki_create_commands WHERE workspace_id=$1")
+            .bind(ws)
+            .fetch_one(&mut *scoped)
+            .await
+            .unwrap();
+    assert_eq!(visible, 1);
+    scoped.rollback().await.unwrap();
+    restricted.close().await;
+
+    let mut changed = input.clone();
+    changed["title"] = json!("different");
+    let mismatch = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(changed),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(mismatch.0, StatusCode::CONFLICT);
+    assert_eq!(mismatch.1["code"], "request_mismatch");
+    let (other, other_cookie) =
+        create_second_user_session(&harness, "other@example.com", "Other").await;
+    sqlx::query(
+        "INSERT INTO fvoci.memberships (workspace_id,user_id,role) VALUES ($1,$2,'member')",
+    )
+    .bind(ws)
+    .bind(other)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let wrong_actor = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(input.clone()),
+        Some(&other_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        wrong_actor.0,
+        StatusCode::CONFLICT,
+        "another actor cannot use the original command"
+    );
+
+    sqlx::query("UPDATE fvoci.documents SET title='Later title' WHERE id=$1")
+        .bind(id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let replay = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(input.clone()),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(replay.0, StatusCode::CREATED);
+    assert_eq!(
+        replay.1, original,
+        "readback changes cannot change the receipt echo"
+    );
+    sqlx::query("UPDATE fvoci.documents SET deleted_at=now() WHERE id=$1")
+        .bind(id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let trashed = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(input.clone()),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        trashed.0,
+        StatusCode::NOT_FOUND,
+        "a receipt cannot authorize a trashed target"
+    );
+    sqlx::query("UPDATE fvoci.documents SET deleted_at=NULL WHERE id=$1")
+        .bind(id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE fvoci.memberships SET role='guest' WHERE workspace_id=$1 AND user_id=$2")
+        .bind(ws)
+        .bind(owner)
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_eq!(
+        json_request(
+            app.clone(),
+            "POST",
+            &path,
+            Some(input.clone()),
+            Some(&cookie),
+            &[]
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    sqlx::query("UPDATE fvoci.memberships SET role='owner' WHERE workspace_id=$1 AND user_id=$2")
+        .bind(ws)
+        .bind(owner)
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM fvoci.documents WHERE id=$1")
+        .bind(id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let purged = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(input.clone()),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(purged.0, StatusCode::NOT_FOUND);
+    let retired: (i64, i32, i64, Option<Uuid>) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM fvoci.documents WHERE workspace_id=$1), next_document_number, (SELECT count(*) FROM fvoci.wiki_create_commands WHERE workspace_id=$1), (SELECT document_id FROM fvoci.wiki_create_commands WHERE workspace_id=$1 AND command_id=$2) FROM fvoci.workspaces WHERE id=$1"
+    ).bind(ws).bind(command).fetch_one(&admin).await.unwrap();
+    assert_eq!(retired, (0, 1, 1, None));
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn wiki_create_command_requires_identity_and_receipt_failure_rolls_back_everything() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, ws) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let path = format!("/api/v1/workspaces/{ws}/documents");
+    let missing = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(json!({"parentId":null,"title":"missing command"})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(missing.0, StatusCode::BAD_REQUEST);
+    install_insert_fail_trigger(&admin, "wiki_create_commands", "reject_wiki_receipt").await;
+    let input = json!({"commandId":Uuid::now_v7(),"parentId":null,"title":"rolled back"});
+    let failed = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(input.clone()),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(failed.0, StatusCode::INTERNAL_SERVER_ERROR);
+    let inventory: (i64, i32, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM fvoci.documents WHERE workspace_id=$1), next_document_number, (SELECT count(*) FROM fvoci.events WHERE workspace_id=$1 AND verb='document.created'), (SELECT count(*) FROM fvoci.audit_log WHERE workspace_id=$1 AND verb='document.created'), (SELECT count(*) FROM fvoci.wiki_create_commands WHERE workspace_id=$1) FROM fvoci.workspaces WHERE id=$1"
+    ).bind(ws).fetch_one(&admin).await.unwrap();
+    assert_eq!(inventory, (0, 0, 0, 0, 0));
+    sqlx::query("DROP TRIGGER fvoci_reject_wiki_receipt ON fvoci.wiki_create_commands")
+        .execute(&admin)
+        .await
+        .unwrap();
+    let success = json_request(app, "POST", &path, Some(input), Some(&cookie), &[]).await;
+    assert_eq!(success.0, StatusCode::CREATED);
+    assert_eq!(success.1["number"], 1);
     admin.close().await;
     harness.cleanup().await;
 }
