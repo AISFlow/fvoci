@@ -2993,6 +2993,8 @@ async fn selected_body_scope_authorization_controls(
     let (workspace, wiki) = target;
     let project = Uuid::now_v7();
     let document = Uuid::now_v7();
+    let lead = Uuid::now_v7();
+    let lead_email = format!("body-lead-{lead}@example.com");
     let pg = match backend {
         Backend::Postgres(_) => Some(
             PgPoolOptions::new()
@@ -3008,6 +3010,18 @@ async fn selected_body_scope_authorization_controls(
             let mut tx = pg.as_ref().unwrap().begin().await.unwrap();
             sqlx::query("INSERT INTO fvoci.projects(id,workspace_id,key,name,visibility,created_by) VALUES($1,$2,'BODY','Body scope','workspace',$3)")
                 .bind(project).bind(workspace).bind(actor).execute(&mut *tx).await.unwrap();
+            assert_eq!(sqlx::query("INSERT INTO fvoci.users(id,email,password_hash,given_name) SELECT $1,$2,password_hash,'Body lead' FROM fvoci.users WHERE id=$3")
+                .bind(lead).bind(&lead_email).bind(actor).execute(&mut *tx).await.unwrap().rows_affected(), 1);
+            sqlx::query(
+                "INSERT INTO fvoci.memberships(workspace_id,user_id,role) VALUES($1,$2,'member')",
+            )
+            .bind(workspace)
+            .bind(lead)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO fvoci.project_members(workspace_id,project_id,user_id,role) VALUES($1,$2,$3,'lead')")
+                .bind(workspace).bind(project).bind(lead).execute(&mut *tx).await.unwrap();
             sqlx::query("INSERT INTO fvoci.documents(id,workspace_id,project_id,title,path,sort_key,number,status,schema_version,content_json,created_by) VALUES($1,$2,$3,'Body scope',$4,'a0',1,'draft',2,$5,$6)")
                 .bind(document).bind(workspace).bind(project).bind(document.simple().to_string()).bind(fvoci_server::db::documents::empty_document_json()).bind(actor).execute(&mut *tx).await.unwrap();
             tx.commit().await.unwrap();
@@ -3016,6 +3030,18 @@ async fn selected_body_scope_authorization_controls(
             let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
             sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'BODY','Body scope','workspace',?3)")
                 .bind(project.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(actor.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
+            assert_eq!(sqlx::query("INSERT INTO users(id,email,password_hash,given_name) SELECT ?1,?2,password_hash,'Body lead' FROM users WHERE id=?3")
+                .bind(lead.as_bytes().as_slice()).bind(&lead_email).bind(actor.as_bytes().as_slice()).execute(&mut *tx).await.unwrap().rows_affected(), 1);
+            sqlx::query(
+                "INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'member')",
+            )
+            .bind(workspace.as_bytes().as_slice())
+            .bind(lead.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO project_members(workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,'lead')")
+                .bind(workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(lead.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
             sqlx::query("INSERT INTO documents(id,workspace_id,project_id,title,path,sort_key,number,status,schema_version,content_json,created_by) VALUES(?1,?2,?3,'Body scope',?4,'a0',1,'draft',2,?5,?6)")
                 .bind(document.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(document.simple().to_string()).bind(fvoci_server::db::documents::empty_document_json().to_string()).bind(actor.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
             tx.commit().await.unwrap();
