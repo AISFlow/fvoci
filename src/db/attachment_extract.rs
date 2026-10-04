@@ -383,7 +383,7 @@ mod tests {
 /// permission is inferred from a queued attachment or its uploader.
 pub async fn claim_extract_backend(backend: &Backend) -> Result<Option<ExtractClaim>, sqlx::Error> {
     let mut tx = backend.begin_write().await?;
-    tx.set_system().await?;
+    tx.operation().set_system().await?;
     let claim = tx.operation().claim_attachment_extract().await?;
     tx.commit().await.map_err(|e| e.source)?;
     Ok(claim)
@@ -394,8 +394,8 @@ pub async fn load_extract_input_backend(
     claim: &ExtractClaim,
 ) -> Result<Option<ExtractInput>, sqlx::Error> {
     let mut tx = backend.begin_read().await?;
-    tx.set_system().await?;
-    tx.set_tenant(claim.workspace_id).await?;
+    tx.operation().set_system().await?;
+    tx.operation().set_tenant(claim.workspace_id).await?;
     let input = tx.operation().load_attachment_extract(claim).await?;
     tx.commit().await.map_err(|e| e.source)?;
     Ok(input)
@@ -407,8 +407,8 @@ pub async fn finish_extract_backend(
     finish: &FinishExtract,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = backend.begin_write().await?;
-    tx.set_system().await?;
-    tx.set_tenant(claim.workspace_id).await?;
+    tx.operation().set_system().await?;
+    tx.operation().set_tenant(claim.workspace_id).await?;
     let applied = tx
         .operation()
         .finish_attachment_extract(claim, finish)
@@ -426,8 +426,8 @@ pub async fn release_extract_backend(
     claim: &ExtractClaim,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = backend.begin_write().await?;
-    tx.set_system().await?;
-    tx.set_tenant(claim.workspace_id).await?;
+    tx.operation().set_system().await?;
+    tx.operation().set_tenant(claim.workspace_id).await?;
     let released = tx.operation().release_attachment_extract(claim).await?;
     tx.commit().await.map_err(|e| e.source)?;
     Ok(released)
@@ -828,7 +828,7 @@ pub(crate) mod backend_tests {
         let f = Fixture::new().await;
         let c = f.claim().await;
         let mut tx = f.backend.begin_write().await.unwrap();
-        tx.set_tenant(f.workspace).await.unwrap();
+        tx.operation().set_tenant(f.workspace).await.unwrap();
         assert!(tx
             .operation()
             .finish_attachment_extract(&c, &result())
@@ -836,12 +836,12 @@ pub(crate) mod backend_tests {
             .is_err());
         tx.rollback().await.unwrap();
         let mut tx = f.backend.begin_read().await.unwrap();
-        tx.set_system().await.unwrap();
+        tx.operation().set_system().await.unwrap();
         assert!(tx.operation().claim_attachment_extract().await.is_err());
         tx.rollback().await.unwrap();
         let mut tx = f.backend.begin_write().await.unwrap();
-        tx.set_system().await.unwrap();
-        tx.set_tenant(Uuid::now_v7()).await.unwrap();
+        tx.operation().set_system().await.unwrap();
+        tx.operation().set_tenant(Uuid::now_v7()).await.unwrap();
         assert!(tx.operation().release_attachment_extract(&c).await.is_err());
         tx.rollback().await.unwrap();
         f.expire().await;
@@ -887,8 +887,8 @@ pub(crate) mod backend_tests {
             .await
             .unwrap();
         let mut tx = f.backend.begin_write().await.unwrap();
-        tx.set_system().await.unwrap();
-        tx.set_tenant(f.workspace).await.unwrap();
+        tx.operation().set_system().await.unwrap();
+        tx.operation().set_tenant(f.workspace).await.unwrap();
         assert!(tx
             .operation()
             .finish_attachment_extract(&claim, &result())

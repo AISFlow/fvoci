@@ -796,8 +796,8 @@ pub async fn list_pending_embedding_backend(
     limit: i64,
 ) -> Result<Vec<PendingEmbeddingChunk>, sqlx::Error> {
     let mut tx = backend.begin_read().await?;
-    tx.set_system().await?;
-    tx.set_tenant(workspace_id).await?;
+    tx.operation().set_system().await?;
+    tx.operation().set_tenant(workspace_id).await?;
     let chunks = tx
         .operation()
         .list_attachment_pending_embeddings(workspace_id, attachment_id, limit)
@@ -814,7 +814,7 @@ pub async fn next_pending_embedding_backend(
         return next_pending_embedding(pool, excluded).await;
     }
     let mut tx = backend.begin_read().await?;
-    tx.set_system().await?;
+    tx.operation().set_system().await?;
     let next = tx
         .operation()
         .next_attachment_pending_embedding(excluded)
@@ -833,8 +833,8 @@ pub async fn store_chunk_embeddings_backend(
         return Ok(0);
     }
     let mut tx = backend.begin_write().await?;
-    tx.set_system().await?;
-    tx.set_tenant(workspace_id).await?;
+    tx.operation().set_system().await?;
+    tx.operation().set_tenant(workspace_id).await?;
     let written = tx
         .operation()
         .store_attachment_chunk_embeddings(workspace_id, attachment_id, rows)
@@ -1037,7 +1037,7 @@ mod embedding_backend_tests {
         let f = Fixture::new().await;
         f.extracted("Embedding authority fixture").await;
         let mut tx = f.backend.begin_read().await.unwrap();
-        tx.set_tenant(f.workspace).await.unwrap();
+        tx.operation().set_tenant(f.workspace).await.unwrap();
         assert!(tx
             .operation()
             .list_attachment_pending_embeddings(f.workspace, f.attachment, 1)
@@ -1045,8 +1045,8 @@ mod embedding_backend_tests {
             .is_err());
         tx.rollback().await.unwrap();
         let mut tx = f.backend.begin_read().await.unwrap();
-        tx.set_system().await.unwrap();
-        tx.set_tenant(Uuid::now_v7()).await.unwrap();
+        tx.operation().set_system().await.unwrap();
+        tx.operation().set_tenant(Uuid::now_v7()).await.unwrap();
         assert!(tx
             .operation()
             .list_attachment_pending_embeddings(f.workspace, f.attachment, 1)
@@ -1059,8 +1059,8 @@ mod embedding_backend_tests {
         assert_eq!(pending.len(), 1);
         let rows = vec![(pending[0].clone(), vec![1.0; 1536])];
         let mut tx = f.backend.begin_read().await.unwrap();
-        tx.set_system().await.unwrap();
-        tx.set_tenant(f.workspace).await.unwrap();
+        tx.operation().set_system().await.unwrap();
+        tx.operation().set_tenant(f.workspace).await.unwrap();
         assert!(tx
             .operation()
             .store_attachment_chunk_embeddings(f.workspace, f.attachment, &rows)
