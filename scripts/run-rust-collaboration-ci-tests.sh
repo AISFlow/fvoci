@@ -58,5 +58,12 @@ cargo test --locked --offline --no-fail-fast --features db-tests \
   -- --test-threads=1 \
   | tee -a "$LOG" || { second=$?; [[ "$status" -ne 0 ]] || status=$second; }
 
-verify_native_admission_log "$LOG"
-exit "$status"
+# A cargo failure (e.g. a compile error or crash before the admission line
+# printed) keeps its own status; the admission check decides only when both
+# cargo invocations succeeded.
+admission=0
+verify_native_admission_log "$LOG" || admission=$?
+if [[ "$status" -ne 0 ]]; then
+  exit "$status"
+fi
+exit "$admission"

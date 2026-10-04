@@ -125,6 +125,21 @@ case "\$mode" in
     fi
     exit 0
     ;;
+  fail-first-before-admission)
+    if [[ \$second -eq 0 ]]; then
+      echo "error: could not compile (simulated, before any test ran)" >&2
+      exit 101
+    fi
+    exit 0
+    ;;
+  fail-second-no-admission)
+    [[ \$admission -eq 1 ]] && echo 'test collab_delivery_admission_parity_with_locking_join ... ok'
+    if [[ \$second -eq 1 ]]; then
+      echo "error: simulated cargo test failure" >&2
+      exit 102
+    fi
+    exit 0
+    ;;
   fail-both)
     [[ \$admission -eq 1 ]] && echo 'test collab_primary_huge_varint_memory_rejected_1008 ... ok'
     echo "error: simulated cargo test failure" >&2
@@ -216,7 +231,10 @@ fi
 
 # The first non-zero cargo status is returned as is (101 from the first
 # invocation, 102 from the second), never a substituted condition status.
-for case_ in fail:101 fail-first:101 fail-second:102 fail-both:101; do
+# A cargo failure also wins over a failing admission check (no admission line
+# because the first invocation never ran its tests, or the line is missing).
+for case_ in fail:101 fail-first:101 fail-second:102 fail-both:101 \
+  fail-first-before-admission:101 fail-second-no-admission:102; do
   mode="${case_%%:*}"
   expected="${case_##*:}"
   status=0
@@ -236,8 +254,12 @@ if run_runner duplicate >/dev/null 2>&1; then
   exit 1
 fi
 
-if run_runner missing >/dev/null 2>&1; then
-  echo "expected runner failure when admission test is absent" >&2
+# Both cargo invocations succeed but the admission line is missing: the
+# admission check alone fails the runner, with its own status (1).
+status=0
+run_runner missing >/dev/null 2>&1 || status=$?
+if [[ "$status" -ne 1 ]]; then
+  echo "expected admission check failure (1) when admission test is absent, got ${status}" >&2
   exit 1
 fi
 
