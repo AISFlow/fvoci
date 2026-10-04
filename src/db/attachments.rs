@@ -1880,6 +1880,16 @@ pub(crate) struct AttachmentObjectCleanup {
     pub(crate) storage_key: String,
 }
 
+/// Only the caller can establish that rows are currently doomed under this
+/// same writer. A stale upload excludes its original only; a validated doomed
+/// full-row set excludes both keys, never every row in a workspace.
+#[derive(Clone, Copy)]
+pub(crate) enum AttachmentCleanupReferenceExclusion<'a> {
+    None,
+    StaleOriginal(Uuid),
+    DoomedRows(&'a [Uuid]),
+}
+
 impl crate::db::backend::OperationTx<'_, '_> {
     fn attachment_cleanup_global_family(
         &mut self,
@@ -1959,6 +1969,37 @@ impl crate::db::backend::OperationTx<'_, '_> {
     ) -> Result<bool, sqlx::Error> {
         let tx = self.attachment_cleanup_tenant_family(workspace)?;
         let rows=tx.query("SELECT EXISTS(SELECT 1 FROM attachments WHERE workspace_id=?1 AND (storage_key=?2 OR json_extract(variants,'$.preview.key')=?2))", &[crate::db::codec::Cell::uuid(workspace),crate::db::codec::Cell::text(key)]).await?;
+        rows[0].cell(0)?.boolean()
+    }
+
+    /// Opaque physical-key safety across tenants, on the caller's existing
+    /// family writer. No foreign row or broader tenant authority is returned.
+    /// DoomedRows must already be validated by the caller on this same writer.
+    pub(crate) async fn attachment_cleanup_key_referenced_globally(
+        &mut self,
+        workspace: Uuid,
+        key: &str,
+        exclusion: AttachmentCleanupReferenceExclusion<'_>,
+    ) -> Result<bool, sqlx::Error> {
+        let tx = self.attachment_cleanup_tenant_family(workspace)?;
+        let rows = match exclusion {
+            AttachmentCleanupReferenceExclusion::None => tx.query(
+                "SELECT EXISTS(SELECT 1 FROM attachments WHERE storage_key=?1 OR json_extract(variants,'$.preview.key')=?1)",
+                &[Cell::text(key)],
+            ).await?,
+            AttachmentCleanupReferenceExclusion::StaleOriginal(id) => tx.query(
+                "SELECT EXISTS(SELECT 1 FROM attachments WHERE (storage_key=?1 AND NOT(workspace_id=?2 AND id=?3)) OR json_extract(variants,'$.preview.key')=?1)",
+                &[Cell::text(key), Cell::uuid(workspace), Cell::uuid(id)],
+            ).await?,
+            AttachmentCleanupReferenceExclusion::DoomedRows(ids) => {
+                let ids = serde_json::to_string(&ids.iter().map(|id| id.simple().to_string()).collect::<Vec<_>>())
+                    .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+                tx.query(
+                    "SELECT EXISTS(SELECT 1 FROM attachments WHERE NOT(workspace_id=?2 AND lower(hex(id)) IN (SELECT value FROM json_each(?3))) AND (storage_key=?1 OR json_extract(variants,'$.preview.key')=?1))",
+                    &[Cell::text(key), Cell::uuid(workspace), Cell::text(ids)],
+                ).await?
+            }
+        };
         rows[0].cell(0)?.boolean()
     }
 
@@ -2175,10 +2216,18 @@ async fn reclaim_attachment_object_owned_borrowed(
     if !op.attachment_cleanup_journal_current(row).await? {
         return Ok(CleanupDisposition::Reclaimed);
     }
-    if op
-        .attachment_cleanup_key_referenced(row.workspace_id, &row.storage_key)
+    let referenced = if owner.is_some() {
+        op.attachment_cleanup_key_referenced_globally(
+            row.workspace_id,
+            &row.storage_key,
+            AttachmentCleanupReferenceExclusion::None,
+        )
         .await?
-    {
+    } else {
+        op.attachment_cleanup_key_referenced(row.workspace_id, &row.storage_key)
+            .await?
+    };
+    if referenced {
         guard_upload_maintenance(op, owner, cancel).await?;
         op.remove_attachment_cleanup_journal(row).await?;
         return Ok(CleanupDisposition::Reclaimed);
@@ -6682,6 +6731,17 @@ async fn gc_stale_upload_borrowed(
     else {
         return Ok(false);
     };
+    if owner.is_some()
+        && op
+            .attachment_cleanup_key_referenced_globally(
+                workspace,
+                &key,
+                AttachmentCleanupReferenceExclusion::StaleOriginal(attachment),
+            )
+            .await?
+    {
+        return Ok(false);
+    }
     #[cfg(test)]
     cleanup_test_hooks::wait(attachment, 0).await;
     if cancel.is_cancelled() {
@@ -6865,6 +6925,75 @@ pub(crate) enum ImportAttachmentError {
     Attachment(AttachmentDbError),
     Fenced,
     Cancelled,
+}
+
+/// Retained concrete primary refusal inside the shared backend rollback stop.
+#[derive(Debug)]
+pub(crate) enum ImportAttachmentRollbackReason {
+    Domain(ImportAttachmentError),
+    Driver(sqlx::Error),
+    KnownStoredReplay,
+}
+impl std::fmt::Display for ImportAttachmentRollbackReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Domain(error) => write!(f, "import attachment refused: {error:?}"),
+            Self::Driver(error) => write!(f, "import attachment driver refused: {error}"),
+            Self::KnownStoredReplay => f.write_str("known stored import attachment replay"),
+        }
+    }
+}
+impl std::error::Error for ImportAttachmentRollbackReason {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Driver(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+async fn rollback_import_attachment(
+    tx: crate::db::backend::DbTransaction<'_>,
+    primary: ImportAttachmentRollbackReason,
+    #[allow(unused_variables)] test_key: (Uuid, bool),
+) -> Result<ImportAttachmentRollbackReason, sqlx::Error> {
+    let settled = tx.rollback().await;
+    // Synthetic propagation-only fault AFTER the actual awaited rollback.
+    // This does not simulate or prove provider rollback loss or Drop safety.
+    #[cfg(test)]
+    let settled = import_rollback_test_hooks::after_actual_rollback(test_key, settled);
+    match settled {
+        Ok(()) => Ok(primary),
+        Err(cleanup) => Err(crate::db::backend::rollback_cleanup_unknown(
+            Some(Box::new(primary)),
+            cleanup,
+        )),
+    }
+}
+
+#[cfg(test)]
+mod import_rollback_test_hooks {
+    use std::collections::HashSet;
+    use std::sync::{LazyLock, Mutex};
+    use uuid::Uuid;
+    static FAULTS: LazyLock<Mutex<HashSet<(Uuid, bool)>>> =
+        LazyLock::new(|| Mutex::new(HashSet::new()));
+    pub(super) fn arm(key: (Uuid, bool)) {
+        assert!(FAULTS.lock().unwrap().insert(key));
+    }
+    pub(super) fn after_actual_rollback(
+        key: (Uuid, bool),
+        actual: Result<(), sqlx::Error>,
+    ) -> Result<(), sqlx::Error> {
+        actual?;
+        if FAULTS.lock().unwrap().remove(&key) {
+            return Err(sqlx::Error::Protocol(
+                "synthetic import cleanup fault after actual awaited rollback; propagation only"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl OperationTx<'_, '_> {
@@ -7096,15 +7225,36 @@ pub(crate) async fn create_import_attachment_backend(
             Ok(Ok((attachment, key)))
         }
         Ok(Ok(())) => {
-            tx.rollback().await?;
+            rollback_import_attachment(
+                tx,
+                ImportAttachmentRollbackReason::Domain(ImportAttachmentError::Cancelled),
+                (document, true),
+            )
+            .await?;
             Ok(Err(ImportAttachmentError::Cancelled))
         }
         Ok(Err(error)) => {
-            tx.rollback().await?;
+            let primary = rollback_import_attachment(
+                tx,
+                ImportAttachmentRollbackReason::Domain(error),
+                (document, true),
+            )
+            .await?;
+            let ImportAttachmentRollbackReason::Domain(error) = primary else {
+                unreachable!()
+            };
             Ok(Err(error))
         }
         Err(error) => {
-            tx.rollback().await?;
+            let primary = rollback_import_attachment(
+                tx,
+                ImportAttachmentRollbackReason::Driver(error),
+                (document, true),
+            )
+            .await?;
+            let ImportAttachmentRollbackReason::Driver(error) = primary else {
+                unreachable!()
+            };
             Err(error)
         }
     }
@@ -7313,23 +7463,54 @@ pub(crate) async fn mark_import_attachment_stored_backend(
             Ok(Ok(()))
         }
         Ok(Ok(_)) if cancel.is_cancelled() => {
-            tx.rollback().await?;
+            rollback_import_attachment(
+                tx,
+                ImportAttachmentRollbackReason::Domain(ImportAttachmentError::Cancelled),
+                (attachment, false),
+            )
+            .await?;
             Ok(Err(ImportAttachmentError::Cancelled))
         }
         Ok(Ok(false)) => {
-            tx.rollback().await?;
+            rollback_import_attachment(
+                tx,
+                ImportAttachmentRollbackReason::KnownStoredReplay,
+                (attachment, false),
+            )
+            .await?;
             Ok(Ok(()))
         }
         Ok(Ok(true)) => {
-            tx.rollback().await?;
+            rollback_import_attachment(
+                tx,
+                ImportAttachmentRollbackReason::Domain(ImportAttachmentError::Cancelled),
+                (attachment, false),
+            )
+            .await?;
             Ok(Err(ImportAttachmentError::Cancelled))
         }
         Ok(Err(error)) => {
-            tx.rollback().await?;
+            let primary = rollback_import_attachment(
+                tx,
+                ImportAttachmentRollbackReason::Domain(error),
+                (attachment, false),
+            )
+            .await?;
+            let ImportAttachmentRollbackReason::Domain(error) = primary else {
+                unreachable!()
+            };
             Ok(Err(error))
         }
         Err(error) => {
-            tx.rollback().await?;
+            let primary = rollback_import_attachment(
+                tx,
+                ImportAttachmentRollbackReason::Driver(error),
+                (attachment, false),
+            )
+            .await?;
+            let ImportAttachmentRollbackReason::Driver(error) = primary else {
+                unreachable!()
+            };
             Err(error)
         }
     }
@@ -8175,6 +8356,487 @@ mod upload_owned_adapter_tests {
         assert!(current.2 > Utc::now().timestamp_micros() + 55_000_000);
         claim.release().await.unwrap();
         other.close().await.unwrap();
+        f.close().await;
+    }
+
+    async fn live_other_attachment(
+        f: &Fixture,
+        s: &ObjectStorage,
+        preview: &str,
+    ) -> (Uuid, Uuid, String, Uuid) {
+        let workspace = Uuid::now_v7();
+        let document = Uuid::now_v7();
+        let id = Uuid::now_v7();
+        let key = Uuid::now_v7().to_string();
+        let credential = Uuid::now_v7();
+        sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES(?1,?2,'S18 real second tenant')")
+            .bind(workspace.as_bytes().as_slice())
+            .bind(workspace.to_string())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')")
+            .bind(workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,'S18 second tenant',?3,'V',1,'published',2,?4,'{\"type\":\"doc\",\"content\":[]}')")
+            .bind(document.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(document.simple().to_string()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO attachments(id,workspace_id,document_id,uploader_id,status,name,mime,size_bytes,reserved_size_bytes,storage_key,completed_at,variants) VALUES(?1,?2,?3,?4,'stored','other.txt','application/octet-stream',?5,?5,?6,1,json_object('preview',json_object('key',?7)))")
+            .bind(id.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(BYTES.len() as i64).bind(&key).bind(preview).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,9223372036854775807)")
+            .bind(credential.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(credential.to_string()).execute(&f.pool).await.unwrap();
+        s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+        (workspace, id, key, credential)
+    }
+
+    #[tokio::test]
+    async fn upload_owned_claimed_stale_other_tenant_preview_survives_and_orphan_progresses() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let other = second(&f).await;
+        let claim = acquired(&f, MaintenanceJobKey::Uploads, policy()).await;
+        let (id, key) = uploading(&f, &s).await;
+        let (workspace_b, id_b, original_b, credential) = live_other_attachment(&f, &s, &key).await;
+        let (orphan, orphan_key) = uploading(&f, &s).await;
+        let stats = crate::jobs::uploads::run_stale_upload_gc_claimed_backend(
+            &other,
+            &s,
+            Utc::now(),
+            None,
+            10,
+            &CancellationToken::new(),
+            claim.proof(),
+            policy(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((stats.claimed, stats.purged, stats.failed), (2, 1, 0));
+        assert_eq!(current(&f, id).await, ("uploading".into(), key.clone()));
+        literal(&s, &key).await;
+        literal(&s, &original_b).await;
+        let meta = get_attachment_meta_backend(&other, workspace_b, id_b, f.user, credential)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (meta.id, meta.storage_key, meta.status),
+            (id_b, original_b, "stored".into())
+        );
+        assert_eq!(meta.variants["preview"]["key"].as_str(), Some(key.as_str()));
+        assert_eq!(s.head(&orphan_key).await.unwrap(), None);
+        let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM attachments WHERE id=?1")
+            .bind(orphan.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0);
+        // The own-row preview also protects K; stale exclusion is original-only.
+        sqlx::query("UPDATE attachments SET variants=json_object('preview',json_object('key',storage_key)) WHERE id=?1")
+            .bind(id.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("UPDATE attachments SET variants='{}' WHERE id=?1")
+            .bind(id_b.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(!gc_stale_upload_row_claimed_backend(
+            &other,
+            &s,
+            f.workspace,
+            id,
+            claim.proof(),
+            policy(),
+            &CancellationToken::new()
+        )
+        .await
+        .unwrap());
+        literal(&s, &key).await;
+        claim.release().await.unwrap();
+        other.close().await.unwrap();
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn upload_owned_claimed_journal_other_tenant_original_preview_survive_and_orphan_drains()
+    {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let other = second(&f).await;
+        let claim = acquired(&f, MaintenanceJobKey::Uploads, policy()).await;
+        let preview = Uuid::now_v7().to_string();
+        s.put_bytes(&preview, BYTES.to_vec()).await.unwrap();
+        let (workspace_b, id_b, original_b, credential) =
+            live_other_attachment(&f, &s, &preview).await;
+        let preview_journal = journal(&f, Uuid::now_v7(), &preview).await;
+        let original_journal = journal(&f, Uuid::now_v7(), &original_b).await;
+        let orphan = Uuid::now_v7().to_string();
+        s.put_bytes(&orphan, BYTES.to_vec()).await.unwrap();
+        let orphan_journal = journal(&f, Uuid::now_v7(), &orphan).await;
+        let stats = reclaim_attachment_objects_claimed_backend(
+            &other,
+            &s,
+            None,
+            10,
+            claim.proof(),
+            policy(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (stats.claimed, stats.reclaimed, stats.busy, stats.failed),
+            (3, 3, 0, 0)
+        );
+        literal(&s, &preview).await;
+        literal(&s, &original_b).await;
+        assert_eq!(s.head(&orphan).await.unwrap(), None);
+        let meta = get_attachment_meta_backend(&other, workspace_b, id_b, f.user, credential)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(meta.storage_key, original_b);
+        assert_eq!(
+            meta.variants["preview"]["key"].as_str(),
+            Some(preview.as_str())
+        );
+        for row in [preview_journal, original_journal, orphan_journal] {
+            let remaining: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM attachment_object_cleanups WHERE id=?1")
+                    .bind(row.id.as_bytes().as_slice())
+                    .fetch_one(&f.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(remaining, 0);
+        }
+        claim.release().await.unwrap();
+        other.close().await.unwrap();
+        f.close().await;
+    }
+
+    fn rollback_stopped(error: &sqlx::Error) -> &ImportAttachmentRollbackReason {
+        assert!(crate::db::backend::is_rollback_cleanup_unknown(error));
+        let sqlx::Error::AnyDriverError(source) = error else {
+            panic!("shared rollback stop")
+        };
+        let stopped = source
+            .downcast_ref::<crate::db::backend::RollbackCleanupUnknown>()
+            .expect("single shared backend type");
+        assert!(
+            matches!(&stopped.cleanup, sqlx::Error::Protocol(message) if message == "synthetic import cleanup fault after actual awaited rollback; propagation only")
+        );
+        stopped
+            .original
+            .as_ref()
+            .unwrap()
+            .downcast_ref::<ImportAttachmentRollbackReason>()
+            .expect("concrete original domain/driver/replay")
+    }
+
+    // Normal checked/FK-valid rows, not fixture DDL or a fake driver error.
+    // 1025 legal JS-safe reservations overflow SQLite's actual integer SUM.
+    async fn overflow_reservations(f: &Fixture) {
+        sqlx::query("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<1025) INSERT INTO attachments(id,workspace_id,document_id,uploader_id,status,name,reserved_size_bytes,storage_key,upload_meta) SELECT randomblob(16),?1,?2,?3,'uploading','S18 finite overflow control',9007199254740991,lower(hex(randomblob(16))),'{}' FROM n")
+            .bind(f.workspace.as_bytes().as_slice()).bind(f.document.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+    }
+    async fn clear_overflow(f: &Fixture) {
+        let count = sqlx::query(
+            "DELETE FROM attachments WHERE workspace_id=?1 AND name='S18 finite overflow control'",
+        )
+        .bind(f.workspace.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap()
+        .rows_affected();
+        assert_eq!(count, 1025);
+    }
+    async fn import_refs(f: &Fixture, claim: &ImportClaim) -> String {
+        sqlx::query_scalar("SELECT created_refs FROM import_jobs WHERE id=?1")
+            .bind(claim.job_id.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn upload_owned_import_reserve_actual_rollback_primary_domain_driver_and_healthy() {
+        let f = Fixture::new().await;
+        let claim = import_claim(&f).await;
+        let refs = import_refs(&f, &claim).await;
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        import_rollback_test_hooks::arm((f.document, true));
+        let error = create_import_attachment_backend(
+            &f.backend,
+            &StorageQuota::Unlimited,
+            &claim,
+            f.document,
+            "literal.txt",
+            BYTES.len() as i64,
+            &cancelled,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            rollback_stopped(&error),
+            ImportAttachmentRollbackReason::Domain(ImportAttachmentError::Cancelled)
+        ));
+        assert_eq!(import_refs(&f, &claim).await, refs);
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM attachments")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        // A known rollback preserves its ordinary cancellation result.
+        assert!(matches!(
+            create_import_attachment_backend(
+                &f.backend,
+                &StorageQuota::Unlimited,
+                &claim,
+                f.document,
+                "literal.txt",
+                BYTES.len() as i64,
+                &cancelled
+            )
+            .await
+            .unwrap(),
+            Err(ImportAttachmentError::Cancelled)
+        ));
+        overflow_reservations(&f).await;
+        import_rollback_test_hooks::arm((f.document, true));
+        let error = create_import_attachment_backend(
+            &f.backend,
+            &StorageQuota::Unlimited,
+            &claim,
+            f.document,
+            "literal.txt",
+            BYTES.len() as i64,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        let ImportAttachmentRollbackReason::Driver(primary) = rollback_stopped(&error) else {
+            panic!("actual primary driver")
+        };
+        assert!(primary.as_database_error().is_some());
+        assert!(primary.to_string().contains("integer overflow"));
+        assert_eq!(import_refs(&f, &claim).await, refs);
+        clear_overflow(&f).await;
+        let s = storage(&f);
+        let (id, key) = reserve(&f, &claim).await;
+        s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+        finalize(&f, &s, &claim, id, &key, &CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(effects(&f, id).await, (1, 1));
+        literal(&s, &key).await;
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn upload_owned_import_finalize_actual_rollback_primary_domain_driver_replay_and_healthy()
+    {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let other = second(&f).await;
+        let claim = import_claim(&f).await;
+        let (id, key) = reserve(&f, &claim).await;
+        s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+        let refs = import_refs(&f, &claim).await;
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        import_rollback_test_hooks::arm((id, false));
+        let error = finalize(&f, &s, &claim, id, &key, &cancelled)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            rollback_stopped(&error),
+            ImportAttachmentRollbackReason::Domain(ImportAttachmentError::Cancelled)
+        ));
+        literal(&s, &key).await;
+        assert_eq!(current(&f, id).await, ("uploading".into(), key.clone()));
+        assert_eq!(effects(&f, id).await, (0, 0));
+        assert_eq!(import_refs(&f, &claim).await, refs);
+        assert!(matches!(
+            finalize(&f, &s, &claim, id, &key, &cancelled)
+                .await
+                .unwrap(),
+            Err(ImportAttachmentError::Cancelled)
+        ));
+        // Primary driver failure is the real maintained head ENOTDIR error.
+        let path = f.root.join("s18-owned-storage/objects").join(&key);
+        std::fs::remove_dir_all(&path).unwrap();
+        std::fs::write(&path, b"real finalize head ENOTDIR primary sentinel").unwrap();
+        import_rollback_test_hooks::arm((id, false));
+        let error = finalize(&f, &s, &claim, id, &key, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            rollback_stopped(&error),
+            ImportAttachmentRollbackReason::Driver(sqlx::Error::Io(_))
+        ));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"real finalize head ENOTDIR primary sentinel"
+        );
+        assert_eq!(current(&f, id).await, ("uploading".into(), key.clone()));
+        assert_eq!(effects(&f, id).await, (0, 0));
+        assert_eq!(import_refs(&f, &claim).await, refs);
+        std::fs::remove_file(&path).unwrap();
+        restore(&f, &key, BYTES);
+        finalize(&f, &s, &claim, id, &key, &CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(effects(&f, id).await, (1, 1));
+        import_rollback_test_hooks::arm((id, false));
+        let error = finalize(&f, &s, &claim, id, &key, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            rollback_stopped(&error),
+            ImportAttachmentRollbackReason::KnownStoredReplay
+        ));
+        assert_eq!(effects(&f, id).await, (1, 1));
+        assert_eq!(import_refs(&f, &claim).await, refs);
+        literal(&s, &key).await;
+        finalize(&f, &s, &claim, id, &key, &CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(effects(&f, id).await, (1, 1));
+        let fresh = get_attachment_meta_backend(&other, f.workspace, id, f.user, claim.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (fresh.id, fresh.storage_key, fresh.status),
+            (id, key.clone(), "stored".into())
+        );
+        literal(&s, &key).await;
+        other.close().await.unwrap();
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn upload_owned_global_reference_exact_doomed_rows_preserve_every_outside_scope() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let (doomed, key) = uploading(&f, &s).await;
+        let (outside, _) = f
+            .attachment(BYTES.len() as i64, "application/octet-stream")
+            .await;
+        let (workspace_b, id_b, original_b, _) = live_other_attachment(&f, &s, &key).await;
+        let exclusions = [doomed];
+        let mut read = f.backend.begin_read().await.unwrap();
+        read.operation().set_tenant(f.workspace).await.unwrap();
+        assert!(read
+            .operation()
+            .attachment_cleanup_key_referenced_globally(
+                f.workspace,
+                &key,
+                AttachmentCleanupReferenceExclusion::None
+            )
+            .await
+            .is_err());
+        read.rollback().await.unwrap();
+        let mut writer = f.backend.begin_write().await.unwrap();
+        let mut op = writer.operation();
+        op.set_tenant(f.workspace).await.unwrap();
+        assert!(op
+            .attachment_cleanup_key_referenced_globally(
+                f.workspace,
+                &key,
+                AttachmentCleanupReferenceExclusion::DoomedRows(&exclusions)
+            )
+            .await
+            .unwrap());
+        // Even explicit foreign IDs cannot confer an exclusion across tenants.
+        assert!(op
+            .attachment_cleanup_key_referenced_globally(
+                f.workspace,
+                &original_b,
+                AttachmentCleanupReferenceExclusion::DoomedRows(&[id_b])
+            )
+            .await
+            .unwrap());
+        assert!(op
+            .attachment_cleanup_key_referenced_globally(
+                workspace_b,
+                &key,
+                AttachmentCleanupReferenceExclusion::None
+            )
+            .await
+            .is_err());
+        drop(op);
+        writer.rollback().await.unwrap();
+        sqlx::query("UPDATE attachments SET variants='{}' WHERE id=?1")
+            .bind(id_b.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE attachments SET variants=json_object('preview',json_object('key',?2)) WHERE id=?1")
+            .bind(outside.as_bytes().as_slice()).bind(&key).execute(&f.pool).await.unwrap();
+        let mut writer = f.backend.begin_write().await.unwrap();
+        let mut op = writer.operation();
+        op.set_tenant(f.workspace).await.unwrap();
+        assert!(op
+            .attachment_cleanup_key_referenced_globally(
+                f.workspace,
+                &key,
+                AttachmentCleanupReferenceExclusion::DoomedRows(&exclusions)
+            )
+            .await
+            .unwrap());
+        drop(op);
+        writer.rollback().await.unwrap();
+        sqlx::query("UPDATE attachments SET variants='{}' WHERE id=?1")
+            .bind(outside.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE attachments SET variants=json_object('preview',json_object('key',storage_key)) WHERE id=?1")
+            .bind(doomed.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let mut writer = f.backend.begin_write().await.unwrap();
+        let mut op = writer.operation();
+        op.set_tenant(f.workspace).await.unwrap();
+        assert!(op
+            .attachment_cleanup_key_referenced_globally(
+                f.workspace,
+                &key,
+                AttachmentCleanupReferenceExclusion::StaleOriginal(doomed)
+            )
+            .await
+            .unwrap());
+        assert!(!op
+            .attachment_cleanup_key_referenced_globally(
+                f.workspace,
+                &key,
+                AttachmentCleanupReferenceExclusion::DoomedRows(&exclusions)
+            )
+            .await
+            .unwrap());
+        assert!(op
+            .attachment_cleanup_key_referenced_globally(
+                f.workspace,
+                &key,
+                AttachmentCleanupReferenceExclusion::DoomedRows(&[])
+            )
+            .await
+            .unwrap());
+        assert!(!op
+            .attachment_cleanup_key_referenced_globally(
+                f.workspace,
+                &Uuid::now_v7().to_string(),
+                AttachmentCleanupReferenceExclusion::None
+            )
+            .await
+            .unwrap());
+        drop(op);
+        writer.rollback().await.unwrap();
+        literal(&s, &key).await;
+        literal(&s, &original_b).await;
         f.close().await;
     }
 }
