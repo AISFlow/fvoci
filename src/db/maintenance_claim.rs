@@ -1,6 +1,8 @@
 //! Family global maintenance ownership. This record does not supply business
 //! authority, scheduled consumers, or fencing of remote storage/SMTP effects.
-use super::backend::{Backend, CommitCleanupUnknown, CommitUnknown, FamilyTx, OperationTx};
+use super::backend::{
+    Backend, CommitCleanupUnknown, CommitSettlement, CommitUnknown, FamilyTx, OperationTx,
+};
 use super::codec::Cell;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -135,7 +137,7 @@ impl FamilyMaintenanceClaimRequest {
         #[cfg(test)]
         test_hooks::commit_fault(&mut tx, self.owner, 0).await?;
         if let Err(unknown) = tx.commit_with_cleanup().await {
-            if unknown.cleanup_error.is_some() {
+            if !unknown.permits_reconciliation() {
                 return Err(unconfirmed(unknown, None));
             }
             match observe(backend, &prepared.proof).await {
@@ -175,6 +177,7 @@ pub enum MaintenanceClaimError {
     CommitUnknown {
         #[source]
         source: CommitUnknown,
+        settlement: CommitSettlement,
         cleanup_error: Option<sqlx::Error>,
         observation_error: Option<sqlx::Error>,
     },
@@ -185,6 +188,7 @@ fn unconfirmed(
 ) -> MaintenanceClaimError {
     MaintenanceClaimError::CommitUnknown {
         source: unknown.source,
+        settlement: unknown.settlement,
         cleanup_error: unknown.cleanup_error,
         observation_error,
     }
@@ -256,7 +260,7 @@ impl FamilyMaintenanceClaim {
         #[cfg(test)]
         test_hooks::commit_fault(&mut tx, self.proof.owner, if release { 2 } else { 1 }).await?;
         if let Err(unknown) = tx.commit_with_cleanup().await {
-            if unknown.cleanup_error.is_some() {
+            if !unknown.permits_reconciliation() {
                 return Err(unconfirmed(unknown, None));
             }
             match observe(&self.backend, &self.proof).await {
@@ -449,7 +453,9 @@ impl OperationTx<'_, '_> {
     }
 }
 
-/// Called after the failed remote finish's OWN cleanup receipt. Local SQLx
+/// Called only after confirmed settlement. Failed remote finishes currently
+/// retain explicit uncertainty (public SDK hides Close) and never call this.
+/// Local SQLx
 /// rollback is queued before connection reuse; this fresh reserved writer also
 /// waits for that work. No unbounded retry or effects during observation.
 async fn observe(
@@ -940,7 +946,7 @@ mod tests {
             _ => panic!("common entry must retain actual failed COMMIT"),
         };
         assert!(
-            matches!(&error, MaintenanceClaimError::CommitUnknown { source, cleanup_error: None, observation_error: None }
+            matches!(&error, MaintenanceClaimError::CommitUnknown { source, settlement: CommitSettlement::LocalWriterReconcile, cleanup_error: None, observation_error: None }
             if source.source.as_database_error().is_some())
         );
         assert_eq!(f.row(MaintenanceJobKey::Uploads).await, (None, 0, None));
