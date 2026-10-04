@@ -289,18 +289,6 @@ async fn setup_session(harness: &TestDb) -> (axum::Router, String, Uuid) {
     (app, cookie, user_id.0)
 }
 
-async fn reapply_app_grants(admin_url: &str, role_name: &str) {
-    let migration_pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(admin_url)
-        .await
-        .expect("connect for grants");
-    fvoci_server::db::migrate::apply_app_role_grants(&migration_pool, role_name)
-        .await
-        .expect("grant");
-    migration_pool.close().await;
-}
-
 async fn install_insert_fail_trigger(admin: &PgPool, target: &str, fn_name: &str) {
     sqlx::query(&format!(
         r#"
