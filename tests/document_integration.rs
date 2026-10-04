@@ -19,6 +19,9 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+#[path = "support/collab_projection.rs"]
+mod selected_room_support;
+
 const PEPPER: &str =
     r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
 
@@ -3071,22 +3074,279 @@ async fn selected_workspace_race_controls(
 
 #[tokio::test]
 async fn selected_backend_setup_cookie_wiki_command_readback() {
-    selected_backend_wiki_fixture(false, false, false).await;
+    selected_backend_wiki_fixture(false, false, false, false).await;
 }
 
 #[tokio::test]
 async fn selected_backend_native_append_fresh_child_readback() {
-    selected_backend_wiki_fixture(true, false, false).await;
+    selected_backend_wiki_fixture(true, false, false, false).await;
 }
 
 #[tokio::test]
 async fn selected_backend_workspace_current_membership_race() {
-    selected_backend_wiki_fixture(false, true, false).await;
+    selected_backend_wiki_fixture(false, true, false, false).await;
 }
 
 #[tokio::test]
 async fn selected_backend_native_compaction_receipt_readback() {
-    selected_backend_wiki_fixture(true, false, true).await;
+    selected_backend_wiki_fixture(true, false, true, false).await;
+}
+
+/// Real socket/actor/native helper receipt. The normal process + actual Vue
+/// browser tracer is still a separate required acceptance, not this test.
+#[tokio::test]
+async fn selected_backend_room_transport_persist_revision_readback() {
+    selected_backend_wiki_fixture(false, false, false, true).await;
+}
+
+async fn selected_room_transport_flow(
+    app: axum::Router,
+    hub: Arc<fvoci_server::collab::CollabHub>,
+    backend: &fvoci_server::db::backend::Backend,
+    path: &str,
+    document: &str,
+    workspace: &str,
+    cookie: &str,
+    engine: &std::path::Path,
+    content: &Value,
+    update: &[u8],
+) {
+    use futures_util::SinkExt;
+    use fvoci_server::collab::wire::{DocumentMessage, SyncMessage, SyncStep, WireFrame};
+    use selected_room_support as room;
+    use tokio_tungstenite::tungstenite::Message;
+    let server = room::spawn_server(app.clone(), hub.clone()).await;
+    let addr = server.addr;
+    let routing = format!("{workspace}:document:{document}");
+    let mut writer = room::connect_member(addr, cookie).await;
+    room::auth_and_join(&mut writer, &routing, 1701).await;
+    room::complete_sync_handshake(&mut writer, &routing).await;
+    writer
+        .send(Message::Binary(
+            room::sync_update_frame(&routing, update).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        room::wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
+        "{} actual actor must acknowledge native commit",
+        backend.kind()
+    );
+    let request = Uuid::now_v7();
+    writer
+        .send(Message::Binary(
+            room::stateless_frame(&routing, &format!("persist:{request}")).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        room::wait_for_stateless_exact(
+            &mut writer,
+            &format!("persisted:{request}"),
+            Duration::from_secs(5)
+        )
+        .await,
+        "{} exact persist request ACK is required",
+        backend.kind()
+    );
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{path}/{document}/body"),
+        None,
+        Some(cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body["contentJson"], content);
+    let revisions = format!("{path}/{document}/revisions");
+    let (status, created, _, _) =
+        json_request(app.clone(), "POST", &revisions, None, Some(cookie), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{} actual live manual revision {created}",
+        backend.kind()
+    );
+    let revision = created["id"].as_str().unwrap();
+    let (status, login, session, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/login",
+        Some(json!({"email":"admin@example.com","password":"supersecret1"})),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "fresh actor login: {login}");
+    let fresh_cookie = extract_session_cookie(session.as_ref().unwrap());
+    assert_ne!(fresh_cookie, cookie);
+    let mut fresh = room::connect_member(addr, &fresh_cookie).await;
+    room::auth_and_join(&mut fresh, &routing, 1702).await;
+    fresh
+        .send(Message::Binary(
+            room::sync_step1_frame(&routing, &[0]).into(),
+        ))
+        .await
+        .unwrap();
+    let mut native = None;
+    for _ in 0..16 {
+        match room::recv_document_frame(&mut fresh, 1)
+            .await
+            .expect("fresh socket frame")
+        {
+            WireFrame::Document {
+                message:
+                    DocumentMessage::Sync(SyncMessage {
+                        step: SyncStep::Step2,
+                        y_protocol,
+                    }),
+                ..
+            } => {
+                let (step, bytes) =
+                    fvoci_server::collab::y_sync::parse_sync_payload(&y_protocol, 4 * 1024 * 1024)
+                        .unwrap();
+                assert_eq!(step, SyncStep::Step2);
+                native = Some(bytes);
+                break;
+            }
+            WireFrame::Document {
+                message: DocumentMessage::SyncStatus { applied: false },
+                ..
+            } => panic!("fresh client native read refused"),
+            _ => {}
+        }
+    }
+    let native = native.expect("fresh client must receive native Step2 within bounded handshake");
+    let bin = engine.to_path_buf();
+    let projected = tokio::task::spawn_blocking(move || {
+        use collab_engine::outcome::EngineStatus;
+        use collab_engine::process::{ChildSlotKind, EngineSession, SpawnRequest};
+        use collab_engine::protocol::Request;
+        let mut child = EngineSession::spawn(SpawnRequest {
+            engine_bin: bin.clone(),
+            limits: collab_engine::Limits::default(),
+            slot_kind: ChildSlotKind::Primary,
+            slot_wait: None,
+            test_hang_ms: None,
+            test_exit_after_read: None,
+            test_close_stdout_hang_ms: None,
+            test_exit_after_write: None,
+        })
+        .unwrap();
+        let pid = child.pid().unwrap();
+        assert_eq!(
+            std::fs::read_link(format!("/proc/{pid}/exe")).unwrap(),
+            std::fs::canonicalize(&bin).unwrap()
+        );
+        assert!(child
+            .call(&Request::Load {
+                snapshot_b64: Some(native),
+                tail_b64: vec![],
+                encoding: 1
+            })
+            .outcome
+            .is_applied_ok());
+        let projected = match child.call(&Request::Project { encoding: 1 }).outcome {
+            EngineStatus::Ok {
+                content_json: Some(content),
+                ..
+            } => content,
+            outcome => panic!("fresh transport native projection {outcome:?}"),
+        };
+        child.kill_and_reap();
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+        eprintln!("selected_room_fresh_client_child pid={pid} reaped=true");
+        projected
+    })
+    .await
+    .unwrap();
+    assert_eq!(&projected, content);
+    let (status, meta, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{path}/{document}"),
+        None,
+        Some(&fresh_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(meta["id"], document);
+    let (status, detail, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{revisions}/{revision}"),
+        None,
+        Some(&fresh_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["id"], revision);
+    assert_eq!(detail["targetId"], document);
+    assert_eq!(detail["targetKind"], "document");
+    assert_eq!(detail["reason"], "manual");
+    assert_eq!(&detail["contentJson"], content);
+    assert!(
+        !collab_engine::b64::decode(detail["ySnapshot"].as_str().unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{path}/{document}/body"),
+        None,
+        Some(&fresh_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body["contentJson"], content);
+    let (status, _, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{}/documents/{document}/body",
+            Uuid::now_v7()
+        ),
+        None,
+        Some(&fresh_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    fresh.close(None).await.unwrap();
+    writer.close(None).await.unwrap();
+    drop(fresh);
+    drop(writer);
+    // Probe drains real socket lease drops before observing no remaining clients.
+    let key = fvoci_server::collab::room::RoomKey(
+        Uuid::parse_str(workspace).unwrap(),
+        Uuid::parse_str(document).unwrap(),
+        fvoci_server::collab::wire::CollabKind::Document,
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if hub.probe_actor(key).await.connections == 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "actual socket lease cleanup deadline"
+        );
+        tokio::task::yield_now().await;
+    }
+    let status = hub.shutdown().await;
+    assert!(
+        status.is_clean(),
+        "{} actual room cleanup {status:?}",
+        backend.kind()
+    );
+    server.shutdown().await.unwrap();
+    eprintln!("selected_room_transport backend={} actual_socket=true persist_ack={} manual_revision={} fresh_cookie=true fresh_native_body=true room_cleanup=true port={addr}",backend.kind(),request,revision);
 }
 
 async fn selected_compaction_effect_counts(
@@ -3122,6 +3382,7 @@ async fn selected_backend_wiki_fixture(
     with_native: bool,
     membership_races: bool,
     with_compaction: bool,
+    with_room: bool,
 ) {
     use fvoci_server::db::backend::Backend;
     async fn claim_native(
@@ -3192,7 +3453,7 @@ async fn selected_backend_wiki_fixture(
             }
         }
     }
-    let native_fixture = if with_native {
+    let native_fixture = if with_native || with_room {
         let engine_bin = std::path::PathBuf::from(
             std::env::var_os("FVOCI_COLLAB_ENGINE")
                 .expect("native fixture requires freshly built FVOCI_COLLAB_ENGINE"),
@@ -3252,7 +3513,24 @@ async fn selected_backend_wiki_fixture(
             }
             Backend::LibsqlRemote(_) => unreachable!("remote primary is a separate actual proof"),
         }
-        let state = app_state_backend(backend.clone()).await;
+        let mut state = app_state_backend(backend.clone()).await;
+        let room_hub = if with_room {
+            let config = selected_room_support::test_collab_config(2, 30_000);
+            let timings =
+                fvoci_server::collab::config::FamilyRoomTimings::new(30_000, 5_000).unwrap();
+            let hub = Arc::new(
+                fvoci_server::collab::CollabHub::new_backend(
+                    config,
+                    backend.clone(),
+                    Some(timings),
+                )
+                .unwrap(),
+            );
+            state.collab = Some(hub.clone());
+            Some(hub)
+        } else {
+            None
+        };
         let storage = state.storage.clone();
         let app = document_app(state);
         let (status, instance, _, _) =
@@ -3449,6 +3727,33 @@ async fn selected_backend_wiki_fixture(
             fvoci_server::db::documents::empty_document_json()
         );
         assert_eq!(body["version"], created["version"]);
+        if let Some(hub) = room_hub {
+            let (engine, content, update) = native_fixture.as_ref().unwrap();
+            selected_room_transport_flow(
+                app.clone(),
+                hub,
+                &backend,
+                &path,
+                document,
+                workspace,
+                &fresh_cookie,
+                engine,
+                content,
+                update,
+            )
+            .await;
+            drop(app);
+            let root = match &storage {
+                fvoci_server::attachments::ObjectStorage::Local(local) => {
+                    local.root().to_path_buf()
+                }
+                _ => unreachable!(),
+            };
+            drop(storage);
+            backend.close().await.unwrap();
+            std::fs::remove_dir_all(root).unwrap();
+            continue;
+        }
         // Exercise the existing native authorization/empty-only seed through
         // the real cookie identity and restricted selected-backend connection.
         // Room transport, persist ACK and revisions remain separate acceptance.

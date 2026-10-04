@@ -3,6 +3,7 @@ use sqlx::postgres::PgConnection;
 use sqlx::Postgres;
 use uuid::Uuid;
 
+use crate::collab::config::FamilyRoomTimings;
 use crate::db::backend::Backend;
 use crate::db::collab::COLLAB_ROOM_SESSION_LOCK_NAMESPACE;
 use crate::db::collab::{
@@ -10,7 +11,7 @@ use crate::db::collab::{
     append_family_document_room_update_timed, claim_writer_and_load_kind_backend,
     release_family_document_room, renew_family_document_room, AppendCollabInput,
     AppendCollabResult, ClaimWriterResult, CollabDbError, CollabDbStageTimings, CollabKind,
-    FamilyRoomFence,
+    FamilyRoomDeliveryFence, FamilyRoomFence,
 };
 use crate::db::context::lock_key_from_uuid;
 
@@ -91,7 +92,7 @@ pub(crate) enum BackendRoomGuard {
         original: FamilyRoomFence,
         current: FamilyRoomFence,
         writer_owner: Uuid,
-        lease: std::time::Duration,
+        timings: FamilyRoomTimings,
     },
 }
 
@@ -99,14 +100,35 @@ impl BackendRoomGuard {
     pub(crate) fn family(
         backend: Backend,
         fence: FamilyRoomFence,
-        lease: std::time::Duration,
+        timings: FamilyRoomTimings,
     ) -> Self {
         Self::Family {
             backend,
             original: fence,
             current: fence,
             writer_owner: Uuid::now_v7(),
-            lease,
+            timings,
+        }
+    }
+
+    pub(crate) fn delivery_fence(&self) -> Option<FamilyRoomDeliveryFence> {
+        match self {
+            Self::Postgres(_) => None,
+            Self::Family {
+                original,
+                writer_owner,
+                ..
+            } => Some(FamilyRoomDeliveryFence {
+                original: *original,
+                writer_owner: *writer_owner,
+            }),
+        }
+    }
+
+    pub(crate) fn renew_interval(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Postgres(_) => None,
+            Self::Family { timings, .. } => Some(timings.renew()),
         }
     }
 
@@ -199,12 +221,12 @@ impl BackendRoomGuard {
             original,
             current,
             writer_owner,
-            lease,
+            timings,
         } = self
         else {
             return Ok(true);
         };
-        if renew_family_document_room(backend, *current, *lease).await? {
+        if renew_family_document_room(backend, *current, timings.lease()).await? {
             return Ok(true);
         }
         let mut activated = *original;
@@ -212,7 +234,7 @@ impl BackendRoomGuard {
         if activated == *current {
             return Ok(false);
         }
-        if renew_family_document_room(backend, activated, *lease).await? {
+        if renew_family_document_room(backend, activated, timings.lease()).await? {
             *current = activated;
             return Ok(true);
         }

@@ -209,6 +209,15 @@ pub struct FamilyRoomFence {
     pub(crate) fence: i64,
 }
 
+/// Stable room lineage carried by the actor-issued socket lease. Activation
+/// rotates only the known owner token, retaining the same global fence. A
+/// successor or a purged/recreated document can never match this lineage.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FamilyRoomDeliveryFence {
+    pub(crate) original: FamilyRoomFence,
+    pub(crate) writer_owner: Uuid,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FamilyRoomClaim {
     pub fence: FamilyRoomFence,
@@ -1893,6 +1902,50 @@ pub async fn load_collab_readonly_kind_backend(
     Ok(result)
 }
 
+/// A room reload may seed missing legacy state, so family reloads keep the
+/// current room fence around the existing authorized operation and COMMIT.
+pub(crate) async fn load_room_collab_readonly(
+    backend: &Backend,
+    kind: CollabKind,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    resource: Uuid,
+    fence: Option<FamilyRoomFence>,
+) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
+    if matches!(backend, Backend::Postgres(_)) {
+        return load_collab_readonly_kind_backend(
+            backend, kind, workspace, actor, credential, resource,
+        )
+        .await;
+    }
+    let Some(fence) = fence else {
+        return Ok(Err(CollabDbError::StaleWriter));
+    };
+    if kind != CollabKind::Document
+        || fence.workspace_id != workspace
+        || fence.document_id != resource
+    {
+        return Ok(Err(CollabDbError::StaleWriter));
+    }
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(workspace).await?;
+    if !tx.operation().verify_family_room_fence(fence).await? {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::StaleWriter));
+    }
+    let result = tx
+        .operation()
+        .load_collab_native_readonly(kind, workspace, actor, credential, resource)
+        .await?;
+    if result.is_err() || !tx.operation().verify_family_room_fence(fence).await? {
+        tx.rollback().await?;
+        return Ok(result.and(Err(CollabDbError::StaleWriter)));
+    }
+    tx.commit().await.map_err(|unknown| unknown.source)?;
+    Ok(result)
+}
+
 pub async fn claim_writer_and_load(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -3182,6 +3235,59 @@ pub async fn estimate_persisted_collab_bytes_kind(
         Some((snapshot_len, tail_len)) => (snapshot_len + tail_len) as u64,
         None => 2,
     })
+}
+
+/// Current reader authority precedes the family estimate. This reads lengths
+/// before loading native bytes so the hub can reserve helper memory first.
+pub(crate) async fn estimate_family_document_bytes(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    document: Uuid,
+) -> Result<Result<u64, CollabDbError>, sqlx::Error> {
+    #[cfg(feature = "db-tests")]
+    if FORCE_ESTIMATE_FAIL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&document)
+    {
+        return Err(sqlx::Error::Protocol("forced estimate fail".into()));
+    }
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(workspace).await?;
+    if let Err(error) = tx
+        .operation()
+        .authorize_collab_read(
+            CollabKind::Document,
+            workspace,
+            actor,
+            credential,
+            document,
+            &mut CollabDbStageTimings::default(),
+        )
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(error));
+    }
+    let DbTransaction::SqliteFamily(family) = &mut tx else {
+        return Err(sqlx::Error::Protocol(
+            "family estimate requires family transaction".into(),
+        ));
+    };
+    let rows = family.query("SELECT length(ds.state),coalesce((SELECT sum(length(payload)) FROM document_collab_updates u WHERE u.workspace_id=ds.workspace_id AND u.document_id=ds.document_id AND u.seq>ds.snapshot_cutoff_seq),0) FROM document_states ds WHERE ds.workspace_id=?1 AND ds.document_id=?2", &[Cell::uuid(workspace),Cell::uuid(document)]).await?;
+    let bytes = match rows.first() {
+        Some(row) => row
+            .cell(0)?
+            .integer()?
+            .checked_add(row.cell(1)?.integer()?)
+            .and_then(|n| u64::try_from(n).ok())
+            .ok_or_else(|| sqlx::Error::Protocol("native size estimate overflow".into()))?,
+        None => 2,
+    };
+    tx.commit().await.map_err(|unknown| unknown.source)?;
+    Ok(Ok(bytes))
 }
 
 pub async fn project_derived_body(

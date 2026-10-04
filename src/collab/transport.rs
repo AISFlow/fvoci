@@ -23,8 +23,8 @@ use crate::collab::room::{
     JoinError, OutboundFrame, OutboundKind, RoomClientEvent, RoomJoin,
 };
 use crate::collab::wire::{AuthMessage, CollabRoomName, DocumentMessage, WireFrame};
-use crate::db::collab::resolve_collab_admission_kind;
-use crate::db::collab_delivery::{authorize_outbound_delivery_kind, OutboundDeliveryAuth};
+use crate::db::collab::resolve_collab_admission_kind_backend;
+use crate::db::collab_delivery::{authorize_outbound_delivery_kind_backend, OutboundDeliveryAuth};
 use crate::db::identity::find_live_session_backend;
 use crate::error::SESSION_COOKIE;
 use crate::http::state::AppState;
@@ -396,13 +396,14 @@ async fn handle_socket(
                                         }
                                         auth = tokio::time::timeout_at(
                                             deadline,
-                                            authorize_outbound_delivery_kind(
-                                                hub.pool(),
+                                            authorize_outbound_delivery_kind_backend(
+                                                hub.backend(),
                                                 kind,
                                                 workspace_id,
                                                 live.user_id,
                                                 live.session_id,
                                                 document_id,
+                                                connection_lease.as_ref().and_then(|lease| lease.family_room_delivery),
                                             ),
                                         ) => auth,
                                     };
@@ -856,8 +857,8 @@ async fn try_authenticate(
         }
     };
     let key = crate::collab::room::RoomKey(room.workspace_id, room.resource_id, room.kind);
-    let admission = match resolve_collab_admission_kind(
-        hub.pool(),
+    let admission = match resolve_collab_admission_kind_backend(
+        hub.backend(),
         room.kind,
         room.workspace_id,
         live.user_id,

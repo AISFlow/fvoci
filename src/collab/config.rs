@@ -106,6 +106,51 @@ pub struct CollabConfig {
     pub revision_session_snapshot: bool,
 }
 
+/// SQLite-family room timings must be chosen explicitly for the deployment.
+/// The local first tracer uses 30 s / 5 s; these are not remote service bounds.
+#[derive(Debug, Clone, Copy)]
+pub struct FamilyRoomTimings {
+    lease: std::time::Duration,
+    renew: std::time::Duration,
+}
+
+impl FamilyRoomTimings {
+    pub fn new(lease_ms: u64, renew_ms: u64) -> Result<Self, String> {
+        if renew_ms == 0
+            || lease_ms <= renew_ms
+            || i64::try_from(u128::from(lease_ms) * 1000).is_err()
+        {
+            return Err(
+                "family room timings require 0 < renew < lease and signed microseconds".into(),
+            );
+        }
+        Ok(Self {
+            lease: std::time::Duration::from_millis(lease_ms),
+            renew: std::time::Duration::from_millis(renew_ms),
+        })
+    }
+
+    pub fn from_env() -> Result<Self, String> {
+        fn required(name: &str) -> Result<u64, String> {
+            env::var(name)
+                .map_err(|_| format!("{name} is required for family rooms"))?
+                .parse()
+                .map_err(|_| format!("{name} must be an unsigned millisecond integer"))
+        }
+        Self::new(
+            required("FVOCI_COLLAB_FAMILY_LEASE_MS")?,
+            required("FVOCI_COLLAB_FAMILY_RENEW_MS")?,
+        )
+    }
+
+    pub(crate) fn lease(self) -> std::time::Duration {
+        self.lease
+    }
+    pub(crate) fn renew(self) -> std::time::Duration {
+        self.renew
+    }
+}
+
 fn parse_max_rooms(raw: Option<&str>) -> usize {
     raw.and_then(|v| v.trim().parse().ok())
         .unwrap_or(DEFAULT_MAX_ROOMS)
@@ -278,6 +323,20 @@ pub fn require_collab_engine_for_tests() -> PathBuf {
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[test]
+    fn family_room_timings_reject_unbounded_or_nonpositive_renewal() {
+        assert!(FamilyRoomTimings::new(30_000, 5_000).is_ok());
+        for (lease, renew) in [
+            (0, 0),
+            (30_000, 0),
+            (5_000, 5_000),
+            (5_000, 30_000),
+            (u64::MAX, 1),
+        ] {
+            assert!(FamilyRoomTimings::new(lease, renew).is_err());
+        }
+    }
 
     #[test]
     fn derive_child_concurrency_includes_headroom() {

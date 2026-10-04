@@ -30,16 +30,18 @@ use crate::collab::derived_body::prepare_derived_body;
 use crate::collab::engine_bridge::{
     warn_engine_not_applied, BridgeError, EngineBridge, RecycleError,
 };
-use crate::collab::guard::RoomGuard;
+use crate::collab::guard::{BackendRoomGuard, RoomGuard};
 use crate::collab::revision::{capture_revision_offline, prepare_revision_text};
 use crate::collab::validation::{
     classify_admission_load, validate_recovery_bundle, validate_snapshot_only, BundleValidation,
     ValidateStageTimings,
 };
+use crate::db::backend::Backend;
 use crate::db::revisions::{
-    create_system_revision, latest_revision_y_snapshot, load_durable_collab_for_system,
-    lookup_restored_revision, CreateRevisionInput, RestoreRevisionAppend, RestoreRevisionInput,
-    RevisionDbError, RevisionTarget, SystemRevisionHead, SYSTEM_REVISION_HEAD_RETRIES,
+    create_system_revision_for_room_backend, latest_revision_y_snapshot_for_room_backend,
+    load_durable_collab_for_room_backend, lookup_restored_revision, CreateRevisionInput,
+    RestoreRevisionAppend, RestoreRevisionInput, RevisionDbError, RevisionTarget,
+    SystemRevisionHead, SYSTEM_REVISION_HEAD_RETRIES,
 };
 
 const MAX_REJECTED_CANDIDATES_PER_USER: usize = 8;
@@ -54,13 +56,13 @@ use crate::collab::wire::CollabKind;
 use crate::collab::wire::{encode, AuthMessage, DocumentMessage, SyncStep, WireFrame};
 use crate::collab::y_sync::{encode_sync_payload, is_empty_update, parse_sync_payload};
 use crate::db::collab::{
-    append_collab_restore_kind, append_collab_update_kind, append_collab_update_on_conn_timed,
-    claim_writer_and_load_kind, compact_collab_snapshot_kind, load_collab_readonly_kind,
-    project_derived_body_kind, resolve_collab_admission_kind, verify_collab_operation_kind,
-    AppendCollabInput, AppendCollabResult, CollabDbError, CompactCollabInput,
+    append_collab_restore_kind, compact_collab_snapshot_kind_backend, load_room_collab_readonly,
+    project_derived_body_kind_backend, resolve_collab_admission_kind_backend,
+    verify_collab_operation_kind_backend, AppendCollabInput, AppendCollabResult, ClaimWriterResult,
+    CollabDbError, CompactCollabInput, FamilyRoomDeliveryFence, FamilyRoomFence,
     ProjectDerivedBodyInput, ProjectDerivedBodyResult, VerifyCollabInput,
 };
-use crate::db::collab_delivery::{check_delivery_admission_kind, DeliveryAdmission};
+use crate::db::collab_delivery::{check_delivery_admission_kind_backend, DeliveryAdmission};
 use crate::db::identity::LiveSession;
 
 #[cfg(feature = "db-tests")]
@@ -773,6 +775,7 @@ pub struct RoomJoin {
 pub struct ConnectionLease {
     pub conn_id: Uuid,
     _hold: oneshot::Sender<Infallible>,
+    pub(crate) family_room_delivery: Option<FamilyRoomDeliveryFence>,
 }
 
 struct JoinAdmission {
@@ -1194,9 +1197,9 @@ struct RoomActor {
     document_id: Uuid,
     kind: CollabKind,
     config: CollabConfig,
-    pool: PgPool,
+    backend: Backend,
     engine: EngineBridge,
-    room_guard: Option<RoomGuard>,
+    room_guard: Option<BackendRoomGuard>,
     writer_generation: Option<i64>,
     committed: CommittedBundle,
     connections: HashMap<Uuid, ConnectionState>,
@@ -1244,21 +1247,49 @@ pub async fn spawn_room(
     live_conns: Arc<AtomicUsize>,
     admission_reservation: MemoryReservation,
 ) -> Result<(RoomHandle, oneshot::Receiver<()>), JoinError> {
+    spawn_room_backend(
+        key,
+        config,
+        Backend::Postgres(pool),
+        BackendRoomGuard::Postgres(room_guard),
+        None,
+        live_conns,
+        admission_reservation,
+    )
+    .await
+}
+
+pub(crate) async fn spawn_room_backend(
+    key: RoomKey,
+    config: CollabConfig,
+    backend: Backend,
+    room_guard: BackendRoomGuard,
+    initial_load: Option<crate::db::collab::CollabLoadState>,
+    live_conns: Arc<AtomicUsize>,
+    admission_reservation: MemoryReservation,
+) -> Result<(RoomHandle, oneshot::Receiver<()>), JoinError> {
     let RoomKey(workspace_id, document_id, kind) = key;
     wait_spawn_room_block(document_id).await;
     // Starts only the bridge thread (it fails only if the OS refuses a thread);
     // the helper spawns on the actor's first reload.
-    let engine = EngineBridge::spawn(config.engine_bin.clone(), config.limits)
-        .map_err(|_| JoinError::EngineUnavailable)?;
+    let engine = match EngineBridge::spawn(config.engine_bin.clone(), config.limits) {
+        Ok(engine) => engine,
+        Err(_) => {
+            if let Err(error) = room_guard.release().await {
+                tracing::error!(%document_id, %error, "room startup guard cleanup failed");
+            }
+            return Err(JoinError::EngineUnavailable);
+        }
+    };
     let (tx, mut rx) = mpsc::channel(config.max_queued_room_ops);
     let (session_cancel_tx, session_cancel_rx) = watch::channel(false);
     let (finished_tx, finished_rx) = oneshot::channel();
-    let actor = RoomActor {
+    let mut actor = RoomActor {
         workspace_id,
         document_id,
         kind,
         config,
-        pool,
+        backend,
         engine,
         room_guard: Some(room_guard),
         writer_generation: None,
@@ -1288,6 +1319,9 @@ pub async fn spawn_room(
         session_revision: None,
         admission_reservation: Some(admission_reservation),
     };
+    if let Some(load) = initial_load {
+        actor.set_committed_from_load(&load);
+    }
     tokio::spawn(async move {
         let mut actor = actor;
         let document_id = actor.document_id;
@@ -1409,6 +1443,13 @@ impl RoomActor {
     async fn run_loop(&mut self, rx: &mut mpsc::Receiver<RoomCommand>) -> RoomExit {
         let mut acl_tick = tokio::time::interval(Duration::from_millis(self.config.revoke_poll_ms));
         acl_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let renew_interval = self
+            .room_guard
+            .as_ref()
+            .and_then(BackendRoomGuard::renew_interval);
+        let mut renew_tick =
+            tokio::time::interval(renew_interval.unwrap_or(Duration::from_secs(1)));
+        renew_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             #[cfg(feature = "db-tests")]
             if consume_lease_drop_priority(self.document_id).await {
@@ -1508,6 +1549,13 @@ impl RoomActor {
                 _ = acl_tick.tick() => {
                     self.poll_acl().await;
                 }
+                _ = renew_tick.tick(), if renew_interval.is_some() && !self.fence_lost => {
+                    let renewed = if let Some(guard) = self.room_guard.as_mut() {
+                        matches!(tokio::time::timeout(Duration::from_millis(self.config.rpc_timeout_ms),
+                            guard.renew()).await, Ok(Ok(true)))
+                    } else { false };
+                    if !renewed { self.fatal_fence_lost().await; }
+                }
             }
             self.finish_pending_lease_drops().await;
             self.publish_live_conns();
@@ -1553,11 +1601,18 @@ impl RoomActor {
         #[cfg(feature = "db-tests")]
         pause_before_guard_release(self.document_id).await;
 
-        if let Some(guard) = self.room_guard.take() {
-            guard.release().await;
-        }
+        let guard_clean = match self.room_guard.take() {
+            Some(guard) => match guard.release().await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::error!(%error, document_id=%self.document_id, "room guard cleanup failed");
+                    false
+                }
+            },
+            None => !self.fence_lost,
+        };
 
-        matches!(exit, RoomExit::Clean) && engine_stop_ok
+        matches!(exit, RoomExit::Clean) && engine_stop_ok && guard_clean
     }
 
     /// Called on every tick of the room's `revoke_poll_ms` interval (the only
@@ -1571,13 +1626,14 @@ impl RoomActor {
             .map(|(id, c)| (*id, c.session.clone(), c.read_only))
             .collect::<Vec<_>>();
         for (conn_id, session, read_only) in snapshots {
-            match check_delivery_admission_kind(
-                &self.pool,
+            match check_delivery_admission_kind_backend(
+                &self.backend,
                 self.kind,
                 self.workspace_id,
                 session.user_id,
                 session.session_id,
                 self.document_id,
+                self.delivery_fence(),
             )
             .await
             {
@@ -1609,8 +1665,8 @@ impl RoomActor {
         session_id: Uuid,
         read_only: bool,
     ) -> LockingAuth {
-        match resolve_collab_admission_kind(
-            &self.pool,
+        match resolve_collab_admission_kind_backend(
+            &self.backend,
             self.kind,
             self.workspace_id,
             user_id,
@@ -1705,10 +1761,14 @@ impl RoomActor {
     async fn capture_committed_revision_primary(
         &mut self,
     ) -> Result<CapturedRevision, RevisionCaptureError> {
-        let durable =
-            load_durable_collab_for_system(&self.pool, self.workspace_id, self.revision_target())
-                .await
-                .map_err(|_| RevisionCaptureError::Unavailable)?;
+        let durable = load_durable_collab_for_room_backend(
+            &self.backend,
+            self.workspace_id,
+            self.revision_target(),
+            self.family_fence(),
+        )
+        .await
+        .map_err(|_| RevisionCaptureError::Unavailable)?;
         let durable = durable.map_err(|_| RevisionCaptureError::Unavailable)?;
         self.committed.snapshot = durable.snapshot;
         self.committed.tail_payloads = durable.tail;
@@ -1821,7 +1881,8 @@ impl RoomActor {
         };
         let workspace_id = self.workspace_id;
         let target = self.revision_target();
-        let pool = self.pool.clone();
+        let backend = self.backend.clone();
+        let room_fence = self.family_fence();
 
         if work.captured.is_none() {
             match self.capture_committed_revision_primary().await {
@@ -1845,7 +1906,14 @@ impl RoomActor {
             return true;
         }
 
-        let latest = match latest_revision_y_snapshot(&pool, workspace_id, target).await {
+        let latest = match latest_revision_y_snapshot_for_room_backend(
+            &backend,
+            workspace_id,
+            target,
+            room_fence,
+        )
+        .await
+        {
             Ok(row) => row,
             Err(err) => {
                 tracing::warn!(
@@ -1918,13 +1986,14 @@ impl RoomActor {
             self.abort_session_revision_work();
             return true;
         }
-        let done = match create_system_revision(
-            &pool,
+        let done = match create_system_revision_for_room_backend(
+            &backend,
             workspace_id,
             target,
             input,
             work.writer_generation,
             head_fence,
+            room_fence,
         )
         .await
         {
@@ -2007,6 +2076,38 @@ impl RoomActor {
         }
     }
 
+    fn family_fence(&self) -> Option<FamilyRoomFence> {
+        self.room_guard
+            .as_ref()
+            .and_then(BackendRoomGuard::family_fence)
+    }
+
+    fn delivery_fence(&self) -> Option<FamilyRoomDeliveryFence> {
+        self.room_guard
+            .as_ref()
+            .and_then(BackendRoomGuard::delivery_fence)
+    }
+
+    async fn claim_writer(
+        &mut self,
+        actor: Uuid,
+        credential: Uuid,
+    ) -> Result<Result<ClaimWriterResult, CollabDbError>, sqlx::Error> {
+        let Some(guard) = self.room_guard.as_mut() else {
+            return Ok(Err(CollabDbError::StaleWriter));
+        };
+        guard
+            .claim_writer(
+                &self.backend,
+                self.kind,
+                self.workspace_id,
+                actor,
+                credential,
+                self.document_id,
+            )
+            .await
+    }
+
     async fn handle_join(&mut self, join: RoomJoin) -> Result<JoinAdmission, JoinError> {
         if self.fence_lost {
             return Err(JoinError::EngineUnavailable);
@@ -2016,8 +2117,8 @@ impl RoomActor {
         if self.connections.len() >= self.config.max_connections_per_room {
             return Err(JoinError::RoomFull);
         }
-        let admission = resolve_collab_admission_kind(
-            &self.pool,
+        let admission = resolve_collab_admission_kind_backend(
+            &self.backend,
             self.kind,
             self.workspace_id,
             join.conn.session.user_id,
@@ -2037,24 +2138,18 @@ impl RoomActor {
         let admission = admission.map_err(|_| JoinError::AdmissionDenied)?;
         let read_only = join.conn.read_only || admission.read_only;
         if self.writer_generation.is_none() && !read_only {
-            let claim = claim_writer_and_load_kind(
-                &self.pool,
-                self.kind,
-                self.workspace_id,
-                join.conn.session.user_id,
-                join.conn.session.session_id,
-                self.document_id,
-            )
-            .await
-            .map_err(|err| {
-                warn_join_db_error(
-                    "room.handle_join.claim_writer",
-                    self.workspace_id,
-                    self.document_id,
-                    &err,
-                );
-                JoinError::DbError
-            })?;
+            let claim = self
+                .claim_writer(join.conn.session.user_id, join.conn.session.session_id)
+                .await
+                .map_err(|err| {
+                    warn_join_db_error(
+                        "room.handle_join.claim_writer",
+                        self.workspace_id,
+                        self.document_id,
+                        &err,
+                    );
+                    JoinError::DbError
+                })?;
             let claim = claim.map_err(|e| match e {
                 CollabDbError::StaleWriter => JoinError::WriterStale,
                 _ => JoinError::AdmissionDenied,
@@ -2067,13 +2162,14 @@ impl RoomActor {
             }
             self.writer_generation = Some(claim.writer_generation);
         } else if self.writer_generation.is_none() && read_only {
-            let load = load_collab_readonly_kind(
-                &self.pool,
+            let load = load_room_collab_readonly(
+                &self.backend,
                 self.kind,
                 self.workspace_id,
                 join.conn.session.user_id,
                 join.conn.session.session_id,
                 self.document_id,
+                self.family_fence(),
             )
             .await
             .map_err(|err| {
@@ -2172,6 +2268,7 @@ impl RoomActor {
             lease: ConnectionLease {
                 conn_id,
                 _hold: lease_tx,
+                family_room_delivery: self.delivery_fence(),
             },
             drop_rx,
             conn_generation,
@@ -2197,7 +2294,12 @@ impl RoomActor {
         self.writer_generation = None;
         self.primary_loaded = false;
         self.primary_dirty = true;
-        self.room_guard = None;
+        if let Some(guard) = self.room_guard.take() {
+            if let Err(error) = guard.release().await {
+                tracing::error!(%error, document_id=%self.document_id, "lost room guard cleanup failed");
+            }
+        }
+        self.abort_session_revision_work();
         self.close_all_connections(1013, "try again later").await;
     }
 
@@ -2357,13 +2459,14 @@ impl RoomActor {
                     self.close_connection(conn_id, 1008, "invalid room").await;
                     return;
                 }
-                match check_delivery_admission_kind(
-                    &self.pool,
+                match check_delivery_admission_kind_backend(
+                    &self.backend,
                     self.kind,
                     self.workspace_id,
                     session.user_id,
                     session.session_id,
                     self.document_id,
+                    self.delivery_fence(),
                 )
                 .await
                 {
@@ -2430,13 +2533,14 @@ impl RoomActor {
                     .await;
             }
             DocumentMessage::Awareness(payload) => {
-                match check_delivery_admission_kind(
-                    &self.pool,
+                match check_delivery_admission_kind_backend(
+                    &self.backend,
                     self.kind,
                     self.workspace_id,
                     session.user_id,
                     session.session_id,
                     self.document_id,
+                    self.delivery_fence(),
                 )
                 .await
                 {
@@ -2680,7 +2784,6 @@ impl RoomActor {
                     self.fatal_fence_lost().await;
                     return;
                 };
-                let room_conn = room_guard.connection_mut();
 
                 #[cfg(feature = "db-tests")]
                 pause_for_append_in_tx_reject_barrier(self.document_id).await;
@@ -2689,22 +2792,22 @@ impl RoomActor {
                 let expected_tail = self.committed.tail_seq;
                 let digest = payload_digest(&payload);
                 let append_started = std::time::Instant::now();
-                let timed_append = append_collab_update_on_conn_timed(
-                    room_conn,
-                    self.kind,
-                    AppendCollabInput {
-                        workspace_id: self.workspace_id,
-                        actor_user_id,
-                        session_id,
-                        document_id: self.document_id,
-                        writer_generation,
-                        expected_tail_seq: expected_tail,
-                        op_id,
-                        payload: &payload,
-                        client_ip: None,
-                    },
-                )
-                .await;
+                let timed_append = room_guard
+                    .append(
+                        self.kind,
+                        AppendCollabInput {
+                            workspace_id: self.workspace_id,
+                            actor_user_id,
+                            session_id,
+                            document_id: self.document_id,
+                            writer_generation,
+                            expected_tail_seq: expected_tail,
+                            op_id,
+                            payload: &payload,
+                            client_ip: None,
+                        },
+                    )
+                    .await;
                 let append_tx = timed_append
                     .as_ref()
                     .ok()
@@ -2898,8 +3001,8 @@ impl RoomActor {
         payload: &[u8],
         digest: &[u8],
     ) -> Option<AppendCollabResult> {
-        match verify_collab_operation_kind(
-            &self.pool,
+        match verify_collab_operation_kind_backend(
+            &self.backend,
             self.kind,
             VerifyCollabInput {
                 workspace_id: self.workspace_id,
@@ -2916,13 +3019,14 @@ impl RoomActor {
         {
             Ok(Ok(lookup)) => Some(AppendCollabResult::DuplicateAck { seq: lookup.seq }),
             Ok(Err(CollabDbError::NotFound)) => {
-                match load_collab_readonly_kind(
-                    &self.pool,
+                match load_room_collab_readonly(
+                    &self.backend,
                     self.kind,
                     self.workspace_id,
                     actor_user_id,
                     session_id,
                     self.document_id,
+                    self.family_fence(),
                 )
                 .await
                 {
@@ -2968,13 +3072,14 @@ impl RoomActor {
     }
 
     async fn fatal_room_divergence(&mut self, actor_user_id: Uuid, session_id: Uuid) {
-        if let Ok(Ok(load)) = load_collab_readonly_kind(
-            &self.pool,
+        if let Ok(Ok(load)) = load_room_collab_readonly(
+            &self.backend,
             self.kind,
             self.workspace_id,
             actor_user_id,
             session_id,
             self.document_id,
+            self.family_fence(),
         )
         .await
         {
@@ -2989,13 +3094,14 @@ impl RoomActor {
     }
 
     async fn fatal_primary_unhealthy(&mut self, actor_user_id: Uuid, session_id: Uuid) {
-        if let Ok(Ok(load)) = load_collab_readonly_kind(
-            &self.pool,
+        if let Ok(Ok(load)) = load_room_collab_readonly(
+            &self.backend,
             self.kind,
             self.workspace_id,
             actor_user_id,
             session_id,
             self.document_id,
+            self.family_fence(),
         )
         .await
         {
@@ -3233,8 +3339,8 @@ impl RoomActor {
             }
         };
 
-        match project_derived_body_kind(
-            &self.pool,
+        match project_derived_body_kind_backend(
+            &self.backend,
             self.kind,
             ProjectDerivedBodyInput::new(
                 self.workspace_id,
@@ -3245,6 +3351,7 @@ impl RoomActor {
                 seq,
                 prepared,
             ),
+            self.family_fence(),
         )
         .await
         {
@@ -3625,8 +3732,8 @@ impl RoomActor {
         self.persist_step("validated", started);
         if let Some(writer_generation) = self.writer_generation {
             let cutoff = self.committed.tail_seq;
-            let compact = compact_collab_snapshot_kind(
-                &self.pool,
+            let compact = compact_collab_snapshot_kind_backend(
+                &self.backend,
                 self.kind,
                 CompactCollabInput {
                     workspace_id: self.workspace_id,
@@ -3639,6 +3746,7 @@ impl RoomActor {
                     new_snapshot: &snapshot,
                     client_ip: None,
                 },
+                self.family_fence(),
             )
             .await;
             self.persist_step("compacted", started);
@@ -3723,13 +3831,14 @@ impl RoomActor {
         // Without a writer generation nothing fences out-of-room appends
         // (import, a newer writer), so the committed tail may be behind.
         if !self.committed_loaded || self.writer_generation.is_none() {
-            let load = load_collab_readonly_kind(
-                &self.pool,
+            let load = load_room_collab_readonly(
+                &self.backend,
                 self.kind,
                 self.workspace_id,
                 actor_user_id,
                 session_id,
                 self.document_id,
+                self.family_fence(),
             )
             .await
             .map_err(|_| RevisionCaptureError::Unavailable)?;
@@ -3786,7 +3895,9 @@ impl RoomActor {
         // Recovery precedes the old tail comparison: our own committed restore
         // must not invalidate a response-loss retry of that exact operation.
         if let Some(restored) = lookup_restored_revision(
-            &self.pool,
+            self.backend
+                .postgres("native revision restore")
+                .map_err(|_| RevisionRestoreError::Unavailable)?,
             self.workspace_id,
             actor_user_id,
             session_id,
@@ -3917,16 +4028,10 @@ impl RoomActor {
         session_id: Uuid,
     ) -> Result<(), ForwardWriteError> {
         if self.writer_generation.is_none() {
-            let claim = claim_writer_and_load_kind(
-                &self.pool,
-                self.kind,
-                self.workspace_id,
-                actor_user_id,
-                session_id,
-                self.document_id,
-            )
-            .await
-            .map_err(|_| ForwardWriteError::Unavailable)?;
+            let claim = self
+                .claim_writer(actor_user_id, session_id)
+                .await
+                .map_err(|_| ForwardWriteError::Unavailable)?;
             let claim = claim.map_err(|err| match err {
                 CollabDbError::Forbidden | CollabDbError::NotFound => ForwardWriteError::Rejected,
                 _ => ForwardWriteError::Unavailable,
@@ -4047,13 +4152,19 @@ impl RoomActor {
             client_ip: None,
         };
         let append = if let Some(capture) = capture.as_ref() {
-            append_collab_restore_kind(&self.pool, self.kind, input, capture)
-                .await
-                .map(|result| result.map(|(append, revision_id)| (append, Some(revision_id))))
+            match self.backend.postgres("native revision restore") {
+                Ok(pool) => append_collab_restore_kind(pool, self.kind, input, capture).await,
+                Err(error) => Err(error),
+            }
+            .map(|result| result.map(|(append, revision_id)| (append, Some(revision_id))))
         } else {
-            append_collab_update_kind(&self.pool, self.kind, input)
-                .await
-                .map(|result| result.map(|append| (append, None)))
+            match self.room_guard.as_mut() {
+                Some(guard) => guard
+                    .append(self.kind, input)
+                    .await
+                    .map(|(result, _)| result.map(|append| (append, None))),
+                None => Ok(Err(CollabDbError::StaleWriter)),
+            }
         };
 
         let mut own_receipt_verified = false;
@@ -4102,13 +4213,14 @@ impl RoomActor {
             if let AppendCollabResult::DuplicateAck { seq } = committed {
                 // A concurrently recovered replay already owns its exact payload.
                 // Reload durable bytes; do not broadcast our speculative payload.
-                let load = load_collab_readonly_kind(
-                    &self.pool,
+                let load = load_room_collab_readonly(
+                    &self.backend,
                     self.kind,
                     self.workspace_id,
                     actor_user_id,
                     session_id,
                     self.document_id,
+                    self.family_fence(),
                 )
                 .await
                 .map_err(|_| ForwardWriteError::Unavailable)?
@@ -4154,7 +4266,9 @@ impl RoomActor {
                 // existing room read policy. It is not current write permission:
                 // a demoted/revoked actor must not receive restore success.
                 let recovered = lookup_restored_revision(
-                    &self.pool,
+                    self.backend
+                        .postgres("native revision restore")
+                        .map_err(|_| ForwardWriteError::Unavailable)?,
                     self.workspace_id,
                     actor_user_id,
                     session_id,
