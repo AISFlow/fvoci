@@ -1069,6 +1069,20 @@ fn cleanup_is_unconfirmed(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::AnyDriverError(source) if source.downcast_ref::<MigrationCleanupUnconfirmed>().is_some())
 }
 
+// A reference worker without a shutdown receipt remains unconfirmed even
+// when rollback of the separate preparation transaction also fails. Ordinary
+// validation errors retain the existing rollback-error precedence.
+fn sqlite_validation_error_after_rollback(
+    primary: sqlx::Error,
+    rollback: Result<(), sqlx::Error>,
+) -> sqlx::Error {
+    if cleanup_is_unconfirmed(&primary) {
+        primary
+    } else {
+        rollback.err().unwrap_or(primary)
+    }
+}
+
 fn start_sqlite_migration_owned(
     path: &std::path::Path,
     control: MigrationControl,
@@ -1223,8 +1237,10 @@ async fn apply_sqlite_migrations(
             }
             Ok(false) => tx.rollback().await?,
             Err(error) => {
-                tx.rollback().await?;
-                return Err(error);
+                return Err(sqlite_validation_error_after_rollback(
+                    error,
+                    tx.rollback().await,
+                ));
             }
         }
     }
@@ -1259,8 +1275,16 @@ pub async fn assert_sqlite_schema_current(
         })
     }
     .await;
-    tx.rollback().await?;
-    result
+    match result {
+        Ok(capability) => {
+            tx.rollback().await?;
+            Ok(capability)
+        }
+        Err(error) => Err(sqlite_validation_error_after_rollback(
+            error,
+            tx.rollback().await,
+        )),
+    }
 }
 
 fn verify_compiled_sqlite_digest(sql: &str, digest: &str) -> Result<(), sqlx::Error> {
@@ -1382,4 +1406,55 @@ async fn verify_sqlite_objects(
     let bytes = serde_json::to_vec(&(SQLITE_LINEAGE, steps, actual))
         .map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
     Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+#[cfg(test)]
+mod sqlite_rollback_tests {
+    use super::*;
+
+    fn unconfirmed_reference() -> sqlx::Error {
+        unconfirmed_migration_cleanup(schema_error("reference worker shutdown unconfirmed"))
+    }
+
+    #[test]
+    fn unconfirmed_primary_survives_failed_rollback() {
+        // The original rollback-first `?` loses the typed quarantine reason.
+        let legacy = Err::<(), _>(schema_error("rollback failed"))
+            .err()
+            .unwrap_or_else(unconfirmed_reference);
+        assert!(!cleanup_is_unconfirmed(&legacy));
+        let fixed = sqlite_validation_error_after_rollback(
+            unconfirmed_reference(),
+            Err(schema_error("rollback failed")),
+        );
+        assert!(cleanup_is_unconfirmed(&fixed));
+    }
+
+    #[test]
+    fn ordinary_primary_retains_failed_rollback_precedence() {
+        let fixed = sqlite_validation_error_after_rollback(
+            schema_error("schema validation failed"),
+            Err(schema_error("rollback failed")),
+        );
+        assert!(!cleanup_is_unconfirmed(&fixed));
+        assert_eq!(
+            fixed.to_string(),
+            schema_error("rollback failed").to_string()
+        );
+    }
+
+    #[test]
+    fn successful_rollback_retains_primary_classification() {
+        let unconfirmed = sqlite_validation_error_after_rollback(unconfirmed_reference(), Ok(()));
+        assert!(cleanup_is_unconfirmed(&unconfirmed));
+        let ordinary = sqlite_validation_error_after_rollback(
+            schema_error("schema validation failed"),
+            Ok(()),
+        );
+        assert!(!cleanup_is_unconfirmed(&ordinary));
+        assert_eq!(
+            ordinary.to_string(),
+            schema_error("schema validation failed").to_string()
+        );
+    }
 }
