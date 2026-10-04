@@ -82,3 +82,65 @@ impl Drop for JobClaim {
         }
     }
 }
+
+
+pub use crate::db::maintenance_claim::{
+    FamilyLeaseAction, FamilyMaintenanceClaim, FamilyMaintenanceClaimRequest,
+    FamilyMaintenanceLeasePolicy, FamilyMaintenanceProof, MaintenanceClaimError, MaintenanceJobKey,
+};
+
+/// Preserve PG dedicated-session lifetime; family holds only a durable proof
+/// between units. No scheduler/consumer is silently enabled by this adapter.
+pub enum GlobalJobClaim {
+    Postgres(JobClaim),
+    Family(FamilyMaintenanceClaim),
+}
+pub enum GlobalClaimAcquisition {
+    Acquired(GlobalJobClaim),
+    Busy,
+    Cancelled,
+}
+pub enum GlobalClaimRelease {
+    PostgresFinishAwaited,
+    Family(FamilyLeaseAction),
+}
+impl GlobalJobClaim {
+    pub async fn try_claim(
+        backend: &crate::db::backend::Backend,
+        key: MaintenanceJobKey,
+        family_policy: FamilyMaintenanceLeasePolicy,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<GlobalClaimAcquisition, MaintenanceClaimError> {
+        if cancel.is_cancelled() {
+            return Ok(GlobalClaimAcquisition::Cancelled);
+        }
+        if let crate::db::backend::Backend::Postgres(pool) = backend {
+            return Ok(match JobClaim::try_claim(pool, key as i32).await? {
+                Some(claim) => GlobalClaimAcquisition::Acquired(Self::Postgres(claim)),
+                None => GlobalClaimAcquisition::Busy,
+            });
+        }
+        use crate::db::maintenance_claim::FamilyClaimAcquisition;
+        Ok(
+            match FamilyMaintenanceClaimRequest::new(key)
+                .try_acquire(backend, family_policy, cancel)
+                .await?
+            {
+                FamilyClaimAcquisition::Acquired(claim) => {
+                    GlobalClaimAcquisition::Acquired(Self::Family(claim))
+                }
+                FamilyClaimAcquisition::Busy => GlobalClaimAcquisition::Busy,
+                FamilyClaimAcquisition::Cancelled => GlobalClaimAcquisition::Cancelled,
+            },
+        )
+    }
+    pub async fn release(self) -> Result<GlobalClaimRelease, MaintenanceClaimError> {
+        match self {
+            Self::Postgres(claim) => {
+                claim.release().await;
+                Ok(GlobalClaimRelease::PostgresFinishAwaited)
+            }
+            Self::Family(claim) => claim.release().await.map(GlobalClaimRelease::Family),
+        }
+    }
+}
