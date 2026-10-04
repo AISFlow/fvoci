@@ -530,13 +530,18 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             assert_eq!(gate.applied_steps, 3);
-            let count: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM sqlite_schema",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            assert_eq!(count, 254);
+            // The accepted full schema is commit254f3f2 + compiled001–003,
+            // not a numeric254 object inventory. The maintained gate above
+            // compares every canonical object name/type/definition and receipt.
+            let (total, user_objects): (i64, i64) =
+                sqlx::query_as("SELECT count(*),sum(name NOT GLOB 'sqlite_*') FROM sqlite_schema")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            println!(
+                "S31 prepared schema steps={} sha256={} catalog_total={} user_objects={}",
+                gate.applied_steps, gate.schema_sha256, total, user_objects
+            );
             let pin: (String,String,i64) = sqlx::query_as("SELECT sqlite_version(),sqlite_source_id(),(SELECT foreign_keys FROM pragma_foreign_keys)").fetch_one(&pool).await.unwrap();
             assert_eq!(
                 pin,
@@ -745,6 +750,20 @@ pub(crate) mod tests {
             .unwrap()
             .is_none());
         assert_eq!(before, f.row(id).await);
+        // No existing SQLite missing-object regression is present at this
+        // bounded base. Prove the maintained full gate rejects a real missing
+        // object, rather than accepting migration markers or a row-only model.
+        sqlx::query("DROP INDEX attachments_preview_pending_idx")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let invalid = crate::db::migrate::assert_sqlite_schema_current(&f.backend)
+            .await
+            .unwrap_err();
+        assert!(
+            invalid.to_string().contains("schema definitions differ"),
+            "{invalid}"
+        );
         f.close().await;
     }
 
