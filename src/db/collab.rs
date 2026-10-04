@@ -2616,61 +2616,74 @@ pub async fn verify_collab_operation_kind(
     kind: CollabKind,
     input: VerifyCollabInput<'_>,
 ) -> Result<Result<CollabOperationLookup, CollabDbError>, sqlx::Error> {
-    let t = CollabTables::for_kind(kind);
-    let VerifyCollabInput {
-        workspace_id,
-        actor_user_id,
-        session_id,
-        document_id,
-        op_id,
-        expected_payload_len,
-        expected_payload_sha256,
-        expected_actor_user_id,
-    } = input;
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    if let Err(err) = authorize_collab_read(
-        &mut tx,
-        kind,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        document_id,
-        &mut CollabDbStageTimings::default(),
-    )
-    .await?
-    {
-        tx.rollback().await?;
-        return Ok(Err(err));
+    verify_collab_operation_kind_backend(&Backend::Postgres(pool.clone()), kind, input).await
+}
+
+/// Reconcile an immutable receipt under current reader authority. A receipt
+/// never revives a revoked credential or grants access to its former actor.
+pub async fn verify_collab_operation_kind_backend(
+    backend: &Backend,
+    kind: CollabKind,
+    input: VerifyCollabInput<'_>,
+) -> Result<Result<CollabOperationLookup, CollabDbError>, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    let result = tx.operation().verify_native_operation(kind, input).await?;
+    match result {
+        Ok(receipt) => {
+            tx.commit().await.map_err(|unknown| unknown.source)?;
+            Ok(Ok(receipt))
+        }
+        Err(error) => {
+            tx.rollback().await?;
+            Ok(Err(error))
+        }
     }
-    let row: Option<(i64, i64, Vec<u8>, Uuid)> = sqlx::query_as(&t.sql(
-        r#"
-        SELECT seq, payload_len, payload_sha256, actor_user_id
-        FROM {receipts}
-        WHERE workspace_id = $1 AND {id} = $2 AND op_id = $3
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .bind(op_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    let Some((seq, payload_len, payload_sha256, stored_actor)) = row else {
-        return Ok(Err(CollabDbError::NotFound));
-    };
-    if payload_len != expected_payload_len
-        || payload_sha256.as_slice() != expected_payload_sha256
-        || stored_actor != expected_actor_user_id
-    {
-        return Ok(Err(CollabDbError::OpIdConflict));
+}
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn verify_native_operation(
+        &mut self,
+        kind: CollabKind,
+        input: VerifyCollabInput<'_>,
+    ) -> Result<Result<CollabOperationLookup, CollabDbError>, sqlx::Error> {
+        let VerifyCollabInput {
+            workspace_id,
+            actor_user_id,
+            session_id,
+            document_id,
+            op_id,
+            expected_payload_len,
+            expected_payload_sha256,
+            expected_actor_user_id,
+        } = input;
+        self.set_tenant(workspace_id).await?;
+        if let Err(error) = self
+            .authorize_collab_read(
+                kind,
+                workspace_id,
+                actor_user_id,
+                session_id,
+                document_id,
+                &mut CollabDbStageTimings::default(),
+            )
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        let Some(receipt) = self
+            .native_operation_receipt(kind, workspace_id, document_id, op_id)
+            .await?
+        else {
+            return Ok(Err(CollabDbError::NotFound));
+        };
+        if receipt.payload_len != expected_payload_len
+            || receipt.payload_sha256.as_slice() != expected_payload_sha256
+            || receipt.actor_user_id != expected_actor_user_id
+        {
+            return Ok(Err(CollabDbError::OpIdConflict));
+        }
+        Ok(Ok(receipt))
     }
-    Ok(Ok(CollabOperationLookup {
-        seq,
-        payload_len,
-        payload_sha256,
-        actor_user_id: stored_actor,
-    }))
 }
 
 pub async fn compact_collab_snapshot(
@@ -2685,218 +2698,285 @@ pub async fn compact_collab_snapshot_kind(
     kind: CollabKind,
     input: CompactCollabInput<'_>,
 ) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
-    let t = CollabTables::for_kind(kind);
-    let CompactCollabInput {
-        workspace_id,
-        actor_user_id,
-        session_id,
-        document_id,
-        writer_generation,
-        cutoff_seq,
-        expected_tail_seq,
-        new_snapshot,
-        client_ip,
-    } = input;
-    if new_snapshot.is_empty() || new_snapshot.len() > MAX_COLLAB_SNAPSHOT_BYTES {
-        return Ok(Err(CollabDbError::PayloadTooLarge));
-    }
+    compact_collab_snapshot_kind_backend(&Backend::Postgres(pool.clone()), kind, input, None).await
+}
 
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    if let Err(err) = authorize_collab_write(
-        &mut tx,
-        kind,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        document_id,
-        &mut CollabDbStageTimings::default(),
-    )
-    .await?
-    {
-        tx.rollback().await?;
-        return Ok(Err(err));
+/// An ON family compaction requires the live room's exact opaque proof. The
+/// returned durable source is published only after the owned transaction commits.
+pub async fn compact_collab_snapshot_kind_backend(
+    backend: &Backend,
+    kind: CollabKind,
+    input: CompactCollabInput<'_>,
+    room_fence: Option<FamilyRoomFence>,
+) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
+    if let Err(error) = validate_compaction_snapshot(input.new_snapshot) {
+        return Ok(Err(error));
     }
-    let content = load_resource_content(&mut tx, t, workspace_id, document_id).await?;
-    match ensure_collab_state_row(&mut tx, t, workspace_id, document_id, &content.0).await? {
-        Ok(()) => {}
-        Err(err) => {
+    let mut tx = backend.begin_write().await?;
+    let result = tx
+        .operation()
+        .compact_native(kind, input, room_fence)
+        .await?;
+    match result {
+        Ok(prepared) => {
+            tx.commit().await.map_err(|unknown| unknown.source)?;
+            Ok(Ok(prepared.load))
+        }
+        Err(error) => {
             tx.rollback().await?;
-            return Ok(Err(err));
+            Ok(Err(error))
         }
     }
-    let state = fetch_state_for_update(&mut tx, t, workspace_id, document_id).await?;
-    let Some(state) = state else {
-        tx.rollback().await?;
-        return Ok(Err(CollabDbError::NotFound));
-    };
-    if state.2 != writer_generation {
-        tx.rollback().await?;
-        return Ok(Err(CollabDbError::StaleWriter));
-    }
-    if expected_tail_seq != state.4 {
-        tx.rollback().await?;
-        return Ok(Err(CollabDbError::StaleCutoff));
-    }
-    if cutoff_seq < state.3 || cutoff_seq > state.4 {
-        tx.rollback().await?;
-        return Ok(Err(CollabDbError::InvalidCutoff));
-    }
+}
 
-    let newer: Option<(i64,)> = sqlx::query_as(&t.sql(
-        r#"
-        SELECT seq
-        FROM {updates}
-        WHERE workspace_id = $1 AND {id} = $2 AND seq > $3
-        ORDER BY seq ASC
-        LIMIT 1
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .bind(cutoff_seq)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if cutoff_seq < state.4 && newer.is_some() {
-        tx.rollback().await?;
-        return Ok(Err(CollabDbError::InvalidCutoff));
-    }
+/// Uncommitted compaction result. Borrowed callers must finish their same
+/// transaction before publishing this source or acknowledging a persist.
+pub(crate) struct PreparedNativeCompaction {
+    pub(crate) load: CollabLoadState,
+}
 
-    // Saving the already committed snapshot again (same locked cutoff, no
-    // compactable rows, byte-identical bytes) changes nothing. Skip the row
-    // rewrite, tail delete, event and audit; every check above still applied.
-    let compactable: bool = sqlx::query_scalar(&t.sql(
-        r#"
-        SELECT EXISTS(
-            SELECT 1 FROM {updates}
-            WHERE workspace_id = $1 AND {id} = $2 AND seq <= $3
-        )
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .bind(cutoff_seq)
-    .fetch_one(&mut *tx)
-    .await?;
-    let unchanged = cutoff_seq == state.3 && !compactable && state.0.as_slice() == new_snapshot;
-    if !unchanged {
-        compact_rows(
-            &mut tx,
-            t,
+fn validate_compaction_snapshot(snapshot: &[u8]) -> Result<(), CollabDbError> {
+    if snapshot.is_empty() || snapshot.len() > MAX_COLLAB_SNAPSHOT_BYTES {
+        Err(CollabDbError::PayloadTooLarge)
+    } else {
+        Ok(())
+    }
+}
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn compact_native(
+        &mut self,
+        kind: CollabKind,
+        input: CompactCollabInput<'_>,
+        room_fence: Option<FamilyRoomFence>,
+    ) -> Result<Result<PreparedNativeCompaction, CollabDbError>, sqlx::Error> {
+        let t = CollabTables::for_kind(kind);
+        let CompactCollabInput {
             workspace_id,
             actor_user_id,
+            session_id,
             document_id,
             writer_generation,
             cutoff_seq,
+            expected_tail_seq,
             new_snapshot,
             client_ip,
-        )
-        .await?;
+        } = input;
+        if let Err(error) = validate_compaction_snapshot(new_snapshot) {
+            return Ok(Err(error));
+        }
+        self.set_tenant(workspace_id).await?;
+        if matches!(self, Self::SqliteFamily(_)) {
+            let Some(fence) = room_fence else {
+                return Ok(Err(CollabDbError::StaleWriter));
+            };
+            if kind != CollabKind::Document
+                || fence.workspace_id != workspace_id
+                || fence.document_id != document_id
+                || !self.verify_family_room_fence(fence).await?
+            {
+                return Ok(Err(CollabDbError::StaleWriter));
+            }
+        }
+        if let Err(error) = self
+            .authorize_collab_write(
+                kind,
+                workspace_id,
+                actor_user_id,
+                session_id,
+                document_id,
+                &mut CollabDbStageTimings::default(),
+            )
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        let content = self
+            .load_collab_resource_content(t, workspace_id, document_id)
+            .await?;
+        if let Err(error) = self
+            .ensure_collab_state(t, workspace_id, document_id, &content)
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        let Some(state) = self
+            .fetch_native_state(t, workspace_id, document_id)
+            .await?
+        else {
+            return Ok(Err(CollabDbError::NotFound));
+        };
+        if state.2 != writer_generation {
+            return Ok(Err(CollabDbError::StaleWriter));
+        }
+        if expected_tail_seq != state.4 {
+            return Ok(Err(CollabDbError::StaleCutoff));
+        }
+        if cutoff_seq < state.3 || cutoff_seq > state.4 {
+            return Ok(Err(CollabDbError::InvalidCutoff));
+        }
+        let (newer, compactable) = self
+            .native_compaction_tail_flags(t, workspace_id, document_id, cutoff_seq)
+            .await?;
+        if cutoff_seq < state.4 && newer {
+            return Ok(Err(CollabDbError::InvalidCutoff));
+        }
+        let unchanged = cutoff_seq == state.3 && !compactable && state.0.as_slice() == new_snapshot;
+        if !unchanged {
+            self.compact_native_rows(
+                t,
+                workspace_id,
+                actor_user_id,
+                document_id,
+                writer_generation,
+                cutoff_seq,
+                new_snapshot,
+                client_ip,
+            )
+            .await?;
+        }
+        let Some(refreshed) = self
+            .fetch_native_state(t, workspace_id, document_id)
+            .await?
+        else {
+            return Ok(Err(CollabDbError::NotFound));
+        };
+        let tail = match self
+            .load_native_tail(
+                t,
+                workspace_id,
+                document_id,
+                refreshed.3,
+                refreshed.0.len() as i64,
+            )
+            .await?
+        {
+            Ok(tail) => tail,
+            Err(error) => return Ok(Err(error)),
+        };
+        if let Some(fence) = room_fence {
+            if !self.verify_family_room_fence(fence).await? {
+                return Ok(Err(CollabDbError::StaleWriter));
+            }
+        }
+        Ok(Ok(PreparedNativeCompaction {
+            load: state_row_to_load(refreshed, tail),
+        }))
     }
 
-    let refreshed = fetch_state_for_update(&mut tx, t, workspace_id, document_id).await?;
-    let Some(refreshed) = refreshed else {
-        tx.rollback().await?;
-        return Ok(Err(CollabDbError::NotFound));
-    };
-    let tail = match load_tail_updates(
-        &mut tx,
-        t,
-        workspace_id,
-        document_id,
-        refreshed.3,
-        refreshed.0.len() as i64,
-    )
-    .await?
-    {
-        Ok(tail) => tail,
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
+    async fn native_compaction_tail_flags(
+        &mut self,
+        t: &CollabTables,
+        workspace: Uuid,
+        resource: Uuid,
+        cutoff: i64,
+    ) -> Result<(bool, bool), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_as(&t.sql(
+                "SELECT EXISTS(SELECT 1 FROM {updates} WHERE workspace_id=$1 AND {id}=$2 AND seq>$3), EXISTS(SELECT 1 FROM {updates} WHERE workspace_id=$1 AND {id}=$2 AND seq<=$3)"))
+                .bind(workspace).bind(resource).bind(cutoff).fetch_one(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                let statement = match t.kind {
+                    CollabKind::Document => "SELECT EXISTS(SELECT 1 FROM document_collab_updates WHERE workspace_id=?1 AND document_id=?2 AND seq>?3),EXISTS(SELECT 1 FROM document_collab_updates WHERE workspace_id=?1 AND document_id=?2 AND seq<=?3)",
+                    CollabKind::Task => "SELECT EXISTS(SELECT 1 FROM task_collab_updates WHERE workspace_id=?1 AND task_id=?2 AND seq>?3),EXISTS(SELECT 1 FROM task_collab_updates WHERE workspace_id=?1 AND task_id=?2 AND seq<=?3)",
+                };
+                let rows = tx.query(statement, &[Cell::uuid(workspace), Cell::uuid(resource), Cell::Integer(cutoff)]).await?;
+                let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+                Ok((row.cell(0)?.boolean()?, row.cell(1)?.boolean()?))
+            }
         }
-    };
-    let load = state_row_to_load(refreshed, tail);
-    tx.commit().await?;
-    Ok(Ok(load))
-}
+    }
 
-/// The committing half of a compaction: new snapshot and cutoff, compacted
-/// tail removal, and the collab_snapshot_compacted event and audit.
-#[allow(clippy::too_many_arguments)]
-async fn compact_rows(
-    tx: &mut Transaction<'_, Postgres>,
-    t: &CollabTables,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    document_id: Uuid,
-    writer_generation: i64,
-    cutoff_seq: i64,
-    new_snapshot: &[u8],
-    client_ip: Option<&str>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(&t.sql(
-        r#"
-        UPDATE {states}
-        SET state = $3,
-            snapshot_cutoff_seq = $4,
-            updated_at = now()
-        WHERE workspace_id = $1 AND {id} = $2 AND writer_generation = $5
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .bind(new_snapshot)
-    .bind(cutoff_seq)
-    .bind(writer_generation)
-    .execute(&mut **tx)
-    .await?;
-
-    sqlx::query(&t.sql(
-        r#"
-        DELETE FROM {updates}
-        WHERE workspace_id = $1 AND {id} = $2 AND seq <= $3
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .bind(cutoff_seq)
-    .execute(&mut **tx)
-    .await?;
-
-    let payload = json!({
-        t.payload_key: document_id.to_string(),
-        "cutoffSeq": cutoff_seq,
-        "writerGeneration": writer_generation,
-    });
-    append_event(
-        &mut *tx,
-        EventAppend {
+    #[allow(clippy::too_many_arguments)]
+    async fn compact_native_rows(
+        &mut self,
+        t: &CollabTables,
+        workspace: Uuid,
+        actor: Uuid,
+        resource: Uuid,
+        generation: i64,
+        cutoff: i64,
+        snapshot: &[u8],
+        client_ip: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query(&t.sql("UPDATE {states} SET state=$3,snapshot_cutoff_seq=$4,updated_at=now() WHERE workspace_id=$1 AND {id}=$2 AND writer_generation=$5"))
+                    .bind(workspace).bind(resource).bind(snapshot).bind(cutoff).bind(generation).execute(&mut ***tx).await?;
+                sqlx::query(
+                    &t.sql("DELETE FROM {updates} WHERE workspace_id=$1 AND {id}=$2 AND seq<=$3"),
+                )
+                .bind(workspace)
+                .bind(resource)
+                .bind(cutoff)
+                .execute(&mut ***tx)
+                .await?;
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                let update = match t.kind {
+                    CollabKind::Document => "UPDATE document_states SET state=?3,snapshot_cutoff_seq=?4,updated_at=CAST((julianday('now')-2440587.5)*86400000000 AS INTEGER) WHERE workspace_id=?1 AND document_id=?2 AND writer_generation=?5",
+                    CollabKind::Task => "UPDATE task_states SET state=?3,snapshot_cutoff_seq=?4,updated_at=CAST((julianday('now')-2440587.5)*86400000000 AS INTEGER) WHERE workspace_id=?1 AND task_id=?2 AND writer_generation=?5",
+                };
+                let changed = tx
+                    .execute(
+                        update,
+                        &[
+                            Cell::uuid(workspace),
+                            Cell::uuid(resource),
+                            Cell::Blob(snapshot.to_vec()),
+                            Cell::Integer(cutoff),
+                            Cell::Integer(generation),
+                        ],
+                    )
+                    .await?;
+                if changed != 1 {
+                    return Err(sqlx::Error::Protocol(
+                        "locked native compaction target changed".into(),
+                    ));
+                }
+                let delete = match t.kind {
+                    CollabKind::Document => "DELETE FROM document_collab_updates WHERE workspace_id=?1 AND document_id=?2 AND seq<=?3",
+                    CollabKind::Task => "DELETE FROM task_collab_updates WHERE workspace_id=?1 AND task_id=?2 AND seq<=?3",
+                };
+                tx.execute(
+                    delete,
+                    &[
+                        Cell::uuid(workspace),
+                        Cell::uuid(resource),
+                        Cell::Integer(cutoff),
+                    ],
+                )
+                .await?;
+            }
+        }
+        let payload = json!({t.payload_key:resource.to_string(),"cutoffSeq":cutoff,"writerGeneration":generation});
+        self.append_event(EventAppend {
             id: Uuid::now_v7(),
-            workspace_id: Some(workspace_id),
-            actor_user_id: Some(actor_user_id),
+            workspace_id: Some(workspace),
+            actor_user_id: Some(actor),
             verb: t.verb("collab_snapshot_compacted"),
             target_type: Some(t.target_type.to_string()),
-            target_id: Some(document_id),
+            target_id: Some(resource),
             payload: payload.clone(),
-        },
-    )
-    .await?;
-    append_audit(
-        &mut *tx,
-        AuditAppend {
+        })
+        .await?;
+        self.append_audit(AuditAppend {
             id: Uuid::now_v7(),
-            workspace_id: Some(workspace_id),
-            actor_user_id: Some(actor_user_id),
+            workspace_id: Some(workspace),
+            actor_user_id: Some(actor),
             verb: t.verb("collab_snapshot_compacted"),
             target_type: Some(t.target_type.to_string()),
-            target_id: Some(document_id),
+            target_id: Some(resource),
             payload,
             ip: client_ip.map(str::to_string),
-        },
-    )
-    .await?;
-
-    Ok(())
+        })
+        .await?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
