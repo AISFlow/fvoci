@@ -1859,6 +1859,527 @@ async fn reschedule_object_cleanup(
     Ok(())
 }
 
+// Selected-backend cleanup borrows the actual family writer, never a session
+// mutex. PostgreSQL counterparts retain their detached upload-session owner.
+#[derive(Debug, Clone)]
+pub(crate) struct AttachmentObjectCleanup {
+    pub(crate) id: Uuid,
+    pub(crate) workspace_id: Uuid,
+    pub(crate) attachment_id: Uuid,
+    pub(crate) storage_key: String,
+}
+
+impl crate::db::backend::OperationTx<'_, '_> {
+    fn attachment_cleanup_global_family(
+        &mut self,
+    ) -> Result<&mut crate::db::backend::FamilyTx, sqlx::Error> {
+        let Self::SqliteFamily(tx) = self else {
+            return Err(sqlx::Error::Protocol(
+                "PostgreSQL cleanup uses its detached upload-session transaction".into(),
+            ));
+        };
+        tx.require_system_context()?;
+        if tx.tenant().is_some() {
+            return Err(sqlx::Error::Protocol(
+                "global attachment cleanup cannot broaden tenant context".into(),
+            ));
+        }
+        Ok(tx)
+    }
+
+    fn attachment_cleanup_tenant_family(
+        &mut self,
+        workspace: Uuid,
+    ) -> Result<&mut crate::db::backend::FamilyTx, sqlx::Error> {
+        let Self::SqliteFamily(tx) = self else {
+            return Err(sqlx::Error::Protocol(
+                "PostgreSQL cleanup uses its detached upload-session transaction".into(),
+            ));
+        };
+        tx.require_writer()?;
+        tx.require_tenant(workspace)?;
+        if tx.require_system_context().is_ok() {
+            return Err(sqlx::Error::Protocol(
+                "scoped attachment cleanup refuses system broadening".into(),
+            ));
+        }
+        Ok(tx)
+    }
+
+    pub(crate) async fn list_due_attachment_objects(
+        &mut self,
+        only: Option<(Uuid, Uuid)>,
+        limit: i64,
+    ) -> Result<Vec<AttachmentObjectCleanup>, sqlx::Error> {
+        if limit < 0 {
+            return Err(sqlx::Error::Protocol(
+                "negative attachment cleanup limit".into(),
+            ));
+        }
+        let tx = self.attachment_cleanup_global_family()?;
+        let rows = tx.query("SELECT id,workspace_id,attachment_id,storage_key FROM attachment_object_cleanups WHERE due_at <= unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 AND (?1 IS NULL OR (workspace_id=?1 AND attachment_id=?2)) ORDER BY due_at,id LIMIT ?3", &[crate::db::codec::Cell::optional_uuid(only.map(|v|v.0)),crate::db::codec::Cell::optional_uuid(only.map(|v|v.1)),crate::db::codec::Cell::Integer(limit)]).await?;
+        rows.iter()
+            .map(|r| {
+                Ok(AttachmentObjectCleanup {
+                    id: r.cell(0)?.id()?,
+                    workspace_id: r.cell(1)?.id()?,
+                    attachment_id: r.cell(2)?.id()?,
+                    storage_key: r.cell(3)?.string()?,
+                })
+            })
+            .collect()
+    }
+
+    /// Check the actual journal identity under the same writer as publication.
+    /// A stale snapshot cannot drop a replacement row or purge its new key.
+    pub(crate) async fn attachment_cleanup_journal_current(
+        &mut self,
+        row: &AttachmentObjectCleanup,
+    ) -> Result<bool, sqlx::Error> {
+        let tx = self.attachment_cleanup_tenant_family(row.workspace_id)?;
+        let rows = tx.query("SELECT id FROM attachment_object_cleanups WHERE id=?1 AND workspace_id=?2 AND attachment_id=?3 AND storage_key=?4", &cleanup_cells(row)).await?;
+        Ok(!rows.is_empty())
+    }
+
+    pub(crate) async fn attachment_cleanup_key_referenced(
+        &mut self,
+        workspace: Uuid,
+        key: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let tx = self.attachment_cleanup_tenant_family(workspace)?;
+        let rows=tx.query("SELECT EXISTS(SELECT 1 FROM attachments WHERE workspace_id=?1 AND (storage_key=?2 OR json_extract(variants,'$.preview.key')=?2))", &[crate::db::codec::Cell::uuid(workspace),crate::db::codec::Cell::text(key)]).await?;
+        rows[0].cell(0)?.boolean()
+    }
+
+    pub(crate) async fn remove_attachment_cleanup_journal(
+        &mut self,
+        row: &AttachmentObjectCleanup,
+    ) -> Result<bool, sqlx::Error> {
+        let tx = self.attachment_cleanup_tenant_family(row.workspace_id)?;
+        Ok(tx.execute("DELETE FROM attachment_object_cleanups WHERE id=?1 AND workspace_id=?2 AND attachment_id=?3 AND storage_key=?4", &cleanup_cells(row)).await?==1)
+    }
+
+    pub(crate) async fn reschedule_attachment_object(
+        &mut self,
+        row: &AttachmentObjectCleanup,
+        failed: bool,
+    ) -> Result<(), sqlx::Error> {
+        let tx = self.attachment_cleanup_tenant_family(row.workspace_id)?;
+        tx.execute("UPDATE attachment_object_cleanups SET due_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000+?5,attempts=attempts+?6 WHERE id=?1 AND workspace_id=?2 AND attachment_id=?3 AND storage_key=?4", &[crate::db::codec::Cell::uuid(row.id),crate::db::codec::Cell::uuid(row.workspace_id),crate::db::codec::Cell::uuid(row.attachment_id),crate::db::codec::Cell::text(&row.storage_key),crate::db::codec::Cell::Integer(OBJECT_CLEANUP_RETRY.as_secs() as i64*1_000_000),crate::db::codec::Cell::Integer(i64::from(failed))]).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn list_stale_attachment_uploads(
+        &mut self,
+        cutoff: DateTime<Utc>,
+        after: Option<StaleUploadCursor>,
+        limit: i64,
+    ) -> Result<Vec<StaleUpload>, sqlx::Error> {
+        if limit < 0 {
+            return Err(sqlx::Error::Protocol("negative stale upload limit".into()));
+        }
+        let tx = self.attachment_cleanup_global_family()?;
+        let rows=tx.query("SELECT id,workspace_id,created_at FROM attachments WHERE status IN ('uploading','assembling') AND created_at<?1 AND (?2 IS NULL OR (created_at,id)>(?2,?3)) ORDER BY created_at,id LIMIT ?4", &[crate::db::codec::Cell::instant(cutoff)?,after.map(|v|crate::db::codec::Cell::instant(v.0)).transpose()?.unwrap_or(crate::db::codec::Cell::Null),crate::db::codec::Cell::optional_uuid(after.map(|v|v.1)),crate::db::codec::Cell::Integer(limit)]).await?;
+        rows.iter()
+            .map(|r| {
+                Ok(StaleUpload {
+                    id: r.cell(0)?.id()?,
+                    workspace_id: r.cell(1)?.id()?,
+                    created_at: r.cell(2)?.datetime()?,
+                })
+            })
+            .collect()
+    }
+}
+
+fn cleanup_cells(row: &AttachmentObjectCleanup) -> [crate::db::codec::Cell; 4] {
+    [
+        crate::db::codec::Cell::uuid(row.id),
+        crate::db::codec::Cell::uuid(row.workspace_id),
+        crate::db::codec::Cell::uuid(row.attachment_id),
+        crate::db::codec::Cell::text(&row.storage_key),
+    ]
+}
+
+/// Selected-backend journal drain. PG retains its detached upload-session lock;
+/// family holds the actual writer through reference check, storage and commit.
+pub async fn reclaim_attachment_objects_backend(
+    backend: &crate::db::backend::Backend,
+    storage: &ObjectStorage,
+    only: Option<(Uuid, Uuid)>,
+    limit: i64,
+) -> Result<ObjectCleanupStats, sqlx::Error> {
+    reclaim_attachment_objects_backend_with_cancel(
+        backend,
+        storage,
+        only,
+        limit,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+}
+
+pub(crate) async fn reclaim_attachment_objects_backend_with_cancel(
+    backend: &crate::db::backend::Backend,
+    storage: &ObjectStorage,
+    only: Option<(Uuid, Uuid)>,
+    limit: i64,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<ObjectCleanupStats, sqlx::Error> {
+    if cancel.is_cancelled() {
+        return Ok(ObjectCleanupStats::default());
+    }
+    if let crate::db::backend::Backend::Postgres(pool) = backend {
+        return reclaim_attachment_objects(pool, storage, only, limit).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let mut op = tx.operation();
+    let previous = op.set_system().await?;
+    let rows = op.list_due_attachment_objects(only, limit).await;
+    op.restore_system(previous).await?;
+    tx.rollback().await?;
+    let rows = rows?;
+    let mut stats = ObjectCleanupStats::default();
+    for row in rows {
+        if cancel.is_cancelled() {
+            break;
+        }
+        stats.claimed += 1;
+        match reclaim_family_object(backend, storage, &row, cancel).await {
+            Ok(CleanupDisposition::Reclaimed) => stats.reclaimed += 1,
+            Ok(CleanupDisposition::Cancelled) => break,
+            Ok(CleanupDisposition::Busy) => {
+                stats.busy += 1;
+                reschedule_family_object(backend, &row, false).await?;
+            }
+            Ok(CleanupDisposition::Retry) => {
+                stats.failed += 1;
+                reschedule_family_object(backend, &row, true).await?;
+            }
+            Err(CleanupFailure::Known(err)) => {
+                stats.failed += 1;
+                tracing::warn!(attachment_id=%row.attachment_id,error=%err,"attachment.object_cleanup_failed");
+                reschedule_family_object(backend, &row, true).await?;
+            }
+            // A lost COMMIT reply does not authorize retrying a destructive
+            // step or incrementing attempts. Reconciliation was awaited.
+            Err(CleanupFailure::Unknown(err)) => return Err(err),
+        }
+    }
+    Ok(stats)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CleanupDisposition {
+    Reclaimed,
+    Busy,
+    Retry,
+    Cancelled,
+}
+enum CleanupFailure {
+    Known(sqlx::Error),
+    Unknown(sqlx::Error),
+}
+
+async fn reclaim_family_object(
+    backend: &crate::db::backend::Backend,
+    storage: &ObjectStorage,
+    row: &AttachmentObjectCleanup,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<CleanupDisposition, CleanupFailure> {
+    // BEGIN is always awaited; do not drop a partly acquired writer on token
+    // cancellation. Token cancellation is cooperative, not task-abort safety.
+    let mut tx = backend.begin_write().await.map_err(CleanupFailure::Known)?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(row.workspace_id).await?;
+        reclaim_attachment_object_borrowed(&mut op, storage, row, cancel).await
+    }
+    .await;
+    match result {
+        Ok(CleanupDisposition::Reclaimed) if cancel.is_cancelled() => {
+            tx.rollback().await.map_err(CleanupFailure::Known)?;
+            Ok(CleanupDisposition::Cancelled)
+        }
+        Ok(CleanupDisposition::Reclaimed) => {
+            match tx.commit().await {
+                Ok(()) => Ok(CleanupDisposition::Reclaimed),
+                Err(unknown) => {
+                    // Observe a stable current journal/reference state under
+                    // the writer again, never repeat purge on an unknown reply.
+                    reconcile_attachment_cleanup(backend, storage, row)
+                        .await
+                        .map_err(CleanupFailure::Unknown)?;
+                    Err(CleanupFailure::Unknown(sqlx::Error::AnyDriverError(
+                        Box::new(unknown),
+                    )))
+                }
+            }
+        }
+        Ok(outcome) => {
+            tx.rollback().await.map_err(CleanupFailure::Known)?;
+            Ok(outcome)
+        }
+        Err(err) => {
+            tx.rollback().await.map_err(CleanupFailure::Known)?;
+            Err(CleanupFailure::Known(err))
+        }
+    }
+}
+
+/// Deliberately retains the caller's actual writer during bounded storage I/O.
+/// Releasing after the reference check permits a publisher to make this key
+/// live before purge. Await the maintained storage calls even if cancelled;
+/// their existing read/operation limits remain unchanged. No Drop guarantee,
+/// detached filesystem purge or outer timeout destroys the writer owner.
+async fn reclaim_attachment_object_borrowed(
+    op: &mut crate::db::backend::OperationTx<'_, '_>,
+    storage: &ObjectStorage,
+    row: &AttachmentObjectCleanup,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<CleanupDisposition, sqlx::Error> {
+    if cancel.is_cancelled() {
+        return Ok(CleanupDisposition::Cancelled);
+    }
+    if !op.attachment_cleanup_journal_current(row).await? {
+        return Ok(CleanupDisposition::Reclaimed);
+    }
+    if op
+        .attachment_cleanup_key_referenced(row.workspace_id, &row.storage_key)
+        .await?
+    {
+        op.remove_attachment_cleanup_journal(row).await?;
+        return Ok(CleanupDisposition::Reclaimed);
+    }
+    if op
+        .attachment_cleanup_assembly_busy(row.workspace_id, row.attachment_id)
+        .await?
+    {
+        return Ok(CleanupDisposition::Busy);
+    }
+    #[cfg(test)]
+    cleanup_test_hooks::wait(row.id, 0).await;
+    if cancel.is_cancelled() {
+        return Ok(CleanupDisposition::Cancelled);
+    }
+    if let Err(err) = storage.purge_key(&row.storage_key).await {
+        tracing::warn!(error=%err,"attachment.object_cleanup_storage_failed");
+        return Ok(CleanupDisposition::Retry);
+    }
+    #[cfg(test)]
+    cleanup_test_hooks::wait(row.id, 1).await;
+    let head = storage.head(&row.storage_key).await;
+    if cancel.is_cancelled() {
+        return Ok(CleanupDisposition::Cancelled);
+    }
+    if !matches!(head, Ok(None)) {
+        return Ok(CleanupDisposition::Retry);
+    }
+    op.remove_attachment_cleanup_journal(row).await?;
+    Ok(CleanupDisposition::Reclaimed)
+}
+
+async fn reconcile_attachment_cleanup(
+    backend: &crate::db::backend::Backend,
+    storage: &ObjectStorage,
+    row: &AttachmentObjectCleanup,
+) -> Result<(), sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(row.workspace_id).await?;
+        let journal = op.attachment_cleanup_journal_current(row).await?;
+        let referenced = op
+            .attachment_cleanup_key_referenced(row.workspace_id, &row.storage_key)
+            .await?;
+        let head = storage.head(&row.storage_key).await;
+        tracing::warn!(
+            journal,
+            referenced,
+            head_missing = matches!(head, Ok(None)),
+            "attachment.cleanup_commit_unknown_reconciled"
+        );
+        Ok::<_, sqlx::Error>(())
+    }
+    .await;
+    tx.rollback().await?;
+    result
+}
+
+async fn reschedule_family_object(
+    backend: &crate::db::backend::Backend,
+    row: &AttachmentObjectCleanup,
+    failed: bool,
+) -> Result<(), sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(row.workspace_id).await?;
+        op.reschedule_attachment_object(row, failed).await
+    }
+    .await;
+    match result {
+        Ok(()) => tx
+            .commit()
+            .await
+            .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e))),
+        Err(err) => {
+            tx.rollback().await?;
+            Err(err)
+        }
+    }
+}
+
+pub async fn list_stale_uploading_backend(
+    backend: &crate::db::backend::Backend,
+    cutoff: DateTime<Utc>,
+    after: Option<StaleUploadCursor>,
+    limit: i64,
+) -> Result<Vec<StaleUpload>, sqlx::Error> {
+    if let crate::db::backend::Backend::Postgres(pool) = backend {
+        return list_stale_uploading(pool, cutoff, after, limit).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let mut op = tx.operation();
+    let previous = op.set_system().await?;
+    let result = op.list_stale_attachment_uploads(cutoff, after, limit).await;
+    op.restore_system(previous).await?;
+    tx.rollback().await?;
+    result
+}
+
+pub async fn gc_stale_upload_row_backend(
+    backend: &crate::db::backend::Backend,
+    storage: &ObjectStorage,
+    workspace: Uuid,
+    attachment: Uuid,
+) -> Result<bool, sqlx::Error> {
+    gc_stale_upload_row_backend_with_cancel(
+        backend,
+        storage,
+        workspace,
+        attachment,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+}
+
+pub(crate) async fn gc_stale_upload_row_backend_with_cancel(
+    backend: &crate::db::backend::Backend,
+    storage: &ObjectStorage,
+    workspace: Uuid,
+    attachment: Uuid,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<bool, sqlx::Error> {
+    if cancel.is_cancelled() {
+        return Ok(false);
+    }
+    if let crate::db::backend::Backend::Postgres(pool) = backend {
+        return gc_stale_upload_row(pool, storage, workspace, attachment).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        let Some(key) = op
+            .prepare_stale_attachment_cleanup(workspace, attachment)
+            .await?
+        else {
+            return Ok(false);
+        };
+        #[cfg(test)]
+        cleanup_test_hooks::wait(attachment, 0).await;
+        if cancel.is_cancelled() {
+            return Ok(false);
+        }
+        // The row retains the exact key until successful purge+head+DELETE.
+        // Cancellation waits for owned purge and head, leaving the row pointer.
+        storage
+            .purge_key(&key)
+            .await
+            .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
+        #[cfg(test)]
+        cleanup_test_hooks::wait(attachment, 1).await;
+        let head = storage.head(&key).await;
+        if cancel.is_cancelled() {
+            return Ok(false);
+        }
+        if !matches!(head, Ok(None)) {
+            return Err(sqlx::Error::Io(std::io::Error::other(
+                "stale attachment purge did not confirm absence",
+            )));
+        }
+        op.remove_stale_attachment_cleanup(workspace, attachment, &key)
+            .await
+    }
+    .await;
+    match result {
+        Ok(true) if cancel.is_cancelled() => {
+            tx.rollback().await?;
+            Ok(false)
+        }
+        Ok(true) => match tx.commit().await {
+            Ok(()) => Ok(true),
+            Err(unknown) => {
+                // Await a fresh writer/current-row observation, no destructive
+                // retry after an uncertain DELETE/trigger-journal commit.
+                let mut observe = backend.begin_write().await?;
+                let observed = async {
+                    let mut op = observe.operation();
+                    op.set_tenant(workspace).await?;
+                    op.prepare_stale_attachment_cleanup(workspace, attachment)
+                        .await
+                }
+                .await;
+                observe.rollback().await?;
+                observed?;
+                Err(sqlx::Error::AnyDriverError(Box::new(unknown)))
+            }
+        },
+        Ok(false) => {
+            tx.rollback().await?;
+            Ok(false)
+        }
+        Err(err) => {
+            tx.rollback().await?;
+            Err(err)
+        }
+    }
+}
+
+impl crate::db::backend::OperationTx<'_, '_> {
+    /// Missing S18 selected complete/session owner: never treat an assembling
+    /// row as abandoned merely because its timestamp is old. Pagination still
+    /// advances and healthy uploading/journal work proceeds. No invented TTL.
+    async fn attachment_cleanup_assembly_busy(
+        &mut self,
+        workspace: Uuid,
+        attachment: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        let tx = self.attachment_cleanup_tenant_family(workspace)?;
+        let rows=tx.query("SELECT EXISTS(SELECT 1 FROM attachments WHERE workspace_id=?1 AND id=?2 AND status='assembling')", &[crate::db::codec::Cell::uuid(workspace),crate::db::codec::Cell::uuid(attachment)]).await?;
+        rows[0].cell(0)?.boolean()
+    }
+    pub(crate) async fn prepare_stale_attachment_cleanup(
+        &mut self,
+        workspace: Uuid,
+        attachment: Uuid,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let tx = self.attachment_cleanup_tenant_family(workspace)?;
+        let rows=tx.query("SELECT storage_key FROM attachments a WHERE a.workspace_id=?1 AND a.id=?2 AND a.status='uploading' AND NOT EXISTS(SELECT 1 FROM attachments other WHERE other.workspace_id=?1 AND ((other.id<>?2 AND other.storage_key=a.storage_key) OR json_extract(other.variants,'$.preview.key')=a.storage_key))", &[crate::db::codec::Cell::uuid(workspace),crate::db::codec::Cell::uuid(attachment)]).await?;
+        rows.first().map(|r| r.cell(0)?.string()).transpose()
+    }
+    pub(crate) async fn remove_stale_attachment_cleanup(
+        &mut self,
+        workspace: Uuid,
+        attachment: Uuid,
+        key: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let tx = self.attachment_cleanup_tenant_family(workspace)?;
+        Ok(tx.execute("DELETE FROM attachments WHERE workspace_id=?1 AND id=?2 AND storage_key=?3 AND status='uploading'", &[crate::db::codec::Cell::uuid(workspace),crate::db::codec::Cell::uuid(attachment),crate::db::codec::Cell::text(key)]).await?==1)
+    }
+}
+
 impl std::fmt::Display for AttachmentDbError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
@@ -2758,5 +3279,601 @@ mod upload_meta_tests {
         assert!(!m.listed_parts_match(&ok, &[part(1, "a", 10)]));
         assert!(!m.listed_parts_match(&ok, &[part(1, "a", 10), part(2, "b", 5), part(3, "c", 1)]));
         assert!(!m.listed_parts_match(&ok, &[part(1, "a", 10), part(3, "b", 5)]));
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod cleanup_test_hooks {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+    use tokio::sync::oneshot;
+    use uuid::Uuid;
+    type Pair = (oneshot::Sender<()>, oneshot::Receiver<()>);
+    static HOOKS: LazyLock<Mutex<HashMap<(Uuid, u8), Pair>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    pub(crate) fn arm(id: Uuid, phase: u8) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (go_tx, go_rx) = oneshot::channel();
+        assert!(HOOKS
+            .lock()
+            .unwrap()
+            .insert((id, phase), (entered_tx, go_rx))
+            .is_none());
+        (entered_rx, go_tx)
+    }
+    pub(super) async fn wait(id: Uuid, phase: u8) {
+        let hook = HOOKS.lock().unwrap().remove(&(id, phase));
+        if let Some((entered, go)) = hook {
+            let _ = entered.send(());
+            let _ = go.await;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod cleanup_tests {
+    use super::*;
+    pub(crate) use crate::db::attachment_preview::tests::Fixture;
+    use crate::db::attachment_preview::{
+        claim_preview_backend, journal_preview_key_backend, publish_preview_backend,
+    };
+    use crate::db::backend::Backend;
+    use tokio_util::sync::CancellationToken;
+    const BYTES: &[u8] = b"S17 literal object bytes for real cleanup/publish fencing";
+
+    pub(crate) async fn journal(
+        f: &Fixture,
+        attachment: Uuid,
+        key: &str,
+        due: i64,
+    ) -> AttachmentObjectCleanup {
+        let row = AttachmentObjectCleanup {
+            id: Uuid::now_v7(),
+            workspace_id: f.workspace,
+            attachment_id: attachment,
+            storage_key: key.into(),
+        };
+        sqlx::query("INSERT INTO attachment_object_cleanups(id,workspace_id,attachment_id,storage_key,due_at) VALUES(?1,?2,?3,?4,?5)").bind(row.id.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(attachment.as_bytes().as_slice()).bind(key).bind(due).execute(&f.pool).await.unwrap();
+        row
+    }
+    pub(crate) fn storage(f: &Fixture) -> ObjectStorage {
+        ObjectStorage::local(f.root.join("s17-storage"))
+    }
+    async fn current(f: &Fixture, id: Uuid) -> (String, i64, i64) {
+        sqlx::query_as(
+            "SELECT storage_key,attempts,due_at FROM attachment_object_cleanups WHERE id=?1",
+        )
+        .bind(id.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap()
+    }
+    async fn bytes(storage: &ObjectStorage, key: &str) {
+        let read = storage
+            .read_range(key, 0, BYTES.len() as u64 - 1)
+            .await
+            .unwrap();
+        assert_eq!(read, BYTES);
+        use sha2::Digest;
+        println!(
+            "S17 actual object bytes={} sha256={:x}",
+            read.len(),
+            sha2::Sha256::digest(&read)
+        );
+    }
+    async fn drain(f: &Fixture, storage: &ObjectStorage) -> ObjectCleanupStats {
+        reclaim_attachment_objects_backend(&f.backend, storage, None, 20)
+            .await
+            .unwrap()
+    }
+    async fn entered(receiver: tokio::sync::oneshot::Receiver<()>) {
+        tokio::time::timeout(Duration::from_secs(2), receiver)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_selected_due_filter_scope_checked_cells_and_fk() {
+        let f = Fixture::new().await;
+        let key = Uuid::now_v7().to_string();
+        let att = Uuid::now_v7();
+        let a = journal(&f, att, &key, 1).await;
+        let b = journal(&f, Uuid::now_v7(), &Uuid::now_v7().to_string(), 2).await;
+        journal(&f, att, &Uuid::now_v7().to_string(), i64::MAX).await;
+        let mut tx = f.backend.begin_read().await.unwrap();
+        assert!(tx
+            .operation()
+            .list_due_attachment_objects(None, 2)
+            .await
+            .is_err());
+        tx.operation().set_system().await.unwrap();
+        let rows = tx
+            .operation()
+            .list_due_attachment_objects(None, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![a.id, b.id]
+        );
+        assert_eq!(
+            tx.operation()
+                .list_due_attachment_objects(Some((f.workspace, att)), 20)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(tx
+            .operation()
+            .remove_attachment_cleanup_journal(&a)
+            .await
+            .is_err());
+        tx.rollback().await.unwrap();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        tx.operation().set_tenant(Uuid::now_v7()).await.unwrap();
+        assert!(tx
+            .operation()
+            .attachment_cleanup_journal_current(&a)
+            .await
+            .is_err());
+        tx.rollback().await.unwrap();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        tx.operation().set_tenant(f.workspace).await.unwrap();
+        tx.operation().set_system().await.unwrap();
+        assert!(tx
+            .operation()
+            .reschedule_attachment_object(&a, true)
+            .await
+            .is_err());
+        assert!(tx
+            .operation()
+            .list_due_attachment_objects(None, 2)
+            .await
+            .is_err());
+        tx.rollback().await.unwrap();
+        let mut tx = f.backend.begin_read().await.unwrap();
+        tx.operation().set_tenant(f.workspace).await.unwrap();
+        assert!(tx
+            .operation()
+            .attachment_cleanup_key_referenced(f.workspace, &key)
+            .await
+            .is_err());
+        tx.rollback().await.unwrap();
+        let (id, _) = f.attachment(1, "image/png").await;
+        assert!(
+            sqlx::query("UPDATE attachments SET document_id=?2 WHERE id=?1")
+                .bind(id.as_bytes().as_slice())
+                .bind(Uuid::now_v7().as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .is_err()
+        );
+        assert_eq!(current(&f, a.id).await.1, 0);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_selected_real_positive_and_both_live_references() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let (att, key) = f.attachment(BYTES.len() as i64, "image/png").await;
+        s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+        let original = journal(&f, att, &key, 1).await;
+        // An original key protects even an uploading row, not only stored.
+        sqlx::query("UPDATE attachments SET status='uploading',size_bytes=NULL,completed_at=NULL WHERE id=?1").bind(att.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let preview = Uuid::now_v7().to_string();
+        s.put_bytes(&preview, BYTES.to_vec()).await.unwrap();
+        sqlx::query("UPDATE attachments SET variants=json_object('preview',json_object('key',?2)) WHERE id=?1").bind(att.as_bytes().as_slice()).bind(&preview).execute(&f.pool).await.unwrap();
+        journal(&f, att, &preview, 2).await;
+        let orphan = Uuid::now_v7().to_string();
+        s.put_bytes(&orphan, BYTES.to_vec()).await.unwrap();
+        journal(&f, Uuid::now_v7(), &orphan, 3).await;
+        let result = drain(&f, &s).await;
+        assert_eq!(
+            result,
+            ObjectCleanupStats {
+                claimed: 3,
+                reclaimed: 3,
+                busy: 0,
+                failed: 0
+            }
+        );
+        bytes(&s, &key).await;
+        bytes(&s, &preview).await;
+        assert_eq!(s.head(&orphan).await.unwrap(), None);
+        assert!(f.journals().await.is_empty());
+        assert_eq!(drain(&f, &s).await.claimed, 0);
+        println!(
+            "S17 reference winner journal {} removed without deleting live bytes",
+            original.id
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_selected_storage_and_head_failures_retain_retry_pointer() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let key = Uuid::now_v7().to_string();
+        s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+        let row = journal(&f, Uuid::now_v7(), &key, 0).await;
+        let blocked = f.root.join("s17-storage/tmp").join(&key);
+        std::fs::create_dir_all(blocked.parent().unwrap()).unwrap();
+        std::fs::write(&blocked, b"real non-directory abort failure").unwrap();
+        let before: i64 = sqlx::query_scalar(
+            "SELECT unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(drain(&f, &s).await.failed, 1);
+        let pointer = current(&f, row.id).await;
+        assert_eq!((&pointer.0, pointer.1), (&key, 1));
+        assert!(pointer.2 >= before + 60_000_000);
+        bytes(&s, &key).await;
+        std::fs::remove_file(blocked).unwrap();
+        sqlx::query("UPDATE attachment_object_cleanups SET due_at=0 WHERE id=?1")
+            .bind(row.id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        for surviving in [false, true] {
+            let (wait, go) = cleanup_test_hooks::arm(row.id, 1);
+            let backend = f.backend.clone();
+            let st = s.clone();
+            let run = tokio::spawn(async move {
+                reclaim_attachment_objects_backend(&backend, &st, None, 20)
+                    .await
+                    .unwrap()
+            });
+            entered(wait).await;
+            let path = f.root.join("s17-storage/objects").join(&key);
+            if surviving {
+                s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+            } else {
+                std::fs::write(&path, b"real head ENOTDIR").unwrap();
+            }
+            go.send(()).unwrap();
+            assert_eq!(run.await.unwrap().failed, 1);
+            assert_eq!(current(&f, row.id).await.1, if surviving { 3 } else { 2 });
+            if surviving {
+                bytes(&s, &key).await;
+            } else {
+                assert!(s.head(&key).await.is_err());
+                std::fs::remove_file(path).unwrap();
+            }
+            sqlx::query("UPDATE attachment_object_cleanups SET due_at=0 WHERE id=?1")
+                .bind(row.id.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+        }
+        assert_eq!(drain(&f, &s).await.reclaimed, 1);
+        assert!(f.journals().await.is_empty());
+        assert_eq!(s.head(&key).await.unwrap(), None);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_selected_cancel_awaited_before_and_after_purge() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        for phase in [0, 1] {
+            let key = Uuid::now_v7().to_string();
+            s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+            let row = journal(&f, Uuid::now_v7(), &key, 0).await;
+            let (wait, go) = cleanup_test_hooks::arm(row.id, phase);
+            let token = CancellationToken::new();
+            let c = token.clone();
+            let backend = f.backend.clone();
+            let st = s.clone();
+            let run = tokio::spawn(async move {
+                reclaim_attachment_objects_backend_with_cancel(&backend, &st, None, 20, &c)
+                    .await
+                    .unwrap()
+            });
+            entered(wait).await;
+            token.cancel();
+            go.send(()).unwrap();
+            let result = run.await.unwrap();
+            assert_eq!((result.claimed, result.reclaimed, result.failed), (1, 0, 0));
+            assert_eq!(current(&f, row.id).await, (key.clone(), 0, 0));
+            if phase == 0 {
+                bytes(&s, &key).await;
+            } else {
+                assert_eq!(s.head(&key).await.unwrap(), None);
+            }
+            assert_eq!(drain(&f, &s).await.reclaimed, 1);
+            assert_eq!(s.head(&key).await.unwrap(), None);
+        }
+        assert!(f.journals().await.is_empty());
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_selected_stale_journal_identity_cannot_purge_old_key() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let old = Uuid::now_v7().to_string();
+        let new = Uuid::now_v7().to_string();
+        s.put_bytes(&old, BYTES.to_vec()).await.unwrap();
+        s.put_bytes(&new, BYTES.to_vec()).await.unwrap();
+        let row = journal(&f, Uuid::now_v7(), &old, 0).await;
+        sqlx::query("UPDATE attachment_object_cleanups SET storage_key=?2 WHERE id=?1")
+            .bind(row.id.as_bytes().as_slice())
+            .bind(&new)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            reclaim_family_object(&f.backend, &s, &row, &CancellationToken::new()).await,
+            Ok(CleanupDisposition::Reclaimed)
+        ));
+        assert_eq!(current(&f, row.id).await.0, new);
+        bytes(&s, &old).await;
+        bytes(&s, &new).await;
+        assert_eq!(drain(&f, &s).await.reclaimed, 1);
+        bytes(&s, &old).await;
+        assert_eq!(s.head(&new).await.unwrap(), None);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_selected_gc_wins_real_writer_then_late_publisher_refused() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let (att, _) = f.attachment(BYTES.len() as i64, "image/png").await;
+        let claim = claim_preview_backend(&f.backend).await.unwrap().unwrap();
+        assert_eq!(claim.attachment_id, att);
+        let key = Uuid::now_v7().to_string();
+        let jid = journal_preview_key_backend(&f.backend, &claim, &key)
+            .await
+            .unwrap()
+            .unwrap();
+        s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+        bytes(&s, &key).await;
+        sqlx::query("UPDATE attachment_object_cleanups SET due_at=0 WHERE id=?1")
+            .bind(jid.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let other = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        let second = Backend::Sqlite(other.clone());
+        let (wait, go) = cleanup_test_hooks::arm(jid, 0);
+        let b = f.backend.clone();
+        let st = s.clone();
+        let gc = tokio::spawn(async move {
+            reclaim_attachment_objects_backend(&b, &st, None, 20)
+                .await
+                .unwrap()
+        });
+        entered(wait).await;
+        let k = key.clone();
+        let mut publisher = tokio::spawn(async move {
+            publish_preview_backend(&second, &claim, jid, &k, 1, 1, BYTES.len() as u64)
+                .await
+                .unwrap()
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut publisher)
+                .await
+                .is_err(),
+            "actual second-pool BEGIN must wait while GC holds writer through purge"
+        );
+        go.send(()).unwrap();
+        assert_eq!(gc.await.unwrap().reclaimed, 1);
+        assert!(!publisher.await.unwrap());
+        assert_eq!(s.head(&key).await.unwrap(), None);
+        assert!(f.journals().await.is_empty());
+        assert_eq!(f.row(att).await.1, "{}");
+        other.close().await;
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_selected_publisher_wins_real_writer_preserves_hash_fresh_readback() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let (att, _) = f.attachment(BYTES.len() as i64, "image/png").await;
+        let claim = claim_preview_backend(&f.backend).await.unwrap().unwrap();
+        let key = Uuid::now_v7().to_string();
+        let jid = journal_preview_key_backend(&f.backend, &claim, &key)
+            .await
+            .unwrap()
+            .unwrap();
+        s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+        sqlx::query("UPDATE attachment_object_cleanups SET due_at=0 WHERE id=?1")
+            .bind(jid.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let other = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        let second = Backend::Sqlite(other.clone());
+        let mut tx = f.backend.begin_write().await.unwrap();
+        let mut op = tx.operation();
+        op.set_tenant(f.workspace).await.unwrap();
+        assert!(op
+            .publish_attachment_preview(&claim, jid, &key, 1, 1, BYTES.len() as u64)
+            .await
+            .unwrap());
+        let st = s.clone();
+        let mut gc = tokio::spawn(async move {
+            reclaim_attachment_objects_backend(&second, &st, None, 20)
+                .await
+                .unwrap()
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut gc)
+                .await
+                .is_err(),
+            "actual GC second-pool writer must wait for publication commit"
+        );
+        tx.commit().await.unwrap();
+        let result = gc.await.unwrap();
+        assert_eq!((result.claimed, result.reclaimed), (1, 1));
+        bytes(&s, &key).await;
+        assert!(f.journals().await.is_empty());
+        other.close().await;
+        f.pool.close().await;
+        let fresh = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        let (variants,fk):(String,i64)=sqlx::query_as("SELECT variants,(SELECT foreign_keys FROM pragma_foreign_keys) FROM attachments WHERE id=?1").bind(att.as_bytes().as_slice()).fetch_one(&fresh).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&variants).unwrap()["preview"]["key"],
+            key
+        );
+        assert_eq!(fk, 1);
+        fresh.close().await;
+        println!("S17 fresh DB published preview readback {} preserved", key);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_selected_actual_commit_failure_reconciles_stable_journal() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let (att, _) = f.attachment(1, "image/png").await;
+        let key = Uuid::now_v7().to_string();
+        s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+        let row = journal(&f, Uuid::now_v7(), &key, 0).await;
+        let mut tx = f.backend.begin_write().await.unwrap();
+        let mut op = tx.operation();
+        op.set_tenant(f.workspace).await.unwrap();
+        assert_eq!(
+            reclaim_attachment_object_borrowed(&mut op, &s, &row, &CancellationToken::new())
+                .await
+                .unwrap(),
+            CleanupDisposition::Reclaimed
+        );
+        let crate::db::backend::OperationTx::SqliteFamily(family) = op else {
+            panic!("actual family writer")
+        };
+        family
+            .execute("PRAGMA defer_foreign_keys=ON", &[])
+            .await
+            .unwrap();
+        family
+            .execute(
+                "UPDATE attachments SET document_id=?2 WHERE id=?1",
+                &[
+                    crate::db::codec::Cell::uuid(att),
+                    crate::db::codec::Cell::uuid(Uuid::now_v7()),
+                ],
+            )
+            .await
+            .unwrap();
+        let error = tx
+            .commit()
+            .await
+            .expect_err("actual deferred FK must fail COMMIT");
+        assert!(error.source.as_database_error().is_some());
+        reconcile_attachment_cleanup(&f.backend, &s, &row)
+            .await
+            .unwrap();
+        assert_eq!(current(&f, row.id).await, (key.clone(), 0, 0));
+        assert_eq!(s.head(&key).await.unwrap(), None);
+        let document: Vec<u8> =
+            sqlx::query_scalar("SELECT document_id FROM attachments WHERE id=?1")
+                .bind(att.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(document, f.document.as_bytes());
+        assert_eq!(drain(&f, &s).await.reclaimed, 1);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_selected_stale_tuple_ties_and_late_stored_row_guard() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let mut ids = Vec::new();
+        let at = 1_700_000_000_000_007i64;
+        for _ in 0..3 {
+            let (id, key) = f.attachment(4, "application/octet-stream").await;
+            s.put_bytes(&key, b"part".to_vec()).await.unwrap();
+            sqlx::query("UPDATE attachments SET status='uploading',size_bytes=NULL,completed_at=NULL,created_at=?2 WHERE id=?1").bind(id.as_bytes().as_slice()).bind(at).execute(&f.pool).await.unwrap();
+            ids.push((id, key));
+        }
+        ids.sort_by_key(|v| v.0);
+        let cutoff = DateTime::from_timestamp_micros(at + 1).unwrap();
+        let a = list_stale_uploading_backend(&f.backend, cutoff, None, 1)
+            .await
+            .unwrap();
+        assert_eq!(a[0].id, ids[0].0);
+        let b =
+            list_stale_uploading_backend(&f.backend, cutoff, Some((a[0].created_at, a[0].id)), 1)
+                .await
+                .unwrap();
+        assert_eq!(b[0].id, ids[1].0);
+        let c =
+            list_stale_uploading_backend(&f.backend, cutoff, Some((b[0].created_at, b[0].id)), 1)
+                .await
+                .unwrap();
+        assert_eq!(c[0].id, ids[2].0);
+        sqlx::query(
+            "UPDATE attachments SET status='stored',size_bytes=4,completed_at=?2 WHERE id=?1",
+        )
+        .bind(ids[1].0.as_bytes().as_slice())
+        .bind(at)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        assert!(
+            !gc_stale_upload_row_backend(&f.backend, &s, f.workspace, ids[1].0)
+                .await
+                .unwrap()
+        );
+        assert_eq!(s.read_range(&ids[1].1, 0, 3).await.unwrap(), b"part");
+        assert!(
+            gc_stale_upload_row_backend(&f.backend, &s, f.workspace, ids[0].0)
+                .await
+                .unwrap()
+        );
+        assert!(
+            gc_stale_upload_row_backend(&f.backend, &s, f.workspace, ids[2].0)
+                .await
+                .unwrap()
+        );
+        assert_eq!(s.head(&ids[0].1).await.unwrap(), None);
+        assert_eq!(s.head(&ids[2].1).await.unwrap(), None);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_selected_assembling_busy_does_not_block_healthy_journal() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let (att, _) = f.attachment(1, "image/png").await;
+        sqlx::query("UPDATE attachments SET status='assembling',size_bytes=NULL,completed_at=NULL WHERE id=?1").bind(att.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let busykey = Uuid::now_v7().to_string();
+        s.put_bytes(&busykey, BYTES.to_vec()).await.unwrap();
+        let busy = journal(&f, att, &busykey, 0).await;
+        let healthy = Uuid::now_v7().to_string();
+        s.put_bytes(&healthy, BYTES.to_vec()).await.unwrap();
+        journal(&f, Uuid::now_v7(), &healthy, 1).await;
+        let result = drain(&f, &s).await;
+        assert_eq!(
+            result,
+            ObjectCleanupStats {
+                claimed: 2,
+                reclaimed: 1,
+                busy: 1,
+                failed: 0
+            }
+        );
+        let row = current(&f, busy.id).await;
+        assert_eq!(row.1, 0);
+        assert!(row.2 > 60_000_000);
+        bytes(&s, &busykey).await;
+        assert_eq!(s.head(&healthy).await.unwrap(), None);
+        f.close().await;
     }
 }
