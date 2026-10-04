@@ -776,6 +776,434 @@ async fn personal_transfer_incoming_current_native_refs_refuse_move_copy_keeps_p
     }).await;
 }
 
+/// The pair's bodies through the genuine native writers: the task (one
+/// persisted update) embeds the pair's own document once; the document (body
+/// PUT, replaced on each call) names `doc_refs` in one paragraph whose block
+/// id is returned. Versions follow the writes.
+async fn write_task_embed(
+    run: &TestRun,
+    addr: SocketAddr,
+    actor: &SessionFixture,
+    source: Uuid,
+    selection: &Value,
+) {
+    let document = Uuid::parse_str(selection["documentId"].as_str().unwrap()).unwrap();
+    let task = Uuid::parse_str(selection["taskId"].as_str().unwrap()).unwrap();
+    let task_json = json!({"type":"doc","content":[{"type":"embed","attrs":{"id":Uuid::now_v7(),"entity":"document","ref":document.to_string()}}]});
+    let seed = seed_update(run, task_json).await;
+    apply_and_persist(
+        addr,
+        &actor.session_token,
+        &task_key(source, task),
+        94,
+        &seed,
+    )
+    .await;
+}
+async fn write_document_refs(
+    run: &TestRun,
+    addr: SocketAddr,
+    actor: &SessionFixture,
+    source: Uuid,
+    selection: &mut Value,
+    doc_refs: Value,
+) -> String {
+    let document = Uuid::parse_str(selection["documentId"].as_str().unwrap()).unwrap();
+    let block = Uuid::now_v7().to_string();
+    let doc_json = json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":block},"content":doc_refs}]});
+    let (status, saved) = session_call(
+        addr,
+        Method::PUT,
+        &document_api(source, document, "/body"),
+        &actor.session_token,
+        Some(json!({"contentJson":doc_json})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    if selection["taskId"].is_null() {
+        let mut conn = scoped_observer(run, source).await;
+        selection["expectedDocumentVersion"] = json!(sqlx::query_scalar::<_, i32>(
+            "SELECT version FROM fvoci.documents WHERE workspace_id=$1 AND id=$2"
+        )
+        .bind(source)
+        .bind(document)
+        .fetch_one(&mut conn)
+        .await
+        .unwrap());
+        sqlx::query("COMMIT").execute(&mut conn).await.unwrap();
+    } else {
+        selection_versions(run, source, selection).await;
+    }
+    block
+}
+/// A fresh captured pair in the same source and destination (no history of
+/// any earlier fixture).
+async fn fresh_pair(
+    addr: SocketAddr,
+    actor: &SessionFixture,
+    source: Uuid,
+    selection: &mut Value,
+    intent: &str,
+) {
+    let (status, pair) = session_call(
+        addr,
+        Method::POST,
+        &format!("/api/v1/workspaces/{source}/personal-input"),
+        &actor.session_token,
+        Some(json!({"requestId":Uuid::now_v7(),"intent":intent,"title":"원본 한글 🧑‍💻"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{pair}");
+    selection["documentId"] = pair["documentId"].clone();
+    selection["taskId"] = pair["taskId"].clone();
+    selection["expectedDocumentVersion"] = json!(1);
+    // A document-only pair carries no task version or status.
+    if pair["taskId"].is_null() {
+        selection["expectedTaskVersion"] = Value::Null;
+        selection["destinationStatusId"] = Value::Null;
+    } else {
+        selection["expectedTaskVersion"] = json!(1);
+    }
+}
+fn pair_mention(entity: &str, id: Uuid) -> Value {
+    json!({"type":"mention","attrs":{"entity":entity,"id":id.to_string(),"label":"원본 한글 🧑‍💻"}})
+}
+/// Stored body (restricted observer) of a document or task in one tenant.
+async fn stored_refs(
+    run: &TestRun,
+    workspace: Uuid,
+    table: &str,
+    id: Uuid,
+) -> (Value, Vec<fvoci_server::collab::derived_body::InternalRef>) {
+    let mut conn = scoped_observer(run, workspace).await;
+    let body: Value = sqlx::query_scalar(&format!(
+        "SELECT content_json FROM fvoci.{table} WHERE workspace_id=$1 AND id=$2"
+    ))
+    .bind(workspace)
+    .bind(id)
+    .fetch_one(&mut conn)
+    .await
+    .unwrap();
+    sqlx::query("COMMIT").execute(&mut conn).await.unwrap();
+    let refs = fvoci_server::collab::derived_body::extract_internal_refs(&body);
+    (body, refs)
+}
+/// The transfer receipt ledger of one tenant (transfer_graph omits it).
+async fn ledger(run: &TestRun, workspace: Uuid) -> Value {
+    let mut conn = scoped_observer(run, workspace).await;
+    let rows:Value=sqlx::query_scalar("SELECT coalesce(jsonb_agg(to_jsonb(c) ORDER BY to_jsonb(c)::text),'[]'::jsonb) FROM fvoci.personal_transfer_commands c WHERE workspace_id=$1")
+        .bind(workspace).fetch_one(&mut conn).await.unwrap();
+    sqlx::query("COMMIT").execute(&mut conn).await.unwrap();
+    rows
+}
+/// The preview refuses with this exact first cause and nothing changes in
+/// either tenant (graph and receipt ledger).
+async fn refuses_before_effects(
+    run: &TestRun,
+    addr: SocketAddr,
+    actor: &SessionFixture,
+    source: Uuid,
+    selection: &Value,
+    title: &str,
+    code: &str,
+) {
+    let before = (transfer_graph(run, source).await, ledger(run, source).await);
+    let target_before = (
+        transfer_graph(run, actor.workspace_id).await,
+        ledger(run, actor.workspace_id).await,
+    );
+    let (status, error) = session_call(
+        addr,
+        Method::POST,
+        &format!("{}/preview", path(source)),
+        &actor.session_token,
+        Some(selection.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["code"], "personal_transfer_incomplete", "{error}");
+    assert_eq!(error["title"], title, "{error}");
+    assert_eq!(error["params"]["code"], code, "{error}");
+    assert_eq!(
+        (transfer_graph(run, source).await, ledger(run, source).await),
+        before
+    );
+    assert_eq!(
+        (
+            transfer_graph(run, actor.workspace_id).await,
+            ledger(run, actor.workspace_id).await
+        ),
+        target_before
+    );
+}
+const CURRENT_REFERENCE: &str = "current reference disclosure mapping";
+const RETAINED_OUTSIDE: &str = "retained typed dependency outside selected closure";
+
+#[tokio::test]
+async fn personal_transfer_move_carries_selected_pair_references_and_refuses_outside_retained_history(
+) {
+    run_test("personal_transfer_move_carries_selected_pair_references_and_refuses_outside_retained_history",async {
+        let mut run=TestRun::new(TestDb::bootstrap().await);
+        let(addr,actor,source,_,_,mut selection)=setup_transfer(&mut run).await;
+        let outside=create_wiki(&in_personal(&actor,source),"공개하지 않을 다른 문서").await;
+        // Negative pair: a real native write naming an outside private wiki.
+        // MOVE's retained native history refuses it first (before the current
+        // body guard), and it keeps refusing after the current body changes:
+        // the history is immutable and is never edited to pass.
+        let task=Uuid::parse_str(selection["taskId"].as_str().unwrap()).unwrap();
+        write_document_refs(&run,addr,&actor,source,&mut selection,json!([pair_mention("task",task),pair_mention("document",outside)])).await;
+        refuses_before_effects(&run,addr,&actor,source,&selection,RETAINED_OUTSIDE,"outgoing_reference").await;
+        write_document_refs(&run,addr,&actor,source,&mut selection,json!([pair_mention("task",task)])).await;
+        refuses_before_effects(&run,addr,&actor,source,&selection,RETAINED_OUTSIDE,"outgoing_reference").await;
+        // Positive pair, fresh (no earlier history): only the pair itself.
+        fresh_pair(addr,&actor,source,&mut selection,"task").await;
+        let document=Uuid::parse_str(selection["documentId"].as_str().unwrap()).unwrap();
+        let task=Uuid::parse_str(selection["taskId"].as_str().unwrap()).unwrap();
+        write_task_embed(&run,addr,&actor,source,&selection).await;
+        write_document_refs(&run,addr,&actor,source,&mut selection,json!([pair_mention("task",task)])).await;
+        // The pair carries real native history, so the shared bare-graph
+        // command() (history retained_private only) does not apply: the
+        // ordinary preview is checked directly, as the native MOVE test does.
+        let dest=actor.workspace_id;
+        let before=transfer_graph(&run,source).await;
+        let dest_before=transfer_graph(&run,dest).await;
+        let(source_ledger,dest_ledger)=(ledger(&run,source).await,ledger(&run,dest).await);
+        let revisions=rows_of(&before,"revisions","target_id",document,None).len()
+            +rows_of(&before,"revisions","target_id",task,None).len();
+        let(status,preview)=session_call(addr,Method::POST,&format!("{}/preview",path(source)),&actor.session_token,Some(selection.clone())).await;
+        assert_eq!(status,StatusCode::OK,"{preview}");
+        assert_eq!(preview["projectVisibility"],"workspace");
+        assert_eq!(preview["documentTitle"],"원본 한글 🧑‍💻");
+        assert_eq!(preview["sourceRetained"],false);
+        let dispositions=preview["dispositions"].as_array().unwrap();
+        assert_eq!(dispositions[0],json!({"item":"document","outcome":"moved","count":1}));
+        assert_eq!(dispositions[1],json!({"item":"task","outcome":"moved","count":1}));
+        assert!(dispositions.iter().all(|d|d["item"]!="attachment"),"{preview}");
+        let history:Vec<&Value>=dispositions.iter().filter(|d|d["item"]=="history").collect();
+        assert_eq!(history,vec![&json!({"item":"history","outcome":"moved","count":revisions})],"{preview}");
+        assert_eq!(transfer_graph(&run,source).await,before,"preview has no source effects");
+        assert_eq!(transfer_graph(&run,dest).await,dest_before,"preview has no destination effects");
+        assert_eq!((ledger(&run,source).await,ledger(&run,dest).await),(source_ledger.clone(),dest_ledger.clone()));
+        let body=json!({"requestId":Uuid::now_v7(),"selection":selection,"previewDigest":preview["digest"],"confirmed":true});
+        let(status,moved)=session_call(addr,Method::POST,&path(source),&actor.session_token,Some(body)).await;
+        assert_eq!(status,StatusCode::OK,"{moved}");
+        assert_eq!(moved["documentId"],document.to_string());assert_eq!(moved["taskId"],task.to_string());
+        assert_eq!(moved["replayed"],false);
+        assert_eq!(ledger(&run,source).await.as_array().unwrap().len(),source_ledger.as_array().unwrap().len()+1);
+        let(doc_body,doc_refs)=stored_refs(&run,dest,"documents",document).await;
+        assert_eq!(doc_refs.len(),1,"{doc_body}");assert_eq!(doc_refs[0].id,task.to_string());
+        let(task_body,task_refs)=stored_refs(&run,dest,"tasks",task).await;
+        assert_eq!(task_refs.len(),1,"{task_body}");assert_eq!(task_refs[0].id,document.to_string());
+        // Every retained native row and revision moved byte-identical with the
+        // same IDs (only the workspace changed); none is left in the source.
+        let after_source=transfer_graph(&run,source).await;
+        let after_dest=transfer_graph(&run,dest).await;
+        let mut tables:Vec<(&str,&str,Uuid)>=NATIVE_TABLES.iter()
+            .map(|(table,column,_)|(*table,*column,if *column=="document_id" {document} else {task})).collect();
+        tables.push(("revisions","target_id",document));
+        tables.push(("revisions","target_id",task));
+        for(table,column,id) in tables {
+            assert_eq!(rows_of(&after_dest,table,column,id,None),rows_of(&before,table,column,id,Some(dest)),"{table} {id}");
+            assert!(rows_of(&after_source,table,column,id,None).is_empty(),"{table} left in source");
+        }
+        // Independent native read of the moved committed document state + tail.
+        let mut conn=scoped_observer(&run,dest).await;
+        let(state,body_json):(Vec<u8>,Value)=sqlx::query_as("SELECT s.state, d.content_json FROM fvoci.document_states s JOIN fvoci.documents d ON d.workspace_id=s.workspace_id AND d.id=s.document_id WHERE s.workspace_id=$1 AND s.document_id=$2")
+            .bind(dest).bind(document).fetch_one(&mut conn).await.unwrap();
+        let tail:Vec<Vec<u8>>=sqlx::query_scalar("SELECT payload FROM fvoci.document_collab_updates WHERE workspace_id=$1 AND document_id=$2 ORDER BY seq")
+            .bind(dest).bind(document).fetch_all(&mut conn).await.unwrap();
+        sqlx::query("COMMIT").execute(&mut conn).await.unwrap();
+        let hub=run.hub();
+        let projected=fvoci_server::collab::revision::project_persisted_offline(hub.engine_bin(),hub.limits(),state,tail).unwrap();
+        assert_eq!(projected,body_json);
+        let(status,_)=session_call(addr,Method::GET,&document_api(source,document,""),&actor.session_token,None).await;
+        assert_eq!(status,StatusCode::NOT_FOUND,"the private route is closed");
+        run.finish().await.unwrap();
+    }).await;
+}
+
+#[tokio::test]
+async fn personal_transfer_copy_points_selected_pair_references_at_the_copy_and_refuses_others() {
+    run_test(
+        "personal_transfer_copy_points_selected_pair_references_at_the_copy_and_refuses_others",
+        async {
+            let mut run = TestRun::new(TestDb::bootstrap().await);
+            let (addr, actor, source, _, _, mut selection) = setup_transfer(&mut run).await;
+            let document = Uuid::parse_str(selection["documentId"].as_str().unwrap()).unwrap();
+            let task = Uuid::parse_str(selection["taskId"].as_str().unwrap()).unwrap();
+            let outside =
+                create_wiki(&in_personal(&actor, source), "공개하지 않을 다른 문서").await;
+            selection["action"] = json!("copy");
+            // COPY reads no retained history, so the current body guard is the
+            // first cause: outside target, wrong kind, then a malformed target that
+            // the extractor ignores but the copy body check refuses. The task body
+            // stays plain through every negative, so on the old blanket guard each
+            // refusal has the same first cause as here.
+            write_document_refs(
+                &run,
+                addr,
+                &actor,
+                source,
+                &mut selection,
+                json!([
+                    pair_mention("task", task),
+                    pair_mention("document", outside)
+                ]),
+            )
+            .await;
+            refuses_before_effects(
+                &run,
+                addr,
+                &actor,
+                source,
+                &selection,
+                CURRENT_REFERENCE,
+                "outgoing_reference",
+            )
+            .await;
+            write_document_refs(
+                &run,
+                addr,
+                &actor,
+                source,
+                &mut selection,
+                json!([pair_mention("document", task)]),
+            )
+            .await;
+            refuses_before_effects(
+                &run,
+                addr,
+                &actor,
+                source,
+                &selection,
+                CURRENT_REFERENCE,
+                "outgoing_reference",
+            )
+            .await;
+            write_document_refs(
+                &run,
+                addr,
+                &actor,
+                source,
+                &mut selection,
+                json!([{"type":"mention","attrs":{"entity":"task","id":"not-a-uuid","label":"x"}}]),
+            )
+            .await;
+            refuses_before_effects(
+                &run,
+                addr,
+                &actor,
+                source,
+                &selection,
+                "copy reference/file/node mapping",
+                "body_encoding",
+            )
+            .await;
+            // A document-only note naming a task: no selected task carries it.
+            let mut note = selection.clone();
+            fresh_pair(addr, &actor, source, &mut note, "note").await;
+            assert!(note["taskId"].is_null(), "{note}");
+            write_document_refs(
+                &run,
+                addr,
+                &actor,
+                source,
+                &mut note,
+                json!([pair_mention("task", task)]),
+            )
+            .await;
+            refuses_before_effects(
+                &run,
+                addr,
+                &actor,
+                source,
+                &note,
+                CURRENT_REFERENCE,
+                "outgoing_reference",
+            )
+            .await;
+            // Only the pair itself: the copy points both references at its own new
+            // document/task. The private original keeps its retained history
+            // (including the outside reference written above); the copy is seeded
+            // from the current closed body only. The task embed is written now,
+            // and the document write after it refreshes both versions.
+            write_task_embed(&run, addr, &actor, source, &selection).await;
+            let block = write_document_refs(
+                &run,
+                addr,
+                &actor,
+                source,
+                &mut selection,
+                json!([pair_mention("task", task)]),
+            )
+            .await;
+            let before = transfer_graph(&run, source).await;
+            let source_ledger = ledger(&run, source).await;
+            let body = command(addr, &actor, source, &selection).await;
+            let (status, copied) = session_call(
+                addr,
+                Method::POST,
+                &path(source),
+                &actor.session_token,
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{copied}");
+            let copy_document = Uuid::parse_str(copied["documentId"].as_str().unwrap()).unwrap();
+            let copy_task = Uuid::parse_str(copied["taskId"].as_str().unwrap()).unwrap();
+            assert_ne!(copy_document, document);
+            assert_ne!(copy_task, task);
+            assert_eq!(
+                ledger(&run, source).await.as_array().unwrap().len(),
+                source_ledger.as_array().unwrap().len() + 1
+            );
+            let (doc_body, doc_refs) =
+                stored_refs(&run, actor.workspace_id, "documents", copy_document).await;
+            assert_eq!(doc_refs.len(), 1, "{doc_body}");
+            assert_eq!(doc_refs[0].id, copy_task.to_string());
+            assert_ne!(
+                doc_body["content"][0]["attrs"]["id"], block,
+                "the copy's block id is fresh"
+            );
+            let (task_body, task_refs) =
+                stored_refs(&run, actor.workspace_id, "tasks", copy_task).await;
+            assert_eq!(task_refs.len(), 1, "{task_body}");
+            assert_eq!(task_refs[0].id, copy_document.to_string());
+            for body in [&doc_body, &task_body] {
+                assert!(!body.to_string().contains(&task.to_string()), "{body}");
+                assert!(!body.to_string().contains(&document.to_string()), "{body}");
+                assert!(!body.to_string().contains(&outside.to_string()), "{body}");
+            }
+            // Fresh native state for the copy, no copied history; the private
+            // original (bodies, native history, revisions, ACL) is unchanged.
+            let team = transfer_graph(&run, actor.workspace_id).await;
+            assert!(team["document_states"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["document_id"] == copy_document.to_string()));
+            assert!(team["task_states"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["task_id"] == copy_task.to_string()));
+            assert!(!team["revisions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["target_id"] == copy_document.to_string()
+                    || row["target_id"] == copy_task.to_string()));
+            assert_eq!(
+                transfer_graph(&run, source).await,
+                before,
+                "COPY leaves the original graph unchanged"
+            );
+            run.finish().await.unwrap();
+        },
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn personal_transfer_copy_current_native_content_has_new_blocks_and_preserves_history() {
     run_test("personal_transfer_copy_current_native_content_has_new_blocks_and_preserves_history",async {

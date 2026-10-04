@@ -717,18 +717,9 @@ impl Archive {
                 return Err(invalid());
             }
         }
-        // Reply chains end at a top-level comment (no cycles).
-        for c in &g.comments {
-            let mut cursor = c.parent_id;
-            let mut steps = 0usize;
-            while let Some(p) = cursor {
-                steps += 1;
-                if steps > g.comments.len() {
-                    return Err(invalid());
-                }
-                cursor = comments.get(&p).and_then(|parent| parent.parent_id);
-            }
-        }
+        // Reply chains end at a top-level comment (no cycles): every comment
+        // is reached from one.
+        comments_parent_first(&g.comments).map_err(|_| invalid())?;
         let mut origin_tasks = BTreeSet::new();
         let mut origin_commands = BTreeSet::new();
         for o in &g.origins {
@@ -2194,6 +2185,45 @@ pub fn mapped_comment_reactions(reactions: &Value, source: Uuid, destination: Uu
     reactions
 }
 
+/// The archived comments with every parent before its replies: top-level
+/// comments in archive order, each followed depth-first by its replies in
+/// archive order (an explicit stack; no recursion). Each comment is visited
+/// once; a repeated comment id, or a comment never reached from a top-level
+/// comment (a reply cycle, or a parent that is not an archived comment), is
+/// Invalid. The id and reply indexes are BTree collections, so O(n log n) for
+/// n comments (n is capped by the capture row limit).
+pub fn comments_parent_first(comments: &[Comment]) -> Result<Vec<&Comment>, ArchiveError> {
+    let invalid = || ArchiveError::Invalid("comment parent order".into());
+    let mut ids = BTreeSet::new();
+    if !comments.iter().all(|comment| ids.insert(comment.id)) {
+        return Err(invalid());
+    }
+    let mut replies: BTreeMap<Uuid, Vec<usize>> = BTreeMap::new();
+    let mut stack = Vec::new();
+    for (index, comment) in comments.iter().enumerate().rev() {
+        match comment.parent_id {
+            Some(parent) => replies.entry(parent).or_default().push(index),
+            None => stack.push(index),
+        }
+    }
+    // With unique ids each comment is pushed at most once (only by its own
+    // parent), so the stack never revisits.
+    let mut order = Vec::with_capacity(comments.len());
+    while let Some(index) = stack.pop() {
+        let comment = &comments[index];
+        order.push(comment);
+        // Replies were collected in reverse archive order, so pushing them as
+        // they are pops them in archive order.
+        if let Some(children) = replies.get(&comment.id) {
+            stack.extend(children.iter().copied());
+        }
+    }
+    if order.len() != comments.len() {
+        return Err(invalid());
+    }
+    Ok(order)
+}
+
 /// JSON bytes charged to the graph budget per extracted history reference
 /// (a 36-character id, its quotes and a separator).
 pub const HISTORY_REFERENCE_BYTES: usize = 39;
@@ -3060,6 +3090,122 @@ pub(crate) mod tests {
         assert!(invalid(|a| a.graph.comments[0].reactions = json!({"😀":[]})));
         assert!(invalid(|a| a.graph.comments[0].reactions = json!([])));
         assert!(invalid(|a| a.graph.comments[0].id = a.graph.labels[0].id));
+        assert!(invalid(
+            |a| a.graph.comments[1].parent_id = Some(a.graph.comments[1].id)
+        ));
+        // Scale (writers allow any reply depth; capture caps comments at
+        // 10000): a 10000-deep chain listed deepest first validates and is
+        // ordered parents first; the same chain closed into a cycle, and a
+        // flat 10000-comment set, behave as before.
+        let chain = |n: u128, reversed: bool, cycle: bool| {
+            let mut archive = policy_fixture();
+            let template = archive.graph.comments[0].clone();
+            let id = |i: u128| Uuid::from_u128(0x7700_0000_0000_4000_8000_0000_0000_0000 + i);
+            let mut comments: Vec<Comment> = (0..n)
+                .map(|i| {
+                    let mut c = template.clone();
+                    c.id = id(i);
+                    c.parent_id = (i > 0).then(|| id(i - 1));
+                    if i > 0 {
+                        c.resolved_at = None;
+                    }
+                    c
+                })
+                .collect();
+            if cycle {
+                comments[0].parent_id = Some(id(n - 1));
+                comments[0].resolved_at = None;
+            }
+            if reversed {
+                comments.reverse();
+            }
+            archive.graph.comments = comments;
+            archive
+        };
+        // The shared helper refuses a repeated id itself (two roots, or a
+        // root and a reply sharing an id), besides the global id check.
+        let mut duplicate_roots = policy_fixture().graph.comments;
+        duplicate_roots.truncate(1);
+        duplicate_roots[0].parent_id = None;
+        duplicate_roots.push(duplicate_roots[0].clone());
+        assert!(matches!(
+            comments_parent_first(&duplicate_roots),
+            Err(ArchiveError::Invalid(_))
+        ));
+        let mut duplicate_child = policy_fixture().graph.comments;
+        let reply = duplicate_child[1].clone();
+        duplicate_child.push(reply);
+        assert!(matches!(
+            comments_parent_first(&duplicate_child),
+            Err(ArchiveError::Invalid(_))
+        ));
+        comments_parent_first(&policy_fixture().graph.comments).unwrap();
+        let deep = chain(10_000, true, false);
+        deep.validate().unwrap();
+        let order = comments_parent_first(&deep.graph.comments).unwrap();
+        let mut seen = BTreeSet::new();
+        for c in &order {
+            assert!(c.parent_id.is_none_or(|p| seen.contains(&p)));
+            seen.insert(c.id);
+        }
+        assert_eq!(order.len(), 10_000);
+        assert!(matches!(
+            chain(10_000, true, true).validate(),
+            Err(ArchiveError::Invalid(_))
+        ));
+        let mut flat = chain(10_000, false, false);
+        for c in &mut flat.graph.comments {
+            c.parent_id = None;
+        }
+        flat.validate().unwrap();
+        assert_eq!(
+            comments_parent_first(&flat.graph.comments)
+                .unwrap()
+                .iter()
+                .map(|c| c.id)
+                .collect::<Vec<_>>(),
+            flat.graph.comments.iter().map(|c| c.id).collect::<Vec<_>>()
+        );
+        // Cost witness on the same corpus (recorded, never a time gate): the
+        // previous chain walk and rescanning publish order against the one
+        // ordering pass.
+        let comments = &deep.graph.comments;
+        let started = std::time::Instant::now();
+        let index: BTreeMap<Uuid, &Comment> = comments.iter().map(|c| (c.id, c)).collect();
+        let mut walked = 0u64;
+        for c in comments {
+            let mut cursor = c.parent_id;
+            while let Some(p) = cursor {
+                walked += 1;
+                cursor = index.get(&p).and_then(|parent| parent.parent_id);
+            }
+        }
+        let previous_walk = started.elapsed();
+        let started = std::time::Instant::now();
+        let mut remaining: Vec<&Comment> = comments.iter().collect();
+        let mut inserted = BTreeSet::new();
+        let mut scanned = 0u64;
+        while !remaining.is_empty() {
+            let at = remaining
+                .iter()
+                .position(|c| {
+                    scanned += 1;
+                    c.parent_id.is_none_or(|id| inserted.contains(&id))
+                })
+                .unwrap();
+            inserted.insert(remaining.remove(at).id);
+        }
+        let previous_publish = started.elapsed();
+        let started = std::time::Instant::now();
+        let _ = comments_parent_first(comments).unwrap();
+        let ordering = started.elapsed();
+        println!(
+            "W7-COMMENT-COST {}",
+            json!({"comments": comments.len(), "depth": comments.len(),
+                "previousWalkSteps": walked, "previousWalkMs": previous_walk.as_secs_f64() * 1e3,
+                "previousPublishChecks": scanned, "previousPublishMs": previous_publish.as_secs_f64() * 1e3,
+                "orderingVisits": comments.len(), "orderingMs": ordering.as_secs_f64() * 1e3})
+        );
         let archive = policy_fixture();
         let destination = Uuid::parse_str("40000000-0000-4000-8000-000000000001").unwrap();
         assert_eq!(

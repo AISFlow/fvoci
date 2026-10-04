@@ -86,15 +86,34 @@ fn seed_truthy(value: &Value) -> bool {
     }
 }
 
+/// The selected pair's identities in a body copy: each selected document or
+/// task reference becomes the copy's identity (itself while validating).
+struct PairRefs {
+    document: (Uuid, Uuid),
+    task: Option<(Uuid, Uuid)>,
+}
+
+impl PairRefs {
+    fn copied(&self, kind: InternalRefKind, id: &str) -> Option<Uuid> {
+        let id = Uuid::parse_str(id).ok()?;
+        match kind {
+            InternalRefKind::Document => (id == self.document.0).then_some(self.document.1),
+            InternalRefKind::Task => self.task.filter(|task| task.0 == id).map(|task| task.1),
+        }
+    }
+}
+
 fn copy_body(
     json: &Value,
     files: &std::collections::HashMap<Uuid, Uuid>,
+    pair: &PairRefs,
 ) -> Result<(Value, std::collections::HashMap<String, String>), PersonalTransferDbError> {
     fn visit(
         node: &mut Value,
         depth: usize,
         ids: &mut std::collections::HashMap<String, String>,
         files: &std::collections::HashMap<Uuid, Uuid>,
+        pair: &PairRefs,
     ) -> Result<(), PersonalTransferDbError> {
         if depth > 64 {
             return Err(PersonalTransferDbError::Incomplete(
@@ -126,7 +145,12 @@ fn copy_body(
                 "copy body marks are not an array",
             ));
         }
-        let kind = node.get("type").and_then(Value::as_str).unwrap_or("");
+        // Owned: `node` is borrowed mutably below while the kind is still read.
+        let kind = node
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
         // The copy is seeded from this body: an `image` node is outside the
         // native seed schema (images are attachment nodes with `image`), so it
         // refuses here rather than failing the commit's seed.
@@ -137,6 +161,32 @@ fn copy_body(
             ));
         }
         let file = kind == "attachment";
+        // A mention (target in `id`) or embed (target in `ref`) of the
+        // selected pair points at the copy's own document/task; any other
+        // reference, or any other entity, still refuses below.
+        let target = match kind.as_str() {
+            "mention" => Some("id"),
+            "embed" => Some("ref"),
+            _ => None,
+        };
+        let mut pair_reference = false;
+        if let Some(key) = target {
+            // Only this node's own typed target (its attrs), never one of its
+            // descendants: a malformed or unsupported parent cannot borrow a
+            // selected child's reference. Descendants are visited on their own.
+            let own = json!({"type": kind.as_str(), "attrs": node.get("attrs").cloned().unwrap_or(Value::Null)});
+            let references = extract_internal_refs(&own);
+            let copied = match references.as_slice() {
+                [reference] => pair.copied(reference.kind, &reference.id),
+                _ => None,
+            };
+            if let (Some(copied), Some(attrs)) =
+                (copied, node.get_mut("attrs").and_then(Value::as_object_mut))
+            {
+                attrs.insert(key.into(), Value::String(copied.to_string()));
+                pair_reference = true;
+            }
+        }
         if file {
             let copied = node
                 .get("attrs")
@@ -153,26 +203,28 @@ fn copy_body(
                 ));
             };
             attrs.insert("id".into(), Value::String(copied.to_string()));
-        } else if !matches!(
-            kind,
-            "doc"
-                | "text"
-                | "paragraph"
-                | "heading"
-                | "blockquote"
-                | "bulletList"
-                | "orderedList"
-                | "listItem"
-                | "taskList"
-                | "taskItem"
-                | "codeBlock"
-                | "hardBreak"
-                | "horizontalRule"
-                | "table"
-                | "tableRow"
-                | "tableCell"
-                | "tableHeader"
-        ) {
+        } else if !pair_reference
+            && !matches!(
+                kind.as_str(),
+                "doc"
+                    | "text"
+                    | "paragraph"
+                    | "heading"
+                    | "blockquote"
+                    | "bulletList"
+                    | "orderedList"
+                    | "listItem"
+                    | "taskList"
+                    | "taskItem"
+                    | "codeBlock"
+                    | "hardBreak"
+                    | "horizontalRule"
+                    | "table"
+                    | "tableRow"
+                    | "tableCell"
+                    | "tableHeader"
+            )
+        {
             let blocker = if !extract_internal_refs(node).is_empty() {
                 Blocker::OutgoingReference
             } else {
@@ -186,11 +238,12 @@ fn copy_body(
         // Block IDs are editor UUIDs, but body PUT/block PATCH accept any
         // string. Every present identity gets a fresh one, so the copy never
         // shares a block ID with the private original. A file node's id is
-        // its attachment (mapped above); its children are still checked.
+        // its attachment (mapped above) and a mention's id its target (mapped
+        // above); their children are still checked. An embed's id is a block.
         if let Some(attrs) = node
             .get_mut("attrs")
             .and_then(Value::as_object_mut)
-            .filter(|_| !file)
+            .filter(|_| !file && kind != "mention")
         {
             if attrs
                 .get("id")
@@ -211,14 +264,14 @@ fn copy_body(
         }
         if let Some(content) = node.get_mut("content").and_then(Value::as_array_mut) {
             for child in content {
-                visit(child, depth + 1, ids, files)?;
+                visit(child, depth + 1, ids, files, pair)?;
             }
         }
         Ok(())
     }
     let mut json = json.clone();
     let mut ids = std::collections::HashMap::new();
-    visit(&mut json, 0, &mut ids, files)?;
+    visit(&mut json, 0, &mut ids, files, pair)?;
     Ok((json, ids))
 }
 
@@ -523,6 +576,20 @@ struct Destination {
     root_id: Uuid,
     root_path: String,
     collection_id: Option<Uuid>,
+}
+
+/// Whether a current body names anything the transfer cannot carry. Only the
+/// selected document and task (exact kind and UUID) are carried: a same-ID
+/// MOVE keeps them as they are (the closure its retained native history is
+/// held to) and a COPY points them at its new identities (`copy_body`). Any
+/// other reference still needs the current reference disclosure mapping.
+fn outside_reference(body: &Value, selection: &PersonalTransferSelection) -> bool {
+    extract_internal_refs(body).iter().any(|reference| {
+        !Uuid::parse_str(&reference.id).is_ok_and(|id| match reference.kind {
+            InternalRefKind::Document => id == selection.document_id,
+            InternalRefKind::Task => Some(id) == selection.task_id,
+        })
+    })
 }
 
 async fn writer_prefix(
@@ -1145,7 +1212,7 @@ async fn source_graph(
             Ok(value) => value,
             Err(error) => return Ok(Err(error)),
         };
-        if !extract_internal_refs(&body.json).is_empty() {
+        if outside_reference(&body.json, selection) {
             return Ok(Err(PersonalTransferDbError::Incomplete(
                 Blocker::OutgoingReference,
                 "current reference disclosure mapping",
@@ -1156,7 +1223,7 @@ async fn source_graph(
         (task.content_json, task.text, task.chosung) = prepared.into_parts();
         task_cut = Some(body.cut);
     }
-    if !extract_internal_refs(&document_body.json).is_empty() {
+    if outside_reference(&document_body.json, selection) {
         return Ok(Err(PersonalTransferDbError::Incomplete(
             Blocker::OutgoingReference,
             "current reference disclosure mapping",
@@ -1189,7 +1256,11 @@ async fn source_graph(
         // commit maps it to the copy's new attachment).
         let pair_files: std::collections::HashMap<Uuid, Uuid> =
             moved_files.iter().map(|file| (file.id, file.id)).collect();
-        let (_, block_ids) = match copy_body(&document.content_json, &pair_files) {
+        let pair = PairRefs {
+            document: (selection.document_id, selection.document_id),
+            task: selection.task_id.map(|id| (id, id)),
+        };
+        let (_, block_ids) = match copy_body(&document.content_json, &pair_files, &pair) {
             Ok(value) => value,
             Err(error) => return Ok(Err(error)),
         };
@@ -1204,7 +1275,7 @@ async fn source_graph(
             }
         }
         if let Some(task) = &task {
-            if let Err(error) = copy_body(&task.content_json, &pair_files) {
+            if let Err(error) = copy_body(&task.content_json, &pair_files, &pair) {
                 return Ok(Err(error));
             }
         }
@@ -2368,18 +2439,23 @@ async fn commit_graph(
         .iter()
         .map(|file| (file.staged.source.id, file.destination))
         .collect();
+    // The selected pair -> the copy's new document/task (unused for a MOVE).
+    let pair = PairRefs {
+        document: (selection.document_id, document_id),
+        task: selection.task_id.zip(task_id),
+    };
     let (document_json, block_ids) = if moving {
         (
             graph.document.content_json.clone(),
             std::collections::HashMap::new(),
         )
     } else {
-        copy_body(&graph.document.content_json, &copied_files)
+        copy_body(&graph.document.content_json, &copied_files, &pair)
             .map_err(|_| sqlx::Error::Protocol("personal transfer copy body changed".into()))?
     };
     let task_json = match &graph.task {
         Some(task) if !moving => Some(
-            copy_body(&task.content_json, &copied_files)
+            copy_body(&task.content_json, &copied_files, &pair)
                 .map_err(|_| sqlx::Error::Protocol("personal transfer copy body changed".into()))?
                 .0,
         ),
@@ -2586,6 +2662,139 @@ async fn commit_graph(
 mod tests {
     use super::*;
 
+    /// A pair none of the test bodies names.
+    fn unrelated() -> PairRefs {
+        PairRefs {
+            document: (Uuid::now_v7(), Uuid::now_v7()),
+            task: Some((Uuid::now_v7(), Uuid::now_v7())),
+        }
+    }
+
+    fn selection(action: &str, document: Uuid, task: Option<Uuid>) -> PersonalTransferSelection {
+        serde_json::from_value(json!({"action":action,"documentId":document,"taskId":task,
+            "expectedDocumentVersion":1,"expectedTaskVersion":task.map(|_| 1),
+            "destinationWorkspaceId":Uuid::now_v7(),"destinationProjectId":Uuid::now_v7(),
+            "destinationStatusId":null}))
+        .unwrap()
+    }
+
+    #[test]
+    fn only_the_selected_pair_references_are_carried() {
+        let (document, task, other) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let body =
+            |nodes: Value| json!({"type":"doc","content":[{"type":"paragraph","content":nodes}]});
+        let mention = |entity: &str, id: Uuid| json!({"type":"mention","attrs":{"entity":entity,"id":id.to_string(),"label":"x"}});
+        let embed = |entity: &str, id: Uuid| json!({"type":"embed","attrs":{"entity":entity,"ref":id.to_string()}});
+        for action in ["move", "copy"] {
+            let pair = selection(action, document, Some(task));
+            assert!(!outside_reference(
+                &body(json!([mention("task", task), embed("document", document)])),
+                &pair
+            ));
+            assert!(!outside_reference(
+                &body(json!([{"type":"text","text":"참조 없음"}])),
+                &pair
+            ));
+            assert!(outside_reference(
+                &body(json!([mention("task", task), mention("document", other)])),
+                &pair
+            ));
+            // The same UUID under the other kind is not the pair member.
+            assert!(outside_reference(
+                &body(json!([mention("document", task)])),
+                &pair
+            ));
+            let lone = selection(action, document, None);
+            assert!(outside_reference(
+                &body(json!([mention("task", task)])),
+                &lone
+            ));
+        }
+    }
+
+    #[test]
+    fn copy_points_selected_pair_references_at_the_copy() {
+        let (document, task, other) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let (new_document, new_task) = (Uuid::now_v7(), Uuid::now_v7());
+        let pair = PairRefs {
+            document: (document, new_document),
+            task: Some((task, new_task)),
+        };
+        let block = Uuid::now_v7().to_string();
+        let embed_block = Uuid::now_v7().to_string();
+        let body = json!({"type":"doc","content":[
+            {"type":"paragraph","attrs":{"id":block},"content":[
+                {"type":"mention","attrs":{"entity":"task","id":task.to_string(),"label":"원본 작업"}}]},
+            {"type":"embed","attrs":{"id":embed_block,"entity":"document","ref":document.to_string()}}]});
+        let none = std::collections::HashMap::new();
+        let (copied, ids) = copy_body(&body, &none, &pair).expect("pair references map");
+        let mention = &copied["content"][0]["content"][0]["attrs"];
+        assert_eq!(
+            mention["id"],
+            new_task.to_string(),
+            "the mention target is the copy's task"
+        );
+        assert_eq!(mention["label"], "원본 작업");
+        assert!(
+            !ids.contains_key(&task.to_string()),
+            "a mention target is not a block identity"
+        );
+        let embed = &copied["content"][1]["attrs"];
+        assert_eq!(embed["ref"], new_document.to_string());
+        assert_ne!(embed["id"], embed_block, "an embed's own block id is fresh");
+        assert_eq!(
+            embed["id"].as_str(),
+            ids.get(&embed_block).map(String::as_str)
+        );
+        assert_ne!(copied["content"][0]["attrs"]["id"], block);
+        assert!(!copied.to_string().contains(&task.to_string()));
+        assert!(!copied.to_string().contains(&document.to_string()));
+        // Anything else still refuses: outside target, crossed kind, a user
+        // mention (no other entity support), several targets in one node.
+        let refuse = |node: Value, expected: Blocker| {
+            let body = json!({"type":"doc","content":[{"type":"paragraph","content":[node]}]});
+            assert!(matches!(
+                copy_body(&body, &none, &pair),
+                Err(PersonalTransferDbError::Incomplete(blocker, "copy reference/file/node mapping")) if blocker == expected
+            ));
+        };
+        refuse(
+            json!({"type":"mention","attrs":{"entity":"task","id":other.to_string(),"label":"x"}}),
+            Blocker::OutgoingReference,
+        );
+        refuse(
+            json!({"type":"mention","attrs":{"entity":"document","id":task.to_string(),"label":"x"}}),
+            Blocker::OutgoingReference,
+        );
+        refuse(
+            json!({"type":"mention","attrs":{"entity":"user","id":other.to_string(),"label":"x"}}),
+            Blocker::BodyEncoding,
+        );
+        refuse(
+            json!({"type":"embed","attrs":{"entity":"task","ref":task.to_string(),"id":task.to_string()},
+            "content":[{"type":"mention","attrs":{"entity":"task","id":other.to_string(),"label":"x"}}]}),
+            Blocker::OutgoingReference,
+        );
+        // A parent never borrows a selected child's reference (F1): a malformed
+        // embed target, an unknown embed entity and a user mention, each with a
+        // child naming the selected pair, refuse instead of being rewritten.
+        let child_document = json!([{"type":"mention","attrs":{"entity":"document","id":document.to_string(),"label":"x"}}]);
+        let child_task =
+            json!([{"type":"mention","attrs":{"entity":"task","id":task.to_string(),"label":"x"}}]);
+        refuse(
+            json!({"type":"embed","attrs":{"entity":"task","ref":"not-a-uuid"},"content":child_document}),
+            Blocker::OutgoingReference,
+        );
+        refuse(
+            json!({"type":"embed","attrs":{"entity":"person","ref":task.to_string()},"content":child_task}),
+            Blocker::OutgoingReference,
+        );
+        refuse(
+            json!({"type":"mention","attrs":{"entity":"user","id":other.to_string(),"label":"x"},"content":child_task}),
+            Blocker::OutgoingReference,
+        );
+    }
+
     #[test]
     fn body_files_lists_every_shown_file_and_marks_unusable_ids() {
         let id = Uuid::now_v7();
@@ -2683,8 +2892,8 @@ mod tests {
             paragraph(Value::Null),
             paragraph(json!("legacy-block-7")),
         ]});
-        let (copied, ids) =
-            copy_body(&body, &std::collections::HashMap::new()).expect("supported body");
+        let (copied, ids) = copy_body(&body, &std::collections::HashMap::new(), &unrelated())
+            .expect("supported body");
         let content = copied["content"].as_array().unwrap();
         for (index, original) in [
             (0, upper.to_lowercase()),
@@ -2709,7 +2918,7 @@ mod tests {
         let structured = json!({"type":"doc","content":[paragraph(json!({"x":1}))]});
         let none = std::collections::HashMap::new();
         assert!(matches!(
-            copy_body(&structured, &none),
+            copy_body(&structured, &none, &unrelated()),
             Err(PersonalTransferDbError::Incomplete(
                 Blocker::BlockIdentity,
                 "copy block identity"
@@ -2723,7 +2932,7 @@ mod tests {
             (callout, Blocker::BodyEncoding),
         ] {
             assert!(matches!(
-                copy_body(&body, &none),
+                copy_body(&body, &none, &unrelated()),
                 Err(PersonalTransferDbError::Incomplete(blocker, "copy reference/file/node mapping"))
                     if blocker == expected
             ));
@@ -2746,7 +2955,7 @@ mod tests {
             ] {
                 assert!(
                     matches!(
-                        copy_body(&body, &none),
+                        copy_body(&body, &none, &unrelated()),
                         Err(PersonalTransferDbError::Incomplete(
                             Blocker::BodyEncoding,
                             "copy body content is not an array"
@@ -2758,7 +2967,8 @@ mod tests {
         }
         for content in [Value::Null, json!(false), json!(0), json!(""), json!([])] {
             let body = json!({"type":"doc","content":[{"type":"paragraph","content":content}]});
-            let (copied, _) = copy_body(&body, &none).expect("falsy or array content is accepted");
+            let (copied, _) =
+                copy_body(&body, &none, &unrelated()).expect("falsy or array content is accepted");
             assert_eq!(copied["content"][0]["type"], json!("paragraph"));
         }
     }
@@ -2781,7 +2991,7 @@ mod tests {
             ] {
                 assert!(
                     matches!(
-                        copy_body(&body, &none),
+                        copy_body(&body, &none, &unrelated()),
                         Err(PersonalTransferDbError::Incomplete(
                             Blocker::BodyEncoding,
                             "copy body marks are not an array"
@@ -2792,13 +3002,14 @@ mod tests {
             }
             let root = json!({"type":"doc","marks":marks.clone(),"content":[]});
             assert!(
-                copy_body(&root, &none).is_ok(),
+                copy_body(&root, &none, &unrelated()).is_ok(),
                 "root marks are not read by the seed: {root}"
             );
         }
         for marks in [Value::Null, json!(false), json!(0), json!(""), json!([])] {
             let body = json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"a","marks":marks}]}]});
-            let (copied, _) = copy_body(&body, &none).expect("falsy or array marks are accepted");
+            let (copied, _) =
+                copy_body(&body, &none, &unrelated()).expect("falsy or array marks are accepted");
             assert_eq!(copied["content"][0]["content"][0]["text"], json!("a"));
         }
     }
@@ -2811,7 +3022,7 @@ mod tests {
             paragraph(json!("p1")),
             {"type":"attachment","attrs":{"id":source.to_string(),"name":"x.pdf","image":true}}
         ]});
-        let (copied, _) = copy_body(&body, &files).expect("pair file maps");
+        let (copied, _) = copy_body(&body, &files, &unrelated()).expect("pair file maps");
         assert_eq!(copied["content"][1]["attrs"]["id"], json!(copy.to_string()));
         assert_eq!(copied["content"][1]["attrs"]["name"], json!("x.pdf"));
         assert_eq!(copied["content"][1]["attrs"]["image"], json!(true));
@@ -2819,7 +3030,7 @@ mod tests {
         for id in [json!(outside.to_string()), json!("a"), Value::Null] {
             let body = json!({"type":"doc","content":[{"type":"attachment","attrs":{"id":id}}]});
             assert!(matches!(
-                copy_body(&body, &files),
+                copy_body(&body, &files, &unrelated()),
                 Err(PersonalTransferDbError::Incomplete(
                     Blocker::File,
                     "copy body file outside the pair"
@@ -2831,7 +3042,7 @@ mod tests {
         let nested_file = json!({"type":"doc","content":[{"type":"attachment","attrs":{"id":source.to_string()},
             "content":[{"type":"attachment","attrs":{"id":outside.to_string()}}]}]});
         assert!(matches!(
-            copy_body(&nested_file, &files),
+            copy_body(&nested_file, &files, &unrelated()),
             Err(PersonalTransferDbError::Incomplete(
                 Blocker::File,
                 "copy body file outside the pair"
@@ -2840,7 +3051,7 @@ mod tests {
         let nested_ref = json!({"type":"doc","content":[{"type":"attachment","attrs":{"id":source.to_string()},
             "content":[{"type":"mention","attrs":{"entity":"task","id":Uuid::now_v7().to_string(),"label":"x"}}]}]});
         assert!(matches!(
-            copy_body(&nested_ref, &files),
+            copy_body(&nested_ref, &files, &unrelated()),
             Err(PersonalTransferDbError::Incomplete(
                 Blocker::OutgoingReference,
                 _
@@ -2853,7 +3064,8 @@ mod tests {
             {"type":"attachment","attrs":{"id":source.to_string()},
              "content":[paragraph(json!("p-nested"))]}
         ]});
-        let (copied, ids) = copy_body(&nested_block, &files).expect("nested block remaps");
+        let (copied, ids) =
+            copy_body(&nested_block, &files, &unrelated()).expect("nested block remaps");
         let nested = &copied["content"][1];
         assert_eq!(nested["attrs"]["id"], json!(copy.to_string()));
         let fresh = nested["content"][0]["attrs"]["id"].as_str().unwrap();
@@ -2869,7 +3081,7 @@ mod tests {
         let image =
             json!({"type":"doc","content":[{"type":"image","attrs":{"id":source.to_string()}}]});
         assert!(matches!(
-            copy_body(&image, &files),
+            copy_body(&image, &files, &unrelated()),
             Err(PersonalTransferDbError::Incomplete(
                 Blocker::BodyEncoding,
                 "copy body node outside the native schema"

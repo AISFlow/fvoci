@@ -1464,22 +1464,15 @@ pub async fn publish(
         value["changes"] = mapped_activity_changes(&row.changes, g.source_actor_id, actor);
         insert_record(&mut tx, "task_activity", value).await?;
     }
-    // Comments: parents before replies (validated acyclic); the author and
-    // the single actor's reactions become the destination actor.
-    let mut remaining: Vec<_> = g.comments.iter().collect();
-    let mut inserted = std::collections::BTreeSet::new();
-    while !remaining.is_empty() {
-        let Some(index) = remaining
-            .iter()
-            .position(|c| c.parent_id.is_none_or(|id| inserted.contains(&id)))
-        else {
-            return Err(ArchiveError::Invalid("comment parent cycle".into()).into());
-        };
-        let row = remaining.remove(index);
+    // Comments: parents before replies (validated acyclic; one ordering pass
+    // instead of rescanning); the author and the single actor's reactions
+    // become the destination actor.
+    let ordered = comments_parent_first(&g.comments)
+        .map_err(|_| ArchiveError::Invalid("comment parent cycle".into()))?;
+    for row in ordered {
         let mut value = mapped(row, workspace, actor)?;
         value["reactions"] = mapped_comment_reactions(&row.reactions, g.source_actor_id, actor);
         insert_record(&mut tx, "comments", value).await?;
-        inserted.insert(row.id);
     }
     for row in &g.states {
         let table = if row.target_kind == "document" {
