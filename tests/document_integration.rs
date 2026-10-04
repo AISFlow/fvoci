@@ -2779,7 +2779,99 @@ async fn wiki_create_command_requires_identity_and_receipt_failure_rolls_back_ev
 /// is a separate required tracer; this does not claim that acceptance.
 #[tokio::test]
 async fn selected_backend_setup_cookie_wiki_command_readback() {
+    selected_backend_wiki_fixture(false).await;
+}
+
+#[tokio::test]
+async fn selected_backend_native_append_fresh_child_readback() {
+    selected_backend_wiki_fixture(true).await;
+}
+
+async fn selected_backend_wiki_fixture(with_native: bool) {
     use fvoci_server::db::backend::Backend;
+    async fn claim_native(
+        backend: &Backend,
+        workspace: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+        document: Uuid,
+        owner: Uuid,
+    ) -> Result<
+        Result<
+            (
+                fvoci_server::db::collab::ClaimWriterResult,
+                Option<fvoci_server::db::collab::FamilyRoomFence>,
+            ),
+            fvoci_server::db::collab::CollabDbError,
+        >,
+        sqlx::Error,
+    > {
+        use fvoci_server::db::collab::{
+            claim_family_document_room, claim_writer_and_load_kind_backend, CollabKind,
+        };
+        match backend {
+            Backend::Postgres(_) => claim_writer_and_load_kind_backend(
+                backend,
+                CollabKind::Document,
+                workspace,
+                actor,
+                credential,
+                document,
+            )
+            .await
+            .map(|result| result.map(|native| (native, None))),
+            _ => claim_family_document_room(
+                backend,
+                workspace,
+                actor,
+                credential,
+                document,
+                owner,
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .map(|result| result.map(|claimed| (claimed.native, Some(claimed.fence)))),
+        }
+    }
+    async fn append_native(
+        backend: &Backend,
+        fence: Option<fvoci_server::db::collab::FamilyRoomFence>,
+        input: fvoci_server::db::collab::AppendCollabInput<'_>,
+    ) -> Result<
+        Result<
+            fvoci_server::db::collab::AppendCollabResult,
+            fvoci_server::db::collab::CollabDbError,
+        >,
+        sqlx::Error,
+    > {
+        use fvoci_server::db::collab::{append_collab_update, append_family_document_room_update};
+        match backend {
+            Backend::Postgres(pool) => append_collab_update(pool, input).await,
+            _ => {
+                append_family_document_room_update(
+                    backend,
+                    fence.expect("family claim must own a fence"),
+                    input,
+                )
+                .await
+            }
+        }
+    }
+    let native_fixture = if with_native {
+        let engine_bin = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_COLLAB_ENGINE")
+                .expect("native fixture requires freshly built FVOCI_COLLAB_ENGINE"),
+        );
+        let content = json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Selected native durable text"}]}]});
+        let seed = fvoci_server::collab::seed::SeedEngine::new(
+            engine_bin.clone(),
+            collab_engine::limits::Limits::default(),
+        );
+        let update = seed.tiptap_to_yjs_update(&content).await.unwrap();
+        Some((engine_bin, content, update))
+    } else {
+        None
+    };
     let pg = TestDb::bootstrap().await;
     let pg_backend = Backend::Postgres(pool::connect_app(&pg.app_url).await.unwrap());
     let directory = std::env::temp_dir().join(format!("fvoci-selected-backend-{}", Uuid::now_v7()));
@@ -2796,6 +2888,7 @@ async fn selected_backend_setup_cookie_wiki_command_readback() {
     assert_eq!(capability.lineage, migrate::SQLITE_LINEAGE);
     assert_eq!(capability.applied_steps, 3);
     let command = Uuid::now_v7();
+    let room_owner = Uuid::now_v7();
     for backend in [pg_backend, sqlite_backend] {
         let state = app_state_backend(backend.clone()).await;
         let storage = state.storage.clone();
@@ -2936,8 +3029,8 @@ async fn selected_backend_setup_cookie_wiki_command_readback() {
         // the real cookie identity and restricted selected-backend connection.
         // Room transport, persist ACK and revisions remain separate acceptance.
         use fvoci_server::db::collab::{
-            claim_writer_and_load_kind_backend, load_collab_readonly_kind_backend,
-            resolve_collab_admission_kind_backend, CollabDbError, CollabKind,
+            load_collab_readonly_kind_backend, resolve_collab_admission_kind_backend,
+            CollabDbError, CollabKind,
         };
         let live = fvoci_server::db::identity::find_live_session_backend(
             &backend,
@@ -2977,13 +3070,13 @@ async fn selected_backend_setup_cookie_wiki_command_readback() {
         assert_eq!(seeded.writer_generation, 0);
         assert_eq!(seeded.snapshot_cutoff_seq, 0);
         assert_eq!(seeded.tail_seq, 0);
-        let claimed = claim_writer_and_load_kind_backend(
+        let (claimed, room_fence) = claim_native(
             &backend,
-            CollabKind::Document,
             workspace_id,
             live.user_id,
             live.session_id,
             document_id,
+            room_owner,
         )
         .await
         .unwrap()
@@ -3024,17 +3117,10 @@ async fn selected_backend_setup_cookie_wiki_command_readback() {
             ),
         ] {
             assert_eq!(
-                claim_writer_and_load_kind_backend(
-                    &backend,
-                    CollabKind::Document,
-                    tenant,
-                    actor,
-                    session,
-                    document_id,
-                )
-                .await
-                .unwrap()
-                .unwrap_err(),
+                claim_native(&backend, tenant, actor, session, document_id, room_owner)
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
                 expected
             );
         }
@@ -3053,6 +3139,241 @@ async fn selected_backend_setup_cookie_wiki_command_readback() {
             unchanged.writer_generation, 1,
             "refusal cannot bump generation"
         );
+        if let Some((engine_bin, content, payload)) = &native_fixture {
+            use fvoci_server::db::collab::{AppendCollabInput, AppendCollabResult};
+            let operation = command;
+            let input = |actor, credential, generation, op_id| AppendCollabInput {
+                workspace_id,
+                actor_user_id: actor,
+                session_id: credential,
+                document_id,
+                writer_generation: generation,
+                expected_tail_seq: 0,
+                op_id,
+                payload: payload.as_slice(),
+                client_ip: None,
+            };
+            assert_eq!(
+                append_native(
+                    &backend,
+                    room_fence,
+                    input(live.user_id, live.session_id, 1, operation)
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+                AppendCollabResult::Committed { seq: 1 }
+            );
+            // Lost-response retry retains the native operation and exact bytes.
+            assert_eq!(
+                append_native(
+                    &backend,
+                    room_fence,
+                    input(live.user_id, live.session_id, 1, operation)
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+                AppendCollabResult::DuplicateAck { seq: 1 }
+            );
+            let mut changed = payload.clone();
+            changed.push(0);
+            assert_eq!(
+                append_native(
+                    &backend,
+                    room_fence,
+                    AppendCollabInput {
+                        payload: &changed,
+                        ..input(live.user_id, live.session_id, 1, operation)
+                    }
+                )
+                .await
+                .unwrap()
+                .unwrap_err(),
+                CollabDbError::OpIdConflict
+            );
+            assert_eq!(
+                append_native(
+                    &backend,
+                    room_fence,
+                    input(Uuid::now_v7(), live.session_id, 1, operation)
+                )
+                .await
+                .unwrap()
+                .unwrap_err(),
+                CollabDbError::Forbidden
+            );
+            assert_eq!(
+                append_native(
+                    &backend,
+                    room_fence,
+                    input(live.user_id, Uuid::now_v7(), 1, operation)
+                )
+                .await
+                .unwrap()
+                .unwrap_err(),
+                CollabDbError::Forbidden
+            );
+            assert_eq!(
+                append_native(
+                    &backend,
+                    room_fence,
+                    input(live.user_id, live.session_id, 0, operation)
+                )
+                .await
+                .unwrap()
+                .unwrap_err(),
+                CollabDbError::StaleWriter
+            );
+            let persisted = load_collab_readonly_kind_backend(
+                &backend,
+                CollabKind::Document,
+                workspace_id,
+                live.user_id,
+                live.session_id,
+                document_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(persisted.tail_seq, 1);
+            assert_eq!(
+                persisted.tail.len(),
+                1,
+                "refused/replayed operations cannot add native updates"
+            );
+            assert_eq!(persisted.tail[0].op_id, operation);
+            assert_eq!(persisted.tail[0].payload, *payload);
+            let (engine, snapshot, tail) = (
+                engine_bin.clone(),
+                persisted.snapshot,
+                persisted.tail.into_iter().map(|row| row.payload).collect(),
+            );
+            let fresh = tokio::task::spawn_blocking(move || {
+                fvoci_server::collab::revision::project_persisted_offline(
+                    engine,
+                    collab_engine::limits::Limits::default(),
+                    snapshot,
+                    tail,
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                fresh, *content,
+                "new isolated native client loads committed state"
+            );
+            if let Some(fence) = room_fence {
+                use fvoci_server::db::collab::{
+                    claim_family_document_room, release_family_document_room,
+                    renew_family_document_room,
+                };
+                let retry = claim_family_document_room(
+                    &backend,
+                    workspace_id,
+                    live.user_id,
+                    live.session_id,
+                    document_id,
+                    room_owner,
+                    std::time::Duration::from_secs(30),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(retry.fence, fence);
+                assert_eq!(
+                    retry.native.writer_generation, 1,
+                    "same live owner retry cannot replace generation"
+                );
+                let other_owner = Uuid::now_v7();
+                assert_eq!(
+                    claim_family_document_room(
+                        &backend,
+                        workspace_id,
+                        live.user_id,
+                        live.session_id,
+                        document_id,
+                        other_owner,
+                        std::time::Duration::from_secs(30)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::StaleWriter
+                );
+                assert!(renew_family_document_room(
+                    &backend,
+                    fence,
+                    std::time::Duration::from_secs(30)
+                )
+                .await
+                .unwrap());
+                assert!(release_family_document_room(&backend, fence).await.unwrap());
+                assert_eq!(
+                    append_native(
+                        &backend,
+                        Some(fence),
+                        input(live.user_id, live.session_id, 1, operation)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::StaleWriter,
+                    "expired ownership cannot replay a receipt"
+                );
+                let replacement = claim_family_document_room(
+                    &backend,
+                    workspace_id,
+                    live.user_id,
+                    live.session_id,
+                    document_id,
+                    other_owner,
+                    std::time::Duration::from_secs(30),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_ne!(replacement.fence, fence);
+                assert_eq!(replacement.native.writer_generation, 2);
+                assert!(!renew_family_document_room(
+                    &backend,
+                    fence,
+                    std::time::Duration::from_secs(30)
+                )
+                .await
+                .unwrap());
+                assert!(
+                    !release_family_document_room(&backend, fence).await.unwrap(),
+                    "old owner cannot release replacement"
+                );
+                assert_eq!(
+                    append_native(
+                        &backend,
+                        Some(fence),
+                        input(live.user_id, live.session_id, 2, operation)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::StaleWriter
+                );
+                assert_eq!(
+                    append_native(
+                        &backend,
+                        Some(replacement.fence),
+                        input(live.user_id, live.session_id, 2, operation)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                    AppendCollabResult::DuplicateAck { seq: 1 }
+                );
+                assert!(release_family_document_room(&backend, replacement.fence)
+                    .await
+                    .unwrap());
+            }
+        }
         let (status, _, _, _) = json_request(
             app.clone(),
             "GET",

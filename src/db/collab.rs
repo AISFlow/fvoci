@@ -43,7 +43,7 @@ use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::collab::derived_body::PreparedDerivedBody;
-use crate::db::backend::{Backend, OperationTx};
+use crate::db::backend::{Backend, DbTransaction, FamilyTx, OperationTx};
 use crate::db::codec::Cell;
 use crate::db::context::{lock_key_from_uuid, set_tenant};
 use crate::db::documents::empty_document_json;
@@ -151,36 +151,6 @@ fn payload_sha256(payload: &[u8]) -> Vec<u8> {
     Sha256::digest(payload).to_vec()
 }
 
-async fn tail_budget_allows_append(
-    tx: &mut Transaction<'_, Postgres>,
-    t: &CollabTables,
-    workspace_id: Uuid,
-    document_id: Uuid,
-    snapshot_cutoff_seq: i64,
-    snapshot_len: i64,
-    incoming_len: i64,
-) -> Result<Result<(), CollabDbError>, sqlx::Error> {
-    let stats: (i64, i64) = sqlx::query_as(&t.sql(
-        r#"
-        SELECT count(*)::bigint, coalesce(sum(octet_length(payload)), 0)::bigint
-        FROM {updates}
-        WHERE workspace_id = $1 AND {id} = $2 AND seq > $3
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .bind(snapshot_cutoff_seq)
-    .fetch_one(&mut **tx)
-    .await?;
-    if stats.0 + 1 > MAX_COLLAB_TAIL_UPDATES {
-        return Ok(Err(CollabDbError::StateBudgetExceeded));
-    }
-    if snapshot_len + stats.1 + incoming_len > MAX_COLLAB_LOAD_BYTES {
-        return Ok(Err(CollabDbError::StateBudgetExceeded));
-    }
-    Ok(Ok(()))
-}
-
 fn load_budget_allows(
     snapshot_len: i64,
     tail_count: i64,
@@ -229,10 +199,282 @@ pub struct ClaimWriterResult {
     pub load: CollabLoadState,
 }
 
+/// Opaque ownership of the document room's SQLite-family lease. A PostgreSQL
+/// room instead retains its detached session advisory-lock connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FamilyRoomFence {
+    pub(crate) workspace_id: Uuid,
+    pub(crate) document_id: Uuid,
+    pub(crate) owner_token: Uuid,
+    pub(crate) fence: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FamilyRoomClaim {
+    pub fence: FamilyRoomFence,
+    pub native: ClaimWriterResult,
+}
+
+async fn family_room_now(tx: &mut FamilyTx) -> Result<i64, sqlx::Error> {
+    let rows = tx
+        .query(
+            "SELECT unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000",
+            &[],
+        )
+        .await?;
+    rows.first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .cell(0)?
+        .integer()
+}
+
+fn room_lease_micros(lease: std::time::Duration) -> Result<i64, sqlx::Error> {
+    let micros = i64::try_from(lease.as_micros())
+        .map_err(|_| sqlx::Error::Protocol("room lease exceeds signed microseconds".into()))?;
+    if micros == 0 {
+        return Err(sqlx::Error::Protocol("room lease must be positive".into()));
+    }
+    Ok(micros)
+}
+
+impl OperationTx<'_, '_> {
+    /// Caller has already authorized the document in this reserved writer.
+    /// A retry of an unconfirmed claim keeps its original owner token; a live
+    /// matching owner returns the same fence without advancing generation.
+    async fn claim_family_room_fence(
+        &mut self,
+        workspace: Uuid,
+        document: Uuid,
+        owner: Uuid,
+        lease: std::time::Duration,
+    ) -> Result<Result<(FamilyRoomFence, bool), CollabDbError>, sqlx::Error> {
+        let Self::SqliteFamily(tx) = self else {
+            return Err(sqlx::Error::Protocol(
+                "family room lease requires SQLite family".into(),
+            ));
+        };
+        tx.require_writer()?;
+        tx.require_tenant(workspace)?;
+        let now = family_room_now(tx).await?;
+        let expires = now.checked_add(room_lease_micros(lease)?).ok_or_else(|| {
+            sqlx::Error::Protocol("room lease expiry exceeds signed microseconds".into())
+        })?;
+        let rows = tx.query(
+            "SELECT owner_token,fence,expires_at FROM collab_room_fences WHERE workspace_id=?1 AND document_id=?2",
+            &[Cell::uuid(workspace),Cell::uuid(document)],
+        ).await?;
+        if let Some(row) = rows.first() {
+            let old_owner = row.cell(0)?.id()?;
+            let fence = row.cell(1)?.integer()?;
+            let old_expiry = row.cell(2)?.integer()?;
+            if fence <= 0 {
+                return Err(sqlx::Error::Protocol("room fence must be positive".into()));
+            }
+            if old_owner == owner {
+                if old_expiry <= now {
+                    return Ok(Err(CollabDbError::StaleWriter));
+                }
+                return Ok(Ok((
+                    FamilyRoomFence {
+                        workspace_id: workspace,
+                        document_id: document,
+                        owner_token: owner,
+                        fence,
+                    },
+                    false,
+                )));
+            }
+            if old_expiry > now {
+                return Ok(Err(CollabDbError::StaleWriter));
+            }
+        }
+        // Allocation is in the same writer transaction as lease, native
+        // generation and state. Purging a target cannot reset this counter.
+        let rows = tx.query(
+            "UPDATE collab_fence_counter SET next_fence=next_fence+1 WHERE id=1 AND next_fence<9223372036854775807 RETURNING next_fence-1",
+            &[],
+        ).await?;
+        let fence = rows
+            .first()
+            .ok_or_else(|| sqlx::Error::Protocol("room fence counter absent or exhausted".into()))?
+            .cell(0)?
+            .integer()?;
+        let changed = tx.execute(
+            "INSERT INTO collab_room_fences(workspace_id,document_id,owner_token,fence,expires_at) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(workspace_id,document_id) DO UPDATE SET owner_token=excluded.owner_token,fence=excluded.fence,expires_at=excluded.expires_at WHERE collab_room_fences.expires_at<=?6",
+            &[Cell::uuid(workspace),Cell::uuid(document),Cell::uuid(owner),Cell::Integer(fence),Cell::Integer(expires),Cell::Integer(now)],
+        ).await?;
+        if changed != 1 {
+            return Ok(Err(CollabDbError::StaleWriter));
+        }
+        Ok(Ok((
+            FamilyRoomFence {
+                workspace_id: workspace,
+                document_id: document,
+                owner_token: owner,
+                fence,
+            },
+            true,
+        )))
+    }
+
+    pub(crate) async fn verify_family_room_fence(
+        &mut self,
+        fence: FamilyRoomFence,
+    ) -> Result<bool, sqlx::Error> {
+        let Self::SqliteFamily(tx) = self else {
+            return Err(sqlx::Error::Protocol(
+                "family room lease requires SQLite family".into(),
+            ));
+        };
+        tx.require_writer()?;
+        tx.require_tenant(fence.workspace_id)?;
+        let now = family_room_now(tx).await?;
+        let rows = tx.query(
+            "SELECT EXISTS(SELECT 1 FROM collab_room_fences WHERE workspace_id=?1 AND document_id=?2 AND owner_token=?3 AND fence=?4 AND expires_at>?5)",
+            &[Cell::uuid(fence.workspace_id),Cell::uuid(fence.document_id),Cell::uuid(fence.owner_token),Cell::Integer(fence.fence),Cell::Integer(now)],
+        ).await?;
+        rows.first()
+            .ok_or(sqlx::Error::RowNotFound)?
+            .cell(0)?
+            .boolean()
+    }
+}
+
+/// Atomically authorize, claim the family document room and claim native
+/// writer generation. No product lease default is selected here: the caller
+/// supplies the measured runtime bound, and protocol fixtures supply theirs.
+pub async fn claim_family_document_room(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    document: Uuid,
+    owner: Uuid,
+    lease: std::time::Duration,
+) -> Result<Result<FamilyRoomClaim, CollabDbError>, sqlx::Error> {
+    if matches!(backend, Backend::Postgres(_)) {
+        return Err(sqlx::Error::Protocol(
+            "PostgreSQL rooms require the session guard".into(),
+        ));
+    }
+    let mut tx = backend.begin_write().await?;
+    let native = tx
+        .operation()
+        .load_collab_native(
+            CollabKind::Document,
+            workspace,
+            actor,
+            credential,
+            document,
+            NativeLoadMode::Writer,
+        )
+        .await?;
+    let mut native = match native {
+        Ok(native) => native,
+        Err(error) => {
+            tx.rollback().await?;
+            return Ok(Err(error));
+        }
+    };
+    let (fence, new_owner) = match tx
+        .operation()
+        .claim_family_room_fence(workspace, document, owner, lease)
+        .await?
+    {
+        Ok(claimed) => claimed,
+        Err(error) => {
+            tx.rollback().await?;
+            return Ok(Err(error));
+        }
+    };
+    if new_owner {
+        let generation = tx
+            .operation()
+            .bump_native_writer_generation(
+                CollabTables::for_kind(CollabKind::Document),
+                workspace,
+                document,
+            )
+            .await?;
+        let Some(generation) = generation else {
+            tx.rollback().await?;
+            return Ok(Err(CollabDbError::NotFound));
+        };
+        native.writer_generation = generation;
+        native.load.writer_generation = generation;
+    }
+    if !tx.operation().verify_family_room_fence(fence).await? {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::StaleWriter));
+    }
+    tx.commit().await.map_err(|error| error.source)?;
+    Ok(Ok(FamilyRoomClaim { fence, native }))
+}
+
+/// An expired original owner cannot renew or release another owner's lease.
+pub async fn renew_family_document_room(
+    backend: &Backend,
+    fence: FamilyRoomFence,
+    lease: std::time::Duration,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(fence.workspace_id).await?;
+    let crate::db::backend::DbTransaction::SqliteFamily(family) = &mut tx else {
+        return Err(sqlx::Error::Protocol(
+            "family room lease requires SQLite family".into(),
+        ));
+    };
+    let now = family_room_now(family).await?;
+    let expires = now.checked_add(room_lease_micros(lease)?).ok_or_else(|| {
+        sqlx::Error::Protocol("room lease expiry exceeds signed microseconds".into())
+    })?;
+    let changed = family.execute(
+        "UPDATE collab_room_fences SET expires_at=?5 WHERE workspace_id=?1 AND document_id=?2 AND owner_token=?3 AND fence=?4 AND expires_at>?6",
+        &[Cell::uuid(fence.workspace_id),Cell::uuid(fence.document_id),Cell::uuid(fence.owner_token),Cell::Integer(fence.fence),Cell::Integer(expires),Cell::Integer(now)],
+    ).await?;
+    tx.commit().await.map_err(|error| error.source)?;
+    Ok(changed == 1)
+}
+
+pub async fn release_family_document_room(
+    backend: &Backend,
+    fence: FamilyRoomFence,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(fence.workspace_id).await?;
+    let crate::db::backend::DbTransaction::SqliteFamily(family) = &mut tx else {
+        return Err(sqlx::Error::Protocol(
+            "family room lease requires SQLite family".into(),
+        ));
+    };
+    let now = family_room_now(family).await?;
+    let changed = family.execute(
+        "UPDATE collab_room_fences SET expires_at=?5 WHERE workspace_id=?1 AND document_id=?2 AND owner_token=?3 AND fence=?4",
+        &[Cell::uuid(fence.workspace_id),Cell::uuid(fence.document_id),Cell::uuid(fence.owner_token),Cell::Integer(fence.fence),Cell::Integer(now)],
+    ).await?;
+    tx.commit().await.map_err(|error| error.source)?;
+    Ok(changed == 1)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppendCollabResult {
     Committed { seq: i64 },
     DuplicateAck { seq: i64 },
+}
+
+/// A borrowed native program has not committed and cannot issue a persist ACK.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreparedNativeAppend {
+    Appended { seq: i64 },
+    Replay { seq: i64 },
+}
+
+impl PreparedNativeAppend {
+    pub(crate) fn seq(self) -> i64 {
+        match self {
+            Self::Appended { seq } | Self::Replay { seq } => seq,
+        }
+    }
 }
 
 pub struct AppendCollabInput<'a> {
@@ -792,6 +1034,206 @@ pub(crate) async fn load_tail_updates(
 }
 
 impl OperationTx<'_, '_> {
+    async fn native_append_fence(
+        &mut self,
+        t: &CollabTables,
+        workspace: Uuid,
+        resource: Uuid,
+    ) -> Result<Option<(i64, i64, i64, i64)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => fetch_append_fence_for_update(tx, t, workspace, resource).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                let statement = match t.kind {
+                    CollabKind::Document => "SELECT length(state),writer_generation,snapshot_cutoff_seq,tail_seq FROM document_states WHERE workspace_id=?1 AND document_id=?2",
+                    CollabKind::Task => "SELECT length(state),writer_generation,snapshot_cutoff_seq,tail_seq FROM task_states WHERE workspace_id=?1 AND task_id=?2",
+                };
+                tx.query(statement, &[Cell::uuid(workspace), Cell::uuid(resource)])
+                    .await?
+                    .first()
+                    .map(|r| {
+                        Ok((
+                            r.cell(0)?.integer()?,
+                            r.cell(1)?.integer()?,
+                            r.cell(2)?.integer()?,
+                            r.cell(3)?.integer()?,
+                        ))
+                    })
+                    .transpose()
+            }
+        }
+    }
+
+    pub(crate) async fn native_operation_receipt(
+        &mut self,
+        kind: CollabKind,
+        workspace: Uuid,
+        resource: Uuid,
+        operation: Uuid,
+    ) -> Result<Option<CollabOperationLookup>, sqlx::Error> {
+        let t = CollabTables::for_kind(kind);
+        let row: Option<(i64,i64,Vec<u8>,Uuid)> = match self {
+            Self::Postgres(tx) => sqlx::query_as(&t.sql("SELECT seq,payload_len,payload_sha256,actor_user_id FROM {receipts} WHERE workspace_id=$1 AND {id}=$2 AND op_id=$3"))
+                .bind(workspace).bind(resource).bind(operation).fetch_optional(&mut ***tx).await?,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                let statement = match kind {
+                    CollabKind::Document => "SELECT seq,payload_len,payload_sha256,actor_user_id FROM document_collab_op_receipts WHERE workspace_id=?1 AND document_id=?2 AND op_id=?3",
+                    CollabKind::Task => "SELECT seq,payload_len,payload_sha256,actor_user_id FROM task_collab_op_receipts WHERE workspace_id=?1 AND task_id=?2 AND op_id=?3",
+                };
+                tx.query(statement, &[Cell::uuid(workspace),Cell::uuid(resource),Cell::uuid(operation)]).await?
+                    .first().map(|r| Ok((r.cell(0)?.integer()?,r.cell(1)?.integer()?,r.cell(2)?.bytes()?,r.cell(3)?.id()?))).transpose()?
+            }
+        };
+        Ok(row.map(
+            |(seq, payload_len, payload_sha256, actor_user_id)| CollabOperationLookup {
+                seq,
+                payload_len,
+                payload_sha256,
+                actor_user_id,
+            },
+        ))
+    }
+
+    async fn advance_native_tail(
+        &mut self,
+        t: &CollabTables,
+        workspace: Uuid,
+        resource: Uuid,
+        generation: i64,
+        expected_tail: i64,
+    ) -> Result<Option<i64>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                let row: Option<(i64,)> = sqlx::query_as(&t.sql("UPDATE {states} SET tail_seq=tail_seq+1,updated_at=now() WHERE workspace_id=$1 AND {id}=$2 AND writer_generation=$3 AND tail_seq=$4 RETURNING tail_seq"))
+                    .bind(workspace).bind(resource).bind(generation).bind(expected_tail).fetch_optional(&mut ***tx).await?;
+                Ok(row.map(|(seq,)| seq))
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                let statement = match t.kind {
+                    CollabKind::Document => "UPDATE document_states SET tail_seq=tail_seq+1,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND document_id=?2 AND writer_generation=?3 AND tail_seq=?4 RETURNING tail_seq",
+                    CollabKind::Task => "UPDATE task_states SET tail_seq=tail_seq+1,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND task_id=?2 AND writer_generation=?3 AND tail_seq=?4 RETURNING tail_seq",
+                };
+                tx.query(
+                    statement,
+                    &[
+                        Cell::uuid(workspace),
+                        Cell::uuid(resource),
+                        Cell::Integer(generation),
+                        Cell::Integer(expected_tail),
+                    ],
+                )
+                .await?
+                .first()
+                .map(|r| r.cell(0)?.integer())
+                .transpose()
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_native_update_and_receipt(
+        &mut self,
+        t: &CollabTables,
+        workspace: Uuid,
+        resource: Uuid,
+        actor: Uuid,
+        operation: Uuid,
+        seq: i64,
+        payload: &[u8],
+        digest: &[u8],
+    ) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query(&t.sql("INSERT INTO {updates}(workspace_id,{id},seq,op_id,payload) VALUES($1,$2,$3,$4,$5)"))
+                    .bind(workspace).bind(resource).bind(seq).bind(operation).bind(payload).execute(&mut ***tx).await?;
+                sqlx::query(&t.sql("INSERT INTO {receipts}(workspace_id,{id},op_id,seq,payload_len,payload_sha256,actor_user_id) VALUES($1,$2,$3,$4,$5,$6,$7)"))
+                    .bind(workspace).bind(resource).bind(operation).bind(seq).bind(payload.len() as i64).bind(digest).bind(actor).execute(&mut ***tx).await?;
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                let (update,receipt) = match t.kind {
+                    CollabKind::Document => (
+                        "INSERT INTO document_collab_updates(workspace_id,document_id,seq,op_id,payload) VALUES(?1,?2,?3,?4,?5)",
+                        "INSERT INTO document_collab_op_receipts(workspace_id,document_id,op_id,seq,payload_len,payload_sha256,actor_user_id) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                    ),
+                    CollabKind::Task => (
+                        "INSERT INTO task_collab_updates(workspace_id,task_id,seq,op_id,payload) VALUES(?1,?2,?3,?4,?5)",
+                        "INSERT INTO task_collab_op_receipts(workspace_id,task_id,op_id,seq,payload_len,payload_sha256,actor_user_id) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                    ),
+                };
+                tx.execute(
+                    update,
+                    &[
+                        Cell::uuid(workspace),
+                        Cell::uuid(resource),
+                        Cell::Integer(seq),
+                        Cell::uuid(operation),
+                        Cell::Blob(payload.to_vec()),
+                    ],
+                )
+                .await?;
+                tx.execute(
+                    receipt,
+                    &[
+                        Cell::uuid(workspace),
+                        Cell::uuid(resource),
+                        Cell::uuid(operation),
+                        Cell::Integer(seq),
+                        Cell::Integer(payload.len() as i64),
+                        Cell::Blob(digest.to_vec()),
+                        Cell::uuid(actor),
+                    ],
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn record_native_append(
+        &mut self,
+        t: &CollabTables,
+        record: CollabAuditRecord<'_>,
+    ) -> Result<(), sqlx::Error> {
+        let CollabAuditRecord {
+            workspace_id,
+            actor_user_id,
+            document_id,
+            op_id,
+            seq,
+            writer_generation,
+            client_ip,
+        } = record;
+        let payload = json!({t.payload_key:document_id.to_string(),"opId":op_id.to_string(),"seq":seq,"writerGeneration":writer_generation});
+        self.append_event(EventAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace_id),
+            actor_user_id: Some(actor_user_id),
+            verb: t.verb("collab_update_appended"),
+            target_type: Some(t.target_type.to_string()),
+            target_id: Some(document_id),
+            payload: payload.clone(),
+        })
+        .await?;
+        self.append_audit(AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace_id),
+            actor_user_id: Some(actor_user_id),
+            verb: t.verb("collab_update_appended"),
+            target_type: Some(t.target_type.to_string()),
+            target_id: Some(document_id),
+            payload,
+            ip: client_ip.map(str::to_string),
+        })
+        .await
+    }
+
     async fn bump_native_writer_generation(
         &mut self,
         t: &CollabTables,
@@ -1120,49 +1562,9 @@ async fn record_collab_event_and_audit(
     t: &CollabTables,
     record: CollabAuditRecord<'_>,
 ) -> Result<(), sqlx::Error> {
-    let CollabAuditRecord {
-        workspace_id,
-        actor_user_id,
-        document_id,
-        op_id,
-        seq,
-        writer_generation,
-        client_ip,
-    } = record;
-    let payload = json!({
-        t.payload_key: document_id.to_string(),
-        "opId": op_id.to_string(),
-        "seq": seq,
-        "writerGeneration": writer_generation,
-    });
-    append_event(
-        tx,
-        EventAppend {
-            id: Uuid::now_v7(),
-            workspace_id: Some(workspace_id),
-            actor_user_id: Some(actor_user_id),
-            verb: t.verb("collab_update_appended"),
-            target_type: Some(t.target_type.to_string()),
-            target_id: Some(document_id),
-            payload: payload.clone(),
-        },
-    )
-    .await?;
-    append_audit(
-        tx,
-        AuditAppend {
-            id: Uuid::now_v7(),
-            workspace_id: Some(workspace_id),
-            actor_user_id: Some(actor_user_id),
-            verb: t.verb("collab_update_appended"),
-            target_type: Some(t.target_type.to_string()),
-            target_id: Some(document_id),
-            payload,
-            ip: client_ip.map(str::to_string),
-        },
-    )
-    .await?;
-    Ok(())
+    OperationTx::Postgres(tx)
+        .record_native_append(t, record)
+        .await
 }
 
 /// Test fixtures only (`db-tests`): the unchanged per-append event and audit
@@ -1310,6 +1712,11 @@ pub async fn claim_writer_and_load_kind_backend(
     credential: Uuid,
     resource: Uuid,
 ) -> Result<Result<ClaimWriterResult, CollabDbError>, sqlx::Error> {
+    if !matches!(backend, Backend::Postgres(_)) {
+        return Err(sqlx::Error::Protocol(
+            "SQLite-family writer claim requires claim_family_document_room ownership".into(),
+        ));
+    }
     load_collab_native_backend(
         backend,
         kind,
@@ -1330,17 +1737,17 @@ pub async fn load_collab_readonly_kind_backend(
     credential: Uuid,
     resource: Uuid,
 ) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
-    load_collab_native_backend(
-        backend,
-        kind,
-        workspace,
-        actor,
-        credential,
-        resource,
-        NativeLoadMode::Reader,
-    )
-    .await
-    .map(|result| result.map(|claimed| claimed.load))
+    let mut tx = backend.begin_write().await?;
+    let result = tx
+        .operation()
+        .load_collab_native_readonly(kind, workspace, actor, credential, resource)
+        .await?;
+    if result.is_err() {
+        tx.rollback().await?;
+    } else {
+        tx.commit().await.map_err(|error| error.source)?;
+    }
+    Ok(result)
 }
 
 pub async fn claim_writer_and_load(
@@ -1436,9 +1843,16 @@ pub async fn append_collab_update_kind(
     }
     let timings = CollabDbStageTimings::default();
     let tx = pool.begin().await?;
-    append_collab_update_in_tx(tx, kind, input, timings, None)
-        .await
-        .map(|(result, _)| result.map(|(append, _)| append))
+    append_collab_update_in_tx(
+        DbTransaction::Postgres(tx),
+        kind,
+        input,
+        timings,
+        None,
+        None,
+    )
+    .await
+    .map(|(result, _)| result.map(|(append, _)| append))
 }
 
 /// A restore commits its new revision in the existing forward append tx.
@@ -1453,11 +1867,12 @@ pub async fn append_collab_restore_kind(
     }
     let tx = pool.begin().await?;
     append_collab_update_in_tx(
-        tx,
+        DbTransaction::Postgres(tx),
         kind,
         input,
         CollabDbStageTimings::default(),
         Some(restore),
+        None,
     )
     .await
     .map(|(result, _)| {
@@ -1486,277 +1901,115 @@ pub async fn append_collab_update_on_conn_timed(
         return Ok((Err(CollabDbError::PayloadTooLarge), timings));
     }
     let tx = conn.begin().await?;
-    append_collab_update_in_tx(tx, kind, input, timings, None)
-        .await
-        .map(|(result, timings)| (result.map(|(append, _)| append), timings))
+    append_collab_update_in_tx(
+        DbTransaction::Postgres(tx),
+        kind,
+        input,
+        timings,
+        None,
+        None,
+    )
+    .await
+    .map(|(result, timings)| (result.map(|(append, _)| append), timings))
 }
 
-async fn append_collab_update_in_tx(
-    mut tx: Transaction<'_, Postgres>,
-    kind: CollabKind,
-    input: AppendCollabInput<'_>,
-    mut timings: CollabDbStageTimings,
-    restore: Option<&crate::db::revisions::RestoreRevisionAppend>,
-) -> Result<
-    (
-        Result<(AppendCollabResult, Option<Uuid>), CollabDbError>,
-        CollabDbStageTimings,
-    ),
-    sqlx::Error,
-> {
-    let AppendCollabInput {
-        workspace_id,
-        actor_user_id,
-        session_id,
-        document_id,
-        writer_generation,
-        expected_tail_seq,
-        op_id,
-        payload,
-        client_ip,
-    } = input;
-    let t = CollabTables::for_kind(kind);
-    set_tenant(&mut tx, workspace_id).await?;
-    if let Err(err) = authorize_collab_write(
-        &mut tx,
-        kind,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        document_id,
-        &mut timings,
-    )
-    .await?
-    {
-        tx.rollback().await?;
-        return Ok((Err(err), timings));
+impl OperationTx<'_, '_> {
+    /// Current native snapshot/head/tail, under the existing reader policy,
+    /// without transferring transaction finish ownership to this operation.
+    pub(crate) async fn load_collab_native_readonly(
+        &mut self,
+        kind: CollabKind,
+        workspace: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+        resource: Uuid,
+    ) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
+        self.load_collab_native(
+            kind,
+            workspace,
+            actor,
+            credential,
+            resource,
+            NativeLoadMode::Reader,
+        )
+        .await
+        .map(|result| result.map(|claimed| claimed.load))
     }
-    if let Some(restore) = restore {
+
+    async fn prepare_native_restore(
+        &mut self,
+        t: &CollabTables,
+        workspace: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+        resource: Uuid,
+        restore: &crate::db::revisions::RestoreRevisionAppend,
+    ) -> Result<Result<Option<crate::db::revisions::RestoredRevision>, CollabDbError>, sqlx::Error>
+    {
         use crate::db::revisions::{
             authorize_restore_in_tx, lookup_restored_revision_in_tx, RevisionDbError,
         };
-        if restore.intent.scope.target().id() != document_id
-            || restore.intent.scope.target().kind_str() != t.target_type
-            || restore.intent.expected_tail_seq != expected_tail_seq
-        {
-            tx.rollback().await?;
-            return Ok((Err(CollabDbError::OpIdConflict), timings));
-        }
-        if let Err(err) = authorize_restore_in_tx(
-            &mut tx,
-            workspace_id,
-            actor_user_id,
-            session_id,
-            restore.intent,
-        )
-        .await?
-        {
-            tx.rollback().await?;
-            return Ok((
-                Err(if err == RevisionDbError::RestoreConflict {
-                    CollabDbError::OpIdConflict
-                } else {
-                    CollabDbError::Forbidden
-                }),
-                timings,
+        let Self::Postgres(tx) = self else {
+            // The first slice adds ordinary ON appends; family revision restore
+            // remains required and refuses before any native mutation.
+            return Err(sqlx::Error::Protocol(
+                "native revision restore is pending SQLite-family port".into(),
             ));
+        };
+        if let Err(error) =
+            authorize_restore_in_tx(tx, workspace, actor, credential, restore.intent).await?
+        {
+            return Ok(Err(if error == RevisionDbError::RestoreConflict {
+                CollabDbError::OpIdConflict
+            } else {
+                CollabDbError::Forbidden
+            }));
         }
-        // Serialize accidental cross-target correlation reuse after current
-        // authorization. This transaction lock has no permanent cache owner.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!(
-                "revision-restore:{workspace_id}:{}",
+                "revision-restore:{workspace}:{}",
                 restore.intent.correlation_id
             ))
-            .execute(&mut *tx)
+            .execute(&mut ***tx)
             .await?;
-        match lookup_restored_revision_in_tx(&mut tx, workspace_id, actor_user_id, restore.intent)
-            .await?
-        {
-            Ok(Some(record)) => {
-                tx.commit().await?;
-                return Ok((
-                    Ok((
-                        AppendCollabResult::DuplicateAck {
-                            seq: record.committed_tail_seq,
-                        },
-                        Some(record.revision_id),
-                    )),
-                    timings,
-                ));
-            }
+        match lookup_restored_revision_in_tx(tx, workspace, actor, restore.intent).await? {
+            Ok(Some(record)) => return Ok(Ok(Some(record))),
             Ok(None) => {}
-            Err(_) => {
-                tx.rollback().await?;
-                return Ok((Err(CollabDbError::OpIdConflict), timings));
-            }
+            Err(_) => return Ok(Err(CollabDbError::OpIdConflict)),
         }
-        let source_id: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM fvoci.revisions WHERE workspace_id = $1 AND id = $2 AND target_kind = $3 AND target_id = $4 FOR SHARE",
-        ).bind(workspace_id).bind(restore.intent.source_revision_id).bind(t.target_type).bind(document_id)
-            .fetch_optional(&mut *tx).await?;
-        if source_id.is_none() {
-            tx.rollback().await?;
-            return Ok((Err(CollabDbError::NotFound), timings));
-        }
-    }
-    let state_started = Instant::now();
-    let mut fence = fetch_append_fence_for_update(&mut tx, t, workspace_id, document_id).await?;
-    if fence.is_none() {
-        // Claim creates the state row, so only a row that never existed gets
-        // here. Seed it the way claim does (NotFound unless the body is still
-        // the empty seed); only this path reads content_json.
-        let content = load_resource_content(&mut tx, t, workspace_id, document_id).await?;
-        if let Err(err) =
-            ensure_collab_state_row(&mut tx, t, workspace_id, document_id, &content.0).await?
-        {
-            tx.rollback().await?;
-            return Ok((Err(err), timings));
-        }
-        fence = fetch_append_fence_for_update(&mut tx, t, workspace_id, document_id).await?;
-    }
-    timings.row_lock_us += state_started.elapsed().as_micros() as u64;
-    let stmt_started = Instant::now();
-    let Some((snapshot_len, current_generation, snapshot_cutoff_seq, tail_seq)) = fence else {
-        tx.rollback().await?;
-        return Ok((Err(CollabDbError::NotFound), timings));
-    };
-    if current_generation != writer_generation {
-        tx.rollback().await?;
-        return Ok((Err(CollabDbError::StaleWriter), timings));
+        let source: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM fvoci.revisions WHERE workspace_id=$1 AND id=$2 AND target_kind=$3 AND target_id=$4 FOR SHARE",
+        ).bind(workspace).bind(restore.intent.source_revision_id).bind(t.target_type).bind(resource)
+            .fetch_optional(&mut ***tx).await?;
+        Ok(if source.is_some() {
+            Ok(None)
+        } else {
+            Err(CollabDbError::NotFound)
+        })
     }
 
-    let incoming_len = payload.len() as i64;
-    let incoming_digest = payload_sha256(payload);
-    let existing: Option<(i64, i64, Vec<u8>, Uuid)> = sqlx::query_as(&t.sql(
-        r#"
-        SELECT seq, payload_len, payload_sha256, actor_user_id
-        FROM {receipts}
-        WHERE workspace_id = $1 AND {id} = $2 AND op_id = $3
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .bind(op_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if let Some((seq, existing_len, existing_digest, existing_actor)) = existing {
-        if existing_len == incoming_len
-            && existing_digest.as_slice() == incoming_digest.as_slice()
-            && existing_actor == actor_user_id
-        {
-            let commit_started = Instant::now();
-            tx.commit().await?;
-            timings.commit_us = commit_started.elapsed().as_micros() as u64;
-            timings.stmt_us = stmt_started.elapsed().as_micros() as u64 - timings.commit_us;
-            return Ok((
-                Ok((
-                    AppendCollabResult::DuplicateAck { seq },
-                    restore.map(|value| value.revision_id),
-                )),
-                timings,
+    async fn apply_native_restore(
+        &mut self,
+        t: &CollabTables,
+        workspace_id: Uuid,
+        actor_user_id: Uuid,
+        document_id: Uuid,
+        seq: i64,
+        restore: &crate::db::revisions::RestoreRevisionAppend,
+    ) -> Result<(), sqlx::Error> {
+        let Self::Postgres(tx) = self else {
+            return Err(sqlx::Error::Protocol(
+                "native revision restore is pending SQLite-family port".into(),
             ));
-        }
-        tx.rollback().await?;
-        return Ok((Err(CollabDbError::OpIdConflict), timings));
-    }
-    if tail_seq != expected_tail_seq {
-        tx.rollback().await?;
-        return Ok((Err(CollabDbError::StaleCutoff), timings));
-    }
-
-    match tail_budget_allows_append(
-        &mut tx,
-        t,
-        workspace_id,
-        document_id,
-        snapshot_cutoff_seq,
-        snapshot_len,
-        payload.len() as i64,
-    )
-    .await?
-    {
-        Ok(()) => {}
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok((Err(err), timings));
-        }
-    }
-    let next_seq: Option<(i64,)> = sqlx::query_as(&t.sql(
-        r#"
-        UPDATE {states}
-        SET tail_seq = tail_seq + 1, updated_at = now()
-        WHERE workspace_id = $1
-          AND {id} = $2
-          AND writer_generation = $3
-        RETURNING tail_seq
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .bind(writer_generation)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some((seq,)) = next_seq else {
-        tx.rollback().await?;
-        return Ok((Err(CollabDbError::StaleWriter), timings));
-    };
-
-    sqlx::query(&t.sql(
-        r#"
-        INSERT INTO {updates} (
-            workspace_id, {id}, seq, op_id, payload
-        ) VALUES ($1, $2, $3, $4, $5)
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .bind(seq)
-    .bind(op_id)
-    .bind(payload)
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query(&t.sql(
-        r#"
-        INSERT INTO {receipts} (
-            workspace_id, {id}, op_id, seq, payload_len, payload_sha256, actor_user_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .bind(op_id)
-    .bind(seq)
-    .bind(incoming_len)
-    .bind(&incoming_digest)
-    .bind(actor_user_id)
-    .execute(&mut *tx)
-    .await?;
-
-    record_collab_event_and_audit(
-        &mut tx,
-        t,
-        CollabAuditRecord {
-            workspace_id,
-            actor_user_id,
-            document_id,
-            op_id,
-            seq,
-            writer_generation,
-            client_ip,
-        },
-    )
-    .await?;
-
-    if let Some(restore) = restore {
+        };
+        let tx = &mut **tx;
         sqlx::query(
             "INSERT INTO fvoci.revisions (id, workspace_id, target_kind, target_id, y_snapshot, encoding, content_json, text, reason, created_by, restored_from_id, restore_correlation_id, restore_base_tail_seq, restore_committed_tail_seq) VALUES ($1,$2,$3,$4,$5,1,$6,$7,'restore',$8,$9,$10,$11,$12)",
         )
         .bind(restore.revision_id).bind(workspace_id).bind(t.target_type).bind(document_id)
         .bind(&restore.y_snapshot).bind(restore.prepared_body.content_json()).bind(restore.prepared_body.text()).bind(actor_user_id)
         .bind(restore.intent.source_revision_id).bind(restore.intent.correlation_id)
-        .bind(restore.intent.expected_tail_seq).bind(seq).execute(&mut *tx).await?;
+        .bind(restore.intent.expected_tail_seq).bind(seq).execute(&mut **tx).await?;
         let mut payload = serde_json::json!({
             "restoreRequested": restore.intent.source_revision_id,
             "restoredFromRevisionId": restore.intent.source_revision_id,
@@ -1765,7 +2018,7 @@ async fn append_collab_update_in_tx(
         });
         payload[t.payload_key] = serde_json::json!(document_id);
         append_event(
-            &mut tx,
+            tx,
             EventAppend {
                 id: Uuid::now_v7(),
                 workspace_id: Some(workspace_id),
@@ -1801,18 +2054,325 @@ async fn append_collab_update_in_tx(
         .bind(restore.prepared_body.content_json())
         .bind(restore.prepared_body.text())
         .bind(restore.prepared_body.chosung())
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
         if updated.is_some() {
-            append_system_updated_event(&mut tx, t, workspace_id, document_id).await?;
+            append_system_updated_event(tx, t, workspace_id, document_id).await?;
         }
+        Ok(())
     }
-    timings.stmt_us = stmt_started.elapsed().as_micros() as u64;
+}
+
+/// Ordinary ON append through a family's real room owner. The same native
+/// receipt, generation, tail budget, event and audit program serves PG too.
+pub async fn append_family_document_room_update(
+    backend: &Backend,
+    fence: FamilyRoomFence,
+    input: AppendCollabInput<'_>,
+) -> Result<Result<AppendCollabResult, CollabDbError>, sqlx::Error> {
+    if matches!(backend, Backend::Postgres(_)) {
+        return Err(sqlx::Error::Protocol(
+            "PostgreSQL room append requires its detached session connection".into(),
+        ));
+    }
+    if input.payload.is_empty() || input.payload.len() > MAX_COLLAB_UPDATE_BYTES {
+        return Ok(Err(CollabDbError::PayloadTooLarge));
+    }
+    let tx = backend.begin_write().await?;
+    append_collab_update_in_tx(
+        tx,
+        CollabKind::Document,
+        input,
+        CollabDbStageTimings::default(),
+        None,
+        Some(fence),
+    )
+    .await
+    .map(|(result, _)| result.map(|(appended, _)| appended))
+}
+
+impl OperationTx<'_, '_> {
+    /// ON native append program on the caller's current transaction. The
+    /// caller owns commit/rollback, allowing projection/revision/command effects
+    /// to be composed without reimplementing receipts or native tail policy.
+    pub(crate) async fn append_collab_native(
+        &mut self,
+        kind: CollabKind,
+        input: AppendCollabInput<'_>,
+        mut timings: CollabDbStageTimings,
+        restore: Option<&crate::db::revisions::RestoreRevisionAppend>,
+        room_fence: Option<FamilyRoomFence>,
+    ) -> Result<
+        (
+            Result<(PreparedNativeAppend, Option<Uuid>), CollabDbError>,
+            CollabDbStageTimings,
+        ),
+        sqlx::Error,
+    > {
+        if input.payload.is_empty() || input.payload.len() > MAX_COLLAB_UPDATE_BYTES {
+            return Ok((Err(CollabDbError::PayloadTooLarge), timings));
+        }
+        let AppendCollabInput {
+            workspace_id,
+            actor_user_id,
+            session_id,
+            document_id,
+            writer_generation,
+            expected_tail_seq,
+            op_id,
+            payload,
+            client_ip,
+        } = input;
+        let t = CollabTables::for_kind(kind);
+        self.set_tenant(workspace_id).await?;
+        if matches!(self, Self::SqliteFamily(_)) {
+            let Some(fence) = room_fence else {
+                return Ok((Err(CollabDbError::StaleWriter), timings));
+            };
+            if fence.workspace_id != workspace_id
+                || fence.document_id != document_id
+                || kind != CollabKind::Document
+                || !self.verify_family_room_fence(fence).await?
+            {
+                return Ok((Err(CollabDbError::StaleWriter), timings));
+            }
+        }
+        if let Err(err) = self
+            .authorize_collab_write(
+                kind,
+                workspace_id,
+                actor_user_id,
+                session_id,
+                document_id,
+                &mut timings,
+            )
+            .await?
+        {
+            return Ok((Err(err), timings));
+        }
+        if let Some(restore) = restore {
+            if restore.intent.scope.target().id() != document_id
+                || restore.intent.scope.target().kind_str() != t.target_type
+                || restore.intent.expected_tail_seq != expected_tail_seq
+            {
+                return Ok((Err(CollabDbError::OpIdConflict), timings));
+            }
+            match self
+                .prepare_native_restore(
+                    t,
+                    workspace_id,
+                    actor_user_id,
+                    session_id,
+                    document_id,
+                    restore,
+                )
+                .await?
+            {
+                Ok(Some(record)) => {
+                    return Ok((
+                        Ok((
+                            PreparedNativeAppend::Replay {
+                                seq: record.committed_tail_seq,
+                            },
+                            Some(record.revision_id),
+                        )),
+                        timings,
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Ok((Err(error), timings));
+                }
+            }
+        }
+        let state_started = Instant::now();
+        let mut fence = self
+            .native_append_fence(t, workspace_id, document_id)
+            .await?;
+        if fence.is_none() {
+            // Claim creates the state row, so only a row that never existed gets
+            // here. Seed it the way claim does (NotFound unless the body is still
+            // the empty seed); only this path reads content_json.
+            let content = self
+                .load_collab_resource_content(t, workspace_id, document_id)
+                .await?;
+            if let Err(err) = self
+                .ensure_collab_state(t, workspace_id, document_id, &content)
+                .await?
+            {
+                return Ok((Err(err), timings));
+            }
+            fence = self
+                .native_append_fence(t, workspace_id, document_id)
+                .await?;
+        }
+        timings.row_lock_us += state_started.elapsed().as_micros() as u64;
+        let stmt_started = Instant::now();
+        let Some((snapshot_len, current_generation, snapshot_cutoff_seq, tail_seq)) = fence else {
+            return Ok((Err(CollabDbError::NotFound), timings));
+        };
+        if current_generation != writer_generation {
+            return Ok((Err(CollabDbError::StaleWriter), timings));
+        }
+
+        let incoming_len = payload.len() as i64;
+        let incoming_digest = payload_sha256(payload);
+        let existing = self
+            .native_operation_receipt(kind, workspace_id, document_id, op_id)
+            .await?;
+        if let Some(CollabOperationLookup {
+            seq,
+            payload_len: existing_len,
+            payload_sha256: existing_digest,
+            actor_user_id: existing_actor,
+        }) = existing
+        {
+            if existing_len == incoming_len
+                && existing_digest.as_slice() == incoming_digest.as_slice()
+                && existing_actor == actor_user_id
+            {
+                if let Some(fence) = room_fence {
+                    if !self.verify_family_room_fence(fence).await? {
+                        return Ok((Err(CollabDbError::StaleWriter), timings));
+                    }
+                }
+                timings.stmt_us = stmt_started.elapsed().as_micros() as u64;
+                return Ok((
+                    Ok((
+                        PreparedNativeAppend::Replay { seq },
+                        restore.map(|value| value.revision_id),
+                    )),
+                    timings,
+                ));
+            }
+            return Ok((Err(CollabDbError::OpIdConflict), timings));
+        }
+        if tail_seq != expected_tail_seq {
+            return Ok((Err(CollabDbError::StaleCutoff), timings));
+        }
+
+        let (count, bytes) = self
+            .native_tail_stats(t, workspace_id, document_id, snapshot_cutoff_seq)
+            .await?;
+        if count + 1 > MAX_COLLAB_TAIL_UPDATES
+            || snapshot_len + bytes + incoming_len > MAX_COLLAB_LOAD_BYTES
+        {
+            return Ok((Err(CollabDbError::StateBudgetExceeded), timings));
+        }
+        let next_seq = self
+            .advance_native_tail(
+                t,
+                workspace_id,
+                document_id,
+                writer_generation,
+                expected_tail_seq,
+            )
+            .await?;
+        let Some(seq) = next_seq else {
+            return Ok((Err(CollabDbError::StaleWriter), timings));
+        };
+
+        self.insert_native_update_and_receipt(
+            t,
+            workspace_id,
+            document_id,
+            actor_user_id,
+            op_id,
+            seq,
+            payload,
+            &incoming_digest,
+        )
+        .await?;
+
+        self.record_native_append(
+            t,
+            CollabAuditRecord {
+                workspace_id,
+                actor_user_id,
+                document_id,
+                op_id,
+                seq,
+                writer_generation,
+                client_ip,
+            },
+        )
+        .await?;
+
+        if let Some(restore) = restore {
+            self.apply_native_restore(t, workspace_id, actor_user_id, document_id, seq, restore)
+                .await?;
+        }
+        if let Some(fence) = room_fence {
+            if !self.verify_family_room_fence(fence).await? {
+                return Ok((Err(CollabDbError::StaleWriter), timings));
+            }
+        }
+        timings.stmt_us = stmt_started.elapsed().as_micros() as u64;
+        Ok((
+            Ok((
+                PreparedNativeAppend::Appended { seq },
+                restore.map(|value| value.revision_id),
+            )),
+            timings,
+        ))
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("native append failed and rollback was not confirmed: {rollback}")]
+struct NativeRollbackUnconfirmed {
+    #[source]
+    original: sqlx::Error,
+    rollback: sqlx::Error,
+}
+
+async fn append_collab_update_in_tx(
+    mut tx: DbTransaction<'_>,
+    kind: CollabKind,
+    input: AppendCollabInput<'_>,
+    timings: CollabDbStageTimings,
+    restore: Option<&crate::db::revisions::RestoreRevisionAppend>,
+    room_fence: Option<FamilyRoomFence>,
+) -> Result<
+    (
+        Result<(AppendCollabResult, Option<Uuid>), CollabDbError>,
+        CollabDbStageTimings,
+    ),
+    sqlx::Error,
+> {
+    #[cfg(feature = "db-tests")]
+    let (workspace_id, document_id) = (input.workspace_id, input.document_id);
+    let (result, mut timings) = match tx
+        .operation()
+        .append_collab_native(kind, input, timings, restore, room_fence)
+        .await
+    {
+        Ok(result) => result,
+        Err(original) => {
+            if let Err(rollback) = tx.rollback().await {
+                return Err(sqlx::Error::Decode(Box::new(NativeRollbackUnconfirmed {
+                    original,
+                    rollback,
+                })));
+            }
+            return Err(original);
+        }
+    };
+    let prepared_result = match result {
+        Err(error) => {
+            tx.rollback().await?;
+            return Ok((Err(error), timings));
+        }
+        Ok(prepared) => prepared,
+    };
+    #[cfg(feature = "db-tests")]
+    let committed_new_restore =
+        restore.is_some() && matches!(prepared_result.0, PreparedNativeAppend::Appended { .. });
     let commit_started = Instant::now();
-    tx.commit().await?;
+    tx.commit().await.map_err(|error| error.source)?;
     timings.commit_us = commit_started.elapsed().as_micros() as u64;
     #[cfg(feature = "db-tests")]
-    if restore.is_some() {
+    if committed_new_restore {
         let barrier = RESTORE_COMMIT_AMBIGUITY
             .lock()
             .await
@@ -1826,13 +2386,13 @@ async fn append_collab_update_in_tx(
             )));
         }
     }
-    Ok((
-        Ok((
-            AppendCollabResult::Committed { seq },
-            restore.map(|value| value.revision_id),
-        )),
-        timings,
-    ))
+    let (prepared, revision) = prepared_result;
+    let seq = prepared.seq();
+    let confirmed = match prepared {
+        PreparedNativeAppend::Appended { .. } => AppendCollabResult::Committed { seq },
+        PreparedNativeAppend::Replay { .. } => AppendCollabResult::DuplicateAck { seq },
+    };
+    Ok((Ok((confirmed, revision)), timings))
 }
 
 pub async fn lookup_collab_operation(
@@ -2268,17 +2828,15 @@ pub async fn load_collab_readonly_kind(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
-    load_collab_native_backend(
+    load_collab_readonly_kind_backend(
         &Backend::Postgres(pool.clone()),
         kind,
         workspace_id,
         actor_user_id,
         session_id,
         document_id,
-        NativeLoadMode::Reader,
     )
     .await
-    .map(|result| result.map(|claimed| claimed.load))
 }
 
 /// One-shot, per-fixture fault after a real restore commit. No production hook.
