@@ -279,6 +279,21 @@ test("offline fields retry interaction keeps the Calendar draft through reconnec
   await offlineCalendarScenario(page, context, "OFFLINERETRY", true, true);
 });
 
+for (const metadata of ["collection", "views"] as const)
+  test(`cached ${metadata} transport failure keeps the Calendar draft through owned retry and reconnect`, async ({
+    page,
+    context,
+  }) => {
+    await offlineCalendarScenario(
+      page,
+      context,
+      metadata === "collection" ? "COLREFRESH" : "VIEWREFRESH",
+      true,
+      true,
+      metadata,
+    );
+  });
+
 test("online fields transport failure keeps the Calendar draft while visible retry initiates a real GET", async ({
   page,
 }) => {
@@ -358,6 +373,7 @@ async function offlineCalendarScenario(
   key: string,
   fieldsBarrier = false,
   offlineRetry = false,
+  metadata: "fields" | "collection" | "views" = "fields",
 ): Promise<void> {
   const f = await fixture(page, key);
   const point = await f.task("DST point", {});
@@ -394,7 +410,10 @@ async function offlineCalendarScenario(
     const collection = idSchema.parse(
       await (await page.request.get(`${f.base}/projects/${f.project.id}/collection`)).json(),
     );
-    const fieldsPath = `${f.base}/collections/${collection.id}/fields`;
+    const fieldsPath =
+      metadata === "collection"
+        ? `${f.base}/projects/${f.project.id}/collection`
+        : `${f.base}/collections/${collection.id}/${metadata}`;
     const { promise: fieldsStarted, resolve: markFieldsStarted } = deferred();
     const { promise: fieldsGate, resolve: releaseFields } = deferred();
     await page.route(`**${fieldsPath}`, async (route) => {
@@ -402,13 +421,26 @@ async function offlineCalendarScenario(
       await fieldsGate;
       await route.continue();
     });
-    // A real peer write reaches the mounted project's SSE subscription. Its
-    // metadata refetch begins online; only fields crosses the offline boundary.
-    const siblings = [
+    // Correlate requests intercepted after these gates are installed, not any
+    // historical200. Siblings always fetch genuine Rust responses, including a
+    // later invalidation round: only the selected request uses browser offline.
+    const siblingPaths = [
+      `${f.base}/collections/${collection.id}/fields`,
       `${f.base}/projects/${f.project.id}/collection`,
       `${f.base}/collections/${collection.id}/views`,
       `${f.base}/collections/${collection.id}/query`,
-    ].map((path) => page.waitForResponse((r) => r.url().endsWith(path) && r.ok()));
+    ].filter((path) => path !== fieldsPath);
+    const siblings = siblingPaths.map((path) => {
+      const { promise, resolve } = deferred();
+      return { path, promise, resolve };
+    });
+    for (const sibling of siblings)
+      await page.route(`**${sibling.path}`, async (route) => {
+        const response = await route.fetch();
+        expect(response.status()).toBe(200);
+        await route.fulfill({ response });
+        sibling.resolve();
+      });
     expect(
       (
         await page.request.patch(`${f.base}/tasks/${point.id}`, {
@@ -417,7 +449,7 @@ async function offlineCalendarScenario(
       ).ok(),
     ).toBe(true);
     await fieldsStarted;
-    await Promise.all(siblings);
+    await Promise.all(siblings.map((sibling) => sibling.promise));
     const fieldsFailed = page.waitForEvent("requestfailed", {
       predicate: (request) => request.url().endsWith(fieldsPath),
     });
@@ -428,11 +460,15 @@ async function offlineCalendarScenario(
       await expect(popover).toHaveAttribute("data-state", "open");
       await expect(editor).toBeVisible();
       expect(await input.evaluate((node, previous) => node === previous, draftNode)).toBe(true);
-      const fieldsError = fieldsErrorLocator(page);
+      const fieldsError =
+        metadata === "collection"
+          ? page.locator('[role="alert"]:has(+ section[data-testid="collection-calendar"])')
+          : fieldsErrorLocator(page);
       await expect(fieldsError).toBeVisible();
       await expect(fieldsError.getByRole("button", { name: "다시 시도" })).toBeVisible();
       expect(patches).toBe(0);
       await page.unroute(`**${fieldsPath}`);
+      for (const sibling of siblings) await page.unroute(`**${sibling.path}`);
       const recovered = page.waitForResponse(
         (response) => response.url().endsWith(fieldsPath) && response.ok(),
       );
@@ -486,6 +522,24 @@ async function offlineCalendarScenario(
   await expect(
     page.locator('td[data-date="2026-11-02"]').getByTestId(`collection-preview-${point.displayId}`),
   ).toBeVisible();
+  const browser = required(context.browser());
+  const fresh = await browser.newContext({ storageState: await context.storageState() });
+  try {
+    const freshPage = await fresh.newPage();
+    await freshPage.goto(page.url());
+    await freshPage.locator('input[type="month"]').fill("2026-11");
+    await expect(freshPage.getByTestId(`collection-preview-${point.displayId}`)).toBeVisible();
+    const response = await fresh.request.get(
+      `${new URL(page.url()).origin}${f.base}/tasks/${point.id}`,
+    );
+    expect(response.status()).toBe(200);
+    expect(taskDatesSchema.parse(await response.json())).toMatchObject({
+      id: point.id,
+      dueAt: "2026-11-02T14:30:00Z",
+    });
+  } finally {
+    await fresh.close();
+  }
 }
 
 test("custom date editor retains stale item guard, rolls back conflict and preserves draft for explicit retry", async ({

@@ -6,7 +6,7 @@ import { useRoute, useRouter } from "vue-router";
 import type { CollectionViewType } from "@/features/collections/collection-view";
 import type { ProjectListItem } from "@/features/projects/queries";
 import type { components } from "@/generated/api";
-import { loadErrorMessage } from "@/lib/api";
+import { loadErrorMessage, ProblemError } from "@/lib/api";
 import { projectCollectionPath } from "@/lib/href";
 import { projectCollectionQuery } from "@/lib/queries/collections";
 import QueryError from "../../components/QueryError.vue";
@@ -24,6 +24,17 @@ const props = defineProps<{
 const route = useRoute();
 const router = useRouter();
 const collection = useQuery(() => projectCollectionQuery(props.workspace.id, props.project.id));
+// A cached Calendar may survive transport failures, never an authority denial.
+const collectionRefreshFailed = computed(() => {
+  const error = collection.error.value;
+  return (
+    props.type === "calendar" &&
+    collection.data.value !== undefined &&
+    collection.isError.value &&
+    (error instanceof TypeError ||
+      (error instanceof ProblemError && [408, 429, 500, 502, 503, 504].includes(error.status)))
+  );
+});
 const viewId = computed(() => (typeof route.query.view === "string" ? route.query.view : null));
 
 async function onOpenView(nextType: CollectionViewType, nextViewId: string | null): Promise<void> {
@@ -37,19 +48,27 @@ async function onOpenView(nextType: CollectionViewType, nextViewId: string | nul
 <template>
   <p v-if="collection.isPending.value" role="status">{{ t("collection.loading") }}</p>
   <QueryError
-    v-else-if="collection.isError.value"
+    v-else-if="collection.isError.value && !collectionRefreshFailed"
     :message="loadErrorMessage(collection.error.value)"
     @retry="collection.refetch()"
   />
-  <CollectionContents
-    v-else-if="collection.data.value"
-    :key="`${collection.data.value.id}:${type}`"
-    :workspace-id="workspace.id"
-    :slug="slug"
-    :collection-id="collection.data.value.id"
-    :project-id="project.id"
-    :type="type"
-    :initial-view-id="viewId"
-    @open-view="onOpenView"
-  />
+  <template v-else-if="collection.data.value">
+    <QueryError
+      v-if="collectionRefreshFailed"
+      :message="loadErrorMessage(collection.error.value)"
+      @pointerdown.stop
+      @focusin.stop
+      @retry="collection.refetch()"
+    />
+    <CollectionContents
+      :key="`${collection.data.value.id}:${type}`"
+      :workspace-id="workspace.id"
+      :slug="slug"
+      :collection-id="collection.data.value.id"
+      :project-id="project.id"
+      :type="type"
+      :initial-view-id="viewId"
+      @open-view="onOpenView"
+    />
+  </template>
 </template>
