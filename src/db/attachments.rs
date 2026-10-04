@@ -6827,9 +6827,11 @@ pub(crate) async fn reclaim_attachment_objects_claimed_backend(
         .await;
         match result {
             Ok(outcome) => {
-                tx.commit()
-                    .await
-                    .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+                if let Err(unknown) = tx.commit().await {
+                    #[cfg(test)]
+                    cleanup_test_hooks::wait(row.id, 14).await;
+                    return Err(sqlx::Error::AnyDriverError(Box::new(unknown)));
+                }
                 stats.claimed += 1;
                 match outcome {
                     CleanupDisposition::Reclaimed => stats.reclaimed += 1,
@@ -7194,6 +7196,8 @@ pub(crate) async fn mark_import_attachment_stored_backend(
             return Ok(Err(import_attachment_quota_error(error)));
         }
         let head = storage.head(expected_key).await;
+        #[cfg(test)]
+        cleanup_test_hooks::wait(attachment, 16).await;
         // Token, claim, credential and parent are rechecked after actual I/O,
         // including failed head; cancellation never loses the tracked pointer.
         if let Err(error) = op
@@ -7285,14 +7289,27 @@ pub(crate) async fn mark_import_attachment_stored_backend(
         {
             return Ok(Err(error));
         }
+        #[cfg(test)]
+        cleanup_test_hooks::defer_fk_fault(
+            &mut op,
+            &AttachmentObjectCleanup {
+                id: attachment,
+                workspace_id: claim.workspace_id,
+                attachment_id: attachment,
+                storage_key: expected_key.into(),
+            },
+        )
+        .await?;
         Ok::<_, sqlx::Error>(Ok(true))
     }
     .await;
     match result {
         Ok(Ok(true)) if !cancel.is_cancelled() => {
-            tx.commit()
-                .await
-                .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+            if let Err(unknown) = tx.commit().await {
+                #[cfg(test)]
+                cleanup_test_hooks::wait(attachment, 15).await;
+                return Err(sqlx::Error::AnyDriverError(Box::new(unknown)));
+            }
             Ok(Ok(()))
         }
         Ok(Ok(_)) if cancel.is_cancelled() => {
@@ -7315,5 +7332,841 @@ pub(crate) async fn mark_import_attachment_stored_backend(
             tx.rollback().await?;
             Err(error)
         }
+    }
+}
+
+#[cfg(test)]
+mod upload_owned_adapter_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+    use crate::db::import_jobs::{
+        claim_next_import_job_backend, create_async_import_job_backend, ImportClaim, ImportSource,
+        NewAsyncImport,
+    };
+    use crate::db::maintenance_claim::{
+        FamilyClaimAcquisition, FamilyMaintenanceClaim, FamilyMaintenanceClaimRequest,
+        FamilyMaintenanceLeasePolicy, MaintenanceJobKey,
+    };
+    use tokio_util::sync::CancellationToken;
+    const BYTES: &[u8] = b"S18 owned adapter literal current object bytes, independently read";
+    fn policy() -> FamilyMaintenanceLeasePolicy {
+        FamilyMaintenanceLeasePolicy::new(Duration::from_secs(300), Duration::from_secs(60))
+            .unwrap()
+    }
+    fn storage(f: &Fixture) -> ObjectStorage {
+        ObjectStorage::local(f.root.join("s18-owned-storage"))
+    }
+    async fn second(f: &Fixture) -> Backend {
+        let pool = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        let pin: (String,String,i64) = sqlx::query_as("SELECT sqlite_version(),sqlite_source_id(),(SELECT foreign_keys FROM pragma_foreign_keys)").fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            pin,
+            (
+                crate::db::pool::SQLITE_VERSION.into(),
+                crate::db::pool::SQLITE_SOURCE_ID.into(),
+                1
+            )
+        );
+        Backend::Sqlite(pool)
+    }
+    async fn acquired(
+        f: &Fixture,
+        key: MaintenanceJobKey,
+        p: FamilyMaintenanceLeasePolicy,
+    ) -> FamilyMaintenanceClaim {
+        match FamilyMaintenanceClaimRequest::new(key)
+            .try_acquire(&f.backend, p, &CancellationToken::new())
+            .await
+            .unwrap()
+        {
+            FamilyClaimAcquisition::Acquired(claim) => claim,
+            _ => panic!("healthy actual claim"),
+        }
+    }
+    async fn literal(s: &ObjectStorage, key: &str) {
+        let bytes = s.read_range(key, 0, BYTES.len() as u64 - 1).await.unwrap();
+        assert_eq!(bytes, BYTES);
+        use sha2::Digest;
+        println!(
+            "S18 owned current bytes={} sha256={:x}",
+            bytes.len(),
+            sha2::Sha256::digest(&bytes)
+        );
+    }
+    fn restore(f: &Fixture, key: &str, bytes: &[u8]) {
+        use std::io::Write;
+        let dir = f.root.join("s18-owned-storage/objects").join(key);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut file = std::fs::File::create(dir.join("payload")).unwrap();
+        file.write_all(bytes).unwrap();
+        file.sync_all().unwrap();
+    }
+    async fn uploading(f: &Fixture, s: &ObjectStorage) -> (Uuid, String) {
+        let (id, key) = f
+            .attachment(BYTES.len() as i64, "application/octet-stream")
+            .await;
+        sqlx::query("UPDATE attachments SET status='uploading',size_bytes=NULL,completed_at=NULL,upload_meta='{}',created_at=1 WHERE id=?1").bind(id.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+        (id, key)
+    }
+    async fn current(f: &Fixture, id: Uuid) -> (String, String) {
+        sqlx::query_as("SELECT status,storage_key FROM attachments WHERE id=?1")
+            .bind(id.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap()
+    }
+    fn stopped(error: &sqlx::Error, want: UploadMaintenanceStop) {
+        match error {
+            sqlx::Error::AnyDriverError(source) => {
+                assert_eq!(source.downcast_ref::<UploadMaintenanceStop>(), Some(&want))
+            }
+            _ => panic!("typed stop required: {error}"),
+        }
+    }
+    fn unknown(error: &sqlx::Error) {
+        match error {
+            sqlx::Error::AnyDriverError(source) => {
+                assert!(source
+                    .downcast_ref::<crate::db::backend::CommitUnknown>()
+                    .is_some());
+                assert!(error.to_string().to_lowercase().contains("foreign key"));
+            }
+            _ => panic!("actual typed COMMIT error required: {error}"),
+        }
+    }
+    async fn journal(f: &Fixture, attachment: Uuid, key: &str) -> AttachmentObjectCleanup {
+        let row = AttachmentObjectCleanup {
+            id: Uuid::now_v7(),
+            workspace_id: f.workspace,
+            attachment_id: attachment,
+            storage_key: key.into(),
+        };
+        sqlx::query("INSERT INTO attachment_object_cleanups(id,workspace_id,attachment_id,storage_key,due_at) VALUES(?1,?2,?3,?4,0)").bind(row.id.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(attachment.as_bytes().as_slice()).bind(key).execute(&f.pool).await.unwrap();
+        row
+    }
+    async fn journal_row(f: &Fixture, id: Uuid) -> (String, i64, i64) {
+        sqlx::query_as(
+            "SELECT storage_key,attempts,due_at FROM attachment_object_cleanups WHERE id=?1",
+        )
+        .bind(id.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn upload_owned_claim_wrong_key_no_effect_and_current_batch_positive() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let other = second(&f).await;
+        let (id, key) = uploading(&f, &s).await;
+        let daily = acquired(&f, MaintenanceJobKey::Daily, policy()).await;
+        let error = gc_stale_upload_row_claimed_backend(
+            &other,
+            &s,
+            f.workspace,
+            id,
+            daily.proof(),
+            policy(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        stopped(&error, UploadMaintenanceStop::LostClaim);
+        literal(&s, &key).await;
+        assert_eq!(current(&f, id).await, ("uploading".into(), key.clone()));
+        daily.release().await.unwrap();
+        let claim = acquired(&f, MaintenanceJobKey::Uploads, policy()).await;
+        let stats = crate::jobs::uploads::run_stale_upload_gc_claimed_backend(
+            &other,
+            &s,
+            Utc::now(),
+            None,
+            1,
+            &CancellationToken::new(),
+            claim.proof(),
+            policy(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((stats.claimed, stats.purged, stats.failed), (1, 1, 0));
+        assert_eq!(stats.resume_after.unwrap().1, id);
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT storage_key FROM attachments WHERE id=?1")
+                .bind(id.as_bytes().as_slice())
+                .fetch_optional(&f.pool)
+                .await
+                .unwrap();
+        assert!(row.is_none());
+        assert_eq!(s.head(&key).await.unwrap(), None);
+        claim.release().await.unwrap();
+        other.close().await.unwrap();
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn upload_owned_claim_actual_writer_expiry_preserves_pointer_then_successor() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let other = second(&f).await;
+        let (id, key) = uploading(&f, &s).await;
+        let short =
+            FamilyMaintenanceLeasePolicy::new(Duration::from_secs(1), Duration::from_millis(100))
+                .unwrap();
+        let claim = acquired(&f, MaintenanceJobKey::Uploads, short).await;
+        let proof = claim.proof().clone();
+        let backend = other.clone();
+        let object = s.clone();
+        let workspace = f.workspace;
+        let (entered, release) = cleanup_test_hooks::arm(id, 0);
+        let actor = tokio::spawn(async move {
+            gc_stale_upload_row_claimed_backend(
+                &backend,
+                &object,
+                workspace,
+                id,
+                &proof,
+                short,
+                &CancellationToken::new(),
+            )
+            .await
+        });
+        entered.await.unwrap();
+        // Actual DB clock expiry while the consumer retains BEGIN IMMEDIATE;
+        // no manual claim-table write or pretending a pool mutex is ownership.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let waiting = other.clone();
+        let (ready, blocked) = tokio::sync::oneshot::channel();
+        let writer = tokio::spawn(async move {
+            let tx = waiting.begin_write().await.unwrap();
+            let _ = ready.send(());
+            tx.rollback().await.unwrap();
+        });
+        tokio::task::yield_now().await;
+        assert!(!writer.is_finished());
+        release.send(()).unwrap();
+        let error = actor.await.unwrap().unwrap_err();
+        stopped(&error, UploadMaintenanceStop::LostClaim);
+        blocked.await.unwrap();
+        writer.await.unwrap();
+        literal(&s, &key).await;
+        assert_eq!(current(&f, id).await, ("uploading".into(), key.clone()));
+        claim.release().await.unwrap();
+        let next = acquired(&f, MaintenanceJobKey::Uploads, policy()).await;
+        assert!(gc_stale_upload_row_claimed_backend(
+            &other,
+            &s,
+            f.workspace,
+            id,
+            next.proof(),
+            policy(),
+            &CancellationToken::new()
+        )
+        .await
+        .unwrap());
+        assert_eq!(s.head(&key).await.unwrap(), None);
+        next.release().await.unwrap();
+        other.close().await.unwrap();
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn upload_owned_journal_cancelled_actual_failed_purge_retains_due_then_progress() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let other = second(&f).await;
+        let claim = acquired(&f, MaintenanceJobKey::Uploads, policy()).await;
+        let key = Uuid::now_v7().to_string();
+        let row = journal(&f, Uuid::now_v7(), &key).await;
+        let before = journal_row(&f, row.id).await;
+        let root = f.root.join("s18-owned-storage");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("objects"), b"real ENOTDIR blocker").unwrap();
+        let cancel = CancellationToken::new();
+        let worker_cancel = cancel.clone();
+        let proof = claim.proof().clone();
+        let backend = other.clone();
+        let object = s.clone();
+        let (entered, release) = cleanup_test_hooks::arm(row.id, 2);
+        let actor = tokio::spawn(async move {
+            reclaim_attachment_objects_claimed_backend(
+                &backend,
+                &object,
+                None,
+                10,
+                &proof,
+                policy(),
+                &worker_cancel,
+            )
+            .await
+        });
+        entered.await.unwrap();
+        cancel.cancel();
+        release.send(()).unwrap();
+        let error = actor.await.unwrap().unwrap_err();
+        stopped(&error, UploadMaintenanceStop::Cancelled);
+        assert_eq!(journal_row(&f, row.id).await, before);
+        std::fs::remove_file(root.join("objects")).unwrap();
+        s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+        literal(&s, &key).await;
+        let result = reclaim_attachment_objects_claimed_backend(
+            &other,
+            &s,
+            None,
+            10,
+            claim.proof(),
+            policy(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (result.claimed, result.reclaimed, result.busy, result.failed),
+            (1, 1, 0, 0)
+        );
+        assert_eq!(s.head(&key).await.unwrap(), None);
+        claim.release().await.unwrap();
+        other.close().await.unwrap();
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn upload_owned_journal_real_commit_unknown_stops_without_second_purge() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let other = second(&f).await;
+        let claim = acquired(&f, MaintenanceJobKey::Uploads, policy()).await;
+        let (kept, keptkey) = f.attachment(1, "image/png").await;
+        let key = Uuid::now_v7().to_string();
+        s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+        let row = journal(&f, kept, &key).await;
+        let before = journal_row(&f, row.id).await;
+        cleanup_test_hooks::arm_deferred_fk(row.id, kept, Uuid::now_v7());
+        let (entered, release) = cleanup_test_hooks::arm(row.id, 14);
+        let backend = other.clone();
+        let object = s.clone();
+        let proof = claim.proof().clone();
+        let mut actor = tokio::spawn(async move {
+            reclaim_attachment_objects_claimed_backend(
+                &backend,
+                &object,
+                None,
+                10,
+                &proof,
+                policy(),
+                &CancellationToken::new(),
+            )
+            .await
+        });
+        entered.await.unwrap();
+        assert_eq!(s.head(&key).await.unwrap(), None);
+        let sentinel = vec![b'R'; BYTES.len()];
+        restore(&f, &key, &sentinel);
+        // A fresh second pool owns a real writer while the failed consumer
+        // returns. An unwanted observer must wait behind this actual writer.
+        let writer = f.backend.begin_write().await.unwrap();
+        release.send(()).unwrap();
+        let completed = tokio::time::timeout(Duration::from_secs(1), &mut actor).await;
+        writer.rollback().await.unwrap();
+        let error = match completed {
+            Ok(result) => result.unwrap().unwrap_err(),
+            Err(_) => {
+                let _ = actor.await.unwrap();
+                panic!("unknown handler started or waited for an observer");
+            }
+        };
+        unknown(&error);
+        assert!(upload_maintenance_must_stop(&error));
+        assert_eq!(s.head(&key).await.unwrap(), Some(sentinel.len() as u64));
+        assert_eq!(
+            s.read_range(&key, 0, sentinel.len() as u64 - 1)
+                .await
+                .unwrap(),
+            sentinel
+        );
+        assert_eq!(journal_row(&f, row.id).await, before);
+        assert_eq!(current(&f, kept).await, ("stored".into(), keptkey));
+        let parent: Vec<u8> = sqlx::query_scalar("SELECT document_id FROM attachments WHERE id=?1")
+            .bind(kept.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(parent, f.document.as_bytes());
+        let result = reclaim_attachment_objects_claimed_backend(
+            &other,
+            &s,
+            None,
+            10,
+            claim.proof(),
+            policy(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.reclaimed, 1);
+        assert_eq!(s.head(&key).await.unwrap(), None);
+        claim.release().await.unwrap();
+        other.close().await.unwrap();
+        f.close().await;
+    }
+
+    async fn import_claim(f: &Fixture) -> ImportClaim {
+        let credential = Uuid::now_v7();
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,9223372036854775807)").bind(credential.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(credential.to_string()).execute(&f.pool).await.unwrap();
+        create_async_import_job_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            ImportSource::NotionZip,
+            NewAsyncImport {
+                file_name: Some("validated-input.zip"),
+                project_id: None,
+                payload: b"attachment adapter producer input",
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        claim_next_import_job_backend(&f.backend)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    async fn reserve(f: &Fixture, claim: &ImportClaim) -> (Uuid, String) {
+        create_import_attachment_backend(
+            &f.backend,
+            &StorageQuota::Unlimited,
+            claim,
+            f.document,
+            "literal.txt",
+            BYTES.len() as i64,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    }
+    async fn finalize(
+        f: &Fixture,
+        s: &ObjectStorage,
+        claim: &ImportClaim,
+        id: Uuid,
+        key: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Result<(), ImportAttachmentError>, sqlx::Error> {
+        mark_import_attachment_stored_backend(
+            &f.backend,
+            s,
+            &StorageQuota::Unlimited,
+            claim,
+            f.document,
+            id,
+            key,
+            "literal.txt",
+            &crate::attachments::sniff_mime_from_bytes(BYTES),
+            BYTES.len() as i64,
+            cancel,
+        )
+        .await
+    }
+    async fn effects(f: &Fixture, id: Uuid) -> (i64, i64) {
+        let deferred:i64=sqlx::query_scalar("SELECT count(*) FROM import_deferred_events WHERE target_id=?1 AND verb='attachment.completed'").bind(id.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+        let audit: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_log WHERE target_id=?1 AND verb='attachment.completed'",
+        )
+        .bind(id.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        (deferred, audit)
+    }
+
+    #[tokio::test]
+    async fn upload_owned_import_actual_put_fresh_read_exact_replay_and_wrong_key() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let other = second(&f).await;
+        let claim = import_claim(&f).await;
+        let (id, key) = reserve(&f, &claim).await;
+        s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+        finalize(&f, &s, &claim, id, &key, &CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(effects(&f, id).await, (1, 1));
+        literal(&s, &key).await;
+        let meta = get_attachment_meta_backend(&other, f.workspace, id, f.user, claim.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (meta.id, meta.storage_key.clone(), meta.status),
+            (id, key.clone(), "stored".into())
+        );
+        finalize(&f, &s, &claim, id, &key, &CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(effects(&f, id).await, (1, 1));
+        let replacement = Uuid::now_v7().to_string();
+        s.put_bytes(&replacement, BYTES.to_vec()).await.unwrap();
+        let refused = finalize(&f, &s, &claim, id, &replacement, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(
+            refused,
+            Err(ImportAttachmentError::Fenced)
+                | Err(ImportAttachmentError::Attachment(
+                    AttachmentDbError::UploadState
+                ))
+        ));
+        literal(&s, &key).await;
+        literal(&s, &replacement).await;
+        assert_eq!(effects(&f, id).await, (1, 1));
+        other.close().await.unwrap();
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn upload_owned_import_after_put_cancel_revoked_claim_parent_then_healthy() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let claim = import_claim(&f).await;
+        let (id, key) = reserve(&f, &claim).await;
+        s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert!(matches!(
+            finalize(&f, &s, &claim, id, &key, &cancel).await.unwrap(),
+            Err(ImportAttachmentError::Cancelled)
+        ));
+        literal(&s, &key).await;
+        assert_eq!(current(&f, id).await, ("uploading".into(), key.clone()));
+        assert_eq!(effects(&f, id).await, (0, 0));
+        let mut stale = claim.clone();
+        stale.attempt += 1;
+        assert!(matches!(
+            finalize(&f, &s, &stale, id, &key, &CancellationToken::new())
+                .await
+                .unwrap(),
+            Err(ImportAttachmentError::Fenced)
+        ));
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(claim.session_id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            finalize(&f, &s, &claim, id, &key, &CancellationToken::new())
+                .await
+                .unwrap(),
+            Err(ImportAttachmentError::Attachment(
+                AttachmentDbError::Forbidden
+            ))
+        ));
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(claim.session_id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE documents SET deleted_at=1 WHERE id=?1")
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            finalize(&f, &s, &claim, id, &key, &CancellationToken::new())
+                .await
+                .unwrap(),
+            Err(ImportAttachmentError::Attachment(
+                AttachmentDbError::NotFound
+            ))
+        ));
+        sqlx::query("UPDATE documents SET deleted_at=NULL WHERE id=?1")
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        literal(&s, &key).await;
+        assert_eq!(effects(&f, id).await, (0, 0));
+        finalize(&f, &s, &claim, id, &key, &CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(effects(&f, id).await, (1, 1));
+        literal(&s, &key).await;
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn upload_owned_import_actual_commit_failure_keeps_key_then_explicit_retry() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let other = second(&f).await;
+        let claim = import_claim(&f).await;
+        let (id, key) = reserve(&f, &claim).await;
+        s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+        cleanup_test_hooks::arm_deferred_fk(id, id, Uuid::now_v7());
+        let (entered, release) = cleanup_test_hooks::arm(id, 15);
+        let backend = other.clone();
+        let object = s.clone();
+        let current_claim = claim.clone();
+        let expected_key = key.clone();
+        let document = f.document;
+        let mut actor = tokio::spawn(async move {
+            mark_import_attachment_stored_backend(
+                &backend,
+                &object,
+                &StorageQuota::Unlimited,
+                &current_claim,
+                document,
+                id,
+                &expected_key,
+                "literal.txt",
+                &crate::attachments::sniff_mime_from_bytes(BYTES),
+                BYTES.len() as i64,
+                &CancellationToken::new(),
+            )
+            .await
+        });
+        entered.await.unwrap();
+        literal(&s, &key).await;
+        let sentinel = vec![b'R'; BYTES.len()];
+        restore(&f, &key, &sentinel);
+        let writer = f.backend.begin_write().await.unwrap();
+        release.send(()).unwrap();
+        let completed = tokio::time::timeout(Duration::from_secs(1), &mut actor).await;
+        writer.rollback().await.unwrap();
+        let error = match completed {
+            Ok(result) => result.unwrap().unwrap_err(),
+            Err(_) => {
+                let _ = actor.await.unwrap();
+                panic!("unknown finalize started or waited for an observer");
+            }
+        };
+        unknown(&error);
+        assert_eq!(current(&f, id).await, ("uploading".into(), key.clone()));
+        assert_eq!(effects(&f, id).await, (0, 0));
+        assert_eq!(s.head(&key).await.unwrap(), Some(sentinel.len() as u64));
+        assert_eq!(
+            s.read_range(&key, 0, sentinel.len() as u64 - 1)
+                .await
+                .unwrap(),
+            sentinel
+        );
+        restore(&f, &key, BYTES);
+        finalize(&f, &s, &claim, id, &key, &CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(effects(&f, id).await, (1, 1));
+        literal(&s, &key).await;
+        other.close().await.unwrap();
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn upload_owned_import_real_failed_head_cancel_and_quota_keep_pointer() {
+        use crate::db::quota::QuotaLimit;
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let other = second(&f).await;
+        let claim = import_claim(&f).await;
+        let (id, key) = reserve(&f, &claim).await;
+        s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
+        let before = current(&f, id).await;
+        let refs: String = sqlx::query_scalar("SELECT created_refs FROM import_jobs WHERE id=?1")
+            .bind(claim.job_id.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        let root = f.root.join("s18-owned-storage");
+        std::fs::rename(root.join("objects"), root.join("saved-objects")).unwrap();
+        std::fs::write(root.join("objects"), b"actual ENOTDIR head blocker").unwrap();
+        assert!(
+            finalize(&f, &s, &claim, id, &key, &CancellationToken::new())
+                .await
+                .is_err()
+        );
+        assert_eq!(current(&f, id).await, before);
+        assert_eq!(effects(&f, id).await, (0, 0));
+        let cancel = CancellationToken::new();
+        let child_cancel = cancel.clone();
+        let backend = other.clone();
+        let object = s.clone();
+        let current_claim = claim.clone();
+        let expected_key = key.clone();
+        let document = f.document;
+        let (entered, release) = cleanup_test_hooks::arm(id, 16);
+        let actor = tokio::spawn(async move {
+            mark_import_attachment_stored_backend(
+                &backend,
+                &object,
+                &StorageQuota::Unlimited,
+                &current_claim,
+                document,
+                id,
+                &expected_key,
+                "literal.txt",
+                &crate::attachments::sniff_mime_from_bytes(BYTES),
+                BYTES.len() as i64,
+                &child_cancel,
+            )
+            .await
+        });
+        entered.await.unwrap();
+        cancel.cancel();
+        release.send(()).unwrap();
+        assert!(matches!(
+            actor.await.unwrap().unwrap(),
+            Err(ImportAttachmentError::Cancelled)
+        ));
+        assert_eq!(current(&f, id).await, before);
+        assert_eq!(effects(&f, id).await, (0, 0));
+        std::fs::remove_file(root.join("objects")).unwrap();
+        std::fs::rename(root.join("saved-objects"), root.join("objects")).unwrap();
+        literal(&s, &key).await;
+        let strict = StorageQuota::fixed(QuotaLimit::Bytes(0), QuotaLimit::Unlimited);
+        assert!(matches!(
+            mark_import_attachment_stored_backend(
+                &other,
+                &s,
+                &strict,
+                &claim,
+                f.document,
+                id,
+                &key,
+                "literal.txt",
+                &crate::attachments::sniff_mime_from_bytes(BYTES),
+                BYTES.len() as i64,
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap(),
+            Err(ImportAttachmentError::Attachment(
+                AttachmentDbError::StorageLimit
+            ))
+        ));
+        let after_refs: String =
+            sqlx::query_scalar("SELECT created_refs FROM import_jobs WHERE id=?1")
+                .bind(claim.job_id.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(refs, after_refs);
+        assert_eq!(current(&f, id).await, before);
+        literal(&s, &key).await;
+        finalize(&f, &s, &claim, id, &key, &CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(effects(&f, id).await, (1, 1));
+        literal(&s, &key).await;
+        other.close().await.unwrap();
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn upload_owned_claimed_batch_failed_prefix_keeps_cursor_and_healthy_progress() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let other = second(&f).await;
+        let claim = acquired(&f, MaintenanceJobKey::Uploads, policy()).await;
+        let (bad, badkey) = uploading(&f, &s).await;
+        let (good, goodkey) = uploading(&f, &s).await;
+        let path = f.root.join("s18-owned-storage/objects").join(&badkey);
+        std::fs::remove_dir_all(&path).unwrap();
+        std::fs::write(&path, b"real failed-prefix ENOTDIR sentinel").unwrap();
+        let listed = list_stale_uploading_backend(&other, Utc::now(), None, 2)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+        let stats = crate::jobs::uploads::run_stale_upload_gc_claimed_backend(
+            &other,
+            &s,
+            Utc::now(),
+            None,
+            2,
+            &CancellationToken::new(),
+            claim.proof(),
+            policy(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((stats.claimed, stats.purged, stats.failed), (2, 1, 1));
+        assert_eq!(
+            stats.resume_after,
+            Some((listed[1].created_at, listed[1].id))
+        );
+        assert_eq!(current(&f, bad).await, ("uploading".into(), badkey));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"real failed-prefix ENOTDIR sentinel"
+        );
+        let remaining: Option<(String,)> =
+            sqlx::query_as("SELECT storage_key FROM attachments WHERE id=?1")
+                .bind(good.as_bytes().as_slice())
+                .fetch_optional(&f.pool)
+                .await
+                .unwrap();
+        assert!(remaining.is_none());
+        assert_eq!(s.head(&goodkey).await.unwrap(), None);
+        claim.release().await.unwrap();
+        other.close().await.unwrap();
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn upload_owned_claimed_journal_current_both_refs_failure_and_orphan_positive() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let other = second(&f).await;
+        let claim = acquired(&f, MaintenanceJobKey::Uploads, policy()).await;
+        let (att, original) = f.attachment(BYTES.len() as i64, "image/png").await;
+        let preview = Uuid::now_v7().to_string();
+        let orphan = Uuid::now_v7().to_string();
+        let bad = Uuid::now_v7().to_string();
+        for key in [&original, &preview, &orphan] {
+            s.put_bytes(key, BYTES.to_vec()).await.unwrap();
+        }
+        sqlx::query("UPDATE attachments SET variants=json_object('preview',json_object('key',?2)) WHERE id=?1").bind(att.as_bytes().as_slice()).bind(&preview).execute(&f.pool).await.unwrap();
+        journal(&f, att, &original).await;
+        journal(&f, att, &preview).await;
+        journal(&f, Uuid::now_v7(), &orphan).await;
+        let failed = journal(&f, Uuid::now_v7(), &bad).await;
+        let path = f.root.join("s18-owned-storage/objects").join(&bad);
+        std::fs::write(&path, b"real journal ENOTDIR sentinel").unwrap();
+        let stats = reclaim_attachment_objects_claimed_backend(
+            &other,
+            &s,
+            None,
+            10,
+            claim.proof(),
+            policy(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (stats.claimed, stats.reclaimed, stats.busy, stats.failed),
+            (4, 3, 0, 1)
+        );
+        literal(&s, &original).await;
+        literal(&s, &preview).await;
+        assert_eq!(s.head(&orphan).await.unwrap(), None);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"real journal ENOTDIR sentinel"
+        );
+        let current = journal_row(&f, failed.id).await;
+        assert_eq!((current.0, current.1), (bad, 1));
+        assert!(current.2 > Utc::now().timestamp_micros() + 55_000_000);
+        claim.release().await.unwrap();
+        other.close().await.unwrap();
+        f.close().await;
     }
 }
