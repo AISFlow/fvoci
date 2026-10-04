@@ -495,10 +495,9 @@ pub async fn claim_family_document_room(
 ) -> Result<Result<FamilyRoomClaim, CollabDbError>, sqlx::Error> {
     claim_family_document_room_mode(
         backend,
-        workspace,
+        (workspace, document),
         actor,
         credential,
-        document,
         owner,
         lease,
         NativeLoadMode::Writer,
@@ -519,10 +518,9 @@ pub async fn acquire_family_document_room(
 ) -> Result<Result<FamilyRoomClaim, CollabDbError>, sqlx::Error> {
     claim_family_document_room_mode(
         backend,
-        workspace,
+        (workspace, document),
         actor,
         credential,
-        document,
         owner,
         lease,
         NativeLoadMode::Reader,
@@ -532,16 +530,22 @@ pub async fn acquire_family_document_room(
 
 async fn claim_family_document_room_mode(
     backend: &Backend,
-    workspace: Uuid,
+    target: (Uuid, Uuid),
     actor: Uuid,
     credential: Uuid,
-    document: Uuid,
     owner: Uuid,
     lease: std::time::Duration,
     mode: NativeLoadMode,
 ) -> Result<Result<FamilyRoomClaim, CollabDbError>, sqlx::Error> {
+    let (workspace, document) = target;
     let (tx, claim) = match prepare_family_document_room_claim(
-        backend, workspace, actor, credential, document, owner, lease, mode,
+        backend,
+        (workspace, document),
+        actor,
+        credential,
+        owner,
+        lease,
+        mode,
     )
     .await?
     {
@@ -561,8 +565,15 @@ pub(crate) enum FamilyRoomStartError {
     #[error("family room startup COMMIT outcome unknown")]
     Commit {
         source: sqlx::Error,
-        cleanup_error: Option<sqlx::Error>,
+        settlement: FamilyRoomStartSettlement,
     },
+}
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum FamilyRoomStartSettlement {
+    /// SQLx local transaction rollback queue is serialized before a new writer.
+    LocalSqlx,
+    /// No supported receipt proves the original remote stream settled.
+    RemoteUnconfirmed,
 }
 impl FamilyRoomStartError {
     pub(crate) fn source_error(&self) -> &sqlx::Error {
@@ -574,7 +585,7 @@ impl FamilyRoomStartError {
         matches!(
             self,
             Self::Commit {
-                cleanup_error: None,
+                settlement: FamilyRoomStartSettlement::LocalSqlx,
                 ..
             }
         )
@@ -629,10 +640,9 @@ pub(crate) async fn acquire_family_document_room_for_start(
 ) -> Result<Result<FamilyRoomClaim, CollabDbError>, FamilyRoomStartError> {
     let (tx, claim) = match prepare_family_document_room_claim(
         backend,
-        workspace,
+        (workspace, document),
         actor,
         credential,
-        document,
         owner,
         lease,
         NativeLoadMode::Reader,
@@ -657,7 +667,7 @@ pub(crate) async fn acquire_family_document_room_for_start(
             source: sqlx::Error::Protocol(
                 "fixture lost startup outcome reply after actual commit/rollback".into(),
             ),
-            cleanup_error: None,
+            settlement: FamilyRoomStartSettlement::LocalSqlx,
         });
     }
     commit_family_room_start(tx).await?;
@@ -674,22 +684,24 @@ async fn commit_family_room_start(tx: DbTransaction<'_>) -> Result<(), FamilyRoo
         .await
         .map_err(|unknown| FamilyRoomStartError::Commit {
             source: unknown.source,
-            cleanup_error: remote.then(|| {
-                sqlx::Error::Protocol("original remote COMMIT stream settlement unconfirmed".into())
-            }),
+            settlement: if remote {
+                FamilyRoomStartSettlement::RemoteUnconfirmed
+            } else {
+                FamilyRoomStartSettlement::LocalSqlx
+            },
         })
 }
 
 async fn prepare_family_document_room_claim<'a>(
     backend: &'a Backend,
-    workspace: Uuid,
+    target: (Uuid, Uuid),
     actor: Uuid,
     credential: Uuid,
-    document: Uuid,
     owner: Uuid,
     lease: std::time::Duration,
     mode: NativeLoadMode,
 ) -> Result<Result<(DbTransaction<'a>, FamilyRoomClaim), CollabDbError>, sqlx::Error> {
+    let (workspace, document) = target;
     if matches!(backend, Backend::Postgres(_)) {
         return Err(sqlx::Error::Protocol(
             "PostgreSQL rooms require the session guard".into(),

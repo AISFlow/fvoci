@@ -3653,16 +3653,16 @@ async fn selected_socket_native_history(
 
 async fn selected_room_durable_ack(
     backend: &fvoci_server::db::backend::Backend,
-    workspace: Uuid,
-    document: Uuid,
-    actor: Uuid,
-    session: Uuid,
+    target: (Uuid, Uuid),
+    credential: (Uuid, Uuid),
     engine: &std::path::Path,
     payloads: &[&[u8]],
-    cutoff: i64,
-    generation: i64,
+    head: (i64, i64),
     expected_history: &[u8],
 ) {
+    let (workspace, document) = target;
+    let (actor, session) = credential;
+    let (cutoff, generation) = head;
     use fvoci_server::db::backend::Backend;
     use fvoci_server::db::collab::{load_collab_readonly_kind_backend, CollabKind};
     use sha2::{Digest, Sha256};
@@ -3746,17 +3746,14 @@ async fn selected_room_transport_flow(
     app: axum::Router,
     hub: Arc<fvoci_server::collab::CollabHub>,
     backend: &fvoci_server::db::backend::Backend,
-    path: &str,
-    document: &str,
-    workspace: &str,
+    route: (&str, &str, &str),
     cookie: &str,
-    engine: &std::path::Path,
-    content: &Value,
-    update: &[u8],
-    pg_url: &str,
-    pg_admin_url: &str,
-    sqlite_path: &std::path::Path,
+    native: (&std::path::Path, &Value, &[u8]),
+    databases: (&str, &str, &std::path::Path),
 ) {
+    let (path, document, workspace) = route;
+    let (engine, content, update) = native;
+    let (pg_url, pg_admin_url, sqlite_path) = databases;
     use futures_util::SinkExt;
     use fvoci_server::collab::wire::{DocumentMessage, SyncMessage, SyncStep, WireFrame};
     use selected_room_support as room;
@@ -3818,14 +3815,11 @@ async fn selected_room_transport_flow(
     );
     selected_room_durable_ack(
         backend,
-        workspace_id,
-        document_id,
-        live.user_id,
-        live.session_id,
+        (workspace_id, document_id),
+        (live.user_id, live.session_id),
         engine,
         &[update],
-        1,
-        1,
+        (1, 1),
         &expected_before.1,
     )
     .await;
@@ -3874,14 +3868,11 @@ async fn selected_room_transport_flow(
     );
     selected_room_durable_ack(
         backend,
-        workspace_id,
-        document_id,
-        live.user_id,
-        live.session_id,
+        (workspace_id, document_id),
+        (live.user_id, live.session_id),
         engine,
         &[update, &deletion],
-        2,
-        1,
+        (2, 1),
         &expected_after.1,
     )
     .await;
@@ -4156,14 +4147,11 @@ async fn selected_room_transport_flow(
     // helper proves unchanged history after restart and no native tail loss.
     selected_room_durable_ack(
         &restarted_backend,
-        workspace_id,
-        document_id,
-        live.user_id,
-        live.session_id,
+        (workspace_id, document_id),
+        (live.user_id, live.session_id),
         engine,
         &[update, &deletion],
-        2,
-        2,
+        (2, 2),
         &expected_after.1,
     )
     .await;
@@ -4604,16 +4592,10 @@ async fn selected_backend_wiki_fixture(
                 app.clone(),
                 hub,
                 &backend,
-                &path,
-                document,
-                workspace,
+                (&path, document, workspace),
                 &fresh_cookie,
-                engine,
-                content,
-                update,
-                &pg.app_url,
-                &pg.admin_url,
-                &sqlite_path,
+                (engine, content, update),
+                (&pg.app_url, &pg.admin_url, &sqlite_path),
             )
             .await;
             drop(app);
