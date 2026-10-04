@@ -581,4 +581,68 @@ mod backend_tests {
         provider.finish().await;
         f.finish().await;
     }
+    #[tokio::test]
+    async fn cancellation_during_embedding_writer_wait_does_not_publish() {
+        let mut f = Fixture::new().await;
+        f.extracted("Cancelled after provider response while awaiting writer")
+            .await;
+        let other = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        let reservation = other.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let provider = Provider::new(1).await;
+        let cancel = CancellationToken::new();
+        let c = cancel.clone();
+        let backend = f.backend.clone();
+        let embedder = provider.embedder.clone();
+        let call = tokio::spawn(async move {
+            run_embed_pass_backend(&backend, &embedder, &mut EmbedBackoff::default(), &c).await
+        });
+        provider.seen().await;
+        assert_eq!(f.pool.num_idle(), 1); // Provider wait owns no app connection.
+        provider.state.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while f.pool.num_idle() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap(); // The sole embedding task now awaits its writer.
+        cancel.cancel();
+        reservation.rollback().await.unwrap();
+        let outcome = call.await.unwrap().unwrap();
+        let vectors = vector_count(&f).await;
+        let events = f.event_count("attachment.embedded").await;
+        provider.finish().await;
+        other.close().await;
+        f.backend.close().await.unwrap();
+        f.pool.close().await;
+        // Resources and the original failure database are closed before the
+        // oracle; on failure its directory is deliberately retained.
+        assert_eq!(outcome, EmbedPassOutcome::Cancelled);
+        assert_eq!(
+            vectors, 0,
+            "cancelled writer wait must preserve NULL vectors"
+        );
+        assert_eq!(events, 0, "cancelled writer wait must not publish an event");
+        let fresh = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        f.pool = fresh.clone();
+        f.backend = Backend::Sqlite(fresh);
+        let provider = Provider::new(0).await;
+        let outcome = run_embed_pass_backend(
+            &f.backend,
+            &provider.embedder,
+            &mut EmbedBackoff::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome,EmbedPassOutcome::Embedded{chunks,..} if chunks>0));
+        assert!(vector_count(&f).await > 0);
+        assert_eq!(f.event_count("attachment.embedded").await, 1);
+        provider.finish().await;
+        f.finish().await;
+    }
 }
