@@ -919,13 +919,65 @@ mod backend_regressions {
             .await
             .is_err());
         assert_eq!(marker_queue(&f, event.id).await, (0, 0));
-        fan_out_event_backend(&f.backend, owner, &event)
+        // Duplicate mark and UNIQUE queue controls use the same actual owner
+        // writer before its valid cursor advance, matching DatabaseAtomic.
+        let mut tx = f.backend.begin_write().await.unwrap();
+        tx.operation().set_tenant(f.workspace).await.unwrap();
+        let previous = tx.operation().set_system().await.unwrap();
+        let current = tx
+            .operation()
+            .outbox_event_by_id(event.id)
             .await
+            .unwrap()
             .unwrap();
-        fan_out_event_backend(&f.backend, owner, &event)
+        assert!(
+            mark_processed_backend_tx(&mut tx, WEBHOOKS_CONSUMER, current.id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            fan_out_backend(&mut tx.operation(), &current)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            !mark_processed_backend_tx(&mut tx, WEBHOOKS_CONSUMER, current.id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            fan_out_backend(&mut tx.operation(), &current)
+                .await
+                .unwrap(),
+            1
+        );
+        let mut operation = tx.operation();
+        let OperationTx::SqliteFamily(family) = &mut operation else {
+            unreachable!()
+        };
+        let duplicate_counts=family.query("SELECT (SELECT count(*) FROM processed_events WHERE consumer='webhooks' AND event_id=?1),(SELECT count(*) FROM webhook_deliveries WHERE event_id=?1)",&[crate::db::codec::Cell::uuid(current.id)]).await.unwrap();
+        assert_eq!(duplicate_counts[0].cell(0).unwrap().integer().unwrap(), 1);
+        assert_eq!(duplicate_counts[0].cell(1).unwrap().integer().unwrap(), 1);
+        assert!(
+            advance_cursor_backend_tx(&mut tx, WEBHOOKS_CONSUMER, owner, &current.cursor())
+                .await
+                .unwrap()
+        );
+        tx.operation().restore_system(previous).await.unwrap();
+        tx.commit().await.unwrap();
+        // Already-passed callbacks have no successful advance contract absent
+        // a genuine requeue marker. Rejection must preserve the first effects.
+        assert!(fan_out_event_backend(&f.backend, owner, &event)
             .await
-            .unwrap();
+            .is_err());
         assert_eq!(marker_queue(&f, event.id).await, (1, 1));
+        assert_eq!(
+            fetch_cursor_backend(&f.backend, WEBHOOKS_CONSUMER)
+                .await
+                .unwrap(),
+            Some(OutboxCursor::SqliteFamily { seq: event.seq })
+        );
         sqlx::query("UPDATE memberships SET role='member' WHERE workspace_id=?1 AND user_id=?2")
             .bind(f.workspace.as_bytes().as_slice())
             .bind(f.user.as_bytes().as_slice())
@@ -942,6 +994,63 @@ mod backend_regressions {
                 .await
                 .unwrap(),
             Some(OutboxCursor::SqliteFamily { seq: no_hook.seq })
+        );
+        // Actual core dead-letter skip and explicit requeue are the supported
+        // replay seam; neither a cursor rewind nor an invented core policy.
+        sqlx::query("UPDATE memberships SET role='admin' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let replay = f.append_comment_event("comment.created").await;
+        for attempt in 1..=crate::db::outbox::OUTBOX_MAX_ATTEMPTS {
+            assert_eq!(
+                crate::db::outbox::record_failure_backend(
+                    &f.backend,
+                    WEBHOOKS_CONSUMER,
+                    owner,
+                    replay.id,
+                    "synthetic whole-rollback error",
+                    crate::db::outbox::OUTBOX_FAILURE_BACKOFF_MS,
+                    crate::db::outbox::OUTBOX_MAX_ATTEMPTS
+                )
+                .await
+                .unwrap(),
+                attempt
+            );
+        }
+        assert!(crate::db::outbox::advance_cursor_backend(
+            &f.backend,
+            WEBHOOKS_CONSUMER,
+            owner,
+            &replay.cursor()
+        )
+        .await
+        .unwrap());
+        assert_eq!(marker_queue(&f, replay.id).await, (0, 0));
+        assert!(
+            crate::db::outbox::requeue_backend(&f.backend, WEBHOOKS_CONSUMER, replay.id)
+                .await
+                .unwrap()
+        );
+        fan_out_event_backend(&f.backend, owner, &replay)
+            .await
+            .unwrap();
+        assert_eq!(marker_queue(&f, replay.id).await, (1, 1));
+        assert!(crate::db::outbox::fetch_failure_state_backend(
+            &f.backend,
+            WEBHOOKS_CONSUMER,
+            replay.id
+        )
+        .await
+        .unwrap()
+        .is_none());
+        assert_eq!(
+            fetch_cursor_backend(&f.backend, WEBHOOKS_CONSUMER)
+                .await
+                .unwrap(),
+            Some(OutboxCursor::SqliteFamily { seq: replay.seq })
         );
         f.finish().await;
     }
