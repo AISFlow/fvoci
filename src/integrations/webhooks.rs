@@ -783,7 +783,7 @@ mod backend_regressions {
             &f.backend,
             WEBHOOKS_CONSUMER,
             owner,
-            Duration::from_secs(30)
+            30
         )
         .await
         .unwrap());
