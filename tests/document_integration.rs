@@ -3009,6 +3009,68 @@ async fn selected_backend_wiki_fixture(with_native: bool) {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{} me: {me}", backend.kind());
+        // The current Vue session loads this route before opening the wiki.
+        let (status, workspaces, _, _) = json_request(
+            app.clone(),
+            "GET",
+            "/api/v1/me/workspaces",
+            None,
+            Some(&fresh_cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{} workspace session: {workspaces}",
+            backend.kind()
+        );
+        let card = workspaces["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == workspace)
+            .unwrap();
+        assert_eq!(card["documentCount"], 1);
+        assert_eq!(card["assignedCount"], 0);
+        assert_eq!(card["role"], "owner");
+        let (status, metadata, _, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/workspaces/{workspace}"),
+            None,
+            Some(&fresh_cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{} workspace metadata: {metadata}",
+            backend.kind()
+        );
+        assert_eq!(metadata["id"], workspace);
+        let (status, _, _, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/workspaces/{}", Uuid::now_v7()),
+            None,
+            Some(&fresh_cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "workspace membership is current and scoped"
+        );
+        let (status, _, _, _) =
+            json_request(app.clone(), "GET", "/api/v1/me/workspaces", None, None, &[]).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "workspace session remains mandatory"
+        );
         let document = created["id"].as_str().unwrap();
         let (status, read, _, _) = json_request(
             app.clone(),
@@ -3697,6 +3759,122 @@ async fn selected_backend_wiki_fixture(with_native: bool) {
                     AppendCollabResult::DuplicateAck { seq: 1 }
                 );
                 assert!(release_family_document_room(&backend, replacement.fence)
+                    .await
+                    .unwrap());
+                use fvoci_server::db::collab::{
+                    acquire_family_document_room, activate_family_document_writer,
+                };
+                let reader = acquire_family_document_room(
+                    &backend,
+                    workspace_id,
+                    live.user_id,
+                    live.session_id,
+                    document_id,
+                    Uuid::now_v7(),
+                    std::time::Duration::from_secs(30),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    reader.native.writer_generation, 2,
+                    "reader room ownership does not claim native writer generation"
+                );
+                let writer_owner = Uuid::now_v7();
+                let writer = activate_family_document_writer(
+                    &backend,
+                    reader.fence,
+                    live.user_id,
+                    live.session_id,
+                    writer_owner,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(writer.native.writer_generation, 3);
+                assert_eq!(writer.native.load.tail_seq, 1);
+                assert_ne!(
+                    writer.fence, reader.fence,
+                    "stable writer activation changes the opaque owner proof"
+                );
+                let replay = activate_family_document_writer(
+                    &backend,
+                    reader.fence,
+                    live.user_id,
+                    live.session_id,
+                    writer_owner,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    replay.native.writer_generation, 3,
+                    "same activation token reconciles without a second generation bump"
+                );
+                assert_eq!(replay.fence, writer.fence);
+                assert_eq!(
+                    activate_family_document_writer(
+                        &backend,
+                        reader.fence,
+                        live.user_id,
+                        Uuid::now_v7(),
+                        writer_owner
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::Forbidden,
+                    "current credential precedes stable activation replay"
+                );
+                assert_eq!(
+                    activate_family_document_writer(
+                        &backend,
+                        reader.fence,
+                        live.user_id,
+                        live.session_id,
+                        Uuid::now_v7()
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::StaleWriter,
+                    "a different activation cannot steal current ownership"
+                );
+                assert!(!renew_family_document_room(
+                    &backend,
+                    reader.fence,
+                    std::time::Duration::from_secs(30)
+                )
+                .await
+                .unwrap());
+                assert!(!release_family_document_room(&backend, reader.fence)
+                    .await
+                    .unwrap());
+                assert_eq!(
+                    project_derived_body_kind_backend(
+                        &backend,
+                        CollabKind::Document,
+                        project_input(3, 1, live.session_id),
+                        Some(reader.fence)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::StaleWriter
+                );
+                assert_eq!(
+                    project_derived_body_kind_backend(
+                        &backend,
+                        CollabKind::Document,
+                        project_input(3, 1, live.session_id),
+                        Some(writer.fence)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                    ProjectDerivedBodyResult::Unchanged
+                );
+                assert!(release_family_document_room(&backend, writer.fence)
                     .await
                     .unwrap());
             }

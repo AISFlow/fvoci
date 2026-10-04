@@ -2,7 +2,7 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use super::backend::OperationTx;
+use super::backend::{Backend, OperationTx};
 use super::codec::Cell;
 
 use crate::db::context::{
@@ -292,32 +292,29 @@ pub async fn list_workspaces_for_user(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<Vec<WorkspaceListItem>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    set_self_user(&mut tx, user_id).await?;
-    let memberships = sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT workspace_id, role FROM fvoci.memberships WHERE user_id = $1",
-    )
-    .bind(user_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    clear_self_user(&mut tx).await?;
-    tx.commit().await?;
+    list_workspaces_for_user_backend(&Backend::Postgres(pool.clone()), user_id).await
+}
 
+pub async fn list_workspaces_for_user_backend(
+    backend: &Backend,
+    user_id: Uuid,
+) -> Result<Vec<WorkspaceListItem>, sqlx::Error> {
+    // Retain the PG transaction boundaries/isolation and self-user RLS prefix.
+    let mut tx = backend.begin_write().await?;
+    let memberships = tx.operation().self_workspace_memberships(user_id).await?;
+    tx.commit().await.map_err(|unknown| unknown.source)?;
     let mut items = Vec::new();
     for (workspace_id, role_str) in memberships {
         let role = WorkspaceRole::parse(&role_str).unwrap_or(WorkspaceRole::Guest);
-        let mut tx = pool.begin().await?;
-        set_tenant(&mut tx, workspace_id).await?;
-        let row = sqlx::query_as::<_, (Uuid, String, String, String)>(
-            "SELECT id, name, slug, kind FROM fvoci.workspaces WHERE id = $1 AND deleted_at IS NULL",
-        )
-        .bind(workspace_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let item = if let Some((id, name, slug, kind)) = row {
-            let (document_count, assigned_count) =
-                workspace_card_counts_in_tx(&mut tx, workspace_id, user_id, role).await?;
-            Some(WorkspaceListItem {
+        let mut tx = backend.begin_write().await?;
+        tx.operation().set_tenant(workspace_id).await?;
+        let row = tx.operation().live_workspace_card(workspace_id).await?;
+        if let Some((id, name, slug, kind)) = row {
+            let (document_count, assigned_count) = tx
+                .operation()
+                .workspace_card_counts(workspace_id, user_id, role)
+                .await?;
+            items.push(WorkspaceListItem {
                 id,
                 name,
                 slug,
@@ -325,16 +322,109 @@ pub async fn list_workspaces_for_user(
                 kind,
                 document_count,
                 assigned_count,
-            })
-        } else {
-            None
-        };
-        tx.commit().await?;
-        if let Some(item) = item {
-            items.push(item);
+            });
         }
+        tx.commit().await.map_err(|unknown| unknown.source)?;
     }
     Ok(items)
+}
+
+impl OperationTx<'_, '_> {
+    async fn self_workspace_memberships(
+        &mut self,
+        user: Uuid,
+    ) -> Result<Vec<(Uuid, String)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                set_self_user(tx, user).await?;
+                let rows = sqlx::query_as(
+                    "SELECT workspace_id, role FROM fvoci.memberships WHERE user_id=$1",
+                )
+                .bind(user)
+                .fetch_all(&mut **tx)
+                .await?;
+                clear_self_user(tx).await?;
+                Ok(rows)
+            }
+            Self::SqliteFamily(tx) => {
+                // This named self read carries its actor explicitly; it cannot
+                // enumerate another user's rows through an unscoped query.
+                tx.query(
+                    "SELECT workspace_id,role FROM memberships WHERE user_id=?1",
+                    &[Cell::uuid(user)],
+                )
+                .await?
+                .iter()
+                .map(|r| Ok((r.cell(0)?.id()?, r.cell(1)?.string()?)))
+                .collect()
+            }
+        }
+    }
+    async fn live_workspace_card(
+        &mut self,
+        workspace: Uuid,
+    ) -> Result<Option<(Uuid, String, String, String)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_as(
+                "SELECT id,name,slug,kind FROM fvoci.workspaces WHERE id=$1 AND deleted_at IS NULL",
+            )
+            .bind(workspace)
+            .fetch_optional(&mut **tx)
+            .await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let rows=tx.query("SELECT id,name,slug,kind FROM workspaces WHERE id=?1 AND deleted_at IS NULL", &[Cell::uuid(workspace)]).await?;
+                rows.first()
+                    .map(|r| {
+                        Ok((
+                            r.cell(0)?.id()?,
+                            r.cell(1)?.string()?,
+                            r.cell(2)?.string()?,
+                            r.cell(3)?.string()?,
+                        ))
+                    })
+                    .transpose()
+            }
+        }
+    }
+    async fn workspace_card_counts(
+        &mut self,
+        workspace: Uuid,
+        user: Uuid,
+        role: WorkspaceRole,
+    ) -> Result<(i32, i32), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => workspace_card_counts_in_tx(tx, workspace, user, role).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let visible = projects::visible_project_family_sql("p");
+                let params = [
+                    Cell::uuid(workspace),
+                    Cell::Integer(i64::from(role == WorkspaceRole::Guest)),
+                    Cell::uuid(user),
+                ];
+                let documents=tx.query(&format!("SELECT count(*) FROM documents d WHERE d.workspace_id=?1 AND d.deleted_at IS NULL AND ((d.project_id IS NULL AND ?2=0) OR (d.project_id IS NOT NULL AND EXISTS(SELECT 1 FROM projects p WHERE p.workspace_id=d.workspace_id AND p.id=d.project_id AND p.deleted_at IS NULL AND {visible})))"),&params).await?;
+                let assigned=tx.query(&format!("SELECT count(*) FROM tasks t INNER JOIN projects p ON p.workspace_id=t.workspace_id AND p.id=t.project_id AND p.deleted_at IS NULL WHERE t.workspace_id=?1 AND t.deleted_at IS NULL AND t.archived_at IS NULL AND EXISTS(SELECT 1 FROM task_assignees a WHERE a.workspace_id=t.workspace_id AND a.task_id=t.id AND a.user_id=?3) AND EXISTS(SELECT 1 FROM statuses s_open WHERE s_open.workspace_id=t.workspace_id AND s_open.project_id=t.project_id AND s_open.id=t.status_id AND s_open.category NOT IN ('done','canceled')) AND {visible}"),&params).await?;
+                let documents = documents
+                    .first()
+                    .ok_or_else(|| sqlx::Error::Protocol("workspace document count absent".into()))?
+                    .cell(0)?
+                    .integer()?;
+                let assigned = assigned
+                    .first()
+                    .ok_or_else(|| sqlx::Error::Protocol("workspace assigned count absent".into()))?
+                    .cell(0)?
+                    .integer()?;
+                if documents < 0 || assigned < 0 {
+                    return Err(sqlx::Error::Protocol("negative workspace count".into()));
+                }
+                Ok((
+                    i32::try_from(documents).unwrap_or(i32::MAX),
+                    i32::try_from(assigned).unwrap_or(i32::MAX),
+                ))
+            }
+        }
+    }
 }
 
 pub async fn list_members(
@@ -394,13 +484,35 @@ pub async fn get_workspace_meta(
     actor_user_id: Uuid,
     session_id: Uuid,
 ) -> Result<Result<WorkspaceMeta, WorkspaceDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
+    get_workspace_meta_backend(
+        &Backend::Postgres(pool.clone()),
+        workspace_id,
+        actor_user_id,
+        session_id,
+    )
+    .await
+}
+
+pub async fn get_workspace_meta_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<WorkspaceMeta, WorkspaceDbError>, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(workspace_id).await?;
+    if !tx
+        .operation()
+        .session_is_live(actor_user_id, session_id)
+        .await?
+    {
         tx.rollback().await?;
         return Ok(Err(WorkspaceDbError::Forbidden));
     }
-    let role = membership_role(&mut tx, workspace_id, actor_user_id).await?;
+    let role = tx
+        .operation()
+        .membership_role(workspace_id, actor_user_id, false)
+        .await?;
     if !role
         .map(|r| r.at_least(WorkspaceRole::Guest))
         .unwrap_or(false)
@@ -408,21 +520,12 @@ pub async fn get_workspace_meta(
         tx.rollback().await?;
         return Ok(Err(WorkspaceDbError::Forbidden));
     }
-    if workspace_kind_read(&mut tx, workspace_id).await?.is_none() {
-        tx.rollback().await?;
-        return Ok(Err(WorkspaceDbError::NotFound));
-    }
-    let row = sqlx::query_as::<_, (Uuid, String, String)>(
-        "SELECT id, name, slug FROM fvoci.workspaces WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(workspace_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    match row {
-        Some((id, name, slug)) => Ok(Ok(WorkspaceMeta { id, name, slug })),
-        None => Ok(Err(WorkspaceDbError::NotFound)),
-    }
+    let row = tx.operation().live_workspace_card(workspace_id).await?;
+    tx.commit().await.map_err(|unknown| unknown.source)?;
+    Ok(match row {
+        Some((id, name, slug, _)) => Ok(WorkspaceMeta { id, name, slug }),
+        None => Err(WorkspaceDbError::NotFound),
+    })
 }
 
 pub async fn update_workspace_meta(

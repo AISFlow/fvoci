@@ -284,6 +284,23 @@ pub(crate) fn visible_project_sql(
     visible_project_predicate(project_alias, &format!("${guest_param}"), actor_param)
 }
 
+/// SQLite-family SQL leaf of the same card/list visibility predicate. Parameter
+/// positions are fixed by the named operation; no SQL rewriting is involved.
+pub(crate) fn visible_project_family_sql(project_alias: &str) -> String {
+    format!(
+        "(({project_alias}.visibility='workspace' AND ?2=0)
+          OR EXISTS(SELECT 1 FROM project_members pm
+                    WHERE pm.workspace_id={project_alias}.workspace_id
+                      AND pm.project_id={project_alias}.id AND pm.user_id=?3)
+          OR EXISTS(SELECT 1 FROM project_members pm
+                    INNER JOIN group_members gm
+                      ON gm.workspace_id=pm.workspace_id AND gm.group_id=pm.group_id
+                    WHERE pm.workspace_id={project_alias}.workspace_id
+                      AND pm.project_id={project_alias}.id AND gm.user_id=?3
+                      AND pm.group_id IS NOT NULL))"
+    )
+}
+
 /// `visible_project_sql` with the actor's guest flag inlined as a SQL literal
 /// (a server-computed boolean, never request text), for queries that have no
 /// boolean bind for it, such as the task list, whose trailing binds are a text

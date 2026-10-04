@@ -67,17 +67,10 @@ async fn list_my_workspaces(
         None,
     )
     .await?;
-    let listed = crate::db::workspace::list_workspaces_for_user(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/workspaces.rs")
-            .map_err(internal)?,
-        user_id,
-    )
-    .await
-    .map_err(internal)?;
+    let listed =
+        crate::db::workspace::list_workspaces_for_user_backend(&state.auth.db.pool, user_id)
+            .await
+            .map_err(internal)?;
     let items = listed
         .into_iter()
         .map(|w| WorkspaceListItemResponse {
@@ -107,13 +100,8 @@ async fn get_workspace(
         Some(workspace_id),
     )
     .await?;
-    let result = crate::db::workspace::get_workspace_meta(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/workspaces.rs")
-            .map_err(internal)?,
+    let result = crate::db::workspace::get_workspace_meta_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,
