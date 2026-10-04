@@ -11,8 +11,12 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::backend::{Backend, OperationTx};
-use crate::db::codec::Cell;
-use crate::db::notifications::{find_prefs_tx, resolved_store_prefs, NotificationInsert};
+use crate::db::notifications::{
+    find_prefs_tx, list_task_assignees, load_comment, load_comment_pg,
+    notification_document_creator, notification_document_project, notification_group_members,
+    notification_inviter, notification_project_name, resolved_store_prefs, status_name,
+    task_snapshot, user_is_present, CommentSnap, NotificationInsert,
+};
 use crate::db::outbox::{
     advance_cursor_backend_tx, mark_processed_backend_tx, BackendOutboxEvent, OutboxEvent,
 };
@@ -127,18 +131,6 @@ fn payload_uuid_array(payload: &Value, key: &str) -> Vec<Uuid> {
         .unwrap_or_default()
 }
 
-async fn user_is_present_pg(
-    tx: &mut Transaction<'_, Postgres>,
-    user_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let present: Option<(bool,)> =
-        sqlx::query_as("SELECT true FROM fvoci.users WHERE id = $1 AND deleted_at IS NULL")
-            .bind(user_id)
-            .fetch_optional(&mut **tx)
-            .await?;
-    Ok(present.is_some())
-}
-
 async fn recipients_for(
     tx: &mut OperationTx<'_, '_>,
     workspace_id: Uuid,
@@ -187,18 +179,7 @@ async fn can_view_document(
     user: Uuid,
     document: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let project: Option<Option<Uuid>> = match tx {
-        OperationTx::Postgres(tx) => sqlx::query_scalar(
-            "SELECT project_id FROM fvoci.documents WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL"
-        ).bind(workspace).bind(document).fetch_optional(&mut ***tx).await?,
-        OperationTx::SqliteFamily(tx) => {
-            tx.require_tenant(workspace)?;
-            tx.require_system_context()?;
-            tx.query("SELECT project_id FROM documents WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",
-                &[Cell::uuid(workspace), Cell::uuid(document)]).await?
-                .first().map(|row| row.cell(0)?.optional(Cell::id)).transpose()?
-        }
-    };
+    let project = notification_document_project(tx, workspace, document).await?;
     let Some(project) = project else {
         return Ok(false);
     };
@@ -224,55 +205,6 @@ async fn recipients_who_can_view_project(
         }
     }
     Ok(visible)
-}
-
-async fn list_task_assignees_pg(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    task_id: Uuid,
-) -> Result<Vec<Uuid>, sqlx::Error> {
-    let rows: Vec<(Uuid,)> = sqlx::query_as(
-        r#"
-        SELECT user_id
-        FROM fvoci.task_assignees
-        WHERE workspace_id = $1 AND task_id = $2
-        ORDER BY user_id
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(task_id)
-    .fetch_all(&mut **tx)
-    .await?;
-    Ok(rows.into_iter().map(|(id,)| id).collect())
-}
-
-struct TaskSnap {
-    number: i32,
-    title: String,
-    project_id: Uuid,
-}
-
-async fn task_snapshot_pg(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    task_id: Uuid,
-) -> Result<Option<TaskSnap>, sqlx::Error> {
-    let row: Option<(i32, String, Uuid)> = sqlx::query_as(
-        r#"
-        SELECT number, title, project_id
-        FROM fvoci.tasks
-        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(task_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(row.map(|(number, title, project_id)| TaskSnap {
-        number,
-        title,
-        project_id,
-    }))
 }
 
 fn base_insert(
@@ -396,25 +328,6 @@ async fn task_updated(
     Ok(Vec::new())
 }
 
-async fn status_name_pg(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    status_id: &str,
-) -> Result<String, sqlx::Error> {
-    let Ok(id) = Uuid::parse_str(status_id) else {
-        return Ok(status_id.to_string());
-    };
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT name FROM fvoci.statuses WHERE workspace_id = $1 AND id = $2")
-            .bind(workspace_id)
-            .bind(id)
-            .fetch_optional(&mut **tx)
-            .await?;
-    Ok(row
-        .map(|(name,)| name)
-        .unwrap_or_else(|| status_id.to_string()))
-}
-
 async fn task_deleted(
     tx: &mut OperationTx<'_, '_>,
     event: &BackendOutboxEvent,
@@ -486,41 +399,6 @@ fn comment_notify_payload(
         None => Value::Null,
     };
     payload
-}
-
-async fn load_comment_pg(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    comment_id: Uuid,
-) -> Result<Option<CommentSnap>, sqlx::Error> {
-    let row = sqlx::query(
-        r#"
-        SELECT id, document_id, task_id, parent_id, created_by, body
-        FROM fvoci.comments
-        WHERE workspace_id = $1 AND id = $2
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(comment_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(row.map(|row| CommentSnap {
-        id: row.get("id"),
-        document_id: row.get("document_id"),
-        task_id: row.get("task_id"),
-        parent_id: row.get("parent_id"),
-        created_by: row.get("created_by"),
-        body: row.get("body"),
-    }))
-}
-
-struct CommentSnap {
-    id: Uuid,
-    document_id: Option<Uuid>,
-    task_id: Option<Uuid>,
-    parent_id: Option<Uuid>,
-    created_by: Uuid,
-    body: String,
 }
 
 async fn comment_created_audience(
@@ -781,211 +659,6 @@ pub async fn identity_mail_for_event(
         subject: messages.subject(subject),
         text: messages.render(text, &[("provider", provider)]),
     }))
-}
-
-async fn user_is_present(tx: &mut OperationTx<'_, '_>, user: Uuid) -> Result<bool, sqlx::Error> {
-    match tx {
-        OperationTx::Postgres(tx) => user_is_present_pg(tx, user).await,
-        OperationTx::SqliteFamily(tx) => {
-            tx.require_system_context()?;
-            let rows = tx
-                .query(
-                    "SELECT 1 FROM users WHERE id=?1 AND deleted_at IS NULL",
-                    &[Cell::uuid(user)],
-                )
-                .await?;
-            Ok(!rows.is_empty())
-        }
-    }
-}
-async fn list_task_assignees(
-    tx: &mut OperationTx<'_, '_>,
-    workspace: Uuid,
-    task: Uuid,
-) -> Result<Vec<Uuid>, sqlx::Error> {
-    match tx {
-        OperationTx::Postgres(tx) => list_task_assignees_pg(tx, workspace, task).await,
-        OperationTx::SqliteFamily(tx) => {
-            tx.require_tenant(workspace)?;
-            tx.require_system_context()?;
-            tx.query("SELECT user_id FROM task_assignees WHERE workspace_id=?1 AND task_id=?2 ORDER BY user_id",&[Cell::uuid(workspace),Cell::uuid(task)]).await?.iter().map(|r|r.cell(0)?.id()).collect()
-        }
-    }
-}
-async fn task_snapshot(
-    tx: &mut OperationTx<'_, '_>,
-    workspace: Uuid,
-    task: Uuid,
-) -> Result<Option<TaskSnap>, sqlx::Error> {
-    match tx {
-        OperationTx::Postgres(tx) => task_snapshot_pg(tx, workspace, task).await,
-        OperationTx::SqliteFamily(tx) => {
-            tx.require_tenant(workspace)?;
-            tx.require_system_context()?;
-            let rows=tx.query("SELECT number,title,project_id FROM tasks WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",&[Cell::uuid(workspace),Cell::uuid(task)]).await?;
-            rows.first()
-                .map(|r| {
-                    Ok(TaskSnap {
-                        number: i32::try_from(r.cell(0)?.integer()?).map_err(|_| {
-                            sqlx::Error::Protocol("notification task number out of range".into())
-                        })?,
-                        title: r.cell(1)?.string()?,
-                        project_id: r.cell(2)?.id()?,
-                    })
-                })
-                .transpose()
-        }
-    }
-}
-async fn status_name(
-    tx: &mut OperationTx<'_, '_>,
-    workspace: Uuid,
-    status: &str,
-) -> Result<String, sqlx::Error> {
-    match tx {
-        OperationTx::Postgres(tx) => status_name_pg(tx, workspace, status).await,
-        OperationTx::SqliteFamily(tx) => {
-            tx.require_tenant(workspace)?;
-            tx.require_system_context()?;
-            let Ok(id) = Uuid::parse_str(status) else {
-                return Ok(status.to_owned());
-            };
-            let rows = tx
-                .query(
-                    "SELECT name FROM statuses WHERE workspace_id=?1 AND id=?2",
-                    &[Cell::uuid(workspace), Cell::uuid(id)],
-                )
-                .await?;
-            rows.first()
-                .map(|r| r.cell(0)?.string())
-                .unwrap_or_else(|| Ok(status.to_owned()))
-        }
-    }
-}
-async fn load_comment(
-    tx: &mut OperationTx<'_, '_>,
-    workspace: Uuid,
-    comment: Uuid,
-) -> Result<Option<CommentSnap>, sqlx::Error> {
-    match tx {
-        OperationTx::Postgres(tx) => load_comment_pg(tx, workspace, comment).await,
-        OperationTx::SqliteFamily(tx) => {
-            tx.require_tenant(workspace)?;
-            tx.require_system_context()?;
-            let rows=tx.query("SELECT id,document_id,task_id,parent_id,created_by,body FROM comments WHERE workspace_id=?1 AND id=?2",&[Cell::uuid(workspace),Cell::uuid(comment)]).await?;
-            rows.first()
-                .map(|r| {
-                    Ok(CommentSnap {
-                        id: r.cell(0)?.id()?,
-                        document_id: r.cell(1)?.optional(Cell::id)?,
-                        task_id: r.cell(2)?.optional(Cell::id)?,
-                        parent_id: r.cell(3)?.optional(Cell::id)?,
-                        created_by: r.cell(4)?.id()?,
-                        body: r.cell(5)?.string()?,
-                    })
-                })
-                .transpose()
-        }
-    }
-}
-async fn notification_project_name(
-    tx: &mut OperationTx<'_, '_>,
-    workspace: Uuid,
-    project: Uuid,
-) -> Result<Option<String>, sqlx::Error> {
-    match tx {
-        OperationTx::Postgres(tx)=>sqlx::query_scalar("SELECT name FROM fvoci.projects WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL").bind(workspace).bind(project).fetch_optional(&mut ***tx).await,
-        OperationTx::SqliteFamily(tx)=>{
-            tx.require_tenant(workspace)?;tx.require_system_context()?;
-            let rows=tx.query("SELECT name FROM projects WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",&[Cell::uuid(workspace),Cell::uuid(project)]).await?;
-            rows.first().map(|r|r.cell(0)?.string()).transpose()
-        }
-    }
-}
-async fn notification_group_members(
-    tx: &mut OperationTx<'_, '_>,
-    workspace: Uuid,
-    group: Uuid,
-) -> Result<Vec<Uuid>, sqlx::Error> {
-    match tx {
-        OperationTx::Postgres(tx) => {
-            sqlx::query_scalar(
-                "SELECT user_id FROM fvoci.group_members WHERE workspace_id=$1 AND group_id=$2",
-            )
-            .bind(workspace)
-            .bind(group)
-            .fetch_all(&mut ***tx)
-            .await
-        }
-        OperationTx::SqliteFamily(tx) => {
-            tx.require_tenant(workspace)?;
-            tx.require_system_context()?;
-            tx.query(
-                "SELECT user_id FROM group_members WHERE workspace_id=?1 AND group_id=?2",
-                &[Cell::uuid(workspace), Cell::uuid(group)],
-            )
-            .await?
-            .iter()
-            .map(|r| r.cell(0)?.id())
-            .collect()
-        }
-    }
-}
-async fn notification_document_creator(
-    tx: &mut OperationTx<'_, '_>,
-    workspace: Uuid,
-    document: Uuid,
-) -> Result<Option<Uuid>, sqlx::Error> {
-    match tx {
-        OperationTx::Postgres(tx) => {
-            sqlx::query_scalar(
-                "SELECT created_by FROM fvoci.documents WHERE workspace_id=$1 AND id=$2",
-            )
-            .bind(workspace)
-            .bind(document)
-            .fetch_optional(&mut ***tx)
-            .await
-        }
-        OperationTx::SqliteFamily(tx) => {
-            tx.require_tenant(workspace)?;
-            tx.require_system_context()?;
-            let rows = tx
-                .query(
-                    "SELECT created_by FROM documents WHERE workspace_id=?1 AND id=?2",
-                    &[Cell::uuid(workspace), Cell::uuid(document)],
-                )
-                .await?;
-            rows.first().map(|r| r.cell(0)?.id()).transpose()
-        }
-    }
-}
-async fn notification_inviter(
-    tx: &mut OperationTx<'_, '_>,
-    workspace: Uuid,
-    invitation: Uuid,
-) -> Result<Option<Uuid>, sqlx::Error> {
-    match tx {
-        OperationTx::Postgres(tx) => {
-            sqlx::query_scalar(
-                "SELECT invited_by FROM fvoci.invitations WHERE workspace_id=$1 AND id=$2",
-            )
-            .bind(workspace)
-            .bind(invitation)
-            .fetch_optional(&mut ***tx)
-            .await
-        }
-        OperationTx::SqliteFamily(tx) => {
-            tx.require_tenant(workspace)?;
-            tx.require_system_context()?;
-            let rows = tx
-                .query(
-                    "SELECT invited_by FROM invitations WHERE workspace_id=?1 AND id=?2",
-                    &[Cell::uuid(workspace), Cell::uuid(invitation)],
-                )
-                .await?;
-            rows.first().map(|r| r.cell(0)?.id()).transpose()
-        }
-    }
 }
 
 #[cfg(test)]
