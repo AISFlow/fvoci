@@ -2890,6 +2890,31 @@ async fn selected_backend_wiki_fixture(with_native: bool) {
     let command = Uuid::now_v7();
     let room_owner = Uuid::now_v7();
     for backend in [pg_backend, sqlite_backend] {
+        match &backend {
+            Backend::Postgres(pool) => {
+                let role: (String,bool,bool,bool,Option<String>) = sqlx::query_as(
+                    "SELECT current_user::text,rolsuper,rolbypassrls,rolcanlogin,current_setting('app.tenant_id',true) FROM pg_catalog.pg_roles WHERE rolname=current_user"
+                ).fetch_one(pool).await.unwrap();
+                assert_eq!(role.0, pg.role_name);
+                assert!(
+                    !role.1 && !role.2 && role.3,
+                    "actual app LOGIN role must be restricted"
+                );
+                assert!(role.4.as_deref().unwrap_or("").is_empty());
+                eprintln!("selected_backend_actual_role name={} superuser={} bypassrls={} login={} tenant={:?}",role.0,role.1,role.2,role.3,role.4);
+            }
+            Backend::Sqlite(pool) => {
+                let engine: (String,String,i64) = sqlx::query_as("SELECT sqlite_version(),sqlite_source_id(),(SELECT foreign_keys FROM pragma_foreign_keys)").fetch_one(pool).await.unwrap();
+                assert_eq!(engine.0, fvoci_server::db::pool::SQLITE_VERSION);
+                assert_eq!(engine.1, fvoci_server::db::pool::SQLITE_SOURCE_ID);
+                assert_eq!(engine.2, 1);
+                eprintln!(
+                    "selected_backend_actual_sqlite version={} source={} fk={}",
+                    engine.0, engine.1, engine.2
+                );
+            }
+            Backend::LibsqlRemote(_) => unreachable!("remote primary is a separate actual proof"),
+        }
         let state = app_state_backend(backend.clone()).await;
         let storage = state.storage.clone();
         let app = document_app(state);
