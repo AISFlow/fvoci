@@ -43,7 +43,7 @@ use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::collab::derived_body::PreparedDerivedBody;
-use crate::db::backend::OperationTx;
+use crate::db::backend::{Backend, OperationTx};
 use crate::db::codec::Cell;
 use crate::db::context::{lock_key_from_uuid, set_tenant};
 use crate::db::documents::empty_document_json;
@@ -1196,6 +1196,153 @@ pub async fn record_collab_append_for_tests(
     .await
 }
 
+/// Native load policy is shared by PG and the SQLite family; driver methods
+/// only perform the named reads and writes on this same reserved transaction.
+#[derive(Clone, Copy)]
+enum NativeLoadMode {
+    ClaimWriter,
+    Writer,
+    Reader,
+}
+
+impl OperationTx<'_, '_> {
+    #[allow(clippy::too_many_arguments)]
+    async fn load_collab_native(
+        &mut self,
+        kind: CollabKind,
+        workspace: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+        resource: Uuid,
+        mode: NativeLoadMode,
+    ) -> Result<Result<ClaimWriterResult, CollabDbError>, sqlx::Error> {
+        self.set_tenant(workspace).await?;
+        let mut timings = CollabDbStageTimings::default();
+        let authorized = match mode {
+            NativeLoadMode::Reader => self
+                .authorize_collab_read(kind, workspace, actor, credential, resource, &mut timings)
+                .await?
+                .map(|_| ()),
+            NativeLoadMode::ClaimWriter | NativeLoadMode::Writer => {
+                self.authorize_collab_write(
+                    kind,
+                    workspace,
+                    actor,
+                    credential,
+                    resource,
+                    &mut timings,
+                )
+                .await?
+            }
+        };
+        if let Err(error) = authorized {
+            return Ok(Err(error));
+        }
+        let tables = CollabTables::for_kind(kind);
+        let content = self
+            .load_collab_resource_content(tables, workspace, resource)
+            .await?;
+        if let Err(error) = self
+            .ensure_collab_state(tables, workspace, resource, &content)
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        if matches!(mode, NativeLoadMode::ClaimWriter)
+            && self
+                .bump_native_writer_generation(tables, workspace, resource)
+                .await?
+                .is_none()
+        {
+            return Ok(Err(CollabDbError::NotFound));
+        }
+        let Some(state) = self.fetch_native_state(tables, workspace, resource).await? else {
+            return Ok(Err(CollabDbError::NotFound));
+        };
+        if state.1 != COLLAB_STATE_ENCODING_V1 {
+            return Ok(Err(CollabDbError::NotFound));
+        }
+        let tail = match self
+            .load_native_tail(tables, workspace, resource, state.3, state.0.len() as i64)
+            .await?
+        {
+            Ok(tail) => tail,
+            Err(error) => return Ok(Err(error)),
+        };
+        let load = state_row_to_load(state, tail);
+        Ok(Ok(ClaimWriterResult {
+            writer_generation: load.writer_generation,
+            load,
+        }))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn load_collab_native_backend(
+    backend: &Backend,
+    kind: CollabKind,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    resource: Uuid,
+    mode: NativeLoadMode,
+) -> Result<Result<ClaimWriterResult, CollabDbError>, sqlx::Error> {
+    // Read-only native sync can seed an empty state, and the current authority
+    // prefix takes writer locks on PG. Both retain that existing behavior.
+    let mut tx = backend.begin_write().await?;
+    let result = tx
+        .operation()
+        .load_collab_native(kind, workspace, actor, credential, resource, mode)
+        .await?;
+    if result.is_err() {
+        tx.rollback().await?;
+    } else {
+        tx.commit().await.map_err(|error| error.source)?;
+    }
+    Ok(result)
+}
+
+pub async fn claim_writer_and_load_kind_backend(
+    backend: &Backend,
+    kind: CollabKind,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    resource: Uuid,
+) -> Result<Result<ClaimWriterResult, CollabDbError>, sqlx::Error> {
+    load_collab_native_backend(
+        backend,
+        kind,
+        workspace,
+        actor,
+        credential,
+        resource,
+        NativeLoadMode::ClaimWriter,
+    )
+    .await
+}
+
+pub async fn load_collab_readonly_kind_backend(
+    backend: &Backend,
+    kind: CollabKind,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    resource: Uuid,
+) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
+    load_collab_native_backend(
+        backend,
+        kind,
+        workspace,
+        actor,
+        credential,
+        resource,
+        NativeLoadMode::Reader,
+    )
+    .await
+    .map(|result| result.map(|claimed| claimed.load))
+}
+
 pub async fn claim_writer_and_load(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1222,79 +1369,15 @@ pub async fn claim_writer_and_load_kind(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<Result<ClaimWriterResult, CollabDbError>, sqlx::Error> {
-    let t = CollabTables::for_kind(kind);
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    if let Err(err) = authorize_collab_write(
-        &mut tx,
+    claim_writer_and_load_kind_backend(
+        &Backend::Postgres(pool.clone()),
         kind,
         workspace_id,
         actor_user_id,
         session_id,
         document_id,
-        &mut CollabDbStageTimings::default(),
     )
-    .await?
-    {
-        tx.rollback().await?;
-        return Ok(Err(err));
-    }
-    let content = load_resource_content(&mut tx, t, workspace_id, document_id).await?;
-    match ensure_collab_state_row(&mut tx, t, workspace_id, document_id, &content.0).await? {
-        Ok(()) => {}
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
-        }
-    }
-    let bumped: Option<(i64,)> = sqlx::query_as(&t.sql(
-        r#"
-        UPDATE {states}
-        SET writer_generation = writer_generation + 1,
-            updated_at = now()
-        WHERE workspace_id = $1 AND {id} = $2
-        RETURNING writer_generation
-        "#,
-    ))
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some((writer_generation,)) = bumped else {
-        tx.rollback().await?;
-        return Ok(Err(CollabDbError::NotFound));
-    };
-    let state = fetch_state_for_update(&mut tx, t, workspace_id, document_id).await?;
-    let Some(state) = state else {
-        tx.rollback().await?;
-        return Ok(Err(CollabDbError::NotFound));
-    };
-    if state.1 != COLLAB_STATE_ENCODING_V1 {
-        tx.rollback().await?;
-        return Ok(Err(CollabDbError::NotFound));
-    }
-    let tail = match load_tail_updates(
-        &mut tx,
-        t,
-        workspace_id,
-        document_id,
-        state.3,
-        state.0.len() as i64,
-    )
-    .await?
-    {
-        Ok(tail) => tail,
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
-        }
-    };
-    let load = state_row_to_load(state, tail);
-    tx.commit().await?;
-    Ok(Ok(ClaimWriterResult {
-        writer_generation,
-        load,
-    }))
+    .await
 }
 
 pub async fn load_collab_document(
@@ -1323,59 +1406,17 @@ pub async fn load_collab_document_kind(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
-    let t = CollabTables::for_kind(kind);
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    if let Err(err) = authorize_collab_write(
-        &mut tx,
+    load_collab_native_backend(
+        &Backend::Postgres(pool.clone()),
         kind,
         workspace_id,
         actor_user_id,
         session_id,
         document_id,
-        &mut CollabDbStageTimings::default(),
+        NativeLoadMode::Writer,
     )
-    .await?
-    {
-        tx.rollback().await?;
-        return Ok(Err(err));
-    }
-    let content = load_resource_content(&mut tx, t, workspace_id, document_id).await?;
-    match ensure_collab_state_row(&mut tx, t, workspace_id, document_id, &content.0).await? {
-        Ok(()) => {}
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
-        }
-    }
-    let state = fetch_state_for_update(&mut tx, t, workspace_id, document_id).await?;
-    let Some(state) = state else {
-        tx.rollback().await?;
-        return Ok(Err(CollabDbError::NotFound));
-    };
-    if state.1 != COLLAB_STATE_ENCODING_V1 {
-        tx.rollback().await?;
-        return Ok(Err(CollabDbError::NotFound));
-    }
-    let tail = match load_tail_updates(
-        &mut tx,
-        t,
-        workspace_id,
-        document_id,
-        state.3,
-        state.0.len() as i64,
-    )
-    .await?
-    {
-        Ok(tail) => tail,
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
-        }
-    };
-    let load = state_row_to_load(state, tail);
-    tx.commit().await?;
-    Ok(Ok(load))
+    .await
+    .map(|result| result.map(|claimed| claimed.load))
 }
 
 pub async fn append_collab_update(
@@ -2172,18 +2213,38 @@ pub async fn resolve_collab_admission_kind(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<Result<CollabAdmission, CollabDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    let access = match authorize_collab_read(
-        &mut tx,
+    resolve_collab_admission_kind_backend(
+        &Backend::Postgres(pool.clone()),
         kind,
         workspace_id,
         actor_user_id,
         session_id,
         document_id,
-        &mut CollabDbStageTimings::default(),
     )
-    .await?
+    .await
+}
+
+pub async fn resolve_collab_admission_kind_backend(
+    backend: &Backend,
+    kind: CollabKind,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<CollabAdmission, CollabDbError>, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(workspace_id).await?;
+    let access = match tx
+        .operation()
+        .authorize_collab_read(
+            kind,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            document_id,
+            &mut CollabDbStageTimings::default(),
+        )
+        .await?
     {
         Ok(access) => access,
         Err(err) => {
@@ -2191,7 +2252,7 @@ pub async fn resolve_collab_admission_kind(
             return Ok(Err(err));
         }
     };
-    tx.commit().await?;
+    tx.commit().await.map_err(|error| error.source)?;
     Ok(Ok(CollabAdmission {
         read_only: access.archived || !access.permission.at_least(ProjectPermission::Edit),
         archived: access.archived,
@@ -2207,59 +2268,17 @@ pub async fn load_collab_readonly_kind(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
-    let t = CollabTables::for_kind(kind);
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    if let Err(err) = authorize_collab_read(
-        &mut tx,
+    load_collab_native_backend(
+        &Backend::Postgres(pool.clone()),
         kind,
         workspace_id,
         actor_user_id,
         session_id,
         document_id,
-        &mut CollabDbStageTimings::default(),
+        NativeLoadMode::Reader,
     )
-    .await?
-    {
-        tx.rollback().await?;
-        return Ok(Err(err));
-    }
-    let content = load_resource_content(&mut tx, t, workspace_id, document_id).await?;
-    match ensure_collab_state_row(&mut tx, t, workspace_id, document_id, &content.0).await? {
-        Ok(()) => {}
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
-        }
-    }
-    let state = fetch_state_for_update(&mut tx, t, workspace_id, document_id).await?;
-    let Some(state) = state else {
-        tx.rollback().await?;
-        return Ok(Err(CollabDbError::NotFound));
-    };
-    if state.1 != COLLAB_STATE_ENCODING_V1 {
-        tx.rollback().await?;
-        return Ok(Err(CollabDbError::NotFound));
-    }
-    let tail = match load_tail_updates(
-        &mut tx,
-        t,
-        workspace_id,
-        document_id,
-        state.3,
-        state.0.len() as i64,
-    )
-    .await?
-    {
-        Ok(tail) => tail,
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
-        }
-    };
-    let load = state_row_to_load(state, tail);
-    tx.commit().await?;
-    Ok(Ok(load))
+    .await
+    .map(|result| result.map(|claimed| claimed.load))
 }
 
 /// One-shot, per-fixture fault after a real restore commit. No production hook.

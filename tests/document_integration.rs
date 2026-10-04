@@ -2932,6 +2932,127 @@ async fn selected_backend_setup_cookie_wiki_command_readback() {
             fvoci_server::db::documents::empty_document_json()
         );
         assert_eq!(body["version"], created["version"]);
+        // Exercise the existing native authorization/empty-only seed through
+        // the real cookie identity and restricted selected-backend connection.
+        // Room transport, persist ACK and revisions remain separate acceptance.
+        use fvoci_server::db::collab::{
+            claim_writer_and_load_kind_backend, load_collab_readonly_kind_backend,
+            resolve_collab_admission_kind_backend, CollabDbError, CollabKind,
+        };
+        let live = fvoci_server::db::identity::find_live_session_backend(
+            &backend,
+            &hash_token(&fresh_cookie),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let workspace_id = Uuid::parse_str(workspace).unwrap();
+        let document_id = Uuid::parse_str(document).unwrap();
+        let admission = resolve_collab_admission_kind_backend(
+            &backend,
+            CollabKind::Document,
+            workspace_id,
+            live.user_id,
+            live.session_id,
+            document_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!admission.read_only);
+        assert!(!admission.archived);
+        let seeded = load_collab_readonly_kind_backend(
+            &backend,
+            CollabKind::Document,
+            workspace_id,
+            live.user_id,
+            live.session_id,
+            document_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(seeded.snapshot, [0, 0], "canonical empty native V1 state");
+        assert!(seeded.tail.is_empty());
+        assert_eq!(seeded.writer_generation, 0);
+        assert_eq!(seeded.snapshot_cutoff_seq, 0);
+        assert_eq!(seeded.tail_seq, 0);
+        let claimed = claim_writer_and_load_kind_backend(
+            &backend,
+            CollabKind::Document,
+            workspace_id,
+            live.user_id,
+            live.session_id,
+            document_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(claimed.writer_generation, 1);
+        assert_eq!(claimed.load.snapshot, seeded.snapshot);
+        let reread = load_collab_readonly_kind_backend(
+            &backend,
+            CollabKind::Document,
+            workspace_id,
+            live.user_id,
+            live.session_id,
+            document_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(reread.writer_generation, 1, "read cannot claim a writer");
+        assert_eq!(reread.snapshot, seeded.snapshot);
+        for (tenant, actor, session, expected) in [
+            (
+                Uuid::now_v7(),
+                live.user_id,
+                live.session_id,
+                CollabDbError::NotFound,
+            ),
+            (
+                workspace_id,
+                live.user_id,
+                Uuid::now_v7(),
+                CollabDbError::Forbidden,
+            ),
+            (
+                workspace_id,
+                Uuid::now_v7(),
+                live.session_id,
+                CollabDbError::Forbidden,
+            ),
+        ] {
+            assert_eq!(
+                claim_writer_and_load_kind_backend(
+                    &backend,
+                    CollabKind::Document,
+                    tenant,
+                    actor,
+                    session,
+                    document_id,
+                )
+                .await
+                .unwrap()
+                .unwrap_err(),
+                expected
+            );
+        }
+        let unchanged = load_collab_readonly_kind_backend(
+            &backend,
+            CollabKind::Document,
+            workspace_id,
+            live.user_id,
+            live.session_id,
+            document_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            unchanged.writer_generation, 1,
+            "refusal cannot bump generation"
+        );
         let (status, _, _, _) = json_request(
             app.clone(),
             "GET",
