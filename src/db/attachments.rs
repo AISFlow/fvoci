@@ -5311,6 +5311,66 @@ mod upload_session_tests {
             .execute(&f.pool)
             .await
             .unwrap();
+        // Isolate the existing typed row leaf from its independent parent/status
+        // defenses, using the very same actual row and both live tenants.
+        let mut original_scope = f.backend.begin_read().await.unwrap();
+        {
+            let mut op = original_scope.operation();
+            op.set_tenant(f.workspace).await.unwrap();
+            let row = op
+                .upload_row(f.workspace, att.id)
+                .await
+                .unwrap()
+                .expect("original tenant must see its actual uploading row");
+            assert_eq!(row.id, att.id);
+            assert_eq!(row.storage_key, key);
+        }
+        original_scope.rollback().await.unwrap();
+        let mut other_scope = f.backend.begin_read().await.unwrap();
+        {
+            let mut op = other_scope.operation();
+            op.set_tenant(other_workspace).await.unwrap();
+            assert!(
+                op.upload_row(other_workspace, att.id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "row tenant predicate must independently fence the actual ID"
+            );
+        }
+        other_scope.rollback().await.unwrap();
+
+        // Complete a different attachment through real consumers. The first
+        // multipart sample remains uploading for all its existing late-denial
+        // assertions, while this stored sample makes metadata otherwise readable.
+        let (readable, readable_meta) = create(&f, &s, credential).await;
+        let readable_parts = parts(&f, &s, credential, &readable, &readable_meta).await;
+        let stored = finish(&f, &s, credential, readable.id, readable_parts)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, "stored");
+        let visible =
+            get_attachment_meta_backend(&f.backend, f.workspace, stored.id, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(visible.id, stored.id);
+        assert_eq!(visible.workspace_id, f.workspace);
+        assert_eq!(visible.storage_key, readable.storage_key);
+        assert_eq!(visible.status, "stored");
+        literal(&s, &readable.storage_key).await;
+        let committed_counts = counts(&f, stored.id).await;
+        assert_eq!(committed_counts, (1, 1));
+        assert_eq!(
+            get_attachment_meta_backend(&f.backend, other_workspace, stored.id, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap_err(),
+            AttachmentDbError::NotFound
+        );
+        literal(&s, &readable.storage_key).await;
+        assert_eq!(counts(&f, stored.id).await, committed_counts);
         assert_eq!(
             get_attachment_meta_backend(&f.backend, other_workspace, att.id, f.user, credential)
                 .await
