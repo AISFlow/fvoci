@@ -37,6 +37,9 @@ FLAGS = ['-O2', '-fPIC', '-std=c11', '-pthread', '-DSQLITE_CORE',
          '-DSQLITE_ENABLE_UNLOCK_NOTIFY',
          '-DSQLITE_USE_URI', '-DHAVE_USLEEP=1', '-DHAVE_ISNAN=1']
 ENV = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'LANG': 'C'}
+# Required consumer inputs cannot be removed by editing the cache manifest.
+REQUIRED_OUTPUTS = {'env.sh', 'include/sqlite3.h', 'lib/libsqlite3.a',
+                    'proof.txt', 'smoke', 'smoke.c', 'sqlite3.c', 'sqlite3.o'}
 
 
 def fail(message):
@@ -243,13 +246,17 @@ def main():
             manifest = json.loads((prefix / 'manifest.json').read_text())
             if manifest['inputs'] != inputs:
                 fail('existing build input identity differs; use a new owned prefix')
+            if (not isinstance(manifest['outputs'], dict) or
+                    set(manifest['outputs']) != REQUIRED_OUTPUTS):
+                fail('existing prefix required output inventory differs')
             actual = {str(p.relative_to(prefix)) for p in prefix.rglob('*') if not p.is_dir()}
-            if actual != {*manifest['outputs'], 'manifest.json'}:
+            if actual != {*REQUIRED_OUTPUTS, 'manifest.json'}:
                 fail('existing prefix output inventory differs')
-            for name, sha in manifest['outputs'].items():
+            for name in sorted(REQUIRED_OUTPUTS):
                 p = prefix / name
                 no_symlinks(p)
-                if p.is_symlink() or not p.is_file() or digest(p.read_bytes()) != sha:
+                if (not p.is_file() or
+                        digest(p.read_bytes()) != manifest['outputs'][name]):
                     fail(f'existing build output hash/type mismatch: {name}')
             if (prefix / 'env.sh').read_text() != env_text:
                 fail('existing build environment differs')

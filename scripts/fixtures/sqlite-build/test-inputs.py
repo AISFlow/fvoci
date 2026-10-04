@@ -6,8 +6,10 @@ Run prepare-sqlite-build.sh once first. Temporary negative inputs stay under the
 same owned parent and are removed; the original prefix/archive are read-only.
 """
 import argparse
+import hashlib
 import json
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -32,6 +34,8 @@ def main():
             assert result.returncode != 0, 'negative input unexpectedly succeeded'
             assert error in result.stderr, result.stderr
             assert not result.stdout, 'failure exported usable build environment'
+            assert '-c ' not in result.stderr, 'rejected cache triggered a compile'
+            assert '.build-' not in result.stderr, 'rejected cache triggered a replacement build'
         else:
             assert result.returncode == 0, result.stderr
             assert 'Verified same-input SQLite build reuse' in result.stderr
@@ -88,7 +92,30 @@ def main():
             invoke(args.archive, copy, expected)
             if name == 'missing-lib':
                 assert not library.exists(), 'missing archive silently replaced/fell back'
-    print('PASS: same-input actual smoke reuse and 8 fail-closed input/cache controls')
+        # Independent B1 repro: a valid relocated cache loses both the archive
+        # and its manifest entry, while its linked smoke still embeds SQLite.
+        copy = root / 'missing-lib-and-entry'
+        shutil.copytree(args.prefix, copy)
+        relocated = json.loads((copy / 'manifest.json').read_text())
+        env_text = ''.join(f'export {k}={shlex.quote(v)}\n' for k, v in {
+            'SQLITE3_LIB_DIR': str(copy / 'lib'),
+            'SQLITE3_INCLUDE_DIR': str(copy / 'include'),
+            'SQLITE3_STATIC': '1', 'SQLITE3_NO_PKG_CONFIG': '1'}.items())
+        (copy / 'env.sh').write_text(env_text)
+        relocated['outputs']['env.sh'] = hashlib.sha256(env_text.encode()).hexdigest()
+        library = copy / 'lib/libsqlite3.a'
+        library.unlink()
+        del relocated['outputs']['lib/libsqlite3.a']
+        (copy / 'manifest.json').write_text(json.dumps(relocated))
+        before = {str(p.relative_to(copy)): p.read_bytes()
+                  for p in copy.rglob('*') if p.is_file()}
+        siblings = set(root.iterdir())
+        invoke(args.archive, copy, 'required output inventory differs')
+        assert not library.exists(), 'missing archive silently replaced/fell back'
+        assert set(root.iterdir()) == siblings, 'rejection left a lock/replacement stage'
+        assert {str(p.relative_to(copy)): p.read_bytes()
+                for p in copy.rglob('*') if p.is_file()} == before, 'rejection changed cache'
+    print('PASS: same-input actual smoke reuse and 9 fail-closed input/cache controls')
 
 
 if __name__ == '__main__':
