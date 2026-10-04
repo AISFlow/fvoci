@@ -241,9 +241,7 @@ mod tests {
             }
             tx.commit().await.unwrap();
             pool.close_confirmed().await.unwrap();
-            let pool = crate::db::pool::connect_sqlite_app(&path, 1)
-                .await
-                .unwrap();
+            let pool = crate::db::pool::connect_sqlite_app(&path, 1).await.unwrap();
             Self {
                 directory,
                 path,

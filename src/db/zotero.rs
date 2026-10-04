@@ -42,7 +42,7 @@ pub(crate) async fn cookie_session_is_live(
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fvoci.sessions s JOIN fvoci.users u ON u.id=s.user_id WHERE s.id=$2 AND s.user_id=$1 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND u.deleted_at IS NULL AND u.suspended_at IS NULL)").bind(actor).bind(session).fetch_one(&mut **tx).await
 }
-fn bibliographic_text(value: serde_json::Value) -> String {
+pub(crate) fn bibliographic_text(value: serde_json::Value) -> String {
     if value.to_string().len() > zotero::BODY_MAX {
         return String::new();
     }

@@ -5430,7 +5430,7 @@ async fn native_archive_post053_command_only_guard_refuses_full_and_omitted_hist
             .fetch_all(&fx.admin)
             .await
             .unwrap();
-    assert_eq!(versions, (1..=54).collect::<Vec<_>>());
+    assert_eq!(versions, (1..=55).collect::<Vec<_>>());
     let run = archive.graph.timer_runs[0].id;
     let task = archive.graph.timer_runs[0].task_id;
     let historical: Value = sqlx::query_scalar(
@@ -6047,7 +6047,7 @@ async fn native_archive_retained_guard_cost_is_measured() {
         }
     };
     fill(fx.user_id, 2048).await;
-    // Current populated 053 -> 054: the only change is the scalar index.
+    // Historical populated 053 -> 054: the only change is the scalar index.
     // Immutable timer history and every data table retain their fingerprints;
     // FK, RLS/policy, trigger and app-role grant catalogs remain identical.
     let role: String = sqlx::query_scalar("SELECT current_user")
@@ -6082,15 +6082,14 @@ async fn native_archive_retained_guard_cost_is_measured() {
     let absent: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_class WHERE relnamespace='fvoci'::regnamespace AND relname='task_timer_audit_user_id_idx'")
         .fetch_one(&fx.admin).await.unwrap();
     assert_eq!(absent, 0);
-    fvoci_server::db::migrate::run_migrations(&harness.admin_url)
+    fvoci_server::db::migrate::run_migrations_through(&harness.admin_url, 54)
         .await
         .unwrap();
-    fvoci_server::db::migrate::assert_schema_current(&fx.admin)
+    // 054 is deliberately historical; the current gate must refuse it until
+    // the later wiki command migration and canonical role grants are applied.
+    assert!(fvoci_server::db::migrate::assert_schema_current(&fx.admin)
         .await
-        .unwrap();
-    fvoci_server::db::migrate::assert_app_role(&fx.pool)
-        .await
-        .unwrap();
+        .is_err());
     let after_security: Value = sqlx::query_scalar(security_sql)
         .bind(&role)
         .fetch_one(&fx.admin)
@@ -6143,16 +6142,16 @@ async fn native_archive_retained_guard_cost_is_measured() {
     })
     .collect();
     source_checksums.sort_by_key(|row| row["version"].as_i64().unwrap());
-    assert_eq!(source_checksums.len(), 54);
+    assert_eq!(source_checksums.len(), 55);
     println!(
-        "W8-CURRENT-054-FULL-SCHEMA {}",
+        "W8-HISTORICAL-054-FULL-SCHEMA {}",
         json!({"beforeSecurity":before_security,"afterSecurity":after_security,
             "beforeDataFingerprints":before_data,"afterDataFingerprints":after_data,
             "beforeMigrationRows":before_migration_metadata,"afterMigrationRows":after_migration_metadata,
-            "frozenSourceChecksums":source_checksums,"databaseStoresChecksums":false})
+            "frozenSourceChecksums":source_checksums.iter().filter(|row| row["version"].as_i64().unwrap() <= 54).collect::<Vec<_>>(),"databaseStoresChecksums":false})
     );
     println!(
-        "W8-CURRENT-054-CATALOG {}",
+        "W8-HISTORICAL-054-CATALOG {}",
         json!({"index":index,"role":role,"versions":versions,"securityUnchanged":true,"historyUnchanged":true})
     );
     measure("actor 2048, other 0").await;
@@ -6160,6 +6159,103 @@ async fn native_archive_retained_guard_cost_is_measured() {
     measure("actor 20000, other 0").await;
     fill(other.user_id, 20_000).await;
     measure("actor 20000, other 20000").await;
+
+    // Now advance the populated historical installation through canonical055.
+    // Its new table/FKs/RLS/grants are expected additions, while every legacy
+    // catalog entry, data fingerprint and immutable timer row must survive.
+    let historical_security = after_security;
+    let historical_data = restore_database_effects(&fx.admin).await;
+    let historical_history = timer_graph(&fx.admin, fx.user_id).await;
+    fvoci_server::db::migrate::run_migrations(&harness.admin_url)
+        .await
+        .unwrap();
+    fvoci_server::db::migrate::grant_app_role(&harness.admin_url, &role)
+        .await
+        .unwrap();
+    fvoci_server::db::migrate::assert_schema_current(&fx.admin)
+        .await
+        .unwrap();
+    fvoci_server::db::migrate::assert_app_role(&fx.pool)
+        .await
+        .unwrap();
+    let current_versions: Vec<i32> =
+        sqlx::query_scalar("SELECT version FROM fvoci.schema_migrations ORDER BY version")
+            .fetch_all(&fx.admin)
+            .await
+            .unwrap();
+    assert_eq!(current_versions, (1..=55).collect::<Vec<_>>());
+    let current_security: Value = sqlx::query_scalar(security_sql)
+        .bind(&role)
+        .fetch_one(&fx.admin)
+        .await
+        .unwrap();
+    let mut legacy_security = current_security.clone();
+    for (catalog, table_key, new_table) in [
+        ("fks", "table", "fvoci.wiki_create_commands"),
+        ("policies", "tablename", "wiki_create_commands"),
+        ("triggers", "table", "fvoci.wiki_create_commands"),
+        ("grants", "table_name", "wiki_create_commands"),
+        ("rls", "table", "wiki_create_commands"),
+    ] {
+        legacy_security[catalog]
+            .as_array_mut()
+            .unwrap()
+            .retain(|row| row[table_key] != new_table);
+    }
+    assert_eq!(legacy_security, historical_security);
+    let wiki_security: (bool, bool, i64, i64) = sqlx::query_as(
+        "SELECT c.relrowsecurity,c.relforcerowsecurity,
+         (SELECT count(*) FROM pg_constraint WHERE conrelid=c.oid AND contype='f'),
+         (SELECT count(*) FROM pg_policy WHERE polrelid=c.oid AND polname='tenant_isolation'
+          AND pg_get_expr(polqual,polrelid)=pg_get_expr(polwithcheck,polrelid))
+         FROM pg_class c WHERE c.oid='fvoci.wiki_create_commands'::regclass",
+    )
+    .fetch_one(&fx.admin)
+    .await
+    .unwrap();
+    assert_eq!(wiki_security, (true, true, 3, 1));
+    let current_data = restore_database_effects(&fx.admin).await;
+    let new_table = current_data
+        .iter()
+        .find(|row| row.0 == "wiki_create_commands")
+        .unwrap();
+    assert_eq!(new_table.1, 0);
+    assert_eq!(new_table.2, "d41d8cd98f00b204e9800998ecf8427e");
+    assert_eq!(
+        without_versions(
+            current_data
+                .iter()
+                .filter(|row| row.0 != "wiki_create_commands")
+                .cloned()
+                .collect()
+        ),
+        without_versions(historical_data)
+    );
+    assert_eq!(timer_graph(&fx.admin, fx.user_id).await, historical_history);
+    let current_migration_metadata: Value = sqlx::query_scalar(migration_metadata_sql)
+        .fetch_one(&fx.admin)
+        .await
+        .unwrap();
+    assert_eq!(
+        current_migration_metadata
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["version"].as_i64().unwrap() <= 54)
+            .collect::<Vec<_>>(),
+        after_migration_metadata
+            .as_array()
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>()
+    );
+    println!(
+        "W8-CURRENT-055-FULL-SCHEMA {}",
+        json!({"security":current_security,"dataFingerprints":current_data,
+            "migrationRows":current_migration_metadata,"versions":current_versions,
+            "frozenSourceChecksums":source_checksums,"databaseStoresChecksums":false,
+            "legacySecurityUnchanged":true,"historyUnchanged":true})
+    );
 
     let storage = fx.storage_root();
     fx.pool.close().await;
@@ -7409,7 +7505,7 @@ fn storage_inventory(root: &std::path::Path) -> Vec<(String, u64)> {
 /// transaction. All records below are captured from ordinary writers; only the
 /// destination historical receipt is an explicitly labeled history-only seed.
 #[tokio::test]
-async fn native_archive_current54_collections_tags_and_command_guard_share_one_restore() {
+async fn native_archive_current55_collections_tags_and_command_guard_share_one_restore() {
     use fvoci_server::db::native_archive::{capture, publish, NativeDbError};
     let (harness, fx, timed) = timed_archive().await;
     let ws = fx.workspace_id;
@@ -7595,7 +7691,7 @@ async fn native_archive_current54_collections_tags_and_command_guard_share_one_r
                     .fetch_all(&inst.admin)
                     .await
                     .unwrap();
-            assert_eq!(versions, (1..=54).collect::<Vec<_>>());
+            assert_eq!(versions, (1..=55).collect::<Vec<_>>());
             let owner = if foreign {
                 project_harness::add_workspace_user(
                     &inst.admin,
@@ -9014,14 +9110,41 @@ async fn native_archive_restores_a_wiki_collection_of_the_closure() {
     assert_eq!(restored, source);
     // Writers continue: a new wiki document joins the collection, the value is
     // edited, and both read back.
+    // Choose one command ID for this logical create, retaining the exact body
+    // on response loss just as the ordinary wiki client does.
+    let command_id = Uuid::now_v7();
+    let create_body = json!({"commandId":command_id,"parentId":null,"title":"새 위키 문서"});
     let added = call(
         dst.app.clone(),
         "POST",
         format!("{dw}/documents"),
-        Some(json!({"parentId":null,"title":"새 위키 문서"})),
+        Some(create_body.clone()),
         dst.cookie.clone(),
     )
     .await;
+    let replay = call(
+        dst.app.clone(),
+        "POST",
+        format!("{dw}/documents"),
+        Some(create_body),
+        dst.cookie.clone(),
+    )
+    .await;
+    assert_eq!(
+        replay, added,
+        "a lost-response retry keeps the creation receipt"
+    );
+    let binding: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM fvoci.wiki_create_commands WHERE workspace_id=$1 AND command_id=$2 AND document_id=$3),
+         (SELECT count(*) FROM fvoci.documents WHERE workspace_id=$1 AND id=$3)",
+    )
+    .bind(destination)
+    .bind(command_id)
+    .bind(Uuid::parse_str(added["id"].as_str().unwrap()).unwrap())
+    .fetch_one(&dst.admin)
+    .await
+    .unwrap();
+    assert_eq!(binding, (1, 1));
     call(
         dst.app.clone(),
         "POST",
@@ -9053,11 +9176,12 @@ async fn native_archive_restores_a_wiki_collection_of_the_closure() {
 
     // A wiki collection that also holds a wiki document outside the closure
     // is the typed collections refusal at capture, never pruned.
+    let other_command_id = Uuid::now_v7();
     let other = call(
         fx.app.clone(),
         "POST",
         format!("{w}/documents"),
-        Some(json!({"parentId":null,"title":"모음 밖 문서"})),
+        Some(json!({"commandId":other_command_id,"parentId":null,"title":"모음 밖 문서"})),
         fx.cookie.clone(),
     )
     .await;

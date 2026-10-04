@@ -23,7 +23,7 @@ PLAN_VERSION = 3
 
 WORKFLOW_JOBS: dict[str, tuple[str, ...]] = {
     "web": ("web-static", "web-checks", "workspace-browser-shard", "collaboration-flow"),
-    "rust": ("fast", "postgres", "collaboration"),
+    "rust": ("fast", "native-arm64", "postgres", "collaboration"),
     "documents": ("native-extraction",),
     "collab-engine": ("native-collab-engine",),
     "install": ("install-smoke", "backup-restore-smoke", "upgrade-smoke-arm64"),
@@ -743,6 +743,8 @@ RUST_POSTGRES_RUNNER_ARCH: dict[str, str] = {
     "ubuntu-24.04-arm": "arm64",
 }
 RUST_INTEGRATION_MANUAL_TARGETS: frozenset[str] = frozenset({"collab_capacity_probe"})
+RUST_NATIVE_ARM64_STEP = "Native server build and policy tests (ARM64)"
+RUST_NATIVE_ARM64_RUN = "cargo build --locked --offline --bins\ncargo test --locked --offline --lib"
 RUST_DB_TESTS_FEATURE = "db-tests"
 RUST_POSTGRES_INTEGRATION_STEP = "PostgreSQL integration tests"
 RUST_S3_INTEGRATION_STEP = "S3-compatible storage integration tests (pinned test server)"
@@ -1235,6 +1237,33 @@ def collaboration_script_inventory(repo_root: Path) -> tuple[set[str], str | Non
     return tests, None
 
 
+def verify_native_arm64_execution(jobs: dict) -> list[str]:
+    """Keep the former ARM A default-feature check mandatory after the job split."""
+    job = jobs.get("native-arm64")
+    if not isinstance(job, dict):
+        return ["rust: native-arm64 job missing"]
+    errors: list[str] = []
+    if job.get("runs-on") != "ubuntu-24.04-arm" or "strategy" in job:
+        errors.append("rust: native-arm64 must run once on ubuntu-24.04-arm")
+    if job.get("timeout-minutes") != 15:
+        errors.append("rust: native-arm64 must keep the 15 minute budget")
+    if "continue-on-error" in job:
+        errors.append("rust: native-arm64 must fail on build/policy errors")
+    steps = [step for step in _run_steps(job) if step.get("name") == RUST_NATIVE_ARM64_STEP]
+    if len(steps) != 1:
+        errors.append("rust: native-arm64 must execute the default build/policy step exactly once")
+    elif (
+        steps[0]["run"].strip() != RUST_NATIVE_ARM64_RUN
+        or "if" in steps[0]
+        or "continue-on-error" in steps[0]
+        or "env" in steps[0]
+    ):
+        errors.append("rust: native-arm64 must execute the exact unconditional default build/policy commands")
+    if any(step.get("name") == RUST_NATIVE_ARM64_STEP for step in _run_steps(jobs.get("postgres", {}))):
+        errors.append("rust: default ARM build/policy must not share the PostgreSQL job budget")
+    return errors
+
+
 def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
     """Ensure explicit root [[test]] db-tests targets map to rust.yml execution rows."""
     errors: list[str] = []
@@ -1258,6 +1287,7 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
         return errors
     assert jobs is not None
 
+    errors.extend(verify_native_arm64_execution(jobs))
     errors.extend(verify_postgres_integration_execution(jobs))
 
     per_arch, matrix_err = postgres_matrix_inventory(jobs)

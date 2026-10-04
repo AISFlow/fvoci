@@ -184,7 +184,8 @@ const createDocument = useMutation({
       error.status >= 400 &&
       error.status < 500 &&
       pendingCreate?.commandId === scope.commandId
-    ) pendingCreate = null;
+    )
+      pendingCreate = null;
   },
 });
 
@@ -197,7 +198,9 @@ let pendingCreate: {
 } | null = null;
 watch(
   [workspaceId, () => session.me.value?.userId, () => session.me.value?.sessionId],
-  () => { pendingCreate = null; },
+  () => {
+    pendingCreate = null;
+  },
   { flush: "sync" },
 );
 
@@ -207,12 +210,18 @@ function onCreateDocument(): void {
   const sessionId = session.me.value?.sessionId;
   if (id && userId && sessionId) {
     if (
-      !pendingCreate || pendingCreate.workspaceId !== id ||
-      pendingCreate.userId !== userId || pendingCreate.sessionId !== sessionId
-    ) pendingCreate = {
-      commandId: crypto.randomUUID(), workspaceId: id, userId, sessionId,
-      title: t("doc.title.untitled"),
-    };
+      !pendingCreate ||
+      pendingCreate.workspaceId !== id ||
+      pendingCreate.userId !== userId ||
+      pendingCreate.sessionId !== sessionId
+    )
+      pendingCreate = {
+        commandId: crypto.randomUUID(),
+        workspaceId: id,
+        userId,
+        sessionId,
+        title: t("doc.title.untitled"),
+      };
     createDocument.mutate({
       workspaceId: id,
       slug: slug.value,

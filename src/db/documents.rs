@@ -1583,6 +1583,14 @@ impl OperationTx<'_, '_> {
         }
     }
 
+    // The sole caller supplies the authorized workspace/actor and derived ID,
+    // path, sort key and allocated number under the same membership/tree lock.
+    // CreateDocumentInput covers only title/icon/parent; retain the explicit
+    // INSERT column inputs rather than introduce a second request contract.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one locked wiki creation supplies explicit INSERT columns for both backends"
+    )]
     async fn insert_wiki_document(
         &mut self,
         workspace: Uuid,

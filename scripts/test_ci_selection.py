@@ -582,6 +582,17 @@ class GateSchemaTest(unittest.TestCase):
                     ]
                 )
 
+    def test_rust_native_arm64_gate_rejects_incomplete_results(self) -> None:
+        plan = self._plan("rust", {job: True for job in SEL.WORKFLOW_JOBS["rust"]})
+        results = {job: "success" for job in SEL.WORKFLOW_JOBS["rust"]}
+        self.assertEqual(self._gate(plan, "rust", results), 0)
+        for result in ("failure", "cancelled", "skipped"):
+            with self.subTest(result=result):
+                self.assertEqual(self._gate(plan, "rust", {**results, "native-arm64": result}), 1)
+        self.assertEqual(
+            self._gate(plan, "rust", results, omit_jobs=frozenset({"native-arm64"})), 1
+        )
+
     def test_unselected_must_be_skipped(self) -> None:
         plan = self._plan("web", {"web-checks": False})
         rc = self._gate(
@@ -886,6 +897,65 @@ class WorkflowRegistryTest(unittest.TestCase):
         self.assertFalse(any("cargo" in entry.get("run", "") or "rustup" in entry.get("run", "") for entry in steps))
         self.assertFalse(any("format:check" in entry.get("run", "") for jid, job in jobs.items() if jid != job_id for entry in SEL._run_steps(job)))
 
+    def test_native_arm64_split_preserves_default_commands_and_build_inputs(self) -> None:
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/rust.yml")
+        self.assertIsNone(error)
+        jobs = data["jobs"]
+        native = jobs["native-arm64"]
+        self.assertEqual(native["runs-on"], "ubuntu-24.04-arm")
+        self.assertEqual(native["timeout-minutes"], 15)
+        self.assertEqual(native["needs"], "ci-plan")
+        self.assertEqual(native["if"], "needs.ci-plan.outputs.select_native_arm64 == 'true'")
+        self.assertNotIn("services", native)
+        self.assertNotIn("env", native)
+        self.assertNotIn("strategy", native)
+        self.assertNotIn("continue-on-error", native)
+        steps = native["steps"]
+        check = steps[-1]
+        self.assertEqual(check, {
+            "name": "Native server build and policy tests (ARM64)",
+            "run": "cargo build --locked --offline --bins\ncargo test --locked --offline --lib\n",
+        })
+        # Preserve the existing build inputs and cache qualification verbatim.
+        pg_steps = jobs["postgres"]["steps"]
+        expected_setup = [step for step in pg_steps
+                          if step.get("name") != "PostgreSQL service major matches matrix"][:6]
+        self.assertEqual(steps[:-1], expected_setup)
+        cache = next(step for step in steps if step.get("name") == "Restore server build outputs")
+        self.assertEqual(cache["with"]["path"], "target")
+        self.assertIn("db-db-tests-nodebug", cache["with"]["key"])
+        self.assertIn("steps.sqlite.outputs.cache_identity", cache["with"]["key"])
+        self.assertNotIn("restore-keys", cache["with"])
+        self.assertFalse(any(step.get("name") == check["name"] for step in pg_steps))
+        self.assertEqual(jobs["postgres"]["timeout-minutes"], "${{ matrix.shard == 'b' && 20 || 15 }}")
+        self.assertIn("native-arm64", SEL.WORKFLOW_JOBS["rust"])
+        self.assertIn("native-arm64", jobs["rust-ci-gate"]["needs"])
+        self.assertEqual(jobs["rust-ci-gate"]["if"], "always()")
+
+    def test_native_arm64_selection_matches_former_postgres_arm_a_domain(self) -> None:
+        for event, paths, selected in (
+            ("pull_request", ["docs/rewrite.md"], False),
+            ("pull_request", ["apps/web/src/x.ts"], False),
+            ("pull_request", ["apps/web/e2e/navigation.spec.ts"], False),
+            ("pull_request", ["src/main.rs"], True),
+            ("pull_request", [".github/workflows/rust.yml"], True),
+            ("push", None, True),
+            ("merge_group", None, True),
+            ("workflow_dispatch", None, True),
+            ("unknown", None, True),
+        ):
+            with self.subTest(event=event, paths=paths):
+                plan = SEL.build_plan(workflow="rust", event_name=event, base_sha=None,
+                                      head_sha=None, merge_base_sha=None, tested_sha="a" * 40,
+                                      paths=paths)
+                self.assertEqual(plan["jobs"]["native-arm64"]["selected"], selected)
+                self.assertEqual(plan["jobs"]["native-arm64"], plan["jobs"]["postgres"])
+        plan = SEL.build_plan(workflow="rust", event_name="pull_request", base_sha=None,
+                              head_sha=None, merge_base_sha=None, tested_sha="a" * 40,
+                              paths=None, fatal_error="TESTED_SHA_MISMATCH")
+        self.assertFalse(plan["plan_ok"])
+        self.assertTrue(plan["jobs"]["native-arm64"]["selected"])
+
     def test_workflows_match_planner(self) -> None:
         errors = SEL.verify_workflow_registry()
         self.assertEqual(errors, [], msg="\n".join(errors))
@@ -951,6 +1021,59 @@ class RustSuiteRegistryFixture:
 
 
 class RustSuiteRegistryTest(unittest.TestCase):
+    def test_native_arm64_wrong_scheduler_and_check_weakening_fail(self) -> None:
+        def mutate_native(data: dict, field: str, value: object) -> None:
+            job = data["jobs"]["native-arm64"]
+            if field in ("runs-on", "timeout-minutes", "continue-on-error", "strategy"):
+                job[field] = value
+            else:
+                job["steps"][-1][field] = value
+
+        for field, value, expected in (
+            ("runs-on", "ubuntu-24.04", "run once on ubuntu-24.04-arm"),
+            ("strategy", {"matrix": {"shard": ["a", "b"]}}, "run once"),
+            ("timeout-minutes", 20, "15 minute budget"),
+            ("continue-on-error", True, "fail on build/policy errors"),
+            ("if", "false", "exact unconditional"),
+            ("env", {"CARGO_TARGET_DIR": "other"}, "exact unconditional"),
+            ("run", "cargo test --locked --offline --lib --features db-tests", "exact unconditional"),
+            ("run", "cargo build --locked --offline --bins\ncargo test --locked --offline --lib some_filter", "exact unconditional"),
+        ):
+            with self.subTest(field=field, value=value), RustSuiteRegistryFixture() as fx:
+                fx.write_cargo()
+                fx.mutate_rust_workflow(lambda data: mutate_native(data, field, value))
+                errors = SEL.verify_workflow_registry(fx.root)
+                self.assertIn(expected, "\n".join(errors))
+
+    def test_old_combined_arm_scheduler_is_rejected(self) -> None:
+        def restore_old_scheduler(data: dict) -> None:
+            native = data["jobs"].pop("native-arm64")
+            step = native["steps"][-1]
+            step["if"] = "runner.arch == 'ARM64' && matrix.shard == 'a'"
+            data["jobs"]["postgres"]["steps"].insert(7, step)
+            data["jobs"]["rust-ci-gate"]["needs"].remove("native-arm64")
+            data["jobs"]["ci-plan"]["outputs"].pop("select_native_arm64")
+
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo()
+            fx.mutate_rust_workflow(restore_old_scheduler)
+            errors = SEL.verify_workflow_registry(fx.root)
+        self.assertIn("native-arm64 job missing", "\n".join(errors))
+        self.assertIn("every registered job", "\n".join(errors))
+
+    def test_native_arm64_must_share_selection_and_gate_requirements(self) -> None:
+        for mutate, expected in (
+            (lambda data: data["jobs"]["native-arm64"].update({"if": "false"}), "if must be"),
+            (lambda data: data["jobs"]["rust-ci-gate"]["needs"].remove("native-arm64"), "every registered job"),
+            (lambda data: data["jobs"]["ci-plan"]["outputs"].pop("select_native_arm64"), "missing selector output"),
+            (lambda data: data["jobs"]["native-arm64"]["steps"].pop(), "exactly once"),
+        ):
+            with self.subTest(expected=expected), RustSuiteRegistryFixture() as fx:
+                fx.write_cargo()
+                fx.mutate_rust_workflow(mutate)
+                errors = SEL.verify_workflow_registry(fx.root)
+                self.assertIn(expected, "\n".join(errors))
+
     def test_new_cargo_target_without_ci_row_fails(self) -> None:
         with RustSuiteRegistryFixture() as fx:
             fx.write_cargo(["missing_db_target_probe"])

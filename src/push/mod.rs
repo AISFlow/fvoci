@@ -16,7 +16,9 @@ pub use db::{
     PUSH_SUBSCRIPTIONS_PER_USER,
 };
 pub use send::{endpoint_origin_for_log, PushPayload, PushSendOutcome};
-pub use sender::{spawn_push_sender, PushSenderHandle, PushSenderSettings};
+pub use sender::{
+    spawn_push_sender, spawn_push_sender_backend, PushSenderHandle, PushSenderSettings,
+};
 pub use vapid::{
     ensure_vapid_keys, load_vapid_key_pair, load_vapid_public_key, rotate_vapid_keys,
     vapid_context, RotateVapidOutcome, VapidKeysError,

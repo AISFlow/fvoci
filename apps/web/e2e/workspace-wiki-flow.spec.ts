@@ -355,7 +355,11 @@ test("nested wiki tree preserves deep links and more than six children", async (
   const siblings = [];
   for (let index = 1; index <= 6; index++) {
     const siblingRes = await page.request.post(`/api/v1/workspaces/${id}/documents`, {
-      data: { commandId: crypto.randomUUID(), parentId: root.id, title: `형제 문서 ${String(index)}` },
+      data: {
+        commandId: crypto.randomUUID(),
+        parentId: root.id,
+        title: `형제 문서 ${String(index)}`,
+      },
     });
     expect(siblingRes.ok()).toBe(true);
     siblings.push(await readJson(siblingRes, flowSchemas.document));

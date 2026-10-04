@@ -15,15 +15,16 @@ use tracing::{debug, warn};
 
 use crate::attachments::{pick_extractor, ExtractorKind, ObjectStorage};
 use crate::db::attachment_extract::{
-    claim_extract, default_extract_limits, finish_extract, load_extract_input,
-    oversize_resource_limit, release_extract, FinishExtract, EXTRACT_LEASE_SECS,
-    EXTRACT_RETRY_BACKOFF_MS,
+    claim_extract_backend, default_extract_limits, finish_extract_backend,
+    load_extract_input_backend, oversize_resource_limit, release_extract_backend, FinishExtract,
+    EXTRACT_LEASE_SECS, EXTRACT_RETRY_BACKOFF_MS,
 };
+use crate::db::backend::Backend;
 use crate::documents::office::{
     run_office_helper, OfficeCancelled, OfficeLimits, OfficeMode, OfficeOutcome,
 };
 use crate::search::embed::Embedder;
-use crate::search::embed_pass::{run_embed_pass, EmbedBackoff, EmbedPassOutcome};
+use crate::search::embed_pass::{run_embed_pass_backend, EmbedBackoff, EmbedPassOutcome};
 
 // One native extraction can take `timeout_ms` of slot wait plus `timeout_ms`
 // for the child; the lease must outlast both.
@@ -158,12 +159,22 @@ pub fn spawn_extract_job_with_embedder(
     storage: ObjectStorage,
     embedder: Option<Embedder>,
 ) -> ExtractJobHandle {
+    spawn_extract_job_backend(settings, Backend::Postgres(pool), storage, embedder)
+}
+
+/// Configured extraction and optional index-time embedding on the selected DB.
+pub fn spawn_extract_job_backend(
+    settings: ExtractJobSettings,
+    backend: Backend,
+    storage: ObjectStorage,
+    embedder: Option<Embedder>,
+) -> ExtractJobHandle {
     let cancel = CancellationToken::new();
     let wake = Arc::new(Notify::new());
     let child_cancel = cancel.child_token();
     let join = tokio::spawn(run_extract_loop(
         settings,
-        pool,
+        backend,
         storage,
         embedder,
         child_cancel,
@@ -174,7 +185,7 @@ pub fn spawn_extract_job_with_embedder(
 
 async fn run_extract_loop(
     settings: ExtractJobSettings,
-    pool: PgPool,
+    backend: Backend,
     storage: ObjectStorage,
     embedder: Option<Embedder>,
     cancel: CancellationToken,
@@ -182,7 +193,7 @@ async fn run_extract_loop(
 ) {
     let mut embed_backoff = EmbedBackoff::default();
     while !cancel.is_cancelled() {
-        let mut worked = match process_one_claim(&settings, &pool, &storage, &cancel).await {
+        let mut worked = match process_one_claim(&settings, &backend, &storage, &cancel).await {
             Ok(worked) => worked,
             Err(err) => {
                 warn!(error = %err, "attachment extract claim cycle failed");
@@ -190,7 +201,7 @@ async fn run_extract_loop(
             }
         };
         if let Some(embedder) = embedder.as_ref().filter(|_| !cancel.is_cancelled()) {
-            match run_embed_pass(&pool, embedder, &mut embed_backoff, &cancel).await {
+            match run_embed_pass_backend(&backend, embedder, &mut embed_backoff, &cancel).await {
                 Ok(EmbedPassOutcome::Embedded {
                     attachment_id,
                     chunks,
@@ -222,11 +233,11 @@ async fn run_extract_loop(
 
 async fn process_one_claim(
     settings: &ExtractJobSettings,
-    pool: &PgPool,
+    backend: &Backend,
     storage: &ObjectStorage,
     cancel: &CancellationToken,
 ) -> Result<bool, String> {
-    let claim = claim_extract(pool)
+    let claim = claim_extract_backend(backend)
         .await
         .map_err(|e| format!("claim failed: {e}"))?;
     let Some(claim) = claim else {
@@ -241,13 +252,13 @@ async fn process_one_claim(
     );
 
     if cancel.is_cancelled() {
-        let _ = release_extract(pool, &claim)
+        let _ = release_extract_backend(backend, &claim)
             .await
             .map_err(|e| format!("release after cancel failed: {e}"))?;
         return Ok(true);
     }
 
-    let input = load_extract_input(pool, &claim)
+    let input = load_extract_input_backend(backend, &claim)
         .await
         .map_err(|e| format!("load failed: {e}"))?;
     let Some(input) = input else {
@@ -267,7 +278,7 @@ async fn process_one_claim(
                 .await
                 .map_err(|e| format!("storage read failed: {e}"))?;
         if cancel.is_cancelled() {
-            let _ = release_extract(pool, &claim)
+            let _ = release_extract_backend(backend, &claim)
                 .await
                 .map_err(|e| format!("release after cancel failed: {e}"))?;
             return Ok(true);
@@ -275,7 +286,7 @@ async fn process_one_claim(
         match run_extractor(settings, &input.name, &input.mime, bytes, cancel).await? {
             Some(finish) => finish,
             None => {
-                let _ = release_extract(pool, &claim)
+                let _ = release_extract_backend(backend, &claim)
                     .await
                     .map_err(|e| format!("release after cancel failed: {e}"))?;
                 return Ok(true);
@@ -283,7 +294,7 @@ async fn process_one_claim(
         }
     };
 
-    let applied = finish_extract(pool, &claim, &finish)
+    let applied = finish_extract_backend(backend, &claim, &finish)
         .await
         .map_err(|e| format!("finish failed: {e}"))?;
     if !applied {
@@ -582,5 +593,166 @@ mod tests {
         const _: () = assert!(EXTRACT_LEASE_SECS * 1000 > 2 * DEFAULT_TIMEOUT_MS);
         assert_eq!(EXTRACT_MAX_ATTEMPTS, 2);
         const _: () = assert!(MAX_INPUT_BYTES == 20 * 1024 * 1024);
+    }
+}
+
+#[cfg(test)]
+mod backend_tests {
+    use super::*;
+    use crate::db::attachment_extract::backend_tests::Fixture;
+
+    fn settings() -> ExtractJobSettings {
+        ExtractJobSettings {
+            extractor_bin: None,
+            limits: default_extract_limits(),
+            office_helper: None,
+            office_limits: OfficeLimits::attachment(),
+            poll_interval: Duration::from_secs(30),
+            retry_backoff: Duration::from_millis(EXTRACT_RETRY_BACKOFF_MS),
+            #[cfg(feature = "extract-native-tests")]
+            test_hang_ms: None,
+        }
+    }
+    async fn await_extracted(f: &Fixture) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if f.event_count("attachment.extracted").await == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn actual_backend_job_reads_local_utf8_and_commits_chunks_event() {
+        let f = Fixture::new().await;
+        let storage = ObjectStorage::local(f.directory.join("objects"));
+        let text = "안녕\0 world\nUTF8 stored content 😀";
+        storage
+            .put_bytes(&f.storage_key, text.as_bytes().to_vec())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE attachments SET size_bytes=?1,reserved_size_bytes=?1")
+            .bind(text.len() as i64)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let job = spawn_extract_job_backend(settings(), f.backend.clone(), storage.clone(), None);
+        await_extracted(&f).await;
+        job.request_shutdown();
+        job.join().await.unwrap();
+        let fresh = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        let (status, extracted): (String, String) =
+            sqlx::query_as("SELECT extract_status,extract_text FROM attachments")
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+        assert_eq!(status, "ok");
+        assert_eq!(extracted, text.replace('\0', ""));
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM attachment_text WHERE text<>''")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert!(count > 0);
+        assert_eq!(
+            read_extract_input(&storage, &f.storage_key, settings().limits.max_input_bytes)
+                .await
+                .unwrap(),
+            text.as_bytes()
+        );
+        fresh.close().await;
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_claim_waits_releases_lease_and_reuses_connection() {
+        let f = Fixture::new().await;
+        let other = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        let reservation = other.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let storage = ObjectStorage::local(f.directory.join("objects"));
+        let job = spawn_extract_job_backend(settings(), f.backend.clone(), storage, None);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while f.pool.num_idle() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        job.request_shutdown();
+        reservation.rollback().await.unwrap();
+        job.join().await.unwrap();
+        let (attempts, token): (i16, Option<Vec<u8>>) =
+            sqlx::query_as("SELECT extract_attempts,extract_lease_token FROM attachments")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(attempts, 0);
+        assert!(token.is_none());
+        assert_eq!(f.event_count("attachment.extracted").await, 0);
+        let c = f.claim().await;
+        assert_eq!(c.attempt, 1);
+        assert!(release_extract_backend(&f.backend, &c).await.unwrap());
+        other.close().await;
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn oversize_missing_object_and_cancelled_idle_preserve_existing_outcomes() {
+        let f = Fixture::new().await;
+        let storage = ObjectStorage::local(f.directory.join("objects"));
+        sqlx::query("UPDATE attachments SET size_bytes=?1,reserved_size_bytes=?1")
+            .bind(settings().limits.max_input_bytes as i64 + 1)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(
+            process_one_claim(&settings(), &f.backend, &storage, &CancellationToken::new())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT extract_status FROM attachments")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            "resource_limit"
+        );
+        assert_eq!(f.event_count("attachment.extracted").await, 1);
+        f.finish().await;
+        let f = Fixture::new().await;
+        let storage = ObjectStorage::local(f.directory.join("objects"));
+        assert!(
+            process_one_claim(&settings(), &f.backend, &storage, &CancellationToken::new())
+                .await
+                .is_err()
+        );
+        let (status, attempts): (String, i16) =
+            sqlx::query_as("SELECT extract_status,extract_attempts FROM attachments")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 1);
+        assert_eq!(f.event_count("attachment.extracted").await, 0);
+        f.expire().await;
+        let claim = f.claim().await;
+        assert_eq!(claim.attempt, 2);
+        assert!(release_extract_backend(&f.backend, &claim).await.unwrap());
+        sqlx::query("UPDATE attachments SET extract_status='skipped'")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let job = spawn_extract_job_backend(settings(), f.backend.clone(), storage, None);
+        job.request_shutdown();
+        job.join().await.unwrap();
+        assert_eq!(f.event_count("attachment.extracted").await, 0);
+        f.finish().await;
     }
 }

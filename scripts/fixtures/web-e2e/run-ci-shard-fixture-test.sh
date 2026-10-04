@@ -31,6 +31,17 @@ echo "fvoci-web-e2e-fake-generate-api" >&2
 STUB
 chmod +x "$FIXTURE_ROOT/scripts/generate-api.sh"
 
+# Build-only prerequisite; the separate sqlite-ci fixture checks its failure
+# order and exports. This shard fixture never compiles native dependencies.
+cat >"$FIXTURE_ROOT/scripts/prepare-sqlite-ci.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == --env-file && $# == 2 ]]
+printf '%s\n' 'export SQLITE3_LIB_DIR=/fixture/sqlite/lib' \
+  'export SQLITE3_INCLUDE_DIR=/fixture/sqlite/include' \
+  'export SQLITE3_STATIC=1' 'export SQLITE3_NO_PKG_CONFIG=1' >"$2"
+STUB
+
 # Only the harness's prepared check and web build are allowed; anything else fails closed.
 cat >"$FAKE_BIN/bun" <<'STUB'
 #!/usr/bin/env bash

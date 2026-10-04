@@ -1,4 +1,4 @@
-//! PgOnly outbox consumer that fans events into per-user in-app notifications.
+//! Atomic database outbox consumer that fans events into per-user in-app notifications.
 
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -6,20 +6,21 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use sqlx::Row;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{set_system, set_tenant};
-use crate::db::documents::document_permission;
+use crate::db::backend::{Backend, OperationTx};
 use crate::db::notifications::{
-    find_prefs_tx, insert_many, resolved_store_prefs, NotificationInsert,
+    list_task_assignees, load_comment, mail_messages, mail_user, notification_document_creator,
+    notification_document_project, notification_group_members, notification_inviter,
+    notification_project_name, resolved_store_prefs, status_name, task_snapshot, user_is_present,
+    CommentSnap, NotificationInsert,
 };
-use crate::db::outbox::{advance_cursor_tx, mark_processed_tx, OutboxEvent};
-use crate::db::projects::project_member_role;
-use crate::db::workspace::{membership_role, WorkspaceRole};
+use crate::db::outbox::{
+    advance_cursor_backend_tx, mark_processed_backend_tx, BackendOutboxEvent, OutboxEvent,
+};
 use crate::outbox::{DeliveryMode, OutboxConsumer, OutboxProcessError};
-use crate::projects::{effective_permission, ProjectPermission};
+use crate::projects::ProjectPermission;
 
 pub const NOTIFICATIONS_CONSUMER: &str = "notifications";
 
@@ -31,7 +32,7 @@ impl OutboxConsumer for NotificationsConsumer {
     }
 
     fn delivery_mode(&self) -> DeliveryMode {
-        DeliveryMode::PgOnly
+        DeliveryMode::DatabaseAtomic
     }
 
     fn deliver<'a>(
@@ -41,6 +42,16 @@ impl OutboxConsumer for NotificationsConsumer {
         event: &'a OutboxEvent,
     ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
         Box::pin(async move { process_notification_event(pool, lease_owner, event).await })
+    }
+    fn deliver_backend<'a>(
+        &'a self,
+        backend: &'a Backend,
+        lease_owner: Uuid,
+        event: &'a BackendOutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(
+            async move { process_notification_event_backend(backend, lease_owner, event).await },
+        )
     }
 }
 
@@ -53,31 +64,45 @@ pub async fn process_notification_event(
     lease_owner: Uuid,
     event: &OutboxEvent,
 ) -> Result<(), OutboxProcessError> {
-    let mut tx = pool.begin().await?;
-    set_system(&mut tx).await?;
-    if let Some(workspace_id) = event.workspace_id {
-        set_tenant(&mut tx, workspace_id).await?;
+    process_notification_event_backend(
+        &Backend::Postgres(pool.clone()),
+        lease_owner,
+        &event.clone().into(),
+    )
+    .await
+}
+
+pub async fn process_notification_event_backend(
+    backend: &Backend,
+    lease_owner: Uuid,
+    event: &BackendOutboxEvent,
+) -> Result<(), OutboxProcessError> {
+    let mut tx = backend.begin_write().await?;
+    let previous = tx.operation().set_system().await?;
+    if let Some(workspace) = event.workspace_id {
+        tx.operation().set_tenant(workspace).await?;
     }
-    let fresh = mark_processed_tx(&mut tx, NOTIFICATIONS_CONSUMER, event.id).await?;
-    if fresh {
-        let rows = notify_for_event(&mut tx, event).await?;
-        insert_many(&mut tx, &rows).await?;
+    if mark_processed_backend_tx(&mut tx, NOTIFICATIONS_CONSUMER, event.id).await? {
+        let rows = notify_for_event_backend(&mut tx.operation(), event).await?;
+        tx.operation().insert_notifications(&rows).await?;
     }
-    if !advance_cursor_tx(
+    if !advance_cursor_backend_tx(
         &mut tx,
         NOTIFICATIONS_CONSUMER,
         lease_owner,
-        &event.xact,
-        event.seq,
+        &event.cursor(),
     )
     .await?
     {
         tx.rollback().await?;
         return Err(OutboxProcessError::Delivery(
-            "advance rejected in pg-only tx".into(),
+            "advance rejected in notification transaction".into(),
         ));
     }
-    tx.commit().await?;
+    tx.operation().restore_system(previous).await?;
+    tx.commit()
+        .await
+        .map_err(|e| OutboxProcessError::Db(sqlx::Error::AnyDriverError(Box::new(e))))?;
     Ok(())
 }
 
@@ -105,20 +130,8 @@ fn payload_uuid_array(payload: &Value, key: &str) -> Vec<Uuid> {
         .unwrap_or_default()
 }
 
-async fn user_is_present(
-    tx: &mut Transaction<'_, Postgres>,
-    user_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let present: Option<(bool,)> =
-        sqlx::query_as("SELECT true FROM fvoci.users WHERE id = $1 AND deleted_at IS NULL")
-            .bind(user_id)
-            .fetch_optional(&mut **tx)
-            .await?;
-    Ok(present.is_some())
-}
-
 async fn recipients_for(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut OperationTx<'_, '_>,
     workspace_id: Uuid,
     candidates: impl IntoIterator<Item = Uuid>,
     actor_user_id: Option<Uuid>,
@@ -132,7 +145,11 @@ async fn recipients_for(
     }
     let mut out = Vec::new();
     for user_id in unique {
-        if membership_role(tx, workspace_id, user_id).await?.is_none() {
+        if tx
+            .membership_role(workspace_id, user_id, false)
+            .await?
+            .is_none()
+        {
             continue;
         }
         if !user_is_present(tx, user_id).await? {
@@ -144,63 +161,38 @@ async fn recipients_for(
 }
 
 async fn can_view_project(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    user_id: Uuid,
-    project_id: Uuid,
+    tx: &mut OperationTx<'_, '_>,
+    workspace: Uuid,
+    user: Uuid,
+    project: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let visibility: Option<(String,)> = sqlx::query_as(
-        r#"
-        SELECT visibility
-        FROM fvoci.projects
-        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(project_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some((visibility,)) = visibility else {
-        return Ok(false);
-    };
-    let workspace_role = membership_role(tx, workspace_id, user_id)
+    Ok(tx
+        .project_permission_by_id(workspace, user, project)
         .await?
-        .unwrap_or(WorkspaceRole::Guest);
-    let member_role = project_member_role(tx, workspace_id, project_id, user_id).await?;
-    Ok(
-        effective_permission(workspace_role, &visibility, member_role)
-            .at_least(ProjectPermission::View),
-    )
+        .is_some_and(|permission| permission.at_least(ProjectPermission::View)))
 }
 
 async fn can_view_document(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    user_id: Uuid,
-    document_id: Uuid,
+    tx: &mut OperationTx<'_, '_>,
+    workspace: Uuid,
+    user: Uuid,
+    document: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let row: Option<(Option<Uuid>,)> = sqlx::query_as(
-        "SELECT project_id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL",
-    )
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some((project_id,)) = row else {
+    let project = notification_document_project(tx, workspace, document).await?;
+    let Some(project) = project else {
         return Ok(false);
     };
-    if let Some(project_id) = project_id {
-        return can_view_project(tx, workspace_id, user_id, project_id).await;
+    if let Some(project) = project {
+        return can_view_project(tx, workspace, user, project).await;
     }
-    Ok(
-        document_permission(tx, workspace_id, user_id, document_id, true)
-            .await?
-            .at_least(ProjectPermission::View),
-    )
+    Ok(tx
+        .document_permission(workspace, user, document, true)
+        .await?
+        .at_least(ProjectPermission::View))
 }
 
 async fn recipients_who_can_view_project(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut OperationTx<'_, '_>,
     workspace_id: Uuid,
     user_ids: Vec<Uuid>,
     project_id: Uuid,
@@ -214,57 +206,8 @@ async fn recipients_who_can_view_project(
     Ok(visible)
 }
 
-async fn list_task_assignees(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    task_id: Uuid,
-) -> Result<Vec<Uuid>, sqlx::Error> {
-    let rows: Vec<(Uuid,)> = sqlx::query_as(
-        r#"
-        SELECT user_id
-        FROM fvoci.task_assignees
-        WHERE workspace_id = $1 AND task_id = $2
-        ORDER BY user_id
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(task_id)
-    .fetch_all(&mut **tx)
-    .await?;
-    Ok(rows.into_iter().map(|(id,)| id).collect())
-}
-
-struct TaskSnap {
-    number: i32,
-    title: String,
-    project_id: Uuid,
-}
-
-async fn task_snapshot(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    task_id: Uuid,
-) -> Result<Option<TaskSnap>, sqlx::Error> {
-    let row: Option<(i32, String, Uuid)> = sqlx::query_as(
-        r#"
-        SELECT number, title, project_id
-        FROM fvoci.tasks
-        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(task_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(row.map(|(number, title, project_id)| TaskSnap {
-        number,
-        title,
-        project_id,
-    }))
-}
-
 fn base_insert(
-    event: &OutboxEvent,
+    event: &BackendOutboxEvent,
     workspace_id: Uuid,
     user_id: Uuid,
     payload: Value,
@@ -283,13 +226,13 @@ fn base_insert(
 }
 
 async fn keep_by_prefs(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut OperationTx<'_, '_>,
     workspace_id: Uuid,
     rows: Vec<NotificationInsert>,
 ) -> Result<Vec<NotificationInsert>, sqlx::Error> {
     let mut kept = Vec::new();
     for row in rows {
-        let prefs = resolved_store_prefs(find_prefs_tx(tx, workspace_id, row.user_id).await?);
+        let prefs = resolved_store_prefs(tx.notification_prefs(workspace_id, row.user_id).await?);
         if prefs.in_app || prefs.mail_digest {
             kept.push(row);
         }
@@ -298,8 +241,8 @@ async fn keep_by_prefs(
 }
 
 async fn task_created(
-    tx: &mut Transaction<'_, Postgres>,
-    event: &OutboxEvent,
+    tx: &mut OperationTx<'_, '_>,
+    event: &BackendOutboxEvent,
     workspace_id: Uuid,
 ) -> Result<Vec<NotificationInsert>, sqlx::Error> {
     let Some(task_id) = payload_uuid(&event.payload, "taskId") else {
@@ -324,8 +267,8 @@ async fn task_created(
 }
 
 async fn task_updated(
-    tx: &mut Transaction<'_, Postgres>,
-    event: &OutboxEvent,
+    tx: &mut OperationTx<'_, '_>,
+    event: &BackendOutboxEvent,
     workspace_id: Uuid,
 ) -> Result<Vec<NotificationInsert>, sqlx::Error> {
     let Some(task_id) = payload_uuid(&event.payload, "taskId") else {
@@ -384,28 +327,9 @@ async fn task_updated(
     Ok(Vec::new())
 }
 
-async fn status_name(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    status_id: &str,
-) -> Result<String, sqlx::Error> {
-    let Ok(id) = Uuid::parse_str(status_id) else {
-        return Ok(status_id.to_string());
-    };
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT name FROM fvoci.statuses WHERE workspace_id = $1 AND id = $2")
-            .bind(workspace_id)
-            .bind(id)
-            .fetch_optional(&mut **tx)
-            .await?;
-    Ok(row
-        .map(|(name,)| name)
-        .unwrap_or_else(|| status_id.to_string()))
-}
-
 async fn task_deleted(
-    tx: &mut Transaction<'_, Postgres>,
-    event: &OutboxEvent,
+    tx: &mut OperationTx<'_, '_>,
+    event: &BackendOutboxEvent,
     workspace_id: Uuid,
 ) -> Result<Vec<NotificationInsert>, sqlx::Error> {
     let candidates = payload_uuid_array(&event.payload, "assigneeIds");
@@ -428,8 +352,8 @@ async fn task_deleted(
 }
 
 async fn project_member_changed(
-    tx: &mut Transaction<'_, Postgres>,
-    event: &OutboxEvent,
+    tx: &mut OperationTx<'_, '_>,
+    event: &BackendOutboxEvent,
     workspace_id: Uuid,
 ) -> Result<Vec<NotificationInsert>, sqlx::Error> {
     let Some(target_user_id) = payload_uuid(&event.payload, "userId") else {
@@ -438,17 +362,7 @@ async fn project_member_changed(
     let Some(project_id) = payload_uuid(&event.payload, "projectId") else {
         return Ok(Vec::new());
     };
-    let project: Option<(String,)> = sqlx::query_as(
-        r#"
-        SELECT name FROM fvoci.projects
-        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(project_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some((project_name,)) = project else {
+    let Some(project_name) = notification_project_name(tx, workspace_id, project_id).await? else {
         return Ok(Vec::new());
     };
     let recipients =
@@ -486,61 +400,15 @@ fn comment_notify_payload(
     payload
 }
 
-async fn load_comment(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    comment_id: Uuid,
-) -> Result<Option<CommentSnap>, sqlx::Error> {
-    let row = sqlx::query(
-        r#"
-        SELECT id, document_id, task_id, parent_id, created_by, body
-        FROM fvoci.comments
-        WHERE workspace_id = $1 AND id = $2
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(comment_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(row.map(|row| CommentSnap {
-        id: row.get("id"),
-        document_id: row.get("document_id"),
-        task_id: row.get("task_id"),
-        parent_id: row.get("parent_id"),
-        created_by: row.get("created_by"),
-        body: row.get("body"),
-    }))
-}
-
-struct CommentSnap {
-    id: Uuid,
-    document_id: Option<Uuid>,
-    task_id: Option<Uuid>,
-    parent_id: Option<Uuid>,
-    created_by: Uuid,
-    body: String,
-}
-
 async fn comment_created_audience(
-    tx: &mut Transaction<'_, Postgres>,
-    event: &OutboxEvent,
+    tx: &mut OperationTx<'_, '_>,
+    event: &BackendOutboxEvent,
     workspace_id: Uuid,
     comment: &CommentSnap,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
     let mut candidates = payload_uuid_array(&event.payload, "mentionedUserIds");
     for group_id in payload_uuid_array(&event.payload, "mentionedGroupIds") {
-        let members: Vec<(Uuid,)> = sqlx::query_as(
-            r#"
-            SELECT user_id
-            FROM fvoci.group_members
-            WHERE workspace_id = $1 AND group_id = $2
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(group_id)
-        .fetch_all(&mut **tx)
-        .await?;
-        candidates.extend(members.into_iter().map(|(id,)| id));
+        candidates.extend(notification_group_members(tx, workspace_id, group_id).await?);
     }
     if let Some(parent_id) = comment.parent_id {
         if let Some(parent) = load_comment(tx, workspace_id, parent_id).await? {
@@ -551,18 +419,22 @@ async fn comment_created_audience(
         candidates.extend(list_task_assignees(tx, workspace_id, task_id).await?);
     }
     if let Some(document_id) = comment.document_id {
-        let created_by: Option<(Uuid,)> = sqlx::query_as(
-            "SELECT created_by FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
-        )
-        .bind(workspace_id)
-        .bind(document_id)
-        .fetch_optional(&mut **tx)
-        .await?;
-        if let Some((created_by,)) = created_by {
+        if let Some(created_by) =
+            notification_document_creator(tx, workspace_id, document_id).await?
+        {
             candidates.push(created_by);
         }
     }
     let members = recipients_for(tx, workspace_id, candidates, event.actor_user_id).await?;
+    comment_audience_with_current_target(tx, workspace_id, comment, members).await
+}
+
+async fn comment_audience_with_current_target(
+    tx: &mut OperationTx<'_, '_>,
+    workspace_id: Uuid,
+    comment: &CommentSnap,
+    members: Vec<Uuid>,
+) -> Result<Vec<Uuid>, sqlx::Error> {
     if let Some(task_id) = comment.task_id {
         let task = task_snapshot(tx, workspace_id, task_id).await?;
         let Some(task) = task else {
@@ -583,8 +455,8 @@ async fn comment_created_audience(
 }
 
 async fn comment_created(
-    tx: &mut Transaction<'_, Postgres>,
-    event: &OutboxEvent,
+    tx: &mut OperationTx<'_, '_>,
+    event: &BackendOutboxEvent,
     workspace_id: Uuid,
 ) -> Result<Vec<NotificationInsert>, sqlx::Error> {
     let Some(comment_id) = payload_uuid(&event.payload, "commentId") else {
@@ -607,8 +479,8 @@ async fn comment_created(
 }
 
 async fn comment_resolved(
-    tx: &mut Transaction<'_, Postgres>,
-    event: &OutboxEvent,
+    tx: &mut OperationTx<'_, '_>,
+    event: &BackendOutboxEvent,
     workspace_id: Uuid,
 ) -> Result<Vec<NotificationInsert>, sqlx::Error> {
     let Some(comment_id) = payload_uuid(&event.payload, "commentId") else {
@@ -622,6 +494,8 @@ async fn comment_resolved(
         candidates.extend(list_task_assignees(tx, workspace_id, task_id).await?);
     }
     let recipients = recipients_for(tx, workspace_id, candidates, event.actor_user_id).await?;
+    let recipients =
+        comment_audience_with_current_target(tx, workspace_id, &comment, recipients).await?;
     let payload = comment_notify_payload(
         comment.id,
         comment.document_id,
@@ -635,19 +509,14 @@ async fn comment_resolved(
 }
 
 async fn invitation_accepted(
-    tx: &mut Transaction<'_, Postgres>,
-    event: &OutboxEvent,
+    tx: &mut OperationTx<'_, '_>,
+    event: &BackendOutboxEvent,
     workspace_id: Uuid,
 ) -> Result<Vec<NotificationInsert>, sqlx::Error> {
     let Some(invitation_id) = event.target_id else {
         return Ok(Vec::new());
     };
-    let invited_by: Option<(Uuid,)> =
-        sqlx::query_as("SELECT invited_by FROM fvoci.invitations WHERE id = $1")
-            .bind(invitation_id)
-            .fetch_optional(&mut **tx)
-            .await?;
-    let Some((invited_by,)) = invited_by else {
+    let Some(invited_by) = notification_inviter(tx, workspace_id, invitation_id).await? else {
         return Ok(Vec::new());
     };
     let recipients = recipients_for(tx, workspace_id, [invited_by], event.actor_user_id).await?;
@@ -661,9 +530,19 @@ pub async fn notify_for_event(
     tx: &mut Transaction<'_, Postgres>,
     event: &OutboxEvent,
 ) -> Result<Vec<NotificationInsert>, sqlx::Error> {
+    notify_for_event_backend(&mut OperationTx::Postgres(tx), &event.clone().into()).await
+}
+
+pub(crate) async fn notify_for_event_backend(
+    tx: &mut OperationTx<'_, '_>,
+    event: &BackendOutboxEvent,
+) -> Result<Vec<NotificationInsert>, sqlx::Error> {
     let Some(workspace_id) = event.workspace_id else {
         return Ok(Vec::new());
     };
+    if !tx.workspace_is_live(workspace_id).await? {
+        return Ok(Vec::new());
+    }
     let rows = match event.verb.as_str() {
         "task.created" => task_created(tx, event, workspace_id).await?,
         "task.updated" => task_updated(tx, event, workspace_id).await?,
@@ -699,6 +578,14 @@ pub async fn list_immediate_comment_mails(
     tx: &mut Transaction<'_, Postgres>,
     event: &OutboxEvent,
 ) -> Result<Vec<OutboundMail>, sqlx::Error> {
+    list_immediate_comment_mails_backend(&mut OperationTx::Postgres(tx), &event.clone().into())
+        .await
+}
+
+pub(crate) async fn list_immediate_comment_mails_backend(
+    tx: &mut OperationTx<'_, '_>,
+    event: &BackendOutboxEvent,
+) -> Result<Vec<OutboundMail>, sqlx::Error> {
     if event.verb != "comment.created" {
         return Ok(Vec::new());
     }
@@ -711,15 +598,14 @@ pub async fn list_immediate_comment_mails(
     let Some(comment) = load_comment(tx, workspace_id, comment_id).await? else {
         return Ok(Vec::new());
     };
+    if !tx.workspace_is_live(workspace_id).await? {
+        return Ok(Vec::new());
+    }
     let recipients = comment_created_audience(tx, event, workspace_id, &comment).await?;
     let actor_name = if let Some(actor_id) = event.actor_user_id {
-        let row: Option<(String, Option<String>)> = sqlx::query_as(
-            "SELECT given_name, family_name FROM fvoci.users WHERE id = $1 AND deleted_at IS NULL",
-        )
-        .bind(actor_id)
-        .fetch_optional(&mut **tx)
-        .await?;
-        row.map(|(given, family)| format_person_name_ko(&given, family.as_deref()))
+        mail_user(tx, actor_id)
+            .await?
+            .map(|(_, given, family)| format_person_name_ko(&given, family.as_deref()))
             .unwrap_or_default()
     } else {
         String::new()
@@ -728,16 +614,11 @@ pub async fn list_immediate_comment_mails(
     let text = crate::mail::templates::comment_text(&actor_name, &comment.body);
     let mut mails = Vec::new();
     for user_id in recipients {
-        let prefs = resolved_store_prefs(find_prefs_tx(tx, workspace_id, user_id).await?);
+        let prefs = resolved_store_prefs(tx.notification_prefs(workspace_id, user_id).await?);
         if !prefs.mail_immediate {
             continue;
         }
-        let user: Option<(String,)> =
-            sqlx::query_as("SELECT email FROM fvoci.users WHERE id = $1 AND deleted_at IS NULL")
-                .bind(user_id)
-                .fetch_optional(&mut **tx)
-                .await?;
-        let Some((email,)) = user else {
+        let Some((email, _, _)) = mail_user(tx, user_id).await? else {
             continue;
         };
         mails.push(OutboundMail {
@@ -752,6 +633,13 @@ pub async fn list_immediate_comment_mails(
 pub async fn identity_mail_for_event(
     tx: &mut Transaction<'_, Postgres>,
     event: &OutboxEvent,
+) -> Result<Option<OutboundMail>, sqlx::Error> {
+    identity_mail_for_event_backend(&mut OperationTx::Postgres(tx), &event.clone().into()).await
+}
+
+pub(crate) async fn identity_mail_for_event_backend(
+    tx: &mut OperationTx<'_, '_>,
+    event: &BackendOutboxEvent,
 ) -> Result<Option<OutboundMail>, sqlx::Error> {
     use crate::settings::messages::Message;
     let (subject, text) = match event.verb.as_str() {
@@ -768,20 +656,364 @@ pub async fn identity_mail_for_event(
     let Some(provider) = event.payload.get("provider").and_then(Value::as_str) else {
         return Ok(None);
     };
-    let user: Option<(String,)> =
-        sqlx::query_as("SELECT email FROM fvoci.users WHERE id = $1 AND deleted_at IS NULL")
-            .bind(actor_id)
-            .fetch_optional(&mut **tx)
-            .await?;
-    let Some((email,)) = user else {
+    let Some((email, _, _)) = mail_user(tx, actor_id).await? else {
         return Ok(None);
     };
     // Read at delivery time (a redelivery uses the then-current copy); the
     // caller commits this transaction before SMTP.
-    let messages = crate::settings::messages::load(&mut **tx).await?;
+    let messages = mail_messages(tx).await?;
     Ok(Some(OutboundMail {
         to: email,
         subject: messages.subject(subject),
         text: messages.render(text, &[("provider", provider)]),
     }))
+}
+
+#[cfg(test)]
+mod backend_regressions {
+    use super::*;
+    use crate::db::notifications::family_runtime_fixture::Fixture;
+    use crate::db::outbox::{
+        ensure_consumer_backend, fetch_cursor_backend, lease_consumer_backend, OutboxCursor,
+    };
+
+    async fn effect_counts(f: &Fixture, event: Uuid) -> (i64, i64) {
+        let notifications =
+            sqlx::query_scalar("SELECT COUNT(*) FROM notifications WHERE event_id=?1")
+                .bind(event.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        let processed = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM processed_events WHERE consumer=?1 AND event_id=?2",
+        )
+        .bind(NOTIFICATIONS_CONSUMER)
+        .bind(event.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        (notifications, processed)
+    }
+
+    #[tokio::test]
+    async fn actual_backend_consumer_effect_marker_cursor_rollback_duplicate_and_current_target() {
+        let f = Fixture::new().await;
+        f.grant_wiki().await;
+        ensure_consumer_backend(&f.backend, NOTIFICATIONS_CONSUMER)
+            .await
+            .unwrap();
+        let owner = Uuid::now_v7();
+        assert!(
+            lease_consumer_backend(&f.backend, NOTIFICATIONS_CONSUMER, owner, 60)
+                .await
+                .unwrap()
+        );
+        let event = f.append_comment_event("comment.created").await;
+        assert!(
+            process_notification_event_backend(&f.backend, Uuid::now_v7(), &event)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            effect_counts(&f, event.id).await,
+            (0, 0),
+            "false cursor advance must roll back both effect and marker"
+        );
+        assert!(matches!(
+            fetch_cursor_backend(&f.backend, NOTIFICATIONS_CONSUMER)
+                .await
+                .unwrap(),
+            Some(OutboxCursor::SqliteFamily { seq: 0 })
+        ));
+        process_notification_event_backend(&f.backend, owner, &event)
+            .await
+            .unwrap();
+        assert_eq!(effect_counts(&f, event.id).await, (1, 1));
+        assert!(
+            process_notification_event_backend(&f.backend, owner, &event)
+                .await
+                .is_err(),
+            "an already advanced cursor is not a fresh successful advance"
+        );
+        assert_eq!(
+            effect_counts(&f, event.id).await,
+            (1, 1),
+            "duplicate event must not duplicate recipient effect"
+        );
+        assert!(
+            matches!(fetch_cursor_backend(&f.backend,NOTIFICATIONS_CONSUMER).await.unwrap(),Some(OutboxCursor::SqliteFamily{seq}) if seq==event.seq)
+        );
+        sqlx::query("DELETE FROM group_members WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let hidden = f.append_comment_event("comment.created").await;
+        process_notification_event_backend(&f.backend, owner, &hidden)
+            .await
+            .unwrap();
+        assert_eq!(
+            effect_counts(&f, hidden.id).await,
+            (0, 1),
+            "current target policy must filter a formerly authorized guest"
+        );
+        assert!(
+            matches!(fetch_cursor_backend(&f.backend,NOTIFICATIONS_CONSUMER).await.unwrap(),Some(OutboxCursor::SqliteFamily{seq}) if seq==hidden.seq)
+        );
+        f.grant_wiki().await;
+        let resolved = f.append_comment_event("comment.resolved").await;
+        process_notification_event_backend(&f.backend, owner, &resolved)
+            .await
+            .unwrap();
+        assert_eq!(
+            effect_counts(&f, resolved.id).await,
+            (1, 1),
+            "an authorized resolved comment must still produce its normal inbox effect"
+        );
+        f.finish().await;
+    }
+
+    // This test is deliberately a regression expectation, not a replacement
+    // policy: both verbs must reject the same guest after the same grant loss.
+    #[tokio::test]
+    async fn actual_backend_resolved_comment_obeys_current_target_like_created() {
+        let f = Fixture::new().await;
+        f.grant_wiki().await;
+        sqlx::query("DELETE FROM group_members WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let created = f.append_comment_event("comment.created").await;
+        let resolved = f.append_comment_event("comment.resolved").await;
+        for event in [&created, &resolved] {
+            let mut tx = f.backend.begin_write().await.unwrap();
+            tx.operation().set_tenant(f.workspace).await.unwrap();
+            let previous = tx.operation().set_system().await.unwrap();
+            let rows = notify_for_event_backend(&mut tx.operation(), event)
+                .await
+                .unwrap();
+            tx.operation().restore_system(previous).await.unwrap();
+            tx.rollback().await.unwrap();
+            assert!(
+                rows.is_empty(),
+                "{} exposed a comment target after grant removal",
+                event.verb
+            );
+        }
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn actual_backend_cancelled_effect_rolls_back_before_single_connection_reuse() {
+        let f = Fixture::new().await;
+        f.grant_wiki().await;
+        ensure_consumer_backend(&f.backend, NOTIFICATIONS_CONSUMER)
+            .await
+            .unwrap();
+        let owner = Uuid::now_v7();
+        assert!(
+            lease_consumer_backend(&f.backend, NOTIFICATIONS_CONSUMER, owner, 60)
+                .await
+                .unwrap()
+        );
+        let event = f.append_comment_event("comment.created").await;
+        let backend = f.backend.clone();
+        let pending_event = event.clone();
+        let workspace = f.workspace;
+        let (ready, received) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut tx = backend.begin_write().await.unwrap();
+            tx.operation().set_tenant(workspace).await.unwrap();
+            tx.operation().set_system().await.unwrap();
+            let rows = notify_for_event_backend(&mut tx.operation(), &pending_event)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            tx.operation().insert_notifications(&rows).await.unwrap();
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+            tx.rollback().await.unwrap();
+        });
+        received.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(effect_counts(&f, event.id).await, (0, 0));
+        process_notification_event_backend(&f.backend, owner, &event)
+            .await
+            .unwrap();
+        assert_eq!(effect_counts(&f, event.id).await, (1, 1));
+        let mut tx = f.backend.begin_read().await.unwrap();
+        let OperationTx::SqliteFamily(family) = tx.operation() else {
+            panic!("local fixture")
+        };
+        assert!(family.tenant().is_none());
+        assert!(family.require_system_context().is_err());
+        tx.rollback().await.unwrap();
+        f.finish().await;
+    }
+}
+
+#[cfg(test)]
+mod immediate_mail_backend_regressions {
+    use super::*;
+    use crate::db::notifications::family_runtime_fixture::Fixture;
+
+    async fn comment_mails(f: &Fixture, event: &BackendOutboxEvent) -> Vec<OutboundMail> {
+        let mut tx = f.backend.begin_read().await.unwrap();
+        tx.operation().set_system().await.unwrap();
+        tx.operation().set_tenant(f.workspace).await.unwrap();
+        let mails = list_immediate_comment_mails_backend(&mut tx.operation(), event)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        mails
+    }
+
+    #[tokio::test]
+    async fn comment_mail_uses_current_audience_preferences_and_live_target() {
+        let f = Fixture::new().await;
+        f.grant_wiki().await;
+        let mut event = f.append_comment_event("comment.created").await;
+        // The cross-tenant account and actor must not become recipients.
+        event.payload["mentionedUserIds"] = json!([f.user, f.other_user, f.actor, f.user]);
+        let mails = comment_mails(&f, &event).await;
+        assert_eq!(mails.len(), 1);
+        assert_eq!(mails[0].to, "reader@notification.invalid");
+        assert_eq!(mails[0].subject, crate::mail::templates::COMMENT_SUBJECT);
+        assert_eq!(
+            mails[0].text,
+            crate::mail::templates::comment_text("한글🙂", "comment 한글🙂")
+        );
+        sqlx::query("INSERT INTO notification_prefs(workspace_id,user_id,in_app,mail_immediate,mail_digest) VALUES(?1,?2,1,0,0)").bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert!(comment_mails(&f, &event).await.is_empty());
+        sqlx::query("UPDATE notification_prefs SET in_app=0,mail_immediate=1 WHERE workspace_id=?1 AND user_id=?2").bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert_eq!(
+            comment_mails(&f, &event).await.len(),
+            1,
+            "mail channel is independent of in-app preference"
+        );
+        sqlx::query("DELETE FROM group_members WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(
+            comment_mails(&f, &event).await.is_empty(),
+            "grant loss must be applied to a retry"
+        );
+        f.grant_wiki().await;
+        assert_eq!(comment_mails(&f, &event).await.len(), 1);
+        sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(
+            comment_mails(&f, &event).await.is_empty(),
+            "membership loss must filter a still-granted target"
+        );
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn comment_mail_rejects_deleted_workspace_target_and_wrong_tenant() {
+        let f = Fixture::new().await;
+        f.grant_wiki().await;
+        let mut event = f.append_comment_event("comment.created").await;
+        assert_eq!(comment_mails(&f, &event).await.len(), 1);
+        event.workspace_id = Some(f.other_workspace);
+        let mut tx = f.backend.begin_read().await.unwrap();
+        tx.operation().set_system().await.unwrap();
+        tx.operation().set_tenant(f.other_workspace).await.unwrap();
+        assert!(
+            list_immediate_comment_mails_backend(&mut tx.operation(), &event)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        tx.commit().await.unwrap();
+        event.workspace_id = Some(f.workspace);
+        sqlx::query("UPDATE documents SET deleted_at=?1 WHERE id=?2")
+            .bind(chrono::Utc::now().timestamp_micros())
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(comment_mails(&f, &event).await.is_empty());
+        sqlx::query("UPDATE documents SET deleted_at=NULL WHERE id=?1")
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(comment_mails(&f, &event).await.len(), 1);
+        sqlx::query("UPDATE workspaces SET deleted_at=?1 WHERE id=?2")
+            .bind(chrono::Utc::now().timestamp_micros())
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(comment_mails(&f, &event).await.is_empty());
+        f.finish().await;
+    }
+
+    async fn identity_mail(f: &Fixture, event: &BackendOutboxEvent) -> Option<OutboundMail> {
+        let mut tx = f.backend.begin_read().await.unwrap();
+        tx.operation().set_system().await.unwrap();
+        let mail = identity_mail_for_event_backend(&mut tx.operation(), event)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        mail
+    }
+
+    #[tokio::test]
+    async fn identity_mail_reads_current_account_and_overrides_for_both_verbs() {
+        use crate::settings::messages::Message;
+        let f = Fixture::new().await;
+        let mut event = f.append_comment_event("comment.created").await;
+        event.workspace_id = None;
+        event.verb = "identity.linked".into();
+        event.payload = json!({"provider":"fixture-provider {{literal}}","email":"untrusted@notification.invalid"});
+        let mail = identity_mail(&f, &event).await.unwrap();
+        assert_eq!(mail.to, "actor@notification.invalid");
+        assert_eq!(mail.subject, Message::IdentityLinkedSubject.default_text());
+        assert!(mail.text.contains("fixture-provider {{literal}}"));
+        sqlx::query(
+            "UPDATE users SET email='current@notification.invalid',family_name='김' WHERE id=?1",
+        )
+        .bind(f.actor.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        let overrides = json!({"overrides":{"mail.identity.unlinked.subject":"changed\nsubject","mail.identity.unlinked.text":"provider={{provider}}"}});
+        sqlx::query("INSERT INTO instance_settings(key,value) VALUES('i18n',?1)")
+            .bind(overrides.to_string())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        event.verb = "identity.unlinked".into();
+        let mail = identity_mail(&f, &event).await.unwrap();
+        assert_eq!(mail.to, "current@notification.invalid");
+        assert_eq!(mail.subject, "changed subject");
+        assert_eq!(mail.text, "provider=fixture-provider {{literal}}");
+        event.payload = json!({"provider":null});
+        assert!(identity_mail(&f, &event).await.is_none());
+        event.payload = json!({"provider":"fixture"});
+        event.actor_user_id = None;
+        assert!(identity_mail(&f, &event).await.is_none());
+        event.actor_user_id = Some(f.actor);
+        sqlx::query("UPDATE users SET deleted_at=?1 WHERE id=?2")
+            .bind(chrono::Utc::now().timestamp_micros())
+            .bind(f.actor.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(identity_mail(&f, &event).await.is_none());
+        f.finish().await;
+    }
 }

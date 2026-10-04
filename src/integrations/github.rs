@@ -28,13 +28,16 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::auth::password::Keyring;
+use crate::db::backend::Backend;
 use crate::db::context::{
     lock_membership_users, recheck_session, restore_system, set_system, set_tenant,
 };
 use crate::db::documents::{between, empty_document_json, DOCUMENT_SCHEMA_VERSION};
 use crate::db::identity::{append_audit, append_event_channel, AuditAppend, EventAppend};
 use crate::db::integrations::{require_manager_read, require_manager_write, IntegrationDbError};
-use crate::db::outbox::{advance_cursor_tx, OutboxEvent};
+use crate::db::outbox::{
+    advance_cursor_backend_tx, advance_cursor_tx, BackendOutboxEvent, OutboxEvent,
+};
 use crate::db::projects::{lock_project, project_permission};
 use crate::db::task_activity::record_task_activity;
 use crate::db::workspace::workspace_is_live;
@@ -1385,14 +1388,23 @@ pub async fn sync_linked_issue(
     let Some(target) = sync_target(pool, event).await? else {
         return Ok(());
     };
+    sync_current_target(github, event.id, target).await
+}
+
+// Shared maintained token/PATCH flow for legacy PG and selected Backend entrypoints.
+async fn sync_current_target(
+    github: &GithubConfig,
+    event_id: Uuid,
+    target: SyncTarget,
+) -> Result<(), OutboxProcessError> {
     let Some((owner, name)) = repo_segments(&target.repo) else {
-        warn!(event_id = %event.id, "github.repo_unusable");
+        warn!(event_id = %event_id, "github.repo_unusable");
         return Ok(());
     };
     let token = match installation_token(github, &target.installation_id).await {
         Ok(token) => token,
         Err(GithubApiError::Status(status)) if (400..500).contains(&status) => {
-            warn!(event_id = %event.id, http_status = status, "github.token_refused");
+            warn!(event_id = %event_id, http_status = status, "github.token_refused");
             return Ok(());
         }
         Err(err) => {
@@ -1410,7 +1422,7 @@ pub async fn sync_linked_issue(
     .map_err(|err| OutboxProcessError::Delivery(format!("github patch: {err}")))?;
     if (400..500).contains(&status) {
         // Source: a client error is final (not retried).
-        warn!(event_id = %event.id, http_status = status, "github.request_failed");
+        warn!(event_id = %event_id, http_status = status, "github.request_failed");
         return Ok(());
     }
     if !(200..300).contains(&status) {
@@ -1421,8 +1433,77 @@ pub async fn sync_linked_issue(
     Ok(())
 }
 
+fn sync_target_ids(event: &BackendOutboxEvent) -> Option<(Uuid, Uuid)> {
+    if event.channel == "webhook"
+        || event.verb != "task.updated"
+        || !event.payload.get("to").is_some_and(Value::is_string)
+    {
+        return None;
+    }
+    Some((event.workspace_id?, event.target_id?))
+}
+
+async fn sync_target_backend(
+    backend: &Backend,
+    event: &BackendOutboxEvent,
+) -> Result<Option<SyncTarget>, sqlx::Error> {
+    let Some((workspace, task)) = sync_target_ids(event) else {
+        return Ok(None);
+    };
+    let mut tx = backend.begin_read().await?;
+    tx.operation().set_tenant(workspace).await?;
+    let row = tx.operation().github_sync_target(workspace, task).await?;
+    tx.commit()
+        .await
+        .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
+    Ok(row.map(
+        |(repo, issue_number, category, installation_id)| SyncTarget {
+            installation_id,
+            repo,
+            issue_number,
+            state: if matches!(category.as_str(), "done" | "canceled") {
+                "closed"
+            } else {
+                "open"
+            },
+        },
+    ))
+}
+
+async fn sync_linked_issue_backend(
+    backend: &Backend,
+    github: &GithubConfig,
+    event: &BackendOutboxEvent,
+) -> Result<(), OutboxProcessError> {
+    let Some(target) = sync_target_backend(backend, event).await? else {
+        return Ok(());
+    };
+    // The current target read is confirmed and its connection released before either request.
+    sync_current_target(github, event.id, target).await
+}
+
+async fn skip_event_backend(
+    backend: &Backend,
+    lease_owner: Uuid,
+    event: &BackendOutboxEvent,
+) -> Result<(), OutboxProcessError> {
+    let mut tx = backend.begin_write().await?;
+    let previous = tx.operation().set_system().await?;
+    if !advance_cursor_backend_tx(&mut tx, GITHUB_CONSUMER, lease_owner, &event.cursor()).await? {
+        tx.rollback().await?;
+        return Err(OutboxProcessError::Delivery(
+            "advance rejected in backend tx".into(),
+        ));
+    }
+    tx.operation().restore_system(previous).await?;
+    tx.commit()
+        .await
+        .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
+    Ok(())
+}
+
 /// With the app configured, pushes status changes to GitHub. Without it, the
-/// same cursor only moves forward (PgOnly, no effect), so configuring the app
+/// same cursor only moves forward (DatabaseAtomic, no effect), so configuring the app
 /// later does not replay every status change recorded while it was off.
 pub struct GithubSyncConsumer {
     github: Option<GithubConfig>,
@@ -1465,7 +1546,7 @@ impl OutboxConsumer for GithubSyncConsumer {
         if self.github.is_some() {
             DeliveryMode::External
         } else {
-            DeliveryMode::PgOnly
+            DeliveryMode::DatabaseAtomic
         }
     }
 
@@ -1480,6 +1561,40 @@ impl OutboxConsumer for GithubSyncConsumer {
                 Some(github) => sync_linked_issue(pool, github, event).await,
                 None => skip_event(pool, lease_owner, event).await,
             }
+        })
+    }
+
+    fn deliver_backend<'a>(
+        &'a self,
+        backend: &'a Backend,
+        lease_owner: Uuid,
+        event: &'a BackendOutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(async move {
+            match &self.github {
+                Some(github) => sync_linked_issue_backend(backend, github, event).await,
+                None => skip_event_backend(backend, lease_owner, event).await,
+            }
+        })
+    }
+
+    fn deliver_batch_backend<'a>(
+        &'a self,
+        backend: &'a Backend,
+        lease_owner: Uuid,
+        events: &'a [BackendOutboxEvent],
+    ) -> Pin<Box<dyn Future<Output = (usize, Option<OutboxProcessError>)> + Send + 'a>> {
+        Box::pin(async move {
+            // Select the same implementation for PG and family; the trait's
+            // compatibility default would route PG back to its old target read.
+            let mut done = 0;
+            for event in events {
+                if let Err(error) = self.deliver_backend(backend, lease_owner, event).await {
+                    return (done, Some(error));
+                }
+                done += 1;
+            }
+            (done, None)
         })
     }
 
@@ -1616,5 +1731,861 @@ mod tests {
         assert!(!installation_id_is_valid("12a"));
         assert!(!installation_id_is_valid(""));
         assert!(GithubConfig::new("1", "not a key", "s", GITHUB_API_DEFAULT, [1u8; 32]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod backend_regressions {
+    use super::*;
+    use crate::db::notifications::family_runtime_fixture::Fixture;
+    use crate::db::outbox::{
+        ensure_consumer_backend, fetch_cursor_backend, fetch_event_by_id_backend,
+        is_processed_backend, lease_consumer_backend, release_consumer_backend, OutboxCursor,
+    };
+    use axum::{
+        body::Bytes,
+        extract::{OriginalUri, State},
+        http::{HeaderMap, Method, StatusCode},
+        routing::any,
+        Json, Router,
+    };
+    use std::sync::{
+        atomic::{AtomicBool, AtomicU16, Ordering},
+        Mutex,
+    };
+    use tokio::sync::Notify;
+
+    const TEST_KEY: &str = include_str!("../../tests/fixtures/github-app-test-key.pem");
+    const TOKEN: &str = "synthetic-installation-token";
+    #[derive(Clone, Debug)]
+    struct Call {
+        method: String,
+        path: String,
+        body: Value,
+        authenticated: bool,
+        headers_valid: bool,
+    }
+    #[derive(Clone)]
+    struct ProviderState {
+        calls: Arc<Mutex<Vec<Call>>>,
+        token_status: Arc<AtomicU16>,
+        patch_status: Arc<AtomicU16>,
+        hold_patch: Arc<AtomicBool>,
+        patch_seen: Arc<Notify>,
+        release_patch: Arc<Notify>,
+        github: GithubConfig,
+    }
+    fn app_bearer_valid(headers: &HeaderMap, github: &GithubConfig) -> bool {
+        let Some(jwt) = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+        else {
+            return false;
+        };
+        let parts: Vec<_> = jwt.split('.').collect();
+        if parts.len() != 3 {
+            return false;
+        }
+        let Ok(signature) = URL_SAFE_NO_PAD.decode(parts[2]) else {
+            return false;
+        };
+        let Ok(claims) = URL_SAFE_NO_PAD.decode(parts[1]) else {
+            return false;
+        };
+        let Ok(claims) = serde_json::from_slice::<Value>(&claims) else {
+            return false;
+        };
+        claims["iss"] == "123"
+            && ring::signature::UnparsedPublicKey::new(
+                &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+                github.key.public().as_ref(),
+            )
+            .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &signature)
+            .is_ok()
+    }
+    async fn receive(
+        State(state): State<ProviderState>,
+        method: Method,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+        bytes: Bytes,
+    ) -> (StatusCode, Json<Value>) {
+        let token_request = method == Method::POST;
+        let authenticated = if token_request {
+            app_bearer_valid(&headers, &state.github)
+        } else {
+            headers
+                .get("authorization")
+                .is_some_and(|v| v == format!("Bearer {TOKEN}").as_str())
+        };
+        let headers_valid = headers
+            .get("accept")
+            .is_some_and(|v| v == "application/vnd.github+json")
+            && headers
+                .get("x-github-api-version")
+                .is_some_and(|v| v == "2022-11-28")
+            && headers.get("user-agent").is_some_and(|v| v == "FVOCI");
+        state.calls.lock().unwrap().push(Call {
+            method: method.to_string(),
+            path: uri.path().into(),
+            body: if bytes.is_empty() {
+                Value::Null
+            } else {
+                serde_json::from_slice(&bytes).unwrap()
+            },
+            authenticated,
+            headers_valid,
+        });
+        if method == Method::PATCH {
+            state.patch_seen.notify_one();
+            if state.hold_patch.swap(false, Ordering::SeqCst) {
+                state.release_patch.notified().await;
+            }
+        }
+        let status = if token_request {
+            state.token_status.load(Ordering::SeqCst)
+        } else {
+            state.patch_status.load(Ordering::SeqCst)
+        };
+        (
+            StatusCode::from_u16(status).unwrap(),
+            Json(if token_request {
+                json!({"token": TOKEN})
+            } else {
+                json!({"state": "ok"})
+            }),
+        )
+    }
+    struct Provider {
+        state: ProviderState,
+        join: tokio::task::JoinHandle<()>,
+    }
+    impl Provider {
+        async fn new() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let github = GithubConfig::new(
+                "123",
+                TEST_KEY,
+                "synthetic-webhook-secret",
+                &format!("http://{address}/api/v3"),
+                [7; 32],
+            )
+            .unwrap();
+            let state = ProviderState {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                token_status: Arc::new(AtomicU16::new(201)),
+                patch_status: Arc::new(AtomicU16::new(200)),
+                hold_patch: Arc::new(AtomicBool::new(false)),
+                patch_seen: Arc::new(Notify::new()),
+                release_patch: Arc::new(Notify::new()),
+                github,
+            };
+            let app = Router::new()
+                .fallback(any(receive))
+                .with_state(state.clone());
+            let join = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            Self { state, join }
+        }
+        fn config(&self) -> GithubConfig {
+            self.state.github.clone()
+        }
+        fn calls(&self) -> Vec<Call> {
+            self.state.calls.lock().unwrap().clone()
+        }
+        async fn finish(self) {
+            self.state.release_patch.notify_one();
+            self.join.abort();
+            assert!(self.join.await.unwrap_err().is_cancelled());
+        }
+    }
+    struct TaskFixture {
+        f: Fixture,
+        task: Uuid,
+        statuses: Vec<Uuid>,
+    }
+    impl TaskFixture {
+        async fn new(repo: &str) -> Self {
+            let f = Fixture::new().await;
+            let version: String = sqlx::query_scalar("SELECT sqlite_version()")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+            assert_eq!(version, crate::db::pool::SQLITE_VERSION);
+            let source: String = sqlx::query_scalar("SELECT sqlite_source_id()")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+            assert_eq!(source, crate::db::pool::SQLITE_SOURCE_ID);
+            let fk: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+            assert_eq!(fk, 1);
+            let project = Uuid::now_v7();
+            let workflow = Uuid::now_v7();
+            let task = Uuid::now_v7();
+            sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'GITHUB','synthetic github','workspace',?3)")
+                .bind(project.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.actor.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+            sqlx::query("INSERT INTO workflows(id,workspace_id,project_id) VALUES(?1,?2,?3)")
+                .bind(workflow.as_bytes().as_slice())
+                .bind(f.workspace.as_bytes().as_slice())
+                .bind(project.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let mut statuses = Vec::new();
+            for (n, category) in ["backlog", "todo", "in_progress", "done", "canceled"]
+                .iter()
+                .enumerate()
+            {
+                let id = Uuid::now_v7();
+                sqlx::query("INSERT INTO statuses(id,workspace_id,project_id,workflow_id,name,category,sort_key) VALUES(?1,?2,?3,?4,?5,?5,?6)")
+                    .bind(id.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(workflow.as_bytes().as_slice()).bind(category).bind(n.to_string()).execute(&f.pool).await.unwrap();
+                statuses.push(id);
+            }
+            sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,content_json,created_by) VALUES(?1,?2,?3,1,'synthetic 한글🙂',?4,'{\"type\":\"doc\"}',?5)")
+                .bind(task.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(statuses[3].as_bytes().as_slice()).bind(f.actor.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+            sqlx::query("INSERT INTO github_installations(id,workspace_id,installation_id) VALUES(?1,?2,'42')")
+                .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+            sqlx::query("INSERT INTO github_issue_links(id,workspace_id,task_id,repo,issue_number) VALUES(?1,?2,?3,?4,7)")
+                .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(task.as_bytes().as_slice()).bind(repo).execute(&f.pool).await.unwrap();
+            Self { f, task, statuses }
+        }
+        async fn event(
+            &self,
+            verb: &str,
+            workspace: Option<Uuid>,
+            target: Option<Uuid>,
+            payload: Value,
+            channel: &str,
+        ) -> BackendOutboxEvent {
+            let id = Uuid::now_v7();
+            let mut tx = self.f.backend.begin_write().await.unwrap();
+            if let Some(workspace) = workspace {
+                tx.operation().set_tenant(workspace).await.unwrap()
+            }
+            let previous = tx.operation().set_system().await.unwrap();
+            tx.operation()
+                .append_event(EventAppend {
+                    id,
+                    workspace_id: workspace,
+                    actor_user_id: Some(self.f.actor),
+                    verb: verb.into(),
+                    target_type: Some("task".into()),
+                    target_id: target,
+                    payload,
+                })
+                .await
+                .unwrap();
+            tx.operation().restore_system(previous).await.unwrap();
+            tx.commit().await.unwrap();
+            if channel != "web" {
+                sqlx::query("UPDATE events SET channel=?1 WHERE id=?2")
+                    .bind(channel)
+                    .bind(id.as_bytes().as_slice())
+                    .execute(&self.f.pool)
+                    .await
+                    .unwrap();
+            }
+            fetch_event_by_id_backend(&self.f.backend, id)
+                .await
+                .unwrap()
+                .unwrap()
+        }
+        async fn change(&self) -> BackendOutboxEvent {
+            self.event(
+                "task.updated",
+                Some(self.f.workspace),
+                Some(self.task),
+                json!({"to":self.statuses[0]}),
+                "web",
+            )
+            .await
+        }
+        async fn cursor(&self) -> Option<OutboxCursor> {
+            fetch_cursor_backend(&self.f.backend, GITHUB_CONSUMER)
+                .await
+                .unwrap()
+        }
+        async fn protected(&self) -> (i64, i64, i64, i64) {
+            sqlx::query_as("SELECT (SELECT count(*) FROM github_issue_links),(SELECT count(*) FROM github_installations),(SELECT count(*) FROM processed_events WHERE consumer='github'),(SELECT count(*) FROM outbox_failures WHERE consumer='github')")
+                .fetch_one(&self.f.pool).await.unwrap()
+        }
+        async fn finish(self) {
+            self.f.finish().await;
+        }
+    }
+    async fn lease(f: &TaskFixture, backend: &Backend) -> Uuid {
+        ensure_consumer_backend(backend, GITHUB_CONSUMER)
+            .await
+            .unwrap();
+        let owner = Uuid::now_v7();
+        assert!(lease_consumer_backend(backend, GITHUB_CONSUMER, owner, 30)
+            .await
+            .unwrap());
+        assert_eq!(
+            f.cursor().await,
+            Some(OutboxCursor::SqliteFamily { seq: 0 })
+        );
+        owner
+    }
+    fn dispatcher(
+        f: &TaskFixture,
+        config: Option<GithubConfig>,
+    ) -> crate::outbox::OutboxDispatcherHandle {
+        crate::outbox::spawn_outbox_dispatcher_backend(
+            crate::outbox::OutboxDispatcherSettings {
+                poll_interval: Duration::from_millis(10),
+                ..Default::default()
+            },
+            f.f.backend.clone(),
+            vec![github_sync_consumer(config)],
+        )
+        .unwrap()
+    }
+    async fn wait_cursor(f: &TaskFixture, event: &BackendOutboxEvent) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if f.cursor().await == Some(event.cursor()) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    async fn wait_mark(f: &TaskFixture, event: &BackendOutboxEvent) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if is_processed_backend(&f.f.backend, GITHUB_CONSUMER, event.id)
+                    .await
+                    .unwrap()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    fn assert_calls(calls: &[Call], state: &str, repo_path: &str) {
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            (calls[0].method.as_str(), calls[0].path.as_str()),
+            ("POST", "/api/v3/app/installations/42/access_tokens")
+        );
+        assert_eq!(calls[0].body, Value::Null);
+        assert_eq!(
+            (calls[1].method.as_str(), calls[1].path.as_str()),
+            ("PATCH", repo_path)
+        );
+        assert_eq!(calls[1].body, json!({"state":state}));
+        assert!(calls.iter().all(|c| c.authenticated && c.headers_valid));
+    }
+
+    #[tokio::test]
+    async fn actual_backend_unconfigured_registered_cursor_commits_without_mark_or_replay() {
+        let f = TaskFixture::new("octo/repo").await;
+        let provider = Provider::new().await;
+        let old = f.change().await;
+        let c = github_sync_consumer(None);
+        assert_eq!(c.delivery_mode(), DeliveryMode::DatabaseAtomic);
+        assert_eq!(c.batch_event_cap(), 1);
+        let run = dispatcher(&f, None);
+        wait_cursor(&f, &old).await;
+        run.request_shutdown();
+        run.join().await.unwrap();
+        assert_eq!(f.protected().await, (1, 1, 0, 0));
+        assert!(provider.calls().is_empty());
+        sqlx::query("UPDATE tasks SET status_id=?1 WHERE id=?2")
+            .bind(f.statuses[0].as_bytes().as_slice())
+            .bind(f.task.as_bytes().as_slice())
+            .execute(&f.f.pool)
+            .await
+            .unwrap();
+        let new = f.change().await;
+        let run = dispatcher(&f, Some(provider.config()));
+        wait_cursor(&f, &new).await;
+        run.request_shutdown();
+        run.join().await.unwrap();
+        assert!(!is_processed_backend(&f.f.backend, GITHUB_CONSUMER, old.id)
+            .await
+            .unwrap());
+        assert!(is_processed_backend(&f.f.backend, GITHUB_CONSUMER, new.id)
+            .await
+            .unwrap());
+        assert_eq!(f.protected().await, (1, 1, 1, 0));
+        assert_calls(
+            &provider.calls(),
+            "open",
+            "/api/v3/repos/octo/repo/issues/7",
+        );
+        provider.finish().await;
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn actual_backend_unconfigured_replaced_expired_cancelled_owner_and_two_pool_reuse() {
+        let f = TaskFixture::new("octo/repo").await;
+        let event = f.change().await;
+        let owner = lease(&f, &f.f.backend).await;
+        let consumer = github_sync_consumer(None);
+        let protected = f.protected().await;
+        assert!(consumer
+            .deliver_backend(&f.f.backend, Uuid::now_v7(), &event)
+            .await
+            .is_err());
+        assert_eq!(
+            f.cursor().await,
+            Some(OutboxCursor::SqliteFamily { seq: 0 })
+        );
+        assert_eq!(f.protected().await, protected);
+        sqlx::query("UPDATE outbox_consumers SET lease_until=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)-1 WHERE consumer='github'").execute(&f.f.pool).await.unwrap();
+        assert!(consumer
+            .deliver_backend(&f.f.backend, owner, &event)
+            .await
+            .is_err());
+        let second = crate::db::pool::connect_sqlite_app(&f.f.dir.join("test.sqlite"), 1)
+            .await
+            .unwrap();
+        let backend = Backend::Sqlite(second.clone());
+        let replacement = Uuid::now_v7();
+        assert!(
+            lease_consumer_backend(&backend, GITHUB_CONSUMER, replacement, 30)
+                .await
+                .unwrap()
+        );
+        assert!(consumer
+            .deliver_backend(&f.f.backend, owner, &event)
+            .await
+            .is_err());
+        assert_eq!(f.protected().await, protected);
+        let hold = backend.begin_write().await.unwrap();
+        let waiting = {
+            let b = f.f.backend.clone();
+            let c = consumer.clone();
+            let e = event.clone();
+            tokio::spawn(async move { c.deliver_backend(&b, replacement, &e).await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        waiting.abort();
+        assert!(waiting.await.unwrap_err().is_cancelled());
+        hold.rollback().await.unwrap();
+        f.f.backend.ping().await.unwrap();
+        backend.ping().await.unwrap();
+        assert_eq!(
+            f.cursor().await,
+            Some(OutboxCursor::SqliteFamily { seq: 0 })
+        );
+        assert_eq!(f.protected().await, protected);
+        consumer
+            .deliver_backend(&f.f.backend, replacement, &event)
+            .await
+            .unwrap();
+        assert_eq!(f.cursor().await, Some(event.cursor()));
+        assert!(consumer
+            .deliver_backend(&f.f.backend, replacement, &event)
+            .await
+            .is_err());
+        assert_eq!(f.protected().await, protected);
+        assert_eq!(f.cursor().await, Some(event.cursor()));
+        second.close().await;
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn actual_backend_configured_reads_current_categories_and_literal_encoded_paths() {
+        let f = TaskFixture::new("octo/a?b#c").await;
+        let provider = Provider::new().await;
+        let consumer = github_sync_consumer(Some(provider.config()));
+        assert_eq!(consumer.delivery_mode(), DeliveryMode::External);
+        assert_eq!(consumer.batch_event_cap(), 1);
+        for (n, want) in [
+            (0, "open"),
+            (1, "open"),
+            (2, "open"),
+            (3, "closed"),
+            (4, "closed"),
+        ] {
+            sqlx::query("UPDATE tasks SET status_id=?1 WHERE id=?2")
+                .bind(f.statuses[n].as_bytes().as_slice())
+                .bind(f.task.as_bytes().as_slice())
+                .execute(&f.f.pool)
+                .await
+                .unwrap();
+            let event = f.change().await;
+            let target = sync_target_backend(&f.f.backend, &event)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (
+                    target.installation_id.as_str(),
+                    target.repo.as_str(),
+                    target.issue_number,
+                    target.state
+                ),
+                ("42", "octo/a?b#c", 7, want)
+            );
+            consumer
+                .deliver_backend(&f.f.backend, Uuid::now_v7(), &event)
+                .await
+                .unwrap();
+            let calls = provider.calls();
+            assert_calls(
+                &calls[n * 2..n * 2 + 2],
+                want,
+                "/api/v3/repos/octo/a%3Fb%23c/issues/7",
+            );
+            assert_eq!(f.protected().await, (1, 1, 0, 0));
+            assert_eq!(f.cursor().await, None);
+        }
+        provider.finish().await;
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn actual_backend_configured_missing_deleted_cross_tenant_and_echo_refuse_transport() {
+        let f = TaskFixture::new("octo/repo").await;
+        let provider = Provider::new().await;
+        let consumer = github_sync_consumer(Some(provider.config()));
+        for (verb, workspace, target, payload, channel) in [
+            (
+                "task.created",
+                Some(f.f.workspace),
+                Some(f.task),
+                json!({"to":"ignored"}),
+                "web",
+            ),
+            (
+                "task.updated",
+                Some(f.f.workspace),
+                Some(f.task),
+                json!({}),
+                "web",
+            ),
+            (
+                "task.updated",
+                Some(f.f.workspace),
+                Some(f.task),
+                json!({"to":null}),
+                "web",
+            ),
+            (
+                "task.updated",
+                Some(f.f.workspace),
+                Some(f.task),
+                json!({"to":"ignored"}),
+                "webhook",
+            ),
+            (
+                "task.updated",
+                Some(f.f.other_workspace),
+                Some(f.task),
+                json!({"to":"ignored"}),
+                "web",
+            ),
+            (
+                "task.updated",
+                Some(f.f.workspace),
+                Some(Uuid::now_v7()),
+                json!({"to":"ignored"}),
+                "web",
+            ),
+            (
+                "task.updated",
+                Some(f.f.workspace),
+                None,
+                json!({"to":"ignored"}),
+                "web",
+            ),
+            (
+                "task.updated",
+                None,
+                Some(f.task),
+                json!({"to":"ignored"}),
+                "web",
+            ),
+        ] {
+            let event = f.event(verb, workspace, target, payload, channel).await;
+            consumer
+                .deliver_backend(&f.f.backend, Uuid::now_v7(), &event)
+                .await
+                .unwrap();
+            assert!(provider.calls().is_empty());
+            assert_eq!(f.protected().await, (1, 1, 0, 0));
+            assert_eq!(f.cursor().await, None);
+        }
+        let event = f.change().await;
+        for sql in [
+            "UPDATE tasks SET deleted_at=1700000000123456",
+            "UPDATE workspaces SET deleted_at=1700000000123456",
+        ] {
+            sqlx::query(sql).execute(&f.f.pool).await.unwrap();
+            consumer
+                .deliver_backend(&f.f.backend, Uuid::now_v7(), &event)
+                .await
+                .unwrap();
+            assert!(provider.calls().is_empty());
+            assert_eq!(f.protected().await, (1, 1, 0, 0));
+            assert_eq!(f.cursor().await, None);
+            sqlx::query("UPDATE tasks SET deleted_at=NULL")
+                .execute(&f.f.pool)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE workspaces SET deleted_at=NULL")
+                .execute(&f.f.pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("DELETE FROM github_issue_links")
+            .execute(&f.f.pool)
+            .await
+            .unwrap();
+        consumer
+            .deliver_backend(&f.f.backend, Uuid::now_v7(), &event)
+            .await
+            .unwrap();
+        assert!(provider.calls().is_empty());
+        assert_eq!(f.protected().await, (0, 1, 0, 0));
+        sqlx::query("INSERT INTO github_issue_links(id,workspace_id,task_id,repo,issue_number) VALUES(?1,?2,?3,'../repo',7)").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.f.workspace.as_bytes().as_slice()).bind(f.task.as_bytes().as_slice()).execute(&f.f.pool).await.unwrap();
+        consumer
+            .deliver_backend(&f.f.backend, Uuid::now_v7(), &event)
+            .await
+            .unwrap();
+        assert!(provider.calls().is_empty());
+        assert_eq!(f.protected().await, (1, 1, 0, 0));
+        sqlx::query("UPDATE github_issue_links SET repo='octo/repo'")
+            .execute(&f.f.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM github_installations")
+            .execute(&f.f.pool)
+            .await
+            .unwrap();
+        consumer
+            .deliver_backend(&f.f.backend, Uuid::now_v7(), &event)
+            .await
+            .unwrap();
+        assert!(provider.calls().is_empty());
+        assert_eq!(f.protected().await, (1, 0, 0, 0));
+        sqlx::query(
+            "INSERT INTO github_installations(id,workspace_id,installation_id) VALUES(?1,?2,'42')",
+        )
+        .bind(Uuid::now_v7().as_bytes().as_slice())
+        .bind(f.f.workspace.as_bytes().as_slice())
+        .execute(&f.f.pool)
+        .await
+        .unwrap();
+        consumer
+            .deliver_backend(&f.f.backend, Uuid::now_v7(), &event)
+            .await
+            .unwrap();
+        assert_calls(
+            &provider.calls(),
+            "closed",
+            "/api/v3/repos/octo/repo/issues/7",
+        );
+        assert_eq!(f.protected().await, (1, 1, 0, 0));
+        let mut tx = f.f.backend.begin_read().await.unwrap();
+        tx.operation()
+            .set_tenant(f.f.other_workspace)
+            .await
+            .unwrap();
+        assert!(tx
+            .operation()
+            .github_sync_target(f.f.workspace, f.task)
+            .await
+            .is_err());
+        tx.rollback().await.unwrap();
+        assert_eq!(f.protected().await, (1, 1, 0, 0));
+        let wrong_fk=sqlx::query("INSERT INTO github_issue_links(id,workspace_id,task_id,repo,issue_number) VALUES(?1,?2,?3,'other/repo',8)").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.f.other_workspace.as_bytes().as_slice()).bind(f.task.as_bytes().as_slice()).execute(&f.f.pool).await;
+        assert!(wrong_fk.is_err());
+        assert_eq!(f.protected().await, (1, 1, 0, 0));
+        provider.finish().await;
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn actual_backend_configured_client_errors_settle_transient_errors_do_not() {
+        let f = TaskFixture::new("octo/repo").await;
+        let provider = Provider::new().await;
+        provider.state.token_status.store(404, Ordering::SeqCst);
+        let event = f.change().await;
+        let run = dispatcher(&f, Some(provider.config()));
+        wait_cursor(&f, &event).await;
+        run.request_shutdown();
+        run.join().await.unwrap();
+        assert_eq!(provider.calls().len(), 1);
+        assert_eq!(f.protected().await, (1, 1, 1, 0));
+        provider.state.token_status.store(201, Ordering::SeqCst);
+        provider.state.patch_status.store(404, Ordering::SeqCst);
+        let event = f.change().await;
+        let run = dispatcher(&f, Some(provider.config()));
+        wait_cursor(&f, &event).await;
+        run.request_shutdown();
+        run.join().await.unwrap();
+        assert_eq!(provider.calls().len(), 3);
+        assert_eq!(f.protected().await, (1, 1, 2, 0));
+        let prior = f.cursor().await;
+        let consumer = github_sync_consumer(Some(provider.config()));
+        for (token, patch) in [(500, 200), (201, 503)] {
+            provider.state.token_status.store(token, Ordering::SeqCst);
+            provider.state.patch_status.store(patch, Ordering::SeqCst);
+            let event = f.change().await;
+            assert!(consumer
+                .deliver_backend(&f.f.backend, Uuid::now_v7(), &event)
+                .await
+                .is_err());
+            assert!(
+                !is_processed_backend(&f.f.backend, GITHUB_CONSUMER, event.id)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(f.cursor().await, prior);
+            assert_eq!(f.protected().await, (1, 1, 2, 0));
+        }
+        // A real owned TCP peer closes before a token response: this is a
+        // transport error, not an HTTP status or a mock classification.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let reset_peer = tokio::spawn(async move {
+            let (connection, _) = listener.accept().await.unwrap();
+            drop(connection);
+            drop(listener);
+        });
+        let reset_config = GithubConfig::new(
+            "123",
+            TEST_KEY,
+            "synthetic-secret",
+            &format!("http://{address}"),
+            [7; 32],
+        )
+        .unwrap();
+        let event = f.change().await;
+        assert!(github_sync_consumer(Some(reset_config))
+            .deliver_backend(&f.f.backend, Uuid::now_v7(), &event)
+            .await
+            .is_err());
+        reset_peer.await.unwrap();
+        assert!(
+            !is_processed_backend(&f.f.backend, GITHUB_CONSUMER, event.id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(f.cursor().await, prior);
+        assert_eq!(f.protected().await, (1, 1, 2, 0));
+        provider.state.token_status.store(201, Ordering::SeqCst);
+        provider.state.patch_status.store(200, Ordering::SeqCst);
+        let run = dispatcher(&f, Some(provider.config()));
+        let last: BackendOutboxEvent = {
+            let id: Vec<u8> = sqlx::query_scalar("SELECT id FROM events ORDER BY seq DESC LIMIT 1")
+                .fetch_one(&f.f.pool)
+                .await
+                .unwrap();
+            fetch_event_by_id_backend(&f.f.backend, Uuid::from_slice(&id).unwrap())
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        wait_cursor(&f, &last).await;
+        run.request_shutdown();
+        run.join().await.unwrap();
+        assert_eq!(f.protected().await, (1, 1, 5, 0));
+        provider.finish().await;
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn actual_backend_confirmed_external_effect_marks_before_replaced_owner_cursor() {
+        let f = TaskFixture::new("octo/repo").await;
+        let provider = Provider::new().await;
+        provider.state.hold_patch.store(true, Ordering::SeqCst);
+        let event = f.change().await;
+        let run = dispatcher(&f, Some(provider.config()));
+        tokio::time::timeout(Duration::from_secs(3), provider.state.patch_seen.notified())
+            .await
+            .unwrap();
+        // Network is in flight, yet an independent real writer can take the database.
+        let second = crate::db::pool::connect_sqlite_app(&f.f.dir.join("test.sqlite"), 1)
+            .await
+            .unwrap();
+        let backend = Backend::Sqlite(second.clone());
+        let writer = backend.begin_write().await.unwrap();
+        writer.rollback().await.unwrap();
+        sqlx::query("UPDATE outbox_consumers SET lease_until=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)-1 WHERE consumer='github'").execute(&second).await.unwrap();
+        let replacement = Uuid::now_v7();
+        assert!(
+            lease_consumer_backend(&backend, GITHUB_CONSUMER, replacement, 30)
+                .await
+                .unwrap()
+        );
+        run.request_shutdown();
+        provider.state.release_patch.notify_one();
+        run.join().await.unwrap();
+        wait_mark(&f, &event).await;
+        assert_eq!(
+            f.cursor().await,
+            Some(OutboxCursor::SqliteFamily { seq: 0 })
+        );
+        assert_eq!(f.protected().await, (1, 1, 1, 0));
+        assert_calls(
+            &provider.calls(),
+            "closed",
+            "/api/v3/repos/octo/repo/issues/7",
+        );
+        assert!(
+            release_consumer_backend(&backend, GITHUB_CONSUMER, replacement)
+                .await
+                .unwrap()
+        );
+        let run = dispatcher(&f, Some(provider.config()));
+        wait_cursor(&f, &event).await;
+        run.request_shutdown();
+        run.join().await.unwrap();
+        assert_eq!(provider.calls().len(), 2);
+        assert_eq!(f.protected().await, (1, 1, 1, 0));
+        second.close().await;
+        provider.finish().await;
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn actual_backend_cancelled_unknown_external_response_remains_unmarked_until_restart() {
+        let f = TaskFixture::new("octo/repo").await;
+        let provider = Provider::new().await;
+        provider.state.hold_patch.store(true, Ordering::SeqCst);
+        let event = f.change().await;
+        let waiting = {
+            let b = f.f.backend.clone();
+            let c = github_sync_consumer(Some(provider.config()));
+            let e = event.clone();
+            tokio::spawn(async move { c.deliver_backend(&b, Uuid::now_v7(), &e).await })
+        };
+        tokio::time::timeout(Duration::from_secs(3), provider.state.patch_seen.notified())
+            .await
+            .unwrap();
+        waiting.abort();
+        assert!(waiting.await.unwrap_err().is_cancelled());
+        provider.state.release_patch.notify_one();
+        f.f.backend.ping().await.unwrap();
+        assert_eq!(f.protected().await, (1, 1, 0, 0));
+        assert_eq!(f.cursor().await, None);
+        let run = dispatcher(&f, Some(provider.config()));
+        wait_cursor(&f, &event).await;
+        run.request_shutdown();
+        run.join().await.unwrap();
+        let calls = provider.calls();
+        assert_eq!(calls.len(), 4);
+        assert_calls(&calls[0..2], "closed", "/api/v3/repos/octo/repo/issues/7");
+        assert_calls(&calls[2..4], "closed", "/api/v3/repos/octo/repo/issues/7");
+        assert_eq!(f.protected().await, (1, 1, 1, 0));
+        provider.finish().await;
+        f.finish().await;
     }
 }

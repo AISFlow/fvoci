@@ -326,8 +326,10 @@ curl -fsS -c "$JAR" -b "$JAR" -H 'content-type: application/json' -H "origin: $O
   -d '{"email":"owner@install.test","password":"installpass1","givenName":"Owner","workspaceSlug":"install","workspaceName":"Install"}' >/dev/null
 login
 WS="$(curl -fsS -b "$JAR" "$BASE/api/v1/me/workspaces" | jq -er '.items[0].id')"
+DOC_COMMAND_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+DOC_CREATE_BODY="{\"commandId\":\"${DOC_COMMAND_ID}\",\"parentId\":null,\"title\":\"Install doc\"}"
 DOC="$(curl -fsS -b "$JAR" -H 'content-type: application/json' -H "origin: $ORIGIN" \
-  -X POST "$BASE/api/v1/workspaces/${WS}/documents" -d '{"parentId":null,"title":"Install doc"}' | jq -er .id)"
+  -X POST "$BASE/api/v1/workspaces/${WS}/documents" -d "$DOC_CREATE_BODY" | jq -er .id)"
 curl -fsS "$BASE/" | grep -qi '<!doctype html' || fail "web root"
 deadline=$((SECONDS + 60))
 until curl -fsS -b "$JAR" "$BASE/api/v1/workspaces/${WS}/search?q=Install%20doc" \

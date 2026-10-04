@@ -289,17 +289,17 @@ async fn workspace_kind(
 }
 
 #[cfg(feature = "db-tests")]
-static WORKSPACE_CARD_BARRIERS: std::sync::LazyLock<
-    tokio::sync::Mutex<
-        std::collections::HashMap<
-            Uuid,
-            (
-                tokio::sync::oneshot::Sender<()>,
-                tokio::sync::oneshot::Receiver<()>,
-            ),
-        >,
-    >,
-> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
+type WorkspaceCardBarriers = std::collections::HashMap<
+    Uuid,
+    (
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ),
+>;
+
+#[cfg(feature = "db-tests")]
+static WORKSPACE_CARD_BARRIERS: std::sync::LazyLock<tokio::sync::Mutex<WorkspaceCardBarriers>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Pause this actor only, after the self-list transaction has actually committed
 /// and before any card transaction reserves its writer/current authority.
