@@ -575,13 +575,22 @@ mod tests {
         .unwrap());
         assert_eq!(f.row(id).await.0, "failed");
         assert!(f.journals().await.is_empty());
-        let source = png();
+        // Exact maintained pressure stimulus from the original PG integration
+        // case; that same case also proves this input succeeds with defaults.
+        let large = image::RgbaImage::from_fn(3000, 3000, |x, y| {
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, 90, 255])
+        });
+        let mut source = Vec::new();
+        image::DynamicImage::ImageRgba8(large)
+            .write_to(&mut Cursor::new(&mut source), image::ImageFormat::Png)
+            .unwrap();
         let mut memory = PreviewLimits::default();
-        memory.child_address_space = 32 * 1024 * 1024;
-        assert!(matches!(
-            run_preview_helper(&settings().helper, source.clone(), &memory).await,
-            Err(PreviewError::ResourceLimit(_))
-        ));
+        memory.child_address_space = 96 * 1024 * 1024;
+        let pressure = run_preview_helper(&settings().helper, source.clone(), &memory).await;
+        assert!(
+            matches!(&pressure, Err(PreviewError::ResourceLimit(_))),
+            "{pressure:?}"
+        );
         let mut time = PreviewLimits::default();
         time.timeout = Duration::from_nanos(1);
         assert!(matches!(
