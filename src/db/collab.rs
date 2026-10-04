@@ -2968,18 +2968,19 @@ pub async fn project_derived_body_kind(
     kind: CollabKind,
     input: ProjectDerivedBodyInput,
 ) -> Result<Result<ProjectDerivedBodyResult, CollabDbError>, sqlx::Error> {
-    project_derived_body_kind_backend(&Backend::Postgres(pool.clone()), kind, input).await
+    project_derived_body_kind_backend(&Backend::Postgres(pool.clone()), kind, input, None).await
 }
 
 pub async fn project_derived_body_kind_backend(
     backend: &Backend,
     kind: CollabKind,
     input: ProjectDerivedBodyInput,
+    room_fence: Option<FamilyRoomFence>,
 ) -> Result<Result<ProjectDerivedBodyResult, CollabDbError>, sqlx::Error> {
     let mut tx = backend.begin_write().await?;
     let result = tx
         .operation()
-        .project_collab_derived_body(kind, input)
+        .project_collab_derived_body(kind, input, room_fence)
         .await?;
     if result.is_ok() {
         tx.commit().await.map_err(|unknown| unknown.source)?;
@@ -2996,6 +2997,7 @@ impl OperationTx<'_, '_> {
         &mut self,
         kind: CollabKind,
         input: ProjectDerivedBodyInput,
+        room_fence: Option<FamilyRoomFence>,
     ) -> Result<Result<ProjectDerivedBodyResult, CollabDbError>, sqlx::Error> {
         let t = CollabTables::for_kind(kind);
         let ProjectDerivedBodyInput {
@@ -3008,6 +3010,18 @@ impl OperationTx<'_, '_> {
             prepared,
         } = input;
         self.set_tenant(workspace_id).await?;
+        if matches!(self, Self::SqliteFamily(_)) {
+            let Some(fence) = room_fence else {
+                return Ok(Err(CollabDbError::StaleWriter));
+            };
+            if kind != CollabKind::Document
+                || fence.workspace_id != workspace_id
+                || fence.document_id != document_id
+                || !self.verify_family_room_fence(fence).await?
+            {
+                return Ok(Err(CollabDbError::StaleWriter));
+            }
+        }
         if let Err(error) = self
             .authorize_collab_write(
                 kind,
@@ -3028,6 +3042,11 @@ impl OperationTx<'_, '_> {
             return Ok(Err(CollabDbError::NotFound));
         };
         if current_tail_seq == 0 {
+            if let Some(fence) = room_fence {
+                if !self.verify_family_room_fence(fence).await? {
+                    return Ok(Err(CollabDbError::StaleWriter));
+                }
+            }
             return Ok(Ok(ProjectDerivedBodyResult::SkippedSeed));
         }
         if current_generation != writer_generation {
@@ -3036,14 +3055,21 @@ impl OperationTx<'_, '_> {
         if current_tail_seq != expected_tail_seq {
             return Ok(Err(CollabDbError::StaleCutoff));
         }
-        if !self
+        let changed = self
             .write_native_body_projection(t, workspace_id, document_id, &prepared)
-            .await?
-        {
+            .await?;
+        if changed {
+            self.append_native_body_updated(t, workspace_id, document_id)
+                .await?;
+        }
+        if let Some(fence) = room_fence {
+            if !self.verify_family_room_fence(fence).await? {
+                return Ok(Err(CollabDbError::StaleWriter));
+            }
+        }
+        if !changed {
             return Ok(Ok(ProjectDerivedBodyResult::Unchanged));
         }
-        self.append_native_body_updated(t, workspace_id, document_id)
-            .await?;
         Ok(Ok(ProjectDerivedBodyResult::Updated))
     }
 

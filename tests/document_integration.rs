@@ -3328,7 +3328,8 @@ async fn selected_backend_wiki_fixture(with_native: bool) {
                     project_derived_body_kind_backend(
                         &backend,
                         CollabKind::Document,
-                        project_input(generation, tail, session)
+                        project_input(generation, tail, session),
+                        room_fence
                     )
                     .await
                     .unwrap()
@@ -3340,7 +3341,8 @@ async fn selected_backend_wiki_fixture(with_native: bool) {
                 project_derived_body_kind_backend(
                     &backend,
                     CollabKind::Document,
-                    project_input(1, 1, live.session_id)
+                    project_input(1, 1, live.session_id),
+                    room_fence
                 )
                 .await
                 .unwrap()
@@ -3351,7 +3353,8 @@ async fn selected_backend_wiki_fixture(with_native: bool) {
                 project_derived_body_kind_backend(
                     &backend,
                     CollabKind::Document,
-                    project_input(1, 1, live.session_id)
+                    project_input(1, 1, live.session_id),
+                    room_fence
                 )
                 .await
                 .unwrap()
@@ -3571,6 +3574,19 @@ async fn selected_backend_wiki_fixture(with_native: bool) {
                 .unwrap());
                 assert!(release_family_document_room(&backend, fence).await.unwrap());
                 assert_eq!(
+                    project_derived_body_kind_backend(
+                        &backend,
+                        CollabKind::Document,
+                        project_input(1, 1, live.session_id),
+                        Some(fence)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::StaleWriter,
+                    "expired room cannot project even an unchanged native body"
+                );
+                assert_eq!(
                     append_native(
                         &backend,
                         Some(fence),
@@ -3596,6 +3612,19 @@ async fn selected_backend_wiki_fixture(with_native: bool) {
                 .unwrap();
                 assert_ne!(replacement.fence, fence);
                 assert_eq!(replacement.native.writer_generation, 2);
+                assert_eq!(
+                    project_derived_body_kind_backend(
+                        &backend,
+                        CollabKind::Document,
+                        project_input(2, 1, live.session_id),
+                        Some(fence)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                    CollabDbError::StaleWriter,
+                    "old owner cannot project against replacement generation"
+                );
                 assert!(!renew_family_document_room(
                     &backend,
                     fence,
