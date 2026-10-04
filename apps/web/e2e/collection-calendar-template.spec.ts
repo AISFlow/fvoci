@@ -3,7 +3,7 @@ import { z } from "zod";
 import { expect, test, type BrowserContext, type Page, type Response } from "@playwright/test";
 import { login } from "./helpers";
 import { createHash } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const workspaceListSchema = z
@@ -48,7 +48,7 @@ const collectionQuerySchema = z
 
 test.describe.configure({ mode: "serial" });
 async function fixture(page: Page, key: string) {
-  const served: Promise<{ path: string; sha256: string }>[] = [];
+  const observedAssets: { url: string; path: string; status: number }[] = [];
   const bodylessAssets: { path: string; status: number; redirectedFrom: string | null }[] = [];
   const captureAsset = (response: Response) => {
     const path = new URL(response.url()).pathname;
@@ -63,16 +63,9 @@ async function fixture(page: Page, key: string) {
         });
         return;
       }
-      expect(response.ok(), `asset ${path} status ${String(status)}`).toBe(true);
-      served.push(
-        response.body().then((body) => {
-          expect(body.length, `asset ${path} has a body`).toBeGreaterThan(0);
-          return {
-            path: path.slice(1),
-            sha256: createHash("sha256").update(body).digest("hex"),
-          };
-        }),
-      );
+      // Only retain transport metadata here. Setup/auth can replace the
+      // document before Chromium's deferred getResponseBody completes.
+      observedAssets.push({ url: response.url(), path, status });
     }
   };
   page.on("response", captureAsset);
@@ -133,8 +126,48 @@ async function fixture(page: Page, key: string) {
     await expect(page.locator("[data-v-app]")).toHaveCount(1);
     await page.locator('input[type="month"]').fill(month);
     await expect(page.locator('table[data-testid="collection-calendar"]')).toBeVisible();
-    const assets = await Promise.all(served);
+    page.off("response", captureAsset);
+    const assets: { path: string; sha256: string; bytes: number; loadedStatus: number }[] = [];
+    const measured = new Set<string>();
+    for (const asset of observedAssets) {
+      expect(new URL(asset.url).origin, `loaded asset ${asset.path} origin`).toBe(
+        new URL(page.url()).origin,
+      );
+      expect(asset.status, `loaded asset ${asset.path} status`).toBeGreaterThanOrEqual(200);
+      expect(asset.status, `loaded asset ${asset.path} status`).toBeLessThan(300);
+      if (measured.has(asset.url)) continue;
+      // This measures a fresh HTTP response for an observed loaded URL, not
+      // the original browser body. APIRequestContext owns these bytes across
+      // page navigation and bypasses Chromium's cache/CDP retention.
+      const response = await page.request.get(asset.url, { maxRedirects: 0 });
+      expect(response.ok(), `served asset ${asset.path} status ${String(response.status())}`).toBe(
+        true,
+      );
+      const body = await response.body();
+      expect(body.length, `served asset ${asset.path} has a body`).toBeGreaterThan(0);
+      const sha256 = createHash("sha256").update(body).digest("hex");
+      const candidate = readFileSync(new URL(`../dist${asset.path}`, import.meta.url));
+      expect(sha256, `served asset ${asset.path} matches candidate dist`).toBe(
+        createHash("sha256").update(candidate).digest("hex"),
+      );
+      assets.push({
+        path: asset.path.slice(1),
+        sha256,
+        bytes: body.length,
+        loadedStatus: asset.status,
+      });
+      measured.add(asset.url);
+      await response.dispose();
+    }
     expect(assets.length, "successful terminal asset responses were captured").toBeGreaterThan(0);
+    expect(
+      assets.some((asset) => asset.path.endsWith(".js")),
+      "candidate JS was served",
+    ).toBe(true);
+    expect(
+      assets.some((asset) => asset.path.endsWith(".css")),
+      "candidate CSS was served",
+    ).toBe(true);
     writeFileSync(
       `/tmp/fvoci-front272-calendar-served-${key}.json`,
       JSON.stringify(
@@ -143,12 +176,13 @@ async function fixture(page: Page, key: string) {
           url: new URL(page.url()).pathname,
           assets,
           bodylessAssets,
+          measurement: "http-refetch-of-observed-loaded-url",
+          originalBrowserBody: "NOTMEASURED",
         },
         null,
         2,
       ),
     );
-    page.off("response", captureAsset);
   }
   return { base, project, task, stored, open };
 }
