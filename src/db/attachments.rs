@@ -7429,10 +7429,15 @@ mod upload_owned_adapter_tests {
     fn unknown(error: &sqlx::Error) {
         match error {
             sqlx::Error::AnyDriverError(source) => {
-                assert!(source
+                let unknown = source
                     .downcast_ref::<crate::db::backend::CommitUnknown>()
-                    .is_some());
-                assert!(error.to_string().to_lowercase().contains("foreign key"));
+                    .expect("original typed CommitUnknown");
+                assert!(unknown.source.as_database_error().is_some());
+                assert!(unknown
+                    .source
+                    .to_string()
+                    .to_lowercase()
+                    .contains("foreign key"));
             }
             _ => panic!("actual typed COMMIT error required: {error}"),
         }
