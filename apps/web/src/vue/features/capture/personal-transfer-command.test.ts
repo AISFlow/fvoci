@@ -236,6 +236,7 @@ test("every typed blocker maps to its own reason before the generic refusal", ()
     "block_identity",
     "body_encoding",
     "native_state_missing",
+    "timer_busy",
   ];
   for (const blocker of blockers) {
     const keys = transferFailureKeys(typed("personal_transfer_incomplete", blocker));
@@ -245,6 +246,10 @@ test("every typed blocker maps to its own reason before the generic refusal", ()
   }
   expect(transferFailureKeys(typed("personal_transfer_incomplete", "native_history"))).toEqual([
     "personalTransfer.blocker.nativeHistory",
+    "personalTransfer.incomplete",
+  ]);
+  expect(transferFailureKeys(typed("personal_transfer_incomplete", "timer_busy"))).toEqual([
+    "personalTransfer.blocker.timerBusy",
     "personalTransfer.incomplete",
   ]);
 });

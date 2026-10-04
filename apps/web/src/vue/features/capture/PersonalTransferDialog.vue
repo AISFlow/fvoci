@@ -186,7 +186,7 @@ watch([action, teamId, projectId, statusId], () => {
   preview.value = null;
 });
 onScopeDispose(() => {
-  scope.retire();
+  scope.dispose();
   window.removeEventListener(TRANSFER_COMMAND_EVENT, refreshRecoverable);
 });
 function close(): void {
@@ -209,7 +209,19 @@ function dispositionItem(disposition: TransferDisposition, value: TransferPrevie
       return t("personalTransfer.history", { count: disposition.count });
     case "attachment":
       return t("personalTransfer.files", { count: disposition.count });
+    case "time_entry":
+      return t("personalTransfer.timeEntries", { count: disposition.count });
+    case "timer":
+      return t("personalTransfer.timers", { count: disposition.count });
   }
+}
+/** A MOVE carries time: entries become visible to the destination, timers stay the actor's own. */
+function movesTime(value: TransferPreview): boolean {
+  return value.dispositions.some(
+    (disposition) =>
+      (disposition.item === "time_entry" || disposition.item === "timer") &&
+      disposition.outcome === "moved",
+  );
 }
 async function prepared(captured: ReturnType<typeof scope.capture>): Promise<boolean> {
   const clean = props.prepare ? await props.prepare() : true;
@@ -246,9 +258,52 @@ function cancelReview(): void {
   preview.value = null;
   error.value = null;
 }
+/**
+ * A per-operation fence on the authoritative identity: the app's `me` cache
+ * entry, which the shell keeps current after this dialog's own observers stop.
+ * From before the request until the operation ends, a 401, the entry's
+ * removal, or any value other than the command's actor and session fences the
+ * operation for good, even if the original identity later returns
+ * (A -> B -> A, or a 401 that is restored).
+ */
+function identityFence(command: PendingTransferCommand): { fenced(): boolean; stop(): void } {
+  let fenced = false;
+  const key = JSON.stringify(meQuery.queryKey);
+  const check = () => {
+    const state = client.getQueryState(meQuery.queryKey);
+    const current = client.getQueryData(meQuery.queryKey);
+    if (
+      !state ||
+      (state.error instanceof ProblemError && state.error.status === 401) ||
+      current?.userId !== command.actorId ||
+      current.sessionId !== command.sessionId
+    )
+      fenced = true;
+  };
+  check();
+  const stop = client.getQueryCache().subscribe((event) => {
+    if (fenced || JSON.stringify(event.query.queryKey) !== key) return;
+    if (event.type === "removed") fenced = true;
+    else check();
+  });
+  return { fenced: () => fenced, stop };
+}
+/**
+ * Whether this command's durable bookkeeping (cache settlement, then removing
+ * the stored command) may continue: the identity fence has never tripped, and
+ * the scope is live or merely disposed (a MOVE can retire the source page that
+ * hosts this dialog during settlement; that is not an identity change).
+ */
+function owns(
+  captured: ReturnType<typeof scope.capture>,
+  fence: ReturnType<typeof identityFence>,
+): boolean {
+  return !fence.fenced() && (scope.sameActor(captured) || scope.sameIdentity(captured));
+}
 async function dispatch(command: PendingTransferCommand): Promise<void> {
   const captured = scope.capture();
   if (!captured.actor || captured.actor !== command.actorId) return;
+  const fence = identityFence(command);
   busy.value = true;
   error.value = null;
   try {
@@ -256,11 +311,11 @@ async function dispatch(command: PendingTransferCommand): Promise<void> {
     rememberTransfer(window.sessionStorage, command);
     if (scope.current(captured)) pending.value = command;
     const value = await confirmPersonalTransfer(command.sourceWorkspaceId, command.body);
-    if (!scope.sameActor(captured)) return;
+    if (!owns(captured, fence)) return;
     // Settle the captured scopes first: if that fails the stored command
     // survives, and its identical replay settles them again.
     await settleCaches(command, value);
-    if (!scope.sameActor(captured)) return;
+    if (!owns(captured, fence)) return;
     forgetTransfer(window.sessionStorage, command);
     if (scope.current(captured)) {
       result.value = { command, value };
@@ -270,6 +325,7 @@ async function dispatch(command: PendingTransferCommand): Promise<void> {
   } catch (failure) {
     if (scope.current(captured)) error.value = failureMessage(failure);
   } finally {
+    fence.stop();
     if (scope.current(captured)) busy.value = false;
   }
 }
@@ -482,6 +538,9 @@ const fieldClass =
             </template>
           </dl>
         </div>
+        <p v-if="movesTime(preview.value)" class="text-base leading-relaxed">{{
+          t("personalTransfer.timePrivacy")
+        }}</p>
         <p v-if="preview.value.taskTitle" class="text-base leading-relaxed">{{
           t("personalTransfer.preserveAssignment")
         }}</p>

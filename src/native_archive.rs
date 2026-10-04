@@ -300,7 +300,9 @@ record!(Graph {
     tasks: Vec<Task>, assignees: Vec<Assignee>, labels: Vec<Label>, task_labels: Vec<TaskLabel>,
     milestones: Vec<Milestone>, dependencies: Vec<TaskDependency>, views: Vec<View>,
     document_tags: Vec<DocumentTag>, document_tag_assignments: Vec<DocumentTagAssignment>,
-    origins: Vec<Origin>, activity: Vec<Activity>, comments: Vec<Comment>,
+    origins: Vec<Origin>, activity: Vec<Activity>,
+    // Ids of purged labels/milestones that the history still names (sorted).
+    purged_label_refs: Vec<Uuid>, purged_milestone_refs: Vec<Uuid>, comments: Vec<Comment>,
     states: Vec<NativeState>, revisions: Vec<Revision>, attachments: Vec<Attachment>,
     collections: Vec<Collection>, collection_items: Vec<CollectionItem>,
     collection_fields: Vec<CollectionField>, collection_options: Vec<CollectionOption>,
@@ -620,7 +622,58 @@ impl Archive {
                 return Err(invalid());
             }
         }
-        validate_views(g, &statuses, &labels, &milestones)?;
+        // The writers hard-delete labels and milestones (purge); history keeps
+        // their stored {id, historical name} and saved view/collection-view
+        // filters keep the stored labelId/milestoneId. Each purged list is at
+        // most MAX_ENTRIES long, strictly ascending, disjoint from the other
+        // list and from live rows of either kind, and named as its own kind
+        // by the history or an archived view filter (no padding). Purged ids
+        // widen only those references (history, view label/milestone
+        // filters), never task labels, milestones or any other field; a
+        // reference in neither set stays its typed refusal.
+        if g.purged_label_refs.len() > MAX_ENTRIES || g.purged_milestone_refs.len() > MAX_ENTRIES {
+            return Err(ArchiveError::Limit);
+        }
+        let purged_ok = |list: &[Uuid], other: &[Uuid]| {
+            list.windows(2).all(|w| w[0] < w[1])
+                && list.iter().all(|id| {
+                    !labels.contains(id)
+                        && !milestones.contains(id)
+                        && other.binary_search(id).is_err()
+                })
+        };
+        if !purged_ok(&g.purged_label_refs, &g.purged_milestone_refs)
+            || !purged_ok(&g.purged_milestone_refs, &g.purged_label_refs)
+        {
+            return Err(invalid());
+        }
+        // Bounded before the filters are collected (two per view row).
+        activity_reference_count(&g.activity)?
+            .checked_add(view_filter_ref_bound(&g.views, &g.collection_views)?)
+            .filter(|count| *count <= MAX_GRAPH_BYTES / HISTORY_REFERENCE_BYTES)
+            .ok_or(ArchiveError::Limit)?;
+        let view_refs = view_filter_refs(&g.views, &g.collection_views);
+        let (named_labels, named_milestones) =
+            purged_refs(&g.activity, &view_refs, &labels, &milestones)?;
+        if !g
+            .purged_label_refs
+            .iter()
+            .all(|id| named_labels.contains(id))
+            || !g
+                .purged_milestone_refs
+                .iter()
+                .all(|id| named_milestones.contains(id))
+        {
+            return Err(invalid());
+        }
+        let label_refs: BTreeSet<Uuid> =
+            labels.iter().chain(&g.purged_label_refs).copied().collect();
+        let milestone_refs: BTreeSet<Uuid> = milestones
+            .iter()
+            .chain(&g.purged_milestone_refs)
+            .copied()
+            .collect();
+        validate_views(g, &statuses, &label_refs, &milestone_refs)?;
         let mut task_labels = BTreeSet::new();
         for t in &g.task_labels {
             if !tasks.contains(&t.task_id)
@@ -719,10 +772,10 @@ impl Archive {
                 "changed" => activity_changes_supported(
                     &a.changes,
                     g.source_actor_id,
-                    &labels,
+                    &label_refs,
                     &statuses,
                     &tasks,
-                    &milestones,
+                    &milestone_refs,
                 ),
                 _ => false,
             };
@@ -749,7 +802,7 @@ impl Archive {
                 return Err(ArchiveError::Invalid("missing creation activity".into()));
             }
         }
-        validate_collections(g, &docs, &tasks, &statuses, &labels, &milestones)?;
+        validate_collections(g, &docs, &tasks, &statuses, &label_refs, &milestone_refs)?;
         validate_document_tags(g, &docs)?;
         let mut expected = BTreeSet::new();
         let mut state_ids = BTreeSet::new();
@@ -1335,8 +1388,10 @@ fn validate_views(
 /// sort on a document collection; a custom equals value of the field type's
 /// form (option/people UUID text, number, checkbox bool, ISO date, RFC 3339
 /// datetime, text); field sorts only on scalar (value column) fields.
-/// References (typed "view references" when outside this archive): status,
-/// milestone and label of this project; assignee "me" or the source actor;
+/// References (typed "view references" when outside this archive): status
+/// of this project; milestone and label of this project, live or a listed
+/// purged reference (the caller passes those sets); assignee "me" or the
+/// source actor;
 /// custom fields and sort fields of the query's own collection - in any
 /// deletion state, since a later field/option deletion leaves stored views
 /// as they are; an option equals value an option of that field; a people
@@ -2120,6 +2175,145 @@ pub fn mapped_comment_reactions(reactions: &Value, source: Uuid, destination: Uu
     reactions
 }
 
+/// JSON bytes charged to the graph budget per extracted history reference
+/// (a 36-character id, its quotes and a separator).
+pub const HISTORY_REFERENCE_BYTES: usize = 39;
+
+/// The (field, side value) pairs of labelIds/milestoneId changes in recorded
+/// task activity.
+fn label_milestone_sides(activity: &[Activity]) -> impl Iterator<Item = (bool, &Value)> {
+    activity
+        .iter()
+        .filter_map(|a| a.changes.as_array())
+        .flatten()
+        .filter_map(|change| {
+            let field = change.get("field")?.as_str()?;
+            matches!(field, "labelIds" | "milestoneId").then_some((field == "labelIds", change))
+        })
+        .flat_map(|(is_label, change)| {
+            ["from", "to"]
+                .into_iter()
+                .filter_map(move |side| change.get(side).map(|v| (is_label, v)))
+        })
+}
+
+/// How many label/milestone references recorded task activity holds (list
+/// items and objects, any shape), counted with checked arithmetic before
+/// anything is collected; more than the graph budget can hold is a Limit.
+pub fn activity_reference_count(activity: &[Activity]) -> Result<usize, ArchiveError> {
+    label_milestone_sides(activity).try_fold(0usize, |count, (is_label, v)| {
+        let items = if is_label {
+            v.as_array().map_or(0, Vec::len)
+        } else {
+            usize::from(v.is_object())
+        };
+        count
+            .checked_add(items)
+            .filter(|count| *count <= MAX_GRAPH_BYTES / HISTORY_REFERENCE_BYTES)
+            .ok_or(ArchiveError::Limit)
+    })
+}
+
+/// The most label/milestone filters the archived views can name (two per
+/// view row), known before any config is parsed or collected.
+pub fn view_filter_ref_bound(
+    views: &[View],
+    collection_views: &[CollectionView],
+) -> Result<usize, ArchiveError> {
+    views
+        .len()
+        .checked_add(collection_views.len())
+        .and_then(|rows| rows.checked_mul(2))
+        .ok_or(ArchiveError::Limit)
+}
+
+/// The (is label, id) filters that archived project views and collection
+/// views name (labelId, milestoneId), read through the parsers validation
+/// uses; an unparsable config is left to validation's typed refusal. At most
+/// view_filter_ref_bound entries.
+pub fn view_filter_refs(views: &[View], collection_views: &[CollectionView]) -> Vec<(bool, Uuid)> {
+    let project = views
+        .iter()
+        .filter_map(|v| crate::tasks::list_query::parse_view_query_value(&v.config).ok());
+    let collection = collection_views
+        .iter()
+        .filter_map(|v| crate::collections::parse_query_config(&v.config).ok())
+        .map(|config| config.query);
+    project
+        .chain(collection)
+        .flat_map(|query| {
+            let f = query.filters;
+            f.label_id
+                .map(|id| (true, id))
+                .into_iter()
+                .chain(f.milestone_id.map(|id| (false, id)))
+        })
+        .collect()
+}
+
+/// The purged label and milestone identities that recorded task activity
+/// (well-formed stored references; any other shape is left to the activity
+/// validation's typed refusal) and archived view filters name: ids that are
+/// not a live row of the same kind. Occurrences are bounded first (the
+/// history's counted references plus the view filters); repeated
+/// references to one id are free, and a new distinct id beyond MAX_ENTRIES
+/// per kind is a Limit before it is inserted. One id named as both a label
+/// and a milestone, or a named id that is a live row of the other kind, is
+/// not data the writers produce.
+pub fn purged_refs(
+    activity: &[Activity],
+    view_refs: &[(bool, Uuid)],
+    live_labels: &BTreeSet<Uuid>,
+    live_milestones: &BTreeSet<Uuid>,
+) -> Result<(BTreeSet<Uuid>, BTreeSet<Uuid>), ArchiveError> {
+    activity_reference_count(activity)?
+        .checked_add(view_refs.len())
+        .filter(|count| *count <= MAX_GRAPH_BYTES / HISTORY_REFERENCE_BYTES)
+        .ok_or(ArchiveError::Limit)?;
+    let id = |v: &Value| {
+        v.get("id")
+            .and_then(Value::as_str)
+            .and_then(|raw| Uuid::parse_str(raw).ok())
+    };
+    let admit = |set: &mut BTreeSet<Uuid>, live: &BTreeSet<Uuid>, id: Uuid| {
+        if live.contains(&id) || set.contains(&id) {
+            return Ok(());
+        }
+        if set.len() >= MAX_ENTRIES {
+            return Err(ArchiveError::Limit);
+        }
+        set.insert(id);
+        Ok(())
+    };
+    let (mut labels, mut milestones) = (BTreeSet::new(), BTreeSet::new());
+    for (is_label, v) in label_milestone_sides(activity) {
+        if is_label {
+            for found in v.as_array().into_iter().flatten().filter_map(id) {
+                admit(&mut labels, live_labels, found)?;
+            }
+        } else if let Some(found) = id(v) {
+            admit(&mut milestones, live_milestones, found)?;
+        }
+    }
+    for &(is_label, found) in view_refs {
+        if is_label {
+            admit(&mut labels, live_labels, found)?;
+        } else {
+            admit(&mut milestones, live_milestones, found)?;
+        }
+    }
+    if labels
+        .iter()
+        .any(|id| milestones.contains(id) || live_milestones.contains(id))
+        || milestones.iter().any(|id| live_labels.contains(id))
+    {
+        return Err(ArchiveError::Unsupported(
+            "non-baseline task activity".into(),
+        ));
+    }
+    Ok((labels, milestones))
+}
+
 /// A recorded "changed" task activity (tasks::activity::diff_activity over
 /// db::task_activity snapshots) is portable when every change names a
 /// distinct product activity field and each stored value has exactly that
@@ -2127,9 +2321,10 @@ pub fn mapped_comment_reactions(reactions: &Value, source: Uuid, destination: Uu
 /// the product task rules; statusId is {id: archived status, label}; parentId
 /// null or {id: archived task, label: null}; assigneeIds [{id: the single
 /// source actor, label: null}] (remapped on restore); labelIds [{id: archived
-/// label, label: historical name or null}]; milestoneId null or {id: archived
-/// milestone, label: historical name or null}; recurrence null or the
-/// preset's kind (daily, weekly, monthly). Anything else fails closed.
+/// or purged label, label: historical name or null}]; milestoneId null or {id:
+/// archived or purged milestone, label: historical name or null}; recurrence
+/// null or the preset's kind (daily, weekly, monthly). Anything else fails
+/// closed.
 fn activity_changes_supported(
     changes: &Value,
     actor: Uuid,
@@ -2549,6 +2744,8 @@ pub(crate) mod tests {
             "views",
             "document_tags",
             "document_tag_assignments",
+            "purged_label_refs",
+            "purged_milestone_refs",
             "collection_fields",
             "collection_options",
             "collection_values",
@@ -3481,6 +3678,138 @@ pub(crate) mod tests {
             let last = a.graph.activity[1].changes.as_array().unwrap().len() - 1;
             a.graph.activity[1].changes[last]["to"]["label"] = json!("");
         }));
+        // A purged milestone the history names travels in the typed purged
+        // list (strictly ascending, named, not live, of its own kind); the
+        // same reference unlisted stays the activity refusal above.
+        let (first, second) = (
+            Uuid::parse_str("10000000-0000-4000-8000-0000000000f1").unwrap(),
+            Uuid::parse_str("10000000-0000-4000-8000-0000000000f2").unwrap(),
+        );
+        let purged = |listed: Vec<Uuid>, labels: Vec<Uuid>| {
+            let mut archive = fixture();
+            let last = archive.graph.activity[1].changes.as_array().unwrap().len() - 1;
+            archive.graph.activity[1].changes[last]["from"] =
+                json!({"id": first, "label": "이전 이정표"});
+            archive.graph.activity[1].changes[last]["to"]["id"] = json!(second);
+            archive.graph.purged_milestone_refs = listed;
+            archive.graph.purged_label_refs = labels;
+            archive.validate()
+        };
+        purged(vec![first, second], vec![]).unwrap();
+        for (case, listed, labels) in [
+            ("unsorted", vec![second, first], vec![]),
+            ("duplicate", vec![first, first, second], vec![]),
+            (
+                "padded",
+                vec![
+                    first,
+                    second,
+                    Uuid::parse_str("ffffffff-ffff-4fff-bfff-ffffffffffff").unwrap(),
+                ],
+                vec![],
+            ),
+            ("cross-kind", vec![first, second], vec![first]),
+        ] {
+            assert!(
+                matches!(purged(listed, labels), Err(ArchiveError::Invalid(_))),
+                "{case}"
+            );
+        }
+        assert!(matches!(
+            purged(vec![first], vec![]),
+            Err(ArchiveError::Unsupported(m)) if m == "non-baseline task activity"
+        ));
+        let mut archive = fixture();
+        archive.graph.purged_milestone_refs = vec![archive.graph.milestones[0].id];
+        assert!(
+            matches!(archive.validate(), Err(ArchiveError::Invalid(_))),
+            "a live milestone is never purged"
+        );
+        // One id named as both a label and a milestone, listed in both
+        // lists or in one, and an id that is a live row of the other kind,
+        // are never purged references.
+        let both = |labels: Vec<Uuid>, milestones: Vec<Uuid>| {
+            let mut archive = fixture();
+            archive.graph.activity[1]
+                .changes
+                .as_array_mut()
+                .unwrap()
+                .insert(
+                    0,
+                    json!({"field":"labelIds","from":[],"to":[{"id": first, "label": null}]}),
+                );
+            let last = archive.graph.activity[1].changes.as_array().unwrap().len() - 1;
+            archive.graph.activity[1].changes[last]["from"] = json!({"id": first, "label": null});
+            archive.graph.purged_label_refs = labels;
+            archive.graph.purged_milestone_refs = milestones;
+            archive.validate()
+        };
+        assert!(matches!(
+            both(vec![first], vec![first]),
+            Err(ArchiveError::Invalid(_))
+        ));
+        assert!(matches!(
+            both(vec![first], vec![]),
+            Err(ArchiveError::Unsupported(m)) if m == "non-baseline task activity"
+        ));
+        let opposite = |listed: bool| {
+            let mut archive = fixture();
+            let live_label = archive.graph.labels[0].id;
+            let last = archive.graph.activity[1].changes.as_array().unwrap().len() - 1;
+            archive.graph.activity[1].changes[last]["from"] =
+                json!({"id": live_label, "label": null});
+            if listed {
+                archive.graph.purged_milestone_refs = vec![live_label];
+            }
+            archive.validate()
+        };
+        assert!(matches!(opposite(true), Err(ArchiveError::Invalid(_))));
+        assert!(matches!(
+            opposite(false),
+            Err(ArchiveError::Unsupported(m)) if m == "non-baseline task activity"
+        ));
+        // Distinct purged ids are capped per kind (MAX_ENTRIES), each one
+        // really named by the history (50 per list side, the writers' cap);
+        // repeated references to one id do not count again.
+        let named = |count: usize, listed: usize| {
+            let mut archive = fixture();
+            let ids: Vec<Uuid> = (0..count)
+                .map(|i| Uuid::from_u128(0x2000_0000_0000_4000_8000_0000_0000_0000 + i as u128))
+                .collect();
+            let template = archive.graph.activity[1].clone();
+            for (n, chunk) in ids.chunks(MAX_TASK_REFS).enumerate() {
+                let mut entry = template.clone();
+                entry.id = Uuid::from_u128(0x2100_0000_0000_4000_8000_0000_0000_0000 + n as u128);
+                let refs: Vec<Value> = chunk
+                    .iter()
+                    .map(|id| json!({"id": id, "label": null}))
+                    .collect();
+                let repeated = vec![refs[0].clone()];
+                entry.changes = json!([{"field":"labelIds","from":refs,"to":repeated}]);
+                archive.graph.activity.push(entry);
+            }
+            archive.graph.purged_label_refs = ids[..listed].to_vec();
+            archive.validate()
+        };
+        named(MAX_ENTRIES, MAX_ENTRIES).unwrap();
+        assert!(matches!(
+            named(MAX_ENTRIES + 1, MAX_ENTRIES),
+            Err(ArchiveError::Limit)
+        ));
+        assert!(matches!(
+            named(MAX_ENTRIES + 1, MAX_ENTRIES + 1),
+            Err(ArchiveError::Limit)
+        ));
+        // References are counted before anything is collected.
+        let mut archive = fixture();
+        let many: Vec<Value> = (0..=MAX_GRAPH_BYTES / HISTORY_REFERENCE_BYTES)
+            .map(|_| json!(null))
+            .collect();
+        archive.graph.activity[1].changes = json!([{"field":"labelIds","from":many,"to":[]}]);
+        assert!(matches!(
+            activity_reference_count(&archive.graph.activity),
+            Err(ArchiveError::Limit)
+        ));
         // Recurrence: the writers' preset travels; any other shape is invalid.
         for kind in ["daily", "weekly", "monthly"] {
             let mut archive = fixture();
@@ -3978,6 +4307,68 @@ pub(crate) mod tests {
             |a| a.graph.views[0].config["filters"]["custom"] =
                 json!([{"fieldId":Uuid::nil().to_string(),"operator":"empty"}]),
             "view references"
+        ));
+        // A purged label/milestone that a stored filter names (a purge never
+        // touches views) travels as a listed purged reference named by the
+        // view; unlisted it stays a view reference outside the archive, a
+        // listed id nothing names is invalid, and a purged id is never a live
+        // task label.
+        let (gone_label, gone_milestone) = (
+            Uuid::from_u128(0x7500_0000_0000_4000_8000_0000_0000_00f1),
+            Uuid::from_u128(0x7500_0000_0000_4000_8000_0000_0000_00f2),
+        );
+        let purged = |labels: Vec<Uuid>, milestones: Vec<Uuid>, as_task_label: bool| {
+            let mut archive = fixture();
+            let filters = &mut archive.graph.views[0].config["filters"];
+            filters["labelId"] = json!(gone_label.to_string());
+            filters["milestoneId"] = json!(gone_milestone.to_string());
+            archive.graph.purged_label_refs = labels;
+            archive.graph.purged_milestone_refs = milestones;
+            if as_task_label {
+                let task_id = archive.graph.tasks[0].id;
+                archive.graph.task_labels.push(TaskLabel {
+                    task_id,
+                    label_id: gone_label,
+                });
+            }
+            archive.validate()
+        };
+        purged(vec![gone_label], vec![gone_milestone], false).unwrap();
+        // The filter count is bounded by the view rows before collection.
+        let mut archive = fixture();
+        archive.graph.views[0].config["filters"]["milestoneId"] = json!(gone_milestone.to_string());
+        let (views, collection_views) = (&archive.graph.views, &archive.graph.collection_views);
+        assert_eq!(
+            view_filter_ref_bound(views, collection_views).unwrap(),
+            2 * (views.len() + collection_views.len())
+        );
+        assert_eq!(view_filter_refs(views, collection_views).len(), 2);
+        assert!(matches!(
+            purged(vec![gone_label], vec![], false),
+            Err(ArchiveError::Unsupported(m)) if m == "view references"
+        ));
+        assert!(matches!(
+            purged(vec![gone_label], vec![gone_milestone], true),
+            Err(ArchiveError::Invalid(_))
+        ));
+        assert!(matches!(
+            purged(
+                vec![
+                    gone_label,
+                    Uuid::from_u128(0x7500_0000_0000_4000_8000_0000_0000_00f3)
+                ],
+                vec![gone_milestone],
+                false
+            ),
+            Err(ArchiveError::Invalid(_))
+        ));
+        assert!(matches!(
+            purged(
+                vec![gone_label, gone_milestone],
+                vec![gone_milestone],
+                false
+            ),
+            Err(ArchiveError::Invalid(_))
         ));
         // "me" stays "me"; the source actor's id becomes the destination's.
         let mut archive = fixture();

@@ -70,6 +70,32 @@ test("actor ABA and unmount prohibit old-actor cache settlement and publication"
   expect(scope.sameActor(current)).toBe(false);
 });
 
+test("host disposal ends the UI lifetime but keeps the identity; retire and identity changes do not", () => {
+  const scope = inputScope();
+  scope.bind(A, "doc", "session");
+  const captured = scope.capture();
+  scope.dispose();
+  expect(scope.sameActor(captured)).toBe(false);
+  expect(scope.current(captured)).toBe(false);
+  expect(scope.sameIdentity(captured)).toBe(true);
+  const retired = inputScope();
+  retired.bind(A, "doc", "session");
+  const before = retired.capture();
+  retired.retire();
+  expect(retired.sameIdentity(before)).toBe(false);
+  for (const next of [
+    [B, "session"],
+    [A, "other-session"],
+  ] as const) {
+    const changed = inputScope();
+    changed.bind(A, "doc", "session");
+    const old = changed.capture();
+    changed.bind(next[0], "doc", next[1]);
+    changed.bind(A, "doc", "session");
+    expect(changed.sameIdentity(old)).toBe(false);
+  }
+});
+
 test("same-user credential retirement prohibits former session settlement", () => {
   const scope = inputScope();
   scope.bind(A, "source", "first-session");

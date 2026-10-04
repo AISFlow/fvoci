@@ -65,6 +65,10 @@ pub enum PersonalTransferBlocker {
     BlockIdentity,
     BodyEncoding,
     NativeStateMissing,
+    /// MOVE of an open time entry while the actor has another unfinished
+    /// timer or open-entry reservation, or already has an open entry in the
+    /// destination: resolve that first. Nothing was changed.
+    TimerBusy,
 }
 
 /// `params.code` of `personal_transfer_conflict`.
@@ -87,6 +91,10 @@ pub enum PersonalTransferItem {
     Activity,
     History,
     Attachment,
+    /// The task's time entries (tenant-shared raw history).
+    TimeEntry,
+    /// The actor's own stopwatch runs (actor-private, never shown to others).
+    Timer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

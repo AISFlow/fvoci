@@ -85,6 +85,8 @@ function harness(options: { prepare?: () => Promise<boolean> } = {}) {
   const listeners = new Set<() => void>();
   let confirmAnswer = true;
   const client = new Query.QueryClient();
+  // The shell-maintained authoritative identity a disposed dialog consults.
+  client.setQueryData(["auth", "me"], { userId: ACTOR, sessionId: SESSION });
   // Settlement can be held at a barrier or rejected once to test durability.
   let settlementGate: Promise<unknown> | null = null;
   let failNextSettlement = false;
@@ -197,7 +199,7 @@ function harness(options: { prepare?: () => Promise<boolean> } = {}) {
       document: target.documentId,
     }),
     taskQuery: (workspace: string, task: string) => ({ kind: "task", workspace, task }),
-    meQuery: { kind: "me" },
+    meQuery: { kind: "me", queryKey: ["auth", "me"] },
     workspacesQuery: { kind: "workspaces" },
     projectsQuery: (workspace: string) => ({ kind: "projects", workspace }),
     workflowQuery: (workspace: string, project: string) => ({
@@ -301,6 +303,27 @@ function harness(options: { prepare?: () => Promise<boolean> } = {}) {
       if (mounted) app.unmount();
       mounted = false;
       client.clear();
+    },
+    /** The host page goes away (e.g. a MOVE retired it); the app's cache stays. */
+    unmountHost() {
+      if (mounted) app.unmount();
+      mounted = false;
+    },
+    /** The shell's authoritative identity changes (another account or session). */
+    authoritative(value: { userId: string; sessionId: string }) {
+      client
+        .getQueryCache()
+        .find({ queryKey: ["auth", "me"] })
+        ?.setState({ error: null, status: "success" });
+      client.setQueryData(["auth", "me"], value);
+    },
+    /** The shell's identity query answers 401 (the mounted observer sees it too). */
+    unauthorized() {
+      meError.value = new ProblemError(401);
+      client
+        .getQueryCache()
+        .find({ queryKey: ["auth", "me"] })
+        ?.setState({ error: new ProblemError(401), status: "error" });
     },
   };
 }
@@ -837,6 +860,179 @@ await test("legacy MOVE uses the cached source task detail's project", async () 
     await settle();
     assert.ok(touched(h).includes([SOURCE, PERSONAL_PROJECT, TASK, DOCUMENT].join("/")));
     assert.ok(forgottenAfterSettlement(h));
+  } finally {
+    h.stop();
+  }
+});
+
+await test("a MOVE whose host page unmounts during settlement still settles and removes the same actor's command", async () => {
+  const h = harness();
+  try {
+    await reviewed(h);
+    const gate = deferred();
+    h.holdSettlement(gate.promise);
+    const first = h.call("confirm") as Promise<void>;
+    await settle();
+    h.confirms[0]?.resolve(resultValue);
+    await settle();
+    assert.ok(Command.recoverTransfer(h.storage, ACTOR, SESSION), "stored until settled");
+    // The MOVE retires the source page hosting the dialog mid-settlement.
+    h.unmountHost();
+    gate.resolve(undefined);
+    await first;
+    await settle();
+    assert.equal(Command.recoverTransfer(h.storage, ACTOR, SESSION), null);
+    assert.ok(forgottenAfterSettlement(h), "removed only after the settlement");
+    assert.ok(touched(h).includes(`tree/${SOURCE}`), "the moved source was settled");
+  } finally {
+    h.stop();
+  }
+});
+
+await test("after the host unmounts, an actor or session change (A -> B -> A included) keeps the command and stops its bookkeeping", async () => {
+  for (const change of [
+    [{ userId: TEAM, sessionId: OTHER_SESSION }],
+    [{ userId: ACTOR, sessionId: OTHER_SESSION }],
+    [
+      { userId: TEAM, sessionId: OTHER_SESSION },
+      { userId: ACTOR, sessionId: OTHER_SESSION },
+    ],
+  ]) {
+    const h = harness();
+    try {
+      await reviewed(h);
+      const gate = deferred();
+      h.holdSettlement(gate.promise);
+      const first = h.call("confirm") as Promise<void>;
+      await settle();
+      h.confirms[0]?.resolve(resultValue);
+      await settle();
+      h.unmountHost();
+      for (const identity of change) h.authoritative(identity);
+      gate.resolve(undefined);
+      await first;
+      await settle();
+      assert.ok(Command.recoverTransfer(h.storage, ACTOR, SESSION), "kept for its own actor");
+      assert.equal(h.count("forget"), 0);
+    } finally {
+      h.stop();
+    }
+  }
+  // A change before the response arrives settles nothing at all.
+  const h = harness();
+  try {
+    await reviewed(h);
+    const first = h.call("confirm") as Promise<void>;
+    await settle();
+    h.unmountHost();
+    h.authoritative({ userId: TEAM, sessionId: OTHER_SESSION });
+    h.confirms[0]?.resolve(resultValue);
+    await first;
+    await settle();
+    assert.equal(h.count("invalidate"), 0);
+    assert.ok(Command.recoverTransfer(h.storage, ACTOR, SESSION));
+  } finally {
+    h.stop();
+  }
+});
+
+await test("a failed settlement after the host unmounts keeps the identical command for recovery", async () => {
+  const h = harness();
+  try {
+    await reviewed(h);
+    h.failSettlementOnce();
+    const first = h.call("confirm") as Promise<void>;
+    await settle();
+    const stored = Command.recoverTransfer(h.storage, ACTOR, SESSION);
+    h.unmountHost();
+    h.confirms[0]?.resolve(resultValue);
+    await first;
+    await settle();
+    assert.deepEqual(Command.recoverTransfer(h.storage, ACTOR, SESSION), stored);
+    assert.equal(h.count("forget"), 0);
+  } finally {
+    h.stop();
+  }
+});
+
+await test("a disposed dialog's settlement never removes a newer request started after abandonment", async () => {
+  const h = harness();
+  try {
+    await reviewed(h);
+    const gate = deferred();
+    h.holdSettlement(gate.promise);
+    const first = h.call("confirm") as Promise<void>;
+    await settle();
+    const stored = Command.recoverTransfer(h.storage, ACTOR, SESSION);
+    assert.ok(stored);
+    h.confirms[0]?.resolve(resultValue);
+    await settle();
+    h.unmountHost();
+    // Meanwhile another mount abandons the unconfirmed command (복구 중단)
+    // and starts a new request for the same actor and session.
+    Command.forgetTransfer(h.storage, stored);
+    const newer = { ...stored, body: { ...stored.body, requestId: uuid(99) } };
+    Command.rememberTransfer(h.storage, newer);
+    gate.resolve(undefined);
+    await first;
+    await settle();
+    assert.deepEqual(Command.recoverTransfer(h.storage, ACTOR, SESSION), newer);
+  } finally {
+    h.stop();
+  }
+});
+
+async function disposedThenReturned(change: (h: ReturnType<typeof harness>) => void) {
+  const h = harness();
+  try {
+    await reviewed(h);
+    const gate = deferred();
+    h.holdSettlement(gate.promise);
+    const first = h.call("confirm") as Promise<void>;
+    await settle();
+    h.confirms[0]?.resolve(resultValue);
+    await settle();
+    h.unmountHost();
+    change(h);
+    h.authoritative({ userId: ACTOR, sessionId: SESSION });
+    gate.resolve(undefined);
+    await first;
+    await settle();
+    assert.ok(Command.recoverTransfer(h.storage, ACTOR, SESSION), "kept for its own actor");
+    assert.equal(h.count("forget"), 0);
+  } finally {
+    h.stop();
+  }
+}
+
+await test("after disposal, A -> B -> A back to the exact same session still fences the command", async () => {
+  await disposedThenReturned((h) => {
+    h.authoritative({ userId: TEAM, sessionId: OTHER_SESSION });
+  });
+});
+
+await test("after disposal, a 401 that is later restored to the same session still fences the command", async () => {
+  await disposedThenReturned((h) => {
+    h.unauthorized();
+  });
+});
+
+await test("a 401 while the dialog is still mounted fences the pending settlement (guard; the mounted watcher already rebinds)", async () => {
+  const h = harness();
+  try {
+    await reviewed(h);
+    const gate = deferred();
+    h.holdSettlement(gate.promise);
+    const first = h.call("confirm") as Promise<void>;
+    await settle();
+    h.confirms[0]?.resolve(resultValue);
+    await settle();
+    h.unauthorized();
+    gate.resolve(undefined);
+    await first;
+    await settle();
+    assert.ok(Command.recoverTransfer(h.storage, ACTOR, SESSION));
+    assert.equal(h.count("forget"), 0);
   } finally {
     h.stop();
   }

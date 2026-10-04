@@ -28,6 +28,7 @@ const BLOCKER_KEYS = {
   block_identity: "personalTransfer.blocker.body",
   body_encoding: "personalTransfer.blocker.body",
   native_state_missing: "personalTransfer.blocker.body",
+  timer_busy: "personalTransfer.blocker.timerBusy",
 } as const satisfies Record<TransferBlocker, I18nKey>;
 const CONFLICT_KEYS = {
   command_changed: "personalTransfer.conflictCommand",

@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import path from "node:path";
 import { expect, test, type Browser, type Page, type TestInfo } from "@playwright/test";
 import { z } from "zod";
 import { createE2eUser, login } from "./helpers";
@@ -78,6 +80,117 @@ function committed(workspaceId: string, select: string): unknown {
     throw new Error("restricted committed DB observation failed (credentials omitted)");
   }
 }
+const meiliTaskSchema = z
+  .object({
+    uid: z.number(),
+    indexUid: z.string().nullable().optional(),
+    status: z.string(),
+    type: z.string(),
+    enqueuedAt: z.string(),
+    startedAt: z.string().nullable().optional(),
+    finishedAt: z.string().nullable().optional(),
+    duration: z.string().nullable().optional(),
+    details: z.record(z.string(), z.unknown()).nullable().optional(),
+    error: z.object({ code: z.string() }).passthrough().nullable().optional(),
+  })
+  .passthrough();
+/**
+ * Diagnostic only: this run's isolated Meilisearch tasks enqueued from 10 s
+ * before the poll began, read through the harness's own task API with the
+ * run's generated key (in memory; never recorded). Called after the poll has
+ * settled; waits at most 10 s for those tasks to finish so a task finishing
+ * just after the poll is still timed. Records only sanitized task facts:
+ * uid, index, type, status, times, duration, numeric document counts and an
+ * error code. Never throws.
+ */
+async function observeMeiliTasks(since: Date) {
+  const url = process.env.FVOCI_MEILI_URL;
+  const key = process.env.FVOCI_MEILI_KEY;
+  if (!url || !key) return { unavailable: "harness Meilisearch URL/key not present" };
+  const after = new Date(since.getTime() - 10_000).toISOString();
+  const deadline = Date.now() + 10_000;
+  try {
+    for (;;) {
+      const response = await fetch(
+        `${url}/tasks?afterEnqueuedAt=${encodeURIComponent(after)}&limit=100`,
+        { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(2000) },
+      );
+      if (!response.ok) return { error: `tasks HTTP ${String(response.status)}` };
+      const results = z
+        .object({ results: z.array(meiliTaskSchema) })
+        .parse(await response.json()).results;
+      const pending = results.some((task) => !task.finishedAt);
+      if (!pending || Date.now() > deadline)
+        return {
+          readAt: new Date().toISOString(),
+          pendingAtRead: pending,
+          tasks: results.map((task) => ({
+            uid: task.uid,
+            indexUid: task.indexUid ?? null,
+            type: task.type,
+            status: task.status,
+            enqueuedAt: task.enqueuedAt,
+            startedAt: task.startedAt ?? null,
+            finishedAt: task.finishedAt ?? null,
+            duration: task.duration ?? null,
+            counts: Object.fromEntries(
+              Object.entries(task.details ?? {}).filter(([, value]) => typeof value === "number"),
+            ),
+            errorCode: task.error?.code ?? null,
+          })),
+        };
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  } catch (error) {
+    return { error: error instanceof Error ? error.name : "task read failed" };
+  }
+}
+/**
+ * Diagnostic observer for a search-index outbox poll (test only). Each call
+ * records, through the same restricted committed() role and tenant, the exact
+ * event rows of the targets with their processed flags, the snapshot xmin and
+ * this role's backends holding an xid or xmin. It never throws, so it cannot
+ * change the poll; the poll's own predicate is unchanged.
+ */
+function outboxObserver(workspaceId: string, targets: string[], verbs: string[]) {
+  for (const id of [workspaceId, ...targets]) z.string().uuid().parse(id);
+  const inTargets = targets.map((id) => `'${id}'`).join(",");
+  const inVerbs = verbs.map((verb) => `'${verb.replace(/[^a-z.]/g, "")}'`).join(",");
+  const observations: unknown[] = [];
+  const startedAt = new Date();
+  const observe = () => {
+    try {
+      observations.push(
+        committed(
+          workspaceId,
+          `SELECT json_build_object('at',clock_timestamp(),'tenant',current_setting('app.tenant_id',true),
+          'self',pg_backend_pid(),'snapshotXmin',pg_snapshot_xmin(pg_current_snapshot())::text,
+          'rows',(SELECT count(*) FROM fvoci.events WHERE target_id IN (${inTargets}) AND verb IN (${inVerbs})),
+          'distinctTargets',(SELECT count(DISTINCT target_id) FROM fvoci.events WHERE target_id IN (${inTargets}) AND verb IN (${inVerbs})),
+          'events',(SELECT coalesce(json_agg(json_build_object('id',id,'target',target_id,'verb',verb,'xact',xact::text,'seq',seq,
+            'processed',fvoci.app_outbox_is_processed('search-index',id)) ORDER BY xact,seq),'[]'::json)
+            FROM fvoci.events WHERE target_id IN (${inTargets}) AND verb IN (${inVerbs})),
+          'backends',(SELECT coalesce(json_agg(json_build_object('pid',pid,'state',state,'xactStart',xact_start,
+            'backendXid',backend_xid::text,'backendXmin',backend_xmin::text,'wait',wait_event_type) ORDER BY pid),'[]'::json)
+            FROM pg_stat_activity WHERE datname=current_database() AND (backend_xid IS NOT NULL OR backend_xmin IS NOT NULL)))`,
+        ),
+      );
+    } catch (error) {
+      observations.push({
+        at: new Date().toISOString(),
+        error: error instanceof Error ? error.message : "observation failed",
+      });
+    }
+  };
+  const record = async (testInfo: TestInfo, label: string) => {
+    const meiliTasks = await observeMeiliTasks(startedAt);
+    const body = JSON.stringify({ workspaceId, targets, verbs, observations, meiliTasks }, null, 1);
+    await testInfo.attach(`outbox-observer-${label}`, { body, contentType: "application/json" });
+    const dir = process.env.FVOCI_W2_DIAG_DIR;
+    if (dir) writeFileSync(path.join(dir, `${label}-${String(Date.now())}.json`), body);
+  };
+  return { observe, record };
+}
 /** The source pair's committed graph in one tenant, read as the app role. */
 function graph(workspaceId: string, documentId: string, taskId: string) {
   for (const id of [documentId, taskId]) z.string().uuid().parse(id);
@@ -154,10 +267,16 @@ async function witness(workspaceId: string, testInfo: TestInfo): Promise<void> {
     ).trim();
     return { name, container, inspected };
   });
+  const body = JSON.stringify({ test: testInfo.title, observed, ledger }, null, 1);
   await testInfo.attach("restricted-role-and-service-witness", {
-    body: JSON.stringify({ observed, ledger }, null, 1),
+    body,
     contentType: "application/json",
   });
+  // Durable copy when the runner provides its diagnostics directory (the same
+  // sanitized body: no environment, credentials or session values).
+  const dir = process.env.FVOCI_W2_DIAG_DIR;
+  if (dir)
+    writeFileSync(path.join(dir, `witness-${testInfo.testId}-${String(Date.now())}.json`), body);
 }
 async function setup(page: Page): Promise<void> {
   await page.goto("/");
@@ -206,6 +325,8 @@ async function openTransfer(page: Page) {
   return page.getByRole("dialog", { name: "팀에 공개하거나 이동", exact: true });
 }
 const dispositionsSchema = z.object({
+  documentTitle: z.string(),
+  taskTitle: z.string().nullable(),
   dispositions: z.array(z.object({ item: z.string(), outcome: z.string(), count: z.number() })),
 });
 function previewed(page: Page) {
@@ -215,19 +336,74 @@ function previewed(page: Page) {
       response.request().method() === "POST",
   );
 }
-/** The dialog discloses exactly what the server's preview says travels, stays or is left out. */
+// The ko translation contract the dialog renders (personalTransfer.files /
+// activities / history and personalTransfer.outcome.*).
+const OUTCOME_TEXT: Record<string, string> = {
+  moved: "같은 ID로 팀에 이동",
+  copied_new_id: "새 ID로 팀에 복사",
+  retained_private: "개인 공간에 비공개로 남음",
+  not_included: "포함하지 않음",
+};
+type DisclosureRow = { item: string; outcome: string; outcomeText: string };
+function expectedRows(preview: z.infer<typeof dispositionsSchema>): DisclosureRow[] {
+  return preview.dispositions.map(({ item, outcome, count }) => ({
+    item:
+      item === "document"
+        ? preview.documentTitle
+        : item === "task"
+          ? (preview.taskTitle ?? "")
+          : item === "attachment"
+            ? `첨부 파일 ${String(count)}개`
+            : item === "activity"
+              ? `작업 기록 ${String(count)}개`
+              : item === "time_entry"
+                ? `시간 기록 ${String(count)}개`
+                : item === "timer"
+                  ? `내 측정 기록 ${String(count)}개`
+                  : `편집 이력 ${String(count)}개`,
+    outcome,
+    outcomeText: OUTCOME_TEXT[outcome] ?? `missing outcome text for ${outcome}`,
+  }));
+}
+/**
+ * The dialog discloses exactly the server's preview, row by row and in order:
+ * each <dt> names its item (title or "{count}" label) and the <dd> after it
+ * carries that item's outcome and outcome text.
+ */
 async function expectDisclosure(
   dialog: ReturnType<Page["getByRole"]>,
   preview: Awaited<ReturnType<typeof previewed>>,
 ) {
   expect(preview.status(), await preview.text()).toBe(200);
-  const { dispositions } = dispositionsSchema.parse(await preview.json());
+  const parsed = dispositionsSchema.parse(await preview.json());
+  const { dispositions } = parsed;
   expect(dispositions.length).toBeGreaterThan(0);
-  const shown = dialog.locator("dd[data-outcome]");
-  await expect(shown).toHaveCount(dispositions.length);
-  expect(
-    (await shown.evaluateAll((rows) => rows.map((row) => row.getAttribute("data-outcome")))).sort(),
-  ).toEqual(dispositions.map((disposition) => disposition.outcome).sort());
+  // The one list whose rows carry outcomes (a plain CSS :has(), relative to
+  // the dialog).
+  const shown = await dialog.locator("dl:has(> dd[data-outcome])").evaluate((list) => {
+    const rows: { item: string; outcome: string; outcomeText: string }[] = [];
+    for (const term of list.querySelectorAll("dt")) {
+      const value = term.nextElementSibling;
+      rows.push({
+        item: term.textContent.trim(),
+        outcome: value?.tagName === "DD" ? (value.getAttribute("data-outcome") ?? "") : "",
+        outcomeText: value?.tagName === "DD" ? value.textContent.trim() : "",
+      });
+    }
+    return rows;
+  });
+  const expected = expectedRows(parsed);
+  expect(shown).toEqual(expected);
+  // Negative controls: the comparison distinguishes a swapped outcome and a
+  // changed count from what is shown.
+  const swapped = parsed.dispositions.map((row) => ({
+    ...row,
+    outcome: row.outcome === "moved" ? "copied_new_id" : "moved",
+  }));
+  expect(shown).not.toEqual(expectedRows({ ...parsed, dispositions: swapped }));
+  const counted = parsed.dispositions.map((row) => ({ ...row, count: row.count + 1 }));
+  if (parsed.dispositions.some((row) => !["document", "task"].includes(row.item)))
+    expect(shown).not.toEqual(expectedRows({ ...parsed, dispositions: counted }));
   return dispositions;
 }
 async function choose(
@@ -389,14 +565,24 @@ test("explicit COPY: Cancel has no effects, lost success replays once, new IDs, 
     // copy by its token and never an ID of the private original, in the
     // team, in global search and on a fresh search page; the personal
     // workspace's search stays closed to them.
-    await expect
-      .poll(() =>
-        committed(
-          team.id,
-          `SELECT (count(DISTINCT target_id)=2 AND COALESCE(bool_and(fvoci.app_outbox_is_processed('search-index',id)),false))::text::json FROM fvoci.events WHERE target_id IN ('${copyTask}','${replay.documentId}') AND verb IN ('task.created','document.created')`,
-        ),
-      )
-      .toBe(true);
+    const copyObserver = outboxObserver(
+      team.id,
+      [copyTask, replay.documentId],
+      ["task.created", "document.created"],
+    );
+    try {
+      await expect
+        .poll(() => {
+          copyObserver.observe();
+          return committed(
+            team.id,
+            `SELECT (count(DISTINCT target_id)=2 AND COALESCE(bool_and(fvoci.app_outbox_is_processed('search-index',id)),false))::text::json FROM fvoci.events WHERE target_id IN ('${copyTask}','${replay.documentId}') AND verb IN ('task.created','document.created')`,
+          );
+        })
+        .toBe(true);
+    } finally {
+      await copyObserver.record(testInfo, "copy-team-created");
+    }
     const found = (body: z.infer<typeof searchSchema>) => body.items.map((item) => item.id);
     await expect
       .poll(async () => {
@@ -486,6 +672,11 @@ test("explicit same-ID MOVE keeps document/task UUIDs, removes the private sourc
         expect.objectContaining({ item: "task", outcome: "moved" }),
       ]),
     );
+    // Literal rows: both titles disclosed as moved with the same IDs.
+    const moveRows = dialog.locator("dt", { hasText: title });
+    await expect(moveRows).toHaveCount(2);
+    for (const row of await moveRows.all())
+      await expect(row.locator("xpath=following-sibling::dd[1]")).toHaveText("같은 ID로 팀에 이동");
     await expect(
       dialog.getByText("완료 후 원본은 선택한 팀 프로젝트에서 열 수 있습니다."),
     ).toBeVisible();
@@ -533,8 +724,36 @@ test("explicit same-ID MOVE keeps document/task UUIDs, removes the private sourc
         workspace,
         `SELECT (count(DISTINCT target_id)=2 AND COALESCE(bool_and(fvoci.app_outbox_is_processed('search-index',id)),false))::text::json FROM fvoci.events WHERE target_id IN ('${pair.taskId}','${pair.documentId}') AND verb IN (${verbs})`,
       );
-    await expect.poll(() => processed(team.id, "'task.created','document.created'")).toBe(true);
-    await expect.poll(() => processed(personal.id, "'task.deleted','document.deleted'")).toBe(true);
+    const moveTeam = outboxObserver(
+      team.id,
+      [pair.taskId, pair.documentId],
+      ["task.created", "document.created"],
+    );
+    try {
+      await expect
+        .poll(() => {
+          moveTeam.observe();
+          return processed(team.id, "'task.created','document.created'");
+        })
+        .toBe(true);
+    } finally {
+      await moveTeam.record(testInfo, "move-team-created");
+    }
+    const movePersonal = outboxObserver(
+      personal.id,
+      [pair.taskId, pair.documentId],
+      ["task.deleted", "document.deleted"],
+    );
+    try {
+      await expect
+        .poll(() => {
+          movePersonal.observe();
+          return processed(personal.id, "'task.deleted','document.deleted'");
+        })
+        .toBe(true);
+    } finally {
+      await movePersonal.record(testInfo, "move-personal-deleted");
+    }
     const ids = async (url: string) => {
       const response = await mine.request.get(url);
       expect(response.status(), url).toBe(200);
@@ -724,6 +943,10 @@ test("COPY with an attachment: the copy gets a new file id a fresh teammate down
       expect.objectContaining({ item: "attachment", outcome: "copied_new_id", count: 1 }),
     ]),
   );
+  // Literal row: the one file is disclosed as copied with a new ID.
+  await expect(
+    dialog.locator("dt", { hasText: "첨부 파일 1개" }).locator("xpath=following-sibling::dd[1]"),
+  ).toHaveText("새 ID로 팀에 복사");
   await expect(dialog.getByText("원본은 개인 공간에 남습니다.")).toBeVisible();
   const committedCopy = page.waitForResponse(
     (response) =>
@@ -791,4 +1014,627 @@ test("COPY with an attachment: the copy gets a new file id a fresh teammate down
   );
   expect(original.status()).toBe(200);
   expect(Buffer.from(await original.body()).equals(bytes)).toBe(true);
+});
+
+const identitySchema = z.object({ userId: z.string().uuid(), sessionId: z.string().uuid() });
+const timerReceiptSchema = z.object({ runId: z.string().uuid(), version: z.number().int() });
+/** Labelled admin fixture (isolated run DB, local socket): states no current route creates. */
+function adminFixture(sql: string): string {
+  const adminUrl = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
+  const container = process.env.FVOCI_TEST_PG_CONTAINER;
+  if (!adminUrl || !container) throw new Error("isolated PostgreSQL fixture is required");
+  return execFileSync(
+    "docker",
+    [
+      "exec",
+      "-i",
+      container,
+      "psql",
+      "-X",
+      "-qAt",
+      "-U",
+      "postgres",
+      "-d",
+      new URL(adminUrl).pathname.slice(1),
+      "-v",
+      "ON_ERROR_STOP=1",
+    ],
+    { input: sql, encoding: "utf8", stdio: "pipe" },
+  ).trim();
+}
+
+test("MOVE discloses and carries the time records and my timer; COPY keeps them private; a timer running elsewhere refuses with no effects", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(120000);
+  await setup(page);
+  const token = `w2time${String(Date.now())}`;
+  const { personal, pair } = await capturedPair(page, `${token} 측정한 작업`);
+  const { team } = await teamProject(page, "PUBR", "workspace");
+  await witness(personal.id, testInfo);
+  const me = identitySchema.parse(await (await page.request.get("/api/v1/auth/me")).json());
+  const timer = async (workspace: string, task: string, body: Record<string, unknown>) => {
+    const response = await page.request.post(
+      `/api/v1/workspaces/${workspace}/tasks/${task}/timer`,
+      {
+        data: {
+          expectedActorId: me.userId,
+          expectedSessionId: me.sessionId,
+          requestId: crypto.randomUUID(),
+          runId: null,
+          ...body,
+        },
+      },
+    );
+    expect(response.status(), await response.text()).toBe(200);
+    return timerReceiptSchema.parse(await response.json());
+  };
+  // Real W5 route: one stopped run (its segment projects one time record).
+  const started = await timer(personal.id, pair.taskId, { operation: "start", expectedVersion: 0 });
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  await timer(personal.id, pair.taskId, {
+    operation: "stop",
+    expectedVersion: started.version,
+    runId: started.runId,
+  });
+  const timeRows = (workspace: string) =>
+    committed(
+      workspace,
+      `SELECT count(*)::text::json FROM fvoci.time_entries WHERE task_id='${pair.taskId}'`,
+    );
+  expect(timeRows(personal.id)).toBe(1);
+
+  // COPY review: both stay with the private original; no time privacy line.
+  await page.goto(`/w/${personal.slug}/${pair.documentDisplayId}`);
+  let dialog = await openTransfer(page);
+  let previewing = previewed(page);
+  await choose(dialog, "팀에 사본 공개", "PUBR 공개 프로젝트");
+  await expectDisclosure(dialog, await previewing);
+  for (const label of ["시간 기록 1개", "내 측정 기록 1개"])
+    await expect(
+      dialog.locator("dt", { hasText: label }).locator("xpath=following-sibling::dd[1]"),
+    ).toHaveText("개인 공간에 비공개로 남음");
+  await expect(dialog.getByText("시간 기록은 이 프로젝트에 접근할 수 있는")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "취소", exact: true }).click();
+  // Cancel returns to the form; close the dialog before opening it again.
+  await dialog.getByRole("button", { name: "닫기", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(timeRows(personal.id)).toBe(1);
+
+  // MOVE review: both move with the same IDs; the privacy line is shown.
+  dialog = await openTransfer(page);
+  previewing = previewed(page);
+  await choose(dialog, "팀으로 이동", "PUBR 공개 프로젝트");
+  await expectDisclosure(dialog, await previewing);
+  for (const label of ["시간 기록 1개", "내 측정 기록 1개"])
+    await expect(
+      dialog.locator("dt", { hasText: label }).locator("xpath=following-sibling::dd[1]"),
+    ).toHaveText("같은 ID로 팀에 이동");
+  await expect(
+    dialog.getByText(
+      "시간 기록은 이 프로젝트에 접근할 수 있는 사람에게 보입니다. 내 측정 기록과 수정 사유는 나에게만 보입니다.",
+    ),
+  ).toBeVisible();
+  const moving = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/personal-transfers") && response.request().method() === "POST",
+  );
+  await dialog.getByRole("button", { name: "팀으로 이동", exact: true }).click();
+  const moved = await moving;
+  expect(moved.status(), await moved.text()).toBe(200);
+  // The MOVE retires the private source: its page leaves the moved
+  // document's route, and the client still settles its durable command (no
+  // unconfirmed request remains to recover).
+  await expect(page).not.toHaveURL(new RegExp(`/${pair.documentDisplayId}$`));
+  await expect(
+    page.getByRole("button", { name: "미확인 팀 공개·이동 요청 확인", exact: true }),
+  ).toHaveCount(0);
+  expect(timeRows(team.id)).toBe(1);
+  expect(timeRows(personal.id)).toBe(0);
+
+  // A second pair with a released legacy open record (labelled admin
+  // fixture: no current route creates an open record), then a timer running
+  // on the moved task: moving the second pair would reinsert an open record
+  // the 048 trigger refuses, so it refuses before any effect.
+  const second = await capturedPair(page, `${token} 열린 기록`);
+  const open = crypto.randomUUID();
+  adminFixture(
+    `BEGIN; SELECT set_config('app.self_user_id','${me.userId}',true); INSERT INTO fvoci.time_entries(id,workspace_id,task_id,user_id,started_at,note) VALUES('${open}','${personal.id}','${second.pair.taskId}','${me.userId}',now()-interval '1 hour','열린 기록'); COMMIT;`,
+  );
+  const release = await page.request.post("/api/v1/me/task-timer/legacy-release", {
+    data: {
+      expectedActorId: me.userId,
+      expectedSessionId: me.sessionId,
+      requestId: crypto.randomUUID(),
+      timeEntryId: open,
+    },
+  });
+  expect(release.status(), await release.text()).toBe(200);
+  const running = await timer(team.id, pair.taskId, { operation: "start", expectedVersion: 0 });
+  const secondGraph = () => graph(personal.id, second.pair.documentId, second.pair.taskId);
+  const secondBefore = secondGraph();
+  const secondTime = () =>
+    committed(
+      personal.id,
+      `SELECT count(*)::text::json FROM fvoci.time_entries WHERE task_id='${second.pair.taskId}' AND ended_at IS NULL`,
+    );
+  expect(secondTime()).toBe(1);
+  await page.goto(`/w/${personal.slug}/${second.pair.documentDisplayId}`);
+  dialog = await openTransfer(page);
+  const refused = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/personal-transfers/preview") &&
+      response.request().method() === "POST",
+  );
+  await choose(dialog, "팀으로 이동", "PUBR 공개 프로젝트");
+  expect((await refused).status()).toBe(409);
+  await expect(dialog.getByRole("alert")).toContainText(
+    "다른 작업에서 측정 중이거나 끝나지 않은 시간 기록이 있어 지금은 이동할 수 없습니다. 그 측정을 끝낸 뒤 다시 시도하세요.",
+  );
+  expect(secondGraph()).toEqual(secondBefore);
+  expect(secondTime()).toBe(1);
+  // Acting on the message: stop that timer, and the same pair moves with its
+  // open record.
+  await timer(team.id, pair.taskId, {
+    operation: "stop",
+    expectedVersion: running.version,
+    runId: running.runId,
+  });
+  await dialog.getByRole("button", { name: "공개 내용 확인", exact: true }).click();
+  await expect(
+    dialog.locator("dt", { hasText: "시간 기록 1개" }).locator("xpath=following-sibling::dd[1]"),
+  ).toHaveText("같은 ID로 팀에 이동");
+  const secondMoving = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/personal-transfers") && response.request().method() === "POST",
+  );
+  await dialog.getByRole("button", { name: "팀으로 이동", exact: true }).click();
+  expect((await secondMoving).status()).toBe(200);
+  expect(
+    committed(
+      team.id,
+      `SELECT count(*)::text::json FROM fvoci.time_entries WHERE task_id='${second.pair.taskId}' AND ended_at IS NULL`,
+    ),
+  ).toBe(1);
+});
+
+const updateLogSchema = z.array(
+  z.object({ seq: z.number(), op: z.string().uuid(), payload: z.string(), at: z.string() }),
+);
+const nativeSchema = z.object({
+  document: z.object({ content: z.string(), hasToken: z.boolean() }),
+  documentState: z.object({ state: z.string() }).passthrough().nullable(),
+  documentUpdates: updateLogSchema,
+  taskState: z.object({ state: z.string() }).passthrough().nullable(),
+  taskUpdates: updateLogSchema,
+  revisions: z.array(z.object({ id: z.string().uuid() }).passthrough()),
+});
+const timerGraphSchema = z.object({
+  workspaces: z.array(z.string().uuid()),
+  runs: z.array(z.object({ id: z.string().uuid() }).passthrough()),
+  segments: z.array(z.object({ id: z.string().uuid(), run: z.string().uuid() }).passthrough()),
+});
+const teamTaskSchema = z.object({ id: z.string().uuid(), number: z.number().int() });
+const workflowSchema = z.object({ statuses: z.array(z.object({ id: z.string() }).passthrough()) });
+
+/**
+ * One MOVE observed by another signed-in session of the owner that keeps two
+ * pages mounted: the personal task page and one destination view (`tasks` or
+ * `board`) of a fresh team project that already shows a task. After the MOVE
+ * the source is denied with no editable stale form, and the destination view
+ * shows the moved task in place (same URL, page marker kept).
+ */
+async function moveWithOpenViews(
+  page: Page,
+  browser: Browser,
+  testInfo: TestInfo,
+  key: string,
+  destination: "tasks" | "board",
+) {
+  const token = `w2views${destination}${String(Date.now())}`;
+  const title = `${token} 열린 화면 작업`;
+  const { personal, pair } = await capturedPair(page, title);
+  const { team, project } = await teamProject(page, key, "workspace");
+  const workflow = workflowSchema.parse(
+    await (
+      await page.request.get(`/api/v1/workspaces/${team.id}/projects/${project.id}/workflow`)
+    ).json(),
+  );
+  const seeded = await page.request.post(
+    `/api/v1/workspaces/${team.id}/projects/${project.id}/tasks`,
+    { data: { title: `${token} 기존 팀 작업`, type: "task", statusId: workflow.statuses[0]?.id } },
+  );
+  expect(seeded.status(), await seeded.text()).toBe(201);
+  const existing = teamTaskSchema.parse(await seeded.json());
+
+  const other = await browser.newContext({ baseURL: testInfo.project.use.baseURL });
+  try {
+    const detail = await other.newPage();
+    await login(detail, owner.email, owner.password);
+    await detail.goto(`/w/${personal.slug}/${pair.taskDisplayId}`);
+    await expect(detail.getByTestId("task-edit-title")).toHaveValue(title);
+    const view = await other.newPage();
+    await view.goto(`/w/tracer/${project.key}/${destination}`);
+    const boardPanel = view.locator('section[data-testid="collection-board"]');
+    const row = (id: string, number: number) =>
+      destination === "tasks"
+        ? view.getByTestId(`task-row-${id}`)
+        : boardPanel.getByTestId(`collection-card-${project.key}-${String(number)}`);
+    await expect(row(existing.id, existing.number)).toBeVisible();
+    // Page-state markers: a reload or full navigation would drop them.
+    const views = [detail, view];
+    const urls = views.map((mounted) => mounted.url());
+    for (const mounted of views)
+      await mounted.evaluate((mark) => {
+        (window as unknown as { w2ViewMark?: string }).w2ViewMark = mark;
+      }, token);
+
+    const before = graph(personal.id, pair.documentId, pair.taskId);
+    await page.goto(`/w/${personal.slug}/${pair.documentDisplayId}`);
+    const dialog = await openTransfer(page);
+    const movePreview = previewed(page);
+    await choose(dialog, "팀으로 이동", `${key} 공개 프로젝트`);
+    await expectDisclosure(dialog, await movePreview);
+    const committedMove = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/personal-transfers") && response.request().method() === "POST",
+    );
+    await dialog.getByRole("button", { name: "팀으로 이동", exact: true }).click();
+    const response = await committedMove;
+    expect(response.status(), await response.text()).toBe(200);
+    const moved = transferSchema.parse(await response.json());
+    expect(moved).toMatchObject({
+      workspaceId: team.id,
+      projectId: project.id,
+      documentId: pair.documentId,
+      taskId: pair.taskId,
+      replayed: false,
+    });
+    const teamGraph = graph(team.id, pair.documentId, pair.taskId);
+    expect(teamGraph).toMatchObject({ documents: 1, tasks: 1, origins: 1, assignees: 1 });
+    const personalGraph = graph(personal.id, pair.documentId, pair.taskId);
+    expect(personalGraph).toMatchObject({
+      documents: 0,
+      tasks: 0,
+      origins: 0,
+      assignees: 0,
+      receipts: before.receipts + 1,
+    });
+    // Exactly one MOVE: one deleted event per target in the source tenant and
+    // one created event per target in the team.
+    const once = (verbs: string[], verb: string) =>
+      verbs.filter((row) => row.startsWith(`${verb}:`)).length;
+    for (const verb of ["task.deleted", "document.deleted"])
+      expect(once(personalGraph.eventVerbs, verb), verb).toBe(1);
+    for (const verb of ["task.created", "document.created"])
+      expect(once(teamGraph.eventVerbs, verb), verb).toBe(1);
+
+    // Server reads from the open session: the old source is gone, the team
+    // copy of the same IDs is readable.
+    for (const suffix of [`tasks/${pair.taskId}`, `documents/${pair.documentId}`]) {
+      const denied = await detail.request.get(`/api/v1/workspaces/${personal.id}/${suffix}`);
+      expect([403, 404], suffix).toContain(denied.status());
+    }
+    const teamRead = await detail.request.get(`/api/v1/workspaces/${team.id}/tasks/${pair.taskId}`);
+    expect(teamRead.status()).toBe(200);
+
+    // Both mounted pages converge through their own stream/refetch, in place.
+    await expect(
+      detail.getByRole("alert").filter({ hasText: "태스크를 찾을 수 없습니다" }),
+    ).toBeVisible();
+    await expect(detail.getByTestId("task-edit-title")).toHaveCount(0);
+    await expect(row(pair.taskId, moved.taskNumber ?? 0)).toContainText(title);
+    await expect(row(existing.id, existing.number)).toBeVisible();
+    for (const [index, mounted] of views.entries()) {
+      expect(mounted.url()).toBe(urls[index]);
+      expect(
+        await mounted.evaluate(() => (window as unknown as { w2ViewMark?: string }).w2ViewMark),
+      ).toBe(token);
+    }
+    // Watching changed nothing: still exactly the one MOVE.
+    expect(graph(team.id, pair.documentId, pair.taskId)).toEqual(teamGraph);
+  } finally {
+    await other.close();
+  }
+}
+
+test("MOVE with views open elsewhere: the personal task page is denied in place, and a mounted team task list, then a mounted board, converge without reloading", async ({
+  page,
+  browser,
+}, testInfo) => {
+  test.setTimeout(120000);
+  await setup(page);
+  const personal = workspaceSchema.parse(
+    await (await page.request.post("/api/v1/me/personal-workspace")).json(),
+  );
+  await witness(personal.id, testInfo);
+  // Sequential: each MOVE has its own pair, project and observing context.
+  await moveWithOpenViews(page, browser, testInfo, "PUBV", "tasks");
+  await moveWithOpenViews(page, browser, testInfo, "PUBW", "board");
+});
+
+test("MOVE whose committed success is lost replays the same request once: same IDs, file, time records and history, no duplicate effects", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(120000);
+  await setup(page);
+  const token = `w2lostmove${String(Date.now())}`;
+  const title = `${token} 응답 유실 이동`;
+  const { personal, pair } = await capturedPair(page, title);
+  const { team, project } = await teamProject(page, "PUBL", "workspace");
+  await witness(personal.id, testInfo);
+  const me = identitySchema.parse(await (await page.request.get("/api/v1/auth/me")).json());
+  // One file shown in the document body, and one stopped run (real W5 route)
+  // projecting one time record.
+  const bytes = Buffer.from(Array.from({ length: 70_000 }, (_, i) => (i * 7919) % 251));
+  const fileName = `${token} 증빙.bin`;
+  const attachment = await uploadTaskFile(page, personal.id, pair.taskId, fileName, bytes);
+  const saved = await page.request.put(
+    `/api/v1/workspaces/${personal.id}/documents/${pair.documentId}/body`,
+    {
+      data: {
+        contentJson: {
+          type: "doc",
+          content: [
+            { type: "paragraph", content: [{ type: "text", text: `${token} 이동할 본문` }] },
+            { type: "attachment", attrs: { id: attachment, name: fileName } },
+          ],
+        },
+      },
+    },
+  );
+  expect(saved.ok(), await saved.text()).toBe(true);
+  const timer = async (body: Record<string, unknown>) => {
+    const response = await page.request.post(
+      `/api/v1/workspaces/${personal.id}/tasks/${pair.taskId}/timer`,
+      {
+        data: {
+          expectedActorId: me.userId,
+          expectedSessionId: me.sessionId,
+          requestId: crypto.randomUUID(),
+          runId: null,
+          ...body,
+        },
+      },
+    );
+    expect(response.status(), await response.text()).toBe(200);
+    return timerReceiptSchema.parse(await response.json());
+  };
+  const started = await timer({ operation: "start", expectedVersion: 0 });
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  await timer({ operation: "stop", expectedVersion: started.version, runId: started.runId });
+
+  const ids = (workspace: string, table: "time_entries" | "attachments") =>
+    committed(
+      workspace,
+      `SELECT coalesce(json_agg(id ORDER BY id),'[]'::json) FROM fvoci.${table} WHERE task_id='${pair.taskId}'`,
+    );
+  const history = (workspace: string) =>
+    committed(
+      workspace,
+      `SELECT json_build_object(
+      'revisions',(SELECT count(*) FROM fvoci.revisions WHERE (target_kind='document' AND target_id='${pair.documentId}') OR (target_kind='task' AND target_id='${pair.taskId}')),
+      'documentUpdates',(SELECT count(*) FROM fvoci.document_collab_updates WHERE document_id='${pair.documentId}'),
+      'taskUpdates',(SELECT count(*) FROM fvoci.task_collab_updates WHERE task_id='${pair.taskId}'))`,
+    );
+  // Exact native state of this document and task in one tenant: current
+  // content, stored states, ordered update logs and revisions, as digests
+  // and metadata (no parser; rows restricted to the tenant and these IDs).
+  const native = (workspace: string) =>
+    nativeSchema.parse(
+      committed(
+        workspace,
+        `SELECT json_build_object(
+        'document',(SELECT json_build_object('content',md5(content_json::text),'hasToken',position('${token}' in content_json::text)>0) FROM fvoci.documents WHERE workspace_id='${workspace}' AND id='${pair.documentId}'),
+        'documentState',(SELECT json_build_object('state',md5(state),'encoding',encoding,'compacted',compacted_at,'updated',updated_at) FROM fvoci.document_states WHERE workspace_id='${workspace}' AND document_id='${pair.documentId}'),
+        'documentUpdates',(SELECT coalesce(json_agg(json_build_object('seq',seq,'op',op_id,'payload',md5(payload),'at',created_at) ORDER BY seq),'[]'::json) FROM fvoci.document_collab_updates WHERE workspace_id='${workspace}' AND document_id='${pair.documentId}'),
+        'taskState',(SELECT json_build_object('state',md5(state),'encoding',encoding,'compacted',compacted_at,'updated',updated_at,'generation',writer_generation,'cutoff',snapshot_cutoff_seq,'tail',tail_seq) FROM fvoci.task_states WHERE workspace_id='${workspace}' AND task_id='${pair.taskId}'),
+        'taskUpdates',(SELECT coalesce(json_agg(json_build_object('seq',seq,'op',op_id,'payload',md5(payload),'at',created_at) ORDER BY seq),'[]'::json) FROM fvoci.task_collab_updates WHERE workspace_id='${workspace}' AND task_id='${pair.taskId}'),
+        'revisions',(SELECT coalesce(json_agg(json_build_object('id',id,'kind',target_kind,'snapshot',md5(y_snapshot),'content',md5(content_json::text),'text',md5(text),'reason',reason,'by',created_by,'at',created_at) ORDER BY id),'[]'::json) FROM fvoci.revisions WHERE workspace_id='${workspace}' AND target_id IN ('${pair.documentId}','${pair.taskId}')))`,
+      ),
+    );
+  // My timer rows are actor-scoped (048 self_timer RLS): read through the
+  // same restricted role with a transaction-local self user (a validated
+  // UUID), canonical and ordered, without the workspace column.
+  const actor = z.string().uuid().parse(me.userId);
+  // 048 self_timer filters by user only, so each read also names the
+  // validated workspace: the source and destination are observed separately.
+  const timerRows = (workspace: string) => {
+    const tenant = z.string().uuid().parse(workspace);
+    return timerGraphSchema.parse(
+      committed(
+        workspace,
+        `SET LOCAL app.self_user_id='${actor}'; SELECT json_build_object(
+      'workspaces',(SELECT coalesce(json_agg(DISTINCT workspace_id),'[]'::json) FROM (SELECT workspace_id FROM fvoci.task_timer_runs WHERE workspace_id='${tenant}' AND task_id='${pair.taskId}' UNION ALL SELECT workspace_id FROM fvoci.task_timer_segments WHERE workspace_id='${tenant}' AND task_id='${pair.taskId}') w),
+      'runs',(SELECT coalesce(json_agg(json_build_object('id',id,'user',user_id,'task',task_id,'status',status,'version',version,'started',started_at,'stopped',stopped_at,'note',note) ORDER BY id),'[]'::json) FROM fvoci.task_timer_runs WHERE workspace_id='${tenant}' AND task_id='${pair.taskId}'),
+      'segments',(SELECT coalesce(json_agg(json_build_object('id',id,'run',run_id,'user',user_id,'task',task_id,'started',started_at,'ended',ended_at,'timeEntry',time_entry_id) ORDER BY id),'[]'::json) FROM fvoci.task_timer_segments WHERE workspace_id='${tenant}' AND task_id='${pair.taskId}'))`,
+      ),
+    );
+  };
+  const sourceTimer = timerRows(personal.id);
+  expect(sourceTimer.workspaces).toEqual([personal.id]);
+  expect(sourceTimer.runs.map((run) => run.id)).toEqual([started.runId]);
+  expect(sourceTimer.segments.length).toBeGreaterThan(0);
+  for (const segment of sourceTimer.segments) expect(segment.run).toBe(started.runId);
+  const sourceTime = ids(personal.id, "time_entries");
+  expect(sourceTime).toHaveLength(1);
+  expect(ids(personal.id, "attachments")).toEqual([attachment]);
+  const before = graph(personal.id, pair.documentId, pair.taskId);
+
+  await page.goto(`/w/${personal.slug}/${pair.documentDisplayId}`);
+  const dialog = await openTransfer(page);
+  const movePreview = previewed(page);
+  await choose(dialog, "팀으로 이동", "PUBL 공개 프로젝트");
+  await expectDisclosure(dialog, await movePreview);
+  for (const label of ["첨부 파일 1개", "시간 기록 1개"])
+    await expect(
+      dialog.locator("dt", { hasText: label }).locator("xpath=following-sibling::dd[1]"),
+    ).toHaveText("같은 ID로 팀에 이동");
+  let original: unknown;
+  const sent: { bytes: Buffer | null } = { bytes: null };
+  let originalCookie: string | null = null;
+  let lostSeen!: (value: z.infer<typeof transferSchema>) => void;
+  const lostResponse = new Promise<z.infer<typeof transferSchema>>((resolve) => {
+    lostSeen = resolve;
+  });
+  await page.route("**/personal-transfers", async (route) => {
+    original = route.request().postDataJSON() as unknown;
+    sent.bytes = route.request().postDataBuffer();
+    originalCookie = await route.request().headerValue("cookie");
+    const response = await route.fetch();
+    expect(response.status()).toBe(200);
+    const body = transferSchema.parse(await response.json());
+    // The actual Rust transaction committed; only the browser response is lost.
+    await route.abort("failed");
+    lostSeen(body);
+  });
+  await dialog.getByRole("button", { name: "팀으로 이동", exact: true }).click();
+  const lost = await lostResponse;
+  await page.unroute("**/personal-transfers");
+  expect(lost).toMatchObject({
+    workspaceId: team.id,
+    projectId: project.id,
+    documentId: pair.documentId,
+    taskId: pair.taskId,
+    replayed: false,
+  });
+  // Committed exactly once: the same IDs moved with the file and time record.
+  expect(graph(personal.id, pair.documentId, pair.taskId)).toMatchObject({
+    documents: 0,
+    tasks: 0,
+    origins: 0,
+    assignees: 0,
+    receipts: before.receipts + 1,
+  });
+  const committedTeam = graph(team.id, pair.documentId, pair.taskId);
+  expect(committedTeam).toMatchObject({ documents: 1, tasks: 1, origins: 1, assignees: 1 });
+  expect(ids(team.id, "time_entries")).toEqual(sourceTime);
+  expect(ids(personal.id, "time_entries")).toEqual([]);
+  expect(ids(team.id, "attachments")).toEqual([attachment]);
+  expect(ids(personal.id, "attachments")).toEqual([]);
+  // The run and its segments moved as the same rows; only the workspace maps.
+  const movedTimer = timerRows(team.id);
+  expect(movedTimer).toEqual({ ...sourceTimer, workspaces: [team.id] });
+  expect(timerRows(personal.id)).toEqual({ workspaces: [], runs: [], segments: [] });
+  const committedHistory = history(team.id);
+  // The moved document carries its current content and native updates.
+  const committedNative = native(team.id);
+  expect(committedNative.document).toMatchObject({ hasToken: true });
+  expect(
+    committedNative.documentUpdates.length + (committedNative.documentState ? 1 : 0),
+  ).toBeGreaterThan(0);
+  // The source tenant committed exactly one deleted event per target.
+  const committedPersonal = graph(personal.id, pair.documentId, pair.taskId);
+  for (const verb of ["task.deleted", "document.deleted"])
+    expect(committedPersonal.eventVerbs.filter((row) => row.startsWith(`${verb}:`))).toHaveLength(
+      1,
+    );
+
+  // A lost MOVE success can leave no source route: from a page without one,
+  // the shell's recovery entry replays the stored command.
+  await page.goto("/w/tracer/my-tasks");
+  const entry = page.getByRole("button", { name: "미확인 팀 공개·이동 요청 확인", exact: true });
+  await entry.click();
+  const recovery = page.getByRole("dialog", { name: "미확인 팀 공개·이동 요청 확인", exact: true });
+  await expect(recovery.getByRole("button", { name: "같은 요청 다시 확인" })).toBeEnabled();
+  const retry = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/personal-transfers") && response.request().method() === "POST",
+  );
+  await recovery.getByRole("button", { name: "같은 요청 다시 확인" }).click();
+  const retried = await retry;
+  expect(retried.request().postDataJSON()).toEqual(original);
+  // Byte-identical, not only JSON-equal.
+  const originalBytes = sent.bytes;
+  if (!originalBytes) throw new Error("original request body was not captured");
+  const retriedBytes = retried.request().postDataBuffer();
+  expect(retriedBytes?.equals(originalBytes)).toBe(true);
+  // Same session (compared in memory only; never recorded).
+  expect(await retried.request().headerValue("cookie")).toBe(originalCookie);
+  const replay = transferSchema.parse(await retried.json());
+  expect(replay).toEqual({ ...lost, replayed: true });
+  // On success the same dialog is retitled from the recovery step back to
+  // its normal title (as in the COPY case).
+  const completed = page.getByRole("dialog", { name: "팀에 공개하거나 이동", exact: true });
+  await expect(completed.getByText("요청이 완료되었습니다.")).toBeVisible();
+
+  // No second transfer and no duplicate effects.
+  expect(graph(personal.id, pair.documentId, pair.taskId).receipts).toBe(before.receipts + 1);
+  expect(graph(team.id, pair.documentId, pair.taskId)).toEqual(committedTeam);
+  expect(ids(team.id, "time_entries")).toEqual(sourceTime);
+  expect(ids(team.id, "attachments")).toEqual([attachment]);
+  expect(history(team.id)).toEqual(committedHistory);
+  expect(native(team.id)).toEqual(committedNative);
+  expect(graph(personal.id, pair.documentId, pair.taskId)).toEqual(committedPersonal);
+  expect(timerRows(team.id)).toEqual(movedTimer);
+  expect(timerRows(personal.id)).toEqual({ workspaces: [], runs: [], segments: [] });
+  for (const verb of ["task.created", "document.created"])
+    expect(committedTeam.eventVerbs.filter((row) => row.startsWith(`${verb}:`))).toHaveLength(1);
+  const download = await page.request.get(
+    `/api/v1/workspaces/${team.id}/attachments/${attachment}/download`,
+  );
+  expect(download.status()).toBe(200);
+  expect(Buffer.from(await download.body()).equals(bytes)).toBe(true);
+
+  // Search: once the consumer processed the one created pair (no TTL wait),
+  // the team finds the same IDs once and personal search no longer does.
+  const observer = outboxObserver(
+    team.id,
+    [pair.taskId, pair.documentId],
+    ["task.created", "document.created"],
+  );
+  try {
+    await expect
+      .poll(() => {
+        observer.observe();
+        return committed(
+          team.id,
+          `SELECT (count(DISTINCT target_id)=2 AND COALESCE(bool_and(fvoci.app_outbox_is_processed('search-index',id)),false))::text::json FROM fvoci.events WHERE target_id IN ('${pair.taskId}','${pair.documentId}') AND verb IN ('task.created','document.created')`,
+        );
+      })
+      .toBe(true);
+  } finally {
+    await observer.record(testInfo, "lost-move-team-created");
+  }
+  const personalObserver = outboxObserver(
+    personal.id,
+    [pair.taskId, pair.documentId],
+    ["task.deleted", "document.deleted"],
+  );
+  try {
+    await expect
+      .poll(() => {
+        personalObserver.observe();
+        return committed(
+          personal.id,
+          `SELECT (count(DISTINCT target_id)=2 AND COALESCE(bool_and(fvoci.app_outbox_is_processed('search-index',id)),false))::text::json FROM fvoci.events WHERE target_id IN ('${pair.taskId}','${pair.documentId}') AND verb IN ('task.deleted','document.deleted')`,
+        );
+      })
+      .toBe(true);
+  } finally {
+    await personalObserver.record(testInfo, "lost-move-personal-deleted");
+  }
+  const found = async (url: string) => {
+    const response = await page.request.get(url);
+    expect(response.status(), url).toBe(200);
+    return searchSchema.parse(await response.json()).items.map((item) => item.id);
+  };
+  await expect
+    .poll(async () => found(`/api/v1/workspaces/${team.id}/search?q=${token}`))
+    .toEqual(expect.arrayContaining([pair.taskId, pair.documentId]));
+  const teamIds = await found(`/api/v1/workspaces/${team.id}/search?q=${token}`);
+  expect(teamIds.filter((id) => id === pair.taskId)).toHaveLength(1);
+  expect(teamIds.filter((id) => id === pair.documentId)).toHaveLength(1);
+  const personalIds = await found(`/api/v1/workspaces/${personal.id}/search?q=${token}`);
+  expect(personalIds).not.toContain(pair.taskId);
+  expect(personalIds).not.toContain(pair.documentId);
+
+  // The recovered command is settled: closing leaves no unconfirmed request,
+  // also after a reload.
+  await completed.getByRole("button", { name: "닫기", exact: true }).click();
+  await expect(completed).toBeHidden();
+  await expect(entry).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByTestId("my-tasks")).toBeVisible();
+  await expect(entry).toHaveCount(0);
 });

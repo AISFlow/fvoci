@@ -323,6 +323,8 @@ fn structural_archive(ids: &StructuralIds) -> fvoci_server::native_archive::Arch
         "views",
         "document_tags",
         "document_tag_assignments",
+        "purged_label_refs",
+        "purged_milestone_refs",
         "collection_fields",
         "collection_options",
         "collection_values",
@@ -4580,7 +4582,6 @@ async fn person_time_rows(admin: &sqlx::PgPool, workspace: Uuid, user: Uuid) -> 
 #[tokio::test]
 async fn native_archive_restores_milestones_and_dependencies_for_a_fresh_client() {
     use fvoci_server::db::native_archive::{capture, publish};
-    use fvoci_server::native_archive::ArchiveError;
     let harness = TestDb::bootstrap().await;
     let fx = fixture(&harness).await;
     let session = project_harness::session_id_for_user(&fx.admin, fx.user_id).await;
@@ -4841,9 +4842,9 @@ async fn native_archive_restores_milestones_and_dependencies_for_a_fresh_client(
     )
     .await;
 
-    // Incomplete history: once a milestone that a task's history names is
-    // purged, the history reference has no archived milestone and the export
-    // is refused as a typed model, never silently pruned.
+    // Purged history: once a milestone that a task's history names is purged,
+    // the history keeps its reference and the archive types it as a purged
+    // milestone reference (never a resurrected row, never silently pruned).
     let gone = call(
         fx.app.clone(),
         "POST",
@@ -4868,15 +4869,16 @@ async fn native_archive_restores_milestones_and_dependencies_for_a_fresh_client(
         fx.cookie.clone(),
     )
     .await;
-    let refused = capture(&fx.pool, ws, fx.user_id, session, &project_only(project_id))
+    let purged = capture(&fx.pool, ws, fx.user_id, session, &project_only(project_id))
         .await
         .expect("capture reads the graph")
-        .archive
-        .validate();
-    assert!(
-        matches!(&refused, Err(ArchiveError::Unsupported(m)) if m == "non-baseline task activity"),
-        "{refused:?}"
-    );
+        .archive;
+    purged
+        .validate()
+        .expect("purged milestone history is valid");
+    let gone_id = Uuid::parse_str(gone["id"].as_str().unwrap()).unwrap();
+    assert_eq!(purged.graph.purged_milestone_refs, vec![gone_id]);
+    assert!(purged.graph.milestones.iter().all(|m| m.id != gone_id));
 
     let storages = [fx.storage_root(), dst.storage_root()];
     fx.pool.close().await;
@@ -8109,6 +8111,683 @@ async fn native_archive_restores_recurring_tasks_for_a_fresh_client() {
     assert_eq!(
         items,
         vec![json!({"kind":"created","channel":"system","changes":[],"actor":dst.user_id})]
+    );
+
+    let storages = [fx.storage_root(), dst.storage_root()];
+    fx.pool.close().await;
+    fx.admin.close().await;
+    dst.pool.close().await;
+    dst.admin.close().await;
+    harness.cleanup().await;
+    destination_db.cleanup().await;
+    for storage in storages {
+        std::fs::remove_dir_all(storage).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_archive_restores_purged_label_and_milestone_history() {
+    use fvoci_server::db::native_archive::{capture, publish, NativeDbError};
+    use fvoci_server::native_archive::ArchiveError;
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let session = project_harness::session_id_for_user(&fx.admin, fx.user_id).await;
+    let ws = fx.workspace_id;
+    let call = |app: axum::Router,
+                method: &'static str,
+                path: String,
+                body: Option<Value>,
+                cookie: String| async move {
+        let (status, reply) = json_request(app, method, &path, body, Some(&cookie)).await;
+        assert!(status.is_success(), "{method} {path}: {status} {reply}");
+        reply
+    };
+    let project =
+        project_harness::create_project(fx.app.clone(), &fx.cookie, ws, "PUR", "private").await;
+    let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+    let w = format!("/api/v1/workspaces/{ws}");
+    let base = format!("{w}/projects/{project_id}");
+    // Ordinary writers: a label assigned under its first name, renamed, then
+    // unassigned (history names it twice, under each name); a live label
+    // kept; a milestone assigned. Then the label and the milestone are purged
+    // (neither purge writes task activity).
+    let gone_label = call(
+        fx.app.clone(),
+        "POST",
+        format!("{base}/labels"),
+        Some(json!({"name":"원래 이름","color":"red"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let kept_label = call(
+        fx.app.clone(),
+        "POST",
+        format!("{base}/labels"),
+        Some(json!({"name":"남는 라벨 🧪","color":"teal"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let gone_milestone = call(
+        fx.app.clone(),
+        "POST",
+        format!("{base}/milestones"),
+        Some(json!({"name":"폐기될 이정표 🧪"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let gone_label_id = Uuid::parse_str(gone_label["id"].as_str().unwrap()).unwrap();
+    let gone_milestone_id = Uuid::parse_str(gone_milestone["id"].as_str().unwrap()).unwrap();
+    let task = call(
+        fx.app.clone(),
+        "POST",
+        format!("{base}/tasks"),
+        Some(json!({"title":"이력 태스크 🧪"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let task_id = task["id"].as_str().unwrap().to_owned();
+    call(fx.app.clone(), "PATCH", format!("{w}/tasks/{task_id}"),
+        Some(json!({"labelIds":[gone_label["id"], kept_label["id"]],"milestoneId":gone_milestone["id"]})), fx.cookie.clone()).await;
+    call(
+        fx.app.clone(),
+        "PATCH",
+        format!("{base}/labels/{gone_label_id}"),
+        Some(json!({"name":"바뀐 이름 🧪"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    call(
+        fx.app.clone(),
+        "PATCH",
+        format!("{w}/tasks/{task_id}"),
+        Some(json!({"labelIds":[kept_label["id"]]})),
+        fx.cookie.clone(),
+    )
+    .await;
+    call(
+        fx.app.clone(),
+        "DELETE",
+        format!("{base}/labels/{gone_label_id}"),
+        None,
+        fx.cookie.clone(),
+    )
+    .await;
+    call(
+        fx.app.clone(),
+        "DELETE",
+        format!("{base}/milestones/{gone_milestone_id}"),
+        None,
+        fx.cookie.clone(),
+    )
+    .await;
+    let read = |app: axum::Router, w: String, base: String, cookie: String| {
+        let task_id = task_id.clone();
+        async move {
+            let detail = call(
+                app.clone(),
+                "GET",
+                format!("{w}/tasks/{task_id}"),
+                None,
+                cookie.clone(),
+            )
+            .await;
+            let activity = call(
+                app.clone(),
+                "GET",
+                format!("{w}/tasks/{task_id}/activity"),
+                None,
+                cookie.clone(),
+            )
+            .await;
+            let items: Vec<Value> = activity["items"].as_array().unwrap().iter()
+                .map(|i| json!({"id":i["id"],"type":i["type"],"kind":i["kind"],"channel":i["channel"],"changes":i["changes"]}))
+                .collect();
+            let labels = call(
+                app.clone(),
+                "GET",
+                format!("{base}/labels"),
+                None,
+                cookie.clone(),
+            )
+            .await;
+            let milestones = call(
+                app.clone(),
+                "GET",
+                format!("{base}/milestones"),
+                None,
+                cookie.clone(),
+            )
+            .await;
+            json!({"task":{"id":detail["id"],"number":detail["number"],"title":detail["title"],"labelIds":detail["labelIds"],"milestoneId":detail["milestoneId"]},
+                "activity":items,"labels":labels,"milestones":milestones})
+        }
+    };
+    let source = read(fx.app.clone(), w.clone(), base.clone(), fx.cookie.clone()).await;
+    // Source facts: the history names the purged label under both names and
+    // the purged milestone; neither is a live row any more.
+    let history = source["activity"].to_string();
+    for text in [
+        gone_label_id.to_string(),
+        gone_milestone_id.to_string(),
+        "원래 이름".into(),
+        "바뀐 이름 🧪".into(),
+        "폐기될 이정표 🧪".into(),
+    ] {
+        assert!(history.contains(&text), "{text} in {history}");
+    }
+    assert_eq!(source["task"]["labelIds"], json!([kept_label["id"]]));
+    assert_eq!(source["task"]["milestoneId"], Value::Null);
+
+    let captured = capture(&fx.pool, ws, fx.user_id, session, &project_only(project_id))
+        .await
+        .expect("purged label and milestone history is capturable");
+    captured
+        .archive
+        .validate()
+        .expect("purged label and milestone history is valid");
+    let graph = serde_json::to_value(&captured.archive.graph).unwrap();
+    assert_eq!(
+        (&graph["purged_label_refs"], &graph["purged_milestone_refs"]),
+        (&json!([gone_label_id]), &json!([gone_milestone_id]))
+    );
+    assert_eq!(graph["labels"].as_array().unwrap().len(), 1);
+    assert_eq!(graph["milestones"], json!([]));
+
+    // Archive-level negatives on the real captured graph: a padded, duplicate,
+    // live, cross-kind or emptied list, and an unknown reference kind, never
+    // validate (or parse); the unedited graph does.
+    let edited = |edit: &dyn Fn(&mut Value)| {
+        let mut archive = serde_json::to_value(&captured.archive).unwrap();
+        edit(&mut archive["graph"]);
+        serde_json::from_value::<fvoci_server::native_archive::Archive>(archive)
+            .map_err(|e| e.to_string())
+            .and_then(|a| a.validate().map_err(|e| format!("{e:?}")))
+    };
+    let padded = Uuid::now_v7();
+    let push = |key: &'static str, value: Value| {
+        move |g: &mut Value| g[key].as_array_mut().unwrap().push(value.clone())
+    };
+    assert!(
+        edited(&push("purged_label_refs", json!(padded))).is_err(),
+        "padded"
+    );
+    assert!(
+        edited(&push("purged_label_refs", json!(gone_label_id))).is_err(),
+        "duplicate"
+    );
+    assert!(
+        edited(&push("purged_label_refs", graph["labels"][0]["id"].clone())).is_err(),
+        "live"
+    );
+    assert!(
+        edited(&push("purged_label_refs", json!(gone_milestone_id))).is_err(),
+        "milestone listed as a label"
+    );
+    assert!(
+        edited(&|g: &mut Value| g["purged_status_refs"] = json!([])).is_err(),
+        "unknown kind"
+    );
+    // The history's milestone change also names an id that is the purged
+    // label, or the live label: one id as both kinds, and an id that is a
+    // live row of the other kind, are never purged references (listed or
+    // not).
+    let milestone_from = |id: Value, listed: bool| {
+        move |g: &mut Value| {
+            for item in g["activity"].as_array_mut().unwrap() {
+                for change in item["changes"].as_array_mut().unwrap() {
+                    if change["field"] == "milestoneId" {
+                        change["from"] = json!({"id": id.clone(), "label": null});
+                    }
+                }
+            }
+            if listed {
+                let mut ids = vec![id.clone(), json!(gone_milestone_id)];
+                ids.sort_by_key(|v| v.as_str().unwrap().to_owned());
+                g["purged_milestone_refs"] = json!(ids);
+            }
+        }
+    };
+    for listed in [true, false] {
+        assert!(
+            edited(&milestone_from(json!(gone_label_id), listed)).is_err(),
+            "both kinds, listed {listed}"
+        );
+        assert!(
+            edited(&milestone_from(graph["labels"][0]["id"].clone(), listed)).is_err(),
+            "live other kind, listed {listed}"
+        );
+    }
+    assert_eq!(
+        edited(&|g: &mut Value| g["purged_milestone_refs"] = json!([])),
+        Err("Unsupported(\"non-baseline task activity\")".to_owned()),
+        "emptied"
+    );
+    assert_eq!(edited(&|_: &mut Value| {}), Ok(()), "unedited");
+
+    let destination_db = TestDb::bootstrap().await;
+    let dst = fixture(&destination_db).await;
+    let (destination, _, claim) = claimed_restore(&dst, dst.user_id, &dst.cookie).await;
+    publish(
+        &dst.pool,
+        &claim,
+        &captured.archive,
+        &std::collections::BTreeMap::new(),
+        &dst.settings.quota,
+    )
+    .await
+    .expect("purged label and milestone history restores");
+    let dw = format!("/api/v1/workspaces/{destination}");
+    let dbase = format!("{dw}/projects/{project_id}");
+    // The destination client reads exactly the source: the same history
+    // (historical ids and names), the same live labels and milestones.
+    let restored = read(
+        dst.app.clone(),
+        dw.clone(),
+        dbase.clone(),
+        dst.cookie.clone(),
+    )
+    .await;
+    assert_eq!(restored, source);
+    // No purged row is resurrected anywhere in the destination installation.
+    let resurrected: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM fvoci.labels WHERE id=$1), (SELECT count(*) FROM fvoci.milestones WHERE id=$2)",
+    )
+    .bind(gone_label_id)
+    .bind(gone_milestone_id)
+    .fetch_one(&dst.admin)
+    .await
+    .unwrap();
+    assert_eq!(resurrected, (0, 0));
+    // Writers continue on the destination: a new label and milestone are
+    // created and assigned and read back, and the history gains one entry.
+    let new_label = call(
+        dst.app.clone(),
+        "POST",
+        format!("{dbase}/labels"),
+        Some(json!({"name":"새 라벨","color":"red"})),
+        dst.cookie.clone(),
+    )
+    .await;
+    let new_milestone = call(
+        dst.app.clone(),
+        "POST",
+        format!("{dbase}/milestones"),
+        Some(json!({"name":"새 이정표"})),
+        dst.cookie.clone(),
+    )
+    .await;
+    call(dst.app.clone(), "PATCH", format!("{dw}/tasks/{task_id}"),
+        Some(json!({"labelIds":[kept_label["id"], new_label["id"]],"milestoneId":new_milestone["id"]})), dst.cookie.clone()).await;
+    let continued = read(
+        dst.app.clone(),
+        dw.clone(),
+        dbase.clone(),
+        dst.cookie.clone(),
+    )
+    .await;
+    let mut expected_labels = vec![kept_label["id"].clone(), new_label["id"].clone()];
+    expected_labels.sort_by_key(|v| v.as_str().unwrap().to_owned());
+    let mut got_labels = continued["task"]["labelIds"].as_array().unwrap().clone();
+    got_labels.sort_by_key(|v| v.as_str().unwrap().to_owned());
+    assert_eq!(
+        (got_labels, &continued["task"]["milestoneId"]),
+        (expected_labels, &new_milestone["id"])
+    );
+    assert_eq!(
+        continued["activity"].as_array().unwrap().len(),
+        source["activity"].as_array().unwrap().len() + 1
+    );
+    assert_eq!(
+        continued["activity"].as_array().unwrap()[1..],
+        source["activity"].as_array().unwrap()[..]
+    );
+
+    // A history reference to a label that is live outside the project (only a
+    // hand-written row can make one; the writers refuse it) is the typed
+    // outside-closure refusal at capture, not a purged reference.
+    let other =
+        project_harness::create_project(fx.app.clone(), &fx.cookie, ws, "OUT", "private").await;
+    let foreign = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/projects/{}/labels", other["id"].as_str().unwrap()),
+        Some(json!({"name":"외부 라벨","color":"red"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    sqlx::query("INSERT INTO fvoci.task_activity (id, workspace_id, task_id, actor_user_id, channel, kind, changes) VALUES ($1, $2, $3::text::uuid, $4, 'web', 'changed', $5)")
+        .bind(Uuid::now_v7())
+        .bind(ws)
+        .bind(&task_id)
+        .bind(fx.user_id)
+        .bind(json!([{"field":"labelIds","from":[],"to":[{"id":foreign["id"],"label":"외부 라벨"}]}]))
+        .execute(&fx.admin)
+        .await
+        .unwrap();
+    let refused = capture(&fx.pool, ws, fx.user_id, session, &project_only(project_id)).await;
+    assert!(
+        matches!(&refused, Err(NativeDbError::Archive(ArchiveError::Unsupported(m))) if m == "reference outside selected closure"),
+        "{:?}",
+        refused.as_ref().err()
+    );
+
+    let storages = [fx.storage_root(), dst.storage_root()];
+    fx.pool.close().await;
+    fx.admin.close().await;
+    dst.pool.close().await;
+    dst.admin.close().await;
+    harness.cleanup().await;
+    destination_db.cleanup().await;
+    for storage in storages {
+        std::fs::remove_dir_all(storage).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_archive_restores_view_filters_naming_purged_labels_and_milestones() {
+    use fvoci_server::db::native_archive::{capture, publish, NativeDbError};
+    use fvoci_server::native_archive::ArchiveError;
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let session = project_harness::session_id_for_user(&fx.admin, fx.user_id).await;
+    let ws = fx.workspace_id;
+    let call = |app: axum::Router,
+                method: &'static str,
+                path: String,
+                body: Option<Value>,
+                cookie: String| async move {
+        let (status, reply) = json_request(app, method, &path, body, Some(&cookie)).await;
+        assert!(status.is_success(), "{method} {path}: {status} {reply}");
+        reply
+    };
+    let project =
+        project_harness::create_project(fx.app.clone(), &fx.cookie, ws, "PVF", "private").await;
+    let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+    let w = format!("/api/v1/workspaces/{ws}");
+    let base = format!("{w}/projects/{project_id}");
+    // Ordinary writers: a label and a milestone named only by saved filters
+    // (an owner project board and a task-collection list view), then both
+    // purged; a purge never touches stored view configs.
+    let gone_label = call(
+        fx.app.clone(),
+        "POST",
+        format!("{base}/labels"),
+        Some(json!({"name":"사라질 라벨","color":"red"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let gone_milestone = call(
+        fx.app.clone(),
+        "POST",
+        format!("{base}/milestones"),
+        Some(json!({"name":"사라질 이정표 🧪"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let gone_label_id = Uuid::parse_str(gone_label["id"].as_str().unwrap()).unwrap();
+    let gone_milestone_id = Uuid::parse_str(gone_milestone["id"].as_str().unwrap()).unwrap();
+    call(
+        fx.app.clone(),
+        "POST",
+        format!("{base}/tasks"),
+        Some(json!({"title":"필터 대상 🧪"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    let board = call(fx.app.clone(), "POST", format!("{base}/views"),
+        Some(json!({"name":"필터 보드 🧪","type":"board","config":{"filters":{"labelId":gone_label["id"],"milestoneId":gone_milestone["id"]},"sort":[]}})),
+        fx.cookie.clone()).await;
+    let cid = call(
+        fx.app.clone(),
+        "GET",
+        format!("{base}/collection"),
+        None,
+        fx.cookie.clone(),
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    call(fx.app.clone(), "POST", format!("{w}/collections/{cid}/views"),
+        Some(json!({"name":"라벨 목록","type":"table","visibility":"private","config":{"query":{"filters":{"labelId":gone_label["id"]}},"groupBy":null,"dateBy":null}})),
+        fx.cookie.clone()).await;
+    call(
+        fx.app.clone(),
+        "DELETE",
+        format!("{base}/labels/{gone_label_id}"),
+        None,
+        fx.cookie.clone(),
+    )
+    .await;
+    call(
+        fx.app.clone(),
+        "DELETE",
+        format!("{base}/milestones/{gone_milestone_id}"),
+        None,
+        fx.cookie.clone(),
+    )
+    .await;
+    // What a client reads: the stored views and the task list each stored
+    // filter selects (status and problem code, the product's own answer).
+    let read = |app: axum::Router, w: String, base: String, cookie: String| {
+        let cid = cid.clone();
+        async move {
+            let pick = |items: &Value, keys: &[&str]| -> Value {
+                let mut list: Vec<Value> = items["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| {
+                        Value::Object(
+                            keys.iter()
+                                .map(|k| (k.to_string(), v[*k].clone()))
+                                .collect(),
+                        )
+                    })
+                    .collect();
+                list.sort_by_key(|v| v["id"].as_str().unwrap().to_owned());
+                json!(list)
+            };
+            let views = call(
+                app.clone(),
+                "GET",
+                format!("{base}/views"),
+                None,
+                cookie.clone(),
+            )
+            .await;
+            let collection_views = call(
+                app.clone(),
+                "GET",
+                format!("{w}/collections/{cid}/views"),
+                None,
+                cookie.clone(),
+            )
+            .await;
+            let mut lists = Vec::new();
+            for filter in [
+                json!({"filters":{"labelId":gone_label_id}}),
+                json!({"filters":{"milestoneId":gone_milestone_id}}),
+            ] {
+                let encoded: String =
+                    url::form_urlencoded::byte_serialize(filter.to_string().as_bytes()).collect();
+                let (status, reply) = json_request(
+                    app.clone(),
+                    "GET",
+                    &format!("{base}/tasks?query={encoded}"),
+                    None,
+                    Some(&cookie),
+                )
+                .await;
+                lists.push(json!([status.as_u16(), reply["code"]]));
+            }
+            json!({"views":pick(&views, &["id","name","type","config"]),
+                "collectionViews":pick(&collection_views, &["id","name","type","visibility","config"]),
+                "lists":lists})
+        }
+    };
+    let source = read(fx.app.clone(), w.clone(), base.clone(), fx.cookie.clone()).await;
+    // Source facts: the stored filters keep the purged ids; the product
+    // refuses to list by them.
+    assert_eq!(
+        source["lists"],
+        json!([[400, "invalid_input"], [400, "invalid_input"]])
+    );
+    let stored = source["views"].to_string() + &source["collectionViews"].to_string();
+    for id in [gone_label_id, gone_milestone_id] {
+        assert!(stored.contains(&id.to_string()), "{id} in {stored}");
+    }
+
+    let captured = capture(&fx.pool, ws, fx.user_id, session, &project_only(project_id))
+        .await
+        .expect("view filters naming purged labels and milestones are capturable");
+    captured
+        .archive
+        .validate()
+        .expect("view filters naming purged labels and milestones are valid");
+    let graph = serde_json::to_value(&captured.archive.graph).unwrap();
+    assert_eq!(
+        (
+            &graph["purged_label_refs"],
+            &graph["purged_milestone_refs"],
+            &graph["labels"],
+            &graph["milestones"]
+        ),
+        (
+            &json!([gone_label_id]),
+            &json!([gone_milestone_id]),
+            &json!([]),
+            &json!([])
+        )
+    );
+    // Negatives on the real graph: a padded list, an emptied list (the
+    // filter is then a view reference outside the archive), and a purged id
+    // offered as a live task label.
+    let edited = |edit: &dyn Fn(&mut Value)| {
+        let mut archive = serde_json::to_value(&captured.archive).unwrap();
+        edit(&mut archive["graph"]);
+        serde_json::from_value::<fvoci_server::native_archive::Archive>(archive)
+            .map_err(|e| e.to_string())
+            .and_then(|a| a.validate().map_err(|e| format!("{e:?}")))
+    };
+    let padded = Uuid::now_v7();
+    assert!(
+        edited(&|g: &mut Value| g["purged_label_refs"] = json!([gone_label_id, padded])).is_err(),
+        "padded"
+    );
+    assert_eq!(
+        edited(&|g: &mut Value| g["purged_label_refs"] = json!([])),
+        Err("Unsupported(\"view references\")".to_owned()),
+        "emptied"
+    );
+    let task = graph["tasks"][0].clone();
+    {
+        assert!(
+            edited(&|g: &mut Value| g["task_labels"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"task_id":task["id"],"label_id":gone_label_id})))
+            .is_err(),
+            "purged id as a live task label"
+        );
+    }
+    assert_eq!(edited(&|_: &mut Value| {}), Ok(()), "unedited");
+
+    let destination_db = TestDb::bootstrap().await;
+    let dst = fixture(&destination_db).await;
+    let (destination, _, claim) = claimed_restore(&dst, dst.user_id, &dst.cookie).await;
+    publish(
+        &dst.pool,
+        &claim,
+        &captured.archive,
+        &std::collections::BTreeMap::new(),
+        &dst.settings.quota,
+    )
+    .await
+    .expect("view filters naming purged labels and milestones restore");
+    let dw = format!("/api/v1/workspaces/{destination}");
+    let dbase = format!("{dw}/projects/{project_id}");
+    // The destination client reads the same stored views and gets the same
+    // answer for each stored filter.
+    let restored = read(
+        dst.app.clone(),
+        dw.clone(),
+        dbase.clone(),
+        dst.cookie.clone(),
+    )
+    .await;
+    assert_eq!(restored, source);
+    let resurrected: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM fvoci.labels WHERE id=$1), (SELECT count(*) FROM fvoci.milestones WHERE id=$2)",
+    )
+    .bind(gone_label_id)
+    .bind(gone_milestone_id)
+    .fetch_one(&dst.admin)
+    .await
+    .unwrap();
+    assert_eq!(resurrected, (0, 0));
+    // The owner recovers as on the source: dropping the filter saves and
+    // reads back.
+    let board_id = board["id"].as_str().unwrap();
+    let restored_board = restored["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["id"] == board["id"])
+        .unwrap()
+        .clone();
+    let changed = call(
+        dst.app.clone(),
+        "PATCH",
+        format!("{dw}/views/{board_id}"),
+        Some(json!({"name":"필터 보드 🧪","config":{"filters":{},"sort":[]},"expectedConfig":restored_board["config"]})),
+        dst.cookie.clone(),
+    )
+    .await;
+    assert_eq!(changed, json!({"ok":true}));
+    let reread = read(
+        dst.app.clone(),
+        dw.clone(),
+        dbase.clone(),
+        dst.cookie.clone(),
+    )
+    .await;
+    let reread_board = reread["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["id"] == board["id"])
+        .unwrap()
+        .clone();
+    assert_eq!(reread_board["config"], json!({"filters":{},"sort":[]}));
+
+    // A stored filter naming a label live in another project (only a
+    // hand-written row can make one; the writers refuse it) is the typed
+    // outside-closure refusal at capture, not a purged reference.
+    let other =
+        project_harness::create_project(fx.app.clone(), &fx.cookie, ws, "OUT", "private").await;
+    let foreign = call(
+        fx.app.clone(),
+        "POST",
+        format!("{w}/projects/{}/labels", other["id"].as_str().unwrap()),
+        Some(json!({"name":"외부 라벨","color":"red"})),
+        fx.cookie.clone(),
+    )
+    .await;
+    sqlx::query("INSERT INTO fvoci.views (id, workspace_id, project_id, user_id, name, type, config) VALUES ($1,$2,$3,$4,'외부 필터','list',$5)")
+        .bind(Uuid::now_v7())
+        .bind(ws)
+        .bind(project_id)
+        .bind(fx.user_id)
+        .bind(json!({"filters":{"labelId":foreign["id"]},"sort":[]}))
+        .execute(&fx.admin)
+        .await
+        .unwrap();
+    let refused = capture(&fx.pool, ws, fx.user_id, session, &project_only(project_id)).await;
+    assert!(
+        matches!(&refused, Err(NativeDbError::Archive(ArchiveError::Unsupported(m))) if m == "reference outside selected closure"),
+        "{:?}",
+        refused.as_ref().err()
     );
 
     let storages = [fx.storage_root(), dst.storage_root()];

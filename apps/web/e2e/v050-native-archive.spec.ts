@@ -3998,3 +3998,786 @@ test("native archive restores document tag search filters into a separate instal
   }
   if (errors.length) throw new AggregateError(errors, "native tag oracle or cleanup failed");
 });
+
+test("native archive restores a same-ID personal MOVE graph after a lost restore response into a fresh session", async ({
+  browser,
+  baseURL,
+}, testInfo) => {
+  const sourceApp = process.env.DATABASE_APP_URL;
+  if (!sourceApp || !baseURL) throw new Error("source app role/base URL missing");
+  const out = testInfo.outputPath("moved-graph");
+  mkdirSync(out, { recursive: true });
+  const source = await browser.newContext({ baseURL });
+  const destinationInstall = new Installation(out);
+  const errors: unknown[] = [];
+  const groups: string[] = [];
+  const passed = (group: string) => {
+    groups.push(group);
+  };
+  const identity = meSchema.extend({ sessionId: z.string().uuid() });
+  const rows = z.array(z.record(z.unknown()));
+  const graphSchema = z.object({
+    documents: rows,
+    tasks: rows,
+    origins: rows,
+    assignees: rows,
+    attachments: rows,
+    revisions: rows,
+    activity: rows,
+    events: rows,
+    jobs: rows,
+    transferCount: z.number(),
+  });
+  const timeSchema = z.object({
+    entries: rows,
+    runs: rows,
+    segments: rows,
+    commands: rows,
+    audit: rows,
+  });
+  try {
+    const page = await source.newPage();
+    await login(page, SOURCE_OWNER.email, SOURCE_OWNER.password);
+    const actorA = await okJson(page.request.get("/api/v1/auth/me"), identity);
+    const personal = await okJson(
+      page.request.post("/api/v1/me/personal-workspace"),
+      workspaceMeta,
+    );
+    const pair = await okJson(
+      page.request.post(`/api/v1/workspaces/${personal.id}/personal-input`, {
+        data: { requestId: randomUUID(), intent: "task", title: "W8 D 같은 ID 이동 한글" },
+      }),
+      z.object({
+        documentId: z.string().uuid(),
+        taskId: z.string().uuid(),
+        documentDisplayId: z.string(),
+        taskDisplayId: z.string(),
+        projectId: z.string().uuid(),
+      }),
+    );
+    const team = (await okJson(page.request.get("/api/v1/me/workspaces"), workspaces)).items.find(
+      (row) => row.slug === "native-source",
+    );
+    if (!team) throw new Error("ordinary source team missing");
+    const project = await okJson(
+      page.request.post(`/api/v1/workspaces/${team.id}/projects`, {
+        data: { key: "PUBD", name: "W8 D 이동 그래프", visibility: "private" },
+      }),
+      projectSchema,
+    );
+    const workflow = await okJson(
+      page.request.get(`/api/v1/workspaces/${team.id}/projects/${project.id}/workflow`),
+      workflowSchema,
+    );
+    const status = workflow.statuses[0];
+    if (!status) throw new Error("destination status missing");
+    const file = { name: "이동 증빙.txt", text: "W8 D independent attachment bytes\n한글🙂\n" };
+    const fileBytes = Buffer.from(file.text, "utf8");
+    const fileHash = sha256(fileBytes);
+    const attachment = await uploadFile(
+      page.request,
+      `/api/v1/workspaces/${personal.id}/tasks/${pair.taskId}/uploads`,
+      personal.id,
+      file,
+    );
+    const docText = "W8 D 이동 문서 본문 한글 ";
+    const taskText = "W8 D 이동 작업 본문 한글";
+    const docBody = {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", text: docText },
+            { type: "mention", attrs: { entity: "task", id: pair.taskId, label: "이동 작업" } },
+          ],
+        },
+        { type: "attachment", attrs: { id: attachment, name: file.name } },
+      ],
+    };
+    const saved = await page.request.put(
+      `/api/v1/workspaces/${personal.id}/documents/${pair.documentId}/body`,
+      { data: { contentJson: docBody } },
+    );
+    expect(saved.status(), await saved.text()).toBe(200);
+    const taskScope = '[data-testid="task-body"]';
+    await openItem(page, personal.slug, pair.taskDisplayId, taskScope);
+    await edit(page, taskScope, {
+      kind: "set",
+      content: {
+        type: "doc",
+        content: [{ type: "paragraph", content: [{ type: "text", text: taskText }] }],
+      },
+    });
+    await persist(page, taskScope);
+    const expectedDoc: Block[] = [
+      {
+        type: "paragraph",
+        runs: [
+          { text: docText, marks: [] },
+          { mention: { entity: "task", id: pair.taskId, label: "이동 작업" } },
+        ],
+      },
+      {
+        type: "attachment",
+        ref: { entity: "attachment", id: attachment, name: file.name, image: false },
+      },
+    ];
+    const expectedTask: Block[] = [{ type: "paragraph", runs: [{ text: taskText, marks: [] }] }];
+    await waitDurable(
+      sourceApp,
+      personal.id,
+      "document",
+      pair.documentId,
+      expectedDoc,
+      actorA.userId,
+    );
+    await waitDurable(sourceApp, personal.id, "task", pair.taskId, expectedTask, actorA.userId);
+    await okJson(
+      page.request.post(
+        `/api/v1/workspaces/${personal.id}/projects/${pair.projectId}/documents/${pair.documentId}/revisions`,
+      ),
+      idOf,
+    );
+    await okJson(
+      page.request.post(`/api/v1/workspaces/${personal.id}/tasks/${pair.taskId}/revisions`),
+      idOf,
+    );
+    // Original commands retain A's PERSONAL path/body/hash, never a team locator.
+    const originalTimerPath = `/api/v1/workspaces/${personal.id}/tasks/${pair.taskId}/timer`;
+    const startBody = {
+      expectedActorId: actorA.userId,
+      expectedSessionId: actorA.sessionId,
+      requestId: randomUUID(),
+      runId: null,
+      operation: "start",
+      expectedVersion: 0,
+    };
+    const timerResult = z.object({ runId: z.string().uuid(), version: z.number().int() });
+    const started = await okJson(
+      page.request.post(originalTimerPath, { data: startBody }),
+      timerResult,
+    );
+    const elapsedStart = Date.now();
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    expect(Date.now() - elapsedStart).toBeGreaterThanOrEqual(1100);
+    const stopBody = {
+      ...startBody,
+      requestId: randomUUID(),
+      runId: started.runId,
+      operation: "stop",
+      expectedVersion: started.version,
+    };
+    await okJson(page.request.post(originalTimerPath, { data: stopBody }), timerResult);
+    const readTime = (connection: string, tenant: string, actor: string) => {
+      for (const id of [tenant, actor]) expect(id).toMatch(UUID);
+      // Correlate each read with the materialized actor context so PostgreSQL
+      // cannot evaluate an uncorrelated InitPlan before setting actor-only RLS.
+      return timeSchema.parse(
+        appRoleRead(
+          connection,
+          tenant,
+          `WITH actor_context AS MATERIALIZED
+        (SELECT set_config('app.self_user_id','${actor}',true) AS actor) SELECT jsonb_build_object(
+        'entries',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM fvoci.time_entries t WHERE user_id=actor_context.actor::uuid AND workspace_id='${tenant}' AND task_id='${pair.taskId}'),
+        'runs',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM fvoci.task_timer_runs t WHERE user_id=actor_context.actor::uuid AND workspace_id='${tenant}' AND task_id='${pair.taskId}'),
+        'segments',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM fvoci.task_timer_segments t WHERE user_id=actor_context.actor::uuid AND workspace_id='${tenant}' AND task_id='${pair.taskId}'),
+        'commands',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY request_id),'[]'::jsonb) FROM fvoci.task_timer_commands t WHERE user_id=actor_context.actor::uuid AND run_id='${started.runId}' AND request_id IN('${startBody.requestId}','${stopBody.requestId}')),
+        'audit',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM fvoci.task_timer_audit t WHERE user_id=actor_context.actor::uuid AND task_id='${pair.taskId}' AND request_id IN('${startBody.requestId}','${stopBody.requestId}')))
+        FROM actor_context`,
+        ),
+      );
+    };
+    const beforeTime = readTime(sourceApp, personal.id, actorA.userId);
+    expect(beforeTime.entries).toHaveLength(1);
+    expect(beforeTime.runs.map((row) => row.id)).toEqual([started.runId]);
+    expect(beforeTime.segments.length).toBeGreaterThan(0);
+    expect(beforeTime.commands.map((row) => row.request_id).sort()).toEqual(
+      [startBody.requestId, stopBody.requestId].sort(),
+    );
+    expect(beforeTime.audit.map((row) => [row.request_id, row.verb]).sort()).toEqual(
+      [
+        [startBody.requestId, "running"],
+        [stopBody.requestId, "stopped"],
+      ].sort(),
+    );
+    for (const row of beforeTime.audit) expect(row.workspace_id).toBe(personal.id);
+    passed("14 nonempty elapsed entry/segments/start-stop audit");
+    const readGraph = (connection: string, tenant: string) =>
+      graphSchema.parse(
+        appRoleRead(
+          connection,
+          tenant,
+          `SELECT jsonb_build_object(
+      'documents',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM fvoci.documents t WHERE workspace_id='${tenant}' AND project_id='${project.id}'),
+      'tasks',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM fvoci.tasks t WHERE workspace_id='${tenant}' AND id='${pair.taskId}'),
+      'origins',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY task_id),'[]'::jsonb) FROM fvoci.task_origins t WHERE workspace_id='${tenant}' AND task_id='${pair.taskId}'),
+      'assignees',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY user_id),'[]'::jsonb) FROM fvoci.task_assignees t WHERE workspace_id='${tenant}' AND task_id='${pair.taskId}'),
+      'attachments',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM fvoci.attachments t WHERE workspace_id='${tenant}' AND id='${attachment}'),
+      'revisions',(SELECT coalesce(jsonb_agg((to_jsonb(t)-'workspace_id'-'created_by') || jsonb_build_object('snapshot_sha',encode(sha256(y_snapshot),'hex')) ORDER BY id),'[]'::jsonb) FROM fvoci.revisions t WHERE workspace_id='${tenant}' AND target_id IN('${pair.documentId}','${pair.taskId}')),
+      'activity',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM fvoci.task_activity t WHERE workspace_id='${tenant}' AND task_id='${pair.taskId}'),
+      'events',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM fvoci.events t WHERE workspace_id='${tenant}' AND target_id IN('${pair.documentId}','${pair.taskId}')),
+      'jobs',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM fvoci.import_jobs t WHERE workspace_id='${tenant}' AND source='native-archive'),
+      'transferCount',(SELECT count(*) FROM fvoci.personal_transfer_commands WHERE workspace_id='${tenant}'))`,
+        ),
+      );
+    const docVersion = await okJson(
+      page.request.get(`/api/v1/workspaces/${personal.id}/documents/${pair.documentId}`),
+      documentMeta.extend({ version: z.number().int() }),
+    );
+    const taskVersion = await okJson(
+      page.request.get(`/api/v1/workspaces/${personal.id}/tasks/${pair.taskId}`),
+      taskSchema.extend({ version: z.number().int() }),
+    );
+    const selection = {
+      action: "move",
+      documentId: pair.documentId,
+      taskId: pair.taskId,
+      expectedDocumentVersion: docVersion.version,
+      expectedTaskVersion: taskVersion.version,
+      destinationWorkspaceId: team.id,
+      destinationProjectId: project.id,
+      destinationStatusId: status.id,
+    };
+    const transferPath = `/api/v1/workspaces/${personal.id}/personal-transfers`;
+    const preview = await okJson(
+      page.request.post(`${transferPath}/preview`, { data: selection }),
+      z.object({ digest: z.string() }),
+    );
+    const moveBody = {
+      requestId: randomUUID(),
+      selection,
+      previewDigest: preview.digest,
+      confirmed: true,
+    };
+    const moveBytes = Buffer.from(JSON.stringify(moveBody));
+    const transferResult = z
+      .object({
+        workspaceId: z.string().uuid(),
+        projectId: z.string().uuid(),
+        documentId: z.string().uuid(),
+        taskId: z.string().uuid(),
+        replayed: z.boolean(),
+      })
+      .passthrough();
+    const moveResponse = await page.request.post(transferPath, {
+      data: moveBytes,
+      headers: { "content-type": "application/json" },
+    });
+    expect(moveResponse.status(), await moveResponse.text()).toBe(200);
+    const moved = transferResult.parse(await moveResponse.json());
+    expect(moved).toMatchObject({
+      workspaceId: team.id,
+      projectId: project.id,
+      documentId: pair.documentId,
+      taskId: pair.taskId,
+      replayed: false,
+    });
+    // Sensitive MOVE binding values remain in memory only; evidence gets digest/count.
+    const receipt = () =>
+      z
+        .object({
+          count: z.number(),
+          digest: z.string(),
+          request_id: z.string(),
+          request_hash: z.string(),
+          session_id: z.string(),
+        })
+        .parse(
+          appRoleRead(
+            sourceApp,
+            personal.id,
+            `SELECT jsonb_build_object('count',count(*),'digest',md5(string_agg(to_jsonb(c)::text,'' ORDER BY request_id)),
+        'request_id',min(request_id::text),'request_hash',min(request_hash),'session_id',min(session_id::text))
+        FROM fvoci.personal_transfer_commands c WHERE workspace_id='${personal.id}' AND request_id='${moveBody.requestId}'`,
+          ),
+        );
+    const frozenReceipt = receipt();
+    expect(frozenReceipt.count).toBe(1);
+    expect(frozenReceipt.session_id).toBe(actorA.sessionId);
+    const sourceGraph = readGraph(sourceApp, team.id);
+    expect(sourceGraph.documents.filter((row) => row.id === pair.documentId)).toHaveLength(1);
+    for (const key of ["tasks", "origins", "assignees", "attachments"] as const)
+      expect(sourceGraph[key]).toHaveLength(1);
+    expect(
+      appRoleRead(
+        sourceApp,
+        personal.id,
+        `SELECT jsonb_build_array(
+      (SELECT count(*) FROM fvoci.documents WHERE id='${pair.documentId}'),(SELECT count(*) FROM fvoci.tasks WHERE id='${pair.taskId}'),
+      (SELECT count(*) FROM fvoci.task_origins WHERE task_id='${pair.taskId}'),(SELECT count(*) FROM fvoci.task_assignees WHERE task_id='${pair.taskId}'),
+      (SELECT count(*) FROM fvoci.attachments WHERE id='${attachment}'))`,
+      ),
+    ).toEqual([0, 0, 0, 0, 0]);
+    const movedTime = readTime(sourceApp, team.id, actorA.userId);
+    for (const key of ["entries", "runs", "segments"] as const)
+      expect(movedTime[key]).toEqual(
+        beforeTime[key].map((row) => ({ ...row, workspace_id: team.id })),
+      );
+    expect(movedTime.commands).toEqual(beforeTime.commands);
+    expect(movedTime.audit).toEqual(beforeTime.audit);
+    passed("1 same-ID MOVE/graph/source retirement/one receipt");
+    const moveReplay = await page.request.post(transferPath, {
+      data: moveBytes,
+      headers: { "content-type": "application/json" },
+    });
+    expect(moveReplay.status(), await moveReplay.text()).toBe(200);
+    expect(transferResult.parse(await moveReplay.json())).toEqual({ ...moved, replayed: true });
+    expect(readGraph(sourceApp, team.id)).toEqual(sourceGraph);
+    expect(readTime(sourceApp, team.id, actorA.userId)).toEqual(movedTime);
+    expect(receipt()).toEqual(frozenReceipt);
+    passed("2 same-session MOVE replay no effects");
+    const rowDocA = await waitDurable(
+      sourceApp,
+      team.id,
+      "document",
+      pair.documentId,
+      expectedDoc,
+      actorA.userId,
+    );
+    const rowTaskA = await waitDurable(
+      sourceApp,
+      team.id,
+      "task",
+      pair.taskId,
+      expectedTask,
+      actorA.userId,
+    );
+    expect(sourceGraph.revisions.length).toBeGreaterThanOrEqual(2);
+    const download = await page.request.get(
+      `/api/v1/workspaces/${team.id}/attachments/${attachment}/download`,
+    );
+    expect(download.status()).toBe(200);
+    expect(Buffer.from(await download.body()).equals(fileBytes)).toBe(true);
+    const exported = await page.request.get(
+      `/api/v1/workspaces/${team.id}/projects/${project.id}/native-archive`,
+    );
+    expect(exported.status(), exported.status() === 200 ? "ZIP" : await exported.text()).toBe(200);
+    const archive = Buffer.from(await exported.body());
+    const archiveHash = sha256(archive);
+    const archivePath = path.join(out, "moved-graph.zip");
+    writeFileSync(archivePath, archive);
+    expect(receipt()).toEqual(frozenReceipt);
+    passed("3 source MOVE receipt unchanged through export");
+    const zip = await JSZip.loadAsync(archive);
+    const keys = new Set<string>();
+    const collect = (value: unknown): void => {
+      if (Array.isArray(value)) value.forEach(collect);
+      else if (value && typeof value === "object")
+        for (const [key, child] of Object.entries(value)) {
+          keys.add(key);
+          collect(child);
+        }
+    };
+    const graphValue: unknown = JSON.parse(await entryText(zip, "graph.json"));
+    collect(graphValue);
+    expect(forbiddenArchiveKeys(keys)).toEqual([]);
+    expect([...keys]).not.toContain("personal_transfer_commands");
+    for (const name of Object.keys(zip.files)) {
+      const bytes = Buffer.from(await entryBytes(zip, name));
+      for (const secret of [
+        frozenReceipt.request_id,
+        frozenReceipt.request_hash,
+        frozenReceipt.session_id,
+      ])
+        expect(bytes.includes(Buffer.from(secret)), "source MOVE credential/receipt excluded").toBe(
+          false,
+        );
+    }
+    passed("4 archive credential and MOVE-model exclusion");
+    const portable = z
+      .object({
+        documents: rows,
+        tasks: rows,
+        attachments: rows,
+        time_entries: rows,
+        timer_runs: rows,
+        timer_segments: rows,
+        timer_commands: rows,
+        timer_audit: rows,
+      })
+      .parse(graphValue);
+    expect(portable.documents.map((row) => row.id).sort()).toEqual(
+      sourceGraph.documents.map((row) => row.id).sort(),
+    );
+    for (const key of ["tasks", "attachments"] as const)
+      expect(portable[key].map((row) => row.id)).toEqual(sourceGraph[key].map((row) => row.id));
+    for (const [key, sourceKey] of [
+      ["time_entries", "entries"],
+      ["timer_runs", "runs"],
+      ["timer_segments", "segments"],
+      ["timer_audit", "audit"],
+    ] as const)
+      expect(portable[key].map((row) => row.id)).toEqual(movedTime[sourceKey].map((row) => row.id));
+    expect(portable.timer_commands.map((row) => row.request_id)).toEqual(
+      movedTime.commands.map((row) => row.request_id),
+    );
+    expect(portable.timer_audit.map((row) => row.workspace_id)).toEqual(
+      movedTime.audit.map((row) => row.workspace_id),
+    );
+    expect(sha256(await entryBytes(zip, `attachments/${attachment}/payload`))).toBe(fileHash);
+    passed("5 archive canonical graph/time/history/ref/file IDs");
+    await destinationInstall.start();
+    checkServerEnvNames(destinationInstall.envNames);
+    const initial = await browser.newContext({ baseURL: destinationInstall.url });
+    let workspaceB = { id: "", slug: "" };
+    let actorB = { userId: "", sessionId: "" };
+    const lost: { bytes: Buffer | null; job: z.infer<typeof jobSchema> | null } = {
+      bytes: null,
+      job: null,
+    };
+    try {
+      const dpage = await initial.newPage();
+      await setupThroughUi(dpage, DESTINATION_OWNER, {
+        name: "D 별도 복원 설치",
+        slug: "moved-graph-destination",
+      });
+      actorB = await okJson(dpage.request.get("/api/v1/auth/me"), identity);
+      expect(actorB.userId).not.toBe(actorA.userId);
+      workspaceB = await okJson(dpage.request.post("/api/v1/me/personal-workspace"), workspaceMeta);
+      expect(workspaceB.id).not.toBe(personal.id);
+      const preflight = await okJson(
+        dpage.request.post(`/api/v1/workspaces/${workspaceB.id}/native-archive/preflight`, {
+          data: { archiveBase64: archive.toString("base64") },
+        }),
+        preflightSchema.extend({ preservedContentIds: z.literal(true) }),
+      );
+      expect(preflight).toMatchObject({
+        complete: true,
+        archiveHash,
+        projectId: project.id,
+        documentCount: sourceGraph.documents.length,
+        taskCount: sourceGraph.tasks.length,
+        attachmentCount: sourceGraph.attachments.length,
+        revisionCount: sourceGraph.revisions.length,
+      });
+      passed("6 separate-install preflight/frozen counts/content IDs");
+      await dpage.goto(`/w/${workspaceB.slug}/settings`);
+      const importer = dpage
+        .locator(".native-archive")
+        .filter({ has: dpage.getByRole("button", { name: /복원할 네이티브 보관 파일 선택/ }) });
+      const chooser = dpage.waitForEvent("filechooser");
+      await importer.getByRole("button", { name: /복원할 네이티브 보관 파일 선택/ }).click();
+      await (await chooser).setFiles(archivePath);
+      for (const value of [archiveHash, workspaceB.id, actorB.userId])
+        await expect(importer.getByText(value)).toBeVisible();
+      await importer.getByRole("checkbox").check();
+      let settleLoss!: () => void;
+      let refuseLoss!: (error: unknown) => void;
+      const intercepted = new Promise<void>((resolve, reject) => {
+        settleLoss = resolve;
+        refuseLoss = reject;
+      });
+      intercepted.catch(() => undefined);
+      await dpage.route("**/native-archive/restore", async (route) => {
+        try {
+          lost.bytes = route.request().postDataBuffer();
+          expect(lost.bytes).not.toBeNull();
+          const response = await route.fetch();
+          expect(response.status()).toBe(202);
+          lost.job = jobSchema.parse(await response.json());
+          expect(lost.job.archiveHash).toBe(archiveHash);
+          await route.abort("failed");
+          settleLoss();
+        } catch (error) {
+          refuseLoss(error);
+        }
+      });
+      await importer.getByRole("button", { name: "확인한 내용 복원" }).click();
+      await intercepted;
+      await dpage.unroute("**/native-archive/restore");
+      await expect(importer.getByRole("status")).not.toContainText("복원이 완료되었습니다");
+    } finally {
+      try {
+        await initial.close();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (!lost.bytes || !lost.job) throw new Error("actual lost202 request/job not captured");
+    const sentBytes = lost.bytes;
+    const firstJob = lost.job;
+    const fresh = await browser.newContext({ baseURL: destinationInstall.url });
+    try {
+      const fpage = await fresh.newPage();
+      await login(fpage, DESTINATION_OWNER.email, DESTINATION_OWNER.password);
+      const freshActor = await okJson(fpage.request.get("/api/v1/auth/me"), identity);
+      expect(freshActor.userId).toBe(actorB.userId);
+      expect(freshActor.sessionId).not.toBe(actorB.sessionId);
+      const restorePath = `/api/v1/workspaces/${workspaceB.id}/native-archive/restore`;
+      const replay = await fpage.request.post(restorePath, {
+        data: sentBytes,
+        headers: { "content-type": "application/json", Origin: destinationInstall.url },
+      });
+      expect(replay.status(), await replay.text()).toBe(202);
+      expect(jobSchema.parse(await replay.json()).id).toBe(firstJob.id);
+      const jobPath = `/api/v1/workspaces/${workspaceB.id}/native-archive/jobs/${firstJob.id}`;
+      await expect
+        .poll(async () => (await okJson(fpage.request.get(jobPath), jobSchema)).status)
+        .toBe("completed");
+      const job = await okJson(fpage.request.get(jobPath), jobSchema);
+      expect(job).toMatchObject({
+        id: firstJob.id,
+        projectId: project.id,
+        archiveHash,
+        status: "completed",
+      });
+      const appB = destinationInstall.appUrl;
+      const graphB = readGraph(appB, workspaceB.id);
+      expect(graphB.documents).toHaveLength(sourceGraph.documents.length);
+      for (const key of ["tasks", "origins", "assignees", "attachments"] as const)
+        expect(graphB[key]).toHaveLength(1);
+      expect(graphB.jobs).toHaveLength(1);
+      const copy = new JSZip();
+      for (const name of Object.keys(zip.files))
+        copy.file(name, await entryBytes(zip, name), { createFolders: false });
+      const changedBytes = await copy.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+      expect(changedBytes.equals(archive)).toBe(false);
+      const restoreBody = z
+        .object({
+          requestId: z.string().uuid(),
+          destinationActorId: z.string().uuid(),
+          confirm: z.literal(true),
+        })
+        .passthrough()
+        .parse(JSON.parse(sentBytes.toString("utf8")));
+      const mismatch = await fpage.request.post(restorePath, {
+        data: {
+          ...restoreBody,
+          archiveBase64: changedBytes.toString("base64"),
+          archiveHash: sha256(changedBytes),
+        },
+        headers: { Origin: destinationInstall.url },
+      });
+      expect(mismatch.status()).toBe(409);
+      expect(readGraph(appB, workspaceB.id)).toEqual(graphB);
+      passed(
+        "7 genuine lost202/new-session identical-byte same-job replay/changed-valid-body409/once",
+      );
+      expect(
+        (
+          await okJson(
+            fpage.request.get(`/api/v1/workspaces/${workspaceB.id}/projects/${project.id}`),
+            projectSchema,
+          )
+        ).id,
+      ).toBe(project.id);
+      expect(
+        (
+          await okJson(
+            fpage.request.get(
+              `/api/v1/workspaces/${workspaceB.id}/projects/${project.id}/documents/${pair.documentId}`,
+            ),
+            documentMeta,
+          )
+        ).id,
+      ).toBe(pair.documentId);
+      expect(
+        (
+          await okJson(
+            fpage.request.get(`/api/v1/workspaces/${workspaceB.id}/tasks/${pair.taskId}`),
+            taskSchema,
+          )
+        ).id,
+      ).toBe(pair.taskId);
+      const readFile = async () => {
+        const response = await fpage.request.get(
+          `/api/v1/workspaces/${workspaceB.id}/attachments/${attachment}/download`,
+        );
+        expect(response.status()).toBe(200);
+        const bytes = Buffer.from(await response.body());
+        expect(bytes.equals(fileBytes)).toBe(true);
+        return sha256(bytes);
+      };
+      expect(await readFile()).toBe(fileHash);
+      expect(
+        (
+          await okJson(
+            fpage.request.get(
+              `/api/v1/workspaces/${workspaceB.id}/tasks/${pair.taskId}/time-entries`,
+            ),
+            z.object({ items: z.array(idOf) }),
+          )
+        ).items.map((row) => row.id),
+      ).toEqual(beforeTime.entries.map((row) => row.id));
+      passed("8 fresh ordinary project/document/task/file/time reads");
+      const natives = () => [
+        nativeRow.parse(
+          appRoleRead(appB, workspaceB.id, nativeSelect("document", pair.documentId)),
+        ),
+        nativeRow.parse(appRoleRead(appB, workspaceB.id, nativeSelect("task", pair.taskId))),
+      ];
+      const nativeB = natives();
+      for (const [index, rowA] of [rowDocA, rowTaskA].entries()) {
+        const rowB = nativeB[index];
+        if (!rowB) throw new Error("restored native row missing");
+        expect(rowB).toEqual({
+          ...rowA,
+          receipts: rowA.receipts.map((receipt) => ({ ...receipt, actor: actorB.userId })),
+        });
+        checkBinding(rowA, actorA.userId);
+        checkBinding(rowB, actorB.userId);
+        expect(fullNativeStructure(nativeDoc(rowB))).toEqual(fullJsonStructure(rowA.content));
+      }
+      expect(graphB.revisions).toEqual(sourceGraph.revisions);
+      passed("9 exact native ACK/history/revision IDs and digests/only receipt actor map");
+      const timerB = readTime(appB, workspaceB.id, actorB.userId);
+      for (const key of ["entries", "runs", "segments"] as const)
+        expect(timerB[key]).toEqual(
+          movedTime[key].map((row) => ({
+            ...row,
+            workspace_id: workspaceB.id,
+            user_id: actorB.userId,
+          })),
+        );
+      passed("10 exact live time IDs/workspace and actor mapping");
+      expect(timerB.commands).toEqual(
+        movedTime.commands.map((row) => ({
+          ...row,
+          user_id: actorB.userId,
+          restored_from_archive: job.id,
+        })),
+      );
+      passed("11 historical commands unchanged and persisted052 retirement marker");
+      const { readdirSync } = await import("node:fs");
+      const storageFacts = () => {
+        const facts: { path: string; bytes: number; sha256: string }[] = [];
+        const visit = (dir: string) => {
+          for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
+            a.name.localeCompare(b.name),
+          )) {
+            const file = path.join(dir, entry.name);
+            if (entry.isSymbolicLink())
+              throw new Error("owned D storage unexpectedly contains a symlink");
+            if (entry.isDirectory()) visit(file);
+            else if (entry.isFile()) {
+              const bytes = readFileSync(file);
+              facts.push({
+                path: path.relative(destinationInstall.storageDir, file),
+                bytes: bytes.length,
+                sha256: sha256(bytes),
+              });
+            } else throw new Error("owned D storage contains an unexpected resource type");
+          }
+        };
+        visit(destinationInstall.storageDir);
+        return facts;
+      };
+      const effects = async () => ({
+        graph: readGraph(appB, workspaceB.id),
+        native: natives(),
+        time: readTime(appB, workspaceB.id, actorB.userId),
+        job: await okJson(fpage.request.get(jobPath), jobSchema),
+        file: await readFile(),
+        ownedStorage: storageFacts(),
+      });
+      const beforeProbes = await effects();
+      const deny = async (
+        path: string,
+        body: unknown,
+        status: number,
+        code: string,
+        timer = false,
+      ) => {
+        const response = await fpage.request.post(path, {
+          data: body,
+          headers: { Origin: destinationInstall.url },
+        });
+        expect(response.status(), await response.text()).toBe(status);
+        const problem = z
+          .object({ code: z.string(), params: z.object({ code: z.string() }).optional() })
+          .parse(await response.json());
+        expect(timer ? problem.params?.code : problem.code).toBe(code);
+        expect(await effects()).toEqual(beforeProbes);
+      };
+      const timerPathB = `/api/v1/workspaces/${workspaceB.id}/tasks/${pair.taskId}/timer`;
+      await deny(timerPathB, stopBody, 409, "timer_context_changed", true);
+      passed("11a original A timer body actor refusal/no effects");
+      await deny(
+        timerPathB,
+        {
+          ...stopBody,
+          expectedActorId: freshActor.userId,
+          expectedSessionId: freshActor.sessionId,
+        },
+        409,
+        "request_mismatch",
+        true,
+      );
+      passed("11b B current personal locator/body hash mismatch/no live replay/no effects");
+      expect(timerB.audit).toEqual(
+        movedTime.audit.map((row) => ({ ...row, user_id: actorB.userId })),
+      );
+      for (const audit of timerB.audit) expect(audit.workspace_id).toBe(personal.id);
+      passed("12 exact historical audit IDs/values/personal locator and mapped actor");
+      expect(
+        (await okJson(fpage.request.get("/api/v1/me/workspaces"), workspaces)).items.map(
+          (row) => row.id,
+        ),
+      ).not.toContain(personal.id);
+      await deny(transferPath, { ...moveBody, confirmed: false }, 400, "confirm_invalid");
+      const absent = await fpage.request.post(transferPath, {
+        data: moveBytes,
+        headers: { Origin: destinationInstall.url, "content-type": "application/json" },
+      });
+      expect(absent.status()).toBe(404);
+      expect(z.object({ code: z.string() }).parse(await absent.json()).code).toBe("not_found");
+      expect(await effects()).toEqual(beforeProbes);
+      expect(readGraph(appB, workspaceB.id).transferCount).toBe(0);
+      passed(
+        "13 registered MOVE handler400/exact absent personal source404/no effects/no portable receipt",
+      );
+      expect(groups).toHaveLength(16);
+      record(out, "observed-D-current54.json", {
+        groups,
+        archiveHash,
+        sourceWorkspace: team.id,
+        sourcePersonalWorkspace: personal.id,
+        destinationWorkspace: workspaceB.id,
+        project: project.id,
+        document: pair.documentId,
+        task: pair.taskId,
+        attachment,
+        fileHash,
+        run: started.runId,
+        segmentIds: beforeTime.segments.map((row) => row.id),
+        entryIds: beforeTime.entries.map((row) => row.id),
+        revisionIds: sourceGraph.revisions.map((row) => row.id),
+        sourceReceiptDigest: frozenReceipt.digest,
+        sourceReceiptCount: frozenReceipt.count,
+        sourceNative: [rowDocA, rowTaskA],
+        destinationNative: nativeB,
+        timerCommandsPreservedWithRetirement: true,
+        historicalAuditPersonalLocatorPreserved: true,
+        originalTimerPath,
+        restoreJob: job,
+        browserResponse202Lost: true,
+        newSessionSameBodySameJob: true,
+        noEffectNegativeProbes: 4,
+        sourceRoles: roleWitness(sourceApp, team.id),
+        destinationRoles: roleWitness(appB, workspaceB.id),
+        normalServerEnvNames: destinationInstall.envNames,
+        ownedStorageFiles: beforeProbes.ownedStorage.length,
+      });
+    } finally {
+      try {
+        await fresh.close();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+  } catch (error) {
+    errors.unshift(error);
+  }
+  try {
+    await source.close();
+  } catch (error) {
+    errors.push(error);
+  }
+  try {
+    await destinationInstall.stop();
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length) throw new AggregateError(errors, "D moved graph restore and owned cleanup");
+});

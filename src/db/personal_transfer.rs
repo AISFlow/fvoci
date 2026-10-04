@@ -513,6 +513,8 @@ struct SourceGraph {
     activities: Vec<Activity>,
     collection_item: Option<CollectionItem>,
     body_cuts: Value,
+    /// MOVE only: the task's time graph, relocated with the same IDs.
+    timer: TimerGraph,
 }
 struct Destination {
     workspace_name: String,
@@ -615,37 +617,312 @@ async fn owner_private_zotero_rows(
     Ok(found)
 }
 
-/// 048 timer rows of the moved task (owner-private, actor-self RLS). The
-/// task delete of a MOVE would cascade them away, so a MOVE refuses while any
-/// run or legacy open reservation exists; relocating them needs a reviewed
-/// timer checkpoint. A COPY leaves the original's timers untouched.
-async fn owner_private_timer_rows(
-    tx: &mut Transaction<'_, Postgres>,
-    source: Uuid,
-    actor: Uuid,
-    selection: &PersonalTransferSelection,
-) -> Result<bool, sqlx::Error> {
-    let Some(task) = selection.task_id else {
-        return Ok(false);
-    };
+/// Upper bound on each timer collection of a moved task; more refuses as
+/// inventory_budget rather than truncating.
+const TIMER_ROW_BUDGET: i64 = 10_000;
+
+/// A 034 time entry of the moved task, every stored value (tenant-shared).
+#[derive(Debug, Clone)]
+struct TimeEntryRow {
+    id: Uuid,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    duration_seconds: Option<i32>,
+    note: Option<String>,
+}
+
+/// A 034 row as read: (id, author, started, ended, duration, note).
+type TimeEntryWithAuthor = (
+    Uuid,
+    Uuid,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+    Option<i32>,
+    Option<String>,
+);
+
+/// A 048 stopwatch run of the actor on the moved task (actor-private).
+#[derive(Debug, Clone)]
+struct TimerRunRow {
+    id: Uuid,
+    status: String,
+    version: i32,
+    started_at: DateTime<Utc>,
+    stopped_at: Option<DateTime<Utc>>,
+    note: Option<String>,
+}
+
+/// A 048 run segment, with its optional 034 projection.
+#[derive(Debug, Clone)]
+struct TimerSegmentRow {
+    id: Uuid,
+    run_id: Uuid,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    time_entry_id: Option<Uuid>,
+}
+
+/// The moved task's canonical time graph, relocated with the same IDs. The
+/// command receipts and audit rows that reference it are immutable history
+/// and are never read into, moved or rewritten by the transfer. This relies
+/// on migration 053 (the command run locator is historical, not a foreign
+/// key) and the W5 replay/correction lookup that follow the stable IDs; the
+/// writer is integrated only together with them.
+#[derive(Debug, Clone, Default)]
+struct TimerGraph {
+    entries: Vec<TimeEntryRow>,
+    runs: Vec<TimerRunRow>,
+    segments: Vec<TimerSegmentRow>,
+    /// Open entries holding a genuine legacy reservation in the source.
+    reserved: Vec<Uuid>,
+}
+
+impl TimerGraph {
+    fn digest(&self) -> Value {
+        json!({
+            "entries": self.entries.iter().map(|e| json!({"id":e.id,"startedAt":e.started_at,"endedAt":e.ended_at,"duration":e.duration_seconds,"note":e.note})).collect::<Vec<_>>(),
+            "runs": self.runs.iter().map(|r| json!({"id":r.id,"status":r.status,"version":r.version,"startedAt":r.started_at,"stoppedAt":r.stopped_at,"note":r.note})).collect::<Vec<_>>(),
+            "segments": self.segments.iter().map(|g| json!({"id":g.id,"run":g.run_id,"startedAt":g.started_at,"endedAt":g.ended_at,"entry":g.time_entry_id})).collect::<Vec<_>>(),
+            "reserved": self.reserved,
+        })
+    }
+}
+
+/// The transaction's current `app.self_user_id`, to restore after a block
+/// that runs under the actor's 048 self policy.
+async fn previous_self_user(tx: &mut Transaction<'_, Postgres>) -> Result<String, sqlx::Error> {
     let previous: Option<String> =
         sqlx::query_scalar("SELECT current_setting('app.self_user_id', true)")
             .fetch_one(&mut **tx)
             .await?;
-    set_self_user(tx, actor).await?;
-    let found: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM fvoci.task_timer_runs WHERE workspace_id=$1 AND task_id=$2)
-            OR EXISTS(SELECT 1 FROM fvoci.task_timer_legacy_open WHERE workspace_id=$1 AND task_id=$2)",
+    Ok(previous.unwrap_or_default())
+}
+
+async fn restore_self_user(
+    tx: &mut Transaction<'_, Postgres>,
+    previous: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT set_config('app.self_user_id', $1, true)")
+        .bind(previous)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// MOVE: the locked, bounded time graph of the selected task, and the
+/// pre-effect conflicts that would otherwise fail inside the publication.
+/// 034 entries are read under the source tenant; 048 rows under the actor's
+/// self policy (the personal source's only member is the actor, which the
+/// caller's owner fence already holds). A foreign-author entry refuses rather
+/// than being exported or cascaded away.
+async fn timer_snapshot(
+    tx: &mut Transaction<'_, Postgres>,
+    source: Uuid,
+    actor: Uuid,
+    selection: &PersonalTransferSelection,
+) -> TransferResult<TimerGraph> {
+    let Some(task) = selection.task_id else {
+        return Ok(Ok(TimerGraph::default()));
+    };
+    let budget = || {
+        Ok(Err(PersonalTransferDbError::Incomplete(
+            Blocker::InventoryBudget,
+            "timer inventory budget",
+        )))
+    };
+    set_tenant(tx, source).await?;
+    let rows: Vec<TimeEntryWithAuthor> = sqlx::query_as(
+        "SELECT id,user_id,started_at,ended_at,duration_seconds,note FROM fvoci.time_entries WHERE workspace_id=$1 AND task_id=$2 ORDER BY started_at,id LIMIT $3 FOR UPDATE",
     )
     .bind(source)
     .bind(task)
-    .fetch_one(&mut **tx)
+    .bind(TIMER_ROW_BUDGET + 1)
+    .fetch_all(&mut **tx)
     .await?;
-    sqlx::query("SELECT set_config('app.self_user_id', $1, true)")
-        .bind(previous.unwrap_or_default())
-        .execute(&mut **tx)
+    if rows.len() as i64 > TIMER_ROW_BUDGET {
+        return budget();
+    }
+    if rows.iter().any(|row| row.1 != actor) {
+        return Ok(Err(PersonalTransferDbError::Incomplete(
+            Blocker::DependentGraph,
+            "time entry by another author",
+        )));
+    }
+    let entries: Vec<TimeEntryRow> = rows
+        .into_iter()
+        .map(
+            |(id, _, started_at, ended_at, duration_seconds, note)| TimeEntryRow {
+                id,
+                started_at,
+                ended_at,
+                duration_seconds,
+                note,
+            },
+        )
+        .collect();
+    let previous = previous_self_user(tx).await?;
+    set_self_user(tx, actor).await?;
+    let runs: Vec<TimerRunRow> = sqlx::query_as::<_, (Uuid, String, i32, DateTime<Utc>, Option<DateTime<Utc>>, Option<String>)>(
+        "SELECT id,status,version,started_at,stopped_at,note FROM fvoci.task_timer_runs WHERE workspace_id=$1 AND task_id=$2 AND user_id=$3 ORDER BY started_at,id LIMIT $4 FOR UPDATE",
+    )
+    .bind(source)
+    .bind(task)
+    .bind(actor)
+    .bind(TIMER_ROW_BUDGET + 1)
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .map(|(id, status, version, started_at, stopped_at, note)| TimerRunRow {
+        id,
+        status,
+        version,
+        started_at,
+        stopped_at,
+        note,
+    })
+    .collect();
+    let segments: Vec<TimerSegmentRow> = sqlx::query_as::<_, (Uuid, Uuid, DateTime<Utc>, Option<DateTime<Utc>>, Option<Uuid>)>(
+        "SELECT id,run_id,started_at,ended_at,time_entry_id FROM fvoci.task_timer_segments WHERE workspace_id=$1 AND task_id=$2 AND user_id=$3 ORDER BY started_at,id LIMIT $4 FOR UPDATE",
+    )
+    .bind(source)
+    .bind(task)
+    .bind(actor)
+    .bind(TIMER_ROW_BUDGET + 1)
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .map(|(id, run_id, started_at, ended_at, time_entry_id)| TimerSegmentRow {
+        id,
+        run_id,
+        started_at,
+        ended_at,
+        time_entry_id,
+    })
+    .collect();
+    let reserved: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT time_entry_id FROM fvoci.task_timer_legacy_open WHERE workspace_id=$1 AND task_id=$2 AND user_id=$3 ORDER BY time_entry_id FOR UPDATE",
+    )
+    .bind(source)
+    .bind(task)
+    .bind(actor)
+    .fetch_all(&mut **tx)
+    .await?;
+    if runs.len() as i64 > TIMER_ROW_BUDGET || segments.len() as i64 > TIMER_ROW_BUDGET {
+        restore_self_user(tx, &previous).await?;
+        return budget();
+    }
+    // An open entry is reinserted, and the unchanged 048 trigger refuses it
+    // while the actor has any other unfinished run or reservation; the 034
+    // index allows one open entry per actor in the destination. Refuse both
+    // here, before any effect, rather than closing or releasing anything.
+    if entries.iter().any(|entry| entry.ended_at.is_none()) {
+        let elsewhere: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM fvoci.task_timer_runs WHERE user_id=$1 AND status<>'stopped' AND NOT (workspace_id=$2 AND task_id=$3))
+                OR EXISTS(SELECT 1 FROM fvoci.task_timer_legacy_open WHERE user_id=$1 AND NOT (workspace_id=$2 AND task_id=$3))",
+        )
+        .bind(actor)
+        .bind(source)
+        .bind(task)
+        .fetch_one(&mut **tx)
         .await?;
-    Ok(found)
+        set_tenant(tx, selection.destination_workspace_id).await?;
+        let destination_open: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM fvoci.time_entries WHERE workspace_id=$1 AND user_id=$2 AND ended_at IS NULL)",
+        )
+        .bind(selection.destination_workspace_id)
+        .bind(actor)
+        .fetch_one(&mut **tx)
+        .await?;
+        set_tenant(tx, source).await?;
+        if elsewhere || destination_open {
+            restore_self_user(tx, &previous).await?;
+            return Ok(Err(PersonalTransferDbError::Incomplete(
+                Blocker::TimerBusy,
+                "another unfinished timer or open time entry",
+            )));
+        }
+    }
+    restore_self_user(tx, &previous).await?;
+    Ok(Ok(TimerGraph {
+        entries,
+        runs,
+        segments,
+        reserved,
+    }))
+}
+
+/// MOVE publication of the time graph under the destination tenant, after the
+/// destination task exists: closed entries; the (at most one, per 034) open
+/// entry, dropping the reservation its INSERT trigger creates unless the source
+/// held a genuine one; stopped runs, then any unfinished run; segments last.
+/// Every value is the source's; only the tenant locator changes.
+async fn relocate_timer(
+    tx: &mut Transaction<'_, Postgres>,
+    destination: Uuid,
+    actor: Uuid,
+    task: Uuid,
+    timer: &TimerGraph,
+) -> Result<(), sqlx::Error> {
+    if timer.entries.is_empty() && timer.runs.is_empty() {
+        return Ok(());
+    }
+    let previous = previous_self_user(tx).await?;
+    set_self_user(tx, actor).await?;
+    let insert_entry = "INSERT INTO fvoci.time_entries(id,workspace_id,task_id,user_id,started_at,ended_at,duration_seconds,note) VALUES($1,$2,$3,$4,$5,$6,$7,$8)";
+    let mut ordered: Vec<&TimeEntryRow> = timer.entries.iter().collect();
+    ordered.sort_by_key(|entry| entry.ended_at.is_none());
+    for entry in ordered {
+        sqlx::query(insert_entry)
+            .bind(entry.id)
+            .bind(destination)
+            .bind(task)
+            .bind(actor)
+            .bind(entry.started_at)
+            .bind(entry.ended_at)
+            .bind(entry.duration_seconds)
+            .bind(&entry.note)
+            .execute(&mut **tx)
+            .await?;
+        if entry.ended_at.is_none() && !timer.reserved.contains(&entry.id) {
+            sqlx::query(
+                "DELETE FROM fvoci.task_timer_legacy_open WHERE time_entry_id=$1 AND user_id=$2",
+            )
+            .bind(entry.id)
+            .bind(actor)
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+    let mut runs: Vec<&TimerRunRow> = timer.runs.iter().collect();
+    runs.sort_by_key(|run| run.status != "stopped");
+    for run in runs {
+        sqlx::query("INSERT INTO fvoci.task_timer_runs(id,user_id,workspace_id,task_id,status,version,started_at,stopped_at,note) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+            .bind(run.id)
+            .bind(actor)
+            .bind(destination)
+            .bind(task)
+            .bind(&run.status)
+            .bind(run.version)
+            .bind(run.started_at)
+            .bind(run.stopped_at)
+            .bind(&run.note)
+            .execute(&mut **tx)
+            .await?;
+    }
+    for segment in &timer.segments {
+        sqlx::query("INSERT INTO fvoci.task_timer_segments(id,run_id,user_id,workspace_id,task_id,started_at,ended_at,time_entry_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
+            .bind(segment.id)
+            .bind(segment.run_id)
+            .bind(actor)
+            .bind(destination)
+            .bind(task)
+            .bind(segment.started_at)
+            .bind(segment.ended_at)
+            .bind(segment.time_entry_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    restore_self_user(tx, &previous).await
 }
 
 /// Locks source metadata before checking the target project. A held target
@@ -798,7 +1075,6 @@ async fn source_graph(
       OR EXISTS(SELECT 1 FROM fvoci.task_labels WHERE workspace_id=$1 AND task_id=$3)
       OR EXISTS(SELECT 1 FROM fvoci.github_issue_links WHERE workspace_id=$1 AND task_id=$3)
       OR EXISTS(SELECT 1 FROM fvoci.task_dependencies WHERE workspace_id=$1 AND (blocker_id=$3 OR blocked_id=$3))
-      OR EXISTS(SELECT 1 FROM fvoci.time_entries WHERE workspace_id=$1 AND task_id=$3)
       OR EXISTS(SELECT 1 FROM fvoci.collection_items WHERE workspace_id=$1 AND document_id=$2)
       OR EXISTS(SELECT 1 FROM fvoci.collection_values WHERE workspace_id=$1 AND item_id=$4)
       OR EXISTS(SELECT 1 FROM fvoci.collection_choices WHERE workspace_id=$1 AND item_id=$4)
@@ -806,8 +1082,7 @@ async fn source_graph(
       OR EXISTS(SELECT 1 FROM fvoci.task_origins WHERE workspace_id=$1 AND document_id=$2 AND task_id IS DISTINCT FROM $3)
     "#).bind(source).bind(selection.document_id).bind(selection.task_id).bind(collection_item.as_ref().map(|item|item.id)).bind(selection.action==PersonalTransferAction::Move).fetch_one(&mut **tx).await?;
     let zotero = selection.action == PersonalTransferAction::Move
-        && (owner_private_zotero_rows(tx, source, actor, selection).await?
-            || owner_private_timer_rows(tx, source, actor, selection).await?);
+        && owner_private_zotero_rows(tx, source, actor, selection).await?;
     // The pair's files are inventoried and locked first: a MOVE's retained
     // history and a COPY's current body may show exactly these and no other.
     let mut moved_files = Vec::new();
@@ -934,6 +1209,16 @@ async fn source_graph(
             }
         }
     }
+    // MOVE relocates the task's time graph with the same IDs; COPY creates a
+    // task without any and leaves the original's untouched.
+    let timer = if selection.action == PersonalTransferAction::Move {
+        match timer_snapshot(tx, source, actor, selection).await? {
+            Ok(timer) => timer,
+            Err(error) => return Ok(Err(error)),
+        }
+    } else {
+        TimerGraph::default()
+    };
     Ok(Ok(SourceGraph {
         document,
         files: moved_files,
@@ -944,6 +1229,7 @@ async fn source_graph(
         activities,
         collection_item,
         body_cuts: json!({"document":document_body.cut,"task":task_cut}),
+        timer,
     }))
 }
 
@@ -1391,7 +1677,7 @@ fn preview_digest(
         .iter()
         .map(|f| json!({"id":f.id,"document":f.document_id,"task":f.task_id,"uploader":f.uploader_id,"name":f.name,"mime":f.mime,"declaredMime":f.declared_mime,"key":f.storage_key,"size":f.size_bytes,"image":f.image,"scan":f.scan_status,"preview":f.preview,"createdAt":f.created_at,"completedAt":f.completed_at}))
         .collect();
-    let canonical = json!({"files":files,"native":native,"source":source,"actor":actor,"session":session,"selection":selection,"document":{"title":doc.title,"icon":doc.icon,"kind":doc.kind,"status":doc.status,"version":doc.version,"body":doc.content_json,"updatedAt":doc.updated_at},"task":task,"bodyCuts":graph.body_cuts,"assignees":graph.assignees,"activity":activities,"destination":{"name":destination.workspace_name,"projectName":destination.project_name,"visibility":destination.visibility,"root":destination.root_id,"path":destination.root_path}});
+    let canonical = json!({"files":files,"native":native,"source":source,"actor":actor,"session":session,"selection":selection,"document":{"title":doc.title,"icon":doc.icon,"kind":doc.kind,"status":doc.status,"version":doc.version,"body":doc.content_json,"updatedAt":doc.updated_at},"task":task,"bodyCuts":graph.body_cuts,"assignees":graph.assignees,"activity":activities,"timer":graph.timer.digest(),"destination":{"name":destination.workspace_name,"projectName":destination.project_name,"visibility":destination.visibility,"root":destination.root_id,"path":destination.root_path}});
     hex::encode(Sha256::digest(canonical.to_string().as_bytes()))
 }
 
@@ -1401,6 +1687,7 @@ fn preview_digest(
 async fn dispositions(
     tx: &mut Transaction<'_, Postgres>,
     source: Uuid,
+    actor: Uuid,
     selection: &PersonalTransferSelection,
     graph: &SourceGraph,
 ) -> Result<Vec<PersonalTransferDisposition>, sqlx::Error> {
@@ -1450,6 +1737,51 @@ async fn dispositions(
             outcome: Outcome::Moved,
             count: u32::try_from(moved_revisions).unwrap_or(u32::MAX),
         });
+    }
+    // Time: a MOVE carries the task's entries (tenant-shared) and the actor's
+    // own runs; a COPY's task has none and the original keeps them privately.
+    let (entries, runs) = if moving {
+        (
+            graph.timer.entries.len() as i64,
+            graph.timer.runs.len() as i64,
+        )
+    } else if let Some(task) = selection.task_id {
+        set_tenant(tx, source).await?;
+        let entries: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM fvoci.time_entries WHERE workspace_id=$1 AND task_id=$2",
+        )
+        .bind(source)
+        .bind(task)
+        .fetch_one(&mut **tx)
+        .await?;
+        let previous = previous_self_user(tx).await?;
+        set_self_user(tx, actor).await?;
+        let runs: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM fvoci.task_timer_runs WHERE workspace_id=$1 AND task_id=$2 AND user_id=$3",
+        )
+        .bind(source)
+        .bind(task)
+        .bind(actor)
+        .fetch_one(&mut **tx)
+        .await?;
+        restore_self_user(tx, &previous).await?;
+        (entries, runs)
+    } else {
+        (0, 0)
+    };
+    let kept = if moving {
+        Outcome::Moved
+    } else {
+        Outcome::RetainedPrivate
+    };
+    for (item, count) in [(Item::TimeEntry, entries), (Item::Timer, runs)] {
+        if count > 0 {
+            out.push(PersonalTransferDisposition {
+                item,
+                outcome: kept,
+                count: u32::try_from(count).unwrap_or(u32::MAX),
+            });
+        }
     }
     if !moving {
         set_tenant(tx, source).await?;
@@ -1507,7 +1839,7 @@ pub async fn preview_personal_transfer(
         tx.rollback().await?;
         return Ok(Err(PersonalTransferDbError::NotFound));
     }
-    let dispositions = dispositions(&mut tx, source, selection, &graph).await?;
+    let dispositions = dispositions(&mut tx, source, actor, selection, &graph).await?;
     let preview = PersonalTransferPreview {
         digest: preview_digest(source, actor, session, selection, &graph, &target),
         document_title: graph.document.title,
@@ -2186,6 +2518,7 @@ async fn commit_graph(
             for activity in &graph.activities {
                 sqlx::query("INSERT INTO fvoci.task_activity(id,workspace_id,task_id,actor_user_id,channel,kind,changes,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)").bind(activity.id).bind(dst).bind(id).bind(activity.actor).bind(&activity.channel).bind(&activity.kind).bind(&activity.changes).bind(activity.created_at).execute(&mut **tx).await?;
             }
+            relocate_timer(tx, dst, actor, id, &graph.timer).await?;
         } else {
             crate::db::task_activity::record_task_activity(
                 tx,

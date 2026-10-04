@@ -45,6 +45,8 @@ const MODELS: &[&str] = &[
     "collection-value",
     "collection-view",
     "document-tag",
+    "purged-label-ref",
+    "purged-milestone-ref",
 ];
 const POLICY: &str = "preserve-content-ids-fresh-private-workspace";
 

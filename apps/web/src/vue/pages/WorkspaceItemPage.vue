@@ -531,8 +531,11 @@ async function onTrash(): Promise<void> {
       :message="loadErrorMessage(workflow.error.value)"
       @retry="workflow.refetch()"
     />
+    <!-- A failed refetch keeps the last task data; an authoritative 404/miss
+         (e.g. the task moved to a team) must not leave that form editable.
+         Transient errors keep it, with any draft. -->
     <TaskDetailView
-      v-if="item && task.data.value"
+      v-if="item && task.data.value && !realNotFound"
       :key="collabRoomName(workspace.id, 'task', task.data.value.id)"
       :slug="slug"
       :workspace-id="workspace.id"

@@ -229,6 +229,42 @@ fn scoped<'q>(
         .bind(&scope.connectors)
 }
 
+/// Charges bytes the capture materializes outside `rows` to the same
+/// cumulative graph budget.
+fn admit_graph_bytes(scope: &Scope, bytes: usize) -> Result<(), NativeDbError> {
+    let admitted = i64::try_from(bytes).ok().and_then(|bytes| {
+        scope
+            .graph_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .checked_add(bytes)
+    });
+    match admitted {
+        Some(admitted) if admitted <= MAX_GRAPH_BYTES as i64 => {
+            scope
+                .graph_bytes
+                .store(admitted, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+        _ => Err(ArchiveError::Limit.into()),
+    }
+}
+
+/// Charges the history's label/milestone references plus the view-filter
+/// bound (two per view row), 39 bytes each, to the cumulative graph budget;
+/// capture calls it before any filter is parsed or collected.
+fn admit_history_references(
+    scope: &Scope,
+    activity: &[Activity],
+    views: &[View],
+    collection_views: &[CollectionView],
+) -> Result<(), NativeDbError> {
+    let bytes = activity_reference_count(activity)?
+        .checked_add(view_filter_ref_bound(views, collection_views)?)
+        .and_then(|references| references.checked_mul(HISTORY_REFERENCE_BYTES))
+        .ok_or(ArchiveError::Limit)?;
+    admit_graph_bytes(scope, bytes)
+}
+
 async fn rows<T: DeserializeOwned>(
     tx: &mut Transaction<'_, Postgres>,
     sql: &str,
@@ -319,12 +355,12 @@ pub async fn capture(
     let document_tags = rows(&mut tx, "SELECT to_jsonb(t)-'workspace_id' FROM fvoci.document_tags t WHERE t.id IN(SELECT a.tag_id FROM fvoci.document_tag_assignments a WHERE a.document_id IN {DOCS}) ORDER BY t.id LIMIT 10001", &scope).await?;
     // Every person's saved views of the project are read so another person's
     // private view is refused by validation, never silently left behind.
-    let views = rows(&mut tx, "SELECT to_jsonb(v)-'workspace_id' FROM fvoci.views v WHERE v.project_id=$1 ORDER BY v.id LIMIT 10001", &scope).await?;
+    let views: Vec<View> = rows(&mut tx, "SELECT to_jsonb(v)-'workspace_id' FROM fvoci.views v WHERE v.project_id=$1 ORDER BY v.id LIMIT 10001", &scope).await?;
     // Either end in the project: the writer keeps both ends in one project,
     // and validation refuses an edge whose other end is not archived.
     let dependencies = rows(&mut tx, "SELECT to_jsonb(d)-'workspace_id' FROM fvoci.task_dependencies d WHERE d.blocker_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1) OR d.blocked_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1) ORDER BY d.blocker_id,d.blocked_id LIMIT 10001", &scope).await?;
     let origins = rows(&mut tx, "SELECT to_jsonb(o)-'workspace_id' FROM fvoci.task_origins o JOIN fvoci.tasks t ON t.id=o.task_id WHERE t.project_id=$1 ORDER BY o.task_id LIMIT 10001", &scope).await?;
-    let activity = rows(&mut tx, "SELECT to_jsonb(a)-'workspace_id' FROM fvoci.task_activity a JOIN fvoci.tasks t ON t.id=a.task_id WHERE t.project_id=$1 ORDER BY a.id LIMIT 10001", &scope).await?;
+    let activity: Vec<Activity> = rows(&mut tx, "SELECT to_jsonb(a)-'workspace_id' FROM fvoci.task_activity a JOIN fvoci.tasks t ON t.id=a.task_id WHERE t.project_id=$1 ORDER BY a.id LIMIT 10001", &scope).await?;
     let collections = rows(&mut tx, "SELECT to_jsonb(c)-'workspace_id' FROM fvoci.collections c WHERE c.project_id=$1 ORDER BY c.id LIMIT 10001", &scope).await?;
     let collection_items = rows(&mut tx, "SELECT to_jsonb(i)-'workspace_id' FROM fvoci.collection_items i JOIN fvoci.collections c ON c.id=i.collection_id WHERE c.project_id=$1 ORDER BY i.id LIMIT 10001", &scope).await?;
     // Person-made collection state of the project's collections; numbers as
@@ -335,7 +371,42 @@ pub async fn capture(
     let collection_values = rows(&mut tx, "SELECT (to_jsonb(v)-'workspace_id'-'value_number')||jsonb_build_object('value_number',v.value_number::text) FROM fvoci.collection_values v WHERE v.collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1) ORDER BY v.item_id,v.field_id LIMIT 10001", &scope).await?;
     let collection_choices = rows(&mut tx, "SELECT to_jsonb(x)-'workspace_id' FROM fvoci.collection_choices x WHERE x.collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1) ORDER BY x.item_id,x.field_id,x.option_id LIMIT 10001", &scope).await?;
     let collection_people = rows(&mut tx, "SELECT to_jsonb(x)-'workspace_id' FROM fvoci.collection_people x WHERE x.collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1) ORDER BY x.item_id,x.field_id,x.user_id LIMIT 10001", &scope).await?;
-    let collection_views = rows(&mut tx, "SELECT to_jsonb(v)-'workspace_id' FROM fvoci.collection_views v WHERE v.collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1) ORDER BY v.id LIMIT 10001", &scope).await?;
+    let collection_views: Vec<CollectionView> = rows(&mut tx, "SELECT to_jsonb(v)-'workspace_id' FROM fvoci.collection_views v WHERE v.collection_id IN(SELECT id FROM fvoci.collections WHERE project_id=$1) ORDER BY v.id LIMIT 10001", &scope).await?;
+    // Purged labels/milestones the captured history or the captured view
+    // filters still name: the history references and the view-filter bound
+    // (two per view row) are counted and charged to the graph budget before
+    // the filters are collected or any set is built (distinct purged ids are
+    // capped per kind as they are added).
+    // Tasks never change project and the writers assign only the project's
+    // own labels/milestones, so a named id with no live project row was
+    // purged; one still live anywhere in the workspace, as either kind, is
+    // outside the closure, never a purged reference.
+    admit_history_references(&scope, &activity, &views, &collection_views)?;
+    let view_refs = view_filter_refs(&views, &collection_views);
+    let live_labels: std::collections::BTreeSet<Uuid> =
+        labels.iter().map(|l: &Label| l.id).collect();
+    let live_milestones: std::collections::BTreeSet<Uuid> =
+        milestones.iter().map(|m: &Milestone| m.id).collect();
+    let (purged_labels, purged_milestones) =
+        purged_refs(&activity, &view_refs, &live_labels, &live_milestones)?;
+    let purged_label_refs: Vec<Uuid> = purged_labels.into_iter().collect();
+    let purged_milestone_refs: Vec<Uuid> = purged_milestones.into_iter().collect();
+    if !(purged_label_refs.is_empty() && purged_milestone_refs.is_empty()) {
+        let named: Vec<Uuid> = purged_label_refs
+            .iter()
+            .chain(&purged_milestone_refs)
+            .copied()
+            .collect();
+        let outside: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fvoci.labels WHERE id=ANY($1)) OR EXISTS(SELECT 1 FROM fvoci.milestones WHERE id=ANY($1))")
+            .bind(&named)
+            .fetch_one(&mut *tx)
+            .await?;
+        if outside {
+            return Err(
+                ArchiveError::Unsupported("reference outside selected closure".into()).into(),
+            );
+        }
+    }
     let mut entries = BTreeMap::new();
     let mut states = Vec::new();
     for (kind, table, parent) in [
@@ -518,6 +589,8 @@ pub async fn capture(
                 document_tag_assignments,
                 origins,
                 activity,
+                purged_label_refs,
+                purged_milestone_refs,
                 comments,
                 states,
                 revisions,
@@ -1553,4 +1626,48 @@ pub async fn publish(
     }
     tx.commit().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The view-filter precharge refuses at the remaining-budget boundary,
+    /// before any filter is collected, and leaves the budget untouched.
+    #[test]
+    fn native_archive_view_filter_precharge_refuses_at_the_remaining_budget() {
+        let scope = |used: usize| Scope {
+            project: Uuid::nil(),
+            wiki: Vec::new(),
+            workspace: Uuid::nil(),
+            actor: Uuid::nil(),
+            connectors: Vec::new(),
+            graph_bytes: std::sync::atomic::AtomicI64::new(used as i64),
+        };
+        let views: Vec<View> = serde_json::from_value(json!([{"id":Uuid::nil(),
+            "project_id":Uuid::nil(),"user_id":Uuid::nil(),"name":"보기","type":"list",
+            "config":{"filters":{"labelId":Uuid::nil().to_string(),
+            "milestoneId":Uuid::from_u128(1).to_string()},"sort":[]},
+            "created_at":"2026-10-03T00:00:00Z","updated_at":"2026-10-03T00:00:00Z"}]))
+        .unwrap();
+        let charge = 2 * HISTORY_REFERENCE_BYTES;
+        let exact = scope(MAX_GRAPH_BYTES - charge);
+        admit_history_references(&exact, &[], &views, &[]).unwrap();
+        assert_eq!(
+            exact.graph_bytes.load(std::sync::atomic::Ordering::Relaxed),
+            MAX_GRAPH_BYTES as i64
+        );
+        let short = scope(MAX_GRAPH_BYTES - charge + 1);
+        assert!(matches!(
+            admit_history_references(&short, &[], &views, &[]),
+            Err(NativeDbError::Archive(ArchiveError::Limit))
+        ));
+        assert_eq!(
+            short.graph_bytes.load(std::sync::atomic::Ordering::Relaxed),
+            (MAX_GRAPH_BYTES - charge + 1) as i64
+        );
+        // No views, no history: nothing is charged.
+        let empty = scope(MAX_GRAPH_BYTES);
+        admit_history_references(&empty, &[], &[], &[]).unwrap();
+    }
 }

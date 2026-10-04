@@ -93,5 +93,18 @@ export function inputScope() {
       actorEpoch++;
       targetEpoch++;
     },
+    /**
+     * The host unmounted: this scope's UI lifetime ends, but no identity
+     * changed, so the epochs stay. Nothing rebinds a disposed scope, so a
+     * caller must confirm the actor against an authoritative source before
+     * finishing durable work under `sameIdentity`.
+     */
+    dispose() {
+      active = false;
+    },
+    /** The captured actor and epoch are still this scope's, whether or not its UI is live. */
+    sameIdentity(scope: { actor: string; actorEpoch: number }) {
+      return scope.actor === actor && scope.actorEpoch === actorEpoch;
+    },
   };
 }
