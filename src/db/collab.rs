@@ -384,7 +384,7 @@ pub async fn acquire_family_document_room(
         document,
         owner,
         lease,
-        NativeLoadMode::Writer,
+        NativeLoadMode::Reader,
     )
     .await
 }
