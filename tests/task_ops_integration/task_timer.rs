@@ -5291,12 +5291,14 @@ mod task_timer {
             fk.contains("FOREIGN KEY (run_id)") && fk.contains("ON DELETE SET NULL"),
             "{fk}"
         );
-        fvoci_server::db::migrate::run_migrations(&harness.admin_url)
+        // Verify the historical timer migrations against the entire 052 FK
+        // catalog before 055 introduces the wiki command table.
+        fvoci_server::db::migrate::run_migrations_through(&harness.admin_url, 54)
             .await
             .unwrap();
-        fvoci_server::db::migrate::assert_schema_current(&admin)
+        assert!(fvoci_server::db::migrate::assert_schema_current(&admin)
             .await
-            .unwrap();
+            .is_err());
         let after: Value = sqlx::query_scalar(receipts_sql)
             .fetch_one(&admin)
             .await
@@ -5307,6 +5309,34 @@ mod task_timer {
             .await
             .unwrap();
         assert_eq!(after_constraints, constraints);
+        let fk_count:i64=sqlx::query_scalar("SELECT count(*) FROM pg_constraint WHERE conrelid='fvoci.task_timer_commands'::regclass AND conname='task_timer_commands_run_id_fkey'").fetch_one(&admin).await.unwrap();
+        assert_eq!(fk_count, 0);
+
+        // Current admission must also preserve receipts and every legacy FK.
+        // Expect all three declared 055 FKs explicitly; unexpected catalog
+        // additions, removals or changes still fail the full comparison.
+        fvoci_server::db::migrate::run_migrations(&harness.admin_url)
+            .await
+            .unwrap();
+        fvoci_server::db::migrate::assert_schema_current(&admin)
+            .await
+            .unwrap();
+        let mut current_constraints = constraints.clone();
+        current_constraints.as_array_mut().unwrap().extend([
+            json!({"table":"fvoci.wiki_create_commands","name":"wiki_create_commands_actor_user_id_fkey","definition":"FOREIGN KEY (actor_user_id) REFERENCES fvoci.users(id) ON DELETE CASCADE"}),
+            json!({"table":"fvoci.wiki_create_commands","name":"wiki_create_commands_workspace_id_document_id_fkey","definition":"FOREIGN KEY (workspace_id, document_id) REFERENCES fvoci.documents(workspace_id, id) ON DELETE SET NULL (document_id)"}),
+            json!({"table":"fvoci.wiki_create_commands","name":"wiki_create_commands_workspace_id_fkey","definition":"FOREIGN KEY (workspace_id) REFERENCES fvoci.workspaces(id) ON DELETE CASCADE"}),
+        ]);
+        let after_current_constraints: Value = sqlx::query_scalar(constraints_sql)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+        assert_eq!(after_current_constraints, current_constraints);
+        let after_current: Value = sqlx::query_scalar(receipts_sql)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+        assert_eq!(after_current, before);
         let fk_count:i64=sqlx::query_scalar("SELECT count(*) FROM pg_constraint WHERE conrelid='fvoci.task_timer_commands'::regclass AND conname='task_timer_commands_run_id_fkey'").fetch_one(&admin).await.unwrap();
         assert_eq!(fk_count, 0);
         let restricted = sqlx::postgres::PgPoolOptions::new()
