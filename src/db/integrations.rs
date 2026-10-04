@@ -1124,6 +1124,7 @@ mod webhook_backend_regressions {
                 .await
                 .unwrap();
         let state = row(&f, new.due.id).await;
+        eprintln!("webhook stale control: old_until_us={} new_until_us={} old_attempt={} new_attempt={} old_ack_accepted={} current_state={:?}",old.claimed_until.timestamp_micros(),new.claimed_until.timestamp_micros(),old.due.attempt,new.due.attempt,accepted,state);
         // Cleanup before the deliberate old-source regression assertion so
         // even the allocated failure control has no retained fixture resource.
         f.finish().await;
