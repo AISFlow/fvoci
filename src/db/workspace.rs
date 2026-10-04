@@ -341,7 +341,7 @@ impl OperationTx<'_, '_> {
                     "SELECT workspace_id, role FROM fvoci.memberships WHERE user_id=$1",
                 )
                 .bind(user)
-                .fetch_all(&mut **tx)
+                .fetch_all(&mut ***tx)
                 .await?;
                 clear_self_user(tx).await?;
                 Ok(rows)
@@ -369,7 +369,7 @@ impl OperationTx<'_, '_> {
                 "SELECT id,name,slug,kind FROM fvoci.workspaces WHERE id=$1 AND deleted_at IS NULL",
             )
             .bind(workspace)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(&mut ***tx)
             .await,
             Self::SqliteFamily(tx) => {
                 tx.require_tenant(workspace)?;
@@ -397,24 +397,34 @@ impl OperationTx<'_, '_> {
             Self::Postgres(tx) => workspace_card_counts_in_tx(tx, workspace, user, role).await,
             Self::SqliteFamily(tx) => {
                 tx.require_tenant(workspace)?;
-                let visible = projects::visible_project_family_sql("p");
-                let params = [
-                    Cell::uuid(workspace),
-                    Cell::Integer(i64::from(role == WorkspaceRole::Guest)),
-                    Cell::uuid(user),
-                ];
-                let documents=tx.query(&format!("SELECT count(*) FROM documents d WHERE d.workspace_id=?1 AND d.deleted_at IS NULL AND ((d.project_id IS NULL AND ?2=0) OR (d.project_id IS NOT NULL AND EXISTS(SELECT 1 FROM projects p WHERE p.workspace_id=d.workspace_id AND p.id=d.project_id AND p.deleted_at IS NULL AND {visible})))"),&params).await?;
-                let assigned=tx.query(&format!("SELECT count(*) FROM tasks t INNER JOIN projects p ON p.workspace_id=t.workspace_id AND p.id=t.project_id AND p.deleted_at IS NULL WHERE t.workspace_id=?1 AND t.deleted_at IS NULL AND t.archived_at IS NULL AND EXISTS(SELECT 1 FROM task_assignees a WHERE a.workspace_id=t.workspace_id AND a.task_id=t.id AND a.user_id=?3) AND EXISTS(SELECT 1 FROM statuses s_open WHERE s_open.workspace_id=t.workspace_id AND s_open.project_id=t.project_id AND s_open.id=t.status_id AND s_open.category NOT IN ('done','canceled')) AND {visible}"),&params).await?;
-                let documents = documents
+                let rows=tx.query(
+                    r#"WITH visible_projects AS (
+                        SELECT p.id FROM projects p
+                        WHERE p.workspace_id=?1 AND p.deleted_at IS NULL
+                          AND ((p.visibility='workspace' AND ?2=0)
+                            OR EXISTS(SELECT 1 FROM project_members pm
+                                      WHERE pm.workspace_id=p.workspace_id AND pm.project_id=p.id AND pm.user_id=?3)
+                            OR EXISTS(SELECT 1 FROM project_members pm
+                                      INNER JOIN group_members gm ON gm.workspace_id=pm.workspace_id AND gm.group_id=pm.group_id
+                                      WHERE pm.workspace_id=p.workspace_id AND pm.project_id=p.id AND gm.user_id=?3 AND pm.group_id IS NOT NULL))
+                    )
+                    SELECT
+                      (SELECT count(*) FROM documents d
+                       WHERE d.workspace_id=?1 AND d.deleted_at IS NULL
+                         AND ((d.project_id IS NULL AND ?2=0) OR d.project_id IN (SELECT id FROM visible_projects))),
+                      (SELECT count(*) FROM tasks t
+                       WHERE t.workspace_id=?1 AND t.deleted_at IS NULL AND t.archived_at IS NULL
+                         AND t.project_id IN (SELECT id FROM visible_projects)
+                         AND EXISTS(SELECT 1 FROM task_assignees a WHERE a.workspace_id=t.workspace_id AND a.task_id=t.id AND a.user_id=?3)
+                         AND EXISTS(SELECT 1 FROM statuses s_open WHERE s_open.workspace_id=t.workspace_id AND s_open.project_id=t.project_id AND s_open.id=t.status_id AND s_open.category NOT IN ('done','canceled')))
+                    "#,
+                    &[Cell::uuid(workspace),Cell::Integer(i64::from(role==WorkspaceRole::Guest)),Cell::uuid(user)]
+                ).await?;
+                let row = rows
                     .first()
-                    .ok_or_else(|| sqlx::Error::Protocol("workspace document count absent".into()))?
-                    .cell(0)?
-                    .integer()?;
-                let assigned = assigned
-                    .first()
-                    .ok_or_else(|| sqlx::Error::Protocol("workspace assigned count absent".into()))?
-                    .cell(0)?
-                    .integer()?;
+                    .ok_or_else(|| sqlx::Error::Protocol("workspace card counts absent".into()))?;
+                let documents = row.cell(0)?.integer()?;
+                let assigned = row.cell(1)?.integer()?;
                 if documents < 0 || assigned < 0 {
                     return Err(sqlx::Error::Protocol("negative workspace count".into()));
                 }
