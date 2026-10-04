@@ -58,6 +58,7 @@ pub mod task_origins;
 pub mod task_timer;
 pub mod tasks;
 pub mod templates;
+pub(crate) mod vapid;
 pub mod user_export;
 pub mod view_query;
 pub mod workflow_statuses;
