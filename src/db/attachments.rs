@@ -2158,6 +2158,17 @@ async fn reclaim_attachment_object_borrowed(
     row: &AttachmentObjectCleanup,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<CleanupDisposition, sqlx::Error> {
+    reclaim_attachment_object_owned_borrowed(op, storage, row, cancel, None).await
+}
+
+async fn reclaim_attachment_object_owned_borrowed(
+    op: &mut crate::db::backend::OperationTx<'_, '_>,
+    storage: &ObjectStorage,
+    row: &AttachmentObjectCleanup,
+    cancel: &tokio_util::sync::CancellationToken,
+    owner: Option<UploadMaintenanceOwner<'_>>,
+) -> Result<CleanupDisposition, sqlx::Error> {
+    guard_upload_maintenance(op, owner, cancel).await?;
     if cancel.is_cancelled() {
         return Ok(CleanupDisposition::Cancelled);
     }
@@ -2168,6 +2179,7 @@ async fn reclaim_attachment_object_borrowed(
         .attachment_cleanup_key_referenced(row.workspace_id, &row.storage_key)
         .await?
     {
+        guard_upload_maintenance(op, owner, cancel).await?;
         op.remove_attachment_cleanup_journal(row).await?;
         return Ok(CleanupDisposition::Reclaimed);
     }
@@ -2182,10 +2194,12 @@ async fn reclaim_attachment_object_borrowed(
     if cancel.is_cancelled() {
         return Ok(CleanupDisposition::Cancelled);
     }
+    guard_upload_maintenance(op, owner, cancel).await?;
     if let Err(err) = storage.purge_key(&row.storage_key).await {
         tracing::warn!(error=%err,"attachment.object_cleanup_storage_failed");
         #[cfg(test)]
         cleanup_test_hooks::wait(row.id, 2).await;
+        guard_upload_maintenance(op, owner, cancel).await?;
         return Ok(CleanupDisposition::Retry);
     }
     #[cfg(test)]
@@ -2197,6 +2211,7 @@ async fn reclaim_attachment_object_borrowed(
     if !matches!(head, Ok(None)) {
         return Ok(CleanupDisposition::Retry);
     }
+    guard_upload_maintenance(op, owner, cancel).await?;
     op.remove_attachment_cleanup_journal(row).await?;
     #[cfg(test)]
     cleanup_test_hooks::defer_fk_fault(op, row).await?;
@@ -2305,36 +2320,7 @@ pub(crate) async fn gc_stale_upload_row_backend_with_cancel(
     let result = async {
         let mut op = tx.operation();
         op.set_tenant(workspace).await?;
-        let Some(key) = op
-            .prepare_stale_attachment_cleanup(workspace, attachment)
-            .await?
-        else {
-            return Ok(false);
-        };
-        #[cfg(test)]
-        cleanup_test_hooks::wait(attachment, 0).await;
-        if cancel.is_cancelled() {
-            return Ok(false);
-        }
-        // The row retains the exact key until successful purge+head+DELETE.
-        // Cancellation waits for owned purge and head, leaving the row pointer.
-        storage
-            .purge_key(&key)
-            .await
-            .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
-        #[cfg(test)]
-        cleanup_test_hooks::wait(attachment, 1).await;
-        let head = storage.head(&key).await;
-        if cancel.is_cancelled() {
-            return Ok(false);
-        }
-        if !matches!(head, Ok(None)) {
-            return Err(sqlx::Error::Io(std::io::Error::other(
-                "stale attachment purge did not confirm absence",
-            )));
-        }
-        op.remove_stale_attachment_cleanup(workspace, attachment, &key)
-            .await
+        gc_stale_upload_borrowed(&mut op, storage, workspace, attachment, cancel, None).await
     }
     .await;
     match result {
@@ -6606,4 +6592,728 @@ async fn observe_upload_mutation(
     }.await;
     fresh.rollback().await?;
     observed
+}
+
+// Scheduler mutation authority is borrowed from the current Uploads claim.
+// This adapter depends on the separately owned claim API; it does not create
+// claims, confer tenant/system scope, or start a second writer.
+#[derive(Clone, Copy)]
+struct UploadMaintenanceOwner<'a> {
+    proof: &'a crate::db::maintenance_claim::FamilyMaintenanceProof,
+    policy: crate::db::maintenance_claim::FamilyMaintenanceLeasePolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UploadMaintenanceStop {
+    LostClaim,
+    Cancelled,
+}
+impl std::fmt::Display for UploadMaintenanceStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "upload maintenance stopped: {self:?}")
+    }
+}
+impl std::error::Error for UploadMaintenanceStop {}
+#[derive(Debug)]
+struct UploadMaintenanceRollbackFailure {
+    original: Option<sqlx::Error>,
+    cleanup: sqlx::Error,
+}
+impl std::fmt::Display for UploadMaintenanceRollbackFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "upload maintenance rollback failed: {}", self.cleanup)
+    }
+}
+impl std::error::Error for UploadMaintenanceRollbackFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.original.as_ref().unwrap_or(&self.cleanup))
+    }
+}
+
+fn upload_maintenance_stop(reason: UploadMaintenanceStop) -> sqlx::Error {
+    sqlx::Error::AnyDriverError(Box::new(reason))
+}
+
+pub(crate) fn upload_maintenance_must_stop(error: &sqlx::Error) -> bool {
+    // Preserve the original downcastable uncertainty, including a separately
+    // owned additive CommitCleanupUnknown. No opaque driver error is counted
+    // as an ordinary failed row followed by another mutation.
+    matches!(error, sqlx::Error::AnyDriverError(_))
+}
+
+async fn guard_upload_maintenance(
+    op: &mut crate::db::backend::OperationTx<'_, '_>,
+    owner: Option<UploadMaintenanceOwner<'_>>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<(), sqlx::Error> {
+    let Some(owner) = owner else {
+        return Ok(());
+    };
+    if cancel.is_cancelled() {
+        return Err(upload_maintenance_stop(UploadMaintenanceStop::Cancelled));
+    }
+    let key = crate::db::maintenance_claim::MaintenanceJobKey::Uploads;
+    if !op.check_family_maintenance_claim(owner.proof, key).await?
+        || op
+            .renew_family_maintenance_claim(owner.proof, key, owner.policy)
+            .await?
+            .is_none()
+    {
+        return Err(upload_maintenance_stop(UploadMaintenanceStop::LostClaim));
+    }
+    if cancel.is_cancelled() {
+        return Err(upload_maintenance_stop(UploadMaintenanceStop::Cancelled));
+    }
+    Ok(())
+}
+
+async fn gc_stale_upload_borrowed(
+    op: &mut crate::db::backend::OperationTx<'_, '_>,
+    storage: &ObjectStorage,
+    workspace: Uuid,
+    attachment: Uuid,
+    cancel: &tokio_util::sync::CancellationToken,
+    owner: Option<UploadMaintenanceOwner<'_>>,
+) -> Result<bool, sqlx::Error> {
+    guard_upload_maintenance(op, owner, cancel).await?;
+    let Some(key) = op
+        .prepare_stale_attachment_cleanup(workspace, attachment)
+        .await?
+    else {
+        return Ok(false);
+    };
+    #[cfg(test)]
+    cleanup_test_hooks::wait(attachment, 0).await;
+    if cancel.is_cancelled() {
+        return Ok(false);
+    }
+    guard_upload_maintenance(op, owner, cancel).await?;
+    // The row retains the exact key until successful purge+head+DELETE.
+    // Cancellation waits for owned purge and head, leaving the row pointer.
+    let purged = storage.purge_key(&key).await;
+    // Even a failed purge may settle after cancellation/expiry. Retain the
+    // pointer and report loss before any reschedule or subsequent effect.
+    guard_upload_maintenance(op, owner, cancel).await?;
+    purged.map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
+    #[cfg(test)]
+    cleanup_test_hooks::wait(attachment, 1).await;
+    let head = storage.head(&key).await;
+    guard_upload_maintenance(op, owner, cancel).await?;
+    if cancel.is_cancelled() {
+        return Ok(false);
+    }
+    if !matches!(head, Ok(None)) {
+        return Err(sqlx::Error::Io(std::io::Error::other(
+            "stale attachment purge did not confirm absence",
+        )));
+    }
+    guard_upload_maintenance(op, owner, cancel).await?;
+    op.remove_stale_attachment_cleanup(workspace, attachment, &key)
+        .await
+}
+
+/// One scheduled family unit, retaining the real writer through effects and
+/// final ownership check. PG uses the original detached attachment session.
+/// An uncertain commit stops immediately: no observer, retry or new owner.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn gc_stale_upload_row_claimed_backend(
+    backend: &crate::db::backend::Backend,
+    storage: &ObjectStorage,
+    workspace: Uuid,
+    attachment: Uuid,
+    proof: &crate::db::maintenance_claim::FamilyMaintenanceProof,
+    policy: crate::db::maintenance_claim::FamilyMaintenanceLeasePolicy,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<bool, sqlx::Error> {
+    if cancel.is_cancelled() {
+        return Err(upload_maintenance_stop(UploadMaintenanceStop::Cancelled));
+    }
+    if matches!(backend, crate::db::backend::Backend::Postgres(_)) {
+        return Err(sqlx::Error::Protocol(
+            "family Uploads proof cannot replace PostgreSQL detached job/session ownership".into(),
+        ));
+    }
+    let owner = Some(UploadMaintenanceOwner { proof, policy });
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        let removed =
+            gc_stale_upload_borrowed(&mut op, storage, workspace, attachment, cancel, owner)
+                .await?;
+        guard_upload_maintenance(&mut op, owner, cancel).await?;
+        Ok::<_, sqlx::Error>(removed)
+    }
+    .await;
+    match result {
+        Ok(true) => tx
+            .commit()
+            .await
+            .map(|()| true)
+            .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown))),
+        Ok(false) => {
+            tx.rollback().await.map_err(|cleanup| {
+                sqlx::Error::AnyDriverError(Box::new(UploadMaintenanceRollbackFailure {
+                    original: None,
+                    cleanup,
+                }))
+            })?;
+            Ok(false)
+        }
+        Err(error) => match tx.rollback().await {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(sqlx::Error::AnyDriverError(Box::new(
+                UploadMaintenanceRollbackFailure {
+                    original: Some(error),
+                    cleanup,
+                },
+            ))),
+        },
+    }
+}
+
+/// Scheduled journal drain. Each actual mutation and reschedule uses current
+/// Uploads proof on its own writer; listing itself conveys no mutation right.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn reclaim_attachment_objects_claimed_backend(
+    backend: &crate::db::backend::Backend,
+    storage: &ObjectStorage,
+    only: Option<(Uuid, Uuid)>,
+    limit: i64,
+    proof: &crate::db::maintenance_claim::FamilyMaintenanceProof,
+    policy: crate::db::maintenance_claim::FamilyMaintenanceLeasePolicy,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<ObjectCleanupStats, sqlx::Error> {
+    if cancel.is_cancelled() {
+        return Err(upload_maintenance_stop(UploadMaintenanceStop::Cancelled));
+    }
+    if matches!(backend, crate::db::backend::Backend::Postgres(_)) {
+        return Err(sqlx::Error::Protocol(
+            "family Uploads proof cannot replace PostgreSQL detached job/session ownership".into(),
+        ));
+    }
+    let mut list = backend.begin_read().await?;
+    let rows = async {
+        let mut op = list.operation();
+        let previous = op.set_system().await?;
+        let rows = op.list_due_attachment_objects(only, limit).await;
+        op.restore_system(previous).await?;
+        rows
+    }
+    .await;
+    list.rollback().await?;
+    let owner = Some(UploadMaintenanceOwner { proof, policy });
+    let mut stats = ObjectCleanupStats::default();
+    for row in rows? {
+        let mut tx = backend.begin_write().await?;
+        let result = async {
+            let mut op = tx.operation();
+            op.set_tenant(row.workspace_id).await?;
+            let outcome =
+                reclaim_attachment_object_owned_borrowed(&mut op, storage, &row, cancel, owner)
+                    .await?;
+            guard_upload_maintenance(&mut op, owner, cancel).await?;
+            match outcome {
+                CleanupDisposition::Busy => op.reschedule_attachment_object(&row, false).await?,
+                CleanupDisposition::Retry => op.reschedule_attachment_object(&row, true).await?,
+                CleanupDisposition::Cancelled => {
+                    return Err(upload_maintenance_stop(UploadMaintenanceStop::Cancelled))
+                }
+                CleanupDisposition::Reclaimed => {}
+            }
+            guard_upload_maintenance(&mut op, owner, cancel).await?;
+            Ok::<_, sqlx::Error>(outcome)
+        }
+        .await;
+        match result {
+            Ok(outcome) => {
+                tx.commit()
+                    .await
+                    .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+                stats.claimed += 1;
+                match outcome {
+                    CleanupDisposition::Reclaimed => stats.reclaimed += 1,
+                    CleanupDisposition::Busy => stats.busy += 1,
+                    CleanupDisposition::Retry => stats.failed += 1,
+                    CleanupDisposition::Cancelled => unreachable!("cancelled unit rolled back"),
+                }
+            }
+            Err(error) => {
+                // An unconfirmed rollback is also a stop, preserving the
+                // original domain/driver failure and the actual cleanup error.
+                return match tx.rollback().await {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(sqlx::Error::AnyDriverError(Box::new(
+                        UploadMaintenanceRollbackFailure {
+                            original: Some(error),
+                            cleanup,
+                        },
+                    ))),
+                };
+            }
+        }
+    }
+    Ok(stats)
+}
+
+/// Selected import failures keep the journaled key/ref; the consumer must not
+/// compensate on an uncertain driver commit or treat a cancelled put as ACK.
+#[derive(Debug)]
+pub(crate) enum ImportAttachmentError {
+    Attachment(AttachmentDbError),
+    Fenced,
+    Cancelled,
+}
+
+impl OperationTx<'_, '_> {
+    async fn import_attachment_authority(
+        &mut self,
+        claim: &crate::db::import_jobs::ImportClaim,
+        document: Uuid,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Result<(), ImportAttachmentError>, sqlx::Error> {
+        if cancel.is_cancelled() {
+            return Ok(Err(ImportAttachmentError::Cancelled));
+        }
+        // These are the import owner's authoritative borrowed operations;
+        // they use this writer, not an attachment-specific copy of job SQL.
+        if !self.hold_import_claim(claim).await? {
+            return Ok(Err(ImportAttachmentError::Fenced));
+        }
+        if let Err(error) = self
+            .require_import_admin(claim.workspace_id, claim.created_by, claim.session_id)
+            .await?
+        {
+            return Ok(Err(ImportAttachmentError::Attachment(match error {
+                crate::db::import_jobs::ImportDbError::NotFound => AttachmentDbError::NotFound,
+                crate::db::import_jobs::ImportDbError::Forbidden => AttachmentDbError::Forbidden,
+            })));
+        }
+        if !self.workspace_is_live(claim.workspace_id).await? {
+            return Ok(Err(ImportAttachmentError::Attachment(
+                AttachmentDbError::NotFound,
+            )));
+        }
+        let parent = match self
+            .upload_parent_access(
+                claim.workspace_id,
+                claim.created_by,
+                AttachmentParent::Document(document),
+                true,
+            )
+            .await?
+        {
+            Ok(parent) => parent,
+            Err(error) => return Ok(Err(ImportAttachmentError::Attachment(error))),
+        };
+        if !parent.permission.at_least(ProjectPermission::Edit) {
+            return Ok(Err(ImportAttachmentError::Attachment(
+                AttachmentDbError::Forbidden,
+            )));
+        }
+        if let Err(error) = parent.writable {
+            return Ok(Err(ImportAttachmentError::Attachment(error)));
+        }
+        if cancel.is_cancelled() {
+            return Ok(Err(ImportAttachmentError::Cancelled));
+        }
+        Ok(Ok(()))
+    }
+
+    async fn import_attachment_reserved_bytes(
+        &mut self,
+        workspace: Uuid,
+    ) -> Result<i64, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                lock_workspace_storage(tx, workspace).await?;
+                count_reserved_bytes(tx, workspace).await
+            }
+            Self::SqliteFamily(family) => {
+                family.require_writer()?;
+                family.require_tenant(workspace)?;
+                let rows = family.query("SELECT coalesce(sum(reserved_size_bytes),0) FROM attachments WHERE workspace_id=?1", &[Cell::uuid(workspace)]).await?;
+                rows[0].cell(0)?.integer()
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_import_attachment_row(
+        &mut self,
+        claim: &crate::db::import_jobs::ImportClaim,
+        document: Uuid,
+        attachment: Uuid,
+        key: &str,
+        name: &str,
+        size: i64,
+    ) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query("INSERT INTO fvoci.attachments(id,workspace_id,document_id,task_id,uploader_id,status,name,declared_mime,reserved_size_bytes,storage_key,upload_meta) VALUES($1,$2,$3,NULL,$4,'uploading',$5,NULL,$6,$7,'{}'::jsonb)")
+                    .bind(attachment).bind(claim.workspace_id).bind(document).bind(claim.created_by).bind(name).bind(size).bind(key).execute(&mut ***tx).await?;
+            }
+            Self::SqliteFamily(family) => {
+                family.require_writer()?;
+                family.require_tenant(claim.workspace_id)?;
+                family.execute("INSERT INTO attachments(id,workspace_id,document_id,task_id,uploader_id,status,name,declared_mime,reserved_size_bytes,storage_key,upload_meta) VALUES(?1,?2,?3,NULL,?4,'uploading',?5,NULL,?6,?7,'{}')", &[Cell::uuid(attachment),Cell::uuid(claim.workspace_id),Cell::uuid(document),Cell::uuid(claim.created_by),Cell::text(name),Cell::Integer(size),Cell::text(key)]).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn import_attachment_row_for_update(
+        &mut self,
+        workspace: Uuid,
+        attachment: Uuid,
+    ) -> Result<Option<AttachmentRow>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                let row = sqlx::query(&format!("SELECT {ATTACHMENT_COLUMNS} FROM fvoci.attachments WHERE workspace_id=$1 AND id=$2 FOR UPDATE"))
+                    .bind(workspace).bind(attachment).fetch_optional(&mut ***tx).await?;
+                Ok(row.map(|row| row_to_attachment(&row)))
+            }
+            Self::SqliteFamily(_) => self.upload_row(workspace, attachment).await,
+        }
+    }
+
+    async fn import_attachment_key_exclusive(
+        &mut self,
+        workspace: Uuid,
+        attachment: Uuid,
+        key: &str,
+    ) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM fvoci.attachments WHERE workspace_id=$1 AND ((id<>$2 AND storage_key=$3) OR variants->'preview'->>'key'=$3))")
+                .bind(workspace).bind(attachment).bind(key).fetch_one(&mut ***tx).await,
+            Self::SqliteFamily(_) => self.upload_key_owned(workspace, attachment, key).await,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_import_attachment_row(
+        &mut self,
+        workspace: Uuid,
+        attachment: Uuid,
+        key: &str,
+        mime: &str,
+        name: &str,
+        size: i64,
+    ) -> Result<bool, sqlx::Error> {
+        let image = is_image_mime(mime);
+        let preview = if image && crate::attachments::preview::preview_mime_supported(mime) {
+            "pending"
+        } else {
+            "skipped"
+        };
+        let extract = initial_extract_status(name, mime);
+        match self {
+            Self::Postgres(tx) => Ok(sqlx::query("UPDATE fvoci.attachments SET status='stored',mime=$3,size_bytes=$4,image=$5,scan_status='skipped',extract_status=$6,preview_status=$7,upload_meta=NULL,completed_at=now() WHERE workspace_id=$1 AND id=$2 AND status='uploading' AND storage_key=$8")
+                .bind(workspace).bind(attachment).bind(mime).bind(size).bind(image).bind(extract).bind(preview).bind(key).execute(&mut ***tx).await?.rows_affected()==1),
+            Self::SqliteFamily(family) => {
+                family.require_writer()?; family.require_tenant(workspace)?;
+                Ok(family.execute("UPDATE attachments SET status='stored',mime=?3,size_bytes=?4,image=?5,scan_status='skipped',extract_status=?6,preview_status=?7,upload_meta=NULL,completed_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2 AND status='uploading' AND storage_key=?8", &[Cell::uuid(workspace),Cell::uuid(attachment),Cell::text(mime),Cell::Integer(size),Cell::Integer(i64::from(image)),Cell::text(extract),Cell::text(preview),Cell::text(key)]).await?==1)
+            }
+        }
+    }
+}
+
+fn import_attachment_quota_error(error: StorageQuotaError) -> ImportAttachmentError {
+    ImportAttachmentError::Attachment(match error {
+        StorageQuotaError::Upload => AttachmentDbError::UploadLimit,
+        StorageQuotaError::Storage => AttachmentDbError::StorageLimit,
+    })
+}
+
+/// Reserve the row and tracked StoredKey ref together before the consumer's
+/// maintained put. No automatic key regeneration/replay after unknown COMMIT.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn create_import_attachment_backend(
+    backend: &Backend,
+    quota: &StorageQuota,
+    claim: &crate::db::import_jobs::ImportClaim,
+    document: Uuid,
+    name: &str,
+    size: i64,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Result<(Uuid, String), ImportAttachmentError>, sqlx::Error> {
+    if size <= 0 {
+        return Ok(Err(ImportAttachmentError::Attachment(
+            AttachmentDbError::InvalidInput,
+        )));
+    }
+    let attachment = Uuid::now_v7();
+    let key = Uuid::now_v7().to_string();
+    let fence = crate::db::documents::ImportFence {
+        job_id: claim.job_id,
+        lease_token: claim.lease_token,
+    };
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(claim.workspace_id).await?;
+        if let Err(error) = op
+            .import_attachment_authority(claim, document, cancel)
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        let reserved = op
+            .import_attachment_reserved_bytes(claim.workspace_id)
+            .await?;
+        if let Err(error) = quota.check(reserved, size) {
+            return Ok(Err(import_attachment_quota_error(error)));
+        }
+        op.insert_import_attachment_row(claim, document, attachment, &key, name, size)
+            .await?;
+        if !op
+            .append_import_ref(
+                claim.workspace_id,
+                fence,
+                crate::db::import_jobs::ImportRefKind::StoredKey,
+                &key,
+            )
+            .await?
+        {
+            return Ok(Err(ImportAttachmentError::Fenced));
+        }
+        if let Err(error) = op
+            .import_attachment_authority(claim, document, cancel)
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        Ok::<_, sqlx::Error>(Ok(()))
+    }
+    .await;
+    match result {
+        Ok(Ok(())) if !cancel.is_cancelled() => {
+            tx.commit()
+                .await
+                .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+            Ok(Ok((attachment, key)))
+        }
+        Ok(Ok(())) => {
+            tx.rollback().await?;
+            Ok(Err(ImportAttachmentError::Cancelled))
+        }
+        Ok(Err(error)) => {
+            tx.rollback().await?;
+            Ok(Err(error))
+        }
+        Err(error) => {
+            tx.rollback().await?;
+            Err(error)
+        }
+    }
+}
+
+/// Finalize only this current claim's immutable row/key after put has settled.
+/// Retain the real writer through actual head/current authority/publication
+/// and COMMIT; an object head alone never becomes a committed attachment ACK.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn mark_import_attachment_stored_backend(
+    backend: &Backend,
+    storage: &ObjectStorage,
+    quota: &StorageQuota,
+    claim: &crate::db::import_jobs::ImportClaim,
+    document: Uuid,
+    attachment: Uuid,
+    expected_key: &str,
+    name: &str,
+    mime: &str,
+    size: i64,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Result<(), ImportAttachmentError>, sqlx::Error> {
+    let fence = crate::db::documents::ImportFence {
+        job_id: claim.job_id,
+        lease_token: claim.lease_token,
+    };
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(claim.workspace_id).await?;
+        if let Err(error) = op
+            .import_attachment_authority(claim, document, cancel)
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        if !op
+            .import_claim_contains_ref(
+                claim,
+                crate::db::import_jobs::ImportRefKind::StoredKey,
+                expected_key,
+            )
+            .await?
+        {
+            return Ok(Err(ImportAttachmentError::Fenced));
+        }
+        let Some(row) = op
+            .import_attachment_row_for_update(claim.workspace_id, attachment)
+            .await?
+        else {
+            return Ok(Err(ImportAttachmentError::Attachment(
+                AttachmentDbError::NotFound,
+            )));
+        };
+        if row.document_id != Some(document)
+            || row.task_id.is_some()
+            || row.uploader_id != claim.created_by
+            || row.storage_key != expected_key
+            || row.name != name
+            || row.reserved_size_bytes != size
+            || size <= 0
+            || !matches!(row.status.as_str(), "uploading" | "stored")
+            || (row.status == "stored" && (row.mime != mime || row.size_bytes != Some(size)))
+        {
+            return Ok(Err(ImportAttachmentError::Attachment(
+                AttachmentDbError::UploadState,
+            )));
+        }
+        if !op
+            .import_attachment_key_exclusive(claim.workspace_id, attachment, expected_key)
+            .await?
+        {
+            return Ok(Err(ImportAttachmentError::Attachment(
+                AttachmentDbError::UploadState,
+            )));
+        }
+        let reserved = op
+            .import_attachment_reserved_bytes(claim.workspace_id)
+            .await?;
+        let Some(other_reserved) = reserved
+            .checked_sub(row.reserved_size_bytes)
+            .filter(|v| *v >= 0)
+        else {
+            return Err(sqlx::Error::Protocol(
+                "import storage reservation invariant failed".into(),
+            ));
+        };
+        if let Err(error) = quota.check(other_reserved, size) {
+            return Ok(Err(import_attachment_quota_error(error)));
+        }
+        let head = storage.head(expected_key).await;
+        // Token, claim, credential and parent are rechecked after actual I/O,
+        // including failed head; cancellation never loses the tracked pointer.
+        if let Err(error) = op
+            .import_attachment_authority(claim, document, cancel)
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        if head.map_err(upload_storage_error)? != Some(size as u64) {
+            return Ok(Err(ImportAttachmentError::Attachment(
+                AttachmentDbError::UploadState,
+            )));
+        }
+        let actual_mime = storage.sniff_mime(expected_key).await;
+        if let Err(error) = op
+            .import_attachment_authority(claim, document, cancel)
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        if actual_mime.map_err(upload_storage_error)? != mime {
+            return Ok(Err(ImportAttachmentError::Attachment(
+                AttachmentDbError::UploadState,
+            )));
+        }
+        if !op
+            .import_claim_contains_ref(
+                claim,
+                crate::db::import_jobs::ImportRefKind::StoredKey,
+                expected_key,
+            )
+            .await?
+        {
+            return Ok(Err(ImportAttachmentError::Fenced));
+        }
+        if row.status == "stored" {
+            return Ok(Ok(false));
+        }
+        if !op
+            .publish_import_attachment_row(
+                claim.workspace_id,
+                attachment,
+                expected_key,
+                mime,
+                name,
+                size,
+            )
+            .await?
+        {
+            return Ok(Err(ImportAttachmentError::Attachment(
+                AttachmentDbError::UploadState,
+            )));
+        }
+        let payload =
+            json!({"name":name,"documentId":document.to_string(),"sizeBytes":size,"mime":mime});
+        if !op
+            .park_import_event(
+                claim.workspace_id,
+                fence,
+                EventAppend {
+                    id: Uuid::now_v7(),
+                    workspace_id: Some(claim.workspace_id),
+                    actor_user_id: Some(claim.created_by),
+                    verb: "attachment.completed".into(),
+                    target_type: Some("attachment".into()),
+                    target_id: Some(attachment),
+                    payload: payload.clone(),
+                },
+                "web",
+            )
+            .await?
+        {
+            return Ok(Err(ImportAttachmentError::Fenced));
+        }
+        op.append_audit(AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(claim.workspace_id),
+            actor_user_id: Some(claim.created_by),
+            verb: "attachment.completed".into(),
+            target_type: Some("attachment".into()),
+            target_id: Some(attachment),
+            payload,
+            ip: None,
+        })
+        .await?;
+        if let Err(error) = op
+            .import_attachment_authority(claim, document, cancel)
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        Ok::<_, sqlx::Error>(Ok(true))
+    }
+    .await;
+    match result {
+        Ok(Ok(true)) if !cancel.is_cancelled() => {
+            tx.commit()
+                .await
+                .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+            Ok(Ok(()))
+        }
+        Ok(Ok(_)) if cancel.is_cancelled() => {
+            tx.rollback().await?;
+            Ok(Err(ImportAttachmentError::Cancelled))
+        }
+        Ok(Ok(false)) => {
+            tx.rollback().await?;
+            Ok(Ok(()))
+        }
+        Ok(Ok(true)) => {
+            tx.rollback().await?;
+            Ok(Err(ImportAttachmentError::Cancelled))
+        }
+        Ok(Err(error)) => {
+            tx.rollback().await?;
+            Ok(Err(error))
+        }
+        Err(error) => {
+            tx.rollback().await?;
+            Err(error)
+        }
+    }
 }
