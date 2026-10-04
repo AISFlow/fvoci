@@ -337,7 +337,12 @@ async fn create_target_revision(
         return Err(AppError::rate_limited(retry_after).into());
     }
     match authorize_revision_target(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/revisions.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         credential_id,
@@ -353,7 +358,12 @@ async fn create_target_revision(
     let captured = capture_for_create(&state, workspace_id, user_id, credential_id, scope).await?;
     let text = prepare_revision_text(&captured.content_json).map_err(|_| collab_unavailable())?;
     let result = create_manual_revision(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/revisions.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         credential_id,
@@ -418,7 +428,12 @@ async fn list_target_revisions(
     let (user_id, credential_id) =
         revision_credential(&state, &headers, &jar, workspace_id, scope.target(), false).await?;
     let result = list_revisions_for(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/revisions.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         credential_id,
@@ -465,7 +480,12 @@ async fn get_target_revision(
     let (user_id, credential_id) =
         revision_credential(&state, &headers, &jar, workspace_id, scope.target(), false).await?;
     let result = get_revision_for(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/revisions.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         credential_id,
@@ -532,7 +552,12 @@ async fn restore_target_revision(
         return Err(AppError::rate_limited(retry_after).into());
     }
     let snap = resolve_restore(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/revisions.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         credential_id,
@@ -657,7 +682,12 @@ async fn preview_restore_target(
     // The immutable source must belong to this exact route target. A preview
     // is for an editable restore; viewing history alone does not permit it.
     resolve_restore(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/revisions.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         credential_id,
@@ -669,7 +699,12 @@ async fn preview_restore_target(
     .map_err(internal)?
     .map_err(map_revision_error)?;
     let source = get_revision_for(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/revisions.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         credential_id,
@@ -696,7 +731,12 @@ async fn preview_restore_target(
     })?;
     // Check route affiliation again after room startup/project work.
     authorize_revision_target(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/revisions.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         credential_id,
@@ -729,7 +769,12 @@ async fn capture_for_create(
         }
     }
     let persisted = load_persisted_target_source(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/revisions.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         session_id,

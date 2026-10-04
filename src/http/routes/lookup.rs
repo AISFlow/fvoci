@@ -70,7 +70,12 @@ async fn lookup_display_id_route(
         return Err(AppError::rate_limited(retry_after));
     }
     let result = lookup_display_id(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/lookup.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,

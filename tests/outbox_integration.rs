@@ -2186,7 +2186,13 @@ async fn probes_report_real_database_and_outbox_lag() {
 
     let harness = TestDb::bootstrap().await;
     let state = project_harness::app_state(&harness.app_url).await;
-    let app_pool = state.auth.db.pool.clone();
+    let app_pool = state
+        .auth
+        .db
+        .pool
+        .postgres("PostgreSQL integration fixture")
+        .expect("actual PG fixture backend")
+        .clone();
     let consumer = "probe-lag";
     ensure_consumer(&app_pool, consumer).await.expect("ensure");
     let admin = PgPoolOptions::new()
@@ -2346,7 +2352,13 @@ async fn metrics_see_outbox_lag_and_xmin_stall_behind_an_xid_holder() {
 
     let harness = TestDb::bootstrap().await;
     let state = project_harness::app_state(&harness.app_url).await;
-    let app_pool = state.auth.db.pool.clone();
+    let app_pool = state
+        .auth
+        .db
+        .pool
+        .postgres("PostgreSQL integration fixture")
+        .expect("actual PG fixture backend")
+        .clone();
     let consumer = "stall-lag";
     ensure_consumer(&app_pool, consumer).await.expect("ensure");
     let admin = PgPoolOptions::new()

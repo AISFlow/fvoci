@@ -140,7 +140,12 @@ async fn list_document_comments_route(
     )
     .await?;
     let page = list_document_comments(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/comments.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -182,7 +187,12 @@ async fn list_project_document_comments_route(
     )
     .await?;
     let page = list_project_document_comments(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/comments.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -225,7 +235,12 @@ async fn list_task_comments_route(
     )
     .await?;
     let page = list_task_comments(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/comments.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -278,7 +293,12 @@ async fn create_document_comment_route(
         return Err(AppError::rate_limited(retry_after).into());
     }
     let created = create_document_comment(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/comments.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -331,7 +351,12 @@ async fn create_project_document_comment_route(
         return Err(AppError::rate_limited(retry_after).into());
     }
     let created = create_project_document_comment(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/comments.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -384,7 +409,12 @@ async fn create_task_comment_route(
         return Err(AppError::rate_limited(retry_after).into());
     }
     let created = create_task_comment(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/comments.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -427,7 +457,12 @@ async fn patch_comment_route(
     let auth = require_mutation_auth(&state, &headers, &jar, workspace_id, comment_id).await?;
     let ip = peer_ip(peer.ip());
     let updated = update_comment(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/comments.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -456,7 +491,12 @@ async fn delete_comment_route(
     let auth = require_mutation_auth(&state, &headers, &jar, workspace_id, comment_id).await?;
     let ip = peer_ip(peer.ip());
     let result = purge_comment(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/comments.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -482,7 +522,12 @@ async fn resolve_comment_route(
     let auth = require_mutation_auth(&state, &headers, &jar, workspace_id, comment_id).await?;
     let ip = peer_ip(peer.ip());
     let updated = resolve_comment(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/comments.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -508,7 +553,12 @@ async fn unresolve_comment_route(
     let auth = require_mutation_auth(&state, &headers, &jar, workspace_id, comment_id).await?;
     let ip = peer_ip(peer.ip());
     let updated = unresolve_comment(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/comments.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -536,7 +586,12 @@ async fn react_comment_route(
     let auth = require_mutation_auth(&state, &headers, &jar, workspace_id, comment_id).await?;
     let ip = peer_ip(peer.ip());
     let updated = set_comment_reaction(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/comments.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -652,7 +707,12 @@ async fn require_mutation_auth(
     let auth = require_comment_auth(state, headers, jar, Access::Any, Some(workspace_id)).await?;
     if auth.token_scopes.is_some() {
         let kind = comment_write_kind(
-            &state.auth.db.pool,
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/comments.rs")
+                .map_err(internal)?,
             workspace_id,
             auth.user_id,
             auth.credential_id,

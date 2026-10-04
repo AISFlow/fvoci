@@ -765,6 +765,40 @@ pub async fn fetch_cursor_backend(
     Ok(cursor)
 }
 
+/// PostgreSQL's xmin stall is an actual cluster observation; it has no family
+/// equivalent. None means not applicable, never an invented healthy zero.
+pub async fn outbox_ages_backend(
+    backend: &Backend,
+    consumers: &[String],
+) -> Result<(i64, Option<i64>), sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        let (lag, stall): (i64, i64) = sqlx::query_as(
+            "SELECT fvoci.app_outbox_lag_seconds($1),fvoci.app_oldest_write_xact_age_seconds()",
+        )
+        .bind(consumers)
+        .fetch_one(pool)
+        .await?;
+        return Ok((lag, Some(stall)));
+    }
+    let mut tx = backend.begin_read().await?;
+    let names = serde_json::to_value(consumers).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+    let rows=family_tx(&mut tx)?.query("SELECT min(e.created_at),(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) FROM outbox_consumers c JOIN events e ON e.seq>c.last_seq WHERE c.consumer IN (SELECT value FROM json_each(?1))", &[Cell::json(&names)?]).await?;
+    let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+    let oldest = row.cell(0)?.optional(Cell::integer)?;
+    let now = row.cell(1)?.integer()?;
+    let lag = match oldest {
+        None => 0,
+        Some(oldest) => {
+            now.checked_sub(oldest)
+                .and_then(|age| age.max(0).checked_add(500_000))
+                .ok_or_else(|| sqlx::Error::Protocol("outbox lag duration overflow".into()))?
+                / 1_000_000
+        }
+    };
+    tx.rollback().await?;
+    Ok((lag, None))
+}
+
 pub async fn record_failure_backend(
     backend: &Backend,
     consumer: &str,

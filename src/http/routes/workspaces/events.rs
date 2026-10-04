@@ -71,7 +71,12 @@ pub(super) async fn list_workspace_events_route(
         Some(raw) => Some(decode_event_cursor(raw).ok_or_else(invalid_cursor)?),
     };
     let page = list_workspace_events(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/workspaces/events.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         session_id,

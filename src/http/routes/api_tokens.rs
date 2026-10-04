@@ -114,7 +114,12 @@ async fn list_workspace_tokens(
     )
     .await?;
     let result = list_api_tokens(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/api_tokens.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -160,7 +165,12 @@ async fn create_workspace_token(
         return Err(AppError::rate_limited(retry_after));
     }
     let result = create_api_token(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/api_tokens.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -202,7 +212,12 @@ async fn revoke_workspace_token(
     .await?;
     let ip = peer_ip(peer.ip());
     let result = revoke_api_token(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/api_tokens.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -223,9 +238,18 @@ async fn list_me_tokens(
     jar: CookieJar,
 ) -> Result<Json<ApiTokenListResponse>, AppError> {
     let auth = require_request_auth(&state, &headers, &jar, Access::Session, None).await?;
-    let result = list_user_api_tokens(&state.auth.db.pool, auth.user_id, auth.credential_id)
-        .await
-        .map_err(internal)?;
+    let result = list_user_api_tokens(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/api_tokens.rs")
+            .map_err(internal)?,
+        auth.user_id,
+        auth.credential_id,
+    )
+    .await
+    .map_err(internal)?;
     match result {
         Ok(items) => Ok(Json(ApiTokenListResponse {
             items: items.iter().map(record_output).collect(),
@@ -257,7 +281,12 @@ async fn create_me_token(
         return Err(AppError::rate_limited(retry_after));
     }
     let result = create_api_token(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/api_tokens.rs")
+            .map_err(internal)?,
         body.workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -292,7 +321,12 @@ async fn revoke_me_token(
     let auth = require_request_auth(&state, &headers, &jar, Access::Session, None).await?;
     let ip = peer_ip(peer.ip());
     let result = revoke_user_api_token(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/api_tokens.rs")
+            .map_err(internal)?,
         auth.user_id,
         auth.credential_id,
         id,

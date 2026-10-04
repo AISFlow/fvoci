@@ -56,7 +56,12 @@ async fn put_push_subscription(
     let Json(body) = body.map_err(AppError::from)?;
     let subscription = validate_body(body)?;
     let stored = register_subscription(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/push.rs")
+            .map_err(crate::http::routes::tasks::internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,

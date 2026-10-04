@@ -119,9 +119,28 @@ async fn workspace_task_stream(
         Some(workspace_id),
     )
     .await?;
-    admit(workspace_stream_access(&state.auth.db.pool, workspace_id, user_id, session_id).await)?;
+    admit(
+        workspace_stream_access(
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/streams.rs")
+                .map_err(internal)?,
+            workspace_id,
+            user_id,
+            session_id,
+        )
+        .await,
+    )?;
 
-    let pool = state.auth.db.pool.clone();
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/streams.rs")
+        .map_err(internal)?
+        .clone();
     let hub = state.streams.clone();
     let cursor = initial_cursor(&pool).await.map_err(internal)?;
     let stream = workspace_task_sse_stream(
@@ -354,7 +373,12 @@ async fn project_task_stream(
     .await?;
     admit(
         project_stream_access(
-            &state.auth.db.pool,
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/streams.rs")
+                .map_err(internal)?,
             workspace_id,
             project_id,
             user_id,
@@ -363,7 +387,13 @@ async fn project_task_stream(
         .await,
     )?;
 
-    let pool = state.auth.db.pool.clone();
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/streams.rs")
+        .map_err(internal)?
+        .clone();
     let hub = state.streams.clone();
     let cursor = initial_cursor(&pool).await.map_err(internal)?;
     let stream = task_sse_stream(
@@ -401,9 +431,28 @@ async fn workspace_access_stream(
         Some(workspace_id),
     )
     .await?;
-    admit(workspace_stream_access(&state.auth.db.pool, workspace_id, user_id, session_id).await)?;
+    admit(
+        workspace_stream_access(
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/streams.rs")
+                .map_err(internal)?,
+            workspace_id,
+            user_id,
+            session_id,
+        )
+        .await,
+    )?;
 
-    let pool = state.auth.db.pool.clone();
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/streams.rs")
+        .map_err(internal)?
+        .clone();
     let hub = state.streams.clone();
     let cursor = initial_cursor(&pool).await.map_err(internal)?;
     let stream = access_sse_stream(hub, pool, workspace_id, user_id, session_id, cursor, guard);

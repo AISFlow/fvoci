@@ -246,7 +246,12 @@ async fn patch_task_block(
     revision_write_limit(&state, auth.user_id).await?;
     // Trashed → 404, no edit → 404, archived task/project → 409 (`assertTaskWritable`).
     authorize_revision_target(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_body.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -296,7 +301,12 @@ async fn patch_task_block(
         }
     }
     let task = get_task(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_body.rs")
+            .map_err(internal)?,
         workspace_id,
         task_id,
         auth.user_id,
@@ -387,7 +397,12 @@ async fn create_task_from_document(
     );
     let ip = peer_ip(peer.ip());
     let outcome = create_document_task(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_body.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -448,7 +463,12 @@ async fn document_task_projects(
     )
     .await?;
     let picker = task_projects(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_body.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -495,7 +515,12 @@ async fn document_task_origins(
     .await?;
     require_extra_scope(&auth, ApiTokenScope::TasksRead)?;
     let page = list_document_task_origins(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_body.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -551,7 +576,12 @@ async fn task_origin(
     .await?;
     require_extra_scope(&auth, ApiTokenScope::TasksRead)?;
     let page = get_task_origin(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_body.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,

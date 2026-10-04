@@ -938,7 +938,13 @@ mod task_timer {
             let pool = fvoci_server::db::pool::connect_app_with_max(&harness.app_url, 1)
                 .await
                 .unwrap();
-            let old_pool = state.auth.db.pool.clone();
+            let old_pool = state
+                .auth
+                .db
+                .pool
+                .postgres("PostgreSQL integration fixture")
+                .expect("actual PG fixture backend")
+                .clone();
             let password_keys = state.auth.password_keys.clone();
             state.auth = std::sync::Arc::new(fvoci_server::auth::AuthService {
                 db: fvoci_server::db::Db::new(pool.clone()),

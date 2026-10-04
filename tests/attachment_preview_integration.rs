@@ -107,7 +107,13 @@ async fn ctx_with(preview_extract: Option<PreviewExtractor>) -> Ctx {
     // on one state so the job and the routes share storage.
     let mut state = app_state(&harness.app_url).await;
     state.preview_extract = preview_extract;
-    let pool = state.auth.db.pool.clone();
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("PostgreSQL integration fixture")
+        .expect("actual PG fixture backend")
+        .clone();
     let storage = state.storage.clone();
     let app2 = fvoci_server::http::router(state, None);
     let _ = app;

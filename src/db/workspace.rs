@@ -725,7 +725,7 @@ pub async fn set_member_role(
     next_role: WorkspaceRole,
     client_ip: Option<&str>,
 ) -> Result<Result<MemberRow, WorkspaceDbError>, sqlx::Error> {
-    let pool = &db.pool;
+    let pool = db.pool.postgres("workspace.member_role")?;
     let license = &db.license;
     let mut tx = pool.begin().await?;
     acquire_admission_lock(&mut tx).await?;

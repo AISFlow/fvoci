@@ -5,6 +5,9 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use super::backend::{Backend, DbTransaction};
+use super::codec::Cell;
+
 use crate::db::admin::{record_instance_change, require_admin_session, InstanceChange};
 use crate::db::context::{clear_self_user, set_self_user, set_system, set_tenant};
 use crate::db::identity::lock_sign_in;
@@ -255,6 +258,31 @@ pub async fn session_consent_pending(pool: &PgPool, token_hash: &str) -> Result<
         .bind(token_hash)
         .fetch_one(pool)
         .await
+}
+
+pub async fn session_consent_pending_backend(
+    backend: &Backend,
+    token_hash: &str,
+) -> Result<bool, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return session_consent_pending(pool, token_hash).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let DbTransaction::SqliteFamily(family) = &mut tx else {
+        return Err(sqlx::Error::Protocol(
+            "family consent check received PG transaction".into(),
+        ));
+    };
+    // Same current live-session/latest-required/actual-consent predicate as the
+    // existing PG definer. Absence is observed by SQL, never assumed in setup.
+    let rows=family.query("SELECT EXISTS(SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id JOIN legal_documents d ON d.required=1 AND NOT EXISTS(SELECT 1 FROM legal_documents newer WHERE newer.kind=d.kind AND newer.version>d.version) WHERE s.token_hash=?1 AND s.revoked_at IS NULL AND s.expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) AND u.deleted_at IS NULL AND u.suspended_at IS NULL AND NOT EXISTS(SELECT 1 FROM user_consents c WHERE c.user_id=u.id AND c.kind=d.kind AND c.version=d.version))", &[Cell::text(token_hash)]).await?;
+    let pending = rows
+        .first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .cell(0)?
+        .boolean()?;
+    tx.rollback().await?;
+    Ok(pending)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

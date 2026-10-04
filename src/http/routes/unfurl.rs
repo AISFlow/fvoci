@@ -64,7 +64,19 @@ async fn require_member(
     user_id: Uuid,
     session_id: Uuid,
 ) -> Result<(), AppError> {
-    match is_member(&state.auth.db.pool, workspace_id, user_id, session_id).await {
+    match is_member(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/unfurl.rs")
+            .map_err(crate::http::routes::tasks::internal)?,
+        workspace_id,
+        user_id,
+        session_id,
+    )
+    .await
+    {
         Ok(true) => Ok(()),
         Ok(false) => Err(AppError::from_code(ProblemCode::NotFound)),
         Err(err) => {
@@ -120,14 +132,22 @@ async fn unfurl_route(
 
     require_member(&state, workspace_id, auth.user_id, auth.credential_id).await?;
 
-    let hosts = crate::settings::current_values(&state.auth.db.pool, &state.branding_name)
-        .await
-        .map_err(|err| {
-            tracing::error!("unfurl settings: {err}");
-            AppError::internal()
-        })?
-        .embed
-        .hosts;
+    let hosts = crate::settings::current_values(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/unfurl.rs")
+            .map_err(crate::http::routes::tasks::internal)?,
+        &state.branding_name,
+    )
+    .await
+    .map_err(|err| {
+        tracing::error!("unfurl settings: {err}");
+        AppError::internal()
+    })?
+    .embed
+    .hosts;
     result.html = oembed_iframe(&query.url, &hosts);
     Ok(Json(result))
 }

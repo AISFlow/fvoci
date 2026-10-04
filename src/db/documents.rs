@@ -11,7 +11,7 @@ use super::backend::{Backend, OperationTx};
 use super::codec::{Cell, FamilyRow};
 
 use crate::db::context::{
-    begin_read, lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
+    lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
 };
 use crate::db::group_grants::{
     group_document_grant_roles_select_sql, group_members_join_sql,
@@ -967,38 +967,115 @@ pub async fn list_workspace_wiki_discovery(
     credential_id: Uuid,
     tag: Option<Uuid>,
 ) -> Result<Result<Vec<TreeNode>, DocumentDbError>, sqlx::Error> {
-    let mut tx = begin_read(pool).await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    if !session_is_live(&mut tx, actor_user_id, credential_id).await? {
+    list_workspace_wiki_discovery_backend(
+        &Backend::Postgres(pool.clone()),
+        workspace_id,
+        actor_user_id,
+        credential_id,
+        tag,
+    )
+    .await
+}
+
+pub async fn list_workspace_wiki_discovery_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    credential_id: Uuid,
+    tag: Option<Uuid>,
+) -> Result<Result<Vec<TreeNode>, DocumentDbError>, sqlx::Error> {
+    let mut tx = backend.begin_read().await?;
+    let mut operation = tx.operation();
+    operation.set_tenant(workspace_id).await?;
+    if !operation
+        .session_is_live(actor_user_id, credential_id)
+        .await?
+    {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::Forbidden));
     }
-    if !workspace_is_live(&mut tx, workspace_id).await? {
+    if !operation.workspace_is_live(workspace_id).await? {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let Some(role) = membership_role(&mut tx, workspace_id, actor_user_id).await? else {
+    let Some(role) = operation
+        .membership_role(workspace_id, actor_user_id, false)
+        .await?
+    else {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::Forbidden));
     };
-    let guest_wiki = guest_wiki_document_ids_select_sql(1, 3);
-    let visible_project = visible_project_sql("p", 2, 3);
-    let rows = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            Uuid,
-            Option<Uuid>,
-            Option<Uuid>,
-            String,
-            Option<String>,
-            String,
-            String,
-            i32,
-            String,
-        ),
-    >(&format!(
-        r#"
+    let rows = operation
+        .wiki_discovery_rows(
+            workspace_id,
+            actor_user_id,
+            role == WorkspaceRole::Guest,
+            tag,
+        )
+        .await?;
+    tx.rollback().await?;
+    Ok(Ok(rows.into_iter().map(tree_node_from_row).collect()))
+}
+
+type TreeRow = (
+    Uuid,
+    Uuid,
+    Option<Uuid>,
+    Option<Uuid>,
+    String,
+    Option<String>,
+    String,
+    String,
+    i32,
+    String,
+);
+
+fn tree_node_from_row(row: TreeRow) -> TreeNode {
+    let (id, workspace_id, parent_id, project_id, title, icon, path, sort_key, number, status) =
+        row;
+    TreeNode {
+        id,
+        workspace_id,
+        parent_id,
+        project_id,
+        title,
+        icon,
+        path,
+        sort_key,
+        number,
+        status,
+    }
+}
+
+fn family_tree_row(row: &FamilyRow) -> Result<TreeRow, sqlx::Error> {
+    Ok((
+        row.cell(0)?.id()?,
+        row.cell(1)?.id()?,
+        row.cell(2)?.optional(Cell::id)?,
+        row.cell(3)?.optional(Cell::id)?,
+        row.cell(4)?.string()?,
+        row.cell(5)?.optional(Cell::string)?,
+        row.cell(6)?.string()?,
+        row.cell(7)?.string()?,
+        row.cell(8)?.int32()?,
+        row.cell(9)?.string()?,
+    ))
+}
+
+impl OperationTx<'_, '_> {
+    async fn wiki_discovery_rows(
+        &mut self,
+        workspace_id: Uuid,
+        actor_user_id: Uuid,
+        guest: bool,
+        tag: Option<Uuid>,
+    ) -> Result<Vec<TreeRow>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                let guest_wiki = guest_wiki_document_ids_select_sql(1, 3);
+                let visible_project = visible_project_sql("p", 2, 3);
+                sqlx::query_as::<_, TreeRow>(&format!(
+                    r#"
         SELECT d.id, d.workspace_id, d.parent_id, d.project_id, d.title,
                d.icon, d.path, d.sort_key, d.number, d.status
         FROM fvoci.documents d
@@ -1018,42 +1095,21 @@ pub async fn list_workspace_wiki_discovery(
           ))
         ORDER BY d.sort_key COLLATE "C", d.id
         "#
-    ))
-    .bind(workspace_id)
-    .bind(role == WorkspaceRole::Guest)
-    .bind(actor_user_id)
-    .bind(tag)
-    .fetch_all(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(Ok(rows
-        .into_iter()
-        .map(
-            |(
-                id,
-                workspace_id,
-                parent_id,
-                project_id,
-                title,
-                icon,
-                path,
-                sort_key,
-                number,
-                status,
-            )| TreeNode {
-                id,
-                workspace_id,
-                parent_id,
-                project_id,
-                title,
-                icon,
-                path,
-                sort_key,
-                number,
-                status,
-            },
-        )
-        .collect()))
+                ))
+                .bind(workspace_id)
+                .bind(guest)
+                .bind(actor_user_id)
+                .bind(tag)
+                .fetch_all(&mut ***tx)
+                .await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace_id)?;
+                let rows=tx.query("SELECT d.id,d.workspace_id,d.parent_id,d.project_id,d.title,d.icon,d.path,d.sort_key,d.number,d.status FROM documents d WHERE d.workspace_id=?1 AND d.deleted_at IS NULL AND ((d.project_id IS NULL AND (?2=0 OR EXISTS(SELECT 1 FROM document_members dm JOIN group_members gm ON gm.workspace_id=dm.workspace_id AND gm.group_id=dm.group_id WHERE dm.workspace_id=d.workspace_id AND dm.document_id=d.id AND gm.user_id=?3 AND dm.group_id IS NOT NULL))) OR EXISTS(SELECT 1 FROM projects p WHERE p.workspace_id=d.workspace_id AND p.id=d.project_id AND p.deleted_at IS NULL AND ((p.visibility='workspace' AND ?2=0) OR EXISTS(SELECT 1 FROM project_members pm WHERE pm.workspace_id=p.workspace_id AND pm.project_id=p.id AND pm.user_id=?3) OR EXISTS(SELECT 1 FROM project_members pm JOIN group_members gm ON gm.workspace_id=pm.workspace_id AND gm.group_id=pm.group_id WHERE pm.workspace_id=p.workspace_id AND pm.project_id=p.id AND gm.user_id=?3 AND pm.group_id IS NOT NULL)))) AND (?4 IS NULL OR EXISTS(SELECT 1 FROM document_tag_assignments a WHERE a.workspace_id=d.workspace_id AND a.document_id=d.id AND a.tag_id=?4)) ORDER BY d.sort_key COLLATE BINARY,d.id", &[Cell::uuid(workspace_id),Cell::Integer(i64::from(guest)),Cell::uuid(actor_user_id),Cell::optional_uuid(tag)]).await?;
+                rows.iter().map(family_tree_row).collect()
+            }
+        }
+    }
 }
 
 pub async fn list_wiki_tree(
@@ -1062,79 +1118,74 @@ pub async fn list_wiki_tree(
     actor_user_id: Uuid,
     session_id: Uuid,
 ) -> Result<Result<Vec<TreeNode>, DocumentDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
+    list_wiki_tree_backend(
+        &Backend::Postgres(pool.clone()),
+        workspace_id,
+        actor_user_id,
+        session_id,
+    )
+    .await
+}
+
+pub async fn list_wiki_tree_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<Vec<TreeNode>, DocumentDbError>, sqlx::Error> {
+    let mut tx = match backend {
+        Backend::Postgres(pool) => super::backend::DbTransaction::Postgres(pool.begin().await?),
+        _ => backend.begin_read().await?,
+    };
+    let mut operation = tx.operation();
+    operation.set_tenant(workspace_id).await?;
+    if !operation.session_is_live(actor_user_id, session_id).await? {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::Forbidden));
     }
-    if !workspace_is_live(&mut tx, workspace_id).await? {
+    if !operation.workspace_is_live(workspace_id).await? {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let role = membership_role(&mut tx, workspace_id, actor_user_id).await?;
+    let role = operation
+        .membership_role(workspace_id, actor_user_id, false)
+        .await?;
     let Some(role) = role else {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::Forbidden));
     };
     if role == WorkspaceRole::Guest {
-        tx.commit().await?;
+        tx.rollback().await?;
         return Ok(Ok(Vec::new()));
     }
-    let rows = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            Uuid,
-            Option<Uuid>,
-            Option<Uuid>,
-            String,
-            Option<String>,
-            String,
-            String,
-            i32,
-            String,
-        ),
-    >(
-        r#"
+    let rows = operation.wiki_tree_rows(workspace_id).await?;
+    tx.rollback().await?;
+    Ok(Ok(rows.into_iter().map(tree_node_from_row).collect()))
+}
+
+impl OperationTx<'_, '_> {
+    async fn wiki_tree_rows(&mut self, workspace_id: Uuid) -> Result<Vec<TreeRow>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query_as::<_, TreeRow>(
+                    r#"
         SELECT id, workspace_id, parent_id, project_id, title, icon, path, sort_key, number, status
         FROM fvoci.documents
         WHERE workspace_id = $1 AND deleted_at IS NULL AND project_id IS NULL
         ORDER BY sort_key COLLATE "C"
         "#,
-    )
-    .bind(workspace_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(Ok(rows
-        .into_iter()
-        .map(
-            |(
-                id,
-                workspace_id,
-                parent_id,
-                project_id,
-                title,
-                icon,
-                path,
-                sort_key,
-                number,
-                status,
-            )| TreeNode {
-                id,
-                workspace_id,
-                parent_id,
-                project_id,
-                title,
-                icon,
-                path,
-                sort_key,
-                number,
-                status,
-            },
-        )
-        .collect()))
+                )
+                .bind(workspace_id)
+                .fetch_all(&mut ***tx)
+                .await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace_id)?;
+                let rows=tx.query("SELECT id,workspace_id,parent_id,project_id,title,icon,path,sort_key,number,status FROM documents WHERE workspace_id=?1 AND deleted_at IS NULL AND project_id IS NULL ORDER BY sort_key COLLATE BINARY", &[Cell::uuid(workspace_id)]).await?;
+                rows.iter().map(family_tree_row).collect()
+            }
+        }
+    }
 }
 
 pub async fn list_wiki_ancestors(
@@ -1144,23 +1195,45 @@ pub async fn list_wiki_ancestors(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<Result<Vec<AncestorCrumb>, DocumentDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
+    list_wiki_ancestors_backend(
+        &Backend::Postgres(pool.clone()),
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+    )
+    .await
+}
+
+pub async fn list_wiki_ancestors_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<Vec<AncestorCrumb>, DocumentDbError>, sqlx::Error> {
+    let mut tx = match backend {
+        Backend::Postgres(pool) => super::backend::DbTransaction::Postgres(pool.begin().await?),
+        _ => backend.begin_read().await?,
+    };
+    let mut operation = tx.operation();
+    operation.set_tenant(workspace_id).await?;
+    if !operation.session_is_live(actor_user_id, session_id).await? {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::Forbidden));
     }
-    if !workspace_is_live(&mut tx, workspace_id).await? {
+    if !operation.workspace_is_live(workspace_id).await? {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let permission =
-        document_permission(&mut tx, workspace_id, actor_user_id, document_id, true).await?;
+    let permission = operation
+        .document_permission(workspace_id, actor_user_id, document_id, true)
+        .await?;
     if !permission_can_view(permission) {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let current = fetch_document_row(&mut tx, workspace_id, document_id).await?;
+    let current = operation.document_row(workspace_id, document_id).await?;
     let Some(current) = current else {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
@@ -1169,8 +1242,37 @@ pub async fn list_wiki_ancestors(
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let rows = sqlx::query_as::<_, (Uuid, String, Option<String>, String, Option<Uuid>, i32)>(
-        r#"
+    let rows = operation
+        .wiki_ancestor_rows(workspace_id, document_id)
+        .await?;
+    tx.rollback().await?;
+    Ok(Ok(rows
+        .into_iter()
+        .map(
+            |(id, title, icon, path, project_id, number)| AncestorCrumb {
+                id,
+                title,
+                icon,
+                path,
+                project_id,
+                number,
+            },
+        )
+        .collect()))
+}
+
+type AncestorRow = (Uuid, String, Option<String>, String, Option<Uuid>, i32);
+
+impl OperationTx<'_, '_> {
+    async fn wiki_ancestor_rows(
+        &mut self,
+        workspace_id: Uuid,
+        document_id: Uuid,
+    ) -> Result<Vec<AncestorRow>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query_as::<_, AncestorRow>(
+                    r#"
         WITH target AS (
             SELECT path FROM fvoci.documents
             WHERE workspace_id = $1 AND id = $2
@@ -1188,25 +1290,30 @@ pub async fn list_wiki_ancestors(
           )
         ORDER BY (length(ancestor.path) - length(replace(ancestor.path, '.', '')))
         "#,
-    )
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(Ok(rows
-        .into_iter()
-        .map(
-            |(id, title, icon, path, project_id, number)| AncestorCrumb {
-                id,
-                title,
-                icon,
-                path,
-                project_id,
-                number,
-            },
-        )
-        .collect()))
+                )
+                .bind(workspace_id)
+                .bind(document_id)
+                .fetch_all(&mut ***tx)
+                .await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace_id)?;
+                let rows=tx.query("WITH target AS(SELECT path FROM documents WHERE workspace_id=?1 AND id=?2) SELECT ancestor.id,ancestor.title,ancestor.icon,ancestor.path,ancestor.project_id,ancestor.number FROM documents ancestor CROSS JOIN target WHERE ancestor.workspace_id=?1 AND ancestor.id<>?2 AND target.path IS NOT NULL AND (target.path=ancestor.path OR substr(target.path,1,length(ancestor.path)+1)=ancestor.path||'.') ORDER BY (length(ancestor.path)-length(replace(ancestor.path,'.','')))", &[Cell::uuid(workspace_id),Cell::uuid(document_id)]).await?;
+                rows.iter()
+                    .map(|row| {
+                        Ok((
+                            row.cell(0)?.id()?,
+                            row.cell(1)?.string()?,
+                            row.cell(2)?.optional(Cell::string)?,
+                            row.cell(3)?.string()?,
+                            row.cell(4)?.optional(Cell::id)?,
+                            row.cell(5)?.int32()?,
+                        ))
+                    })
+                    .collect()
+            }
+        }
+    }
 }
 
 pub async fn update_wiki_document_meta(

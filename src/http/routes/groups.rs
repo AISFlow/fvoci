@@ -109,9 +109,19 @@ async fn list_groups_route(
     .await?;
     let actor_user_id = Uuid::parse_str(&user.user_id)
         .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let result = list_groups(&state.auth.db.pool, workspace_id, actor_user_id, session_id)
-        .await
-        .map_err(internal)?;
+    let result = list_groups(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/groups.rs")
+            .map_err(internal)?,
+        workspace_id,
+        actor_user_id,
+        session_id,
+    )
+    .await
+    .map_err(internal)?;
     match result {
         Ok(items) => Ok(Json(GroupListResponse {
             items: items.into_iter().map(group_output).collect(),
@@ -140,7 +150,12 @@ async fn create_group_route(
     let actor_user_id = Uuid::parse_str(&user.user_id)
         .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
     let result = create_group(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/groups.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,
@@ -172,7 +187,12 @@ async fn purge_group_route(
     let actor_user_id = Uuid::parse_str(&user.user_id)
         .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
     let result = purge_group(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/groups.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,
@@ -203,7 +223,12 @@ async fn list_group_members_route(
     let actor_user_id = Uuid::parse_str(&user.user_id)
         .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
     let result = list_group_members(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/groups.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,
@@ -244,7 +269,12 @@ async fn add_group_member_route(
     let actor_user_id = Uuid::parse_str(&user.user_id)
         .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
     let result = add_group_member(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/groups.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,
@@ -279,7 +309,12 @@ async fn remove_group_member_route(
     let actor_user_id = Uuid::parse_str(&user.user_id)
         .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
     let result = remove_group_member(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/groups.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,
@@ -311,7 +346,12 @@ async fn list_project_groups_route(
     let actor_user_id = Uuid::parse_str(&user.user_id)
         .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
     let result = list_project_group_grants(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/groups.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,
@@ -355,7 +395,12 @@ async fn add_project_group_route(
     let actor_user_id = Uuid::parse_str(&user.user_id)
         .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
     let result = add_group_to_project(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/groups.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,
@@ -391,7 +436,12 @@ async fn remove_project_group_route(
     let actor_user_id = Uuid::parse_str(&user.user_id)
         .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
     let result = remove_group_from_project(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/groups.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,
@@ -423,7 +473,12 @@ async fn list_document_groups_route(
     let actor_user_id = Uuid::parse_str(&user.user_id)
         .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
     let result = list_document_group_grants(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/groups.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,
@@ -467,7 +522,12 @@ async fn add_document_group_route(
     let actor_user_id = Uuid::parse_str(&user.user_id)
         .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
     let result = add_group_to_document(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/groups.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,
@@ -503,7 +563,12 @@ async fn remove_document_group_route(
     let actor_user_id = Uuid::parse_str(&user.user_id)
         .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
     let result = remove_group_from_document(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/groups.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,

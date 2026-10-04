@@ -144,7 +144,12 @@ async fn list_time_entries_route(
         session_id,
     )?;
     let result = list_time_entries(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_ops.rs")
+            .map_err(internal)?,
         workspace_id,
         task_id,
         actor,
@@ -196,7 +201,12 @@ async fn create_time_entry_route(
     .await?;
     let actor = parse_user_id(&user.user_id)?;
     let result = create_time_entry(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_ops.rs")
+            .map_err(internal)?,
         workspace_id,
         task_id,
         actor,
@@ -231,7 +241,12 @@ async fn time_entries_rollup_route(
     .await?;
     let actor = parse_user_id(&user.user_id)?;
     let result = list_time_entries(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_ops.rs")
+            .map_err(internal)?,
         workspace_id,
         task_id,
         actor,
@@ -275,7 +290,12 @@ async fn clone_task_route(
     let actor = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = clone_task(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_ops.rs")
+            .map_err(internal)?,
         workspace_id,
         task_id,
         actor,
@@ -310,7 +330,12 @@ async fn list_task_backlinks_route(
     .await?;
     let actor = parse_user_id(&user.user_id)?;
     let result = list_task_backlinks(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_ops.rs")
+            .map_err(internal)?,
         workspace_id,
         task_id,
         actor,
@@ -363,7 +388,12 @@ async fn purge(
     ip: &str,
 ) -> Result<Json<OkResponse>, TaskApiError> {
     let result = purge_task(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_ops.rs")
+            .map_err(internal)?,
         workspace_id,
         task_id,
         actor,
@@ -390,9 +420,18 @@ async fn flat_actor(
 ) -> Result<(Uuid, Uuid, Uuid), TaskApiError> {
     let (user, _, session_id) = require_session(state, headers, jar, Access::Session, None).await?;
     let actor = parse_user_id(&user.user_id)?;
-    let Some(workspace_id) = locate_task(&state.auth.db.pool, actor, task_id)
-        .await
-        .map_err(internal)?
+    let Some(workspace_id) = locate_task(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_ops.rs")
+            .map_err(internal)?,
+        actor,
+        task_id,
+    )
+    .await
+    .map_err(internal)?
     else {
         return Err(AppError::from_code(ProblemCode::NotFound).into());
     };
@@ -407,7 +446,12 @@ async fn get_flat_task_route(
 ) -> Result<Json<TaskOutput>, TaskApiError> {
     let (workspace_id, actor, session_id) = flat_actor(&state, &headers, &jar, task_id).await?;
     let result = get_task(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_ops.rs")
+            .map_err(internal)?,
         workspace_id,
         task_id,
         actor,
@@ -435,7 +479,12 @@ async fn patch_flat_task_route(
     let (workspace_id, actor, session_id) = flat_actor(&state, &headers, &jar, task_id).await?;
     let ip = peer_ip(peer.ip());
     let result = patch_task_meta(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_ops.rs")
+            .map_err(internal)?,
         workspace_id,
         task_id,
         actor,
@@ -527,7 +576,12 @@ async fn list_task_parents_route(
     .await?;
     let actor = parse_user_id(&user.user_id)?;
     let result = list_task_parents(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_ops.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         actor,
@@ -581,7 +635,12 @@ async fn list_workspace_tasks_route(
     .await?;
     let actor = parse_user_id(&user.user_id)?;
     let result = list_workspace_tasks(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_ops.rs")
+            .map_err(internal)?,
         workspace_id,
         actor,
         session_id,
@@ -629,9 +688,19 @@ async fn list_workspace_statuses_route(
     )
     .await?;
     let actor = parse_user_id(&user.user_id)?;
-    let result = list_workspace_statuses(&state.auth.db.pool, workspace_id, actor, session_id)
-        .await
-        .map_err(internal)?;
+    let result = list_workspace_statuses(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_ops.rs")
+            .map_err(internal)?,
+        workspace_id,
+        actor,
+        session_id,
+    )
+    .await
+    .map_err(internal)?;
     match result {
         Ok(rows) => Ok(Json(WorkspaceStatusListResponse {
             items: rows
@@ -710,7 +779,12 @@ async fn create_status_route(
     .await?;
     let actor = parse_user_id(&user.user_id)?;
     let result = create_status(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_ops.rs")
+            .map_err(internal)?,
         workspace_id,
         workflow_id,
         actor,
@@ -774,7 +848,12 @@ async fn update_status_route(
     .await?;
     let actor = parse_user_id(&user.user_id)?;
     let result = update_status(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_ops.rs")
+            .map_err(internal)?,
         workspace_id,
         workflow_id,
         status_id,
@@ -812,7 +891,12 @@ async fn delete_status_route(
     .await?;
     let actor = parse_user_id(&user.user_id)?;
     let result = delete_status(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_ops.rs")
+            .map_err(internal)?,
         workspace_id,
         workflow_id,
         status_id,

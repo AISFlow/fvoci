@@ -70,7 +70,7 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Db {
-    pub pool: PgPool,
+    pub pool: backend::Backend,
     pub license: Arc<crate::license::Entitlements>,
     /// Instance settings as first resolved by this process (restart badges).
     pub settings_boot: crate::settings::SettingsBoot,
@@ -82,6 +82,17 @@ impl Db {
     }
 
     pub fn with_license(pool: PgPool, license: Arc<crate::license::Entitlements>) -> Self {
+        Self::with_backend_license(backend::Backend::Postgres(pool), license)
+    }
+
+    pub fn from_backend(pool: backend::Backend) -> Self {
+        Self::with_backend_license(pool, Arc::new(crate::license::absent()))
+    }
+
+    pub fn with_backend_license(
+        pool: backend::Backend,
+        license: Arc<crate::license::Entitlements>,
+    ) -> Self {
         Self {
             pool,
             settings_boot: crate::settings::SettingsBoot::with_license(license.clone()),

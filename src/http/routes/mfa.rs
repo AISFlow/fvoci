@@ -158,9 +158,17 @@ async fn confirm_password(
     user_id: Uuid,
     current: Option<&str>,
 ) -> Result<PasswordCheck, AppError> {
-    let Some(stored) = password_hash_by_id(&state.auth.db.pool, user_id)
-        .await
-        .map_err(internal)?
+    let Some(stored) = password_hash_by_id(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/mfa.rs")
+            .map_err(internal)?,
+        user_id,
+    )
+    .await
+    .map_err(internal)?
     else {
         return Ok(PasswordCheck::None);
     };
@@ -185,9 +193,17 @@ async fn status(
     jar: CookieJar,
 ) -> Result<Json<MfaStatusOutput>, AppError> {
     let auth = session(&state, &headers, &jar).await?;
-    let row = mfa::find(&state.auth.db.pool, auth.user_id)
-        .await
-        .map_err(internal)?;
+    let row = mfa::find(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/mfa.rs")
+            .map_err(internal)?,
+        auth.user_id,
+    )
+    .await
+    .map_err(internal)?;
     let enabled = row.as_ref().is_some_and(|r| r.enabled_at.is_some());
     Ok(Json(MfaStatusOutput {
         enabled,
@@ -203,7 +219,14 @@ async fn session_created_recently(state: &AppState, session_id: Uuid) -> Result<
     let created: Option<(chrono::DateTime<Utc>,)> =
         sqlx::query_as("SELECT created_at FROM fvoci.sessions WHERE id = $1")
             .bind(session_id)
-            .fetch_optional(&state.auth.db.pool)
+            .fetch_optional(
+                state
+                    .auth
+                    .db
+                    .pool
+                    .postgres("src/http/routes/mfa.rs")
+                    .map_err(internal)?,
+            )
             .await
             .map_err(internal)?;
     Ok(created.is_some_and(|(at,)| (Utc::now() - at).num_seconds() <= FRESH_AUTH_SECS))
@@ -244,7 +267,12 @@ async fn setup(
     let sealed = secret_box::seal(keyring, &hex::encode(raw), &user_mfa_context(auth.user_id))
         .map_err(|_| AppError::internal())?;
     match mfa::setup(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/mfa.rs")
+            .map_err(internal)?,
         auth.user_id,
         auth.credential_id,
         &sealed,
@@ -286,7 +314,12 @@ async fn enable(
     .await?;
     let Json(body) = body.map_err(AppError::from)?;
     let code = mfa_code(&body.code)?;
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/mfa.rs")
+        .map_err(internal)?;
     let row = mfa::find(pool, auth.user_id).await.map_err(internal)?;
     let Some(row) = row.filter(|r| r.enabled_at.is_none()) else {
         return Err(problem(ProblemCode::MfaNotSetup));
@@ -345,7 +378,12 @@ async fn disable(
     if current.is_none() && code.is_none() {
         return Err(AppError::with_source(ProblemCode::InvalidInput, "/"));
     }
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/mfa.rs")
+        .map_err(internal)?;
     let row = mfa::find(pool, auth.user_id).await.map_err(internal)?;
     let Some(row) = row.filter(|r| r.enabled_at.is_some()) else {
         return Err(problem(ProblemCode::MfaNotEnabled));
@@ -398,7 +436,12 @@ async fn verify(
         ));
     }
     let code = mfa_code(&body.code)?;
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/mfa.rs")
+        .map_err(internal)?;
     let token_hash = hash_token(&body.mfa_token);
     let Some((user_id, generation)) = mfa::peek_challenge(pool, &token_hash)
         .await
