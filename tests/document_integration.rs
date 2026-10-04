@@ -3897,17 +3897,31 @@ async fn selected_family_forward_noop_rechecks_native_proof() {
             }
             "tail" => {
                 use fvoci_server::db::collab::{
-                    AppendCollabInput, AppendCollabResult, FamilyRoomFence,
+                    acquire_family_document_room, AppendCollabInput, AppendCollabResult,
                 };
-                let fence = FamilyRoomFence {
-                    workspace_id: fixture.workspace,
-                    document_id: document,
-                    owner_token: Uuid::from_slice(&before.0).unwrap(),
-                    fence: before.1,
-                };
+                let claim = acquire_family_document_room(
+                    &fixture.backend,
+                    fixture.workspace,
+                    fixture.live.user_id,
+                    fixture.live.session_id,
+                    document,
+                    Uuid::from_slice(&before.0).unwrap(),
+                    Duration::from_secs(30),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(claim.native.writer_generation, before.2);
+                assert_eq!(claim.native.load.tail_seq, before.3);
+                assert_eq!(
+                    selected_family_fence_snapshot(&fixture.backend, fixture.workspace, document)
+                        .await,
+                    before,
+                    "actual same-owner reader acquisition preserves fence and native head"
+                );
                 let committed = fvoci_server::db::collab::append_family_document_room_update(
                     &fixture.backend,
-                    fence,
+                    claim.fence,
                     AppendCollabInput {
                         workspace_id: fixture.workspace,
                         actor_user_id: fixture.live.user_id,
