@@ -109,13 +109,27 @@ case "\$mode" in
     echo "error: simulated cargo test failure" >&2
     exit 101
     ;;
-  fail-second)
+  fail-first)
     [[ \$admission -eq 1 ]] && echo 'test collab_primary_huge_varint_memory_rejected_1008 ... ok'
-    if [[ \$second -eq 1 ]]; then
+    if [[ \$second -eq 0 ]]; then
       echo "error: simulated cargo test failure" >&2
       exit 101
     fi
     exit 0
+    ;;
+  fail-second)
+    [[ \$admission -eq 1 ]] && echo 'test collab_primary_huge_varint_memory_rejected_1008 ... ok'
+    if [[ \$second -eq 1 ]]; then
+      echo "error: simulated cargo test failure" >&2
+      exit 102
+    fi
+    exit 0
+    ;;
+  fail-both)
+    [[ \$admission -eq 1 ]] && echo 'test collab_primary_huge_varint_memory_rejected_1008 ... ok'
+    echo "error: simulated cargo test failure" >&2
+    [[ \$second -eq 1 ]] && exit 102
+    exit 101
     ;;
   duplicate)
     if [[ \$admission -eq 1 ]]; then
@@ -200,11 +214,15 @@ if [[ "$(grep -c '^run ' "$DOCKER_CALLS")" -ne 1 ]] || [[ "$(grep -c '^rm ' "$DO
   exit 1
 fi
 
-for mode in fail fail-second; do
+# The first non-zero cargo status is returned as is (101 from the first
+# invocation, 102 from the second), never a substituted condition status.
+for case_ in fail:101 fail-first:101 fail-second:102 fail-both:101; do
+  mode="${case_%%:*}"
+  expected="${case_##*:}"
   status=0
   run_runner "$mode" >/dev/null 2>&1 || status=$?
-  if [[ "$status" -ne 101 ]]; then
-    echo "expected runner to propagate cargo exit 101 in ${mode}, got ${status}" >&2
+  if [[ "$status" -ne "$expected" ]]; then
+    echo "expected runner to propagate cargo exit ${expected} in ${mode}, got ${status}" >&2
     exit 1
   fi
   if [[ "$(wc -l <"$INVOCATIONS" | tr -d ' ')" -ne 2 ]]; then
