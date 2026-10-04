@@ -1302,3 +1302,226 @@ fn internal(err: sqlx::Error) -> AppError {
     tracing::error!("database error: {}", err);
     AppError::internal()
 }
+
+#[cfg(test)]
+mod upload_session_route_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+    use crate::db::backend::Backend;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+    const BODY: &[u8] = b"S18 actual selected HTTP upload -> fresh client original bytes";
+    fn state(backend: Backend, storage: crate::attachments::ObjectStorage) -> AppState {
+        AppState {
+            auth:Arc::new(crate::auth::AuthService{db:crate::db::Db::from_backend(backend),password_keys:crate::auth::password::Keyring::parse(r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,"test").unwrap()}),
+            branding_name:"FVOCI".into(),public_origin:"http://localhost".into(),cookie_secure:false,rate_limiter:crate::http::rate_limit::RateLimiter::new(),storage,
+            upload:crate::attachments::UploadLimits{part_size_bytes:24,max_file_size_bytes:1024,create_rate_per_5min:20,part_put_slots:crate::attachments::PartPutSlots::new(2)},
+            collab:None,meili:None,search_embedder:None,markdown:None,import_wake:None,import_extractor_available:false,preview_extract:None,quota:Default::default(),mailer:Arc::new(crate::mail::Mailer::disabled()),streams:AppState::fresh_streams(),
+        }
+    }
+    async fn session(f: &Fixture) -> (Uuid, String) {
+        let token = crate::auth::token::new_token();
+        let id = Uuid::now_v7();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        let expires = chrono::DateTime::from_timestamp_micros(
+            chrono::Utc::now().timestamp_micros() + 30 * 24 * 60 * 60 * 1_000_000,
+        )
+        .unwrap();
+        tx.operation()
+            .create_session(id, f.user, &token.hash, expires)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        (id, token.token)
+    }
+    async fn request(
+        app: Router,
+        method: &str,
+        path: &str,
+        token: &str,
+        body: Vec<u8>,
+        json: bool,
+    ) -> (StatusCode, Vec<u8>) {
+        let mut req = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header("cookie", format!("fvoci_session={token}"))
+            .header("origin", "http://localhost")
+            .header("content-length", body.len());
+        if json {
+            req = req.header("content-type", "application/json");
+        }
+        let mut req = req.body(Body::from(body)).unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([203, 0, 113, 18], 41818))));
+        let response = app.oneshot(req).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        (status, bytes.to_vec())
+    }
+    #[tokio::test]
+    async fn upload_session_selected_http_create_resume_complete_fresh_read_and_delete() {
+        let f = Fixture::new().await;
+        let storage = crate::attachments::ObjectStorage::local(f.root.join("s18-http-storage"));
+        let (session_id, token) = session(&f).await;
+        let app = router().with_state(state(f.backend.clone(), storage.clone()));
+        let create_path = format!(
+            "/api/v1/workspaces/{}/documents/{}/uploads",
+            f.workspace, f.document
+        );
+        let input = serde_json::json!({"name":"S18.txt","sizeBytes":BODY.len(),"declaredMime":"text/plain"});
+        let (status, bytes) = request(
+            app.clone(),
+            "POST",
+            &create_path,
+            &token,
+            serde_json::to_vec(&input).unwrap(),
+            true,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(created["transfer"], "proxy");
+        let id = created["attachmentId"].as_str().unwrap();
+        let base = format!("/api/v1/workspaces/{}/attachments/{id}", f.workspace);
+        let mut parts = Vec::new();
+        for part in created["parts"].as_array().unwrap().iter().rev() {
+            let n = part["partNumber"].as_u64().unwrap();
+            let start = (n as usize - 1) * 24;
+            let chunk = BODY[start..(start + 24).min(BODY.len())].to_vec();
+            let (status, bytes) = request(
+                app.clone(),
+                "PUT",
+                part["url"].as_str().unwrap(),
+                &token,
+                chunk,
+                false,
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{}",
+                String::from_utf8_lossy(&bytes)
+            );
+            let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            parts.push(serde_json::json!({"partNumber":n,"etag":response["etag"]}));
+        }
+        let (status, bytes) = request(
+            app.clone(),
+            "GET",
+            &format!("{base}/upload"),
+            &token,
+            Vec::new(),
+            false,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let resumed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            resumed["uploadedParts"].as_array().unwrap().len(),
+            parts.len()
+        );
+        assert!(resumed["parts"].as_array().unwrap().is_empty());
+        let complete = serde_json::to_vec(&serde_json::json!({"parts":parts})).unwrap();
+        let (status, bytes) = request(
+            app.clone(),
+            "POST",
+            &format!("{base}/complete"),
+            &token,
+            complete.clone(),
+            true,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(saved["id"], id);
+        assert_eq!(saved["sizeBytes"], BODY.len());
+        assert!(saved.get("_upload_completion").is_none());
+        assert!(saved.get("variants").is_none());
+        let fresh_pool = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        let fresh =
+            router().with_state(state(Backend::Sqlite(fresh_pool.clone()), storage.clone()));
+        let (_, new_token) = session(&f).await;
+        let (status, bytes) =
+            request(fresh.clone(), "GET", &base, &new_token, Vec::new(), false).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            saved
+        );
+        let (status, bytes) = request(
+            fresh.clone(),
+            "GET",
+            &format!("{base}/download"),
+            &new_token,
+            Vec::new(),
+            false,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes, BODY);
+        use sha2::Digest;
+        println!(
+            "S18 actual fresh HTTP bytes={} sha256={:x}",
+            bytes.len(),
+            sha2::Sha256::digest(&bytes)
+        );
+        let (status, _) = request(
+            fresh.clone(),
+            "POST",
+            &format!("{base}/complete"),
+            &new_token,
+            complete,
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(session_id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let (status, _) = request(app, "GET", &base, &token, Vec::new(), false).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, bytes) = request(
+            fresh.clone(),
+            "DELETE",
+            &base,
+            &new_token,
+            Vec::new(),
+            false,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let (status, _) = request(fresh, "GET", &base, &new_token, Vec::new(), false).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(f.journals().await.is_empty());
+        fresh_pool.close().await;
+        f.close().await;
+    }
+}
