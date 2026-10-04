@@ -3674,7 +3674,7 @@ async fn selected_backend_wiki_fixture(
                 persisted.tail.into_iter().map(|row| row.payload).collect(),
             );
             let backend_kind = backend.kind();
-            let fresh = tokio::task::spawn_blocking(move || {
+            let (fresh, native_compaction_snapshot) = tokio::task::spawn_blocking(move || {
                 use collab_engine::outcome::EngineStatus;
                 use collab_engine::process::{ChildSlotKind, EngineSession, SpawnRequest};
                 use collab_engine::protocol::Request;
@@ -3710,6 +3710,16 @@ async fn selected_backend_wiki_fixture(
                     } => content,
                     other => panic!("fresh native projection: {other:?}"),
                 };
+                // Compaction stores a full native update; a manual revision's
+                // state-vector/delete-set snapshot is separate history data.
+                let full_snapshot =
+                    with_compaction.then(|| match child.call(&Request::Snapshot).outcome {
+                        EngineStatus::Ok {
+                            update_b64: Some(bytes),
+                            ..
+                        } => collab_engine::b64::decode(&bytes).unwrap(),
+                        other => panic!("fresh native full snapshot: {other:?}"),
+                    });
                 child.kill_and_reap();
                 assert!(
                     !proc_path.exists(),
@@ -3719,7 +3729,7 @@ async fn selected_backend_wiki_fixture(
                     "native_fresh_child backend={backend_kind} pid={pid} reaped=true executable={}",
                     engine.display()
                 );
-                projected
+                (projected, full_snapshot)
             })
             .await
             .unwrap();
@@ -3941,6 +3951,7 @@ async fn selected_backend_wiki_fixture(
                     CompactCollabInput, VerifyCollabInput,
                 };
                 use sha2::{Digest, Sha256};
+                let full_snapshot = native_compaction_snapshot.as_ref().unwrap();
                 let digest = Sha256::digest(&payload).to_vec();
                 let verify = |scope, credential, op, stored_actor| VerifyCollabInput {
                     workspace_id: scope,
@@ -4029,7 +4040,7 @@ async fn selected_backend_wiki_fixture(
                     writer_generation: generation,
                     cutoff_seq: cutoff,
                     expected_tail_seq: tail,
-                    new_snapshot: &captured.y_snapshot,
+                    new_snapshot: full_snapshot,
                     client_ip: None,
                 };
                 assert_eq!(
@@ -4099,7 +4110,7 @@ async fn selected_backend_wiki_fixture(
                 .await
                 .unwrap()
                 .unwrap();
-                assert_eq!(compacted.snapshot, captured.y_snapshot);
+                assert_eq!(compacted.snapshot, *full_snapshot);
                 assert!(compacted.tail.is_empty());
                 assert_eq!(
                     (
