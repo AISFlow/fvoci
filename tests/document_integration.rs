@@ -135,11 +135,15 @@ async fn apply_grants(pool: &PgPool, role_name: &str) {
 
 async fn app_state(app_url: &str) -> AppState {
     let pool = pool::connect_app(app_url).await.expect("app pool");
+    app_state_backend(fvoci_server::db::backend::Backend::Postgres(pool)).await
+}
+
+async fn app_state_backend(backend: fvoci_server::db::backend::Backend) -> AppState {
     let storage_root = std::env::temp_dir().join(format!("fvoci-doc-test-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
     AppState {
         auth: Arc::new(AuthService {
-            db: Db::new(pool),
+            db: Db::from_backend(backend),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
         }),
         branding_name: "FVOCI".to_string(),
@@ -2769,4 +2773,155 @@ async fn wiki_create_command_requires_identity_and_receipt_failure_rolls_back_ev
     assert_eq!(success.1["number"], 1);
     admin.close().await;
     harness.cleanup().await;
+}
+
+/// Early executable common fixture. Native editor/ACK/revision/browser proof
+/// is a separate required tracer; this does not claim that acceptance.
+#[tokio::test]
+async fn selected_backend_setup_cookie_wiki_command_readback() {
+    use fvoci_server::db::backend::Backend;
+    let pg = TestDb::bootstrap().await;
+    let pg_backend = Backend::Postgres(pool::connect_app(&pg.app_url).await.unwrap());
+    let directory = std::env::temp_dir().join(format!("fvoci-selected-backend-{}", Uuid::now_v7()));
+    std::fs::create_dir(&directory).unwrap();
+    let sqlite_path = directory.join("app.db");
+    migrate::run_sqlite_migrations(&sqlite_path).await.unwrap();
+    let sqlite_admission = migrate::SqliteAdmission::server(&sqlite_path).unwrap();
+    // The actual operator path refuses a live selected-backend server.
+    assert!(migrate::run_sqlite_migrations(&sqlite_path).await.is_err());
+    let sqlite_backend = Backend::Sqlite(pool::connect_sqlite_app(&sqlite_path, 4).await.unwrap());
+    let capability = migrate::assert_sqlite_schema_current(&sqlite_backend)
+        .await
+        .unwrap();
+    assert_eq!(capability.lineage, migrate::SQLITE_LINEAGE);
+    assert_eq!(capability.applied_steps, 3);
+    let command = Uuid::now_v7();
+    for backend in [pg_backend, sqlite_backend] {
+        let state = app_state_backend(backend.clone()).await;
+        let storage = state.storage.clone();
+        let app = document_app(state);
+        let (status, instance, _, _) =
+            json_request(app.clone(), "GET", "/api/v1/instance", None, None, &[]).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{} instance: {instance}",
+            backend.kind()
+        );
+        let (status, setup, cookie, _) = json_request(
+            app.clone(),
+            "POST",
+            "/api/v1/setup",
+            Some(json!({
+                "email":"admin@example.com", "password":"supersecret1", "givenName":"Admin",
+                "workspaceSlug":"acme", "workspaceName":"Acme"
+            })),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{} setup: {setup}",
+            backend.kind()
+        );
+        let cookie = extract_session_cookie(cookie.as_ref().unwrap());
+        let workspace = setup["workspaceId"].as_str().unwrap();
+        let path = format!("/api/v1/workspaces/{workspace}/documents");
+        let input = json!({"commandId":command,"parentId":null,"title":"Same selected fixture"});
+        let (status, created, _, _) = json_request(
+            app.clone(),
+            "POST",
+            &path,
+            Some(input.clone()),
+            Some(&cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{} create: {created}",
+            backend.kind()
+        );
+        let (status, replayed, _, _) =
+            json_request(app.clone(), "POST", &path, Some(input), Some(&cookie), &[]).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{} replay: {replayed}",
+            backend.kind()
+        );
+        assert_eq!(replayed, created);
+        let (status, _, _, _) = json_request(
+            app.clone(),
+            "POST",
+            &path,
+            Some(json!({"commandId":command,"parentId":null,"title":"Changed hash"})),
+            Some(&cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "{} changed command",
+            backend.kind()
+        );
+        let (status, login, fresh_cookie, _) = json_request(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/login",
+            Some(json!({"email":"admin@example.com","password":"supersecret1"})),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{} login: {login}", backend.kind());
+        let fresh_cookie = extract_session_cookie(fresh_cookie.as_ref().unwrap());
+        assert_ne!(fresh_cookie, cookie);
+        let (status, me, _, _) = json_request(
+            app.clone(),
+            "GET",
+            "/api/v1/auth/me",
+            None,
+            Some(&fresh_cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{} me: {me}", backend.kind());
+        let document = created["id"].as_str().unwrap();
+        let (status, read, _, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!("{path}/{document}"),
+            None,
+            Some(&fresh_cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{} readback: {read}",
+            backend.kind()
+        );
+        assert_eq!(read["id"], created["id"]);
+        assert_eq!(read["title"], created["title"]);
+        assert_eq!(read["body"], created["body"]);
+        drop(app);
+        let storage_root = match &storage {
+            fvoci_server::attachments::ObjectStorage::Local(local) => local.root().to_path_buf(),
+            _ => unreachable!("owned local fixture storage"),
+        };
+        drop(storage);
+        backend.close().await.unwrap();
+        std::fs::remove_dir_all(storage_root).unwrap();
+    }
+    drop(sqlite_admission);
+    // Idempotent restart reads all real step receipts and definitions.
+    migrate::run_sqlite_migrations(&sqlite_path).await.unwrap();
+    pg.cleanup().await;
+    std::fs::remove_dir_all(directory).unwrap();
 }

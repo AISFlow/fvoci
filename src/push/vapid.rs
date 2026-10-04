@@ -35,6 +35,37 @@ pub async fn load_vapid_public_key(pool: &PgPool) -> Result<Option<String>, sqlx
         .await
 }
 
+/// The same current public key read for a selected backend. Private material
+/// is never loaded by the anonymous instance projection.
+pub async fn load_vapid_public_key_backend(
+    backend: &crate::db::backend::Backend,
+) -> Result<Option<String>, sqlx::Error> {
+    use crate::db::backend::{Backend, DbTransaction};
+    if let Backend::Postgres(pool) = backend {
+        return load_vapid_public_key(pool).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        tx.operation().set_system().await?;
+        let DbTransaction::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        let rows = family
+            .query(
+                "SELECT vapid_public_key FROM instance_config WHERE id=1",
+                &[],
+            )
+            .await?;
+        rows.first()
+            .map(|row| row.cell(0)?.optional(|cell| cell.string()))
+            .transpose()
+            .map(Option::flatten)
+    }
+    .await;
+    tx.rollback().await?;
+    result
+}
+
 pub async fn load_vapid_key_pair(
     pool: &PgPool,
     keys: Option<&Keyring>,

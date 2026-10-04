@@ -308,28 +308,16 @@ async fn get_instance(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let snapshot = settings::load(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/legal.rs")
-            .map_err(internal)?,
+    let snapshot = settings::load_backend(
+        &state.auth.db.pool,
         &state.auth.db.settings_boot,
         &state.branding_name,
     )
     .await
     .map_err(internal)?;
-    let vapid_public = crate::push::load_vapid_public_key(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/legal.rs")
-            .map_err(internal)?,
-    )
-    .await
-    .map_err(internal)?;
+    let vapid_public = crate::push::vapid::load_vapid_public_key_backend(&state.auth.db.pool)
+        .await
+        .map_err(internal)?;
     let values = snapshot.values;
     let body = InstanceSettingsOutput {
         version: snapshot.revision,

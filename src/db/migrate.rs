@@ -881,3 +881,270 @@ mod tests {
         assert!(!sql.contains("BEGIN") && !sql.contains("COMMIT"));
     }
 }
+
+/// SQLite-family lineage: these are executed steps, never PG version markers.
+pub const SQLITE_LINEAGE: &str = "fvoci-sqlite-current-v1";
+const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
+    (
+        include_str!("../../migrations/sqlite/001_current_schema.sql"),
+        "0d49ad2c13bcc7942e95441f9965ff3a60f8982b10b3baa55d4b46e00420965f",
+    ),
+    (
+        include_str!("../../migrations/sqlite/002_wiki_create_commands.sql"),
+        "8460c39b4f0815fabf9e13e958ab6a99f2415ad10b59e04bd6de397724abe45c",
+    ),
+    (
+        include_str!("../../migrations/sqlite/003_collab_room_fences.sql"),
+        "fd9b35411378d7485c40f9fcac2821121eb260c1a09dc7bdeb08a72608ba6d70",
+    ),
+];
+
+/// Held by the actual server for its entire joined runtime, or exclusively
+/// by preparation until every migration connection has closed. Locks use
+/// the database inode, so equivalent paths cannot bypass admission.
+pub struct SqliteAdmission(std::fs::File);
+impl SqliteAdmission {
+    pub fn server(path: &std::path::Path) -> Result<Self, sqlx::Error> {
+        Self::acquire(path, false)
+    }
+    fn migration(path: &std::path::Path) -> Result<Self, sqlx::Error> {
+        Self::acquire(path, true)
+    }
+    fn acquire(path: &std::path::Path, migration: bool) -> Result<Self, sqlx::Error> {
+        if !path.is_absolute() || path.file_name().is_none() {
+            return Err(schema_error(
+                "SQLite requires an absolute persistent database file",
+            ));
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(migration);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(path).map_err(sqlx::Error::Io)?;
+        let result = if migration {
+            file.try_lock()
+        } else {
+            file.try_lock_shared()
+        };
+        result.map_err(|_| {
+            schema_error(
+                "SQLite server/migrator admission is held; stop live servers before migration",
+            )
+        })?;
+        Ok(Self(file))
+    }
+}
+impl Drop for SqliteAdmission {
+    fn drop(&mut self) {
+        // Closing the owned OS handle releases this lock, including process
+        // termination. Explicit server shutdown joins consumers before here.
+        let _ = self.0.unlock();
+    }
+}
+
+fn schema_error(message: impl Into<String>) -> sqlx::Error {
+    sqlx::Error::Protocol(message.into())
+}
+
+/// A migration step's DDL and marker share one reserved writer transaction.
+/// Cancellation cannot publish a partial step. Restart checks actual receipts
+/// and schema before deciding whether another step is needed.
+pub async fn run_sqlite_migrations(path: &std::path::Path) -> Result<(), sqlx::Error> {
+    let _admission = SqliteAdmission::migration(path)?;
+    let pool = super::pool::connect_sqlite_prepare(path).await?;
+    let backend = super::backend::Backend::Sqlite(pool);
+    let result = apply_sqlite_migrations(&backend).await;
+    let closed = backend.close().await;
+    closed?;
+    result
+}
+
+async fn apply_sqlite_migrations(backend: &super::backend::Backend) -> Result<(), sqlx::Error> {
+    use super::backend::DbTransaction;
+    use super::codec::Cell;
+    for (index, (sql, digest)) in SQLITE_MIGRATIONS.iter().enumerate() {
+        let mut tx = backend.begin_write().await?;
+        let result = async {
+            let DbTransaction::SqliteFamily(family) = &mut tx else {
+                return Err(schema_error("SQLite migrations require an actual SQLite-family handle"));
+            };
+            let applied = sqlite_applied(family).await?;
+            verify_sqlite_applied(&applied, false)?;
+            verify_sqlite_objects(family, applied.len()).await?;
+            if index < applied.len() { return Ok(false); }
+            if index != applied.len() { return Err(schema_error("SQLite migration gap")); }
+            verify_compiled_sqlite_digest(sql, digest)?;
+            family.apply_migration_batch(sql).await?;
+            family.execute(
+                "INSERT INTO schema_migrations(version,lineage,sql_sha256,applied_at) VALUES(?1,?2,?3,unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)",
+                &[Cell::Integer((index + 1) as i64), Cell::text(SQLITE_LINEAGE), Cell::text(*digest)],
+            ).await?;
+            verify_sqlite_objects(family, index + 1).await?;
+            Ok(true)
+        }.await;
+        match result {
+            Ok(true) => tx
+                .commit()
+                .await
+                .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?,
+            Ok(false) => tx.rollback().await?,
+            Err(error) => {
+                tx.rollback().await?;
+                return Err(error);
+            }
+        }
+    }
+    assert_sqlite_schema_current(backend).await.map(|_| ())
+}
+
+#[derive(Debug)]
+pub struct SqliteCapability {
+    pub lineage: &'static str,
+    pub applied_steps: usize,
+    pub schema_sha256: String,
+}
+
+pub async fn assert_sqlite_schema_current(
+    backend: &super::backend::Backend,
+) -> Result<SqliteCapability, sqlx::Error> {
+    use super::backend::DbTransaction;
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let DbTransaction::SqliteFamily(family) = &mut tx else {
+            return Err(schema_error(
+                "SQLite schema gate requires an actual SQLite-family handle",
+            ));
+        };
+        let applied = sqlite_applied(family).await?;
+        verify_sqlite_applied(&applied, true)?;
+        let schema_sha256 = verify_sqlite_objects(family, applied.len()).await?;
+        Ok(SqliteCapability {
+            lineage: SQLITE_LINEAGE,
+            applied_steps: applied.len(),
+            schema_sha256,
+        })
+    }
+    .await;
+    tx.rollback().await?;
+    result
+}
+
+fn verify_compiled_sqlite_digest(sql: &str, digest: &str) -> Result<(), sqlx::Error> {
+    use sha2::{Digest, Sha256};
+    if hex::encode(Sha256::digest(sql.as_bytes())) != digest {
+        return Err(schema_error(
+            "compiled SQLite migration digest does not match its registry",
+        ));
+    }
+    Ok(())
+}
+
+type SqliteApplied = (i64, String, String);
+async fn sqlite_applied(
+    family: &mut super::backend::FamilyTx,
+) -> Result<Vec<SqliteApplied>, sqlx::Error> {
+    let exists = family
+        .query(
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='schema_migrations'",
+            &[],
+        )
+        .await?;
+    if exists[0].cell(0)?.integer()? == 0 {
+        return Ok(Vec::new());
+    }
+    family
+        .query(
+            "SELECT version,lineage,sql_sha256,applied_at FROM schema_migrations ORDER BY version",
+            &[],
+        )
+        .await?
+        .iter()
+        .map(|row| {
+            // Reject a malformed storage class/time as well as an invalid set.
+            row.cell(3)?.datetime()?;
+            Ok((
+                row.cell(0)?.integer()?,
+                row.cell(1)?.string()?,
+                row.cell(2)?.string()?,
+            ))
+        })
+        .collect()
+}
+fn verify_sqlite_applied(applied: &[SqliteApplied], complete: bool) -> Result<(), sqlx::Error> {
+    if applied.len() > SQLITE_MIGRATIONS.len()
+        || (complete && applied.len() != SQLITE_MIGRATIONS.len())
+    {
+        return Err(schema_error(
+            "SQLite schema is ahead, incomplete or unprepared",
+        ));
+    }
+    for (index, (version, lineage, digest)) in applied.iter().enumerate() {
+        let (sql, expected) = SQLITE_MIGRATIONS[index];
+        verify_compiled_sqlite_digest(sql, expected)?;
+        if *version != (index + 1) as i64 || lineage != SQLITE_LINEAGE || digest != expected {
+            return Err(schema_error(
+                "SQLite schema has a gap, foreign lineage or changed digest",
+            ));
+        }
+    }
+    Ok(())
+}
+
+const SQLITE_OBJECTS: &str = "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type COLLATE BINARY,name COLLATE BINARY";
+type SqliteObject = (String, String, String, String);
+/// Ask the pinned engine to compile the fixed DDL in a separate reference
+/// connection. This validates every actual table/index/trigger definition;
+/// no handwritten SQL parser, guessed column inventory or marker-only gate.
+async fn verify_sqlite_objects(
+    family: &mut super::backend::FamilyTx,
+    steps: usize,
+) -> Result<String, sqlx::Error> {
+    use sha2::{Digest, Sha256};
+    use sqlx::Connection;
+    let mut reference = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true),
+    )
+    .await?;
+    let expected = async {
+        let pin: (String, String) = sqlx::query_as("SELECT sqlite_version(),sqlite_source_id()")
+            .fetch_one(&mut reference)
+            .await?;
+        if pin.0 != super::pool::SQLITE_VERSION || pin.1 != super::pool::SQLITE_SOURCE_ID {
+            return Err(schema_error("SQLite schema reference engine pin mismatch"));
+        }
+        for (sql, digest) in SQLITE_MIGRATIONS.iter().take(steps) {
+            verify_compiled_sqlite_digest(sql, digest)?;
+            sqlx::raw_sql(sql).execute(&mut reference).await?;
+        }
+        sqlx::query_as::<_, SqliteObject>(SQLITE_OBJECTS)
+            .fetch_all(&mut reference)
+            .await
+    }
+    .await;
+    reference.close().await?;
+    let expected = expected?;
+    let actual = family
+        .query(SQLITE_OBJECTS, &[])
+        .await?
+        .iter()
+        .map(|row| {
+            Ok((
+                row.cell(0)?.string()?,
+                row.cell(1)?.string()?,
+                row.cell(2)?.string()?,
+                row.cell(3)?.string()?,
+            ))
+        })
+        .collect::<Result<Vec<SqliteObject>, sqlx::Error>>()?;
+    if actual != expected {
+        return Err(schema_error("SQLite schema definitions differ from compiled capability; unmarked/populated or altered schema refused"));
+    }
+    let bytes = serde_json::to_vec(&(SQLITE_LINEAGE, steps, actual))
+        .map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}

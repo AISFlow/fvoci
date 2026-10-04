@@ -291,6 +291,23 @@ impl FamilyTx {
                 .map_err(remote_error),
         }
     }
+    /// Only the migration registry supplies compiled, fixed DDL. This keeps
+    /// DDL and its applied marker on the caller's already reserved stream.
+    pub(crate) async fn apply_migration_batch(
+        &mut self,
+        sql: &'static str,
+    ) -> Result<(), sqlx::Error> {
+        self.require_writer()?;
+        match self {
+            Self::Local(tx) => sqlx::raw_sql(sql).execute(&mut *tx.tx).await.map(|_| ()),
+            Self::Remote(tx) => tx
+                .connection()
+                .execute_batch(sql)
+                .await
+                .map(|_| ())
+                .map_err(remote_error),
+        }
+    }
     pub(crate) async fn query(
         &mut self,
         statement: &'static str,
