@@ -169,10 +169,20 @@ const fieldsRefreshFailed = computed(() => {
       (error instanceof ProblemError && [408, 429, 500, 502, 503, 504].includes(error.status)))
   );
 });
+const viewsRefreshFailed = computed(() => {
+  const error = views.error.value;
+  return (
+    props.type === "calendar" &&
+    views.data.value !== undefined &&
+    views.isError.value &&
+    (error instanceof TypeError ||
+      (error instanceof ProblemError && [408, 429, 500, 502, 503, 504].includes(error.status)))
+  );
+});
 const rowsEnabled = computed(
   () =>
     (fields.isSuccess.value || fieldsRefreshFailed.value) &&
-    views.isSuccess.value &&
+    (views.isSuccess.value || viewsRefreshFailed.value) &&
     me.isSuccess.value,
 );
 const rows = useQuery(() =>
@@ -415,7 +425,9 @@ const removeView = useMutation({
 
 const failed = computed(
   () =>
-    (fields.isError.value && !fieldsRefreshFailed.value) || views.isError.value || me.isError.value,
+    (fields.isError.value && !fieldsRefreshFailed.value) ||
+    (views.isError.value && !viewsRefreshFailed.value) ||
+    me.isError.value,
 );
 const memberItems = computed<MemberOutput[]>(() => members.data.value?.items ?? []);
 const userNames = computed(() =>
@@ -576,6 +588,13 @@ async function retryMeta(): Promise<void> {
   await Promise.all([fields.refetch(), views.refetch(), me.refetch()]);
 }
 
+async function retryCalendarMeta(): Promise<void> {
+  await Promise.all([
+    ...(fieldsRefreshFailed.value ? [fields.refetch()] : []),
+    ...(viewsRefreshFailed.value ? [views.refetch()] : []),
+  ]);
+}
+
 function onSaveView(event: Event): void {
   event.preventDefault();
   if (
@@ -628,11 +647,11 @@ const emptyCount = computed(() =>
   <section v-else class="flex min-w-0 flex-col gap-4" :data-testid="`collection-${type}`">
     <!-- Metadata retry belongs to the open Calendar editor's interaction. -->
     <QueryError
-      v-if="fieldsRefreshFailed"
-      :message="loadErrorMessage(fields.error.value)"
+      v-if="fieldsRefreshFailed || viewsRefreshFailed"
+      :message="loadErrorMessage(fieldsRefreshFailed ? fields.error.value : views.error.value)"
       @pointerdown.stop
       @focusin.stop
-      @retry="fields.refetch()"
+      @retry="retryCalendarMeta"
     />
     <div class="collection-toolbar">
       <div class="collection-field">

@@ -200,14 +200,27 @@ run_timer_dispatch() {
 
 timer_log="$FIXTURE_ROOT/timer-dispatch.jsonl"
 run_timer_dispatch --workers=1 e2e/v050-task-timer.spec.ts --retries=0 --trace=on >"$timer_log"
-python3 - "$timer_log" <<'PYTHON'
-import json, sys
+python3 - "$timer_log" "$ROOT/apps/web/e2e/v050-task-timer.spec.ts" <<'PYTHON'
+import json, re, sys
 rows = [json.loads(line) for line in open(sys.argv[1])]
 original = ["--workers=1", "e2e/v050-task-timer.spec.ts", "--retries=0", "--trace=on"]
-assert len(rows) == 2, rows
-assert rows[0][:-2] == rows[1][:-2] == original, rows
-assert rows[0][-2] == "--grep-invert" and rows[1][-2] == "--grep", rows
-assert rows[0][-1] == rows[1][-1] and not rows[0][-1].startswith("^"), rows
+assert len(rows) == 4, rows
+assert all(row[:-2] == original for row in rows), rows
+assert [row[-2] for row in rows] == ["--grep-invert", "--grep", "--grep", "--grep"], rows
+titles = re.findall(r'^test\("([^"\n]+)"', open(sys.argv[2]).read(), re.MULTILINE)
+assert len(titles) == 22, titles
+groups = [
+    {title for title in titles if bool(re.search(row[-1], title)) == (row[-2] == "--grep")}
+    for row in rows
+]
+assert [len(group) for group in groups] == [9, 7, 1, 5], groups
+assert set.union(*groups) == set(titles), groups
+assert sum(map(len, groups)) == len(set.union(*groups)), groups
+# This fixture consumes the whole DB graph and retires the group's original
+# server; it must share neither earlier rows nor a later base-URL consumer.
+assert groups[2] == {
+    "native same-database restart preserves paused and running anchors for genuine new clients"
+}, groups
 PYTHON
 
 # Existing explicit filters, mixed specs, shard/list/pending selection and
@@ -224,7 +237,9 @@ cases = [
     ["v050-task-timer.spec.ts", "-g", "literal owner title"],
     ["v050-task-timer.spec.ts", "-gliteral owner title"],
     ["v050-task-timer.spec.ts", "--shard=1/2"],
+    ["v050-task-timer.spec.ts", "--shard", "1/2"],
     ["v050-task-timer.spec.ts", "--list"],
+    ["v050-task-timer.spec.ts", "--", "literal owner title"],
     ["v050-task-timer.spec.ts", "other-flow.spec.ts"],
     ["other-flow.spec.ts", "--workers=1"],
     [],
@@ -236,11 +251,13 @@ pending = dict(env, FVOCI_E2E_PENDING="1")
 args = ["v050-task-timer.spec.ts", "--workers=1"]
 result = subprocess.run(["bash", script, *args], env=pending, text=True, capture_output=True, check=True)
 assert [json.loads(line) for line in result.stdout.splitlines()] == [args]
-for selection, expected_count in [("--grep-invert", 1), ("--grep", 2)]:
-    failing = dict(env, FVOCI_TEST_TIMER_FAIL_FILTER=selection)
+dispatch = subprocess.run(["bash", script, "v050-task-timer.spec.ts"], env=env, text=True, capture_output=True, check=True)
+groups = [json.loads(line) for line in dispatch.stdout.splitlines()]
+for expected_count, group in enumerate(groups, 1):
+    failing = dict(env, FVOCI_TEST_TIMER_FAIL_FILTER=group[-1])
     result = subprocess.run(["bash", script, "v050-task-timer.spec.ts"], env=failing, text=True, capture_output=True)
-    assert result.returncode == 7, (selection, result.returncode, result.stderr)
-    assert len(result.stdout.splitlines()) == expected_count, (selection, result.stdout)
+    assert result.returncode == 7, (group, result.returncode, result.stderr)
+    assert len(result.stdout.splitlines()) == expected_count, (group, result.stdout)
 PYTHON
 
 # Use the actual export statement: each independently allocated run supplies
