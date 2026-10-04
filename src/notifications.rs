@@ -6,7 +6,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use sqlx::Row;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -427,6 +426,15 @@ async fn comment_created_audience(
         }
     }
     let members = recipients_for(tx, workspace_id, candidates, event.actor_user_id).await?;
+    comment_audience_with_current_target(tx, workspace_id, comment, members).await
+}
+
+async fn comment_audience_with_current_target(
+    tx: &mut OperationTx<'_, '_>,
+    workspace_id: Uuid,
+    comment: &CommentSnap,
+    members: Vec<Uuid>,
+) -> Result<Vec<Uuid>, sqlx::Error> {
     if let Some(task_id) = comment.task_id {
         let task = task_snapshot(tx, workspace_id, task_id).await?;
         let Some(task) = task else {
@@ -486,6 +494,8 @@ async fn comment_resolved(
         candidates.extend(list_task_assignees(tx, workspace_id, task_id).await?);
     }
     let recipients = recipients_for(tx, workspace_id, candidates, event.actor_user_id).await?;
+    let recipients =
+        comment_audience_with_current_target(tx, workspace_id, &comment, recipients).await?;
     let payload = comment_notify_payload(
         comment.id,
         comment.document_id,
@@ -523,7 +533,7 @@ pub async fn notify_for_event(
     notify_for_event_backend(&mut OperationTx::Postgres(tx), &event.clone().into()).await
 }
 
-pub async fn notify_for_event_backend(
+pub(crate) async fn notify_for_event_backend(
     tx: &mut OperationTx<'_, '_>,
     event: &BackendOutboxEvent,
 ) -> Result<Vec<NotificationInsert>, sqlx::Error> {
@@ -752,6 +762,16 @@ mod backend_regressions {
         );
         assert!(
             matches!(fetch_cursor_backend(&f.backend,NOTIFICATIONS_CONSUMER).await.unwrap(),Some(OutboxCursor::SqliteFamily{seq}) if seq==hidden.seq)
+        );
+        f.grant_wiki().await;
+        let resolved = f.append_comment_event("comment.resolved").await;
+        process_notification_event_backend(&f.backend, owner, &resolved)
+            .await
+            .unwrap();
+        assert_eq!(
+            effect_counts(&f, resolved.id).await,
+            (1, 1),
+            "an authorized resolved comment must still produce its normal inbox effect"
         );
         f.finish().await;
     }
