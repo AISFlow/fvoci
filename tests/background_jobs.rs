@@ -1082,7 +1082,9 @@ async fn upload_gc_cursor_does_not_starve_rows_behind_a_stuck_one() {
             app.clone(),
             "POST",
             &format!("/api/v1/workspaces/{ws}/documents"),
-            Some(json!({"commandId": uuid::Uuid::now_v7(), "title": "gc cursor", "parentId": null})),
+            Some(
+                json!({"commandId": uuid::Uuid::now_v7(), "title": "gc cursor", "parentId": null}),
+            ),
             Some(&cookie),
         )
         .await;
@@ -1176,7 +1178,9 @@ async fn create_wiki_doc(app: &axum::Router, cookie: &str, ws: Uuid, parent: Opt
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{ws}/documents"),
-        Some(json!({"commandId": uuid::Uuid::now_v7(), "title": "휴지통 문서", "parentId": parent})),
+        Some(
+            json!({"commandId": uuid::Uuid::now_v7(), "title": "휴지통 문서", "parentId": parent}),
+        ),
         Some(cookie),
     )
     .await;

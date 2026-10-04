@@ -45,7 +45,37 @@ use super::codec::Cell;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+pub(crate) enum SystemContext {
+    Postgres(String),
+    SqliteFamily(bool),
+}
+
 impl OperationTx<'_, '_> {
+    pub(crate) async fn set_system(&mut self) -> Result<SystemContext, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => set_system(tx).await.map(SystemContext::Postgres),
+            Self::SqliteFamily(tx) => {
+                Ok(SystemContext::SqliteFamily(tx.replace_system_context(true)))
+            }
+        }
+    }
+    pub(crate) async fn restore_system(
+        &mut self,
+        previous: SystemContext,
+    ) -> Result<(), sqlx::Error> {
+        match (self, previous) {
+            (Self::Postgres(tx), SystemContext::Postgres(value)) => {
+                restore_system(tx, &value).await
+            }
+            (Self::SqliteFamily(tx), SystemContext::SqliteFamily(value)) => {
+                tx.replace_system_context(value);
+                Ok(())
+            }
+            _ => Err(sqlx::Error::Protocol(
+                "system context belongs to a different transaction kind".into(),
+            )),
+        }
+    }
     pub(crate) async fn set_tenant(&mut self, workspace: Uuid) -> Result<(), sqlx::Error> {
         match self {
             Self::Postgres(tx) => set_tenant(tx, workspace).await,

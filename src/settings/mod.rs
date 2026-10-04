@@ -21,6 +21,7 @@ pub mod messages;
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
+use crate::db::backend::{Backend, OperationTx};
 use serde_json::{json, Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -189,10 +190,19 @@ pub async fn load(
     boot: &SettingsBoot,
     brand_default: &str,
 ) -> Result<SettingsSnapshot, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let revision = load_revision(&mut *tx).await?;
-    let rows = load_rows(&mut *tx).await?;
-    tx.commit().await?;
+    load_backend(&Backend::Postgres(pool.clone()), boot, brand_default).await
+}
+
+pub async fn load_backend(
+    backend: &Backend,
+    boot: &SettingsBoot,
+    brand_default: &str,
+) -> Result<SettingsSnapshot, sqlx::Error> {
+    let mut tx = backend.begin_read().await?;
+    let mut operation = tx.operation();
+    let revision = operation.settings_revision().await?;
+    let rows = operation.settings_rows().await?;
+    tx.rollback().await?;
     let snapshot = resolve(rows, revision, brand_default, &boot.license);
     let _ = boot.values.get_or_init(|| snapshot.values.clone());
     Ok(snapshot)
@@ -332,7 +342,25 @@ pub async fn current_values_with_license(
     brand_default: &str,
     license: &crate::license::Entitlements,
 ) -> Result<SettingsValues, sqlx::Error> {
-    let rows = load_rows(pool).await?;
+    current_values_with_license_backend(&Backend::Postgres(pool.clone()), brand_default, license)
+        .await
+}
+
+pub async fn current_values_backend(
+    backend: &Backend,
+    brand_default: &str,
+) -> Result<SettingsValues, sqlx::Error> {
+    current_values_with_license_backend(backend, brand_default, &crate::license::absent()).await
+}
+
+pub async fn current_values_with_license_backend(
+    backend: &Backend,
+    brand_default: &str,
+    license: &crate::license::Entitlements,
+) -> Result<SettingsValues, sqlx::Error> {
+    let mut tx = backend.begin_read().await?;
+    let rows = tx.operation().settings_rows().await?;
+    tx.rollback().await?;
     Ok(resolve(rows, 0, brand_default, license).values)
 }
 
@@ -672,5 +700,34 @@ mod tests {
             &mut out,
         );
         assert_eq!(out, vec!["k.b.c"]);
+    }
+}
+
+impl OperationTx<'_, '_> {
+    async fn settings_rows(&mut self) -> Result<Vec<(String, Value)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => load_rows(&mut ***tx).await,
+            Self::SqliteFamily(tx) => tx
+                .query("SELECT key,value FROM instance_settings", &[])
+                .await?
+                .into_iter()
+                .map(|row| Ok((row.cell(0)?.string()?, row.cell(1)?.value()?)))
+                .collect(),
+        }
+    }
+    async fn settings_revision(&mut self) -> Result<i64, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => load_revision(&mut ***tx).await,
+            Self::SqliteFamily(tx) => tx
+                .query(
+                    "SELECT revision FROM instance_settings_meta WHERE id=1",
+                    &[],
+                )
+                .await?
+                .first()
+                .ok_or(sqlx::Error::RowNotFound)?
+                .cell(0)?
+                .integer(),
+        }
     }
 }

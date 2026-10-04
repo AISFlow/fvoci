@@ -1,4 +1,4 @@
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use uuid::Uuid;
 
 use crate::auth::password::{hash_password, Keyring};
@@ -46,7 +46,7 @@ impl AuthService {
             .map_err(sqlx::Error::Protocol)?;
 
         let token = new_token();
-        let expires_at = Utc::now() + Duration::seconds(SESSION_TTL_SECS);
+        let expires_at = crate::db::identity::stored_now() + Duration::seconds(SESSION_TTL_SECS);
         let input = new_setup_input(SetupSessionParams {
             email: input.email,
             password_hash,
