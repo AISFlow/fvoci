@@ -13,9 +13,11 @@ use crate::api::dto::{
 };
 use crate::auth::scopes::{grants_api_token_scope, ApiTokenScope};
 use crate::db::notifications::{
-    get_prefs, list_me_notifications, list_notifications, put_prefs, read_all, set_flags,
-    unread_count, ContentKind, ListNotificationsQuery, NotificationFilter, NotificationPrefs,
-    NotificationRow, SetNotificationFlags,
+    get_prefs_backend as get_prefs, list_me_notifications_backend as list_me_notifications,
+    list_notifications_backend as list_notifications, put_prefs_backend as put_prefs,
+    read_all_backend as read_all, set_flags_backend as set_flags,
+    unread_count_backend as unread_count, ContentKind, ListNotificationsQuery, NotificationFilter,
+    NotificationPrefs, NotificationRow, SetNotificationFlags,
 };
 use crate::error::AppError;
 use crate::http::authz::{require_request_auth, Access, RequestAuth};
