@@ -119,7 +119,12 @@ async fn list_workspace_notifications(
     let (filter, cursor, limit) = parse_list_query(query)?;
     let kinds = allowed_content_kinds(&auth);
     let page = list_notifications(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/notifications.rs")
+            .map_err(internal)?,
         ListNotificationsQuery {
             workspace_id,
             user_id: auth.user_id,
@@ -151,7 +156,12 @@ async fn unread_count_route(
         require_request_auth(&state, &headers, &jar, Access::Any, Some(workspace_id)).await?;
     let kinds = allowed_content_kinds(&auth);
     let count = unread_count(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/notifications.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -181,7 +191,12 @@ async fn patch_notification(
         require_request_auth(&state, &headers, &jar, Access::Any, Some(workspace_id)).await?;
     let kinds = allowed_content_kinds(&auth);
     let ok = set_flags(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/notifications.rs")
+            .map_err(internal)?,
         SetNotificationFlags {
             workspace_id,
             user_id: auth.user_id,
@@ -212,7 +227,12 @@ async fn read_all_route(
         require_request_auth(&state, &headers, &jar, Access::Any, Some(workspace_id)).await?;
     let kinds = allowed_content_kinds(&auth);
     let updated = read_all(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/notifications.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -235,7 +255,12 @@ async fn get_prefs_route(
     let auth =
         require_request_auth(&state, &headers, &jar, Access::Any, Some(workspace_id)).await?;
     let prefs = get_prefs(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/notifications.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -260,7 +285,12 @@ async fn put_prefs_route(
     let auth =
         require_request_auth(&state, &headers, &jar, Access::Any, Some(workspace_id)).await?;
     let prefs = put_prefs(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/notifications.rs")
+            .map_err(internal)?,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -296,7 +326,12 @@ async fn list_me_notifications_route(
     let auth = require_request_auth(&state, &headers, &jar, Access::Session, None).await?;
     let (filter, cursor, limit) = parse_list_query(query)?;
     let page = list_me_notifications(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/notifications.rs")
+            .map_err(internal)?,
         auth.user_id,
         auth.credential_id,
         filter,

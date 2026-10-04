@@ -188,7 +188,12 @@ async fn global_search(
         return Err(search_unavailable());
     };
     let result = query_global_search(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/search.rs")
+            .map_err(internal)?,
         GlobalSearchRequest {
             actor_user_id,
             session_id,
@@ -288,7 +293,12 @@ async fn workspace_search(
         return Err(search_unavailable());
     };
     let result = query_workspace_search(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/search.rs")
+            .map_err(internal)?,
         WorkspaceSearchRequest {
             workspace_id,
             actor_user_id,
