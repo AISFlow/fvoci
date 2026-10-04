@@ -1067,6 +1067,19 @@ pub(crate) mod webhook_family_fixture {
         tx.operation().restore_system(p).await.unwrap();
         tx.commit().await.unwrap();
     }
+    pub(crate) async fn duplicate_counts(
+        tx: &mut OperationTx<'_, '_>,
+        event: Uuid,
+    ) -> (i64, i64) {
+        let OperationTx::SqliteFamily(family) = tx else {
+            unreachable!()
+        };
+        let rows = family.query("SELECT (SELECT count(*) FROM processed_events WHERE consumer='webhooks' AND event_id=?1),(SELECT count(*) FROM webhook_deliveries WHERE event_id=?1)", &[Cell::uuid(event)]).await.unwrap();
+        (
+            rows[0].cell(0).unwrap().integer().unwrap(),
+            rows[0].cell(1).unwrap().integer().unwrap(),
+        )
+    }
     pub(crate) async fn claim(f: &Fixture) -> ClaimedWebhookDelivery {
         claim_due_webhooks_backend(&f.backend, 1, Duration::from_secs(240))
             .await

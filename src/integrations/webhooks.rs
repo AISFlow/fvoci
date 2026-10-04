@@ -952,13 +952,7 @@ mod backend_regressions {
                 .unwrap(),
             1
         );
-        let mut operation = tx.operation();
-        let OperationTx::SqliteFamily(family) = &mut operation else {
-            unreachable!()
-        };
-        let duplicate_counts=family.query("SELECT (SELECT count(*) FROM processed_events WHERE consumer='webhooks' AND event_id=?1),(SELECT count(*) FROM webhook_deliveries WHERE event_id=?1)",&[crate::db::codec::Cell::uuid(current.id)]).await.unwrap();
-        assert_eq!(duplicate_counts[0].cell(0).unwrap().integer().unwrap(), 1);
-        assert_eq!(duplicate_counts[0].cell(1).unwrap().integer().unwrap(), 1);
+        assert_eq!(duplicate_counts(&mut tx.operation(), current.id).await, (1, 1));
         assert!(
             advance_cursor_backend_tx(&mut tx, WEBHOOKS_CONSUMER, owner, &current.cursor())
                 .await
