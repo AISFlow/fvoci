@@ -21,8 +21,9 @@ use crate::api::dto::OkResponse;
 use crate::auth::scopes::ApiTokenScope;
 use crate::collections::{iso_millis, parse_name};
 use crate::db::document_tags::{
-    assign_tag, create_tag, delete_tag, list_document_tags, list_tags, unassign_tag, update_tag,
-    Affiliation, TagDbError, TagRow, TAG_POOL_LIMIT_DEFAULT, TAG_POOL_LIMIT_MAX, TAG_QUERY_MAX,
+    assign_tag, create_tag, delete_tag, list_document_tags_backend as list_document_tags,
+    list_tags, unassign_tag, update_tag, Affiliation, TagDbError, TagRow, TAG_POOL_LIMIT_DEFAULT,
+    TAG_POOL_LIMIT_MAX, TAG_QUERY_MAX,
 };
 use crate::db::labels::label_color_is_valid;
 use crate::error::{AppError, ProblemCode};
@@ -305,12 +306,7 @@ async fn list_for(
     )
     .await?;
     let tags = list_document_tags(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/document_tags.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         &actor,
         document_id,
