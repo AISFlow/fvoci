@@ -409,12 +409,12 @@ async fn forward(State(state): State<Forwarder>, request: Request) -> Response<B
                 () = state.cancel.cancelled() => break,
             }
         }
-        Body::from_stream(futures_util::stream::once(async {
-            Err::<Bytes, _>(std::io::Error::new(
+        Body::from_stream(futures_util::stream::iter([Err::<Bytes, _>(
+            std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "fixture cut reply after actual upstream response",
-            ))
-        }))
+            ),
+        )]))
     } else {
         Body::from(bytes)
     };
@@ -450,11 +450,41 @@ fn fixed_finish_markers(request: &Value) -> (bool, bool) {
                 step.get("stmt")
                     .and_then(|stmt| stmt.get("sql"))
                     .and_then(Value::as_str)
-                    .is_some_and(|sql| sql.trim() == "COMMIT")
+                    .is_some_and(|sql| {
+                        let sql = sql.trim();
+                        sql.strip_suffix(';').unwrap_or(sql).trim() == "COMMIT"
+                    })
             });
         }
     }
     (commit, close)
+}
+
+#[test]
+fn fixed_commit_marker_accepts_the_pinned_sdk_terminator_only() {
+    for sql in ["COMMIT", "COMMIT;", " COMMIT; "] {
+        assert_eq!(
+            fixed_finish_markers(&serde_json::json!({"requests":[
+                {"type":"batch","batch":{"steps":[{"stmt":{"sql":sql}}]}},
+                {"type":"close"}
+            ]})),
+            (true, true)
+        );
+    }
+    for sql in [
+        "COMMIT;;",
+        "COMMIT; SELECT 1",
+        "SELECT 'COMMIT';",
+        "ROLLBACK;",
+        "BEGIN IMMEDIATE;",
+    ] {
+        assert_eq!(
+            fixed_finish_markers(&serde_json::json!({"requests":[
+                {"type":"batch","batch":{"steps":[{"stmt":{"sql":sql}}]}}
+            ]})),
+            (false, false)
+        );
+    }
 }
 
 /// Discover the port-zero listener from this exact unreaped child's owned
