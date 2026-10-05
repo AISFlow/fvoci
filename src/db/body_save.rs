@@ -138,9 +138,20 @@ pub async fn read_off_document_body(
             return Err(BodySaveError::Native(CollabDbError::Forbidden));
         }
         let writable = op
-            .authorize_revision_scope(workspace, actor, credential, scope, true)
+            .authorize_collab_write(
+                CollabKind::Document,
+                workspace,
+                actor,
+                credential,
+                document,
+                &mut super::collab::CollabDbStageTimings::default(),
+            )
             .await?
-            .is_ok();
+            .is_ok()
+            && op
+                .authorize_revision_scope(workspace, actor, credential, scope, true)
+                .await?
+                .is_ok();
         Ok(OffBodySource {
             native,
             content_json: captured.content_json,
@@ -289,6 +300,15 @@ async fn save_in_writer(
     if load.tail_seq != *expected_tail {
         return Err(BodySaveError::Conflict);
     }
+    let compact_start = load.tail.len() as i64 >= super::collab::MAX_COLLAB_TAIL_UPDATES
+        || load.snapshot.len() as i64
+            + load
+                .tail
+                .iter()
+                .map(|row| row.payload.len() as i64)
+                .sum::<i64>()
+            + update.len() as i64
+            > super::collab::MAX_COLLAB_LOAD_BYTES;
     let generation = load.writer_generation;
     let snapshot = load.snapshot;
     let tail = load.tail.into_iter().map(|row| row.payload).collect();
@@ -300,6 +320,7 @@ async fn save_in_writer(
             snapshot,
             tail,
             payload,
+            compact_start,
             &cancelled,
         )
     })
@@ -313,6 +334,11 @@ async fn save_in_writer(
     let prepared =
         crate::collab::derived_body::prepare_derived_body(native.captured.content_json.clone())
             .map_err(|_| BodySaveError::Invalid)?;
+    if let Some(start) = &native.start_complete_v1 {
+        op.compact_off_body(proof, *expected_tail, start, client_ip.as_deref())
+            .await?
+            .map_err(BodySaveError::Native)?;
+    }
     let seq = op
         .append_off_body(
             proof,
@@ -475,6 +501,7 @@ mod policy_tests {
                 vec![0, 0],
                 vec![],
                 vec![0, 0],
+                false,
                 &cancelled
             ),
             Err(OffBodyPrepareError::Cancelled)
@@ -601,6 +628,134 @@ mod sqlite_native_tests {
         f.close().await;
     }
     #[tokio::test]
+    async fn archived_wiki_history_is_readable_but_not_a_write_grant_or_receipt_oracle() {
+        let f = Fixture::new().await;
+        let credential = session(&f).await;
+        let command = request(&f, credential, "retained archived wiki history").await;
+        save_off_document_body(&f.backend, RealtimeMode::Off, engine(), command.clone())
+            .await
+            .unwrap();
+        let before = counts(&f).await;
+        sqlx::query("UPDATE documents SET status='archived' WHERE workspace_id=?1 AND id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let source = read_off_document_body(
+            &f.backend,
+            RealtimeMode::Off,
+            engine(),
+            f.workspace,
+            RevisionTarget::Document(f.document).into(),
+            f.user,
+            credential,
+        )
+        .await
+        .unwrap();
+        assert!(!source.writable);
+        assert!(source
+            .content_json
+            .to_string()
+            .contains("retained archived wiki history"));
+        assert!(matches!(
+            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), command).await,
+            Err(BodySaveError::Native(CollabDbError::Forbidden))
+        ));
+        assert_eq!(counts(&f).await, before);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn off_save_at_existing_native_tail_limit_compacts_only_validated_history() {
+        let f = Fixture::new().await;
+        let credential = session(&f).await;
+        let initial = request(&f, credential, "retained native history at full tail").await;
+        let mut tx = f.backend.begin_off_body().await.unwrap();
+        let mut op = tx.operation();
+        let (proof, load) = op
+            .load_off_body_writer(
+                RealtimeMode::Off,
+                CollabKind::Document,
+                f.workspace,
+                f.user,
+                credential,
+                f.document,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(load.tail_seq, 0);
+        for seq in 0..super::super::collab::MAX_COLLAB_TAIL_UPDATES {
+            let appended = op
+                .append_off_body(
+                    proof,
+                    AppendCollabInput {
+                        workspace_id: f.workspace,
+                        actor_user_id: f.user,
+                        session_id: credential,
+                        document_id: f.document,
+                        writer_generation: load.writer_generation,
+                        expected_tail_seq: seq,
+                        op_id: Uuid::now_v7(),
+                        payload: &initial.update,
+                        client_ip: None,
+                    },
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(appended.seq(), seq + 1);
+        }
+        tx.commit_with_cleanup().await.unwrap();
+        assert_eq!(counts(&f).await, (64, 0, 0, 64));
+        let config = engine();
+        let incoming = SeedEngine::new(config.engine_bin, config.limits)
+            .tiptap_to_yjs_update(&json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":"new-forward-block"},
+                "content":[{"type":"text","text":"new forward edit at full tail"}]}]})).await.unwrap();
+        let mut command = initial;
+        command.command = Uuid::now_v7();
+        command.expected_tail = 64;
+        command.update = incoming;
+        let saved =
+            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), command.clone())
+                .await
+                .unwrap();
+        assert_eq!(saved.tail_seq, "65");
+        assert_eq!(counts(&f).await, (65, 1, 1, 65));
+        let fresh = read_off_document_body(
+            &f.backend,
+            RealtimeMode::Off,
+            engine(),
+            f.workspace,
+            RevisionTarget::Document(f.document).into(),
+            f.user,
+            credential,
+        )
+        .await
+        .unwrap();
+        assert_eq!(fresh.native.snapshot_cutoff_seq, 65);
+        assert!(fresh.native.tail.is_empty());
+        let projected = fresh.content_json.to_string();
+        for kept in [
+            "retained native history at full tail",
+            "off-stable-block",
+            "bold",
+            "new forward edit at full tail",
+            "new-forward-block",
+        ] {
+            assert!(projected.contains(kept), "missing {kept}");
+        }
+        let before = counts(&f).await;
+        let replay = save_off_document_body(&f.backend, RealtimeMode::Off, engine(), command)
+            .await
+            .unwrap();
+        assert_eq!(replay.revision_id, saved.revision_id);
+        assert_eq!(counts(&f).await, before);
+        f.close().await;
+    }
+
+    #[tokio::test]
     async fn off_project_native_save_binds_affiliation_and_rechecks_archived_replay() {
         let f = Fixture::new().await;
         let credential = session(&f).await;
@@ -678,6 +833,7 @@ mod sqlite_native_tests {
         .unwrap();
         assert!(!fresh.writable);
         assert_eq!(fresh.native.tail_seq, 1);
+        f.close().await;
     }
 
     #[tokio::test]

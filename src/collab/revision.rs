@@ -12,6 +12,7 @@ use crate::collab::room::{CapturedRevision, RevisionCaptureError};
 /// Validated forward edit of the existing native history, never a JSON reseed.
 pub(crate) struct PreparedOffBody {
     pub complete_v1: Vec<u8>,
+    pub start_complete_v1: Option<Vec<u8>>,
     pub captured: CapturedRevision,
 }
 
@@ -28,6 +29,7 @@ pub(crate) fn prepare_off_body(
     snapshot: Vec<u8>,
     tail: Vec<Vec<u8>>,
     update: Vec<u8>,
+    compact_start: bool,
     cancelled: &AtomicBool,
 ) -> Result<PreparedOffBody, OffBodyPrepareError> {
     let check = || {
@@ -65,6 +67,23 @@ pub(crate) fn prepare_off_body(
     ) {
         return Err(OffBodyPrepareError::Unavailable);
     }
+    check()?;
+    // At the accepted tail/load limit, compact only the original history before
+    // appending. A post-edit snapshot must never be published at the old tail.
+    let start_complete_v1 = if compact_start {
+        match session.call(&Request::Snapshot).outcome {
+            EngineStatus::Ok {
+                update_b64: Some(value),
+                pending: false,
+                ..
+            } => Some(
+                collab_engine::b64::decode(&value).map_err(|_| OffBodyPrepareError::Unavailable)?,
+            ),
+            _ => return Err(OffBodyPrepareError::Unavailable),
+        }
+    } else {
+        None
+    };
     check()?;
     match session
         .call(&Request::Apply {
@@ -111,6 +130,7 @@ pub(crate) fn prepare_off_body(
         .map_err(|_| OffBodyPrepareError::Invalid)?;
     Ok(PreparedOffBody {
         complete_v1,
+        start_complete_v1,
         captured: CapturedRevision {
             y_snapshot,
             content_json,
