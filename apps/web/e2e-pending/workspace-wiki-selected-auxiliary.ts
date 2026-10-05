@@ -263,7 +263,7 @@ export async function expectSelectedWikiAuxiliary(input: {
     const tenantResponse = await ownerPage.request.post("/api/v1/workspaces", {
       data: {
         name: "실제 연결 권한 경계",
-        slug: `aux-${randomUUID()}`,
+        slug: `aux-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
       } satisfies Schema["CreateWorkspaceBody"],
     });
     expect(tenantResponse.status()).toBe(201);
