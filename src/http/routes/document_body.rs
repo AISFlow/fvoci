@@ -26,7 +26,8 @@ use uuid::Uuid;
 
 use crate::api::documents_dto::{
     BacklinkFromResponse, BacklinkItemResponse, BacklinkListResponse, BodyMdResponse,
-    DocumentBodyResponse, DuplicateDocumentInput, PatchBlockInput,
+    DocumentBodyResponse, DuplicateDocumentInput, PatchBlockInput, SaveVersionedBodyInput,
+    SaveVersionedBodyResponse, VersionedBodyResponse,
 };
 use crate::api::dto::{AncestorResponse, AncestorsResponse, BodyResponse, DocumentMetaResponse};
 use crate::api::dto::{TreeNodeResponse, TreeResponse};
@@ -61,6 +62,14 @@ const PROJECT_DOC: &str =
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            &format!("{WS_DOC}/body/versioned"),
+            get(get_versioned_body).put(save_versioned_body).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    (crate::db::collab::MAX_COLLAB_UPDATE_BYTES * 4).div_ceil(3) + 4096,
+                ),
+            ),
+        )
         .route(&format!("{WS_DOC}/body"), axum::routing::put(put_body_wiki))
         .route(
             &format!("{WS_DOC}/blocks/{{block_id}}"),
@@ -397,6 +406,7 @@ async fn put_body(
     document_id: Uuid,
     bytes: &[u8],
 ) -> Result<Json<DocumentMetaResponse>, DocumentApiError> {
+    require_realtime_writer(state)?;
     check_origin(headers, &state.public_origin)?;
     let input = parse_body_input(bytes)?;
     let auth = auth(
@@ -510,6 +520,7 @@ async fn patch_block(
     block_id: &str,
     bytes: &[u8],
 ) -> Result<Json<DocumentMetaResponse>, DocumentApiError> {
+    require_realtime_writer(state)?;
     check_origin(headers, &state.public_origin)?;
     let node = parse_block_input(bytes, block_id)?;
     let auth = auth(
@@ -1285,4 +1296,176 @@ mod tests {
         assert!(parse_block_input(br#"{"type":""}"#, "b").is_err());
         assert!(parse_block_input(br#"{"type":"p","extra":1}"#, "b").is_err());
     }
+}
+
+fn require_realtime_writer(state: &AppState) -> Result<(), DocumentApiError> {
+    if state.realtime_mode != crate::config::RealtimeMode::On {
+        return Err(coded(
+            StatusCode::CONFLICT,
+            "body_writer_mode_mismatch",
+            "body writer mode mismatch",
+        ));
+    }
+    Ok(())
+}
+fn require_off_writer(state: &AppState) -> Result<crate::collab::CollabConfig, DocumentApiError> {
+    if state.realtime_mode != crate::config::RealtimeMode::Off {
+        return Err(coded(
+            StatusCode::CONFLICT,
+            "body_writer_mode_mismatch",
+            "body writer mode mismatch",
+        ));
+    }
+    state.native_engine.clone().ok_or_else(collab_unavailable)
+}
+fn parse_body_tail(value: &str) -> Option<i64> {
+    if value.is_empty()
+        || (value.len() > 1 && value.starts_with('0'))
+        || !value.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    value.parse::<i64>().ok().filter(|seq| *seq < i64::MAX)
+}
+fn map_versioned_body_error(error: crate::db::body_save::BodySaveError) -> DocumentApiError {
+    use crate::db::body_save::BodySaveError;
+    use crate::db::collab::CollabDbError;
+    match error {
+        BodySaveError::Conflict | BodySaveError::RequestMismatch => coded(
+            StatusCode::CONFLICT,
+            "document_version_mismatch",
+            "document version mismatch",
+        ),
+        BodySaveError::Native(CollabDbError::StaleCutoff | CollabDbError::StaleWriter) => coded(
+            StatusCode::CONFLICT,
+            "document_version_mismatch",
+            "document version mismatch",
+        ),
+        BodySaveError::Native(
+            CollabDbError::PayloadTooLarge | CollabDbError::StateBudgetExceeded,
+        ) => too_large(),
+        BodySaveError::Native(_) | BodySaveError::Revision(_) => {
+            AppError::from_code(ProblemCode::NotFound).into()
+        }
+        BodySaveError::Invalid => invalid_body(),
+        BodySaveError::Unavailable | BodySaveError::Cancelled => collab_unavailable(),
+        BodySaveError::CommitUnconfirmed(error) => {
+            tracing::warn!(%error, settlement=?error.settlement,"OFF body finish unconfirmed");
+            coded(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "body_save_unconfirmed",
+                "body save is unconfirmed",
+            )
+        }
+        BodySaveError::RollbackUnconfirmed { original, cleanup } => {
+            tracing::warn!(%original,%cleanup,"OFF body rollback unconfirmed");
+            coded(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "body_save_unconfirmed",
+                "body save is unconfirmed",
+            )
+        }
+        BodySaveError::Database(error) => {
+            if matches!(&error, sqlx::Error::AnyDriverError(driver) if driver.downcast_ref::<crate::db::backend::RemoteSettlementUnconfirmed>().is_some())
+            {
+                coded(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "body_save_unconfirmed",
+                    "body save is unconfirmed",
+                )
+            } else {
+                internal(error).into()
+            }
+        }
+    }
+}
+async fn get_versioned_body(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace, document)): WikiPath,
+) -> Result<Json<VersionedBodyResponse>, DocumentApiError> {
+    let engine = require_off_writer(&state)?;
+    let actor = auth(
+        &state,
+        &headers,
+        &jar,
+        ApiTokenScope::DocumentsRead,
+        workspace,
+    )
+    .await?;
+    let source = crate::db::body_save::read_off_wiki_body(
+        &state.auth.db.pool,
+        state.realtime_mode,
+        engine,
+        workspace,
+        document,
+        actor.user_id,
+        actor.credential_id,
+    )
+    .await
+    .map_err(map_versioned_body_error)?;
+    Ok(Json(VersionedBodyResponse {
+        target_id: document,
+        tail_seq: source.native.tail_seq.to_string(),
+        snapshot_v1: collab_engine::b64::encode(&source.native.snapshot),
+        tail_v1: source
+            .native
+            .tail
+            .iter()
+            .map(|row| collab_engine::b64::encode(&row.payload))
+            .collect(),
+        content_json: source.content_json,
+        writable: source.writable,
+    }))
+}
+async fn save_versioned_body(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path((workspace, document)): WikiPath,
+    body: Bytes,
+) -> Result<Json<SaveVersionedBodyResponse>, DocumentApiError> {
+    let engine = require_off_writer(&state)?;
+    check_origin(&headers, &state.public_origin)?;
+    let input: SaveVersionedBodyInput =
+        serde_json::from_slice(&body).map_err(|_| invalid_body())?;
+    let expected = parse_body_tail(&input.expected_tail_seq).ok_or_else(invalid_body)?;
+    if input.update_v1.len() > (crate::db::collab::MAX_COLLAB_UPDATE_BYTES * 4).div_ceil(3) + 4 {
+        return Err(too_large());
+    }
+    let update = collab_engine::b64::decode(&input.update_v1).map_err(|_| invalid_body())?;
+    let actor = auth(
+        &state,
+        &headers,
+        &jar,
+        ApiTokenScope::DocumentsWrite,
+        workspace,
+    )
+    .await?;
+    revision_write_limit(&state, actor.user_id).await?;
+    let saved = crate::db::body_save::save_off_wiki_body(
+        &state.auth.db.pool,
+        state.realtime_mode,
+        engine,
+        crate::db::body_save::OffBodyRequest {
+            workspace,
+            document,
+            actor: actor.user_id,
+            credential: actor.credential_id,
+            command: input.command_id,
+            expected_tail: expected,
+            update,
+            client_ip: Some(peer_ip(peer.ip())),
+        },
+    )
+    .await
+    .map_err(map_versioned_body_error)?;
+    Ok(Json(SaveVersionedBodyResponse {
+        command_id: saved.command_id,
+        target_id: saved.target_id,
+        tail_seq: saved.tail_seq,
+        revision_id: saved.revision_id,
+    }))
 }

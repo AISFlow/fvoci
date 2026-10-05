@@ -124,6 +124,7 @@ use utoipa::ToSchema;
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct SetupStatusResponse {
+    pub realtime_mode: crate::config::RealtimeMode,
     pub needed: bool,
     pub branding: BrandingOutput,
     pub mail_enabled: bool,

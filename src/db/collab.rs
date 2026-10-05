@@ -2284,6 +2284,7 @@ enum NativeLoadMode {
 #[derive(Clone, Copy)]
 enum NativeWriteScope<'a> {
     Room(Option<FamilyRoomFence>),
+    Off(OffBodyWriter),
     Import(&'a crate::db::import_jobs::ImportClaim),
     SyncImport {
         workspace: Uuid,
@@ -2903,6 +2904,12 @@ impl OperationTx<'_, '_> {
         credential: Uuid,
     ) -> Result<bool, sqlx::Error> {
         match scope {
+            NativeWriteScope::Off(proof) => Ok(proof.workspace == workspace
+                && proof.resource == resource
+                && proof.kind == kind
+                && proof.actor == actor
+                && proof.credential == credential
+                && self.verify_off_body_writer(proof).await?),
             NativeWriteScope::Room(Some(fence)) => Ok(kind == CollabKind::Document
                 && fence.workspace_id == workspace
                 && fence.document_id == resource
@@ -3168,7 +3175,9 @@ impl OperationTx<'_, '_> {
                 },
                 match write_scope {
                     NativeWriteScope::Import(claim) => Some(claim),
-                    NativeWriteScope::Room(_) | NativeWriteScope::SyncImport { .. } => None,
+                    NativeWriteScope::Room(_)
+                    | NativeWriteScope::Off(_)
+                    | NativeWriteScope::SyncImport { .. } => None,
                 },
             )
             .await?
@@ -4092,7 +4101,9 @@ impl OperationTx<'_, '_> {
                     document_id,
                     match write_scope {
                         NativeWriteScope::Import(claim) => Some(claim),
-                        NativeWriteScope::Room(_) | NativeWriteScope::SyncImport { .. } => None,
+                        NativeWriteScope::Room(_)
+                        | NativeWriteScope::Off(_)
+                        | NativeWriteScope::SyncImport { .. } => None,
                     },
                 )
                 .await?
@@ -4305,5 +4316,218 @@ mod tests {
             load_budget_allows(MAX_COLLAB_LOAD_BYTES, 1, 1),
             Err(CollabDbError::StateBudgetExceeded)
         );
+    }
+}
+
+/// Issued only from the boot-OFF operation after current writer authorization.
+/// The native generation is a fence; it never grants business authorization.
+#[derive(Clone, Copy)]
+pub(crate) struct OffBodyWriter {
+    workspace: Uuid,
+    resource: Uuid,
+    kind: CollabKind,
+    actor: Uuid,
+    credential: Uuid,
+    generation: i64,
+}
+
+impl OperationTx<'_, '_> {
+    async fn off_room_absent(
+        &mut self,
+        workspace: Uuid,
+        resource: Uuid,
+        kind: CollabKind,
+    ) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1,$2)")
+                    .bind(COLLAB_ROOM_SESSION_LOCK_NAMESPACE)
+                    .bind(lock_key_from_uuid(resource))
+                    .fetch_one(&mut ***tx)
+                    .await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                if kind != CollabKind::Document {
+                    return Ok(false);
+                }
+                let now = family_room_now(tx).await?;
+                let rows = tx.query("SELECT NOT EXISTS(SELECT 1 FROM collab_room_fences WHERE workspace_id=?1 AND document_id=?2 AND expires_at>?3)",
+                    &[Cell::uuid(workspace),Cell::uuid(resource),Cell::Integer(now)]).await?;
+                rows.first()
+                    .ok_or(sqlx::Error::RowNotFound)?
+                    .cell(0)?
+                    .boolean()
+            }
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "OFF native load binds current mode, actor, credential and target on one existing writer"
+    )]
+    pub(crate) async fn load_off_body_read(
+        &mut self,
+        mode: crate::config::RealtimeMode,
+        kind: CollabKind,
+        workspace: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+        resource: Uuid,
+    ) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
+        self.set_tenant(workspace).await?;
+        if mode != crate::config::RealtimeMode::Off
+            || !self.off_room_absent(workspace, resource, kind).await?
+        {
+            return Ok(Err(CollabDbError::StaleWriter));
+        }
+        self.load_collab_native_readonly(kind, workspace, actor, credential, resource)
+            .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "OFF native capability binds current mode, actor, credential and target on one existing writer"
+    )]
+    pub(crate) async fn load_off_body_writer(
+        &mut self,
+        mode: crate::config::RealtimeMode,
+        kind: CollabKind,
+        workspace: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+        resource: Uuid,
+    ) -> Result<Result<(OffBodyWriter, CollabLoadState), CollabDbError>, sqlx::Error> {
+        self.set_tenant(workspace).await?;
+        if mode != crate::config::RealtimeMode::Off
+            || !self.off_room_absent(workspace, resource, kind).await?
+        {
+            return Ok(Err(CollabDbError::StaleWriter));
+        }
+        let loaded = match self
+            .load_collab_native(
+                kind,
+                workspace,
+                actor,
+                credential,
+                resource,
+                NativeLoadMode::Writer,
+            )
+            .await?
+        {
+            Ok(value) => value.load,
+            Err(error) => return Ok(Err(error)),
+        };
+        let proof = OffBodyWriter {
+            workspace,
+            resource,
+            kind,
+            actor,
+            credential,
+            generation: loaded.writer_generation,
+        };
+        Ok(Ok((proof, loaded)))
+    }
+
+    pub(crate) async fn verify_off_body_writer(
+        &mut self,
+        proof: OffBodyWriter,
+    ) -> Result<bool, sqlx::Error> {
+        if !self
+            .off_room_absent(proof.workspace, proof.resource, proof.kind)
+            .await?
+        {
+            return Ok(false);
+        }
+        let state = self
+            .fetch_native_state(
+                CollabTables::for_kind(proof.kind),
+                proof.workspace,
+                proof.resource,
+            )
+            .await?;
+        Ok(state.is_some_and(|state| state.2 == proof.generation))
+    }
+
+    pub(crate) async fn append_off_body(
+        &mut self,
+        proof: OffBodyWriter,
+        input: AppendCollabInput<'_>,
+    ) -> Result<Result<PreparedNativeAppend, CollabDbError>, sqlx::Error> {
+        let (result, _) = self
+            .append_collab_native_owned(
+                proof.kind,
+                input,
+                CollabDbStageTimings::default(),
+                None,
+                NativeWriteScope::Off(proof),
+            )
+            .await?;
+        Ok(result.map(|(value, _)| value))
+    }
+
+    pub(crate) async fn project_off_body(
+        &mut self,
+        proof: OffBodyWriter,
+        input: ProjectDerivedBodyInput,
+    ) -> Result<Result<ProjectDerivedBodyResult, CollabDbError>, sqlx::Error> {
+        self.project_collab_derived_body_owned(proof.kind, input, NativeWriteScope::Off(proof))
+            .await
+    }
+
+    /// Compact the exact validated post-append completeV1 on the same writer.
+    /// All delete history and receipts remain; only incorporated tail rows go.
+    pub(crate) async fn compact_off_body(
+        &mut self,
+        proof: OffBodyWriter,
+        tail: i64,
+        snapshot: &[u8],
+        client_ip: Option<&str>,
+    ) -> Result<Result<(), CollabDbError>, sqlx::Error> {
+        if let Err(error) = validate_compaction_snapshot(snapshot) {
+            return Ok(Err(error));
+        }
+        if !self.verify_off_body_writer(proof).await? {
+            return Ok(Err(CollabDbError::StaleWriter));
+        }
+        if let Err(error) = self
+            .authorize_collab_write(
+                proof.kind,
+                proof.workspace,
+                proof.actor,
+                proof.credential,
+                proof.resource,
+                &mut CollabDbStageTimings::default(),
+            )
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        let tables = CollabTables::for_kind(proof.kind);
+        let Some(state) = self
+            .fetch_native_state(tables, proof.workspace, proof.resource)
+            .await?
+        else {
+            return Ok(Err(CollabDbError::NotFound));
+        };
+        if state.4 != tail {
+            return Ok(Err(CollabDbError::StaleCutoff));
+        }
+        self.compact_native_rows(
+            tables,
+            proof.workspace,
+            proof.actor,
+            proof.resource,
+            proof.generation,
+            tail,
+            snapshot,
+            client_ip,
+        )
+        .await?;
+        if !self.verify_off_body_writer(proof).await? {
+            return Ok(Err(CollabDbError::StaleWriter));
+        }
+        Ok(Ok(()))
     }
 }

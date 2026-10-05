@@ -851,3 +851,31 @@ for (const host of [
     });
   }
 }
+
+await test("OFF and unresolved boot policy construct no realtime transport or presence", () => {
+  let script = readFileSync(roomPath, "utf8");
+  const parsed = ts.createSourceFile("room.ts", script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  for (const statement of [...parsed.statements].reverse())
+    if (ts.isImportDeclaration(statement))
+      script = script.slice(0, statement.getFullStart()) + script.slice(statement.end);
+  script = script.replace(/export /g, "");
+  for (const mode of [false, undefined, null]) {
+    const scope = Vue.effectScope();
+    let reads = 0;
+    const result = scope.run(() => runInNewContext(
+      new Bun.Transpiler({ loader: "ts" }).transformSync(
+        `(() => {${script}\nreturn useCollabRoom("w:document:d", null, undefined, () => mode);})()`,
+      ),
+      {
+        ...Vue, Y, mode,
+        window: { get location() { reads++; throw new Error("OFF read transport location"); } },
+        RoomConnection: class { constructor() { throw new Error("OFF created a room"); } },
+        HocuspocusProvider: class { constructor() { throw new Error("OFF created a provider"); } },
+      },
+    )) as { session: Vue.ComputedRef<unknown> };
+    assert.equal(result.session.value, null);
+    assert.equal(reads, 0);
+    scope.stop();
+    assert.equal(result.session.value, null);
+  }
+});

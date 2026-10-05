@@ -522,6 +522,9 @@ async fn restore_target_revision(
     revision_id: Uuid,
     body: Bytes,
 ) -> Result<Json<RevisionRestoreResponse>, RevisionApiError> {
+    if state.realtime_mode == crate::config::RealtimeMode::Off {
+        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+    }
     check_origin(&headers, &state.public_origin)?;
     let restore_body: RevisionRestoreBody = serde_json::from_slice(&body)
         .map_err(|_| AppError::from_code(ProblemCode::InvalidInput))?;

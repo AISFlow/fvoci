@@ -213,11 +213,15 @@ async fn server_main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics_allow = MetricsAllowList::from_env()?;
     // Read once: the pool size, the hub and the revision engine follow it.
     let collab_config = CollabConfig::from_env();
+    if config.realtime_mode == fvoci_server::config::RealtimeMode::Off && collab_config.is_none() {
+        return Err("FVOCI_REALTIME_MODE=off requires the isolated native engine".into());
+    }
     if collab_config.is_none() {
         log_collab_disabled();
     }
     let app_pool_max = collab_config
         .as_ref()
+        .filter(|_| config.realtime_mode == fvoci_server::config::RealtimeMode::On)
         .map(|cfg| fvoci_server::collab::config::derive_app_pool_max_connections(cfg.max_rooms))
         .unwrap_or(fvoci_server::collab::config::APP_POOL_MAX_CONNECTIONS);
     // The local inode admission outlives the entire joined server runtime.
@@ -391,7 +395,10 @@ async fn run_server(
     let public_origin =
         fvoci_server::http::guard::resolve_public_origin(&config.public_origin, addr)?;
 
-    let collab = match collab_config {
+    let native_engine = collab_config.clone();
+    let collab = match collab_config
+        .filter(|_| config.realtime_mode == fvoci_server::config::RealtimeMode::On)
+    {
         Some(mut cfg) => {
             cfg.revision_session_snapshot = config.revision.session_snapshot_enabled;
             let family_timings = match &backend {
@@ -606,6 +613,8 @@ async fn run_server(
     let import_wake = import_job.as_ref().map(|job| job.wake.clone());
     let stream_hub = AppState::fresh_streams();
     let state = AppState {
+        realtime_mode: config.realtime_mode,
+        native_engine,
         auth: Arc::new(AuthService {
             db: Db::with_backend_license(backend.clone(), license.clone()),
             password_keys: config.password_keys.clone(),

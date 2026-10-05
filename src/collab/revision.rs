@@ -5,8 +5,118 @@ use collab_engine::outcome::EngineStatus;
 use collab_engine::process::{EngineSession, SpawnRequest};
 use collab_engine::protocol::Request;
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::collab::room::{CapturedRevision, RevisionCaptureError};
+
+/// Validated forward edit of the existing native history, never a JSON reseed.
+pub(crate) struct PreparedOffBody {
+    pub complete_v1: Vec<u8>,
+    pub captured: CapturedRevision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OffBodyPrepareError {
+    Invalid,
+    Unavailable,
+    Cancelled,
+}
+
+pub(crate) fn prepare_off_body(
+    engine_bin: PathBuf,
+    limits: Limits,
+    snapshot: Vec<u8>,
+    tail: Vec<Vec<u8>>,
+    update: Vec<u8>,
+    cancelled: &AtomicBool,
+) -> Result<PreparedOffBody, OffBodyPrepareError> {
+    let check = || {
+        if cancelled.load(Ordering::Acquire) {
+            Err(OffBodyPrepareError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
+    check()?;
+    let mut session = EngineSession::spawn(SpawnRequest {
+        engine_bin,
+        limits,
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
+        test_hang_ms: None,
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
+    })
+    .map_err(|_| OffBodyPrepareError::Unavailable)?;
+    if !matches!(
+        session
+            .call(&Request::Load {
+                snapshot_b64: Some(snapshot),
+                tail_b64: tail,
+                encoding: 1,
+            })
+            .outcome,
+        EngineStatus::Ok {
+            applied: true,
+            pending: false,
+            ..
+        }
+    ) {
+        return Err(OffBodyPrepareError::Unavailable);
+    }
+    check()?;
+    match session
+        .call(&Request::Apply {
+            update_b64: update,
+            encoding: 1,
+        })
+        .outcome
+    {
+        EngineStatus::Ok {
+            applied: true,
+            pending: false,
+            ..
+        } => {}
+        EngineStatus::Malformed { .. }
+        | EngineStatus::Unsupported { .. }
+        | EngineStatus::Ok { .. } => return Err(OffBodyPrepareError::Invalid),
+        _ => return Err(OffBodyPrepareError::Unavailable),
+    }
+    check()?;
+    let mut bytes = |request| -> Result<Vec<u8>, OffBodyPrepareError> {
+        check()?;
+        match session.call(&request).outcome {
+            EngineStatus::Ok {
+                update_b64: Some(value),
+                pending: false,
+                ..
+            } => collab_engine::b64::decode(&value).map_err(|_| OffBodyPrepareError::Unavailable),
+            _ => Err(OffBodyPrepareError::Unavailable),
+        }
+    };
+    let complete_v1 = bytes(Request::Snapshot)?;
+    let y_snapshot = bytes(Request::RevisionSnapshot)?;
+    check()?;
+    let content_json = match session.call(&Request::Project { encoding: 1 }).outcome {
+        EngineStatus::Ok {
+            content_json: Some(value),
+            pending: false,
+            ..
+        } => value,
+        _ => return Err(OffBodyPrepareError::Unavailable),
+    };
+    check()?;
+    crate::collab::derived_body::prepare_derived_body(content_json.clone())
+        .map_err(|_| OffBodyPrepareError::Invalid)?;
+    Ok(PreparedOffBody {
+        complete_v1,
+        captured: CapturedRevision {
+            y_snapshot,
+            content_json,
+        },
+    })
+}
 
 pub fn capture_revision_offline(
     engine_bin: PathBuf,

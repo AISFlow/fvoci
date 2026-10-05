@@ -127,6 +127,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/055_wiki_create_commands.sql"),
         55,
     ),
+    (
+        include_str!("../../migrations/056_body_save_commands.sql"),
+        56,
+    ),
 ];
 
 pub(crate) const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -812,6 +816,10 @@ mod tests {
             55,
             "dc60f939985a5c000d57a7f266c12c247373601f92759630b324b22b4a29af45",
         ),
+        (
+            56,
+            "c7f5f0907a02e3120678b1f5032358e277e819e14f0c2506f280217c50896ebe",
+        ),
     ];
 
     #[test]
@@ -900,6 +908,10 @@ const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
     (
         include_str!("../../migrations/sqlite/004_maintenance_claims.sql"),
         "6e034f6aa3f69b6c7a4ac4ff13035e5276ec7e840eb73d97a78a1456105dbade",
+    ),
+    (
+        include_str!("../../migrations/sqlite/005_body_save_commands.sql"),
+        "9a2536646bf6122733fce68e6ad1a5bdbd3ce1c96a22016a4e7715dc0e7df219",
     ),
 ];
 
@@ -1571,7 +1583,7 @@ mod maintenance_claim_migration_tests {
             .unwrap();
         let backend = Backend::Sqlite(pool.clone());
         let before = assert_sqlite_schema_current(&backend).await.unwrap();
-        assert_eq!(before.applied_steps, 4);
+        assert_eq!(before.applied_steps, 5);
         let workspace = uuid::Uuid::now_v7();
         sqlx::query(
             "INSERT INTO workspaces(id,slug,name) VALUES(?1,'s16-populated','preserved literal')",
@@ -1591,7 +1603,7 @@ mod maintenance_claim_migration_tests {
             .unwrap();
         let backend = Backend::Sqlite(pool.clone());
         let current = assert_sqlite_schema_current(&backend).await.unwrap();
-        assert_eq!(current.applied_steps, 4);
+        assert_eq!(current.applied_steps, 5);
         assert_eq!(current.schema_sha256, before.schema_sha256);
         let preserved: String = sqlx::query_scalar("SELECT name FROM workspaces WHERE id=?1")
             .bind(workspace.as_bytes().as_slice())
@@ -1701,8 +1713,23 @@ mod maintenance_claim_upgrade_tests {
         .unwrap();
         assert!(
             assert_sqlite_schema_current(&backend).await.is_err(),
-            "old prefix is never current4"
+            "old prefix is never current5"
         );
+        // Preserve the original populated003 -> exact004 upgrade proof before
+        // advancing this same database to the new current005 capability.
+        let (sql, digest) = SQLITE_MIGRATIONS[3];
+        apply_sqlite_migration_step(&backend, 3, sql, digest, None)
+            .await
+            .unwrap();
+        let markers: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM schema_migrations ORDER BY version")
+                .fetch_all(&preparation.pool)
+                .await
+                .unwrap();
+        assert_eq!(markers, vec![1, 2, 3, 4]);
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM maintenance_job_claims WHERE owner_token IS NULL AND generation=0 AND expires_at IS NULL")
+            .fetch_one(&preparation.pool).await.unwrap();
+        assert_eq!(count, 9);
         preparation.close_confirmed().await.unwrap();
         drop(admission);
         run_sqlite_migrations(&path).await.unwrap();
@@ -1715,7 +1742,7 @@ mod maintenance_claim_upgrade_tests {
                 .await
                 .unwrap()
                 .applied_steps,
-            4
+            5
         );
         let name: String = sqlx::query_scalar("SELECT name FROM workspaces WHERE id=?1")
             .bind(workspace.as_bytes().as_slice())
@@ -1728,7 +1755,7 @@ mod maintenance_claim_upgrade_tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(markers, vec![1, 2, 3, 4]);
+        assert_eq!(markers, vec![1, 2, 3, 4, 5]);
         let count:i64=sqlx::query_scalar("SELECT count(*) FROM maintenance_job_claims WHERE owner_token IS NULL AND generation=0 AND expires_at IS NULL").fetch_one(&pool).await.unwrap();
         assert_eq!(count, 9);
         backend.close().await.unwrap();
