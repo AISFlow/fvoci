@@ -7,10 +7,18 @@ use uuid::Uuid;
 #[path = "e2e-fixture/zotero.rs"]
 mod zotero;
 
+#[path = "e2e-fixture/sqlite.rs"]
+mod sqlite;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().nth(1).as_deref() == Some("zotero-readonly") {
         return zotero::serve().await;
+    }
+    match std::env::var("E2E_DATABASE_BACKEND").as_deref() {
+        Ok("sqlite") => return sqlite::create_user().await.map_err(Into::into),
+        Err(std::env::VarError::NotPresent) | Ok("postgres") => {}
+        _ => return Err("E2E_DATABASE_BACKEND must be postgres or sqlite".into()),
     }
     let admin_url = std::env::var("DATABASE_URL")?;
     let email = std::env::var("E2E_USER_EMAIL").unwrap_or_else(|_| "member@example.com".into());
