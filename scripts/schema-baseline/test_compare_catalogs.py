@@ -50,7 +50,7 @@ def run(old, new):
 
 OLD_LEDGER = catalog(["version", "applied_at"], [{"version": v} for v in range(1, 56)])
 NEW_LEDGER = catalog(["version", "lineage", "sql_sha256", "applied_at"],
-                     [{"version": v, "lineage": "fvoci-postgres-060", "sql_sha256": "0" * 64} for v in range(1, 13)])
+                     [{"version": v, "lineage": "fvoci-postgres-060", "sql_sha256": f"{v:064x}"} for v in range(1, 13)])
 
 
 class CompareCatalogs(unittest.TestCase):
@@ -78,6 +78,32 @@ class CompareCatalogs(unittest.TestCase):
             rc, out = run(old, NEW_LEDGER)
             self.assertEqual(rc, 1, out)
             self.assertIn(f"MISSING table users.{key} {item['name']}", out)
+
+    def test_malformed_new_ledger_is_a_failure_not_an_exception(self):
+        cases = {
+            "wrong lineage": lambda c: c["ledger"].__setitem__(3, {**c["ledger"][3], "lineage": "fvoci-postgres-999"}),
+            "missing digest": lambda c: c["ledger"].__setitem__(5, {"version": 6, "lineage": "fvoci-postgres-060"}),
+            "short digest": lambda c: c["ledger"].__setitem__(1, {**c["ledger"][1], "sql_sha256": "abc"}),
+            "gap in versions": lambda c: c["ledger"].pop(4),
+            "duplicate digest": lambda c: c["ledger"].__setitem__(2, {**c["ledger"][2], "sql_sha256": c["ledger"][1]["sql_sha256"]}),
+            "extra ledger column": lambda c: c["tables"][0]["columns"].append({"num": 5, "name": "note", "type": "text", "notnull": False, "default": None, "identity": "", "generated": "", "collation": "-", "acl": None}),
+            "nullable digest column": lambda c: c["tables"][0]["columns"][2].__setitem__("notnull", False),
+            "no rows": lambda c: c.__setitem__("ledger", []),
+        }
+        for label, mutate in cases.items():
+            new = copy.deepcopy(NEW_LEDGER)
+            for i, r in enumerate(new["ledger"]):
+                r["sql_sha256"] = f"{i:064x}"
+            mutate(new)
+            rc, out = run(OLD_LEDGER, new)
+            self.assertEqual(rc, 1, f"{label}: {out}")
+            self.assertIn("LEDGER", out)
+            self.assertIn("RESULT: FAIL", out)
+        old = copy.deepcopy(OLD_LEDGER)
+        old["ledger"] = [{"version": 1, "lineage": "fvoci-postgres-060", "sql_sha256": "0" * 64}]
+        rc, out = run(old, NEW_LEDGER)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("old receipt 1 carries a lineage", out)
 
     def test_a_missing_ledger_table_is_reported_not_silently_excepted(self):
         new = copy.deepcopy(NEW_LEDGER)

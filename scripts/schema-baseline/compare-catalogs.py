@@ -9,8 +9,13 @@ NEW is the database installed by the fvoci-postgres-060 baseline. The ONLY
 declared exception is the ledger table fvoci.schema_migrations itself: its
 columns, constraints and own indexes differ by design ((version, applied_at)
 versus (version, lineage, sql_sha256, applied_at) with CHECKs), and its rows are
-the lineage receipts. Both sides' ledger definitions and rows are printed in the
-report, never compared. No other object is excluded or normalized. Everything
+the lineage receipts. The exception is granted only after an explicit transition
+validation: the old ledger must have the retired shape (version, applied_at) and
+the new ledger exactly (version, lineage, sql_sha256, applied_at) NOT NULL with
+contiguous receipts from 1, the single lineage fvoci-postgres-060 and distinct
+64-hex digests; otherwise the ledger difference is reported as a failure. Both
+sides' ledger definitions and rows are printed in the report, never compared as
+application catalog. No other object is excluded or normalized. Everything
 else must match: tables/columns (type, typmod, default, null, identity,
 collation, column ACL), constraints (pg_get_constraintdef), indexes
 (pg_get_indexdef), triggers, policies, RLS flags, table ACLs, sequences,
@@ -23,7 +28,56 @@ import argparse
 import json
 import sys
 
+import re
+
 LEDGER_TABLE = "schema_migrations"
+
+NEW_LINEAGE = "fvoci-postgres-060"
+NEW_LEDGER_COLUMNS = ["version", "lineage", "sql_sha256", "applied_at"]
+OLD_LEDGER_COLUMNS = ["version", "applied_at"]
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def validate_ledger_transition(old_tables, old_rows, new_tables, new_rows):
+    """The ledger is excluded from the application-equality check only when it is
+    exactly the expected transition: the retired shape on the old side, and on the
+    new side the fvoci-postgres-060 ledger with contiguous receipts, one lineage and
+    64-hex digests. Anything else is a failure, never a silent exception."""
+    problems = []
+    if len(old_tables) == 1:
+        cols = [c["name"] for c in old_tables[0]["columns"]]
+        if cols != OLD_LEDGER_COLUMNS:
+            problems.append(f"LEDGER old table columns {cols} are not the retired shape {OLD_LEDGER_COLUMNS}")
+    if len(new_tables) == 1:
+        cols = [c["name"] for c in new_tables[0]["columns"]]
+        if cols != NEW_LEDGER_COLUMNS:
+            problems.append(f"LEDGER new table columns {cols} are not {NEW_LEDGER_COLUMNS}")
+        notnull = {c["name"]: c["notnull"] for c in new_tables[0]["columns"]}
+        for name in NEW_LEDGER_COLUMNS:
+            if not notnull.get(name, False):
+                problems.append(f"LEDGER new table column {name} must be NOT NULL")
+    if not isinstance(new_rows, list) or not new_rows:
+        problems.append("LEDGER new rows missing")
+        return problems
+    versions = [r.get("version") for r in new_rows]
+    if versions != list(range(1, len(new_rows) + 1)):
+        problems.append(f"LEDGER new receipts are not contiguous from 1: {versions}")
+    lineages = sorted({r.get("lineage") for r in new_rows})
+    if lineages != [NEW_LINEAGE]:
+        problems.append(f"LEDGER new receipts carry lineage(s) {lineages}, expected [{NEW_LINEAGE!r}]")
+    for r in new_rows:
+        digest = r.get("sql_sha256")
+        if not isinstance(digest, str) or not HEX64.match(digest):
+            problems.append(f"LEDGER new receipt {r.get('version')} has no 64-hex sql_sha256: {digest!r}")
+    if len({r.get("sql_sha256") for r in new_rows}) != len(new_rows):
+        problems.append("LEDGER new receipts repeat a digest")
+    if isinstance(old_rows, list):
+        for r in old_rows:
+            if "lineage" in r:
+                problems.append(f"LEDGER old receipt {r.get('version')} carries a lineage; the old side must be the retired shape")
+                break
+    return problems
+
 
 
 def load(path):
@@ -73,6 +127,7 @@ def main():
     new_ledger = [t for t in new["tables"] if t["name"] == LEDGER_TABLE]
     if len(old_ledger) != 1 or len(new_ledger) != 1:
         report.append(f"MISSING ledger table {LEDGER_TABLE} on one side (old={len(old_ledger)} new={len(new_ledger)})")
+    report.extend(validate_ledger_transition(old_ledger, old.get("ledger"), new_ledger, new.get("ledger")))
     product_old = [t for t in old["tables"] if t["name"] != LEDGER_TABLE]
     product_new = [t for t in new["tables"] if t["name"] != LEDGER_TABLE]
     diff_lists(
