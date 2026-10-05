@@ -1074,6 +1074,68 @@ class RustSuiteRegistryTest(unittest.TestCase):
                 errors = SEL.verify_workflow_registry(fx.root)
                 self.assertIn(expected, "\n".join(errors))
 
+    def test_selected_install_exact_supported_execution_scope(self) -> None:
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo(["selected_install_lifetime"])
+            self.assertEqual(SEL.verify_rust_suite_registry(fx.root), [])
+            jobs, err = SEL._rust_workflow_jobs(fx.root)
+            self.assertIsNone(err)
+            assigned, err = SEL.selected_install_inventory(jobs)
+            self.assertIsNone(err)
+            self.assertEqual(assigned, {"selected_install_lifetime"})
+            step = next(item for item in jobs["postgres"]["steps"] if item.get("name") == SEL.RUST_SELECTED_INSTALL_STEP)
+            self.assertIn('prefix="fvoci-selected-install-", dir="/run"', step["run"])
+            self.assertEqual(jobs["native-arm64"]["steps"][-1]["run"].strip(), SEL.RUST_NATIVE_ARM64_RUN)
+            rows = jobs["postgres"]["strategy"]["matrix"]["include"]
+            self.assertEqual(
+                sorted(row["runner"] for row in rows if row["shard"] == "b" and row["pg_major"] == "18"),
+                ["ubuntu-24.04", "ubuntu-24.04-arm"],
+            )
+
+    def test_selected_install_missing_or_masked_execution_fails(self) -> None:
+        for mutation in ("missing", "duplicate", "disabled", "masked", "no-run-only", "filtered", "zero-count", "wrong-helper-feature", "missing-arm"):
+            with self.subTest(mutation=mutation), RustSuiteRegistryFixture() as fx:
+                fx.write_cargo(["selected_install_lifetime"])
+                def weaken(data: dict) -> None:
+                    job = data["jobs"]["postgres"]
+                    steps = job["steps"]
+                    step = next(item for item in steps if item.get("name") == SEL.RUST_SELECTED_INSTALL_STEP)
+                    if mutation == "missing":
+                        steps.remove(step)
+                    elif mutation == "duplicate":
+                        steps.append(dict(step))
+                    elif mutation == "disabled":
+                        step["if"] = "false"
+                    elif mutation == "masked":
+                        step["continue-on-error"] = True
+                    elif mutation == "no-run-only":
+                        step["run"] = 'cargo test --features db-tests --test selected_install_lifetime --no-run'
+                    elif mutation == "filtered":
+                        step["run"] = step["run"].replace('"--test-threads=1", "--nocapture"', '"nonexistent_filter", "--nocapture"')
+                    elif mutation == "zero-count":
+                        step["run"] = step["run"].replace('4 passed;', '0 passed;')
+                    elif mutation == "wrong-helper-feature":
+                        helper = next(item for item in steps if item.get("name") == "Build production helper for PostgreSQL B native fixtures")
+                        helper["run"] = helper["run"].replace('--features worker ', '')
+                    else:
+                        row = next(row for row in job["strategy"]["matrix"]["include"] if row["runner"] == "ubuntu-24.04-arm" and row["shard"] == "b")
+                        row["pg_major"] = "17"
+                fx.mutate_rust_workflow(weaken)
+                errors = SEL.verify_rust_suite_registry(fx.root)
+                self.assertTrue(errors, "selected install actual execution must be mandatory")
+                self.assertIn("selected install" if mutation not in ("missing", "duplicate") else SEL.RUST_SELECTED_INSTALL_STEP, "\n".join(errors))
+
+    def test_selected_install_cannot_be_double_assigned_as_pg_fixture(self) -> None:
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo(["selected_install_lifetime"])
+            def duplicate(data: dict) -> None:
+                for row in data["jobs"]["postgres"]["strategy"]["matrix"]["include"]:
+                    if row["shard"] == "b":
+                        row["tests"] += " --test selected_install_lifetime"
+            fx.mutate_rust_workflow(duplicate)
+            errors = SEL.verify_rust_suite_registry(fx.root)
+        self.assertIn("assigned to multiple CI buckets: selected_install_lifetime", "\n".join(errors))
+
     def test_new_cargo_target_without_ci_row_fails(self) -> None:
         with RustSuiteRegistryFixture() as fx:
             fx.write_cargo(["missing_db_target_probe"])

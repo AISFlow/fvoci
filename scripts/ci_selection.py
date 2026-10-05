@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -746,6 +747,11 @@ RUST_INTEGRATION_MANUAL_TARGETS: frozenset[str] = frozenset({"collab_capacity_pr
 RUST_NATIVE_ARM64_STEP = "Native server build and policy tests (ARM64)"
 RUST_NATIVE_ARM64_RUN = "cargo build --locked --offline --bins\ncargo test --locked --offline --lib"
 RUST_DB_TESTS_FEATURE = "db-tests"
+RUST_SELECTED_INSTALL_STEP = "Selected SQLite install lifetime controls"
+RUST_SELECTED_INSTALL_TARGET = "selected_install_lifetime"
+RUST_SELECTED_INSTALL_IF = "matrix.shard == 'b' && matrix.pg_major == '18'"
+# Bind the actual owned setup, compiler artifact selection and execution/count gate.
+RUST_SELECTED_INSTALL_RUN_SHA256 = "a4abb9ef086fb864aae3d2c5a5d26d467304923465eafc35ace01d084e8b79b9"
 RUST_POSTGRES_INTEGRATION_STEP = "PostgreSQL integration tests"
 RUST_S3_INTEGRATION_STEP = "S3-compatible storage integration tests (pinned test server)"
 RUST_COLLAB_INTEGRATION_STEP = "WebSocket, PostgreSQL and native helper integration tests"
@@ -1264,6 +1270,63 @@ def verify_native_arm64_execution(jobs: dict) -> list[str]:
     return errors
 
 
+def selected_install_inventory(jobs: dict) -> tuple[set[str], str | None]:
+    """Require the privileged SQLite fixture on both actual PG18 B runners."""
+    steps, err = _postgres_job_steps(jobs)
+    if err:
+        return set(), err
+    assert steps is not None
+    step, err = _unique_named_step(steps, RUST_SELECTED_INSTALL_STEP, job="postgres")
+    if err:
+        return set(), err
+    assert step is not None
+    if "continue-on-error" in step or step.get("if") != RUST_SELECTED_INSTALL_IF:
+        return set(), "rust: selected install step must execute on PG18 B without error masking"
+    expected_env = {
+        "FVOCI_COLLAB_ENGINE": "${{ github.workspace }}/crates/collab-engine/target/debug/collab-engine"
+    }
+    run = step.get("run")
+    if (
+        step.get("env") != expected_env
+        or not isinstance(run, str)
+        or hashlib.sha256(run.strip().encode()).hexdigest() != RUST_SELECTED_INSTALL_RUN_SHA256
+    ):
+        return set(), (
+            "rust: selected install step must keep exact db-tests build, root inputs, "
+            "unfiltered execution and count gate"
+        )
+    helper, err = _unique_named_step(
+        steps, "Build production helper for PostgreSQL B native fixtures", job="postgres"
+    )
+    if err:
+        return set(), err
+    assert helper is not None
+    expected_helper = (
+        "cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml\n"
+        "cargo build --locked --offline --manifest-path crates/collab-engine/Cargo.toml "
+        "--features worker --bin collab-engine"
+    )
+    if (
+        helper.get("if") != "matrix.shard == 'b'"
+        or "continue-on-error" in helper
+        or helper.get("env") != {"CARGO_TARGET_DIR": "${{ github.workspace }}/crates/collab-engine/target"}
+        or str(helper.get("run", "")).strip() != expected_helper
+        or steps.index(helper) >= steps.index(step)
+    ):
+        return set(), "rust: selected install requires the preceding mandatory production worker helper build"
+    rows, err = _postgres_matrix_rows(jobs["postgres"])
+    if err:
+        return set(), err
+    assert rows is not None
+    runners = [
+        row.get("runner") for row in rows
+        if row.get("shard") == "b" and row.get("pg_major") == "18"
+    ]
+    if set(runners) != set(RUST_POSTGRES_RUNNER_ARCH) or len(runners) != 2:
+        return set(), "rust: selected install requires exactly one PG18 B execution on x64 and arm64"
+    return {RUST_SELECTED_INSTALL_TARGET}, None
+
+
 def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
     """Ensure explicit root [[test]] db-tests targets map to rust.yml execution rows."""
     errors: list[str] = []
@@ -1319,8 +1382,17 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
                 "rust: postgres matrix missing on x64: " + ", ".join(only_arm)
             )
 
+    install_tests, install_err = selected_install_inventory(jobs)
+    if install_err:
+        errors.append(install_err)
+        return errors
+
     postgres_union = per_arch["x64"]
-    overlap = (postgres_union & collab_tests) | (postgres_union & s3_tests) | (collab_tests & s3_tests)
+    overlap = (
+        (postgres_union & collab_tests) | (postgres_union & s3_tests)
+        | (collab_tests & s3_tests)
+        | (install_tests & (postgres_union | collab_tests | s3_tests))
+    )
     if overlap:
         errors.append(
             "rust: integration target assigned to multiple CI buckets: "
@@ -1332,7 +1404,7 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
         if not probe_script.is_file():
             errors.append(f"rust: missing manual probe script {RUST_CAPACITY_PROBE_SCRIPT}")
 
-    assigned = postgres_union | collab_tests | s3_tests | RUST_INTEGRATION_MANUAL_TARGETS
+    assigned = postgres_union | collab_tests | s3_tests | install_tests | RUST_INTEGRATION_MANUAL_TARGETS
     required = cargo_targets - RUST_INTEGRATION_MANUAL_TARGETS
     missing = sorted(required - assigned)
     if missing:

@@ -284,6 +284,69 @@ jobs:
           FVOCI_MEILI_KEY: ci-ephemeral-meili-master
         run: cargo test --locked --offline --no-fail-fast --features db-tests ${{ matrix.tests }}
 
+      - name: Selected SQLite install lifetime controls
+        if: matrix.shard == 'b' && matrix.pg_major == '18'
+        env:
+          FVOCI_COLLAB_ENGINE: ${{ github.workspace }}/crates/collab-engine/target/debug/collab-engine
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --features db-tests --test selected_install_lifetime --no-run --message-format=json > "$RUNNER_TEMP/selected-install-build.jsonl"
+          sudo python3 - "$RUNNER_TEMP/selected-install-build.jsonl" "$FVOCI_COLLAB_ENGINE" <<'PYINSTALL'
+          import hashlib, json, os, pathlib, re, secrets, shutil, stat, subprocess, sys, tempfile
+          records = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+          artifacts = [r for r in records if r.get("reason") == "compiler-artifact" and r.get("executable")]
+          def executable(name, kind, test):
+              matches = [r for r in artifacts if r["target"]["name"] == name and kind in r["target"]["kind"] and r["profile"]["test"] == test]
+              assert len(matches) == 1, (name, matches)
+              assert "db-tests" in matches[0]["features"], name
+              return pathlib.Path(matches[0]["executable"])
+          server = executable("fvoci-server", "bin", False)
+          migrate = executable("fvoci-migrate", "bin", False)
+          test = executable("selected_install_lifetime", "test", True)
+          assert server.parent() == migrate.parent()
+          engine = pathlib.Path(sys.argv[2])
+          for file in (server, migrate, test, engine):
+              assert file.is_absolute() and stat.S_ISREG(file.lstat().st_mode), file
+              os.chown(file, 0, 0)
+              os.chmod(file, 0o755)
+          run_root = pathlib.Path(tempfile.mkdtemp(prefix="fvoci-selected-install-", dir="/run"))
+          try:
+              os.chown(run_root, 0, 1000)
+              os.chmod(run_root, 0o710)
+              storage = run_root / "storage"
+              storage.mkdir(mode=0o700)
+              os.chown(storage, 1000, 1000)
+              environment = {
+                  "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                  "PASSWORD_PEPPER_KEYS": json.dumps({"fixture": secrets.token_hex(32)}),
+                  "PASSWORD_PEPPER_ACTIVE_KEY_ID": "fixture",
+                  "ENCRYPTION_KEYS": json.dumps({"fixture": secrets.token_hex(32)}),
+                  "ENCRYPTION_ACTIVE_KEY_ID": "fixture",
+                  "FVOCI_PUBLIC_ORIGIN": "http://127.0.0.1:8080",
+                  "FVOCI_COOKIE_SECURE": "0",
+                  "STORAGE_DRIVER": "local",
+                  "FVOCI_STORAGE_DIR": str(storage),
+                  "FVOCI_COLLAB_ENGINE": str(engine),
+                  "FVOCI_COLLAB_FAMILY_LEASE_MS": "30000",
+                  "FVOCI_COLLAB_FAMILY_RENEW_MS": "5000",
+              }
+              private = run_root / "environment.json"
+              with private.open("x") as handle:
+                  os.fchmod(handle.fileno(), 0o600)
+                  json.dump(environment, handle)
+              env = {"PATH": environment["PATH"], "FVOCI_SELECTED_INSTALL_RUN_ROOT": str(run_root), "FVOCI_SELECTED_INSTALL_ENV_FILE": str(private)}
+              for file, name in ((migrate, "MIGRATE"), (server, "SERVER")):
+                  env["FVOCI_SELECTED_INSTALL_" + name + "_SHA256"] = hashlib.sha256(file.read_bytes()).hexdigest()
+              result = subprocess.run([str(test), "--test-threads=1", "--nocapture"], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+              print(result.stdout, end="", flush=True)
+              for receipt in sorted(run_root.glob("receipts-*/*.json")):
+                  print("selected-install receipt", receipt.name, receipt.read_text(), flush=True)
+              assert result.returncode == 0, result.returncode
+              assert re.search(r"test result: ok\. 4 passed; 0 failed; 0 ignored;", result.stdout), "selected install actual execution count"
+          finally:
+              shutil.rmtree(run_root)
+          PYINSTALL
+
       - name: S3-compatible storage integration tests (pinned test server)
         if: matrix.shard == 'b'
         env:
