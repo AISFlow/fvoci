@@ -1173,6 +1173,8 @@ async fn complete_owned_inner(
     }
 
     if needs_assembly {
+        #[cfg(feature = "db-tests")]
+        test_barrier::wait_pre_assembly_barrier(attachment_id).await;
         let assemble = storage
             .assemble_multipart(&storage_key, meta.upload_ref.as_deref(), parts)
             .await;
@@ -1195,6 +1197,7 @@ async fn complete_owned_inner(
                     actor_user_id,
                     session_id,
                     &completion,
+                    cancel,
                 )
                 .await?
                 {
@@ -1431,10 +1434,13 @@ async fn clear_refused_completion_on_conn(
     actor_user_id: Uuid,
     session_id: Uuid,
     completion: &UploadCompletion,
+    cancel: &CancellationToken,
 ) -> Result<Result<(), AttachmentDbError>, sqlx::Error> {
     let mut tx = lock.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     with_upload_xact_lock(&mut tx, attachment_id).await?;
+    #[cfg(feature = "db-tests")]
+    test_barrier::wait_pre_refused_completion_barrier(attachment_id).await;
     let att = match check_upload_write_access(
         &mut tx,
         workspace_id,
@@ -1450,6 +1456,10 @@ async fn clear_refused_completion_on_conn(
             return Ok(Err(err));
         }
     };
+    if cancel.is_cancelled() {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::UploadState));
+    }
     if att.status != "assembling"
         || !prepared_upload_matches(&att, completion)
         || prepared_upload(&att)?.as_ref() != Some(completion)
@@ -1461,6 +1471,10 @@ async fn clear_refused_completion_on_conn(
         .bind(workspace_id).bind(attachment_id).bind(&completion.storage_key).bind(json!(completion))
         .execute(&mut *tx).await?.rows_affected();
     if changed != 1 {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::UploadState));
+    }
+    if cancel.is_cancelled() {
         tx.rollback().await?;
         return Ok(Err(AttachmentDbError::UploadState));
     }
@@ -2741,6 +2755,72 @@ pub mod test_barrier {
                 let _ = proceed_tx.send(());
             }
         }
+    }
+
+    static ASSEMBLY_BARRIERS: LazyLock<BarrierMap> = LazyLock::new(|| Mutex::new(HashMap::new()));
+    static REFUSAL_BARRIERS: LazyLock<BarrierMap> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub fn arm_pre_assembly(attachment_id: Uuid) -> PreMarkStoredBarrier {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+        ASSEMBLY_BARRIERS
+            .lock()
+            .expect("barrier mutex")
+            .insert(attachment_id, (entered_tx, proceed_rx));
+        PreMarkStoredBarrier {
+            entered_rx,
+            proceed_tx: Some(proceed_tx),
+        }
+    }
+
+    pub async fn wait_pre_assembly_barrier(attachment_id: Uuid) {
+        let entry = ASSEMBLY_BARRIERS
+            .lock()
+            .expect("barrier mutex")
+            .remove(&attachment_id);
+        if let Some((entered_tx, proceed_rx)) = entry {
+            let _ = entered_tx.send(());
+            let _ = proceed_rx.await;
+        }
+    }
+
+    pub fn arm_pre_refused_completion(attachment_id: Uuid) -> PreMarkStoredBarrier {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+        REFUSAL_BARRIERS
+            .lock()
+            .expect("barrier mutex")
+            .insert(attachment_id, (entered_tx, proceed_rx));
+        PreMarkStoredBarrier {
+            entered_rx,
+            proceed_tx: Some(proceed_tx),
+        }
+    }
+
+    pub async fn wait_pre_refused_completion_barrier(attachment_id: Uuid) {
+        let entry = REFUSAL_BARRIERS
+            .lock()
+            .expect("barrier mutex")
+            .remove(&attachment_id);
+        if let Some((entered_tx, proceed_rx)) = entry {
+            let _ = entered_tx.send(());
+            let _ = proceed_rx.await;
+        }
+    }
+
+    /// Invoke the same PG upload operation with a caller-owned cancellation
+    /// token, so tests can cancel after observing an actual authority lock wait.
+    pub async fn complete_with_cancel(
+        pool: &sqlx::PgPool,
+        storage: &crate::attachments::ObjectStorage,
+        identity: (Uuid, Uuid, Uuid, Uuid),
+        parts: Vec<(i32, String)>,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Result<super::AttachmentRow, super::AttachmentDbError>, sqlx::Error> {
+        super::complete_upload_pg_with_cancel(
+            pool, storage, identity.0, identity.1, identity.2, identity.3, parts, None, cancel,
+        )
+        .await
     }
 
     pub async fn wait_pre_mark_stored_barrier(attachment_id: Uuid) {
