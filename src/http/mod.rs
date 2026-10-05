@@ -296,8 +296,8 @@ mod trace_tests {
             .expect("lazy pool");
         AppState {
             realtime_mode: crate::config::RealtimeMode::On,
-        native_engine: None,
-        auth: Arc::new(crate::auth::AuthService {
+            native_engine: None,
+            auth: Arc::new(crate::auth::AuthService {
                 db: crate::db::Db::new(pool),
                 password_keys: crate::auth::password::Keyring::parse(
                     r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
