@@ -89,7 +89,7 @@ const readOnly = computed(
   () =>
     props.readOnly ||
     (props.offBody
-      ? !props.offBody.doc.value || !props.offBody.draft.value?.start.writable
+      ? !props.offBody.doc.value || !props.offBody.writable.value
       : (props.session?.readOnly ?? false)),
 );
 const ready = computed(() =>
@@ -352,7 +352,7 @@ async function persistBody(): Promise<void> {
     <UButton
       v-if="
         offBody &&
-        (!offBody.doc.value || !offBody.draft.value?.start.writable) &&
+        (!offBody.doc.value || !offBody.writable.value) &&
         !offBody.loading.value
       "
       @click="offBody.load"

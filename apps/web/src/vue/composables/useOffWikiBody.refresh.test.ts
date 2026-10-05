@@ -54,6 +54,15 @@ test("a healthy confirmed refresh replaces only the still-clean owned native dra
  expect(h.current.draft.value).not.toBe(original);expect(original?.active).toBe(false);
  expect(h.current.draft.value?.start.tailSeq).toBe("2");expect(JSON.stringify(h.current.draft.value?.mine)).toContain("confirmed restored");h.effect.stop();
 });
+test("a same-owner read-only refresh updates reactive authority without discarding dirty mine",async()=>{
+ const h=harness("null");h.reads[0]!.resolve(body(owner,"start","1"));await settle();const original=h.current.draft.value!;edit(original.doc);
+ const editable=Vue.computed(()=>h.current.writable.value);
+ expect(editable.value).toBe(true);
+ const refresh=h.current.load();h.reads[1]!.resolve({...body(owner,"start","1"),writable:false});await refresh;
+ expect(h.current.draft.value).toBe(original);expect(editable.value).toBe(false);
+ expect(JSON.stringify(original.mine)).toContain("late private");
+ expect(await h.current.save()).toBe(false);h.effect.stop();
+});
 test("source buffer and an unknown save command survive refresh without receipt inference",async()=>{
  const h=harness("write-denied");h.reads[0]!.resolve(body(owner,"start","1"));await settle();const original=h.current.draft.value!;edit(original.doc);
  original.setSourceBuffer({text:"unapplied Markdown",baseV1:Y.encodeStateAsUpdate(original.doc)});

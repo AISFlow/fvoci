@@ -216,6 +216,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     editCurrent,
     verifyCommitted,
     doc: value((current) => current.doc, null),
+    writable: value((current) => current.start.writable, false),
     dirty: value((current) => current.dirty, false),
     durable: value((current) => current.durable, false),
     saving: value((current) => current.saving, false),

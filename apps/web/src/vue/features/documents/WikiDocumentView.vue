@@ -343,7 +343,7 @@ const readOnly = computed(
   () =>
     archived.value ||
     (realtimeOff.value
-      ? !offBody.doc.value || !offBody.draft.value?.start.writable
+      ? !offBody.doc.value || !offBody.writable.value
       : (session.value?.readOnly ?? false)),
 );
 const ready = computed(() =>
@@ -955,7 +955,7 @@ function flashBlock(id: string): void {
       <UButton
         v-if="
           realtimeOff &&
-          (!offBody.doc.value || !offBody.draft.value?.start.writable) &&
+          (!offBody.doc.value || !offBody.writable.value) &&
           !offBody.loading.value
         "
         @click="offBody.load"
