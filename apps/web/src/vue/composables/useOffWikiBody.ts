@@ -22,6 +22,8 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     sourceDraftAuthRetiredKey,
     computed(() => false),
   );
+  // Read the current injected authority after awaits; never retain its narrowed value.
+  const isAuthRetired = () => authRetired.value;
   const draft = shallowRef<OffWikiDraft | null>(null);
   const error = shallowRef<unknown>(null);
   const loading = ref(false);
@@ -44,7 +46,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
   }
   async function load() {
     const scope = owner();
-    if (!scope || !enabled() || authRetired.value) return;
+    if (!scope || !enabled() || isAuthRetired()) return;
     const started = ++lifetime;
     abort?.abort();
     abort = new AbortController();
@@ -58,12 +60,13 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
         scope.projectId,
         scope.kind,
       );
+      const currentOwner = owner();
       if (
         started !== lifetime ||
         !enabled() ||
-        !owner() ||
-        ownerKey(owner()!) !== ownerKey(scope) ||
-        authRetired.value
+        !currentOwner ||
+        ownerKey(currentOwner) !== ownerKey(scope) ||
+        isAuthRetired()
       )
         return;
       let storage: Storage | null = null;
@@ -97,10 +100,17 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     }
   }
   watch(
-    () => JSON.stringify([enabled(), authRetired.value, owner() ? ownerKey(owner()!) : null]),
+    () => {
+      const currentOwner = owner();
+      return JSON.stringify([
+        enabled(),
+        isAuthRetired(),
+        currentOwner ? ownerKey(currentOwner) : null,
+      ]);
+    },
     () => {
       retire();
-      void load();
+      return load();
     },
     { immediate: true, flush: "sync" },
   );
@@ -116,12 +126,13 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
   });
   const value = <T, F>(read: (current: OffWikiDraft) => T, fallback: F) =>
     computed(() => {
-      void revision.value;
-      return draft.value ? read(draft.value) : fallback;
+      const state = { draft: draft.value, revision: revision.value };
+      return state.draft ? read(state.draft) : fallback;
     });
   async function save(): Promise<boolean> {
     const current = draft.value;
-    if (!current || authRetired.value || !enabled()) return false;
+    if (!current || isAuthRetired() || !enabled()) return false;
+    const isActive = () => current.active;
     error.value = null;
     try {
       return await current.save((command) =>
@@ -134,7 +145,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
         ),
       );
     } catch (failure) {
-      if (draft.value !== current || !current.active) return false;
+      if (draft.value !== current || !isActive()) return false;
       error.value = failure;
       if (failure instanceof ProblemError && [401, 403, 404].includes(failure.status)) {
         current.retire();
@@ -152,7 +163,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
             current.owner.projectId,
             current.owner.kind,
           );
-          if (started === lifetime && draft.value === current && current.active)
+          if (started === lifetime && draft.value === current && isActive())
             current.conflict(latest);
         } catch (readFailure) {
           if (started === lifetime) {
@@ -174,13 +185,13 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
   async function createDistinct(destination: DraftDestination) {
     const current = draft.value;
     const started = lifetime;
-    if (!current || authRetired.value || !enabled()) return null;
+    if (!current || isAuthRetired() || !enabled()) return null;
     error.value = null;
     try {
       const result = await current.createDistinct(destination, (body, projectId) =>
         createDocumentFromDraft(current.owner.workspaceId, projectId, body, abort?.signal),
       );
-      if (started !== lifetime || draft.value !== current || !current.active || authRetired.value)
+      if (started !== lifetime || draft.value !== current || !current.active || isAuthRetired())
         return null;
       return result;
     } catch (failure) {
@@ -218,7 +229,8 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
   async function verifyCommitted(): Promise<boolean> {
     const current = draft.value;
     const started = lifetime;
-    if (!current || !current.durable || authRetired.value) return false;
+    if (!current || !current.durable || isAuthRetired()) return false;
+    const isDurable = () => current.durable;
     try {
       const fresh = await readVersionedBody(
         current.owner.workspaceId,
@@ -227,13 +239,13 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
         current.owner.projectId,
         current.owner.kind,
       );
-      if (started !== lifetime || draft.value !== current || !current.active || authRetired.value)
+      if (started !== lifetime || draft.value !== current || !current.active || isAuthRetired())
         return false;
       const reader = loadBody(fresh, current.owner.targetId);
       try {
         return (
           fresh.tailSeq === current.start.tailSeq &&
-          current.durable &&
+          isDurable() &&
           encodeUpdate(Y.encodeStateAsUpdate(reader)) ===
             encodeUpdate(Y.encodeStateAsUpdate(current.doc))
         );

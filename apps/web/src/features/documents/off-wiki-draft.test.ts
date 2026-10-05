@@ -84,9 +84,12 @@ describe("OFF wiki native draft owner", () => {
     expect(current.start.writable).toBe(false);
     expect(JSON.stringify(current.mine)).toContain("kept private");
     expect(
-      await current.save(async () => {
-        throw new Error("read-only owner attempted a write");
-      }),
+      await current.save(
+        () =>
+          new Promise<BodySaveResult>(() => {
+            throw new Error("read-only owner attempted a write");
+          }),
+      ),
     ).toBe(false);
     current.retire();
   });
@@ -102,10 +105,14 @@ describe("OFF wiki native draft owner", () => {
     edit(draft.doc, " mine");
     let sent!: BodySaveCommand;
     expect(
-      await draft.save(async (command) => {
-        sent = command;
-        return result(command);
-      }),
+      await draft.save(
+        (command) =>
+          new Promise<BodySaveResult>((resolve) => {
+            sent = command;
+            resolve(result(command));
+            return;
+          }),
+      ),
     ).toBe(true);
     const fresh = loadBody(initial, targetId);
     Y.applyUpdate(
@@ -130,18 +137,26 @@ describe("OFF wiki native draft owner", () => {
     );
     edit(draft.doc, " first");
     let first!: BodySaveCommand;
-    await expect(
-      draft.save(async (command) => {
-        first = structuredClone(command);
-        throw new Error("connection lost after commit");
-      }),
+    expect(
+      draft.save(
+        (command) =>
+          new Promise<BodySaveResult>(() => {
+            first = structuredClone(command);
+            throw new Error("connection lost after commit");
+          }),
+      ),
     ).rejects.toThrow();
+    await Promise.resolve();
     edit(draft.doc, " later");
     expect(
-      await draft.save(async (command) => {
-        expect(command).toEqual(first);
-        return result(command);
-      }),
+      await draft.save(
+        (command) =>
+          new Promise<BodySaveResult>((resolve) => {
+            expect(command).toEqual(first);
+            resolve(result(command));
+            return;
+          }),
+      ),
     ).toBe(false);
     expect(draft.dirty).toBe(true);
     expect(JSON.stringify(draft.mine)).toContain("later");
@@ -168,11 +183,15 @@ describe("OFF wiki native draft owner", () => {
     pending.resolve(result(first));
     expect(await save).toBe(false);
     expect(
-      await draft.save(async (command) => {
-        expect(command.commandId).not.toBe(first.commandId);
-        expect(command.expectedTailSeq).toBe("9007199254740994");
-        return result(command);
-      }),
+      await draft.save(
+        (command) =>
+          new Promise<BodySaveResult>((resolve) => {
+            expect(command.commandId).not.toBe(first.commandId);
+            expect(command.expectedTailSeq).toBe("9007199254740994");
+            resolve(result(command));
+            return;
+          }),
+      ),
     ).toBe(true);
     draft.retire();
   });
@@ -186,12 +205,18 @@ describe("OFF wiki native draft owner", () => {
         () => commandId,
       );
       edit(draft.doc, " mine");
-      await expect(
-        draft.save(async (command) => ({
-          ...result(command),
-          [field]: field === "tailSeq" ? "7" : field === "revisionId" ? "" : "wrong",
-        })),
+      expect(
+        draft.save(
+          (command) =>
+            new Promise<BodySaveResult>((resolve) => {
+              resolve({
+                ...result(command),
+                [field]: field === "tailSeq" ? "7" : field === "revisionId" ? "" : "wrong",
+              });
+            }),
+        ),
       ).rejects.toThrow();
+      await Promise.resolve();
       expect(draft.durable).toBe(false);
       expect(draft.dirty).toBe(true);
       expect(draft.frozen?.command.commandId).toBe(commandId);
@@ -225,10 +250,14 @@ describe("OFF wiki native draft owner", () => {
     expect(returned.start.tailSeq).toBe(initial.tailSeq);
     expect(returned.dirty).toBe(true);
     expect(
-      await returned.save(async (retry) => {
-        expect(retry).toEqual(command);
-        return result(retry);
-      }),
+      await returned.save(
+        (retry) =>
+          new Promise<BodySaveResult>((resolve) => {
+            expect(retry).toEqual(command);
+            resolve(result(retry));
+            return;
+          }),
+      ),
     ).toBe(true);
     returned.retire();
   });
@@ -320,9 +349,12 @@ describe("OFF wiki native draft owner", () => {
   test("no edit means no write, while version exhaustion never wraps", async () => {
     const draft = new OffWikiDraft(owner, source(), storage(), () => {});
     expect(
-      await draft.save(async () => {
-        throw new Error("unexpected write");
-      }),
+      await draft.save(
+        () =>
+          new Promise<BodySaveResult>(() => {
+            throw new Error("unexpected write");
+          }),
+      ),
     ).toBe(true);
     draft.retire();
     const exhausted = new OffWikiDraft(
@@ -332,11 +364,15 @@ describe("OFF wiki native draft owner", () => {
       () => {},
     );
     edit(exhausted.doc, " extra");
-    await expect(
-      exhausted.save(async () => {
-        throw new Error("unexpected write");
-      }),
+    expect(
+      exhausted.save(
+        () =>
+          new Promise<BodySaveResult>(() => {
+            throw new Error("unexpected write");
+          }),
+      ),
     ).rejects.toThrow("exhausted");
+    await Promise.resolve();
     exhausted.retire();
   });
 });

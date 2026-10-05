@@ -110,7 +110,8 @@ export class OffWikiDraft {
     try {
       const raw = storage?.getItem(ownerKey(owner));
       if (raw && raw.length <= 40 * 1024 * 1024) {
-        const saved = JSON.parse(raw) as StoredDraft;
+        // Persisted JSON has not yet proved the version or optional command shapes.
+        const saved = JSON.parse(raw) as Omit<StoredDraft, "format"> & { format: unknown };
         if (saved.format !== 1 || ownerKey(saved.owner) !== ownerKey(owner))
           throw new Error("Draft owner mismatch");
         if (typeof saved.mine !== "string" || typeof saved.acknowledged !== "string")
@@ -123,7 +124,7 @@ export class OffWikiDraft {
           if (old.store.pendingStructs || old.store.pendingDs)
             throw new Error("Incomplete draft history");
           if (saved.frozen) {
-            const command = saved.frozen.command;
+            const command = saved.frozen.command as BodySaveCommand | undefined;
             if (
               typeof command?.commandId !== "string" ||
               !/^[0-9a-f-]{36}$/i.test(command.commandId) ||
@@ -157,9 +158,10 @@ export class OffWikiDraft {
           if (saved.conflictBackup && ownerKey(saved.conflictBackup.owner) !== ownerKey(owner))
             throw new Error("Conflict draft owner mismatch");
           if (saved.distinct) {
-            const request = saved.distinct.body;
+            const request = saved.distinct.body as OffDraftCreateBody | undefined;
             if (
-              !liveUuid(request?.commandId) ||
+              !request ||
+              !liveUuid(request.commandId) ||
               request.sourceId !== owner.targetId ||
               request.sourceKind !== (owner.kind ?? "document") ||
               (request.sourceProjectId ?? null) !==
@@ -312,7 +314,7 @@ export class OffWikiDraft {
     this.changed();
     try {
       const result = await send(pending.command);
-      if (this.retired) return false;
+      if (!this.active) return false;
       if (
         result.commandId !== pending.command.commandId ||
         result.targetId !== this.owner.targetId ||
@@ -343,7 +345,7 @@ export class OffWikiDraft {
       return this.durable;
     } finally {
       this.saving = false;
-      if (!this.retired) this.changed();
+      if (this.active) this.changed();
     }
   }
   async createDistinct(
@@ -380,15 +382,17 @@ export class OffWikiDraft {
     this.changed();
     try {
       const result = await send(pending.body, pending.projectId);
-      if (this.retired) return null;
+      if (!this.active) return null;
+      const document = result.document as OffDraftCreateResponse["document"] | undefined;
       if (
         result.commandId !== pending.body.commandId ||
         result.tailSeq !== "1" ||
-        !liveUuid(result.document?.id) ||
-        result.document.id === this.owner.targetId ||
-        result.document.workspaceId !== this.owner.workspaceId ||
-        (result.document.projectId ?? null) !== pending.projectId ||
-        result.document.parentId !== pending.body.parentId ||
+        !document ||
+        !liveUuid(document.id) ||
+        document.id === this.owner.targetId ||
+        document.workspaceId !== this.owner.workspaceId ||
+        (document.projectId ?? null) !== pending.projectId ||
+        document.parentId !== pending.body.parentId ||
         !liveUuid(result.revisionId)
       )
         throw new Error("Unmatched distinct document acknowledgment");
@@ -398,7 +402,7 @@ export class OffWikiDraft {
       return result;
     } finally {
       this.creating = false;
-      if (!this.retired) this.changed();
+      if (this.active) this.changed();
     }
   }
   distinctRefused(commandId: string): void {

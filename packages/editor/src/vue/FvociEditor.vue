@@ -733,8 +733,11 @@ function restoreSourceBuffer(current: Editor): void {
     draftDirty.value = true;
     sourceStale.value = !matches;
     if (!matches) modeError.value = t("editor.mode.stale");
-    void nextTick(() => {
+    nextTick(() => {
       if (sourceField.value && !current.isDestroyed) sourceField.value.value = buffer.text;
+    }).catch((error: unknown) => {
+      if (!current.isDestroyed)
+        modeError.value = error instanceof Error ? error.message : t("editor.mode.copyFailed");
     });
   }
 }

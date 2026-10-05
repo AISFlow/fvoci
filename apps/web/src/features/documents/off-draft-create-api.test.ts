@@ -2,23 +2,31 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
+import type { OffDraftCreateBody } from "./document-api";
+type RequestOptions = {
+  params: { path: Record<string, string> };
+  body: OffDraftCreateBody;
+  signal?: AbortSignal;
+};
 
 const source = readFileSync(new URL("./document-api.ts", import.meta.url), "utf8")
   .replace(/^import[^\n]+\n/gm, "")
   .replace(/export /g, "");
 const script = ts.transpile(source, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None });
 test("from-draft transport keeps source and destination distinct and replays exact captured body", async () => {
-  const calls: { path: string; options: any }[] = [];
+  const calls: { path: string; options: RequestOptions }[] = [];
   const adapter = runInNewContext(`${script}\ncreateDocumentFromDraft`, {
     api: {
-      POST: async (path: string, options: any) => {
-        calls.push({ path, options });
-        return { data: { commandId: options.body.commandId } };
-      },
+      POST: (path: string, options: RequestOptions) =>
+        new Promise<{ data: unknown }>((resolve) => {
+          calls.push({ path, options });
+          resolve({ data: { commandId: options.body.commandId } });
+          return;
+        }),
     },
-    ensureOk: (response: any) => response.data,
-  });
-  const body = {
+    ensureOk: (response: { data: unknown }) => response.data,
+  }) as typeof import("./document-api").createDocumentFromDraft;
+  const body: OffDraftCreateBody = {
     commandId: "captured",
     sourceKind: "task",
     sourceId: "source-task",

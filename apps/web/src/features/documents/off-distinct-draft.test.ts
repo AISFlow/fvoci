@@ -4,6 +4,7 @@ import { tiptapJsonToYDoc, yDocToTiptapJson } from "@fvoci/editor/collab-tiptap"
 import { FVOCI_YDOC_FRAGMENT } from "@fvoci/editor/collab";
 import { OffWikiDraft, encodeUpdate, ownerKey } from "./off-wiki-draft";
 import type { OffDraftCreateBody, OffDraftCreateResponse } from "./document-api";
+import type { BodySaveResult } from "./versioned-body-api";
 
 const sourceId = "11111111-1111-4111-8111-111111111111";
 const resultId = "22222222-2222-4222-8222-222222222222";
@@ -60,12 +61,17 @@ describe("OFF separate-document logical command and private mine", () => {
   test("unconfirmed copy keeps its exact retry while manual original resolution and new saves progress", async () => {
     const h = harness();
     let copy!: OffDraftCreateBody;
-    await expect(
-      h.draft.createDistinct(destination, async (body) => {
-        copy = structuredClone(body);
-        throw new Error("copy response lost");
-      }),
+    expect(
+      h.draft.createDistinct(
+        destination,
+        (body) =>
+          new Promise<OffDraftCreateResponse>(() => {
+            copy = structuredClone(body);
+            throw new Error("copy response lost");
+          }),
+      ),
     ).rejects.toThrow("copy response lost");
+    await Promise.resolve();
     const privateMine = encodeUpdate(Y.encodeStateAsUpdate(h.draft.doc));
     const currentDoc = tiptapJsonToYDoc({
       type: "doc",
@@ -92,12 +98,21 @@ describe("OFF separate-document logical command and private mine", () => {
     (paragraph.get(0) as Y.XmlText).insert(0, "manually kept ");
     let originalWrites = 0;
     expect(
-      await h.draft.save(async (command) => {
-        originalWrites++;
-        expect(command.expectedTailSeq).toBe("10");
-        expect(command.commandId).not.toBe(copy.commandId);
-        return { commandId: command.commandId, targetId: sourceId, tailSeq: "11", revisionId };
-      }),
+      await h.draft.save(
+        (command) =>
+          new Promise<BodySaveResult>((resolve) => {
+            originalWrites++;
+            expect(command.expectedTailSeq).toBe("10");
+            expect(command.commandId).not.toBe(copy.commandId);
+            resolve({
+              commandId: command.commandId,
+              targetId: sourceId,
+              tailSeq: "11",
+              revisionId,
+            });
+            return;
+          }),
+      ),
     ).toBe(false); // The independent copy remains unconfirmed, so the whole draft is not durable.
     expect(originalWrites).toBe(1);
     expect(h.draft.start.tailSeq).toBe("11");
@@ -112,10 +127,12 @@ describe("OFF separate-document logical command and private mine", () => {
       (
         await h.draft.createDistinct(
           { ...destination, title: "ignored new form" },
-          async (body) => {
-            expect(body).toEqual(copy);
-            return ack(body);
-          },
+          (body) =>
+            new Promise<OffDraftCreateResponse>((resolve) => {
+              expect(body).toEqual(copy);
+              resolve(ack(body));
+              return;
+            }),
         )
       )?.document.id,
     ).toBe(resultId);
@@ -127,11 +144,13 @@ describe("OFF separate-document logical command and private mine", () => {
   test("unknown result freezes one body/IDs across edits and restart, then keeps original history", async () => {
     const h = harness();
     const sent: OffDraftCreateBody[] = [];
-    const send = async (body: OffDraftCreateBody) => {
-      sent.push(structuredClone(body));
-      throw new Error("response lost");
-    };
-    await expect(h.draft.createDistinct(destination, send)).rejects.toThrow("response lost");
+    const send = (body: OffDraftCreateBody) =>
+      new Promise<OffDraftCreateResponse>(() => {
+        sent.push(structuredClone(body));
+        throw new Error("response lost");
+      });
+    expect(h.draft.createDistinct(destination, send)).rejects.toThrow("response lost");
+    await Promise.resolve();
     const paragraph = h.draft.doc.getXmlFragment(FVOCI_YDOC_FRAGMENT).get(0) as Y.XmlElement;
     (paragraph.get(0) as Y.XmlText).insert(0, "later edit ");
     const original = encodeUpdate(Y.encodeStateAsUpdate(h.draft.doc));
@@ -139,10 +158,12 @@ describe("OFF separate-document logical command and private mine", () => {
     const resumed = new OffWikiDraft(owner, h.source, h.storage, () => {});
     const copied = await resumed.createDistinct(
       { ...destination, title: "changed form must not change retry" },
-      async (body) => {
-        sent.push(structuredClone(body));
-        return ack(body);
-      },
+      (body) =>
+        new Promise<OffDraftCreateResponse>((resolve) => {
+          sent.push(structuredClone(body));
+          resolve(ack(body));
+          return;
+        }),
     );
     expect(sent[1]).toEqual(sent[0]);
     expect(JSON.stringify(sent[0].contentJson)).not.toContain("original-block");
@@ -168,9 +189,13 @@ describe("OFF separate-document logical command and private mine", () => {
       });
     });
     expect(
-      await h.draft.createDistinct(destination, async () => {
-        throw new Error("double create");
-      }),
+      await h.draft.createDistinct(
+        destination,
+        () =>
+          new Promise<OffDraftCreateResponse>(() => {
+            throw new Error("double create");
+          }),
+      ),
     ).toBeNull();
     expect(requests).toBe(1);
     h.draft.retire();
@@ -191,24 +216,36 @@ describe("OFF separate-document logical command and private mine", () => {
       "parent",
     ]) {
       const h = harness();
-      await expect(
-        h.draft.createDistinct(destination, async (body) => {
-          const result = ack(body);
-          if (change === "command") result.commandId = crypto.randomUUID();
-          if (change === "target") result.document.id = sourceId;
-          if (change === "version") result.tailSeq = "0";
-          if (change === "revision") result.revisionId = "";
-          if (change === "workspace") result.document.workspaceId = "another-workspace";
-          if (change === "project")
-            result.document.projectId = "44444444-4444-4444-8444-444444444444";
-          if (change === "parent")
-            result.document.parentId = "55555555-5555-4555-8555-555555555555";
-          return result;
-        }),
+      expect(
+        h.draft.createDistinct(
+          destination,
+          (body) =>
+            new Promise<OffDraftCreateResponse>((resolve) => {
+              const result = ack(body);
+              if (change === "command") result.commandId = crypto.randomUUID();
+              if (change === "target") result.document.id = sourceId;
+              if (change === "version") result.tailSeq = "0";
+              if (change === "revision") result.revisionId = "";
+              if (change === "workspace") result.document.workspaceId = "another-workspace";
+              if (change === "project")
+                result.document.projectId = "44444444-4444-4444-8444-444444444444";
+              if (change === "parent")
+                result.document.parentId = "55555555-5555-4555-8555-555555555555";
+              resolve(result);
+              return;
+            }),
+        ),
       ).rejects.toThrow("Unmatched distinct");
+      await Promise.resolve();
       expect(h.draft.distinct).not.toBeNull();
       expect(h.draft.start.tailSeq).toBe("9");
-      const recovered = await h.draft.createDistinct(destination, async (body) => ack(body));
+      const recovered = await h.draft.createDistinct(
+        destination,
+        (body) =>
+          new Promise<OffDraftCreateResponse>((resolve) => {
+            resolve(ack(body));
+          }),
+      );
       expect(recovered?.document.id).toBe(resultId);
       h.draft.retire();
     }
@@ -216,14 +253,17 @@ describe("OFF separate-document logical command and private mine", () => {
   test("invalid form refuses before freezing or transport and a corrected logical request still progresses", async () => {
     const h = harness();
     let requests = 0;
-    const send = async (body: OffDraftCreateBody) => {
-      requests++;
-      return ack(body);
-    };
+    const send = (body: OffDraftCreateBody) =>
+      new Promise<OffDraftCreateResponse>((resolve) => {
+        requests++;
+        resolve(ack(body));
+        return;
+      });
     for (const title of ["   ", "x".repeat(301)]) {
-      await expect(h.draft.createDistinct({ ...destination, title }, send)).rejects.toThrow(
+      expect(h.draft.createDistinct({ ...destination, title }, send)).rejects.toThrow(
         "Invalid document",
       );
+      await Promise.resolve();
       expect(h.draft.distinct).toBeNull();
       expect(requests).toBe(0);
     }
@@ -236,10 +276,12 @@ describe("OFF separate-document logical command and private mine", () => {
   test("separate confirmed logical copies choose fresh command and block IDs without altering mine", async () => {
     const h = harness();
     const sent: OffDraftCreateBody[] = [];
-    const send = async (body: OffDraftCreateBody) => {
-      sent.push(structuredClone(body));
-      return ack(body);
-    };
+    const send = (body: OffDraftCreateBody) =>
+      new Promise<OffDraftCreateResponse>((resolve) => {
+        sent.push(structuredClone(body));
+        resolve(ack(body));
+        return;
+      });
     await h.draft.createDistinct(destination, send);
     await h.draft.createDistinct(destination, send);
     expect(sent).toHaveLength(2);

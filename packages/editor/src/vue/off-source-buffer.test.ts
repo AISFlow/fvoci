@@ -10,14 +10,20 @@ import { tiptapJsonToYDoc, yDocToTiptapJson } from "../collab-tiptap";
 import { createFvociExtensions } from "../tiptap-schema";
 import { SourceModeSession } from "../source-mode";
 
-const script = readFileSync(new URL("./FvociEditor.vue", import.meta.url), "utf8")
-  .split('<script setup lang="ts">')[1]!
-  .split("</script>")[0]!;
+const script = required(
+  required(
+    readFileSync(new URL("./FvociEditor.vue", import.meta.url), "utf8").split(
+      '<script setup lang="ts">',
+    )[1],
+  ).split("</script>")[0],
+);
 const parsed = ts.createSourceFile("FvociEditor.ts", script, ts.ScriptTarget.Latest, true);
-const fn = parsed.statements.find(
-  (statement) =>
-    ts.isFunctionDeclaration(statement) && statement.name?.text === "restoreSourceBuffer",
-)!;
+const fn = required(
+  parsed.statements.find(
+    (statement) =>
+      ts.isFunctionDeclaration(statement) && statement.name?.text === "restoreSourceBuffer",
+  ),
+);
 const code = ts.transpile(
   `let restoredBuffer=false,sourceBase=null;${fn.getText(parsed)};restoreSourceBuffer`,
   { target: ts.ScriptTarget.ES2022 },
@@ -46,7 +52,7 @@ for (const changed of [false, true]) {
       () => "current-owner",
       () => true,
     );
-    const capture = Vue.shallowRef(null),
+    const capture = Vue.shallowRef<ReturnType<SourceModeSession["capture"]> | null>(null),
       field = Vue.shallowRef({ value: "" }),
       stale = Vue.ref(false),
       dirty = Vue.ref(false),
@@ -64,7 +70,7 @@ for (const changed of [false, true]) {
       sourceField: field,
       nextTick: Vue.nextTick,
       t: (key: string) => key,
-    });
+    }) as (current: { state: EditorState; isDestroyed: boolean }) => void;
     restore({ state, isDestroyed: false });
     await Vue.nextTick();
     expect(field.value.value).toBe("owned unapplied Markdown");
@@ -78,4 +84,9 @@ for (const changed of [false, true]) {
     source.destroy();
     doc.destroy();
   });
+}
+
+function required<T>(value: T | null | undefined): T {
+  if (value == null) throw new Error("Missing required test fixture value");
+  return value;
 }

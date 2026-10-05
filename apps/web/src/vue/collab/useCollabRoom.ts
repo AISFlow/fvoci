@@ -136,7 +136,7 @@ export function useCollabRoom(
       active.value = null;
       // A pending boot-policy query is also closed: no socket, provider or
       // awareness may be created before the server explicitly selects ON.
-      if (allow !== true) return;
+      if (!Object.is(allow, true)) return;
       lifetime = effectScope();
       active.value = lifetime.run(() => createRealtimeRoom(name, user, authorization, doc)) ?? null;
     },

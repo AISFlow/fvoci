@@ -150,7 +150,7 @@ const room = useCollabRoom(
 const session = room.session;
 const bodyDoc = computed(() => (realtimeOff.value ? offBody.doc.value : session.value?.doc));
 const bodyGeneration = computed(() =>
-  realtimeOff.value ? `off:${offBody.generation.value}` : session.value?.generation,
+  realtimeOff.value ? `off:${String(offBody.generation.value)}` : session.value?.generation,
 );
 const offComparisons = computed(() => {
   const bodies = offBody.comparison.value;

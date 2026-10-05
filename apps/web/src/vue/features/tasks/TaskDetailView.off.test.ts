@@ -3,9 +3,13 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 
-const text = readFileSync(new URL("./TaskDetailView.vue", import.meta.url), "utf8")
-  .split('<script setup lang="ts">')[1]!
-  .split("</script>")[0]!;
+const text = required(
+  required(
+    readFileSync(new URL("./TaskDetailView.vue", import.meta.url), "utf8").split(
+      '<script setup lang="ts">',
+    )[1],
+  ).split("</script>")[0],
+);
 const source = ts.createSourceFile("task.ts", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 const functions = source.statements
   .filter(
@@ -58,9 +62,12 @@ function harness() {
       pageEditable: { value: true },
       props: {
         archivePending: false,
-        onArchiveToggle: async () => {
-          order.push("archive");
-        },
+        onArchiveToggle: () =>
+          new Promise<void>((resolve) => {
+            order.push("archive");
+
+            resolve(undefined);
+          }),
       },
       // OFF must reach the actual HTTP body barrier, never a fabricated session.
       runArchiveWithBodyPersist: () => {
@@ -68,7 +75,11 @@ function harness() {
       },
       t: (key: string) => key,
     },
-  );
+  ) as {
+    handleArchiveToggle: (archived: boolean) => Promise<void>;
+    persistOffBody: () => Promise<boolean>;
+    retire: () => void;
+  };
   return { factory, offBody, save, verify, verifyStarted, order, archivePersistError };
 }
 test("actual OFF task archive waits for confirmed body save and fresh native readback", async () => {
@@ -96,4 +107,9 @@ for (const boundary of ["save", "verify", "retired", "replaced"]) {
     expect(h.order).not.toContain("archive");
     expect(h.archivePersistError.value).toBe("task.archive.persistFailed");
   });
+}
+
+function required<T>(value: T | null | undefined): T {
+  if (value == null) throw new Error("Missing required test fixture value");
+  return value;
 }

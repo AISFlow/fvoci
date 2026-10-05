@@ -53,7 +53,7 @@ const props = defineProps<{
 const offBody = computed(() => props.offBody);
 const bodyDoc = computed(() => (props.offBody ? props.offBody.doc.value : props.session?.doc));
 const bodyGeneration = computed(() =>
-  props.offBody ? `off:${props.offBody.generation.value}` : props.session?.generation,
+  props.offBody ? `off:${String(props.offBody.generation.value)}` : props.session?.generation,
 );
 const offComparisons = computed(() => {
   const bodies = props.offBody?.comparison.value;
