@@ -628,6 +628,79 @@ mod sqlite_native_tests {
         f.close().await;
     }
     #[tokio::test]
+    async fn two_actual_sqlite_writers_at_one_version_commit_exactly_one_result() {
+        let f = Fixture::new().await;
+        let credential = session(&f).await;
+        let one = request(&f, credential, "first competing native client").await;
+        let two = request(&f, credential, "second competing native client").await;
+        let pool = crate::db::pool::connect_sqlite_app(&f.path, 2)
+            .await
+            .unwrap();
+        let backend = Backend::Sqlite(pool.clone());
+        let (first, second) = tokio::join!(
+            save_off_document_body(&backend, RealtimeMode::Off, engine(), one.clone()),
+            save_off_document_body(&backend, RealtimeMode::Off, engine(), two.clone()),
+        );
+        let (saved, winner, loser, expected_text, excluded_text) = match (first, second) {
+            (Ok(saved), Err(BodySaveError::Conflict)) => (
+                saved,
+                one,
+                two,
+                "first competing native client",
+                "second competing native client",
+            ),
+            (Err(BodySaveError::Conflict), Ok(saved)) => (
+                saved,
+                two,
+                one,
+                "second competing native client",
+                "first competing native client",
+            ),
+            results => panic!("one CAS commit and one conflict required, got {results:?}"),
+        };
+        assert_eq!(saved.command_id, winner.command);
+        assert_eq!(saved.tail_seq, "1");
+        let before = counts(&f).await;
+        assert_eq!(before, (1, 1, 1, 1));
+        let reader = read_off_document_body(
+            &backend,
+            RealtimeMode::Off,
+            engine(),
+            f.workspace,
+            RevisionTarget::Document(f.document).into(),
+            f.user,
+            credential,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reader.native.tail_seq, 1);
+        assert_eq!(reader.native.snapshot_cutoff_seq, 1);
+        let projection = reader.content_json.to_string();
+        assert!(projection.contains(expected_text));
+        assert!(!projection.contains(excluded_text));
+        let committed: Vec<u8> = sqlx::query_scalar("SELECT payload_sha256 FROM document_collab_op_receipts WHERE workspace_id=?1 AND document_id=?2 AND op_id=?3")
+            .bind(f.workspace.as_bytes().as_slice()).bind(f.document.as_bytes().as_slice()).bind(winner.command.as_bytes().as_slice())
+            .fetch_one(&f.pool).await.unwrap();
+        assert_eq!(committed, Sha256::digest(&winner.update).to_vec());
+        let excluded: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM body_save_commands WHERE workspace_id=?1 AND command_id=?2",
+        )
+        .bind(f.workspace.as_bytes().as_slice())
+        .bind(loser.command.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(excluded, 0);
+        let replay = save_off_document_body(&backend, RealtimeMode::Off, engine(), winner)
+            .await
+            .unwrap();
+        assert_eq!(replay.revision_id, saved.revision_id);
+        assert_eq!(counts(&f).await, before);
+        pool.close().await;
+        f.close().await;
+    }
+
+    #[tokio::test]
     async fn archived_wiki_history_is_readable_but_not_a_write_grant_or_receipt_oracle() {
         let f = Fixture::new().await;
         let credential = session(&f).await;
