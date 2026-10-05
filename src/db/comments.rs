@@ -1053,6 +1053,139 @@ pub async fn create_document_comment(
     Ok(Ok(created))
 }
 
+/// Normal wiki comment publication on the selected backend. PG keeps its
+/// public wrapper and lock order; family authorization, parent validation,
+/// comment, event and audit all share the already reserved current writer.
+pub async fn create_document_comment_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+    input: CreateCommentInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<CommentRow, CommentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return create_document_comment(
+            pool,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            document_id,
+            input,
+            client_ip,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        op.lock_membership_users(&[actor_user_id]).await?;
+        if !op.recheck_session(actor_user_id,session_id).await?
+            || !op.workspace_is_live(workspace_id).await?
+        { return Ok(Err(CommentDbError::NotFound)); }
+        op.lock_tree(workspace_id).await?;
+        let Some(document) = op.document_row(workspace_id,document_id).await? else {
+            return Ok(Err(CommentDbError::NotFound));
+        };
+        if document.8.is_some() || !op.document_permission(workspace_id,actor_user_id,document_id,true).await?.at_least(ProjectPermission::Edit) {
+            return Ok(Err(CommentDbError::NotFound));
+        }
+        let body = match normalize_body(input.body) {
+            Ok(body) => body,
+            Err(error) => return Ok(Err(error)),
+        };
+        let direct = match normalize_mentions(input.mentioned_user_ids) {
+            Ok(ids) => ids,
+            Err(error) => return Ok(Err(error)),
+        };
+        let groups = match normalize_mentions(input.mentioned_group_ids) {
+            Ok(ids) => ids,
+            Err(error) => return Ok(Err(error)),
+        };
+        let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+        family.require_writer()?;
+        family.require_tenant(workspace_id)?;
+        let mut mentioned = direct.into_iter().collect::<BTreeSet<_>>();
+        for group in &groups {
+            // Same tenant-scoped expansion as list_group_member_user_ids; do
+            // not impose a new cap on the original union of group members.
+            let members = family.query(
+                "SELECT user_id FROM group_members WHERE workspace_id=?1 AND group_id=?2 ORDER BY user_id",
+                &[Cell::uuid(workspace_id),Cell::uuid(*group)],
+            ).await?;
+            for member in members { mentioned.insert(member.cell(0)?.id()?); }
+        }
+        if let Some(parent) = input.parent_id {
+            let parents = family.query(
+                "SELECT document_id,task_id FROM comments WHERE workspace_id=?1 AND id=?2",
+                &[Cell::uuid(workspace_id),Cell::uuid(parent)],
+            ).await?;
+            let Some(parent) = parents.first() else { return Ok(Err(CommentDbError::NotFound)); };
+            if parent.cell(0)?.optional(Cell::id)? != Some(document_id)
+                || parent.cell(1)?.optional(Cell::id)?.is_some()
+            { return Ok(Err(CommentDbError::InvalidInput)); }
+        }
+        let comment_id = Uuid::now_v7();
+        let rows = family.query(
+            "INSERT INTO comments(id,workspace_id,document_id,parent_id,created_by,body,chosung)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)
+             RETURNING id,workspace_id,document_id,task_id,parent_id,created_by,body,resolved_at,reactions,created_at,updated_at",
+            &[Cell::uuid(comment_id),Cell::uuid(workspace_id),Cell::uuid(document_id),Cell::optional_uuid(input.parent_id),
+              Cell::uuid(actor_user_id),Cell::text(&body),Cell::text(to_chosung(&body))],
+        ).await?;
+        let Some(row) = rows.first() else { return Ok(Err(CommentDbError::NotFound)); };
+        let created = family_comment_row(row)?;
+        let payload = json!({
+            "commentId":comment_id.to_string(),"documentId":document_id.to_string(),"taskId":null,
+            "mentionedUserIds":mentioned.into_iter().map(|id|id.to_string()).collect::<Vec<_>>(),
+            "mentionedGroupIds":groups.into_iter().map(|id|id.to_string()).collect::<Vec<_>>(),
+            "parentId":input.parent_id.map(|id|id.to_string()),
+        });
+        op.append_event(EventAppend {
+            id:Uuid::now_v7(),workspace_id:Some(workspace_id),actor_user_id:Some(actor_user_id),
+            verb:"comment.created".into(),target_type:Some("comment".into()),target_id:Some(comment_id),payload:payload.clone(),
+        }).await?;
+        op.append_audit(AuditAppend {
+            id:Uuid::now_v7(),workspace_id:Some(workspace_id),actor_user_id:Some(actor_user_id),
+            verb:"comment.created".into(),target_type:Some("comment".into()),target_id:Some(comment_id),payload,
+            ip:client_ip.map(str::to_string),
+        }).await?;
+        Ok(Ok(created))
+    }.await;
+    match result {
+        Ok(Ok(created)) => {
+            tx.commit_with_cleanup()
+                .await
+                .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+            Ok(Ok(created))
+        }
+        Ok(Err(refusal)) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(CommentWriteRefusal(refusal))),
+                    cleanup,
+                ));
+            }
+            Ok(Err(refusal))
+        }
+        Err(original) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(original)),
+                    cleanup,
+                ));
+            }
+            Err(original)
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("comment write refused: {0:?}")]
+struct CommentWriteRefusal(CommentDbError);
+
 pub async fn list_project_document_comments(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1855,6 +1988,596 @@ mod selected_wiki_comment_read_tests {
             .len(),
             3
         );
+        f.pool.close().await;
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod selected_comment_write_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+
+    async fn credential(f: &Fixture) -> Uuid {
+        let id = Uuid::now_v7();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        tx.operation()
+            .create_session(
+                id,
+                f.user,
+                "comment-write-session",
+                Utc::now() + chrono::Duration::days(1),
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        id
+    }
+    fn input(body: &str, parent: Option<Uuid>) -> CreateCommentInput<'_> {
+        CreateCommentInput {
+            body,
+            parent_id: parent,
+            mentioned_user_ids: &[],
+            mentioned_group_ids: &[],
+        }
+    }
+    async fn effects(f: &Fixture) -> (i64, i64, i64, i64) {
+        sqlx::query_as("SELECT (SELECT count(*) FROM comments),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT coalesce(max(seq),0) FROM events)")
+            .fetch_one(&f.pool).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_mutation_comment_literal_parent_mentions_event_audit_atomic_retry() {
+        let f = Fixture::new().await;
+        let credential = credential(&f).await;
+        let parent = create_document_comment_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            f.document,
+            input(" 부모 😀 ", None),
+            Some("127.0.0.1"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(parent.body, "부모 😀");
+        assert_eq!(
+            (
+                parent.document_id,
+                parent.task_id,
+                parent.parent_id,
+                parent.created_by
+            ),
+            (Some(f.document), None, None, f.user)
+        );
+        let member = Uuid::now_v7();
+        sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,'comment-mention@example.test','Mention')").bind(member.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'member')")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(member.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let group = Uuid::now_v7();
+        sqlx::query("INSERT INTO groups(id,workspace_id,name) VALUES(?1,?2,'Comment mentions')")
+            .bind(group.as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        for user in [member, f.user] {
+            sqlx::query(
+                "INSERT INTO group_members(workspace_id,group_id,user_id) VALUES(?1,?2,?3)",
+            )
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(group.as_bytes().as_slice())
+            .bind(user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        }
+        let direct = [f.user, f.user];
+        let groups = [group, group];
+        let reply = create_document_comment_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            f.document,
+            CreateCommentInput {
+                body: " 실제 댓글 中 😀 ",
+                parent_id: Some(parent.id),
+                mentioned_user_ids: &direct,
+                mentioned_group_ids: &groups,
+            },
+            Some("127.0.0.1"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(reply.body, "실제 댓글 中 😀");
+        assert_eq!(reply.parent_id, Some(parent.id));
+        assert_eq!(reply.reactions, json!({}));
+        let chosung: String = sqlx::query_scalar("SELECT chosung FROM comments WHERE id=?1")
+            .bind(reply.id.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(chosung, to_chosung("실제 댓글 中 😀"));
+        let expected = json!({"commentId":reply.id.to_string(),"documentId":f.document.to_string(),"taskId":null,
+            "mentionedUserIds":[f.user,member].into_iter().collect::<BTreeSet<_>>().into_iter().map(|id|id.to_string()).collect::<Vec<_>>(),
+            "mentionedGroupIds":[group.to_string()],"parentId":parent.id.to_string()});
+        let event: (String, String, String) =
+            sqlx::query_as("SELECT verb,channel,payload FROM events WHERE target_id=?1")
+                .bind(reply.id.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (event.0.as_str(), event.1.as_str()),
+            ("comment.created", "web")
+        );
+        assert_eq!(serde_json::from_str::<Value>(&event.2).unwrap(), expected);
+        let audit: (String, String) =
+            sqlx::query_as("SELECT payload,ip FROM audit_log WHERE target_id=?1")
+                .bind(reply.id.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&audit.0).unwrap(), expected);
+        assert_eq!(audit.1, "127.0.0.1");
+        let baseline = effects(&f).await;
+        sqlx::query("CREATE TRIGGER reject_comment_audit BEFORE INSERT ON audit_log WHEN NEW.verb='comment.created' BEGIN SELECT RAISE(ABORT,'comment audit failure'); END;").execute(&f.pool).await.unwrap();
+        assert!(create_document_comment_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            f.document,
+            input("retry literal", Some(parent.id)),
+            None
+        )
+        .await
+        .is_err());
+        assert_eq!(effects(&f).await, baseline);
+        let missing: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM comments WHERE body='retry literal'")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(missing, 0);
+        sqlx::query("DROP TRIGGER reject_comment_audit")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let retry = create_document_comment_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            f.document,
+            input("retry literal", Some(parent.id)),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_ne!(retry.id, reply.id);
+        assert_eq!(retry.parent_id, Some(parent.id));
+        assert_eq!(
+            effects(&f).await,
+            (
+                baseline.0 + 1,
+                baseline.1 + 1,
+                baseline.2 + 1,
+                baseline.3 + 1
+            )
+        );
+        let page = list_document_comments_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            f.document,
+            CommentListQuery {
+                limit: 100,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            page.items.iter().map(|row| row.id).collect::<Vec<_>>(),
+            [parent.id, reply.id, retry.id]
+        );
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|row| row.body.as_str())
+                .collect::<Vec<_>>(),
+            ["부모 😀", "실제 댓글 中 😀", "retry literal"]
+        );
+        f.pool.close().await;
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_mutation_comment_current_actor_tenant_parent_limits_denials_and_healthy_retry(
+    ) {
+        let f = Fixture::new().await;
+        let credential = credential(&f).await;
+        let parent = create_document_comment_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            f.document,
+            input("Parent", None),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let other_doc = Uuid::now_v7();
+        sqlx::query("INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,'Other wiki',?3,'V',2,'published',2,?4,'{}')")
+            .bind(other_doc.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(other_doc.simple().to_string()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let baseline = effects(&f).await;
+        assert!(matches!(
+            create_document_comment_backend(
+                &f.backend,
+                f.workspace,
+                Uuid::now_v7(),
+                credential,
+                f.document,
+                input("Wrong actor", None),
+                None
+            )
+            .await
+            .unwrap(),
+            Err(CommentDbError::NotFound)
+        ));
+        assert!(matches!(
+            create_document_comment_backend(
+                &f.backend,
+                Uuid::now_v7(),
+                f.user,
+                credential,
+                f.document,
+                input("Wrong tenant", None),
+                None
+            )
+            .await
+            .unwrap(),
+            Err(CommentDbError::NotFound)
+        ));
+        assert!(matches!(
+            create_document_comment_backend(
+                &f.backend,
+                f.workspace,
+                f.user,
+                credential,
+                other_doc,
+                input("Wrong reply scope", Some(parent.id)),
+                None
+            )
+            .await
+            .unwrap(),
+            Err(CommentDbError::InvalidInput)
+        ));
+        assert!(matches!(
+            create_document_comment_backend(
+                &f.backend,
+                f.workspace,
+                f.user,
+                credential,
+                f.document,
+                input("Missing parent", Some(Uuid::now_v7())),
+                None
+            )
+            .await
+            .unwrap(),
+            Err(CommentDbError::NotFound)
+        ));
+        for body in [" ".to_string(), "😀".repeat(4001)] {
+            assert!(matches!(
+                create_document_comment_backend(
+                    &f.backend,
+                    f.workspace,
+                    f.user,
+                    credential,
+                    f.document,
+                    input(&body, None),
+                    None
+                )
+                .await
+                .unwrap(),
+                Err(CommentDbError::InvalidInput)
+            ));
+        }
+        let too_many = (1..=51).map(Uuid::from_u128).collect::<Vec<_>>();
+        for (users, groups) in [
+            (too_many.as_slice(), &[][..]),
+            (&[][..], too_many.as_slice()),
+        ] {
+            assert!(matches!(
+                create_document_comment_backend(
+                    &f.backend,
+                    f.workspace,
+                    f.user,
+                    credential,
+                    f.document,
+                    CreateCommentInput {
+                        body: "Too many",
+                        parent_id: None,
+                        mentioned_user_ids: users,
+                        mentioned_group_ids: groups
+                    },
+                    None
+                )
+                .await
+                .unwrap(),
+                Err(CommentDbError::InvalidInput)
+            ));
+        }
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            create_document_comment_backend(
+                &f.backend,
+                f.workspace,
+                f.user,
+                credential,
+                f.document,
+                input("Revoked", None),
+                None
+            )
+            .await
+            .unwrap(),
+            Err(CommentDbError::NotFound)
+        ));
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE memberships SET role='guest' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let viewer_group = Uuid::now_v7();
+        sqlx::query("INSERT INTO groups(id,workspace_id,name) VALUES(?1,?2,'Write test viewers')")
+            .bind(viewer_group.as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO group_members(workspace_id,group_id,user_id) VALUES(?1,?2,?3)")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(viewer_group.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO document_members(id,workspace_id,document_id,group_id,role) VALUES(?1,?2,?3,?4,'viewer')")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.document.as_bytes().as_slice()).bind(viewer_group.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert_eq!(
+            list_document_comments_backend(
+                &f.backend,
+                f.workspace,
+                f.user,
+                credential,
+                f.document,
+                CommentListQuery {
+                    limit: 100,
+                    cursor: None
+                }
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .items[0]
+                .id,
+            parent.id
+        );
+        assert!(matches!(
+            create_document_comment_backend(
+                &f.backend,
+                f.workspace,
+                f.user,
+                credential,
+                f.document,
+                input("Viewer", None),
+                None
+            )
+            .await
+            .unwrap(),
+            Err(CommentDbError::NotFound)
+        ));
+        sqlx::query("UPDATE memberships SET role='owner' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE documents SET deleted_at=1 WHERE id=?1")
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            create_document_comment_backend(
+                &f.backend,
+                f.workspace,
+                f.user,
+                credential,
+                f.document,
+                input("Trashed", None),
+                None
+            )
+            .await
+            .unwrap(),
+            Err(CommentDbError::NotFound)
+        ));
+        sqlx::query("UPDATE documents SET deleted_at=NULL WHERE id=?1")
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let project = Uuid::now_v7();
+        sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'CMT','Comment project','workspace',?3)").bind(project.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("UPDATE documents SET project_id=?1 WHERE id=?2")
+            .bind(project.as_bytes().as_slice())
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            create_document_comment_backend(
+                &f.backend,
+                f.workspace,
+                f.user,
+                credential,
+                f.document,
+                input("Moved", None),
+                None
+            )
+            .await
+            .unwrap(),
+            Err(CommentDbError::NotFound)
+        ));
+        assert_eq!(effects(&f).await, baseline);
+        sqlx::query("UPDATE documents SET project_id=NULL WHERE id=?1")
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let retry = create_document_comment_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            f.document,
+            input("Healthy after refusal", Some(parent.id)),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(retry.parent_id, Some(parent.id));
+        assert_eq!(
+            effects(&f).await,
+            (
+                baseline.0 + 1,
+                baseline.1 + 1,
+                baseline.2 + 1,
+                baseline.3 + 1
+            )
+        );
+        f.pool.close().await;
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_mutation_waiting_writers_recheck_committed_revocation_without_effects() {
+        let f = Fixture::new().await;
+        let credential = credential(&f).await;
+        let race_pool = crate::db::pool::connect_sqlite_app(&f.path, 3)
+            .await
+            .unwrap();
+        let backend = Backend::Sqlite(race_pool.clone());
+        let baseline = effects(&f).await;
+        let mut revoker = backend.begin_write().await.unwrap();
+        let (workspace, user, document) = (f.workspace, f.user, f.document);
+        let (tag_started, tag_waiting) = tokio::sync::oneshot::channel();
+        let tag_backend = backend.clone();
+        let tag = tokio::spawn(async move {
+            tag_started.send(()).unwrap();
+            let actor = crate::db::collections::Actor {
+                user_id: user,
+                credential_id: credential,
+                client_ip: None,
+            };
+            crate::db::document_tags::create_tag_backend(
+                &tag_backend,
+                workspace,
+                &actor,
+                "Queued before revocation",
+                "blue",
+            )
+            .await
+        });
+        let (comment_started, comment_waiting) = tokio::sync::oneshot::channel();
+        let comment_backend = backend.clone();
+        let comment = tokio::spawn(async move {
+            comment_started.send(()).unwrap();
+            create_document_comment_backend(
+                &comment_backend,
+                workspace,
+                user,
+                credential,
+                document,
+                input("Queued before revocation", None),
+                None,
+            )
+            .await
+        });
+        tag_waiting.await.unwrap();
+        comment_waiting.await.unwrap();
+        let OperationTx::SqliteFamily(family) = revoker.operation() else {
+            unreachable!()
+        };
+        family
+            .execute(
+                "UPDATE sessions SET revoked_at=1 WHERE id=?1",
+                &[Cell::uuid(credential)],
+            )
+            .await
+            .unwrap();
+        revoker.commit().await.unwrap();
+        assert!(matches!(
+            tag.await.unwrap().unwrap(),
+            Err(crate::db::document_tags::TagDbError::NotFound)
+        ));
+        assert!(matches!(
+            comment.await.unwrap().unwrap(),
+            Err(CommentDbError::NotFound)
+        ));
+        assert_eq!(effects(&f).await, baseline);
+        let tags: i64 = sqlx::query_scalar("SELECT count(*) FROM document_tags")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(tags, 0);
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            create_document_comment_backend(
+                &f.backend,
+                workspace,
+                user,
+                credential,
+                document,
+                input("Healthy after waiting", None),
+                None
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .body,
+            "Healthy after waiting"
+        );
+        race_pool.close().await;
         f.pool.close().await;
         std::fs::remove_dir_all(&f.root).unwrap();
     }

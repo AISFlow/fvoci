@@ -21,9 +21,9 @@ use crate::api::dto::OkResponse;
 use crate::auth::scopes::ApiTokenScope;
 use crate::collections::{iso_millis, parse_name};
 use crate::db::document_tags::{
-    assign_tag, create_tag, delete_tag, list_document_tags_backend as list_document_tags,
-    list_tags, unassign_tag, update_tag, Affiliation, TagDbError, TagRow, TAG_POOL_LIMIT_DEFAULT,
-    TAG_POOL_LIMIT_MAX, TAG_QUERY_MAX,
+    assign_tag_backend as assign_tag, create_tag_backend as create_tag, delete_tag,
+    list_document_tags_backend as list_document_tags, list_tags, unassign_tag, update_tag,
+    Affiliation, TagDbError, TagRow, TAG_POOL_LIMIT_DEFAULT, TAG_POOL_LIMIT_MAX, TAG_QUERY_MAX,
 };
 use crate::db::labels::label_color_is_valid;
 use crate::error::{AppError, ProblemCode};
@@ -187,21 +187,10 @@ async fn create_route(
     if !label_color_is_valid(&color) {
         return Err(invalid());
     }
-    let tag = create_tag(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/document_tags.rs")
-            .map_err(internal)?,
-        workspace_id,
-        &actor,
-        &name,
-        &color,
-    )
-    .await
-    .map_err(internal)?
-    .map_err(map_tag_error)?;
+    let tag = create_tag(&state.auth.db.pool, workspace_id, &actor, &name, &color)
+        .await
+        .map_err(internal)?
+        .map_err(map_tag_error)?;
     Ok((StatusCode::CREATED, Json(tag_output(tag))).into_response())
 }
 
@@ -342,12 +331,7 @@ async fn assign_for(
     let Json(body) = body.map_err(AppError::from)?;
     let tag_id = parse_body_uuid(&body.tag_id).ok_or_else(invalid)?;
     let tag = assign_tag(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/document_tags.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         &actor,
         document_id,
