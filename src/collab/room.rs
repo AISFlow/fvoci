@@ -1642,6 +1642,7 @@ impl RoomActor {
                         Some(RoomCommand::ReconcileForTest {
                             actor, credential, op_id, expected_tail, payload, reply,
                         }) => {
+                            eprintln!("P102 diagnostic handler before kind={:?} proof_present={} guard_present={} fence_lost={} connections={} writer_generation={:?} committed_generation={} committed_tail={} expected_tail={}", self.kind, self.native_consumer_proof().is_some(), self.room_guard.is_some(), self.fence_lost, self.connections.len(), self.writer_generation, self.committed_writer_generation, self.committed.tail_seq, expected_tail);
                             let digest = payload_digest(&payload);
                             let result = self.reconcile_ambiguous_append(
                                 actor, credential, op_id, expected_tail, &payload, &digest,
@@ -1649,6 +1650,7 @@ impl RoomActor {
                             let reload = if result.is_none() {
                                 self.reload_primary_or_close_room().await
                             } else { true };
+                            eprintln!("P102 diagnostic handler after ack_present={} reloaded={} proof_present={} guard_present={} fence_lost={} connections={}", result.is_some(), reload, self.native_consumer_proof().is_some(), self.room_guard.is_some(), self.fence_lost, self.connections.len());
                             let _ = reply.send((result, reload));
                         }
                         Some(RoomCommand::Shutdown) => {
@@ -5062,6 +5064,7 @@ mod remote_task_finish_tests {
     async fn remote_task_ambiguous_receipt_and_readback_finish_retain_original_owner() {
         for (receipt, mode) in [(true, 1), (true, 3), (false, 1), (false, 3)] {
             let mut room = TaskRoom::new().await;
+            eprintln!("P102 diagnostic subcase receipt={receipt} mode={mode}");
             let op_id = if receipt {
                 room.sync().await;
                 assert_eq!(
@@ -5083,6 +5086,7 @@ mod remote_task_finish_tests {
                 .handle
                 .reconcile_for_test(room.f.user, room.credential, op_id, 0, room.payload.clone())
                 .await;
+            eprintln!("P102 diagnostic returned receipt={receipt} mode={mode} ack_present={} reloaded={reloaded}", ack.is_some());
             room.driver
                 .assert_original_finish_for(if receipt { RECEIPT } else { LOAD })
                 .await;

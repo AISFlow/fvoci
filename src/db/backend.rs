@@ -1207,6 +1207,115 @@ pub(crate) mod maintenance_claim_driver_tests {
         encoded.into_response()
     }
 
+    // Bounded allowlist view of the real SDK requests already recorded above.
+    // Never dump whole bodies: args, headers, credentials, URLs and native
+    // content remain excluded. Hashed batons retain original-stream equality.
+    fn sanitized_request_trace(requests: &[Value]) -> Value {
+        use sha2::{Digest, Sha256};
+
+        let sql_view = |statement: &Value| {
+            let sql = statement["sql"].as_str();
+            json!({
+                "sql": sql.map(|sql| sql.chars().take(1024).collect::<String>()),
+                "sql_truncated": sql.is_some_and(|sql| sql.chars().count() > 1024),
+                "sql_id": statement["sql_id"].as_i64(),
+            })
+        };
+        let first = requests.len().saturating_sub(128);
+        let records = requests.iter().enumerate().skip(first).map(|(index, body)| {
+            let baton = body["baton"].as_str().map(|baton| {
+                format!("{:x}", Sha256::digest(baton.as_bytes()))
+            });
+            let wire_requests = body["requests"].as_array().map_or_else(
+                || vec![body],
+                |requests| requests.iter().take(16).collect(),
+            );
+            let operations = wire_requests.into_iter().map(|request| {
+                let kind = if request.get("batch").is_some() && request["type"].is_null() {
+                    "cursor"
+                } else {
+                    match request["type"].as_str() {
+                        Some("batch") => "batch",
+                        Some("describe") => "describe",
+                        Some("execute") => "execute",
+                        Some("get_autocommit") => "get_autocommit",
+                        Some("store_sql") => "store_sql",
+                        Some("close_sql") => "close_sql",
+                        Some("close") => "close",
+                        _ => "unknown",
+                    }
+                };
+                let steps = request["batch"]["steps"].as_array();
+                json!({
+                    "type": kind,
+                    "statement": sql_view(request),
+                    "execute_statement": sql_view(&request["stmt"]),
+                    "steps": steps.map(|steps| steps.iter().take(16).map(|step| sql_view(&step["stmt"])).collect::<Vec<_>>()),
+                    "step_count": steps.map(Vec::len),
+                })
+            }).collect::<Vec<_>>();
+            json!({"index":index,"baton_sha256":baton,"operations":operations,
+                "request_count":body["requests"].as_array().map(Vec::len)})
+        }).collect::<Vec<_>>();
+        json!({"total_requests":requests.len(),"first_index":first,"records":records})
+    }
+
+    #[test]
+    fn sdk_trace_preserves_statement_and_stream_identity_without_private_fields() {
+        let requests = vec![
+            json!({"baton":"private-baton-a","headers":{"authorization":"private-auth"},
+                "url":"private-url","requests":[{"type":"describe","sql":"SELECT 1","sql_id":7},
+                {"type":"batch","batch":{"steps":[{"stmt":{"sql":"SELECT receipt","args":["private-native"]}}]}}]}),
+            json!({"baton":"private-baton-a","batch":{"steps":[{"stmt":{"sql":"SELECT load","sql_id":8,"args":["private-arg"]}}]}}),
+            json!({"baton":"private-baton-b","requests":[{"type":"close","body":"private-body"}]}),
+        ];
+        let trace = sanitized_request_trace(&requests);
+        assert_eq!(trace["total_requests"], 3);
+        assert_eq!(
+            trace["records"][0]["baton_sha256"],
+            trace["records"][1]["baton_sha256"]
+        );
+        assert_ne!(
+            trace["records"][0]["baton_sha256"],
+            trace["records"][2]["baton_sha256"]
+        );
+        assert_eq!(trace["records"][0]["operations"][0]["type"], "describe");
+        assert_eq!(
+            trace["records"][0]["operations"][0]["statement"]["sql_id"],
+            7
+        );
+        assert_eq!(
+            trace["records"][0]["operations"][1]["steps"][0]["sql"],
+            "SELECT receipt"
+        );
+        assert_eq!(trace["records"][1]["operations"][0]["type"], "cursor");
+        assert_eq!(
+            trace["records"][1]["operations"][0]["steps"][0]["sql_id"],
+            8
+        );
+        assert_eq!(trace["records"][2]["operations"][0]["type"], "close");
+        let encoded = trace.to_string();
+        assert!(!encoded.contains("private-"));
+        let long = sanitized_request_trace(&vec![
+            json!({"requests":[{"type":"describe","sql":"x".repeat(2048)}]});
+            129
+        ]);
+        assert_eq!(long["first_index"], 1);
+        assert_eq!(long["records"].as_array().unwrap().len(), 128);
+        assert!(
+            long["records"][0]["operations"][0]["statement"]["sql_truncated"]
+                .as_bool()
+                .unwrap()
+        );
+        assert_eq!(
+            long["records"][0]["operations"][0]["statement"]["sql"]
+                .as_str()
+                .unwrap()
+                .len(),
+            1024
+        );
+    }
+
     pub(crate) struct Fixture {
         root: PathBuf,
         endpoint: String,
@@ -1340,6 +1449,10 @@ pub(crate) mod maintenance_claim_driver_tests {
         }
         pub(crate) async fn assert_original_finish_for(&self, needle: &str) {
             let model = self.model.lock().await;
+            eprintln!(
+                "S16 diagnostic selected_sql={needle:?} requests={}",
+                sanitized_request_trace(&model.requests)
+            );
             let selected = model
                 .requests
                 .iter()
