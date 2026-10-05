@@ -76,7 +76,7 @@ pub enum MaintenanceConsumerError {
     #[error(transparent)]
     CommitUnknown(#[from] crate::db::backend::CommitCleanupUnknown),
     #[error(transparent)]
-    Claim(#[from] claim::MaintenanceClaimError),
+    Claim(#[from] Box<claim::MaintenanceClaimError>),
     #[error("owned maintenance adapter stopped: {source}")]
     AdapterStopped {
         #[source]
@@ -107,7 +107,20 @@ pub enum MaintenanceConsumerError {
     },
 }
 
+impl From<claim::MaintenanceClaimError> for MaintenanceConsumerError {
+    fn from(error: claim::MaintenanceClaimError) -> Self {
+        Self::Claim(Box::new(error))
+    }
+}
+
 impl MaintenanceConsumerError {
+    fn claim_error(&self) -> Option<&claim::MaintenanceClaimError> {
+        match self {
+            Self::Claim(error) => Some(error.as_ref()),
+            _ => None,
+        }
+    }
+
     pub(crate) fn stops_on_backend(&self, backend: &crate::db::backend::Backend) -> bool {
         // This value is returned only after the target writer's acknowledged
         // rollback. A failed rollback wraps it and is never a healthy skip.
@@ -139,9 +152,10 @@ impl MaintenanceConsumerError {
     pub(crate) fn stops_sweep(&self) -> bool {
         // A confirmed rollback of one ordinary SQL failure can leave later
         // rows healthy. Loss/cancellation/finish uncertainty stops this owner.
-        match self {
-            Self::RevisionRefused(_) => false,
-            Self::Database(error) | Self::Claim(claim::MaintenanceClaimError::Database(error)) => {
+        match (self, self.claim_error()) {
+            (Self::RevisionRefused(_), _) => false,
+            (Self::Database(error), _)
+            | (_, Some(claim::MaintenanceClaimError::Database(error))) => {
                 if crate::db::backend::is_rollback_cleanup_unknown(error) {
                     return true;
                 }
@@ -167,16 +181,20 @@ impl MaintenanceConsumerError {
         use crate::db::backend::{
             CommitCleanupUnknown, CommitSettlement, RemoteSettlementUnconfirmed,
         };
-        match self {
-            Self::FinishAfterFailure { source, finish } => {
+        match (self, self.claim_error()) {
+            (Self::FinishAfterFailure { source, finish }, _) => {
                 source.remote_settlement_unconfirmed() || finish.remote_settlement_unconfirmed()
             }
-            Self::CommitUnknown(error) => error.settlement == CommitSettlement::RemoteUnconfirmed,
-            Self::Claim(claim::MaintenanceClaimError::CommitUnknown { settlement, .. }) => {
+            (Self::CommitUnknown(error), _) => {
+                error.settlement == CommitSettlement::RemoteUnconfirmed
+            }
+            (_, Some(claim::MaintenanceClaimError::CommitUnknown { settlement, .. })) => {
                 *settlement == CommitSettlement::RemoteUnconfirmed
             }
-            Self::DigestFinishUnconfirmed { source, .. } => source.remote_settlement_unconfirmed(),
-            Self::Database(error) => {
+            (Self::DigestFinishUnconfirmed { source, .. }, _) => {
+                source.remote_settlement_unconfirmed()
+            }
+            (Self::Database(error), _) => {
                 let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
                 while let Some(error) = source {
                     if error.is::<RemoteSettlementUnconfirmed>()
@@ -204,17 +222,18 @@ impl MaintenanceConsumerError {
     }
 
     pub(crate) fn cleanup_unconfirmed(&self) -> bool {
-        match self {
-            Self::FinishAfterFailure { source, finish } => {
+        match (self, self.claim_error()) {
+            (Self::FinishAfterFailure { source, finish }, _) => {
                 source.cleanup_unconfirmed() || finish.cleanup_unconfirmed()
             }
-            Self::AdapterStopped { abandon_claim, .. } => *abandon_claim,
-            Self::Claim(claim::MaintenanceClaimError::CommitUnknown { cleanup_error, .. }) => {
+            (Self::AdapterStopped { abandon_claim, .. }, _) => *abandon_claim,
+            (_, Some(claim::MaintenanceClaimError::CommitUnknown { cleanup_error, .. })) => {
                 cleanup_error.is_some()
             }
-            Self::DigestFinishUnconfirmed { source, .. } => source.cleanup_unconfirmed(),
-            Self::CommitUnknown(error) => error.cleanup_error.is_some(),
-            Self::Database(error) | Self::Claim(claim::MaintenanceClaimError::Database(error)) => {
+            (Self::DigestFinishUnconfirmed { source, .. }, _) => source.cleanup_unconfirmed(),
+            (Self::CommitUnknown(error), _) => error.cleanup_error.is_some(),
+            (Self::Database(error), _)
+            | (_, Some(claim::MaintenanceClaimError::Database(error))) => {
                 if crate::db::backend::is_rollback_cleanup_unknown(error) {
                     return true;
                 }
@@ -2001,9 +2020,7 @@ mod enumeration_finish_tests {
                     panic!("typed enumeration uncertainty must stop the actual loop before another tick");
                 }
             };
-            let error = result
-                .err()
-                .expect("cleanup uncertainty cannot become successful drain");
+            let error = result.expect_err("cleanup uncertainty cannot become successful drain");
             let MaintenanceConsumerError::Database(sqlx::Error::AnyDriverError(source)) = &error
             else {
                 panic!("canonical read cleanup receipt must survive the actual loop: {error}");

@@ -1738,8 +1738,7 @@ impl OperationTx<'_, '_> {
         workspace: Uuid,
     ) -> Result<WorkspacePurgeResult, sqlx::Error> {
         let keys: Vec<String>;
-        let deleted;
-        match self {
+        let deleted = match self {
             Self::Postgres(tx) => {
                 let eligible: Option<bool> = sqlx::query_scalar(
                     "SELECT deleted_at IS NOT NULL FROM fvoci.workspaces WHERE id=$1 FOR UPDATE",
@@ -1763,13 +1762,13 @@ impl OperationTx<'_, '_> {
                     .bind(workspace)
                     .execute(&mut ***tx)
                     .await?;
-                deleted = sqlx::query(
+                sqlx::query(
                     "DELETE FROM fvoci.workspaces WHERE id=$1 AND deleted_at IS NOT NULL",
                 )
                 .bind(workspace)
                 .execute(&mut ***tx)
                 .await?
-                .rows_affected();
+                .rows_affected()
             }
             Self::SqliteFamily(tx) => {
                 tx.require_writer()?;
@@ -1801,14 +1800,14 @@ impl OperationTx<'_, '_> {
                     &[Cell::uuid(workspace)],
                 )
                 .await?;
-                deleted = tx
+                tx
                     .execute(
                         "DELETE FROM workspaces WHERE id=?1 AND deleted_at IS NOT NULL",
                         &[Cell::uuid(workspace)],
                     )
-                    .await?;
+                    .await?
             }
-        }
+        };
         if deleted != 1 {
             return Err(sqlx::Error::Protocol(
                 "workspaces.purge: locked workspace was not deleted".into(),

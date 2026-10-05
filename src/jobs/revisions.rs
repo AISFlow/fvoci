@@ -1188,7 +1188,8 @@ mod family_revision_native_tests {
         assert_eq!(stats.snapshots_created, 5);
         assert!(resume.sweep_complete());
         assert_eq!(count(&f).await, 21);
-        let rows: Vec<(String, String, String, Option<Vec<u8>>, i64)> = sqlx::query_as(
+        type ScheduledHistoryRow = (String, String, String, Option<Vec<u8>>, i64);
+        let rows: Vec<ScheduledHistoryRow> = sqlx::query_as(
             "SELECT reason,content_json,text,created_by,encoding FROM revisions ORDER BY id",
         )
         .fetch_all(&f.pool)
