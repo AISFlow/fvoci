@@ -11,6 +11,10 @@ import { lstatSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import * as Y from "yjs";
+import { MessageType } from "@hocuspocus/provider";
+import * as decoding from "lib0/decoding";
+import * as encoding from "lib0/encoding";
+import * as sync from "y-protocols/sync";
 import { yDocToTiptapJson } from "../../../packages/editor/src/collab-tiptap";
 import { emojiGlyph } from "../../../packages/editor/src/emoji-glyph";
 import { extractText, walkTiptap, type TiptapWalkNode } from "../../../packages/editor/src/extract";
@@ -34,7 +38,7 @@ import {
   persistBody,
   waitConnected,
 } from "./collab-helpers";
-import { SESSION_COOKIE, UUID_RE } from "./collab-wire";
+import { decodeHocuspocusFrame, frameBytes, SESSION_COOKIE, UUID_RE } from "./collab-wire";
 
 type DocumentMeta = components["schemas"]["DocumentMetaResponse"];
 type RevisionDetail = components["schemas"]["RevisionDetailResponse"];
@@ -215,13 +219,79 @@ function expectCanonicalOracleControls(
   return controls.map(([label]) => label);
 }
 
-function expectRetainedNative(detail: RevisionDetail, retained: string, removed: string): void {
-  // This is a read-only oracle using maintained Yjs, never an editor reset,
-  // JSON reseed, native parser, or server-side JavaScript fallback.
-  const update = Uint8Array.from(Buffer.from(detail.ySnapshot, "base64"));
+type NativeWireFrame = { direction: "sent" | "received"; room: string; bytes: Uint8Array };
+
+function observeNativeWire(page: Page): NativeWireFrame[] {
+  const frames: NativeWireFrame[] = [];
+  const syncTypes: readonly number[] = [MessageType.Sync];
+  page.on("websocket", (socket) => {
+    if (!socket.url().includes("/collab")) return;
+    const observe = (direction: "sent" | "received", payload: string | Buffer) => {
+      const bytes = frameBytes(payload);
+      const frame = decodeHocuspocusFrame(bytes);
+      if (frame?.kind === "other" && syncTypes.includes(frame.type))
+        frames.push({ direction, room: frame.routingKey, bytes: Uint8Array.from(bytes) });
+    };
+    socket.on("framesent", (frame) => {
+      observe("sent", frame.payload);
+    });
+    socket.on("framereceived", (frame) => {
+      observe("received", frame.payload);
+    });
+  });
+  return frames;
+}
+
+function nativeHistory(frames: NativeWireFrame[], room: string, receivedOnly: boolean): Y.Doc {
+  const native = new Y.Doc({ gc: false });
+  try {
+    let receivedStep2 = 0;
+    for (const frame of frames) {
+      if (frame.room !== room || (receivedOnly && frame.direction !== "received")) continue;
+      // Reuse the existing Hocuspocus frame filter and installed public codecs.
+      // The response encoder is a local sink: no reply is sent to any socket.
+      const decoder = decoding.createDecoder(frame.bytes);
+      expect(decoding.readVarString(decoder)).toBe(room);
+      expect(decoding.readVarUint(decoder)).toBe(MessageType.Sync);
+      const kind = sync.readSyncMessage(
+        decoder,
+        encoding.createEncoder(),
+        native,
+        null,
+        (error) => {
+          throw error;
+        },
+      );
+      expect(decoder.pos).toBe(frame.bytes.length);
+      if (frame.direction === "received" && kind === sync.messageYjsSyncStep2) receivedStep2++;
+    }
+    expect(receivedStep2, "real server full-sync response is required").toBeGreaterThan(0);
+    return native;
+  } catch (error) {
+    native.destroy();
+    throw error;
+  }
+}
+
+function expectRetainedNative(
+  detail: RevisionDetail,
+  native: Y.Doc,
+  retained: string,
+  removed: string,
+): void {
+  // Revision ySnapshot is a DSSV snapshot, not a full update. Its full retained
+  // native history comes only from observed real sync frames (gc=false).
+  const snapshot = Y.decodeSnapshot(Uint8Array.from(Buffer.from(detail.ySnapshot, "base64")));
+  expect(snapshot.sv.size).toBeGreaterThan(0);
+  expect(snapshot.ds.clients.size, "revision snapshot retains the deletion set").toBeGreaterThan(0);
+  expect(
+    Y.equalSnapshots(Y.snapshot(native), snapshot),
+    "revision matches observed native state",
+  ).toBe(true);
+  const update = Y.encodeStateAsUpdate(native);
   expect(update.byteLength).toBeGreaterThan(2);
   const decoded = Y.decodeUpdate(update);
-  expect(decoded.ds.clients.size, "the native snapshot retains the deletion set").toBeGreaterThan(
+  expect(decoded.ds.clients.size, "full native history retains the deletion set").toBeGreaterThan(
     0,
   );
   const retainedStrings = decoded.structs.flatMap((struct) =>
@@ -232,21 +302,59 @@ function expectRetainedNative(detail: RevisionDetail, retained: string, removed:
   expect(retainedStrings.join(""), "deleted source bytes survive the native history").toContain(
     removed,
   );
-  const native = new Y.Doc({ gc: false });
+  const xml: unknown = native.getXmlFragment("prosemirror").toJSON();
+  if (typeof xml !== "string") throw new Error("native XML serialization must be a string");
+  expect([...native.share.keys()]).toEqual(["prosemirror"]);
+  const ids = documentNodeIds(detail.contentJson);
+  expectCanonicalContent(yDocToTiptapJson(native), retained, removed, ids);
+  expect(xml).not.toContain(removed);
+  for (const id of ids) expect(xml).toContain(id);
+  const historical = new Y.Doc({ gc: false });
   try {
-    Y.applyUpdate(native, update);
-    const xml: unknown = native.getXmlFragment("prosemirror").toJSON();
-    if (typeof xml !== "string") throw new Error("native XML serialization must be a string");
-    // Named emoji atoms are intentional schema nodes. Read the native update
-    // through the same maintained converter and glyph mapping as the editor.
-    const ids = documentNodeIds(detail.contentJson);
-    expectCanonicalContent(yDocToTiptapJson(native), retained, removed, ids);
-    expect(xml).not.toContain(removed);
-    expect(ids.length).toBeGreaterThan(0);
-    for (const id of ids) expect(xml).toContain(id);
+    Y.createDocFromSnapshot(native, snapshot, historical);
+    const content = yDocToTiptapJson(historical);
+    expect(content).toEqual(detail.contentJson);
+    expectCanonicalContent(content, retained, removed, ids);
   } finally {
-    native.destroy();
+    historical.destroy();
   }
+}
+
+function expectNativeHistoryControls(
+  detail: RevisionDetail,
+  native: Y.Doc,
+  retained: string,
+  removed: string,
+): string[] {
+  expectRetainedNative(detail, native, retained, removed);
+  const snapshot = Y.decodeSnapshot(Buffer.from(detail.ySnapshot, "base64"));
+  const wrongVector = new Map(snapshot.sv);
+  const first = wrongVector.entries().next().value;
+  if (!first) throw new Error("nonempty native snapshot state vector is required");
+  wrongVector.set(first[0], first[1] + 1);
+  const wrongSnapshot = Y.encodeSnapshot(Y.createSnapshot(snapshot.ds, wrongVector));
+  expect(() => {
+    expectRetainedNative(
+      { ...detail, ySnapshot: Buffer.from(wrongSnapshot).toString("base64") },
+      native,
+      retained,
+      removed,
+    );
+  }, "a valid but wrong revision snapshot must fail").toThrow();
+  const missingHistory = new Y.Doc({ gc: true });
+  try {
+    // A native-byte observer copy only, never a live editor or JSON reseed.
+    Y.applyUpdate(missingHistory, Y.encodeStateAsUpdate(native));
+    missingHistory.gc = false;
+    expect(Y.equalSnapshots(Y.snapshot(missingHistory), snapshot)).toBe(true);
+    expect(yDocToTiptapJson(missingHistory)).toEqual(detail.contentJson);
+    expect(() => {
+      expectRetainedNative(detail, missingHistory, retained, removed);
+    }, "matching text/snapshot without deleted native source bytes must fail").toThrow();
+  } finally {
+    missingHistory.destroy();
+  }
+  return ["valid wrong snapshot", "same text and snapshot but missing deleted native source bytes"];
 }
 
 test("selected normal main: Vue setup, stable wiki create, native persist, manual revision and fresh actor readback", async ({
@@ -265,6 +373,8 @@ test("selected normal main: Vue setup, stable wiki create, native persist, manua
   const pageB = await ctxB.newPage();
   const wireA = attachCollabWire(pageA);
   const wireB = attachCollabWire(pageB);
+  const nativeWireA = observeNativeWire(pageA);
+  const nativeWireB = observeNativeWire(pageB);
   const cspA = watchCspViolations(pageA);
   const cspB = watchCspViolations(pageB);
   let failed = true;
@@ -369,7 +479,14 @@ test("selected normal main: Vue setup, stable wiki create, native persist, manua
       restoredFromId: null,
     });
     expect(saved.contentJson).toEqual(persisted.contentJson);
-    expectRetainedNative(saved, retained, removed);
+    const room = `${workspace.id}:document:${meta.id}`;
+    const nativeA = nativeHistory(nativeWireA, room, false);
+    let nativeControls: string[];
+    try {
+      nativeControls = expectNativeHistoryControls(saved, nativeA, retained, removed);
+    } finally {
+      nativeA.destroy();
+    }
 
     const fixtureUser = installSelectedMember(selected ?? "missing");
     await login(pageB, member.email, member.password);
@@ -402,13 +519,28 @@ test("selected normal main: Vue setup, stable wiki create, native persist, manua
     });
     const freshRevision = await revision(pageB, documentPath, revisionId);
     expect(freshRevision).toEqual(saved);
-    expectRetainedNative(freshRevision, retained, removed);
+    // The fresh actor's server-received full sync must independently contain
+    // retained history; the creator's local edit cache cannot satisfy this.
+    const nativeB = nativeHistory(nativeWireB, room, true);
+    try {
+      expectRetainedNative(freshRevision, nativeB, retained, removed);
+    } finally {
+      nativeB.destroy();
+    }
     // A new page/socket in the independent context reads durable state again.
+    const freshConnectionStart = nativeWireB.length;
     await pageB.reload();
     await waitConnected(pageB);
     await expectTokens(pageB, [retained, "새 편집"]);
     expect(await editorShape(pageB)).toEqual(beforeRevision);
-    expect(await revision(pageB, documentPath, revisionId)).toEqual(saved);
+    const reloadedRevision = await revision(pageB, documentPath, revisionId);
+    expect(reloadedRevision).toEqual(saved);
+    const reloadedNative = nativeHistory(nativeWireB.slice(freshConnectionStart), room, true);
+    try {
+      expectRetainedNative(reloadedRevision, reloadedNative, retained, removed);
+    } finally {
+      reloadedNative.destroy();
+    }
     expect(cspA).toEqual([]);
     expect(cspB).toEqual([]);
     await testInfo.attach("selected-vue-native-readback.json", {
@@ -425,6 +557,13 @@ test("selected normal main: Vue setup, stable wiki create, native persist, manua
             persisted,
             revision: saved,
             canonicalEmojiOracleControls: oracleControls,
+            nativeHistoryOracleControls: nativeControls,
+            nativeHistoryReadback: {
+              room,
+              creator: "observed sent and received native sync",
+              freshActor: "server-received native sync only",
+              reloadedActor: "new connection server-received native sync only",
+            },
             creatorId: creator.userId,
             freshActorId: reader.userId,
           },
