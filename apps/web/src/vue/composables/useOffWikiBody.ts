@@ -70,9 +70,17 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
       } catch {
         /* The editor still retains its in-memory draft. */
       }
-      draft.value?.retire();
-      draft.value = markRaw(new OffWikiDraft(scope, current, storage, changed));
-      generation.value++;
+      const mounted = draft.value;
+      if (mounted?.active && ownerKey(mounted.owner) === ownerKey(scope) && mounted.hasPrivateState) {
+        // Preserve the actual owned in-memory draft, including edits made after
+        // the read started. Reconstructing from storage can lose a quota-denied
+        // edit or an unavailable-storage source buffer/unknown command.
+        mounted.observeAuthorizedBody(current);
+      } else {
+        mounted?.retire();
+        draft.value = markRaw(new OffWikiDraft(scope, current, storage, changed));
+        generation.value++;
+      }
     } catch (failure) {
       if (started === lifetime) {
         if (failure instanceof ProblemError && [401, 403, 404].includes(failure.status)) retire();

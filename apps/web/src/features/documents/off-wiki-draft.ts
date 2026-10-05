@@ -182,6 +182,27 @@ export class OffWikiDraft {
   get active(): boolean {
     return !this.retired;
   }
+  get hasPrivateState(): boolean {
+    return this.dirty || !!this.frozen || !!this.latest ||
+      !!this.conflictBackup || !!this.sourceBuffer;
+  }
+  /** A confirmed operation may be followed by a fresh authorized read while
+   * typing continues. Keep the live native draft even when storage refused it.
+   * This read is not a receipt for any other unknown pending command. */
+  observeAuthorizedBody(current: VersionedBody): void {
+    if (this.retired || current.targetId !== this.owner.targetId) return;
+    const reader = loadBody(current, this.owner.targetId);
+    let snapshot: string;
+    try { snapshot = encodeUpdate(Y.encodeStateAsUpdate(reader)); }
+    finally { reader.destroy(); }
+    this.start = { ...this.start, writable: current.writable };
+    if (current.tailSeq !== this.start.tailSeq || snapshot !== this.acknowledged) {
+      this.latest = current;
+      this.comparison = { start:this.start.contentJson, mine:this.mine, current:current.contentJson };
+    }
+    this.persist();
+    this.changed();
+  }
   persist(): void {
     if (this.retired || !this.storage) return;
     try {
