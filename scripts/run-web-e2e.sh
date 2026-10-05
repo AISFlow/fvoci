@@ -295,13 +295,34 @@ from pathlib import Path
 import sys
 assert Path(sys.argv[1]).resolve().is_relative_to(Path(sys.argv[2]).resolve())
 PY_PARENT
-  sudo chown -R 1000:1000 "$FVOCI_SELECTED_CI_OUTPUT" "$FVOCI_SELECTED_CI_SQLITE_PARENT"
-  sudo install -d -o 1000 -g 1000 -m 0700 "$FVOCI_SELECTED_CI_OUTPUT/tmp"
+  runner_uid="$(id -u)"
+  runner_gid="$(id -g)"
   docker_gid="$(stat -c %g /var/run/docker.sock)"
+  # Qualify only the existing primary read group actually required by current
+  # code/input ancestry. Inaccessible files fail before private ownership moves.
+  runtime_groups="$(python3 "$ROOT/scripts/run-selected-backend-e2e.py" permissions \
+    --output "$FVOCI_SELECTED_CI_OUTPUT" --sqlite-parent "$FVOCI_SELECTED_CI_SQLITE_PARENT" --docker-gid "$docker_gid")"
+  sudo chown -h -R 1000:1000 "$FVOCI_SELECTED_CI_OUTPUT" "$FVOCI_SELECTED_CI_SQLITE_PARENT"
+  sudo install -d -o 1000 -g 1000 -m 0700 "$FVOCI_SELECTED_CI_OUTPUT/tmp"
   sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,PLAYWRIGHT_BROWSERS_PATH \
-    setpriv --reuid=1000 --regid=1000 --groups="$docker_gid" \
+    setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
     env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
       python3 "$ROOT/scripts/run-selected-backend-e2e.py" run --output "$FVOCI_SELECTED_CI_OUTPUT" || selected_status=$?
+  # The launcher has returned, but require existing exact resource-retirement
+  # witnesses (or proof no runtime began) before changing private data ownership.
+  ownership_status=0
+  sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB \
+    setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
+    python3 "$ROOT/scripts/run-selected-backend-e2e.py" owner-return --output "$FVOCI_SELECTED_CI_OUTPUT" || ownership_status=$?
+  if [[ "$ownership_status" -eq 0 ]]; then
+    if ! sudo chown -h -R "$runner_uid:$runner_gid" "$FVOCI_SELECTED_CI_OUTPUT" "$FVOCI_SELECTED_CI_SQLITE_PARENT"; then
+      echo "selected runtime ownership restoration failed" >&2
+      if [[ "$selected_status" -eq 0 ]]; then selected_status=1; fi
+    fi
+  else
+    echo "selected runtime ownership retained: resource retirement proof incomplete" >&2
+    if [[ "$selected_status" -eq 0 ]]; then selected_status=1; fi
+  fi
 fi
 if [[ "$pending_status" -ne 0 ]]; then exit "$pending_status"; fi
 exit "$selected_status"

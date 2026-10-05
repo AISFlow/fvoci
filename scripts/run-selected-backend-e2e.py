@@ -120,6 +120,113 @@ def runtime_access(files,browser):
         assert os.access(path,os.R_OK|os.X_OK), ('browser executable is inaccessible to runtime1000',path)
 
 
+def runtime_permissions(output, sqlite_parent, docker_gid):
+    """Qualify the existing runner read group before the owned runtime transfer."""
+    assert os.environ.get('FVOCI_SELECTED_EXECUTION_MODE', 'github-ci') == 'github-ci'
+    owner = identity('run', output)
+    assert os.environ['GITHUB_JOB'] == 'collaboration-flow'
+    runner_uid, runner_gid = os.getuid(), os.getgid()
+    temp = Path(os.environ['RUNNER_TEMP']).resolve()
+    sqlite_parent = Path(sqlite_parent)
+    assert output == temp/'fvoci-selected-current' and sqlite_parent == temp/'fvoci-sqlite'
+    for prefix in (output, sqlite_parent):
+        assert not prefix.is_symlink() and prefix.is_dir() and prefix.stat().st_uid == runner_uid
+        for path in prefix.rglob('*'):
+            assert not path.is_symlink() and path.stat().st_uid == runner_uid, 'foreign runtime transfer input'
+    assert Path(os.environ['SQLITE3_LIB_DIR']).resolve().is_relative_to(sqlite_parent)
+    before = read(output/'before.json')
+    assert before['head'] == os.environ['GITHUB_SHA']
+    assert read(output/'after.json') == before
+    bun = str(Path(shutil.which('bun')).resolve())
+    chromium = call([bun, '--eval', "console.log(require('@playwright/test').chromium.executablePath())"])
+    files = {str(ROOT/p): os.R_OK for p in before['tracked']}
+    files.update({p: os.R_OK for p in before['external']})
+    files.update({p: os.R_OK|os.X_OK for p in read(output/'bundle.json')['binaries']})
+    files.update({bun: os.R_OK|os.X_OK, chromium: os.R_OK|os.X_OK})
+    # These two private prefixes will change owner; their outside ancestors will not.
+    accessible = {p: mask for p, mask in files.items()
+                  if not any(Path(p).is_relative_to(prefix) for prefix in (output, sqlite_parent))}
+    accessible.update({str(output.parent): os.X_OK, str(sqlite_parent.parent): os.X_OK})
+    groups = {docker_gid}
+    needed = {}
+    for name, mask in accessible.items():
+        path = Path(name)
+        for entry, required in [(path, mask), *((ancestor, os.X_OK) for ancestor in path.parents)]:
+            facts = entry.stat()
+            permitted = (facts.st_mode >> 6) if facts.st_uid == 1000 else (
+                (facts.st_mode >> 3) if facts.st_gid in (1000, docker_gid) else facts.st_mode)
+            if permitted & required != required and facts.st_gid == runner_gid and (facts.st_mode >> 3) & required == required:
+                # Never inherit sudo/admin/root or the runner's full supplementary list.
+                assert runner_gid >= 1000, 'privileged preparation group is not runtime authority'
+                groups.add(runner_gid)
+                needed[str(entry)] = {'path_sha256':hashlib.sha256(str(entry).encode()).hexdigest(),
+                                      'uid':facts.st_uid,'gid':facts.st_gid,'mode':facts.st_mode & 0o777}
+    groups = sorted(groups)
+    check = """import hashlib,json,os,sys
+request=json.load(sys.stdin)
+assert os.getuid()==os.getgid()==1000 and sorted(os.getgroups())==request['groups']
+missing=[p for p,m in request['files'].items() if not os.access(p,m)]
+print(json.dumps({'uid':os.getuid(),'gid':os.getgid(),'groups':sorted(os.getgroups()),
+ 'checked':len(request['files']),'missing':len(missing),
+ 'missing_path_sha256':[hashlib.sha256(p.encode()).hexdigest() for p in missing[:16]]}))
+sys.exit(bool(missing))
+"""
+    result = subprocess.run(['sudo','setpriv','--reuid=1000','--regid=1000',
+                             '--groups='+','.join(map(str,groups)),sys.executable,'-c',check],
+                            input=json.dumps({'groups':groups,'files':accessible}), capture_output=True, text=True)
+    try: receipt = json.loads(result.stdout)
+    except ValueError: receipt = {'invalid_receipt':True}
+    write(output/'runtime-access-stage.json', {'source':before['head'],'tree':before['tree'],'owner':owner,
+          'runner_uid':runner_uid,'runner_gid':runner_gid,'runtime_uid':1000,'runtime_gid':1000,
+          'groups':groups,'required_group_paths':list(needed.values())[:16],
+          'required_group_path_count':len(needed),'preflight_exit':result.returncode,'preflight':receipt})
+    assert result.returncode == 0 and receipt.get('missing') == 0, 'runtime input access preflight failed'
+    print(','.join(map(str,groups)))
+
+
+def runtime_ownership_return(output):
+    """A waited launcher alone does not prove its product resources retired."""
+    assert os.environ.get('FVOCI_SELECTED_EXECUTION_MODE', 'github-ci') == 'github-ci'
+    owner = identity('run', output)
+    assert os.getuid() == os.getgid() == 1000 and os.environ['GITHUB_JOB'] == 'collaboration-flow'
+    before = read(output/'before.json')
+    assert before['head'] == os.environ['GITHUB_SHA']
+    runtime = output/'runtime'
+    allocated = list(output.glob('*-allocation.json')) + list(output.glob('*-binding.json'))
+    no_start = not allocated and (not runtime.exists() or not any(runtime.iterdir()))
+    if no_start:
+        proof = {'no_runtime_started':True}
+    else:
+        result = read(output/'selected-ci-receipt.json')
+        assert result['owner'] == owner and result['source'] == before['head'] and result['tree'] == before['tree']
+        assert [(r['lane'],r['flow']) for r in result['runs']] == list(selected_runs())
+        assert len({r['runRoot'] for r in result['runs']}) == len(result['runs'])
+        for run in result['runs']:
+            root = Path(run['runRoot'])
+            assert root.parent == runtime and root.name.startswith('root-current-'+run['lane']+'-')
+            facts = read(root/'receipt.json')
+            assert run['actualSource'] == before['head']
+            assert facts['source'] == before['head'] and facts['tree'] == before['tree'] and facts['root_owner'] == owner
+            assert facts['final_exit_code'] == run['exit']
+            assert facts['owned_container_absent'] is True
+            if run['lane'] == 'install':
+                assert facts['actual_owned_process_receipts'] == 15
+                processes = list((root/'retained-run').rglob('*process.json'))
+                assert len(processes) == 15 and all(read(p)['status'] is not None for p in processes)
+            else:
+                assert facts['selected_flow'] == run['flow']
+                assert facts['owned_loopback_port_closed'] is True and facts['recorded_process_identities_retired'] is True
+                assert facts['cleanup_errors'] == []
+                if run['lane'] == 'postgres':
+                    parent = read(root/'parent-receipt.json')
+                    assert parent['source'] == before['head'] and parent['tree'] == before['tree'] and parent['root_owner'] == owner
+                    assert parent['selected_flow'] == run['flow'] and parent['all_owned_fixtures_closed'] is True
+        proof = {'closed_current_runs':[{'lane':lane,'flow':flow} for lane,flow in selected_runs()],
+                 'installation_process_receipts':15}
+    write(output/'runtime-close-stage.json', {'source':before['head'],'tree':before['tree'],
+          'owner':owner,'ownership_return_qualified':True,**proof})
+
+
 def abi_files():
     return [str(Path(p).resolve()) for p in ('/lib64/ld-linux-x86-64.so.2','/lib/x86_64-linux-gnu/libc.so.6','/lib/x86_64-linux-gnu/libm.so.6','/lib/x86_64-linux-gnu/libgcc_s.so.1')]
 
@@ -274,12 +381,17 @@ def run(output):
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('mode',choices=['record-before','stage','record-after','run']);parser.add_argument('--output',required=True);parser.add_argument('--stage-name');args,command=parser.parse_known_args()
+    parser=argparse.ArgumentParser();parser.add_argument('mode',choices=['record-before','stage','record-after','run','permissions','owner-return']);parser.add_argument('--output',required=True);parser.add_argument('--stage-name');parser.add_argument('--sqlite-parent');parser.add_argument('--docker-gid',type=int);args,command=parser.parse_known_args()
     assert args.mode=='stage' or not command, 'unexpected arguments outside compiler stage'
+    assert args.mode=='permissions' or (args.sqlite_parent is None and args.docker_gid is None), 'unexpected runtime permission arguments'
     output=Path(args.output).resolve();assert output.is_dir() and output.stat().st_uid==os.getuid() and output.stat().st_mode&0o777==0o700
     if args.mode=='record-before':record_before(output)
     elif args.mode=='record-after':record_after(output)
     elif args.mode=='stage':return stage(output,args.stage_name,command[1:] if command[:1]==['--'] else command)
+    elif args.mode=='permissions':
+        assert args.sqlite_parent and args.docker_gid is not None
+        runtime_permissions(output, args.sqlite_parent, args.docker_gid)
+    elif args.mode=='owner-return':runtime_ownership_return(output)
     else:return run(output)
     return 0
 
