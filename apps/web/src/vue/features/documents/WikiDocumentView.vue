@@ -1043,8 +1043,7 @@ function flashBlock(id: string): void {
           :disabled="
             offBody.creating.value ||
             offBody.saving.value ||
-            !!sourceDraft?.dirty ||
-            !!sourceDraft?.composing
+            (!offBody.pendingDistinct.value && (!!sourceDraft?.dirty || !!sourceDraft?.composing))
           "
           @click="copyOffDraft"
         >

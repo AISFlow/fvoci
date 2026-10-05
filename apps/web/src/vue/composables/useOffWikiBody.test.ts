@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import * as Vue from "vue";
+import { parse } from "@vue/compiler-sfc";
 import * as Y from "yjs";
 import { tiptapJsonToYDoc, yDocToTiptapJson } from "@fvoci/editor/collab-tiptap";
 import {
@@ -483,3 +484,165 @@ test("task native reads, saves and conflict refresh bind task kind without borro
   expect(ownerKey(read.scope)).not.toBe(ownerKey(original));
   h.effects.stop();
 });
+
+for (const host of [
+  "documents/WikiDocumentView.vue",
+  "documents/ProjectDocumentView.vue",
+  "tasks/TaskBodyEditor.vue",
+]) {
+  test(`actual ${host} copy button retries frozen intent with retained Markdown but blocks new intent`, async () => {
+    const filename = new URL(`../features/${host}`, import.meta.url);
+    const { descriptor, errors } = parse(readFileSync(filename, "utf8"));
+    expect(errors).toEqual([]);
+    const nodes = [...descriptor.template!.ast!.children].reverse();
+    const disabledExpressions: string[] = [];
+    while (nodes.length) {
+      const node = nodes.pop()!;
+      if (node.type !== 1) continue;
+      nodes.push(...[...node.children].reverse());
+      if (node.tag !== "UButton") continue;
+      const click = node.props.find(
+        (prop) =>
+          prop.type === 7 &&
+          prop.name === "on" &&
+          prop.arg?.type === 4 &&
+          prop.arg.content === "click" &&
+          prop.exp?.type === 4 &&
+          prop.exp.content === "copyOffDraft",
+      );
+      if (!click) continue;
+      const disabled = node.props.find(
+        (prop) =>
+          prop.type === 7 &&
+          prop.name === "bind" &&
+          prop.arg?.type === 4 &&
+          prop.arg.content === "disabled",
+      );
+      if (disabled?.type === 7 && disabled.exp?.type === 4)
+        disabledExpressions.push(disabled.exp.content);
+    }
+    expect(disabledExpressions).toHaveLength(2);
+    // First is the actual comparison-section button; the separate unknown
+    // retry section cannot replace its reachable enabled state.
+    const disabledExpression = disabledExpressions[0]!;
+    const setup = ts.createSourceFile(
+      host,
+      descriptor.scriptSetup!.content,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const copy = setup.statements.find(
+      (node) => ts.isFunctionDeclaration(node) && node.name?.text === "copyOffDraft",
+    );
+    expect(copy).toBeDefined();
+    const copyScript = ts.transpile(copy!.getText(setup), {
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.None,
+    });
+    const h = harness();
+    h.reads[0]!.pending.resolve(source(original));
+    await settle();
+    const draft = h.body.draft.value!;
+    const sourceDraftState = Vue.shallowRef({ dirty: true, composing: false });
+    const retainedBuffer = {
+      text: "new unapplied private Markdown 😀",
+      baseV1: Y.encodeStateAsUpdate(draft.doc),
+    };
+    draft.setSourceBuffer(retainedBuffer);
+    const environment = {
+      offBody: h.body,
+      props: { offBody: h.body, workspaceId: original.workspaceId },
+      sourceDraft: sourceDraftState,
+      realtimeOff: { value: true },
+      persistLifecycle: { value: 1 },
+      copyParentId: { value: "live-parent" },
+      copyProjectId: { value: "live-project" },
+      copyDestination: { value: "project" },
+      copyTitle: { value: "changed form must not replace frozen body" },
+      scope: { value: { projectId: null } },
+      meta: { value: { parentId: null, title: "source" } },
+      copiedDraft: { value: null },
+      projectId: { value: "live-project" },
+      t: (key: string) => key,
+      queryClient: { invalidateQueries: async () => {} },
+      projectDocumentsQuery: () => ({ queryKey: ["live-tree"] }),
+    };
+    const invoke = runInNewContext(
+      `${copyScript}\ncopyOffDraft`,
+      environment,
+    ) as () => Promise<void>;
+    const disabled = (
+      pending: boolean,
+      dirty: boolean,
+      composing: boolean,
+      creating = false,
+      saving = false,
+    ) =>
+      runInNewContext(disabledExpression, {
+        offBody: {
+          pendingDistinct: { value: pending ? { body: { commandId: "frozen" } } : null },
+          creating: { value: creating },
+          saving: { value: saving },
+        },
+        sourceDraft: { dirty, composing },
+        copyParentId: "live-parent",
+        copyProjectId: "live-project",
+        copyDestination: "project",
+      }) as boolean;
+    for (const state of [
+      { dirty: true, composing: false },
+      { dirty: false, composing: true },
+    ]) {
+      sourceDraftState.value = state;
+      expect(disabled(false, state.dirty, state.composing)).toBe(true);
+      await invoke();
+      expect(h.creates).toHaveLength(0);
+      expect(draft.sourceBuffer?.text).toBe(retainedBuffer.text);
+    }
+    expect(disabled(false, false, false)).toBe(false);
+    draft.setSourceBuffer(null);
+    const initial = h.body.createDistinct({
+      projectId: null,
+      parentId: null,
+      title: "frozen private copy",
+    });
+    const frozen = h.creates[0]!.body;
+    h.creates[0]!.pending.reject(new ProblemError(503));
+    expect(await initial).toBeNull();
+    draft.conflict(source(original, "current body", "1"));
+    expect(h.body.comparison.value).not.toBeNull();
+    draft.setSourceBuffer(retainedBuffer);
+    sourceDraftState.value = { dirty: true, composing: true };
+    expect(disabled(true, true, false)).toBe(false);
+    expect(disabled(true, false, true)).toBe(false);
+    expect(disabled(true, true, true)).toBe(false);
+    expect(disabled(true, true, true, true)).toBe(true);
+    expect(disabled(true, true, true, false, true)).toBe(true);
+    const retry = invoke();
+    expect(h.creates).toHaveLength(2);
+    expect(h.body.creating.value).toBe(true);
+    await invoke();
+    expect(h.creates).toHaveLength(2);
+    expect(h.creates[1]!.body).toBe(frozen);
+    expect(h.creates[1]!.projectId).toBeNull();
+    expect(draft.sourceBuffer?.text).toBe(retainedBuffer.text);
+    h.creates[1]!.pending.resolve({
+      commandId: frozen.commandId,
+      tailSeq: "1",
+      revisionId: "33333333-3333-4333-8333-333333333333",
+      document: {
+        id: "22222222-2222-4222-8222-222222222222",
+        workspaceId: original.workspaceId,
+        parentId: null,
+        projectId: null,
+      },
+    } as OffDraftCreateResponse);
+    await retry;
+    expect(h.body.pendingDistinct.value).toBeNull();
+    expect(draft.sourceBuffer?.text).toBe(retainedBuffer.text);
+    expect(draft.start.tailSeq).toBe("0");
+    expect(h.body.comparison.value).not.toBeNull();
+    h.effects.stop();
+  });
+}

@@ -1078,8 +1078,7 @@ function refOf(number: number): string {
             offBody.creating.value ||
             offBody.saving.value ||
             (!copyParentId && !offBody.pendingDistinct.value) ||
-            !!sourceDraft?.dirty ||
-            !!sourceDraft?.composing
+            (!offBody.pendingDistinct.value && (!!sourceDraft?.dirty || !!sourceDraft?.composing))
           "
           @click="copyOffDraft"
         >

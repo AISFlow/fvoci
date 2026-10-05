@@ -495,8 +495,7 @@ async function persistBody(): Promise<void> {
           (copyDestination === 'project' &&
             (!copyProjectId || !copyParentId) &&
             !offBody.pendingDistinct.value) ||
-          !!sourceDraft?.dirty ||
-          !!sourceDraft?.composing
+          (!offBody.pendingDistinct.value && (!!sourceDraft?.dirty || !!sourceDraft?.composing))
         "
         @click="copyOffDraft"
       >
