@@ -3947,7 +3947,8 @@ mod selected_tests {
             candidate.graph.activity[1].changes = json!([{"field":"estimate","from":value,"to":null}]);
             assert!(matches!(
                 candidate.validate(),
-                Err(crate::native_archive::ArchiveError::Invalid(_))
+                Err(crate::native_archive::ArchiveError::Unsupported(reason))
+                    if reason == "non-baseline task activity"
             ));
         }
         for (value, unit) in [
