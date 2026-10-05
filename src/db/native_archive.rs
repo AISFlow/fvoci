@@ -3382,7 +3382,9 @@ mod selected_tests {
         }
         async fn unpublished(&self, claim: &ImportClaim) {
             assert_eq!(self.graph_counts().await, (0, 0, 0, 0, 0, 0, 0, 0));
-            let row:(String,Option<String>,Option<Vec<u8>>,Option<Vec<u8>>)=sqlx::query_as("SELECT status,native_result,payload,lease_token FROM import_jobs WHERE workspace_id=?1 AND id=?2").bind(self.workspace.as_bytes().as_slice()).bind(claim.job_id.as_bytes().as_slice()).fetch_one(&self.pool).await.unwrap();
+            type UnpublishedNativeJobRow =
+                (String, Option<String>, Option<Vec<u8>>, Option<Vec<u8>>);
+            let row:UnpublishedNativeJobRow=sqlx::query_as("SELECT status,native_result,payload,lease_token FROM import_jobs WHERE workspace_id=?1 AND id=?2").bind(self.workspace.as_bytes().as_slice()).bind(claim.job_id.as_bytes().as_slice()).fetch_one(&self.pool).await.unwrap();
             assert_eq!(row.0, "running");
             assert_eq!(row.1, None);
             assert!(row.2.is_some());
