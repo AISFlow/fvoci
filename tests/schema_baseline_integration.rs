@@ -125,7 +125,40 @@ async fn baseline_sqlite_steps_render_to_the_same_structural_catalog() {
     use sqlx::Connection;
     /// PRAGMA foreign_key_list row: id, seq, table, from, to, on_update, on_delete, match.
     type ForeignKeyRow = (i64, i64, String, String, String, String, String, String);
-    async fn structure(sql_texts: Vec<String>) -> Value {
+    /// SQLite stores a column DEFAULT as the expression text it received, so the
+    /// SDK rendering legitimately changes that text (`unixepoch()*1000000` becomes
+    /// `unixepoch () * 1000000`). Expressions are compared as SQL token streams
+    /// (the parser's own tokenizer; whitespace is never a token, string literals
+    /// keep their inner bytes), which is exact for everything SQLite evaluates.
+    fn default_tokens(expr: &str) -> Vec<(String, String)> {
+        use libsql_sqlite3_parser::lexer::{scan::Scanner, sql::Tokenizer};
+        let mut scanner = Scanner::new(Tokenizer::new());
+        let bytes = expr.as_bytes();
+        let mut out = Vec::new();
+        loop {
+            match scanner.scan(bytes).unwrap() {
+                (_, Some((token, kind)), _) => out.push((
+                    String::from_utf8_lossy(token).into_owned(),
+                    format!("{kind:?}"),
+                )),
+                (_, None, _) => break out,
+            }
+        }
+    }
+    assert_eq!(
+        default_tokens("unixepoch()*1000000 + CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000"),
+        default_tokens(
+            "unixepoch () * 1000000 + CAST (substr (strftime ('%f'), 4, 3) AS INTEGER) * 1000"
+        )
+    );
+    assert_ne!(
+        default_tokens("unixepoch()*1000000"),
+        default_tokens("unixepoch()*100000")
+    );
+    assert_ne!(default_tokens("'a  b'"), default_tokens("'a b'"));
+    assert_ne!(default_tokens("x + 1"), default_tokens("x - 1"));
+    /// (structural catalog with tokenized defaults, raw default texts per table)
+    async fn structure(sql_texts: Vec<String>) -> (Value, Value) {
         let mut conn = sqlx::SqliteConnection::connect_with(
             &sqlx::sqlite::SqliteConnectOptions::new()
                 .in_memory(true)
@@ -143,6 +176,7 @@ async fn baseline_sqlite_steps_render_to_the_same_structural_catalog() {
         .await
         .unwrap();
         let mut out = serde_json::Map::new();
+        let mut default_texts = serde_json::Map::new();
         for (table,) in tables {
             let columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
                 sqlx::query_as(&format!("PRAGMA table_info(\"{table}\")"))
@@ -169,19 +203,23 @@ async fn baseline_sqlite_steps_render_to_the_same_structural_catalog() {
                 index_columns.push(json!({"name": index.1.to_lowercase(), "unique": index.2, "origin": index.3, "partial": index.4, "columns": cols.iter().map(|c| json!([c.0, c.1, c.2.as_deref().map(|s| s.to_lowercase())])).collect::<Vec<_>>()}));
             }
             index_columns.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            default_texts.insert(
+                table.to_lowercase(),
+                json!(columns.iter().map(|c| c.4.clone()).collect::<Vec<_>>()),
+            );
             out.insert(
                 table.to_lowercase(),
                 json!({
-                    "columns": columns.iter().map(|c| json!([c.0, c.1.to_lowercase(), c.2.to_uppercase(), c.3, c.4, c.5])).collect::<Vec<_>>(),
+                    "columns": columns.iter().map(|c| json!([c.0, c.1.to_lowercase(), c.2.to_uppercase(), c.3, c.4.as_deref().map(default_tokens), c.5])).collect::<Vec<_>>(),
                     "fks": fks.iter().map(|f| json!([f.0, f.1, f.2.to_lowercase(), f.3.to_lowercase(), f.4.to_lowercase(), f.5, f.6, f.7])).collect::<Vec<_>>(),
                     "indexes": index_columns,
                 }),
             );
         }
         conn.close().await.unwrap();
-        Value::Object(out)
+        (Value::Object(out), Value::Object(default_texts))
     }
-    let raw = structure(
+    let (raw, raw_defaults) = structure(
         migrate::compiled_sqlite_steps()
             .iter()
             .map(|step| step.sql.to_string())
@@ -192,9 +230,30 @@ async fn baseline_sqlite_steps_render_to_the_same_structural_catalog() {
     for step in migrate::compiled_sqlite_steps() {
         rendered_texts.extend(migrate::sdk_rendered_statements(step.sql).unwrap());
     }
-    let rendered = structure(rendered_texts).await;
+    let (rendered, rendered_defaults) = structure(rendered_texts).await;
     assert_eq!(raw, rendered);
     assert_eq!(raw.as_object().unwrap().len(), 99);
+    // The rendering really is exercised: some DEFAULT texts come back re-rendered
+    // (token-equal, text-different); nothing else in the catalog may differ.
+    let mut rerendered = 0usize;
+    for (table, texts) in raw_defaults.as_object().unwrap() {
+        for (index, text) in texts.as_array().unwrap().iter().enumerate() {
+            let other = &rendered_defaults[table][index];
+            if text != other {
+                rerendered += 1;
+                assert_eq!(
+                    text.as_str().map(default_tokens),
+                    other.as_str().map(default_tokens),
+                    "{table} column {index}"
+                );
+            }
+        }
+    }
+    println!("DEFAULT texts re-rendered by the SDK (token-equal): {rerendered}");
+    assert!(
+        rerendered > 0,
+        "the control must observe the SDK re-rendering"
+    );
 }
 
 /// Dumps the normalized PostgreSQL catalog of an already installed database.
