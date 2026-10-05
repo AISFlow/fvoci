@@ -1416,8 +1416,10 @@ async fn pg_refused_completion_cancelled_during_authority_lock_keeps_identity() 
     use tokio_util::sync::CancellationToken;
 
     let harness = TestDb::bootstrap().await;
-    let root = tempfile::tempdir().unwrap();
-    let storage = ObjectStorage::local(root.path().to_owned());
+    let root =
+        std::env::temp_dir().join(format!("fvoci-ctxe883-b055-pg-cancel-{}", Uuid::now_v7()));
+    std::fs::create_dir(&root).unwrap();
+    let storage = ObjectStorage::local(root.clone());
     let (app, cookie, workspace) =
         setup_session_with_part_size(&harness, storage.clone(), 24).await;
     let document = create_document(&app, &cookie, workspace).await;
@@ -1506,7 +1508,7 @@ async fn pg_refused_completion_cancelled_during_authority_lock_keeps_identity() 
     assert!(before.2.get("_completion").is_some());
     // Physically alter a verified part, causing the actual storage operation
     // to return EtagMismatch before entering the refused-completion cleanup.
-    let part = root.path().join("tmp").join(&before.1).join("1");
+    let part = root.join("tmp").join(&before.1).join("1");
     std::fs::write(&part, [b'X'; 24]).unwrap();
     assembly.proceed();
     tokio::time::timeout(Duration::from_secs(30), refusal.wait_entered())
@@ -1614,6 +1616,7 @@ async fn pg_refused_completion_cancelled_during_authority_lock_keeps_identity() 
     admin.close().await;
     drop(app);
     harness.cleanup().await;
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 /// Review N1, pinned semantics: with S3 the part bytes reach the multipart
