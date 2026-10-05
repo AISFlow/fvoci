@@ -39,6 +39,7 @@ import {
   waitConnected,
 } from "./collab-helpers";
 import { decodeHocuspocusFrame, frameBytes, SESSION_COOKIE, UUID_RE } from "./collab-wire";
+import { expectSelectedWikiAuxiliary } from "./workspace-wiki-selected-auxiliary";
 
 type DocumentMeta = components["schemas"]["DocumentMetaResponse"];
 type RevisionDetail = components["schemas"]["RevisionDetailResponse"];
@@ -572,6 +573,23 @@ test("selected normal main: Vue setup, stable wiki create, native persist, manua
         ),
       ),
     });
+    if (process.env.FVOCI_E2E_SELECTED_AUXILIARY !== undefined) {
+      expect(process.env.FVOCI_E2E_SELECTED_AUXILIARY).toBe("normal-api");
+      await expectSelectedWikiAuxiliary({
+        browser,
+        baseURL,
+        ownerPage: pageA,
+        selected: selected ?? "missing",
+        workspaceId: workspace.id,
+        document: meta,
+        creatorId: creator.userId,
+        sourceBlockId: documentNodeIds(persisted.contentJson)[0],
+        reader,
+        persisted,
+        revision: saved,
+        testInfo,
+      });
+    }
     failed = false;
   } finally {
     await Promise.all([closeCollabContext(ctxA, failed), closeCollabContext(ctxB, failed)]);
