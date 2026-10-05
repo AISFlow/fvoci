@@ -2829,8 +2829,12 @@ mod selected_tests {
             Box<dyn std::error::Error + Send + Sync>,
         >,
     }
+    struct SdkSetupFailure {
+        primary: Box<dyn std::any::Any + Send>,
+        cleanup: SdkCleanup,
+    }
     impl SdkCleanup {
-        fn assert_retired(&self) {
+        fn assert_resources_retired(&self) {
             let receipt = self
                 .receipt
                 .as_ref()
@@ -2841,6 +2845,9 @@ mod selected_tests {
                     && receipt.upstream_closed
                     && receipt.proxy_closed
             );
+        }
+        fn assert_retired(&self) {
+            self.assert_resources_retired();
             self.recovery_close
                 .as_ref()
                 .expect("explicit recovery driver must close cleanly");
@@ -2848,9 +2855,21 @@ mod selected_tests {
         fn report_primary_panic(&self) {
             eprintln!("original SDK test panic; original_close={:?}, recovery_close={:?}, fixture_finish_error={:?}", self.close, self.recovery_close, self.receipt.as_ref().err());
         }
+        fn resume_primary(&self, primary: Box<dyn std::any::Any + Send>) -> ! {
+            self.report_primary_panic();
+            std::panic::resume_unwind(primary);
+        }
     }
     impl SdkFixture {
         async fn new() -> Self {
+            match Self::new_with_setup_failure(false).await {
+                Ok(fixture) => fixture,
+                Err(failure) => failure.cleanup.resume_primary(failure.primary),
+            }
+        }
+        async fn new_with_setup_failure(
+            inject_setup_failure: bool,
+        ) -> Result<Self, SdkSetupFailure> {
             use futures_util::FutureExt;
             let sqld = PathBuf::from(
                 std::env::var_os("FVOCI_TEST_SQLD")
@@ -2863,11 +2882,14 @@ mod selected_tests {
             let database = match driver.database().await {
                 Ok(database) => database,
                 Err(error) => {
-                    let cleanup = driver.finish().await;
-                    panic!(
-                        "actual SDK builder failed: {error}; fixture_finish_error={:?}",
-                        cleanup.as_ref().err()
-                    );
+                    return Err(SdkSetupFailure {
+                        primary: Box::new(format!("actual SDK builder failed: {error}")),
+                        cleanup: SdkCleanup {
+                            close: Ok(()),
+                            recovery_close: Ok(()),
+                            receipt: driver.finish().await,
+                        },
+                    });
                 }
             };
             let backend = Backend::LibsqlRemote(std::sync::Arc::new(
@@ -2882,6 +2904,9 @@ mod selected_tests {
             let setup = std::panic::AssertUnwindSafe(async {
                 crate::db::migrate::initialize_family_backend_for_test(&backend).await.unwrap();
                 crate::db::migrate::assert_sqlite_schema_current(&backend).await.unwrap();
+                // Synthetic propagation control after real initialized startup;
+                // this is not a provider failure or settlement observation.
+                assert!(!inject_setup_failure, "synthetic SDK setup primary");
                 let mut tx = backend.begin_write().await.unwrap();
                 let crate::db::backend::DbTransaction::SqliteFamily(family) = &mut tx else { unreachable!() };
                 assert_eq!(family.query("PRAGMA foreign_keys", &[]).await.unwrap()[0].cell(0).unwrap().integer().unwrap(), 1);
@@ -2895,13 +2920,16 @@ mod selected_tests {
             if let Err(panic) = setup {
                 let close = backend.close().await;
                 let receipt = driver.finish().await;
-                eprintln!(
-                    "failed SDK setup closed={close:?}, fixture_finish_error={:?}",
-                    receipt.as_ref().err()
-                );
-                std::panic::resume_unwind(panic);
+                return Err(SdkSetupFailure {
+                    primary: panic,
+                    cleanup: SdkCleanup {
+                        close,
+                        recovery_close: Ok(()),
+                        receipt,
+                    },
+                });
             }
-            Self {
+            Ok(Self {
                 driver,
                 backend,
                 recovery: None,
@@ -2909,7 +2937,7 @@ mod selected_tests {
                 workspace,
                 actor,
                 session,
-            }
+            })
         }
         async fn claim(&self) -> (ImportClaim, Uuid, String, Archive, BTreeMap<Uuid, String>) {
             let payload = b"native SDK finish policy control";
@@ -2957,11 +2985,24 @@ mod selected_tests {
             )
         }
         async fn finish(self) -> SdkCleanup {
+            self.finish_with_recovery_close_failure(false).await
+        }
+        async fn finish_with_recovery_close_failure(
+            self,
+            inject_recovery_close_failure: bool,
+        ) -> SdkCleanup {
             let close = self.backend.close().await;
-            let recovery_close = match &self.recovery {
+            let mut recovery_close = match &self.recovery {
                 Some(recovery) => recovery.close().await,
                 None => Ok(()),
             };
+            if inject_recovery_close_failure && recovery_close.is_ok() {
+                // Inject only after awaiting the actual recovery close. This
+                // diagnostic tests propagation, never provider settlement.
+                recovery_close = Err(sqlx::Error::Protocol(
+                    "synthetic SDK recovery close diagnostic".into(),
+                ));
+            }
             // Attempt every owned shutdown before any final assertion, even
             // when either driver's returned close evidence is an error.
             let receipt = self.driver.finish().await;
@@ -2977,6 +3018,89 @@ mod selected_tests {
                 receipt,
             }
         }
+    }
+
+    fn sdk_primary_message(primary: &(dyn std::any::Any + Send)) -> Option<&str> {
+        primary
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| primary.downcast_ref::<&str>().copied())
+    }
+
+    #[tokio::test]
+    async fn native_archive_sdk_synthetic_setup_failure_awaits_owned_retirement() {
+        let failure = match SdkFixture::new_with_setup_failure(true).await {
+            Ok(fixture) => {
+                let cleanup = fixture.finish().await;
+                cleanup.assert_retired();
+                panic!("synthetic setup primary was not observed");
+            }
+            Err(failure) => failure,
+        };
+        failure.cleanup.assert_retired();
+        assert!(failure.cleanup.close.is_ok());
+        let primary = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            failure.cleanup.resume_primary(failure.primary);
+        }))
+        .expect_err("original setup failure must propagate after cleanup");
+        assert_eq!(
+            sdk_primary_message(primary.as_ref()),
+            Some("synthetic SDK setup primary")
+        );
+    }
+
+    #[tokio::test]
+    async fn native_archive_sdk_synthetic_recovery_close_keeps_primary_and_retires() {
+        use futures_util::FutureExt;
+        let mut fixture = SdkFixture::new().await;
+        let body: Result<(), Box<dyn std::any::Any + Send>> = std::panic::AssertUnwindSafe(async {
+            let recovery = Backend::LibsqlRemote(std::sync::Arc::new(
+                crate::db::backend::RemoteDatabase::from_test_driver(
+                    fixture.driver.database().await.unwrap(),
+                    std::num::NonZeroU32::new(1).unwrap(),
+                ),
+            ));
+            fixture.recovery = Some(recovery);
+            let mut read = fixture
+                .recovery
+                .as_ref()
+                .unwrap()
+                .begin_read()
+                .await
+                .unwrap();
+            let crate::db::backend::DbTransaction::SqliteFamily(family) = &mut read else {
+                unreachable!()
+            };
+            assert_eq!(
+                family.query("SELECT 1", &[]).await.unwrap()[0]
+                    .cell(0)
+                    .unwrap()
+                    .integer()
+                    .unwrap(),
+                1
+            );
+            read.rollback().await.unwrap();
+            panic!("synthetic SDK body primary");
+        })
+        .catch_unwind()
+        .await;
+        let cleanup = fixture.finish_with_recovery_close_failure(true).await;
+        // Every owned shutdown has already been awaited, even though the
+        // separately injected close diagnostic will be propagated as failure.
+        cleanup.assert_resources_retired();
+        assert!(cleanup.close.is_ok());
+        assert!(
+            matches!(&cleanup.recovery_close, Err(sqlx::Error::Protocol(message)) if message == "synthetic SDK recovery close diagnostic")
+        );
+        let primary = body.expect_err("synthetic body primary required");
+        let primary = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cleanup.resume_primary(primary);
+        }))
+        .expect_err("original body failure must propagate alongside close diagnostic");
+        assert_eq!(
+            sdk_primary_message(primary.as_ref()),
+            Some("synthetic SDK body primary")
+        );
     }
 
     fn sdk_closed_finish_response(
@@ -3069,8 +3193,7 @@ mod selected_tests {
         }).catch_unwind().await;
         let cleanup = f.finish().await;
         if let Err(panic) = body {
-            cleanup.report_primary_panic();
-            std::panic::resume_unwind(panic);
+            cleanup.resume_primary(panic);
         }
         cleanup.assert_retired();
         assert!(
@@ -3119,8 +3242,7 @@ mod selected_tests {
         }).catch_unwind().await;
         let cleanup = f.finish().await;
         if let Err(panic) = body {
-            cleanup.report_primary_panic();
-            std::panic::resume_unwind(panic);
+            cleanup.resume_primary(panic);
         }
         cleanup.assert_retired();
         assert!(
@@ -3164,8 +3286,7 @@ mod selected_tests {
             }).catch_unwind().await;
             let cleanup = f.finish().await;
             if let Err(panic) = body {
-                cleanup.report_primary_panic();
-                std::panic::resume_unwind(panic);
+                cleanup.resume_primary(panic);
             }
             cleanup.assert_retired();
             cleanup
