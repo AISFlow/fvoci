@@ -1730,7 +1730,43 @@ pub(crate) struct ScheduledRevisionSource {
     tail: i64,
 }
 
+pub(crate) fn archive_native_instant(raw: &str) -> Result<DateTime<Utc>, sqlx::Error> {
+    let instant = DateTime::parse_from_rfc3339(raw)
+        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?
+        .with_timezone(&Utc);
+    Cell::instant(instant)?;
+    Ok(instant)
+}
+
 impl OperationTx<'_, '_> {
+    pub(crate) async fn install_archived_revisions(
+        &mut self,
+        claim: &crate::db::import_jobs::ImportClaim,
+        archive: &crate::native_archive::Archive,
+    ) -> Result<(), crate::db::native_archive::NativeDbError> {
+        for row in &archive.graph.revisions {
+            let snapshot = archive.bytes(&row.snapshot_entry)?;
+            let created = archive_native_instant(&row.created_at)?;
+            if !self.hold_import_claim(claim).await? {
+                return Err(crate::db::native_archive::NativeDbError::Fenced);
+            }
+            match self {
+                Self::Postgres(tx) => {
+                    sqlx::query("INSERT INTO fvoci.revisions(id,workspace_id,target_kind,target_id,y_snapshot,encoding,content_json,text,reason,created_by,created_at,restored_from_id,restore_correlation_id,restore_base_tail_seq,restore_committed_tail_seq) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)")
+                        .bind(row.id).bind(claim.workspace_id).bind(&row.target_kind).bind(row.target_id).bind(snapshot).bind(row.encoding).bind(&row.content_json).bind(&row.text).bind(&row.reason).bind(row.created_by.map(|_|claim.created_by)).bind(created).bind(row.restored_from_id).bind(row.restore_correlation_id).bind(row.restore_base_tail_seq).bind(row.restore_committed_tail_seq).execute(&mut ***tx).await?;
+                }
+                Self::SqliteFamily(writer) => {
+                    writer.require_writer()?;
+                    writer.require_tenant(claim.workspace_id)?;
+                    writer.execute("INSERT INTO revisions(id,workspace_id,target_kind,target_id,y_snapshot,encoding,content_json,text,reason,created_by,created_at,restored_from_id,restore_correlation_id,restore_base_tail_seq,restore_committed_tail_seq) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",&[
+                        Cell::uuid(row.id),Cell::uuid(claim.workspace_id),Cell::text(&row.target_kind),Cell::uuid(row.target_id),Cell::Blob(snapshot),Cell::Integer(i64::from(row.encoding)),Cell::json(&row.content_json)?,Cell::text(&row.text),Cell::text(&row.reason),Cell::optional_uuid(row.created_by.map(|_|claim.created_by)),Cell::instant(created)?,Cell::optional_uuid(row.restored_from_id),Cell::optional_uuid(row.restore_correlation_id),row.restore_base_tail_seq.map(Cell::Integer).unwrap_or(Cell::Null),row.restore_committed_tail_seq.map(Cell::Integer).unwrap_or(Cell::Null)
+                    ]).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Borrowed maintenance operations never acquire/finish transactions or
     /// grant business context. The Revisions consumer checks/renews its actual
     /// claim on this writer before work and checks it again before COMMIT.

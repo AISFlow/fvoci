@@ -705,6 +705,146 @@ pub struct ImportFence {
     pub lease_token: Uuid,
 }
 
+/// Prepared by the existing isolated parser/seed consumers before acquiring
+/// the writer. The operation ID is chosen once for this logical publication.
+pub(crate) struct ImportNativeSeed<'a> {
+    pub op_id: Uuid,
+    pub update: &'a [u8],
+    pub prepared: crate::collab::derived_body::PreparedDerivedBody,
+}
+
+pub(crate) struct ImportDocumentPublication<'a> {
+    pub claim: &'a crate::db::import_jobs::ImportClaim,
+    pub title: &'a str,
+    pub parent_id: Option<Uuid>,
+    pub native: Option<ImportNativeSeed<'a>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ImportPublicationError {
+    #[error("invalid imported document input")]
+    InvalidInput,
+    #[error("import publication cancelled")]
+    Cancelled,
+    #[error("import publication lease lost")]
+    Fenced,
+    #[error("import document refused: {0:?}")]
+    Document(DocumentDbError),
+    #[error("import native publication refused: {0:?}")]
+    Native(crate::db::collab::CollabDbError),
+    #[error(transparent)]
+    Sql(#[from] sqlx::Error),
+}
+
+/// One commit owner for current authorization, creation/ref, native seed,
+/// immutable op receipt and derived body. Finish uncertainty is returned with
+/// its original typed cleanup evidence; no observer/retry/compensation occurs.
+pub(crate) async fn publish_import_document_backend(
+    backend: &Backend,
+    input: ImportDocumentPublication<'_>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Uuid, ImportPublicationError> {
+    if !title_is_valid(input.title)
+        || input.native.as_ref().is_some_and(|native| {
+            native.update.is_empty()
+                || native.update.len() > crate::db::collab::MAX_COLLAB_UPDATE_BYTES
+        })
+    {
+        return Err(ImportPublicationError::InvalidInput);
+    }
+    if cancel.is_cancelled() {
+        return Err(ImportPublicationError::Cancelled);
+    }
+    let claim = input.claim;
+    let mut tx = backend.begin_write().await?;
+    let result: Result<Uuid, ImportPublicationError> = async {
+        let mut op = tx.operation();
+        op.set_tenant(claim.workspace_id).await?;
+        op.require_import_admin(claim.workspace_id, claim.created_by, claim.session_id)
+            .await?
+            .map_err(|error| {
+                ImportPublicationError::Document(match error {
+                    crate::db::import_jobs::ImportDbError::NotFound => DocumentDbError::NotFound,
+                    crate::db::import_jobs::ImportDbError::Forbidden => DocumentDbError::Forbidden,
+                })
+            })?;
+        op.lock_tree(claim.workspace_id).await?;
+        if cancel.is_cancelled() {
+            return Err(ImportPublicationError::Cancelled);
+        }
+        if !op.hold_import_claim(claim).await? {
+            return Err(ImportPublicationError::Fenced);
+        }
+        let document = create_wiki_document_operation(
+            &mut op,
+            claim.workspace_id,
+            claim.created_by,
+            claim.session_id,
+            CreateDocumentInput {
+                parent_id: input.parent_id,
+                title: input.title,
+                icon: None,
+            },
+            None,
+            Some(ImportFence {
+                job_id: claim.job_id,
+                lease_token: claim.lease_token,
+            }),
+        )
+        .await?
+        .map_err(ImportPublicationError::Document)?
+        .ok_or(ImportPublicationError::Fenced)?;
+        if let Some(native) = input.native {
+            op.initialize_import_document_native(
+                claim,
+                document.id,
+                native.op_id,
+                native.update,
+                native.prepared,
+            )
+            .await?
+            .map_err(ImportPublicationError::Native)?;
+        }
+        if cancel.is_cancelled() {
+            return Err(ImportPublicationError::Cancelled);
+        }
+        if !op.hold_import_claim(claim).await?
+            || !op
+                .import_claim_contains_ref(
+                    claim,
+                    crate::db::import_jobs::ImportRefKind::Document,
+                    &document.id.to_string(),
+                )
+                .await?
+        {
+            return Err(ImportPublicationError::Fenced);
+        }
+        op.require_import_admin(claim.workspace_id, claim.created_by, claim.session_id)
+            .await?
+            .map_err(|_| ImportPublicationError::Document(DocumentDbError::Forbidden))?;
+        if cancel.is_cancelled() {
+            return Err(ImportPublicationError::Cancelled);
+        }
+        Ok(document.id)
+    }
+    .await;
+    let document = match result {
+        Ok(document) => document,
+        Err(error) => {
+            return Err(match tx.rollback().await {
+                Ok(()) => error,
+                Err(cleanup) => ImportPublicationError::Sql(
+                    super::backend::rollback_cleanup_unknown(Some(Box::new(error)), cleanup),
+                ),
+            });
+        }
+    };
+    tx.commit_with_cleanup().await.map_err(|unknown| {
+        ImportPublicationError::Sql(sqlx::Error::AnyDriverError(Box::new(unknown)))
+    })?;
+    Ok(document)
+}
+
 /// Async import variant: the creator must still be a workspace admin at
 /// execution time, and the document id is appended to the job's
 /// `created_refs` in the same transaction (source `importTx`). `Ok(Ok(None))`
@@ -789,11 +929,6 @@ pub(crate) async fn create_wiki_document_operation(
     client_ip: Option<&str>,
     fence: Option<ImportFence>,
 ) -> Result<Result<Option<DocumentMeta>, DocumentDbError>, sqlx::Error> {
-    if fence.is_some() && matches!(tx, OperationTx::SqliteFamily(_)) {
-        return Err(sqlx::Error::Protocol(
-            "SQLite-family import event deferral is pending W2 producer integration".into(),
-        ));
-    }
     let document_id = Uuid::now_v7();
     tx.lock_membership_users(&[actor_user_id]).await?;
     if !tx.recheck_session(actor_user_id, session_id).await? {
@@ -874,15 +1009,48 @@ pub(crate) async fn create_wiki_document_operation(
         "title": input.title,
         "projectId": null,
     });
-    tx.record_document_event_and_audit(
-        workspace_id,
-        actor_user_id,
-        "document.created",
-        document_id,
-        payload,
-        client_ip,
-    )
-    .await?;
+    if let (Some(fence), true) = (fence, matches!(tx, OperationTx::SqliteFamily(_))) {
+        if !tx
+            .park_import_event(
+                workspace_id,
+                fence,
+                EventAppend {
+                    id: Uuid::now_v7(),
+                    workspace_id: Some(workspace_id),
+                    actor_user_id: Some(actor_user_id),
+                    verb: "document.created".into(),
+                    target_type: Some("document".into()),
+                    target_id: Some(document_id),
+                    payload: payload.clone(),
+                },
+                "web",
+            )
+            .await?
+        {
+            return Ok(Ok(None));
+        }
+        tx.append_audit(AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace_id),
+            actor_user_id: Some(actor_user_id),
+            verb: "document.created".into(),
+            target_type: Some("document".into()),
+            target_id: Some(document_id),
+            payload,
+            ip: client_ip.map(str::to_string),
+        })
+        .await?;
+    } else {
+        tx.record_document_event_and_audit(
+            workspace_id,
+            actor_user_id,
+            "document.created",
+            document_id,
+            payload,
+            client_ip,
+        )
+        .await?;
+    }
 
     if let Some(fence) = fence {
         if !tx
@@ -1701,12 +1869,17 @@ impl OperationTx<'_, '_> {
                 )
                 .await
             }
-            Self::SqliteFamily(tx) => {
-                tx.require_writer()?;
-                tx.require_tenant(workspace)?;
-                Err(sqlx::Error::Protocol(
-                    "SQLite-family import progress is pending W2 producer integration".into(),
-                ))
+            Self::SqliteFamily(_) => {
+                self.append_import_ref(
+                    workspace,
+                    ImportFence {
+                        job_id: job,
+                        lease_token: owner,
+                    },
+                    crate::db::import_jobs::ImportRefKind::Document,
+                    &document.to_string(),
+                )
+                .await
             }
         }
     }

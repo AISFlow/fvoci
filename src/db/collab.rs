@@ -1458,6 +1458,204 @@ pub(crate) async fn load_tail_updates(
 }
 
 impl OperationTx<'_, '_> {
+    /// Retained archive history installation on the publisher's existing
+    /// writer, after its destination/graph/hash/journal checks. This is an
+    /// initial INSERT of preserved identities, never a live room append/reset.
+    pub(crate) async fn install_archived_native_history(
+        &mut self,
+        claim: &crate::db::import_jobs::ImportClaim,
+        archive: &crate::native_archive::Archive,
+    ) -> Result<(), crate::db::native_archive::NativeDbError> {
+        use crate::db::native_archive::NativeDbError;
+        use crate::native_archive::ArchiveError;
+        if claim.source != crate::db::import_jobs::ImportSource::NativeArchive {
+            return Err(NativeDbError::Fenced);
+        }
+        if let Self::SqliteFamily(writer) = self {
+            writer.require_writer()?;
+            writer.require_tenant(claim.workspace_id)?;
+        }
+        archive.validate()?;
+        self.require_import_admin(claim.workspace_id, claim.created_by, claim.session_id)
+            .await?
+            .map_err(|_| NativeDbError::Forbidden)?;
+        if !self.hold_import_claim(claim).await? {
+            return Err(NativeDbError::Fenced);
+        }
+        for state in &archive.graph.states {
+            let (kind, expected_body) = match state.target_kind.as_str() {
+                "document" => (
+                    CollabKind::Document,
+                    &archive
+                        .graph
+                        .documents
+                        .iter()
+                        .find(|row| row.id == state.target_id)
+                        .ok_or_else(|| {
+                            ArchiveError::Invalid("native document target missing".into())
+                        })?
+                        .content_json,
+                ),
+                "task" => (
+                    CollabKind::Task,
+                    &archive
+                        .graph
+                        .tasks
+                        .iter()
+                        .find(|row| row.id == state.target_id)
+                        .ok_or_else(|| ArchiveError::Invalid("native task target missing".into()))?
+                        .content_json,
+                ),
+                _ => return Err(ArchiveError::Invalid("native target kind".into()).into()),
+            };
+            if !self.hold_import_claim(claim).await? {
+                return Err(NativeDbError::Fenced);
+            }
+            let t = CollabTables::for_kind(kind);
+            // The graph owner already inserted these exact destination rows.
+            // Historical deleted targets remain part of the validated archive.
+            if self
+                .load_collab_resource_content(t, claim.workspace_id, state.target_id)
+                .await?
+                != *expected_body
+                || self
+                    .native_state_generation(t, claim.workspace_id, state.target_id)
+                    .await?
+                    .is_some()
+            {
+                return Err(NativeDbError::Conflict);
+            }
+            if let Self::SqliteFamily(writer) = self {
+                if kind==CollabKind::Document && !writer.query("SELECT document_id FROM collab_room_fences WHERE workspace_id=?1 AND document_id=?2",&[Cell::uuid(claim.workspace_id),Cell::uuid(state.target_id)]).await?.is_empty() {
+                    return Err(NativeDbError::Conflict);
+                }
+            }
+            self.install_archived_native_state(claim, archive, state, kind)
+                .await?;
+        }
+        self.install_archived_revisions(claim, archive).await?;
+        if !self.hold_import_claim(claim).await? {
+            return Err(NativeDbError::Fenced);
+        }
+        self.require_import_admin(claim.workspace_id, claim.created_by, claim.session_id)
+            .await?
+            .map_err(|_| NativeDbError::Forbidden)?;
+        Ok(())
+    }
+
+    async fn install_archived_native_state(
+        &mut self,
+        claim: &crate::db::import_jobs::ImportClaim,
+        archive: &crate::native_archive::Archive,
+        state: &crate::native_archive::NativeState,
+        kind: CollabKind,
+    ) -> Result<(), crate::db::native_archive::NativeDbError> {
+        let snapshot = archive.bytes(&state.state_entry)?;
+        let created = super::revisions::archive_native_instant(&state.created_at)?;
+        let updated = super::revisions::archive_native_instant(&state.updated_at)?;
+        let compacted = state
+            .compacted_at
+            .as_deref()
+            .map(super::revisions::archive_native_instant)
+            .transpose()?;
+        let workspace = claim.workspace_id;
+        let resource = state.target_id;
+        let t = CollabTables::for_kind(kind);
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query(&t.sql("INSERT INTO {states}(workspace_id,{id},state,encoding,writer_generation,snapshot_cutoff_seq,tail_seq,created_at,updated_at,compacted_at) VALUES($1,$2,$3,$4,0,$5,$6,$7,$8,$9)"))
+                    .bind(workspace).bind(resource).bind(&snapshot).bind(state.encoding).bind(state.snapshot_cutoff_seq).bind(state.tail_seq).bind(created).bind(updated).bind(compacted).execute(&mut ***tx).await?;
+            }
+            Self::SqliteFamily(writer) => {
+                let statement=match kind {
+                    CollabKind::Document=>"INSERT INTO document_states(workspace_id,document_id,state,encoding,writer_generation,snapshot_cutoff_seq,tail_seq,created_at,updated_at,compacted_at) VALUES(?1,?2,?3,?4,0,?5,?6,?7,?8,?9)",
+                    CollabKind::Task=>"INSERT INTO task_states(workspace_id,task_id,state,encoding,writer_generation,snapshot_cutoff_seq,tail_seq,created_at,updated_at,compacted_at) VALUES(?1,?2,?3,?4,0,?5,?6,?7,?8,?9)",
+                };
+                writer
+                    .execute(
+                        statement,
+                        &[
+                            Cell::uuid(workspace),
+                            Cell::uuid(resource),
+                            Cell::Blob(snapshot),
+                            Cell::Integer(i64::from(state.encoding)),
+                            Cell::Integer(state.snapshot_cutoff_seq),
+                            Cell::Integer(state.tail_seq),
+                            Cell::instant(created)?,
+                            Cell::instant(updated)?,
+                            compacted
+                                .map(Cell::instant)
+                                .transpose()?
+                                .unwrap_or(Cell::Null),
+                        ],
+                    )
+                    .await?;
+            }
+        }
+        for update in &state.updates {
+            let payload = archive.bytes(&update.payload_entry)?;
+            let created = super::revisions::archive_native_instant(&update.created_at)?;
+            match self {
+                Self::Postgres(tx) => {
+                    sqlx::query(&t.sql("INSERT INTO {updates}(workspace_id,{id},seq,op_id,payload,created_at) VALUES($1,$2,$3,$4,$5,$6)"))
+                        .bind(workspace).bind(resource).bind(update.seq).bind(update.op_id).bind(payload).bind(created).execute(&mut ***tx).await?;
+                }
+                Self::SqliteFamily(writer) => {
+                    let statement=match kind {
+                        CollabKind::Document=>"INSERT INTO document_collab_updates(workspace_id,document_id,seq,op_id,payload,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+                        CollabKind::Task=>"INSERT INTO task_collab_updates(workspace_id,task_id,seq,op_id,payload,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+                    };
+                    writer
+                        .execute(
+                            statement,
+                            &[
+                                Cell::uuid(workspace),
+                                Cell::uuid(resource),
+                                Cell::Integer(update.seq),
+                                Cell::uuid(update.op_id),
+                                Cell::Blob(payload),
+                                Cell::instant(created)?,
+                            ],
+                        )
+                        .await?;
+                }
+            }
+        }
+        for receipt in &state.receipts {
+            let digest = hex::decode(&receipt.payload_sha256)
+                .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+            let created = super::revisions::archive_native_instant(&receipt.created_at)?;
+            match self {
+                Self::Postgres(tx) => {
+                    sqlx::query(&t.sql("INSERT INTO {receipts}(workspace_id,{id},op_id,seq,actor_user_id,payload_len,payload_sha256,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)"))
+                        .bind(workspace).bind(resource).bind(receipt.op_id).bind(receipt.seq).bind(claim.created_by).bind(receipt.payload_len).bind(digest).bind(created).execute(&mut ***tx).await?;
+                }
+                Self::SqliteFamily(writer) => {
+                    let statement=match kind {
+                        CollabKind::Document=>"INSERT INTO document_collab_op_receipts(workspace_id,document_id,op_id,seq,actor_user_id,payload_len,payload_sha256,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                        CollabKind::Task=>"INSERT INTO task_collab_op_receipts(workspace_id,task_id,op_id,seq,actor_user_id,payload_len,payload_sha256,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                    };
+                    writer
+                        .execute(
+                            statement,
+                            &[
+                                Cell::uuid(workspace),
+                                Cell::uuid(resource),
+                                Cell::uuid(receipt.op_id),
+                                Cell::Integer(receipt.seq),
+                                Cell::uuid(claim.created_by),
+                                Cell::Integer(receipt.payload_len),
+                                Cell::Blob(digest),
+                                Cell::instant(created)?,
+                            ],
+                        )
+                        .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Current native head on the caller's existing writer. Scheduled native
     /// capture retains this generation/cutoff/tail through helper settlement.
     pub(crate) async fn durable_native_head(
@@ -1639,6 +1837,17 @@ impl OperationTx<'_, '_> {
         t: &CollabTables,
         record: CollabAuditRecord<'_>,
     ) -> Result<(), sqlx::Error> {
+        self.record_native_append_owned(t, record, None)
+            .await
+            .map(|_| ())
+    }
+
+    async fn record_native_append_owned(
+        &mut self,
+        t: &CollabTables,
+        record: CollabAuditRecord<'_>,
+        import: Option<&crate::db::import_jobs::ImportClaim>,
+    ) -> Result<bool, sqlx::Error> {
         let CollabAuditRecord {
             workspace_id,
             actor_user_id,
@@ -1649,7 +1858,7 @@ impl OperationTx<'_, '_> {
             client_ip,
         } = record;
         let payload = json!({t.payload_key:document_id.to_string(),"opId":op_id.to_string(),"seq":seq,"writerGeneration":writer_generation});
-        self.append_event(EventAppend {
+        let event = EventAppend {
             id: Uuid::now_v7(),
             workspace_id: Some(workspace_id),
             actor_user_id: Some(actor_user_id),
@@ -1657,8 +1866,13 @@ impl OperationTx<'_, '_> {
             target_type: Some(t.target_type.to_string()),
             target_id: Some(document_id),
             payload: payload.clone(),
-        })
-        .await?;
+        };
+        if !self
+            .append_native_publication_event(event, "web", import)
+            .await?
+        {
+            return Ok(false);
+        }
         self.append_audit(AuditAppend {
             id: Uuid::now_v7(),
             workspace_id: Some(workspace_id),
@@ -1669,7 +1883,8 @@ impl OperationTx<'_, '_> {
             payload,
             ip: client_ip.map(str::to_string),
         })
-        .await
+        .await?;
+        Ok(true)
     }
 
     async fn bump_native_writer_generation(
@@ -1964,7 +2179,19 @@ impl OperationTx<'_, '_> {
         workspace: Uuid,
         resource: Uuid,
     ) -> Result<(), sqlx::Error> {
-        self.append_event_channel(
+        self.append_native_body_updated_owned(t, workspace, resource, None)
+            .await
+            .map(|_| ())
+    }
+
+    async fn append_native_body_updated_owned(
+        &mut self,
+        t: &CollabTables,
+        workspace: Uuid,
+        resource: Uuid,
+        import: Option<&crate::db::import_jobs::ImportClaim>,
+    ) -> Result<bool, sqlx::Error> {
+        self.append_native_publication_event(
             EventAppend {
                 id: Uuid::now_v7(),
                 workspace_id: Some(workspace),
@@ -1975,8 +2202,32 @@ impl OperationTx<'_, '_> {
                 payload: json!({t.payload_key:resource.to_string(),"collab":true}),
             },
             "system",
+            import,
         )
         .await
+    }
+
+    async fn append_native_publication_event(
+        &mut self,
+        event: EventAppend,
+        channel: &str,
+        import: Option<&crate::db::import_jobs::ImportClaim>,
+    ) -> Result<bool, sqlx::Error> {
+        if let Some(claim) = import {
+            self.park_import_event(
+                claim.workspace_id,
+                crate::db::documents::ImportFence {
+                    job_id: claim.job_id,
+                    lease_token: claim.lease_token,
+                },
+                event,
+                channel,
+            )
+            .await
+        } else {
+            self.append_event_channel(event, channel).await?;
+            Ok(true)
+        }
     }
 }
 
@@ -2028,6 +2279,12 @@ enum NativeLoadMode {
     ClaimWriter,
     Writer,
     Reader,
+}
+
+#[derive(Clone, Copy)]
+enum NativeWriteScope<'a> {
+    Room(Option<FamilyRoomFence>),
+    Import(&'a crate::db::import_jobs::ImportClaim),
 }
 
 impl OperationTx<'_, '_> {
@@ -2609,9 +2866,74 @@ impl OperationTx<'_, '_> {
         &mut self,
         kind: CollabKind,
         input: AppendCollabInput<'_>,
-        mut timings: CollabDbStageTimings,
+        timings: CollabDbStageTimings,
         restore: Option<&crate::db::revisions::RestoreRevisionAppend>,
         room_fence: Option<FamilyRoomFence>,
+    ) -> Result<
+        (
+            Result<(PreparedNativeAppend, Option<Uuid>), CollabDbError>,
+            CollabDbStageTimings,
+        ),
+        sqlx::Error,
+    > {
+        self.append_collab_native_owned(
+            kind,
+            input,
+            timings,
+            restore,
+            NativeWriteScope::Room(room_fence),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn current_native_write_scope(
+        &mut self,
+        scope: NativeWriteScope<'_>,
+        kind: CollabKind,
+        workspace: Uuid,
+        resource: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        match scope {
+            NativeWriteScope::Room(Some(fence)) => Ok(kind == CollabKind::Document
+                && fence.workspace_id == workspace
+                && fence.document_id == resource
+                && self.verify_family_room_fence(fence).await?),
+            NativeWriteScope::Room(None) => Ok(matches!(self, Self::Postgres(_))),
+            NativeWriteScope::Import(claim) => {
+                if kind != CollabKind::Document
+                    || claim.workspace_id != workspace
+                    || claim.created_by != actor
+                    || claim.session_id != credential
+                {
+                    return Ok(false);
+                }
+                if self
+                    .require_import_admin(workspace, actor, credential)
+                    .await?
+                    .is_err()
+                {
+                    return Ok(false);
+                }
+                self.import_claim_contains_ref(
+                    claim,
+                    crate::db::import_jobs::ImportRefKind::Document,
+                    &resource.to_string(),
+                )
+                .await
+            }
+        }
+    }
+
+    async fn append_collab_native_owned(
+        &mut self,
+        kind: CollabKind,
+        input: AppendCollabInput<'_>,
+        mut timings: CollabDbStageTimings,
+        restore: Option<&crate::db::revisions::RestoreRevisionAppend>,
+        write_scope: NativeWriteScope<'_>,
     ) -> Result<
         (
             Result<(PreparedNativeAppend, Option<Uuid>), CollabDbError>,
@@ -2635,17 +2957,18 @@ impl OperationTx<'_, '_> {
         } = input;
         let t = CollabTables::for_kind(kind);
         self.set_tenant(workspace_id).await?;
-        if matches!(self, Self::SqliteFamily(_)) {
-            let Some(fence) = room_fence else {
-                return Ok((Err(CollabDbError::StaleWriter), timings));
-            };
-            if fence.workspace_id != workspace_id
-                || fence.document_id != document_id
-                || kind != CollabKind::Document
-                || !self.verify_family_room_fence(fence).await?
-            {
-                return Ok((Err(CollabDbError::StaleWriter), timings));
-            }
+        if !self
+            .current_native_write_scope(
+                write_scope,
+                kind,
+                workspace_id,
+                document_id,
+                actor_user_id,
+                session_id,
+            )
+            .await?
+        {
+            return Ok((Err(CollabDbError::StaleWriter), timings));
         }
         if let Err(err) = self
             .authorize_collab_write(
@@ -2741,10 +3064,18 @@ impl OperationTx<'_, '_> {
                 && existing_digest.as_slice() == incoming_digest.as_slice()
                 && existing_actor == actor_user_id
             {
-                if let Some(fence) = room_fence {
-                    if !self.verify_family_room_fence(fence).await? {
-                        return Ok((Err(CollabDbError::StaleWriter), timings));
-                    }
+                if !self
+                    .current_native_write_scope(
+                        write_scope,
+                        kind,
+                        workspace_id,
+                        document_id,
+                        actor_user_id,
+                        session_id,
+                    )
+                    .await?
+                {
+                    return Ok((Err(CollabDbError::StaleWriter), timings));
                 }
                 timings.stmt_us = stmt_started.elapsed().as_micros() as u64;
                 return Ok((
@@ -2794,28 +3125,44 @@ impl OperationTx<'_, '_> {
         )
         .await?;
 
-        self.record_native_append(
-            t,
-            CollabAuditRecord {
-                workspace_id,
-                actor_user_id,
-                document_id,
-                op_id,
-                seq,
-                writer_generation,
-                client_ip,
-            },
-        )
-        .await?;
+        if !self
+            .record_native_append_owned(
+                t,
+                CollabAuditRecord {
+                    workspace_id,
+                    actor_user_id,
+                    document_id,
+                    op_id,
+                    seq,
+                    writer_generation,
+                    client_ip,
+                },
+                match write_scope {
+                    NativeWriteScope::Import(claim) => Some(claim),
+                    NativeWriteScope::Room(_) => None,
+                },
+            )
+            .await?
+        {
+            return Ok((Err(CollabDbError::StaleWriter), timings));
+        }
 
         if let Some(restore) = restore {
             self.apply_native_restore(t, workspace_id, actor_user_id, document_id, seq, restore)
                 .await?;
         }
-        if let Some(fence) = room_fence {
-            if !self.verify_family_room_fence(fence).await? {
-                return Ok((Err(CollabDbError::StaleWriter), timings));
-            }
+        if !self
+            .current_native_write_scope(
+                write_scope,
+                kind,
+                workspace_id,
+                document_id,
+                actor_user_id,
+                session_id,
+            )
+            .await?
+        {
+            return Ok((Err(CollabDbError::StaleWriter), timings));
         }
         timings.stmt_us = stmt_started.elapsed().as_micros() as u64;
         Ok((
@@ -3630,6 +3977,16 @@ impl OperationTx<'_, '_> {
         input: ProjectDerivedBodyInput,
         room_fence: Option<FamilyRoomFence>,
     ) -> Result<Result<ProjectDerivedBodyResult, CollabDbError>, sqlx::Error> {
+        self.project_collab_derived_body_owned(kind, input, NativeWriteScope::Room(room_fence))
+            .await
+    }
+
+    async fn project_collab_derived_body_owned(
+        &mut self,
+        kind: CollabKind,
+        input: ProjectDerivedBodyInput,
+        write_scope: NativeWriteScope<'_>,
+    ) -> Result<Result<ProjectDerivedBodyResult, CollabDbError>, sqlx::Error> {
         let t = CollabTables::for_kind(kind);
         let ProjectDerivedBodyInput {
             workspace_id,
@@ -3641,17 +3998,18 @@ impl OperationTx<'_, '_> {
             prepared,
         } = input;
         self.set_tenant(workspace_id).await?;
-        if matches!(self, Self::SqliteFamily(_)) {
-            let Some(fence) = room_fence else {
-                return Ok(Err(CollabDbError::StaleWriter));
-            };
-            if kind != CollabKind::Document
-                || fence.workspace_id != workspace_id
-                || fence.document_id != document_id
-                || !self.verify_family_room_fence(fence).await?
-            {
-                return Ok(Err(CollabDbError::StaleWriter));
-            }
+        if !self
+            .current_native_write_scope(
+                write_scope,
+                kind,
+                workspace_id,
+                document_id,
+                actor_user_id,
+                session_id,
+            )
+            .await?
+        {
+            return Ok(Err(CollabDbError::StaleWriter));
         }
         if let Err(error) = self
             .authorize_collab_write(
@@ -3673,10 +4031,18 @@ impl OperationTx<'_, '_> {
             return Ok(Err(CollabDbError::NotFound));
         };
         if current_tail_seq == 0 {
-            if let Some(fence) = room_fence {
-                if !self.verify_family_room_fence(fence).await? {
-                    return Ok(Err(CollabDbError::StaleWriter));
-                }
+            if !self
+                .current_native_write_scope(
+                    write_scope,
+                    kind,
+                    workspace_id,
+                    document_id,
+                    actor_user_id,
+                    session_id,
+                )
+                .await?
+            {
+                return Ok(Err(CollabDbError::StaleWriter));
             }
             return Ok(Ok(ProjectDerivedBodyResult::SkippedSeed));
         }
@@ -3690,18 +4056,131 @@ impl OperationTx<'_, '_> {
             .write_native_body_projection(t, workspace_id, document_id, &prepared)
             .await?;
         if changed {
-            self.append_native_body_updated(t, workspace_id, document_id)
-                .await?;
-        }
-        if let Some(fence) = room_fence {
-            if !self.verify_family_room_fence(fence).await? {
+            if !self
+                .append_native_body_updated_owned(
+                    t,
+                    workspace_id,
+                    document_id,
+                    match write_scope {
+                        NativeWriteScope::Import(claim) => Some(claim),
+                        NativeWriteScope::Room(_) => None,
+                    },
+                )
+                .await?
+            {
                 return Ok(Err(CollabDbError::StaleWriter));
             }
+        }
+        if !self
+            .current_native_write_scope(
+                write_scope,
+                kind,
+                workspace_id,
+                document_id,
+                actor_user_id,
+                session_id,
+            )
+            .await?
+        {
+            return Ok(Err(CollabDbError::StaleWriter));
         }
         if !changed {
             return Ok(Ok(ProjectDerivedBodyResult::Unchanged));
         }
         Ok(Ok(ProjectDerivedBodyResult::Updated))
+    }
+
+    /// First native publication of a newly created, current-job-owned wiki
+    /// document. It composes the existing ON seed/append/receipt/body program
+    /// on this writer; an existing state or retained room lineage is refused.
+    pub(crate) async fn initialize_import_document_native(
+        &mut self,
+        claim: &crate::db::import_jobs::ImportClaim,
+        document: Uuid,
+        op_id: Uuid,
+        seed: &[u8],
+        prepared: PreparedDerivedBody,
+    ) -> Result<Result<(), CollabDbError>, sqlx::Error> {
+        let kind = CollabKind::Document;
+        let scope = NativeWriteScope::Import(claim);
+        let workspace = claim.workspace_id;
+        if !self
+            .current_native_write_scope(
+                scope,
+                kind,
+                workspace,
+                document,
+                claim.created_by,
+                claim.session_id,
+            )
+            .await?
+        {
+            return Ok(Err(CollabDbError::StaleWriter));
+        }
+        if self
+            .native_state_generation(CollabTables::for_kind(kind), workspace, document)
+            .await?
+            .is_some()
+        {
+            return Ok(Err(CollabDbError::StaleWriter));
+        }
+        if let Self::SqliteFamily(writer) = self {
+            if !writer.query("SELECT document_id FROM collab_room_fences WHERE workspace_id=?1 AND document_id=?2", &[Cell::uuid(workspace),Cell::uuid(document)]).await?.is_empty() {
+                return Ok(Err(CollabDbError::StaleWriter));
+            }
+        }
+        let native = match self
+            .load_collab_native(
+                kind,
+                workspace,
+                claim.created_by,
+                claim.session_id,
+                document,
+                NativeLoadMode::ClaimWriter,
+            )
+            .await?
+        {
+            Ok(native) => native,
+            Err(error) => return Ok(Err(error)),
+        };
+        let (appended, _) = self
+            .append_collab_native_owned(
+                kind,
+                AppendCollabInput {
+                    workspace_id: workspace,
+                    actor_user_id: claim.created_by,
+                    session_id: claim.session_id,
+                    document_id: document,
+                    writer_generation: native.writer_generation,
+                    expected_tail_seq: native.load.tail_seq,
+                    op_id,
+                    payload: seed,
+                    client_ip: None,
+                },
+                CollabDbStageTimings::default(),
+                None,
+                scope,
+            )
+            .await?;
+        let seq = match appended {
+            Ok((appended, _)) => appended.seq(),
+            Err(error) => return Ok(Err(error)),
+        };
+        self.project_collab_derived_body_owned(
+            kind,
+            ProjectDerivedBodyInput::new(
+                workspace,
+                claim.created_by,
+                claim.session_id,
+                document,
+                native.writer_generation,
+                seq,
+                prepared,
+            ),
+            scope,
+        )
+        .await
+        .map(|result| result.map(|_| ()))
     }
 
     async fn write_native_body_projection(
