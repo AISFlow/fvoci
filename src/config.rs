@@ -767,7 +767,7 @@ mod tests {
         ];
         assert!(
             matches!(database_settings(&sqlite).unwrap(), DatabaseSettings::Sqlite { path }
-            if path == PathBuf::from("/owned/wiki.sqlite"))
+            if path.as_path() == std::path::Path::new("/owned/wiki.sqlite"))
         );
         for foreign in [
             "DATABASE_APP_URL",

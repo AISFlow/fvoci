@@ -675,8 +675,15 @@ async fn selected_install_refuses_alias_foreign_and_unrelated_paths() {
 #[tokio::test]
 async fn selected_install_forced_failure_cleans_owned_child_gate_and_temporary_tree() {
     use std::os::unix::fs::symlink;
+    #[derive(Debug, PartialEq, Eq)]
+    struct TypedFixtureFailure {
+        stage: &'static str,
+        value: u64,
+    }
+    const NON_STRING_LABEL: &str =
+        "non-string original panic after actual owned child and COMMIT gate; same payload resumed";
     let inputs = Inputs::load();
-    for phase in ["setup", "body", "healthy"] {
+    for phase in ["setup", "body", "typed", "healthy"] {
         let mut run = inputs.run_directory(phase);
         let temporary = run.path.clone();
         let receipts = run.receipts.clone();
@@ -700,99 +707,159 @@ async fn selected_install_forced_failure_cleans_owned_child_gate_and_temporary_t
         // The run guard lives outside this caught future. All its child/gate
         // locals retire before the explicit cleanup receives the original
         // panic payload; unexpected failures cannot be mistaken for this control.
-        let body = std::panic::AssertUnwindSafe(async {
-            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-            let mut command = inputs.command(&db);
-            command
-                .env("FVOCI_TEST_SQLITE_GATE_SOCKET", &socket)
-                .env("FVOCI_TEST_SQLITE_GATE_PHASE", "commit");
-            let mut process = if phase == "setup" {
-                OwnedProcess::spawn_owned(&mut command, run.report("forced-process.json"))
-            } else {
-                OwnedProcess::start(&mut command, run.report("forced-process.json"))
-            };
-            owned_pid = Some(process.child.id());
-            let (mut gate, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
-                .await
-                .unwrap()
-                .unwrap();
-            let mut marker = [0];
-            tokio::time::timeout(Duration::from_secs(10), gate.read_exact(&mut marker))
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(marker, *b"C");
-            if phase == "setup" {
-                // The actual child is already owned, even if stderr-reader
-                // setup fails before its reader thread exists.
-                process.observe_stderr(Some(&original));
-            } else if phase == "body" {
-                panic!("{original}");
-            }
-            gate.write_all(b"R").await.unwrap();
-            let url = ready(&mut process).await;
-            owned_listener = Some(
-                url.strip_prefix("http://")
+        let disposition = std::panic::AssertUnwindSafe(async {
+            let body = std::panic::AssertUnwindSafe(async {
+                let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+                let mut command = inputs.command(&db);
+                command
+                    .env("FVOCI_TEST_SQLITE_GATE_SOCKET", &socket)
+                    .env("FVOCI_TEST_SQLITE_GATE_PHASE", "commit");
+                let mut process = if phase == "setup" {
+                    OwnedProcess::spawn_owned(&mut command, run.report("forced-process.json"))
+                } else {
+                    OwnedProcess::start(&mut command, run.report("forced-process.json"))
+                };
+                owned_pid = Some(process.child.id());
+                let (mut gate, _) =
+                    tokio::time::timeout(Duration::from_secs(10), listener.accept())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let mut marker = [0];
+                tokio::time::timeout(Duration::from_secs(10), gate.read_exact(&mut marker))
+                    .await
                     .unwrap()
-                    .parse::<std::net::SocketAddr>()
-                    .unwrap(),
-            );
-            let response = reqwest::Client::builder()
-                .no_proxy()
-                .build()
-                .unwrap()
-                .get(format!("{url}/api/v1/setup"))
-                .send()
-                .await
+                    .unwrap();
+                assert_eq!(marker, *b"C");
+                if phase == "setup" {
+                    // The actual child is already owned, even if stderr-reader
+                    // setup fails before its reader thread exists.
+                    process.observe_stderr(Some(&original));
+                } else if phase == "body" {
+                    panic!("{original}");
+                } else if phase == "typed" {
+                    std::panic::panic_any(TypedFixtureFailure {
+                        stage: "actual child COMMIT gate",
+                        value: 0x0340_9636,
+                    });
+                }
+                gate.write_all(b"R").await.unwrap();
+                let url = ready(&mut process).await;
+                owned_listener = Some(
+                    url.strip_prefix("http://")
+                        .unwrap()
+                        .parse::<std::net::SocketAddr>()
+                        .unwrap(),
+                );
+                let response = reqwest::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .unwrap()
+                    .get(format!("{url}/api/v1/setup"))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                assert_eq!(
+                    response.json::<serde_json::Value>().await.unwrap()["needed"],
+                    true
+                );
+                process.signal();
+                assert!(process.finish().await.success());
+                std::fs::write(
+                    run.report("healthy-readback.json"),
+                    json!({"actualSetupNeeded":true,"ownedServiceExit":0}).to_string(),
+                )
                 .unwrap();
-            assert_eq!(response.status(), reqwest::StatusCode::OK);
-            assert_eq!(
-                response.json::<serde_json::Value>().await.unwrap()["needed"],
-                true
-            );
-            process.signal();
-            assert!(process.finish().await.success());
-            std::fs::write(
-                run.report("healthy-readback.json"),
-                json!({"actualSetupNeeded":true,"ownedServiceExit":0}).to_string(),
-            )
-            .unwrap();
-        })
-        .catch_unwind()
-        .await;
-        let primary = match body {
-            Ok(()) => {
-                assert_eq!(phase, "healthy", "forced failure did not happen");
-                "none: healthy body completed".to_owned()
-            }
-            Err(payload) => {
-                let caught = payload
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .or_else(|| {
+            })
+            .catch_unwind()
+            .await;
+            let primary = match body {
+                Ok(()) => {
+                    assert_eq!(phase, "healthy", "forced failure did not happen");
+                    "none: healthy body completed".to_owned()
+                }
+                Err(payload) => {
+                    let caught = payload.downcast_ref::<String>().cloned().or_else(|| {
                         payload
                             .downcast_ref::<&str>()
                             .map(|value| (*value).to_owned())
-                    })
-                    .expect("original panic payload");
-                if phase == "healthy" || caught != original {
-                    let _ = run.cleanup(&caught);
+                    });
+                    let Some(caught) = caught else {
+                        // Keep the original Box<dyn Any> intact. Diagnostics and
+                        // cleanup cannot replace its concrete type or value.
+                        let written = std::fs::write(
+                            run.report("original-failure.json"),
+                            json!({"original":NON_STRING_LABEL,"samePayloadResumed":true})
+                                .to_string(),
+                        );
+                        if let Err(error) = written {
+                            eprintln!(
+                                "{NON_STRING_LABEL}; durable failure receipt failed: {error}"
+                            );
+                        }
+                        if let Err(error) = run.cleanup(NON_STRING_LABEL) {
+                            eprintln!(
+                                "{NON_STRING_LABEL}; cleanup failed: {error}; retained {}",
+                                temporary.display()
+                            );
+                        }
+                        std::panic::resume_unwind(payload);
+                    };
+                    if phase == "healthy" || caught != original {
+                        if let Err(error) = run.cleanup(&caught) {
+                            eprintln!(
+                                "{caught}; cleanup failed: {error}; retained {}",
+                                temporary.display()
+                            );
+                        }
+                        std::panic::resume_unwind(payload);
+                    }
+                    std::fs::write(
+                        run.report("original-failure.json"),
+                        json!({"original":caught,"expectedControl":true}).to_string(),
+                    )
+                    .unwrap();
+                    caught
+                }
+            };
+            if let Err(cleanup) = run.cleanup(&primary) {
+                panic!(
+                    "{primary}; owned temporary cleanup failed: {cleanup}; retained {}",
+                    temporary.display()
+                );
+            }
+            primary
+        })
+        .catch_unwind()
+        .await;
+        let primary = match disposition {
+            Ok(primary) => {
+                assert_ne!(phase, "typed", "concrete typed panic did not happen");
+                primary
+            }
+            Err(payload) => {
+                if phase != "typed" {
                     std::panic::resume_unwind(payload);
                 }
+                let recovered = match payload.downcast::<TypedFixtureFailure>() {
+                    Ok(recovered) => recovered,
+                    Err(original) => std::panic::resume_unwind(original),
+                };
+                assert_eq!(
+                    *recovered,
+                    TypedFixtureFailure {
+                        stage: "actual child COMMIT gate",
+                        value: 0x0340_9636,
+                    }
+                );
                 std::fs::write(
-                    run.report("original-failure.json"),
-                    json!({"original":caught,"expectedControl":true}).to_string(),
-                )
-                .unwrap();
-                caught
+                    run.report("recovered-typed-failure.json"),
+                    json!({"stage":recovered.stage,"value":recovered.value,"sameConcreteTypeAndValue":true}).to_string(),
+                ).unwrap();
+                NON_STRING_LABEL.to_owned()
             }
         };
-        if let Err(cleanup) = run.cleanup(&primary) {
-            panic!(
-                "{primary}; owned temporary cleanup failed: {cleanup}; retained {}",
-                temporary.display()
-            );
-        }
         let pid = owned_pid.expect("actual child was spawned");
         assert!(
             !PathBuf::from(format!("/proc/{pid}")).exists(),
@@ -863,6 +930,15 @@ async fn selected_install_forced_failure_cleans_owned_child_gate_and_temporary_t
             assert!(receipts.join("healthy-readback.json").is_file());
         } else {
             assert!(receipts.join("original-failure.json").is_file());
+        }
+        if phase == "typed" {
+            let original: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(receipts.join("original-failure.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(original["original"], NON_STRING_LABEL);
+            assert_eq!(original["samePayloadResumed"], true);
+            assert!(receipts.join("recovered-typed-failure.json").is_file());
         }
     }
 }
