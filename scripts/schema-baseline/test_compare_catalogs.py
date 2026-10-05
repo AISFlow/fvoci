@@ -323,6 +323,17 @@ class CompareCatalogs(unittest.TestCase):
         new = copy.deepcopy(NEW_ROLE); ledger_table(new)["columns"][0]["acl"] = acl([f"{APP}=w/{OWNER}"])
         rc, out = run(OLD_ROLE, new)
         self.assertEqual(rc, 1, out); self.assertIn("LEDGER TABLE column version acl differs", out)
+        self.assertIn("new column version carries a column acl", out)
+        # Same unsafe column authority on BOTH sides must fail even though equal.
+        for label, column_acl in (("foreign write", "{foreign_app=w/postgres}"), ("PUBLIC write", "{=w/postgres}"),
+                                  ("app read-only column grant", acl([f"{APP}=r/{OWNER}"])), ("foreign read", "{other=r/postgres}")):
+            old = copy.deepcopy(OLD_ROLE); new = copy.deepcopy(NEW_ROLE)
+            ledger_table(old)["columns"][0]["acl"] = column_acl; ledger_table(new)["columns"][0]["acl"] = column_acl
+            rc, out = run(old, new)
+            self.assertEqual(rc, 1, f"{label}: {out}")
+            self.assertIn("old column version carries a column acl", out, label)
+            self.assertIn("new column version carries a column acl", out, label)
+            self.assertNotIn("column version acl differs", out, label)
         new = copy.deepcopy(NEW_ROLE); ledger_table(new)["policies"] = [{"name": "p", "cmd": "*", "permissive": True, "roles": [APP], "public": False, "using": "true", "check": None}]
         rc, out = run(OLD_ROLE, new)
         self.assertEqual(rc, 1, out); self.assertIn("LEDGER TABLE policies differs", out)

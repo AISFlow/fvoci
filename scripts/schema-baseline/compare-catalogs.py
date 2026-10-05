@@ -18,7 +18,8 @@ sides' ledger definitions and rows are printed in the report, never compared as
 application catalog. The ledger table's ACL authority, RLS flags, triggers,
 policies and column ACLs are NOT excepted: they are compared across sides and
 the ACL must grant the app role exactly SELECT (no grant option), nothing to
-any other grantee or PUBLIC, write authority only to the owner. When the app
+any other grantee or PUBLIC, write authority only to the owner, and no ledger
+column may carry a column ACL on either side (the normal ledger has none). When the app
 role's privileges are dumped, both sides must name the same role with identical
 non-elevated attributes and complete metadata (schema, grantor, grantability);
 its ledger privileges must be exactly one non-grantable SELECT on the table and
@@ -196,9 +197,14 @@ def validate_ledger_table_identity(old_ledger, new_ledger, app_role_name):
     for name in sorted(set(old_cols) & set(new_cols)):
         if old_cols[name].get("acl") != new_cols[name].get("acl"):
             problems.append(f"LEDGER TABLE column {name} acl differs: old={old_cols[name].get('acl')!r} new={new_cols[name].get('acl')!r}")
-    for name in sorted(set(new_cols) - set(old_cols)):
-        if new_cols[name].get("acl") is not None:
-            problems.append(f"LEDGER TABLE new column {name} carries a column acl {new_cols[name].get('acl')!r}; expected none")
+    # Absolute authority, same side: the normal ledger carries NO column ACL at
+    # all (grant-app-role.sql grants table-level SELECT only; the baseline SQL
+    # grants nothing on the ledger), so any attacl on any ledger column, on
+    # either side, is unexpected authority even when both sides agree on it.
+    for side, cols in (("old", old_cols), ("new", new_cols)):
+        for name in sorted(cols):
+            if cols[name].get("acl") is not None:
+                problems.append(f"LEDGER TABLE {side} column {name} carries a column acl {cols[name].get('acl')!r}; the normal ledger has none")
     for side, table in (("old", old_t), ("new", new_t)):
         try:
             entries = parse_acl(table.get("acl"))
