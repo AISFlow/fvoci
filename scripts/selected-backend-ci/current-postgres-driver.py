@@ -199,7 +199,11 @@ if len(sys.argv) == 1:
     run = current['run']
     run.mkdir(mode=0o700)
     write(run / 'source-inputs-before.json', source_before)
+    # The owned fixture scripts re-run this driver (--pg-ready, then --inside) with this
+    # filtered environment; keep bytecode suppression explicit so the child never writes
+    # scripts/selected-backend-ci/__pycache__ into the checkout before its own status check.
     environment = {'PATH': os.environ['PATH'], 'LANG': os.environ.get('LANG', 'C.UTF-8'),
+                   'PYTHONDONTWRITEBYTECODE': '1',
                    'FVOCI_ROOT_RUN_OWNER': OWNER, 'FVOCI_TEST_PG_MAJOR': '18',
                    **({'FVOCI_E2E_SELECTED_AUXILIARY': 'normal-api'} if FLOW == 'on' else {}),
                    **{k: os.environ[k] for k in ('FVOCI_ROOT_CURRENT_BINDING','FVOCI_ROOT_CURRENT_ALLOCATION','FVOCI_ROOT_RESTART_GRANT','GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','CI','GITHUB_ACTIONS','GITHUB_SHA','GITHUB_REPOSITORY','GITHUB_JOB','FVOCI_CI_OWNER','FVOCI_CI_SELECTED_RUNS','FVOCI_CI_BUN','BUN_RUNTIME_TRANSPILER_CACHE_PATH','TMPDIR','FVOCI_E2E_SELECTED_FLOW','FVOCI_SELECTED_EXECUTION_MODE','FVOCI_SELECTED_LOCAL_ALLOCATION','FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256','FVOCI_LOCAL_RUN_ID','FVOCI_LOCAL_DISPATCH_ID','FVOCI_LOCAL_TASK_ID','ORCA_TERMINAL_HANDLE','FVOCI_LOCAL_ROOT_TERMINAL') if k in os.environ}}
