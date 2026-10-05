@@ -35,8 +35,10 @@ use crate::collab::room::{BodyWriteError, RoomKey};
 use crate::collab::seed::{SeedEngine, SeedError};
 use crate::db::revisions::{authorize_revision_target, RevisionDbError, RevisionTarget};
 use crate::db::task_origins::{
-    create_document_task, get_task_origin, list_document_task_origins, origin_request_hash,
-    task_projects, DocumentTaskRequest, TaskOriginDbError, TASK_ORIGIN_ANCHOR_MAX_CHARS,
+    create_document_task, get_task_origin,
+    list_document_task_origins_backend as list_document_task_origins, origin_request_hash,
+    task_projects_backend as task_projects, DocumentTaskRequest, TaskOriginDbError,
+    TASK_ORIGIN_ANCHOR_MAX_CHARS,
 };
 use crate::db::tasks::{get_task, CreateTaskInput};
 use crate::documents::blocks::{replace_node_by_id, BlockNode};
@@ -463,12 +465,7 @@ async fn document_task_projects(
     )
     .await?;
     let picker = task_projects(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/task_body.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -515,12 +512,7 @@ async fn document_task_origins(
     .await?;
     require_extra_scope(&auth, ApiTokenScope::TasksRead)?;
     let page = list_document_task_origins(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/task_body.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         auth.user_id,
         auth.credential_id,

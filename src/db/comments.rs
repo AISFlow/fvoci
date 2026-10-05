@@ -8,6 +8,9 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
+use crate::db::backend::{Backend, OperationTx};
+use crate::db::codec::{Cell, FamilyRow};
+
 use crate::collab::derived_body::to_chosung;
 use crate::db::context::{
     begin_read, lock_membership_users, recheck_session, session_is_live, set_tenant,
@@ -825,6 +828,151 @@ pub async fn list_document_comments(
     Ok(Ok(page))
 }
 
+/// Selected wiki read; the PostgreSQL API and all comment writes stay intact.
+pub async fn list_document_comments_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+    query: CommentListQuery,
+) -> Result<Result<CommentListPage, CommentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_document_comments(
+            pool,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            document_id,
+            query,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        if !op.session_is_live(actor_user_id, session_id).await?
+            || !op.workspace_is_live(workspace_id).await?
+            || !op
+                .document_permission(workspace_id, actor_user_id, document_id, true)
+                .await?
+                .at_least(ProjectPermission::View)
+        {
+            return Ok(Err(CommentDbError::NotFound));
+        }
+        // document_permission admits only a live wiki document, including its
+        // current group grants. All page reads share that authorization snapshot.
+        let OperationTx::SqliteFamily(family) = op else {
+            unreachable!()
+        };
+        family_comment_page(family, workspace_id, document_id, query).await
+    }
+    .await;
+    match result {
+        Ok(Ok(page)) => {
+            tx.commit_with_cleanup()
+                .await
+                .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+            Ok(Ok(page))
+        }
+        Ok(Err(refusal)) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(CommentReadRefusal(refusal))),
+                    cleanup,
+                ));
+            }
+            Ok(Err(refusal))
+        }
+        Err(original) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(original)),
+                    cleanup,
+                ));
+            }
+            Err(original)
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("comment read refused: {0:?}")]
+struct CommentReadRefusal(CommentDbError);
+
+fn family_comment_row(row: &FamilyRow) -> Result<CommentRow, sqlx::Error> {
+    Ok(CommentRow {
+        id: row.cell(0)?.id()?,
+        workspace_id: row.cell(1)?.id()?,
+        document_id: row.cell(2)?.optional(Cell::id)?,
+        task_id: row.cell(3)?.optional(Cell::id)?,
+        parent_id: row.cell(4)?.optional(Cell::id)?,
+        created_by: row.cell(5)?.id()?,
+        body: row.cell(6)?.string()?,
+        resolved_at: row.cell(7)?.optional(Cell::datetime)?,
+        reactions: row.cell(8)?.value()?,
+        created_at: row.cell(9)?.datetime()?,
+        updated_at: row.cell(10)?.datetime()?,
+    })
+}
+
+async fn family_comment_page(
+    family: &mut crate::db::backend::FamilyTx,
+    workspace: Uuid,
+    document: Uuid,
+    query: CommentListQuery,
+) -> Result<Result<CommentListPage, CommentDbError>, sqlx::Error> {
+    family.require_tenant(workspace)?;
+    if !(1..=100).contains(&query.limit) {
+        return Ok(Err(CommentDbError::InvalidInput));
+    }
+    let scope = comment_scope(workspace, "document", document);
+    let after = if let Some(cursor) = &query.cursor {
+        if cursor.len() > 1024 {
+            return Ok(Err(CommentDbError::InvalidInput));
+        }
+        let id = match decode_cursor(cursor, &scope) {
+            Ok(id) => id,
+            Err(error) => return Ok(Err(error)),
+        };
+        let rows = family
+            .query(
+                "SELECT document_id FROM comments WHERE workspace_id=?1 AND id=?2",
+                &[Cell::uuid(workspace), Cell::uuid(id)],
+            )
+            .await?;
+        let Some(anchor) = rows.first() else {
+            return Ok(Err(CommentDbError::InvalidCursor));
+        };
+        if anchor.cell(0)?.optional(Cell::id)? != Some(document) {
+            return Ok(Err(CommentDbError::InvalidCursor));
+        }
+        Some(id)
+    } else {
+        None
+    };
+    let rows = family.query(
+        "SELECT c.id,c.workspace_id,c.document_id,c.task_id,c.parent_id,c.created_by,c.body,c.resolved_at,c.reactions,c.created_at,c.updated_at
+         FROM comments c WHERE c.workspace_id=?1 AND c.document_id=?2
+         AND (?3 IS NULL OR (c.created_at,c.id)>(SELECT created_at,id FROM comments WHERE workspace_id=?1 AND id=?3))
+         ORDER BY c.created_at ASC,c.id ASC LIMIT ?4",
+        &[Cell::uuid(workspace),Cell::uuid(document),Cell::optional_uuid(after),Cell::Integer(i64::from(query.limit)+1)],
+    ).await?;
+    let mut items = rows
+        .iter()
+        .map(family_comment_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    let has_more = items.len() > query.limit as usize;
+    items.truncate(query.limit as usize);
+    let next_cursor = if has_more {
+        items.last().map(|row| encode_cursor(row.id, &scope))
+    } else {
+        None
+    };
+    Ok(Ok(CommentListPage { items, next_cursor }))
+}
+
 pub async fn list_task_comments(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1447,4 +1595,267 @@ pub fn comment_output(
         }
     }
     (reactions, other_reaction_count)
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod selected_wiki_comment_read_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+
+    #[tokio::test]
+    async fn wiki_aux_comments_selected_literal_paging_scope_current_parent_and_session() {
+        let f = Fixture::new().await;
+        let credential = Uuid::now_v7();
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,'comments-read',?3)")
+            .bind(credential.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice())
+            .bind(chrono::Utc::now().timestamp_micros()+86_400_000_000).execute(&f.pool).await.unwrap();
+        let ids = [
+            Uuid::from_u128(101),
+            Uuid::from_u128(102),
+            Uuid::from_u128(103),
+        ];
+        for (index, id) in ids.iter().enumerate() {
+            let parent = (index == 1).then_some(ids[0]);
+            sqlx::query("INSERT INTO comments(id,workspace_id,document_id,parent_id,created_by,body,reactions,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,1000000,1000000)")
+                .bind(id.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.document.as_bytes().as_slice())
+                .bind(parent.map(|id|id.as_bytes().to_vec())).bind(f.user.as_bytes().as_slice())
+                .bind(format!("댓글 한글 😀 {index}")).bind(serde_json::json!({"👍":[f.user]}).to_string()).execute(&f.pool).await.unwrap();
+        }
+        let first = list_document_comments_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            f.document,
+            CommentListQuery {
+                limit: 2,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            first.items.iter().map(|row| row.id).collect::<Vec<_>>(),
+            ids[..2]
+        );
+        assert_eq!(first.items[0].body, "댓글 한글 😀 0");
+        assert_eq!(first.items[1].parent_id, Some(ids[0]));
+        assert_eq!(first.items[0].document_id, Some(f.document));
+        assert_eq!(first.items[0].reactions, serde_json::json!({"👍":[f.user]}));
+        let cursor = first.next_cursor.unwrap();
+        let last = list_document_comments_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            f.document,
+            CommentListQuery {
+                limit: 2,
+                cursor: Some(cursor.clone()),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            last.items.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![ids[2]]
+        );
+        assert!(last.next_cursor.is_none());
+        for bad in [
+            "not-base64".to_string(),
+            encode_cursor(
+                ids[0],
+                &comment_scope(Uuid::now_v7(), "document", f.document),
+            ),
+            encode_cursor(
+                Uuid::now_v7(),
+                &comment_scope(f.workspace, "document", f.document),
+            ),
+        ] {
+            assert!(matches!(
+                list_document_comments_backend(
+                    &f.backend,
+                    f.workspace,
+                    f.user,
+                    credential,
+                    f.document,
+                    CommentListQuery {
+                        limit: 2,
+                        cursor: Some(bad)
+                    }
+                )
+                .await
+                .unwrap(),
+                Err(CommentDbError::InvalidCursor)
+            ));
+        }
+        for limit in [0, 101] {
+            assert!(matches!(
+                list_document_comments_backend(
+                    &f.backend,
+                    f.workspace,
+                    f.user,
+                    credential,
+                    f.document,
+                    CommentListQuery {
+                        limit,
+                        cursor: None
+                    }
+                )
+                .await
+                .unwrap(),
+                Err(CommentDbError::InvalidInput)
+            ));
+        }
+        assert!(matches!(
+            list_document_comments_backend(
+                &f.backend,
+                f.workspace,
+                f.user,
+                credential,
+                f.document,
+                CommentListQuery {
+                    limit: 2,
+                    cursor: Some("x".repeat(1025))
+                }
+            )
+            .await
+            .unwrap(),
+            Err(CommentDbError::InvalidInput)
+        ));
+        let other_document = Uuid::now_v7();
+        sqlx::query("INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,'Other',?3,'W',2,'published',2,?4,'{}')")
+            .bind(other_document.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(other_document.simple().to_string()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert!(matches!(
+            list_document_comments_backend(
+                &f.backend,
+                f.workspace,
+                f.user,
+                credential,
+                other_document,
+                CommentListQuery {
+                    limit: 2,
+                    cursor: Some(cursor)
+                }
+            )
+            .await
+            .unwrap(),
+            Err(CommentDbError::InvalidCursor)
+        ));
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_document_comments_backend(
+                &f.backend,
+                f.workspace,
+                f.user,
+                credential,
+                f.document,
+                CommentListQuery {
+                    limit: 50,
+                    cursor: None
+                }
+            )
+            .await
+            .unwrap(),
+            Err(CommentDbError::NotFound)
+        ));
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE documents SET deleted_at=1 WHERE id=?1")
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_document_comments_backend(
+                &f.backend,
+                f.workspace,
+                f.user,
+                credential,
+                f.document,
+                CommentListQuery {
+                    limit: 50,
+                    cursor: None
+                }
+            )
+            .await
+            .unwrap(),
+            Err(CommentDbError::NotFound)
+        ));
+        sqlx::query("UPDATE documents SET deleted_at=NULL WHERE id=?1")
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let healthy = list_document_comments_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            f.document,
+            CommentListQuery {
+                limit: 50,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            healthy.items.iter().map(|row| row.id).collect::<Vec<_>>(),
+            ids
+        );
+        // A driver failure is not a successful empty page or a masked refusal.
+        sqlx::query("ALTER TABLE comments RENAME TO comments_read_failure")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(list_document_comments_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            f.document,
+            CommentListQuery {
+                limit: 50,
+                cursor: None
+            }
+        )
+        .await
+        .is_err());
+        sqlx::query("ALTER TABLE comments_read_failure RENAME TO comments")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            list_document_comments_backend(
+                &f.backend,
+                f.workspace,
+                f.user,
+                credential,
+                f.document,
+                CommentListQuery {
+                    limit: 50,
+                    cursor: None
+                }
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .items
+            .len(),
+            3
+        );
+        f.pool.close().await;
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
 }

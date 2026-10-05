@@ -8,6 +8,9 @@ use chrono::{DateTime, Utc};
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::db::backend::{Backend, OperationTx};
+use crate::db::codec::Cell;
+
 use crate::collections::AttachTarget;
 use crate::db::collections::{begin_member, require_target, Actor, CollectionDbError, Need};
 use crate::db::identity::{append_audit, AuditAppend};
@@ -394,6 +397,74 @@ pub async fn list_document_tags(
     Ok(Ok(rows.into_iter().map(|row| tag_from(row, 0)).collect()))
 }
 
+/// Assigned display tags. Family name ordering is native BINARY with UUID
+/// ties; stored Unicode strings are neither folded nor normalized. This narrow
+/// display contract does not change PG locale order, name uniqueness or cursors.
+pub async fn list_document_tags_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: &Actor,
+    document_id: Uuid,
+    affiliation: Affiliation,
+) -> TagResult<Vec<TagRow>> {
+    if let Backend::Postgres(pool) = backend {
+        return list_document_tags(pool, workspace_id, actor, document_id, affiliation).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        if !op.session_is_live(actor.user_id,actor.credential_id).await?
+            || !op.workspace_is_live(workspace_id).await?
+            || op.membership_role(workspace_id,actor.user_id,false).await?.is_none()
+        { return Ok(Err(TagDbError::NotFound)); }
+        let Some(document) = op.document_row(workspace_id,document_id).await? else { return Ok(Err(TagDbError::NotFound)); };
+        let matches = match affiliation { Affiliation::Wiki => document.project_id.is_none(),Affiliation::Project(project) => document.project_id==Some(project) };
+        if !matches { return Ok(Err(TagDbError::NotFound)); }
+        let permission = if let Some(project) = document.project_id {
+            op.project_permission_by_id(workspace_id,actor.user_id,project).await?.unwrap_or(crate::projects::ProjectPermission::None)
+        } else { op.document_permission(workspace_id,actor.user_id,document_id,true).await? };
+        if !permission.at_least(crate::projects::ProjectPermission::View) { return Ok(Err(TagDbError::NotFound)); }
+        let OperationTx::SqliteFamily(family) = op else { unreachable!() };
+        family.require_tenant(workspace_id)?;
+        let rows = family.query("SELECT t.id,t.workspace_id,t.name,t.color,t.created_at,t.updated_at
+            FROM document_tag_assignments a JOIN document_tags t ON t.workspace_id=a.workspace_id AND t.id=a.tag_id
+            WHERE a.workspace_id=?1 AND a.document_id=?2 ORDER BY t.name,t.id", &[Cell::uuid(workspace_id),Cell::uuid(document_id)]).await?;
+        let tags = rows.iter().map(|row| Ok(tag_from((row.cell(0)?.id()?,row.cell(1)?.id()?,row.cell(2)?.string()?,row.cell(3)?.string()?,row.cell(4)?.datetime()?,row.cell(5)?.datetime()?),0))).collect::<Result<Vec<_>,sqlx::Error>>()?;
+        Ok(Ok(tags))
+    }.await;
+    match result {
+        Ok(Ok(tags)) => {
+            tx.commit_with_cleanup()
+                .await
+                .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+            Ok(Ok(tags))
+        }
+        Ok(Err(refusal)) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(TagReadRefusal(refusal))),
+                    cleanup,
+                ));
+            }
+            Ok(Err(refusal))
+        }
+        Err(original) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(original)),
+                    cleanup,
+                ));
+            }
+            Err(original)
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("tag read refused: {0:?}")]
+struct TagReadRefusal(TagDbError);
+
 pub async fn assign_tag(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
@@ -509,4 +580,222 @@ pub async fn tagged_document_id_set(
     let ids = tagged_document_ids(&mut tx, workspace_id, tag_id).await?;
     tx.commit().await?;
     Ok(ids)
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod selected_assigned_tag_read_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+
+    #[tokio::test]
+    async fn wiki_aux_tags_selected_unicode_tenant_grant_affiliation_and_healthy_read() {
+        let f = Fixture::new().await;
+        let credential = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,'tags-read',?3)",
+        )
+        .bind(credential.as_bytes().as_slice())
+        .bind(f.user.as_bytes().as_slice())
+        .bind(chrono::Utc::now().timestamp_micros() + 86_400_000_000)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        let actor = Actor {
+            user_id: f.user,
+            credential_id: credential,
+            client_ip: None,
+        };
+        let names = ["가", "가", "中", "e\u{301}", "A", "😀"];
+        let ids = names
+            .iter()
+            .enumerate()
+            .map(|(i, _)| Uuid::from_u128(200 + i as u128))
+            .collect::<Vec<_>>();
+        for (name, id) in names.iter().zip(&ids) {
+            sqlx::query(
+                "INSERT INTO document_tags(id,workspace_id,name,color) VALUES(?1,?2,?3,'violet')",
+            )
+            .bind(id.as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(*name)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO document_tag_assignments(workspace_id,document_id,tag_id) VALUES(?1,?2,?3)").bind(f.workspace.as_bytes().as_slice()).bind(f.document.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        }
+        let rows = list_document_tags_backend(
+            &f.backend,
+            f.workspace,
+            &actor,
+            f.document,
+            Affiliation::Wiki,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+            vec!["A", "e\u{301}", "가", "中", "가", "😀"]
+        );
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![ids[4], ids[3], ids[1], ids[2], ids[0], ids[5]]
+        );
+        assert!(rows
+            .iter()
+            .all(|row| row.workspace_id == f.workspace && row.color == "violet"));
+        // Equal-name rows in one tenant are forbidden by the retained catalog;
+        // do not drop its unique index merely to manufacture an ordering tie.
+        assert!(sqlx::query(
+            "INSERT INTO document_tags(id,workspace_id,name,color) VALUES(?1,?2,'가','red')"
+        )
+        .bind(Uuid::now_v7().as_bytes().as_slice())
+        .bind(f.workspace.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .is_err());
+        let other = Uuid::now_v7();
+        let doc = Uuid::now_v7();
+        let tag = Uuid::now_v7();
+        sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES(?1,'tags-other','Other')")
+            .bind(other.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')")
+            .bind(other.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,'Other',?3,'V',1,'published',2,?4,'{}')").bind(doc.as_bytes().as_slice()).bind(other.as_bytes().as_slice()).bind(doc.simple().to_string()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO document_tags(id,workspace_id,name,color) VALUES(?1,?2,'가','red')",
+        )
+        .bind(tag.as_bytes().as_slice())
+        .bind(other.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO document_tag_assignments(workspace_id,document_id,tag_id) VALUES(?1,?2,?3)").bind(other.as_bytes().as_slice()).bind(doc.as_bytes().as_slice()).bind(tag.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert_eq!(
+            list_document_tags_backend(&f.backend, other, &actor, doc, Affiliation::Wiki)
+                .await
+                .unwrap()
+                .unwrap()[0]
+                .id,
+            tag
+        );
+        assert!(matches!(
+            list_document_tags_backend(&f.backend, other, &actor, f.document, Affiliation::Wiki)
+                .await
+                .unwrap(),
+            Err(TagDbError::NotFound)
+        ));
+        assert!(matches!(
+            list_document_tags_backend(&f.backend, f.workspace, &actor, doc, Affiliation::Wiki)
+                .await
+                .unwrap(),
+            Err(TagDbError::NotFound)
+        ));
+        assert!(matches!(
+            list_document_tags_backend(
+                &f.backend,
+                f.workspace,
+                &actor,
+                f.document,
+                Affiliation::Project(Uuid::now_v7())
+            )
+            .await
+            .unwrap(),
+            Err(TagDbError::NotFound)
+        ));
+        sqlx::query("UPDATE memberships SET role='guest' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_document_tags_backend(
+                &f.backend,
+                f.workspace,
+                &actor,
+                f.document,
+                Affiliation::Wiki
+            )
+            .await
+            .unwrap(),
+            Err(TagDbError::NotFound)
+        ));
+        let group = Uuid::now_v7();
+        sqlx::query("INSERT INTO groups(id,workspace_id,name) VALUES(?1,?2,'Wiki viewers')")
+            .bind(group.as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO group_members(workspace_id,group_id,user_id) VALUES(?1,?2,?3)")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(group.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO document_members(id,workspace_id,document_id,group_id,role) VALUES(?1,?2,?3,?4,'viewer')").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.document.as_bytes().as_slice()).bind(group.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert_eq!(
+            list_document_tags_backend(
+                &f.backend,
+                f.workspace,
+                &actor,
+                f.document,
+                Affiliation::Wiki
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .len(),
+            6
+        );
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_document_tags_backend(
+                &f.backend,
+                f.workspace,
+                &actor,
+                f.document,
+                Affiliation::Wiki
+            )
+            .await
+            .unwrap(),
+            Err(TagDbError::NotFound)
+        ));
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            list_document_tags_backend(
+                &f.backend,
+                f.workspace,
+                &actor,
+                f.document,
+                Affiliation::Wiki
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+            rows.iter().map(|row| row.id).collect::<Vec<_>>()
+        );
+        f.pool.close().await;
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
 }
