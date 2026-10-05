@@ -70,6 +70,14 @@ pub fn router() -> Router<AppState> {
                 ),
             ),
         )
+        .route(
+            &format!("{PROJECT_DOC}/body/versioned"),
+            get(get_project_versioned_body)
+                .put(save_project_versioned_body)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    (crate::db::collab::MAX_COLLAB_UPDATE_BYTES * 4).div_ceil(3) + 4096,
+                )),
+        )
         .route(&format!("{WS_DOC}/body"), axum::routing::put(put_body_wiki))
         .route(
             &format!("{WS_DOC}/blocks/{{block_id}}"),
@@ -1385,6 +1393,24 @@ async fn get_versioned_body(
     jar: CookieJar,
     Path((workspace, document)): WikiPath,
 ) -> Result<Json<VersionedBodyResponse>, DocumentApiError> {
+    read_versioned_body_inner(state, headers, jar, workspace, document, None).await
+}
+async fn get_project_versioned_body(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace, project, document)): ProjectPath,
+) -> Result<Json<VersionedBodyResponse>, DocumentApiError> {
+    read_versioned_body_inner(state, headers, jar, workspace, document, Some(project)).await
+}
+async fn read_versioned_body_inner(
+    state: AppState,
+    headers: HeaderMap,
+    jar: CookieJar,
+    workspace: Uuid,
+    document: Uuid,
+    project: Option<Uuid>,
+) -> Result<Json<VersionedBodyResponse>, DocumentApiError> {
     let engine = require_off_writer(&state)?;
     let actor = auth(
         &state,
@@ -1394,12 +1420,17 @@ async fn get_versioned_body(
         workspace,
     )
     .await?;
-    let source = crate::db::body_save::read_off_wiki_body(
+    let source = crate::db::body_save::read_off_document_body(
         &state.auth.db.pool,
         state.realtime_mode,
         engine,
         workspace,
-        document,
+        match project {
+            Some(project) => {
+                crate::db::revisions::RevisionScope::project_document(project, document)
+            }
+            None => crate::db::revisions::RevisionTarget::Document(document).into(),
+        },
         actor.user_id,
         actor.credential_id,
     )
@@ -1427,6 +1458,38 @@ async fn save_versioned_body(
     Path((workspace, document)): WikiPath,
     body: Bytes,
 ) -> Result<Json<SaveVersionedBodyResponse>, DocumentApiError> {
+    save_versioned_body_inner(state, headers, jar, peer, workspace, document, None, body).await
+}
+async fn save_project_versioned_body(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path((workspace, project, document)): ProjectPath,
+    body: Bytes,
+) -> Result<Json<SaveVersionedBodyResponse>, DocumentApiError> {
+    save_versioned_body_inner(
+        state,
+        headers,
+        jar,
+        peer,
+        workspace,
+        document,
+        Some(project),
+        body,
+    )
+    .await
+}
+async fn save_versioned_body_inner(
+    state: AppState,
+    headers: HeaderMap,
+    jar: CookieJar,
+    peer: SocketAddr,
+    workspace: Uuid,
+    document: Uuid,
+    project: Option<Uuid>,
+    body: Bytes,
+) -> Result<Json<SaveVersionedBodyResponse>, DocumentApiError> {
     let engine = require_off_writer(&state)?;
     check_origin(&headers, &state.public_origin)?;
     let input: SaveVersionedBodyInput =
@@ -1445,13 +1508,14 @@ async fn save_versioned_body(
     )
     .await?;
     revision_write_limit(&state, actor.user_id).await?;
-    let saved = crate::db::body_save::save_off_wiki_body(
+    let saved = crate::db::body_save::save_off_document_body(
         &state.auth.db.pool,
         state.realtime_mode,
         engine,
         crate::db::body_save::OffBodyRequest {
             workspace,
             document,
+            project,
             actor: actor.user_id,
             credential: actor.credential_id,
             command: input.command_id,

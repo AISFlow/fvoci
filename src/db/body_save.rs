@@ -54,12 +54,21 @@ pub enum BodySaveError {
 pub struct OffBodyRequest {
     pub workspace: Uuid,
     pub document: Uuid,
+    pub project: Option<Uuid>,
     pub actor: Uuid,
     pub credential: Uuid,
     pub command: Uuid,
     pub expected_tail: i64,
     pub update: Vec<u8>,
     pub client_ip: Option<String>,
+}
+impl OffBodyRequest {
+    fn scope(&self) -> RevisionScope {
+        match self.project {
+            Some(project) => RevisionScope::project_document(project, self.document),
+            None => RevisionTarget::Document(self.document).into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,28 +93,25 @@ impl Drop for NativeCancel {
     }
 }
 
-pub async fn read_off_wiki_body(
+pub async fn read_off_document_body(
     backend: &Backend,
     mode: RealtimeMode,
     engine: CollabConfig,
     workspace: Uuid,
-    document: Uuid,
+    scope: RevisionScope,
     actor: Uuid,
     credential: Uuid,
 ) -> Result<OffBodySource, BodySaveError> {
+    let RevisionTarget::Document(document) = scope.target() else {
+        return Err(BodySaveError::Invalid);
+    };
     let mut tx = backend.begin_off_body().await?;
     let result = async {
         let mut op = tx.operation();
         op.set_tenant(workspace).await?;
-        op.authorize_revision_scope(
-            workspace,
-            actor,
-            credential,
-            RevisionTarget::Document(document).into(),
-            false,
-        )
-        .await?
-        .map_err(BodySaveError::Revision)?;
+        op.authorize_revision_scope(workspace, actor, credential, scope, false)
+            .await?
+            .map_err(BodySaveError::Revision)?;
         let native = op
             .load_off_body_read(
                 mode,
@@ -125,26 +131,14 @@ pub async fn read_off_wiki_body(
         .await
         .map_err(|_| BodySaveError::Unavailable)?
         .map_err(|_| BodySaveError::Unavailable)?;
-        op.authorize_revision_scope(
-            workspace,
-            actor,
-            credential,
-            RevisionTarget::Document(document).into(),
-            false,
-        )
-        .await?
-        .map_err(BodySaveError::Revision)?;
+        op.authorize_revision_scope(workspace, actor, credential, scope, false)
+            .await?
+            .map_err(BodySaveError::Revision)?;
         if !op.recheck_session(actor, credential).await? {
             return Err(BodySaveError::Native(CollabDbError::Forbidden));
         }
         let writable = op
-            .authorize_revision_scope(
-                workspace,
-                actor,
-                credential,
-                RevisionTarget::Document(document).into(),
-                true,
-            )
+            .authorize_revision_scope(workspace, actor, credential, scope, true)
             .await?
             .is_ok();
         Ok(OffBodySource {
@@ -173,7 +167,7 @@ pub async fn read_off_wiki_body(
     }
 }
 
-pub async fn save_off_wiki_body(
+pub async fn save_off_document_body(
     backend: &Backend,
     mode: RealtimeMode,
     engine: CollabConfig,
@@ -213,7 +207,13 @@ pub async fn save_off_wiki_body(
 
 fn command_hash(request: &OffBodyRequest) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"fvoci:off-wiki-body:v1\0");
+    match request.project {
+        Some(project) => {
+            hash.update(b"fvoci:off-project-body:v1\0");
+            hash.update(project.as_bytes());
+        }
+        None => hash.update(b"fvoci:off-wiki-body:v1\0"),
+    }
     for id in [
         request.workspace,
         request.document,
@@ -238,6 +238,7 @@ async fn save_in_writer(
     let OffBodyRequest {
         workspace,
         document,
+        project: _,
         actor,
         credential,
         command,
@@ -257,16 +258,10 @@ async fn save_in_writer(
         )
         .await?
         .map_err(BodySaveError::Native)?;
-    // Wiki-only route cannot name a project document, even if collab access is allowed.
-    op.authorize_revision_scope(
-        *workspace,
-        *actor,
-        *credential,
-        RevisionTarget::Document(*document).into(),
-        true,
-    )
-    .await?
-    .map_err(BodySaveError::Revision)?;
+    // Reuse the exact route's current wiki/project affiliation and authority.
+    op.authorize_revision_scope(*workspace, *actor, *credential, request.scope(), true)
+        .await?
+        .map_err(BodySaveError::Revision)?;
     let hash = command_hash(request);
     if let Some((stored, result)) = op.body_save_receipt(*workspace, *command).await? {
         if stored != hash {
@@ -357,7 +352,7 @@ async fn save_in_writer(
             *workspace,
             *actor,
             *credential,
-            RevisionScope::from(RevisionTarget::Document(*document)),
+            request.scope(),
             CreateRevisionInput {
                 y_snapshot: native.captured.y_snapshot,
                 content_json: native.captured.content_json,
@@ -381,15 +376,9 @@ async fn save_in_writer(
     }
     // Current credential/target authorization is still locked and rechecked
     // after all native awaits, including immediately before caller-owned finish.
-    op.authorize_revision_scope(
-        *workspace,
-        *actor,
-        *credential,
-        RevisionTarget::Document(*document).into(),
-        true,
-    )
-    .await?
-    .map_err(BodySaveError::Revision)?;
+    op.authorize_revision_scope(*workspace, *actor, *credential, request.scope(), true)
+        .await?
+        .map_err(BodySaveError::Revision)?;
     if !op.recheck_session(*actor, *credential).await? || !op.verify_off_body_writer(proof).await? {
         return Err(BodySaveError::Native(CollabDbError::Forbidden));
     }
@@ -448,6 +437,7 @@ mod policy_tests {
         let request = OffBodyRequest {
             workspace: Uuid::now_v7(),
             document: Uuid::now_v7(),
+            project: None,
             actor: Uuid::now_v7(),
             credential: Uuid::now_v7(),
             command: Uuid::now_v7(),
@@ -456,9 +446,10 @@ mod policy_tests {
             client_ip: None,
         };
         let original = command_hash(&request);
-        let mutations: [fn(&mut OffBodyRequest); 6] = [
+        let mutations: [fn(&mut OffBodyRequest); 7] = [
             |r| r.workspace = Uuid::now_v7(),
             |r| r.document = Uuid::now_v7(),
+            |r| r.project = Some(Uuid::now_v7()),
             |r| r.actor = Uuid::now_v7(),
             |r| r.credential = Uuid::now_v7(),
             |r| r.expected_tail += 1,
@@ -527,6 +518,7 @@ mod sqlite_native_tests {
         OffBodyRequest {
             workspace: f.workspace,
             document: f.document,
+            project: None,
             actor: f.user,
             credential,
             command: Uuid::now_v7(),
@@ -548,7 +540,7 @@ mod sqlite_native_tests {
         let credential = session(&f).await;
         let one = request(&f, credential, "one actual writer 😀").await;
         let two = request(&f, credential, "second conflicting writer").await;
-        let saved = save_off_wiki_body(&f.backend, RealtimeMode::Off, engine(), one.clone())
+        let saved = save_off_document_body(&f.backend, RealtimeMode::Off, engine(), one.clone())
             .await
             .unwrap();
         assert_eq!(saved.command_id, one.command);
@@ -557,11 +549,11 @@ mod sqlite_native_tests {
         let before = counts(&f).await;
         assert_eq!(before, (1, 1, 1, 1));
         assert!(matches!(
-            save_off_wiki_body(&f.backend, RealtimeMode::Off, engine(), two).await,
+            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), two).await,
             Err(BodySaveError::Conflict)
         ));
         assert_eq!(counts(&f).await, before);
-        let replay = save_off_wiki_body(&f.backend, RealtimeMode::Off, engine(), one.clone())
+        let replay = save_off_document_body(&f.backend, RealtimeMode::Off, engine(), one.clone())
             .await
             .unwrap();
         assert_eq!(replay.revision_id, saved.revision_id);
@@ -569,16 +561,16 @@ mod sqlite_native_tests {
         let mut changed = one.clone();
         changed.update.push(0);
         assert!(matches!(
-            save_off_wiki_body(&f.backend, RealtimeMode::Off, engine(), changed).await,
+            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), changed).await,
             Err(BodySaveError::RequestMismatch)
         ));
         assert_eq!(counts(&f).await, before);
-        let reader = read_off_wiki_body(
+        let reader = read_off_document_body(
             &f.backend,
             RealtimeMode::Off,
             engine(),
             f.workspace,
-            f.document,
+            RevisionTarget::Document(f.document).into(),
             f.user,
             credential,
         )
@@ -597,7 +589,7 @@ mod sqlite_native_tests {
             .await
             .unwrap();
         assert!(matches!(
-            save_off_wiki_body(&f.backend, RealtimeMode::Off, engine(), one).await,
+            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), one).await,
             Err(BodySaveError::Native(_))
         ));
         assert_eq!(counts(&f).await, before);
@@ -608,6 +600,86 @@ mod sqlite_native_tests {
         assert_eq!(fk, 1);
         f.close().await;
     }
+    #[tokio::test]
+    async fn off_project_native_save_binds_affiliation_and_rechecks_archived_replay() {
+        let f = Fixture::new().await;
+        let credential = session(&f).await;
+        let project = Uuid::now_v7();
+        sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'OFF','OFF','workspace',?3)")
+            .bind(project.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool).await.unwrap();
+        sqlx::query("UPDATE documents SET project_id=?1 WHERE workspace_id=?2 AND id=?3")
+            .bind(project.as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let mut command = request(&f, credential, "project native history").await;
+        command.project = Some(project);
+        let mut wrong = command.clone();
+        wrong.project = Some(Uuid::now_v7());
+        assert!(matches!(
+            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), wrong).await,
+            Err(BodySaveError::Revision(RevisionDbError::NotFound))
+        ));
+        assert_eq!(counts(&f).await, (0, 0, 0, 0));
+        let saved =
+            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), command.clone())
+                .await
+                .unwrap();
+        assert_eq!(saved.tail_seq, "1");
+        let before = counts(&f).await;
+        let scope = RevisionScope::project_document(project, f.document);
+        let fresh = read_off_document_body(
+            &f.backend,
+            RealtimeMode::Off,
+            engine(),
+            f.workspace,
+            scope,
+            f.user,
+            credential,
+        )
+        .await
+        .unwrap();
+        assert!(fresh.writable);
+        assert_eq!(fresh.native.tail_seq, 1);
+        assert!(fresh
+            .content_json
+            .to_string()
+            .contains("project native history"));
+        let replay =
+            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), command.clone())
+                .await
+                .unwrap();
+        assert_eq!(replay.revision_id, saved.revision_id);
+        assert_eq!(counts(&f).await, before);
+        sqlx::query("UPDATE projects SET archived_at=1 WHERE workspace_id=?1 AND id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), command).await,
+            Err(BodySaveError::Native(CollabDbError::Forbidden))
+        ));
+        assert_eq!(counts(&f).await, before);
+        let fresh = read_off_document_body(
+            &f.backend,
+            RealtimeMode::Off,
+            engine(),
+            f.workspace,
+            scope,
+            f.user,
+            credential,
+        )
+        .await
+        .unwrap();
+        assert!(!fresh.writable);
+        assert_eq!(fresh.native.tail_seq, 1);
+    }
+
     #[tokio::test]
     async fn off_wiki_real_foreign_key_failure_rolls_back_native_revision_and_command() {
         let f = Fixture::new().await;
@@ -670,7 +742,7 @@ mod sqlite_native_tests {
         assert_eq!(audits, 0);
         // The same bytes must make normal progress after the rejected writer.
         assert_eq!(
-            save_off_wiki_body(&f.backend, RealtimeMode::Off, engine(), input)
+            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), input)
                 .await
                 .unwrap()
                 .tail_seq,

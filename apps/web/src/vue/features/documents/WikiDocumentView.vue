@@ -796,11 +796,13 @@ function flashBlock(id: string): void {
             :data-body-persisted="offBody.durable.value ? 'true' : 'false'"
           >
             {{
-              offBody.saving.value
-                ? t("version.saving")
-                : offBody.dirty.value || offBody.sourceBuffer.value
-                  ? t("doc.off.draft")
-                  : t("doc.off.saved")
+              !offBody.doc.value
+                ? t("load.loading")
+                : offBody.saving.value
+                  ? t("version.saving")
+                  : offBody.dirty.value || offBody.sourceBuffer.value
+                    ? t("doc.off.draft")
+                    : t("doc.off.saved")
             }}
           </span>
           <span

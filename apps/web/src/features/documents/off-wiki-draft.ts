@@ -7,6 +7,7 @@ export type OffWikiOwner = {
   credentialId: string;
   workspaceId: string;
   targetId: string;
+  projectId?: string | null;
 };
 type FrozenSave = { command: BodySaveCommand; snapshot: string };
 type StoredDraft = {
@@ -23,7 +24,9 @@ type StoredDraft = {
 export function ownerKey(owner: OffWikiOwner): string {
   // sessionStorage is a tab-owned storage area. Neither another credential nor
   // another target can read this slot, including after A -> B -> A navigation.
-  return `fvoci:off-wiki:1:${JSON.stringify([owner.actorId, owner.credentialId, owner.workspaceId, owner.targetId])}`;
+  const identity = [owner.actorId, owner.credentialId, owner.workspaceId, owner.targetId];
+  if (owner.projectId) identity.push(owner.projectId);
+  return `fvoci:off-wiki:1:${JSON.stringify(identity)}`;
 }
 export function encodeUpdate(bytes: Uint8Array): string {
   let binary = "";

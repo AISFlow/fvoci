@@ -74,6 +74,7 @@ function harness() {
   const reads: { scope: OffWikiOwner; pending: ReturnType<typeof deferred<VersionedBody>> }[] = [];
   const writes: {
     command: BodySaveCommand;
+    projectId?: string | null;
     pending: ReturnType<typeof deferred<BodySaveResult>>;
   }[] = [];
   const slots = new Map<string, string>();
@@ -99,14 +100,24 @@ function harness() {
       removeEventListener: () => {},
     },
     AbortController,
-    readVersionedBody: (workspaceId: string, targetId: string) => {
+    readVersionedBody: (
+      workspaceId: string,
+      targetId: string,
+      _signal?: AbortSignal,
+      projectId?: string | null,
+    ) => {
       const pending = deferred<VersionedBody>();
-      reads.push({ scope: { ...scope.value!, workspaceId, targetId }, pending });
+      reads.push({ scope: { ...scope.value!, workspaceId, targetId, projectId }, pending });
       return pending.promise;
     },
-    saveVersionedBody: (_workspace: string, _target: string, command: BodySaveCommand) => {
+    saveVersionedBody: (
+      _workspace: string,
+      _target: string,
+      command: BodySaveCommand,
+      projectId?: string | null,
+    ) => {
       const pending = deferred<BodySaveResult>();
-      writes.push({ command, pending });
+      writes.push({ command, projectId, pending });
       return pending.promise;
     },
   }) as typeof import("./useOffWikiBody").useOffWikiBody;
@@ -221,4 +232,45 @@ describe("OFF wiki HTTP lifetime", () => {
     h.effects.stop();
     expect(h.body.doc.value).toBeNull();
   });
+});
+
+test("project affiliation changes retire reads and preserve separate drafts and retry bindings", async () => {
+  const h = harness();
+  h.scope.value = { ...original, projectId: "project-A" };
+  const a = h.reads.at(-1)!;
+  expect(a.scope.projectId).toBe("project-A");
+  a.pending.resolve(source(a.scope, "project A"));
+  await settle();
+  const draft = h.body.draft.value!;
+  const paragraph = draft.doc.getXmlFragment("prosemirror").get(0) as Y.XmlElement;
+  (paragraph.get(0) as Y.XmlText).insert(1, " private");
+  const saving = h.body.save();
+  expect(h.writes[0]!.projectId).toBe("project-A");
+  const command = h.writes[0]!.command;
+  h.scope.value = { ...original, projectId: "project-B" };
+  const b = h.reads.at(-1)!;
+  b.pending.resolve(source(b.scope, "project B"));
+  await settle();
+  h.writes[0]!.pending.reject(new ProblemError(403));
+  expect(await saving).toBe(false);
+  expect(JSON.stringify(h.body.draft.value!.mine)).toContain("project B");
+  expect(JSON.stringify(h.body.draft.value!.mine)).not.toContain("private");
+  h.scope.value = { ...original, projectId: "project-A" };
+  const resumed = h.reads.at(-1)!;
+  resumed.pending.resolve(source(a.scope, "project A"));
+  await settle();
+  const retry = h.body.save();
+  expect(h.writes[1]!.projectId).toBe("project-A");
+  expect(h.writes[1]!.command).toEqual(command);
+  expect(h.slots.has(ownerKey(a.scope))).toBe(true);
+  h.writes[1]!.pending.resolve({
+    commandId: command.commandId,
+    targetId: original.targetId,
+    tailSeq: "1",
+    revisionId: "revision",
+  });
+  expect(await retry).toBe(true);
+  expect(h.slots.has(ownerKey(a.scope))).toBe(false);
+  expect(ownerKey(a.scope)).not.toBe(ownerKey(b.scope));
+  h.effects.stop();
 });

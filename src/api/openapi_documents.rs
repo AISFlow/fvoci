@@ -18,6 +18,8 @@ use crate::api::dto::{
     paths(
         read_versioned_body,
         save_versioned_body,
+        read_project_versioned_body,
+        save_project_versioned_body,
         put_body,
         put_project_body,
         patch_block,
@@ -377,3 +379,28 @@ fn read_versioned_body() {}
         (status=503,description="Unconfirmed save; retain exact command and draft",body=ProblemResponse))
 )]
 fn save_versioned_body() {}
+
+#[utoipa::path(
+    get,path="/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/body/versioned",tag="documents",
+    security(("fvoci_session"=[]),("bearer_api_token"=["documents.read"])),
+    params(("workspace_id"=String,description="Workspace id"),("project_id"=String,description="Project id"),("document_id"=String,description="Project document id")),
+    responses((status=200,description="Authorized native OFF edit start and opaque version",body=VersionedBodyResponse),
+        (status=404,description="Unavailable or unauthorized target",body=ProblemResponse),
+        (status=409,description="Writer mode mismatch",body=ProblemResponse),
+        (status=503,description="Native engine or finish unconfirmed",body=ProblemResponse))
+)]
+fn read_project_versioned_body() {}
+
+#[utoipa::path(
+    put,path="/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/body/versioned",tag="documents",
+    security(("fvoci_session"=[]),("bearer_api_token"=["documents.write"])),
+    params(("workspace_id"=String,description="Workspace id"),("project_id"=String,description="Project id"),("document_id"=String,description="Project document id")),
+    request_body=SaveVersionedBodyInput,
+    responses((status=200,description="Confirmed atomic body/revision/receipt result",body=SaveVersionedBodyResponse),
+        (status=400,description="Invalid command, native update or opaque version",body=ProblemResponse),
+        (status=404,description="Unavailable or unauthorized target",body=ProblemResponse),
+        (status=409,description="Version, command or writer mode conflict",body=ProblemResponse),
+        (status=413,description="Body/native history limit",body=ProblemResponse),
+        (status=503,description="Unconfirmed save; retain exact command and draft",body=ProblemResponse))
+)]
+fn save_project_versioned_body() {}

@@ -49,7 +49,12 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     loading.value = true;
     error.value = null;
     try {
-      const current = await readVersionedBody(scope.workspaceId, scope.targetId, abort.signal);
+      const current = await readVersionedBody(
+        scope.workspaceId,
+        scope.targetId,
+        abort.signal,
+        scope.projectId,
+      );
       if (
         started !== lifetime ||
         !enabled() ||
@@ -104,7 +109,12 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     error.value = null;
     try {
       return await current.save((command) =>
-        saveVersionedBody(current.owner.workspaceId, current.owner.targetId, command),
+        saveVersionedBody(
+          current.owner.workspaceId,
+          current.owner.targetId,
+          command,
+          current.owner.projectId,
+        ),
       );
     } catch (failure) {
       if (draft.value !== current || !current.active) return false;
@@ -118,7 +128,12 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
         // A confirmed 409 has already rolled back the rejected writer.
         const started = lifetime;
         try {
-          const latest = await readVersionedBody(current.owner.workspaceId, current.owner.targetId);
+          const latest = await readVersionedBody(
+            current.owner.workspaceId,
+            current.owner.targetId,
+            undefined,
+            current.owner.projectId,
+          );
           if (started === lifetime && draft.value === current && current.active)
             current.conflict(latest);
         } catch (readFailure) {
@@ -148,7 +163,12 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     const started = lifetime;
     if (!current || !current.durable || authRetired.value) return false;
     try {
-      const fresh = await readVersionedBody(current.owner.workspaceId, current.owner.targetId);
+      const fresh = await readVersionedBody(
+        current.owner.workspaceId,
+        current.owner.targetId,
+        undefined,
+        current.owner.projectId,
+      );
       if (started !== lifetime || draft.value !== current || !current.active || authRetired.value)
         return false;
       const reader = loadBody(fresh, current.owner.targetId);
