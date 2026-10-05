@@ -2821,6 +2821,34 @@ mod selected_tests {
         actor: Uuid,
         session: Uuid,
     }
+    struct SdkCleanup {
+        close: Result<(), sqlx::Error>,
+        recovery_close: Result<(), sqlx::Error>,
+        receipt: Result<
+            crate::db::libsql_finish_fixture::FinishReceipt,
+            Box<dyn std::error::Error + Send + Sync>,
+        >,
+    }
+    impl SdkCleanup {
+        fn assert_retired(&self) {
+            let receipt = self
+                .receipt
+                .as_ref()
+                .expect("actual upstream/proxy cleanup receipt required");
+            assert!(
+                receipt.sqld_reaped
+                    && receipt.proxy_joined
+                    && receipt.upstream_closed
+                    && receipt.proxy_closed
+            );
+            self.recovery_close
+                .as_ref()
+                .expect("explicit recovery driver must close cleanly");
+        }
+        fn report_primary_panic(&self) {
+            eprintln!("original SDK test panic; original_close={:?}, recovery_close={:?}, fixture_finish_error={:?}", self.close, self.recovery_close, self.receipt.as_ref().err());
+        }
+    }
     impl SdkFixture {
         async fn new() -> Self {
             use futures_util::FutureExt;
@@ -2832,7 +2860,16 @@ mod selected_tests {
             let driver = crate::db::libsql_finish_fixture::LibsqlFinishFixture::start(&sqld, &root)
                 .await
                 .unwrap();
-            let database = driver.database().await.unwrap();
+            let database = match driver.database().await {
+                Ok(database) => database,
+                Err(error) => {
+                    let cleanup = driver.finish().await;
+                    panic!(
+                        "actual SDK builder failed: {error}; fixture_finish_error={:?}",
+                        cleanup.as_ref().err()
+                    );
+                }
+            };
             let backend = Backend::LibsqlRemote(std::sync::Arc::new(
                 crate::db::backend::RemoteDatabase::from_test_driver(
                     database,
@@ -2857,10 +2894,10 @@ mod selected_tests {
             }).catch_unwind().await;
             if let Err(panic) = setup {
                 let close = backend.close().await;
-                let receipt = driver.finish().await.unwrap();
+                let receipt = driver.finish().await;
                 eprintln!(
-                    "failed SDK setup closed={close:?} receipt={}",
-                    receipt.root.display()
+                    "failed SDK setup closed={close:?}, fixture_finish_error={:?}",
+                    receipt.as_ref().err()
                 );
                 std::panic::resume_unwind(panic);
             }
@@ -2919,25 +2956,26 @@ mod selected_tests {
                 BTreeMap::from([(file.id, key)]),
             )
         }
-        async fn finish(self) -> Result<(), sqlx::Error> {
+        async fn finish(self) -> SdkCleanup {
             let close = self.backend.close().await;
-            if let Some(recovery) = &self.recovery {
-                recovery.close().await.unwrap();
-            }
-            let receipt = self.driver.finish().await.unwrap();
-            assert!(
-                receipt.sqld_reaped
-                    && receipt.proxy_joined
-                    && receipt.upstream_closed
-                    && receipt.proxy_closed
-            );
+            let recovery_close = match &self.recovery {
+                Some(recovery) => recovery.close().await,
+                None => Ok(()),
+            };
+            // Attempt every owned shutdown before any final assertion, even
+            // when either driver's returned close evidence is an error.
+            let receipt = self.driver.finish().await;
             // Retain exact upstream/proxy logs and file/database input evidence;
             // no process/listener remains and no unrelated /tmp cleanup occurs.
             println!(
                 "native SDK owned finish receipt {}",
-                receipt.root.join("finish-receipt.json").display()
+                self.root.join("finish-receipt.json").display()
             );
-            close
+            SdkCleanup {
+                close,
+                recovery_close,
+                receipt,
+            }
         }
     }
 
@@ -3029,12 +3067,14 @@ mod selected_tests {
             assert_eq!(captured.archive.graph.documents[0].content_json, archive.graph.documents[0].content_json);
             assert_eq!(std::fs::read(f.root.join(key)).unwrap(), physical);
         }).catch_unwind().await;
-        let close = f.finish().await;
+        let cleanup = f.finish().await;
         if let Err(panic) = body {
+            cleanup.report_primary_panic();
             std::panic::resume_unwind(panic);
         }
+        cleanup.assert_retired();
         assert!(
-            close.is_err(),
+            cleanup.close.is_err(),
             "lost original finish must not become confirmed cleanup"
         );
     }
@@ -3077,12 +3117,14 @@ mod selected_tests {
             publish_backend(&fresh, &claim, &archive, &keys, &crate::db::quota::StorageQuota::Unlimited, &hash, &CancellationToken::new()).await.unwrap();
             assert_eq!(status_backend(&fresh, f.workspace, f.actor, f.session, claim.job_id).await.unwrap().status, "completed");
         }).catch_unwind().await;
-        let close = f.finish().await;
+        let cleanup = f.finish().await;
         if let Err(panic) = body {
+            cleanup.report_primary_panic();
             std::panic::resume_unwind(panic);
         }
+        cleanup.assert_retired();
         assert!(
-            close.is_err(),
+            cleanup.close.is_err(),
             "original failed SDK finish must remain unconfirmed"
         );
     }
@@ -3120,11 +3162,15 @@ mod selected_tests {
                 assert_eq!(status_backend(&f.backend, f.workspace, f.actor, f.session, claim.job_id).await.unwrap().status, "completed");
                 assert_eq!(std::fs::read(f.root.join(key)).unwrap(), archive.bytes(&archive.graph.attachments[0].payload_entry).unwrap());
             }).catch_unwind().await;
-            let close = f.finish().await;
+            let cleanup = f.finish().await;
             if let Err(panic) = body {
+                cleanup.report_primary_panic();
                 std::panic::resume_unwind(panic);
             }
-            close.expect("acknowledged original rollback and healthy progress must close cleanly");
+            cleanup.assert_retired();
+            cleanup
+                .close
+                .expect("acknowledged original rollback and healthy progress must close cleanly");
         }
     }
 
