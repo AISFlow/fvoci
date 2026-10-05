@@ -2123,6 +2123,46 @@ impl OperationTx<'_, '_> {
             }
         }
     }
+    /// Borrowed current sync proof for the canonical native publisher. The
+    /// caller still checks current admin/session; no lease or writer is made.
+    pub(crate) async fn sync_import_contains_document_ref(
+        &mut self,
+        workspace: Uuid,
+        job: Uuid,
+        actor: Uuid,
+        document: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        if !self.hold_sync_import_job(workspace, job, actor).await? {
+            return Ok(false);
+        }
+        let refs = match self {
+            Self::Postgres(tx) => checked_refs(
+                sqlx::query_scalar(
+                    "SELECT created_refs FROM fvoci.import_jobs WHERE workspace_id=$1 AND id=$2",
+                )
+                .bind(workspace)
+                .bind(job)
+                .fetch_one(&mut ***tx)
+                .await?,
+            )?,
+            Self::SqliteFamily(family) => {
+                let rows = family
+                    .query(
+                        "SELECT created_refs FROM import_jobs WHERE workspace_id=?1 AND id=?2",
+                        &[Cell::uuid(workspace), Cell::uuid(job)],
+                    )
+                    .await?;
+                checked_refs(
+                    rows.first()
+                        .ok_or(sqlx::Error::RowNotFound)?
+                        .cell(0)?
+                        .value()?,
+                )?
+            }
+        };
+        Ok(refs.document_ids.contains(&document))
+    }
+
     pub(crate) async fn append_sync_import_document_ref(
         &mut self,
         workspace: Uuid,
@@ -2925,6 +2965,123 @@ mod selected_import_tests {
         );
         c
     }
+    #[tokio::test]
+    async fn import_selected_sync_document_ref_same_writer_current_owner_and_decode_errors() {
+        let f = Fixture::new().await;
+        let credential = session(&f).await;
+        let job = create_sync_import_job_backend(&f.backend, f.workspace, f.user, credential)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        let mut op = tx.operation();
+        op.set_tenant(f.workspace).await.unwrap();
+        assert!(!op
+            .sync_import_contains_document_ref(f.workspace, job.id, f.user, f.document)
+            .await
+            .unwrap());
+        assert!(op
+            .append_sync_import_document_ref(f.workspace, job.id, f.user, f.document)
+            .await
+            .unwrap());
+        assert!(op
+            .sync_import_contains_document_ref(f.workspace, job.id, f.user, f.document)
+            .await
+            .unwrap());
+        assert!(!op
+            .sync_import_contains_document_ref(f.workspace, job.id, f.user, Uuid::now_v7())
+            .await
+            .unwrap());
+        assert!(!op
+            .sync_import_contains_document_ref(f.workspace, job.id, Uuid::now_v7(), f.document)
+            .await
+            .unwrap());
+        assert!(!op
+            .sync_import_contains_document_ref(f.workspace, Uuid::now_v7(), f.user, f.document)
+            .await
+            .unwrap());
+        assert!(matches!(
+            op.sync_import_contains_document_ref(Uuid::now_v7(), job.id, f.user, f.document)
+                .await,
+            Err(sqlx::Error::Protocol(_))
+        ));
+        let OperationTx::SqliteFamily(family) = &mut op else {
+            unreachable!()
+        };
+        family
+            .execute(
+                "UPDATE import_jobs SET created_refs=?2 WHERE id=?1",
+                &[
+                    Cell::uuid(job.id),
+                    Cell::text(r#"{"documentIds":["not-a-uuid"],"taskIds":[],"storedKeys":[]}"#),
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            op.sync_import_contains_document_ref(f.workspace, job.id, f.user, f.document)
+                .await,
+            Err(sqlx::Error::Decode(_))
+        ));
+        tx.rollback().await.unwrap();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        tx.operation().set_tenant(f.workspace).await.unwrap();
+        assert!(!tx
+            .operation()
+            .sync_import_contains_document_ref(f.workspace, job.id, f.user, f.document)
+            .await
+            .unwrap());
+        assert!(tx
+            .operation()
+            .append_sync_import_document_ref(f.workspace, job.id, f.user, f.document)
+            .await
+            .unwrap());
+        assert!(tx
+            .operation()
+            .sync_import_contains_document_ref(f.workspace, job.id, f.user, f.document)
+            .await
+            .unwrap());
+        tx.commit().await.unwrap();
+        let mut read = f.backend.begin_read().await.unwrap();
+        read.operation().set_tenant(f.workspace).await.unwrap();
+        assert!(matches!(
+            read.operation()
+                .sync_import_contains_document_ref(f.workspace, job.id, f.user, f.document)
+                .await,
+            Err(sqlx::Error::Protocol(_))
+        ));
+        read.rollback().await.unwrap();
+        assert!(finish_sync_import_job_backend(
+            &f.backend,
+            f.workspace,
+            job.id,
+            f.user,
+            credential,
+            ImportStatus::Failed
+        )
+        .await
+        .unwrap());
+        let mut tx = f.backend.begin_write().await.unwrap();
+        tx.operation().set_tenant(f.workspace).await.unwrap();
+        assert!(!tx
+            .operation()
+            .sync_import_contains_document_ref(f.workspace, job.id, f.user, f.document)
+            .await
+            .unwrap());
+        tx.rollback().await.unwrap();
+        let after = get_import_job_backend(&f.backend, f.workspace, f.user, credential, job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.created_refs.document_ids, vec![f.document]);
+        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(events, 0);
+        f.close().await;
+    }
+
     #[tokio::test]
     async fn import_selected_daily_retains_actual_failed_sync_document_and_refs() {
         for stale in [false, true] {
