@@ -60,27 +60,49 @@ fn start(server_args: &[String]) -> ! {
                 std::process::exit(1);
             }
         };
-        let outcome = runtime.block_on(async {
-            use tokio::signal::unix::{signal, SignalKind};
-            let (mut term, mut int) = match (
-                signal(SignalKind::terminate()),
-                signal(SignalKind::interrupt()),
-            ) {
-                (Ok(term), Ok(int)) => (term, int),
-                (Err(e), _) | (_, Err(e)) => return Err(e.to_string()),
-            };
-            tokio::select! {
-                result = prepare::prepare() => result.map(|()| None),
-                _ = term.recv() => Ok(Some(143)),
-                _ = int.recv() => Ok(Some(130)),
-            }
-        });
+        enum PreparationOutcome {
+            Prepared,
+            Signalled {
+                code: i32,
+                result: Result<(), prepare::PreparationError>,
+            },
+        }
+        let outcome: Result<PreparationOutcome, Box<dyn std::error::Error>> =
+            runtime.block_on(async {
+                use tokio::signal::unix::{signal, SignalKind};
+                let (mut term, mut int) = match (
+                    signal(SignalKind::terminate()),
+                    signal(SignalKind::interrupt()),
+                ) {
+                    (Ok(term), Ok(int)) => (term, int),
+                    (Err(e), _) | (_, Err(e)) => return Err(e.into()),
+                };
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let preparation = prepare::prepare_with_cancel(&cancel);
+                tokio::pin!(preparation);
+                tokio::select! {
+                    result = &mut preparation => {
+                        result?;
+                        Ok(PreparationOutcome::Prepared)
+                    },
+                    _ = term.recv() => {
+                        eprintln!("fvoci: preparation SIGTERM cancellation requested; awaiting original owner before exit");
+                        cancel.cancel();
+                        Ok(PreparationOutcome::Signalled { code: 143, result: preparation.await })
+                    },
+                    _ = int.recv() => {
+                        eprintln!("fvoci: preparation SIGINT cancellation requested; awaiting original owner before exit");
+                        cancel.cancel();
+                        Ok(PreparationOutcome::Signalled { code: 130, result: preparation.await })
+                    },
+                }
+            });
         // Every preparation connection is closed before the server exists.
         runtime.shutdown_timeout(std::time::Duration::from_secs(5));
         match outcome {
-            Ok(None) => eprintln!("fvoci: prepared; starting the server"),
-            Ok(Some(code)) => {
-                eprintln!("fvoci: stopped by a signal during preparation");
+            Ok(PreparationOutcome::Prepared) => eprintln!("fvoci: prepared; starting the server"),
+            Ok(PreparationOutcome::Signalled { code, result }) => {
+                eprintln!("fvoci: signal during preparation; original result and owned drain: {result:?}; no server exec");
                 std::process::exit(code);
             }
             Err(error) => {

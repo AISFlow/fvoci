@@ -907,28 +907,61 @@ const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
 /// by preparation until every migration connection has closed. Locks use
 /// the database inode, so equivalent paths cannot bypass admission.
 pub struct SqliteAdmission(std::fs::File);
+// Same maintained platform O_NOFOLLOW values already used by the install
+// key-file boundary. std OpenOptionsExt exposes flags, not this constant.
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "arm",
+        target_arch = "aarch64",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    )
+))]
+pub(crate) const SQLITE_NOFOLLOW: i32 = 0o100000;
+#[cfg(all(
+    target_os = "linux",
+    not(any(
+        target_arch = "arm",
+        target_arch = "aarch64",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    ))
+))]
+pub(crate) const SQLITE_NOFOLLOW: i32 = 0o400000;
+#[cfg(not(target_os = "linux"))]
+pub(crate) const SQLITE_NOFOLLOW: i32 = 0x100;
+
 impl SqliteAdmission {
     pub fn server(path: &std::path::Path) -> Result<Self, sqlx::Error> {
-        Self::acquire(path, false)
+        Self::acquire(path, false, false)
     }
     fn migration(path: &std::path::Path) -> Result<Self, sqlx::Error> {
-        Self::acquire(path, true)
+        Self::acquire(path, true, true)
     }
-    fn acquire(path: &std::path::Path, migration: bool) -> Result<Self, sqlx::Error> {
+    /// Existing inode only, exclusive until the owned install handoff ends.
+    /// This is not a new migration/registry authority or a DB creator.
+    pub fn installation_handoff(path: &std::path::Path) -> Result<Self, sqlx::Error> {
+        Self::acquire(path, false, true)
+    }
+    pub fn admitted_file(&self) -> &std::fs::File {
+        &self.0
+    }
+    fn acquire(path: &std::path::Path, create: bool, exclusive: bool) -> Result<Self, sqlx::Error> {
         if !path.is_absolute() || path.file_name().is_none() {
             return Err(schema_error(
                 "SQLite requires an absolute persistent database file",
             ));
         }
         let mut options = std::fs::OpenOptions::new();
-        options.read(true).write(true).create(migration);
+        options.read(true).write(true).create(create);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            options.mode(0o600).custom_flags(SQLITE_NOFOLLOW);
         }
         let file = options.open(path).map_err(sqlx::Error::Io)?;
-        let result = if migration {
+        let result = if exclusive {
             file.try_lock()
         } else {
             file.try_lock_shared()
@@ -1006,6 +1039,22 @@ pub struct SqliteMigration {
     result: Option<tokio::sync::oneshot::Receiver<Result<(), sqlx::Error>>>,
     observer: SqliteMigrationObserver,
 }
+
+/// The original migration result and its actual cleanup/thread-join outcome.
+/// A signal owner must retain both before it can exit or exec another process.
+#[derive(Debug)]
+pub struct SqliteMigrationOutcome {
+    pub result: Result<(), sqlx::Error>,
+    pub drain: Result<SqliteMigrationDrain, sqlx::Error>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("SQLite migration join failed after original result {original:?}: {drain}")]
+struct MigrationJoinFailure {
+    original: Option<sqlx::Error>,
+    #[source]
+    drain: sqlx::Error,
+}
 impl SqliteMigration {
     pub fn observer(&self) -> SqliteMigrationObserver {
         self.observer.clone()
@@ -1013,15 +1062,38 @@ impl SqliteMigration {
     pub fn cancel(&self) {
         self.cancel.cancel();
     }
-    pub async fn wait(mut self) -> Result<(), sqlx::Error> {
-        let result = self
-            .result
-            .take()
-            .expect("one migration result receiver")
-            .await
-            .map_err(|_| schema_error("migration owner ended without a result"))?;
-        self.observer.wait().await?;
-        result
+    pub async fn wait(self) -> Result<(), sqlx::Error> {
+        let outcome = self
+            .wait_with_cancel(&tokio_util::sync::CancellationToken::new())
+            .await;
+        match outcome.drain {
+            Ok(_) => outcome.result,
+            Err(drain) => Err(sqlx::Error::AnyDriverError(Box::new(
+                MigrationJoinFailure {
+                    original: outcome.result.err(),
+                    drain,
+                },
+            ))),
+        }
+    }
+
+    pub async fn wait_with_cancel(
+        mut self,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> SqliteMigrationOutcome {
+        let mut receiver = self.result.take().expect("one migration result receiver");
+        let result = tokio::select! {
+            result = &mut receiver => result,
+            _ = cancel.cancelled() => {
+                self.cancel();
+                // Await the original owner, including an already started
+                // COMMIT; a signal cannot discard its result or cleanup.
+                receiver.await
+            }
+        }
+        .unwrap_or_else(|_| Err(schema_error("migration owner ended without a result")));
+        let drain = self.observer.wait().await;
+        SqliteMigrationOutcome { result, drain }
     }
 }
 impl Drop for SqliteMigration {

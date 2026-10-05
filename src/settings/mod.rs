@@ -330,6 +330,31 @@ pub async fn attachment_transfer_backend(
     Ok(effective_transfer(&snapshot, unavailable))
 }
 
+/// Startup must stop on an unconfirmed finish before admitting consumers.
+/// This is the shared concrete marker, not classification by display text.
+pub fn attachment_transfer_finish_is_unknown(error: &sqlx::Error) -> bool {
+    crate::db::backend::is_rollback_cleanup_unknown(error)
+        || matches!(error, sqlx::Error::AnyDriverError(source)
+            if source.downcast_ref::<crate::db::backend::CommitUnknown>().is_some()
+                || source.downcast_ref::<crate::db::backend::CommitCleanupUnknown>().is_some())
+}
+
+/// Synthetic propagation control after an actual acknowledged settings read.
+/// It does not simulate driver loss or prove a remote stream's settlement.
+#[cfg(feature = "db-tests")]
+pub async fn attachment_transfer_rollback_propagation_control_backend(
+    backend: &Backend,
+    unavailable: Option<TransferUnavailable>,
+) -> Result<EffectiveTransfer, sqlx::Error> {
+    attachment_transfer_backend(backend, unavailable).await?;
+    Err(crate::db::backend::rollback_cleanup_unknown(
+        Some(Box::new(sqlx::Error::Protocol(
+            "synthetic original after acknowledged settings read".into(),
+        ))),
+        sqlx::Error::Protocol("synthetic unconfirmed rollback propagation control".into()),
+    ))
+}
+
 /// Read API for upload creation and original downloads: the mode in effect
 /// now, read per request so an admin change reaches every process on its next
 /// request. Storage that cannot presign is always `proxy`, without a read.

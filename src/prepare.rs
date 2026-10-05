@@ -335,12 +335,392 @@ pub fn wants_prepare() -> bool {
         || std::env::var_os("FVOCI_DATABASE_BACKEND").is_some_and(|kind| kind != "postgres")
 }
 
-/// Steps 2-3. Runs inside a runtime; the caller races it against signals.
+#[derive(Debug, thiserror::Error)]
+pub enum PreparationError {
+    #[error("{0}")]
+    Ordinary(String),
+    #[error("SQLite preparation original result {original:?}; owned drain/thread join {drain:?}; test control {control:?}")]
+    Sqlite {
+        #[source]
+        original: Option<sqlx::Error>,
+        drain: Option<Result<migrate::SqliteMigrationDrain, sqlx::Error>>,
+        control: Option<String>,
+    },
+    #[error("preparation cancelled; SQLite owned drain/thread join: {sqlite_drain:?}")]
+    Cancelled {
+        sqlite_drain: Option<migrate::SqliteMigrationDrain>,
+    },
+}
+
+#[cfg(feature = "db-tests")]
+async fn start_preparation_migration_with_test_gate(
+    path: &Path,
+) -> Result<
+    (
+        migrate::SqliteMigration,
+        Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>,
+    ),
+    PreparationError,
+> {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let Some(socket) = std::env::var_os("FVOCI_TEST_SQLITE_GATE_SOCKET") else {
+        return migrate::start_sqlite_migration(path)
+            .map(|migration| (migration, None))
+            .map_err(|error| PreparationError::Sqlite {
+                original: Some(error),
+                drain: None,
+                control: None,
+            });
+    };
+    let socket = PathBuf::from(socket);
+    let parent = socket
+        .parent()
+        .ok_or("isolated migration gate parent missing")?;
+    let parent_meta = std::fs::symlink_metadata(parent).map_err(|error| error.to_string())?;
+    let socket_meta = std::fs::symlink_metadata(&socket).map_err(|error| error.to_string())?;
+    let own_uid = std::fs::metadata("/proc/self")
+        .map_err(|error| error.to_string())?
+        .uid();
+    if !socket.is_absolute()
+        || !parent_meta.is_dir()
+        || parent_meta.uid() != own_uid
+        || parent_meta.mode() & 0o077 != 0
+        || !socket_meta.file_type().is_socket()
+        || socket_meta.uid() != own_uid
+    {
+        return Err(
+            "migration gate requires an existing socket in this UID's private isolated directory"
+                .into(),
+        );
+    }
+    let phase = std::env::var("FVOCI_TEST_SQLITE_GATE_PHASE")
+        .map_err(|_| "migration gate phase missing")?;
+    if !matches!(phase.as_str(), "commit" | "close") {
+        return Err("migration gate phase must be commit or close".into());
+    }
+    let mut stream =
+        std::os::unix::net::UnixStream::connect(socket).map_err(|error| error.to_string())?;
+    let (connected, connection) = tokio::sync::oneshot::channel();
+    let (proceed, start) = tokio::sync::oneshot::channel();
+    let (cleanup_started, cleanup) = tokio::sync::oneshot::channel();
+    let migration = migrate::start_sqlite_migration_controlled(
+        path,
+        migrate::SqliteMigrationTestControl {
+            connected,
+            proceed: start,
+            cleanup_started: Some(cleanup_started),
+        },
+    )
+    .map_err(|error| PreparationError::Sqlite {
+        original: Some(error),
+        drain: None,
+        control: None,
+    })?;
+    let setup: Result<Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>, String> =
+        async {
+            let connected = connection
+                .await
+                .map_err(|_| "migration gate owner ended before connection")?;
+            let mut held = connected
+                .acquire()
+                .await
+                .map_err(|error| error.to_string())?;
+            if phase == "commit" {
+                {
+                    let mut native = held
+                        .lock_handle()
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let mut first = true;
+                    native.set_commit_hook(move || {
+                        if !first {
+                            return true;
+                        }
+                        first = false;
+                        let mut release = [0];
+                        // Supported SQLx hook pauses the actual SQLite worker's
+                        // first real DDL/marker COMMIT. No fabricated SQL result.
+                        stream.write_all(b"C").is_ok()
+                            && stream.read_exact(&mut release).is_ok()
+                            && release == *b"R"
+                    });
+                }
+                drop(held);
+                let _ = proceed.send(());
+                Ok(None)
+            } else {
+                // Cancel the actual owner while holding its original pool connection;
+                // it enters real explicit close, which cannot acquire that connection.
+                // External SIGTERM must still await this owner instead of exiting.
+                migration.cancel();
+                let _ = proceed.send(());
+                stream
+                    .set_nonblocking(true)
+                    .map_err(|error| error.to_string())?;
+                let mut stream =
+                    tokio::net::UnixStream::from_std(stream).map_err(|error| error.to_string())?;
+                let helper = tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let result = async {
+                        cleanup.await.map_err(|_| {
+                            std::io::Error::other("migration gate owner ended before close")
+                        })?;
+                        stream.write_all(b"L").await?;
+                        let mut release = [0];
+                        stream.read_exact(&mut release).await?;
+                        if release != *b"R" {
+                            return Err(std::io::Error::other("migration gate release invalid"));
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    drop(held);
+                    result
+                });
+                Ok(Some(helper))
+            }
+        }
+        .await;
+    match setup {
+        Ok(helper) => Ok((migration, helper)),
+        Err(control) => {
+            migration.cancel();
+            let outcome = migration
+                .wait_with_cancel(&tokio_util::sync::CancellationToken::new())
+                .await;
+            Err(PreparationError::Sqlite {
+                original: outcome.result.err(),
+                drain: Some(outcome.drain),
+                control: Some(control),
+            })
+        }
+    }
+}
+impl From<String> for PreparationError {
+    fn from(value: String) -> Self {
+        Self::Ordinary(value)
+    }
+}
+impl From<&str> for PreparationError {
+    fn from(value: &str) -> Self {
+        Self::Ordinary(value.to_owned())
+    }
+}
+
+/// Root installation uses a dedicated directory. Protect it before any
+/// root migration; hand it to the service only after the original owner joins.
+struct SqliteInstallDirectory {
+    directory: PathBuf,
+    ancestors: Vec<(PathBuf, std::fs::File)>,
+    existing_inode: Option<(u64, u64)>,
+}
+impl SqliteInstallDirectory {
+    fn protect(path: &Path) -> Result<Self, String> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+        let directory = path
+            .parent()
+            .filter(|parent| parent.parent().is_some())
+            .ok_or("SQLite installation requires a dedicated existing parent directory")?
+            .to_path_buf();
+        let mut ancestors = Vec::new();
+        let mut literal = PathBuf::new();
+        for component in directory.components() {
+            match component {
+                std::path::Component::RootDir | std::path::Component::Normal(_) => {
+                    literal.push(component)
+                }
+                _ => return Err("SQLite installation rejects nonliteral parent components".into()),
+            }
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(migrate::SQLITE_NOFOLLOW)
+                .open(&literal)
+                .map_err(|error| format!("SQLite installation parent open: {error}"))?;
+            let meta = file.metadata().map_err(|error| error.to_string())?;
+            let parent = literal == directory;
+            if !meta.is_dir()
+                || meta.mode() & 0o022 != 0
+                || if parent {
+                    !matches!(meta.uid(), 0 | SERVER_UID)
+                } else {
+                    meta.uid() != 0
+                        || (meta.mode() & 0o001 == 0
+                            && !(meta.gid() == SERVER_GID && meta.mode() & 0o010 != 0))
+                }
+            {
+                return Err("SQLite installation requires root-controlled ancestors and an owned dedicated parent".into());
+            }
+            ancestors.push((literal.clone(), file));
+        }
+        let mut install = Self {
+            directory,
+            ancestors,
+            existing_inode: None,
+        };
+        install.verify_literal()?;
+        install.owned_entries(path)?;
+        let admission = match std::fs::symlink_metadata(path) {
+            Ok(_) => Some(
+                migrate::SqliteAdmission::installation_handoff(path)
+                    .map_err(|error| format!("SQLite installation admission: {error}"))?,
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        if let Some(admission) = &admission {
+            let meta = admission
+                .admitted_file()
+                .metadata()
+                .map_err(|error| error.to_string())?;
+            install.existing_inode = Some((meta.dev(), meta.ino()));
+            install.verify_admitted_file(path, admission.admitted_file())?;
+        }
+        // Admission refusal above leaves a live server's directory unchanged.
+        // Root takes this exact open directory, never a path-based chown.
+        let parent = &install.ancestors.last().expect("dedicated directory").1;
+        std::os::unix::fs::fchown(parent, Some(0), Some(0)).map_err(|error| error.to_string())?;
+        parent
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+        install.verify_literal()?;
+        install.owned_entries(path)?;
+        if let Some(admission) = &admission {
+            install.verify_admitted_file(path, admission.admitted_file())?;
+        }
+        // Parent is now root/private. Actual migration reuses the same inode
+        // and admission policy; no service process can swap an entry here.
+        drop(admission);
+        Ok(install)
+    }
+
+    fn verify_literal(&self) -> Result<(), String> {
+        use std::os::unix::fs::MetadataExt;
+        for (path, file) in &self.ancestors {
+            let actual = file.metadata().map_err(|error| error.to_string())?;
+            let named = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+            if !named.is_dir() || named.dev() != actual.dev() || named.ino() != actual.ino() {
+                return Err("SQLite installation ancestor/parent inode changed".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn owned_entries(&self, path: &Path) -> Result<Vec<std::fs::File>, String> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let name = path
+            .file_name()
+            .ok_or("SQLite installation file name missing")?;
+        let mut wal = name.to_os_string();
+        wal.push("-wal");
+        let mut shm = name.to_os_string();
+        shm.push("-shm");
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(&self.directory).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            if entry.file_name() != name && entry.file_name() != wal && entry.file_name() != shm {
+                return Err("SQLite installation parent contains unrelated entries".into());
+            }
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(migrate::SQLITE_NOFOLLOW)
+                .open(entry.path())
+                .map_err(|error| format!("SQLite installation DB entry no-follow open: {error}"))?;
+            let meta = file.metadata().map_err(|error| error.to_string())?;
+            let named =
+                std::fs::symlink_metadata(entry.path()).map_err(|error| error.to_string())?;
+            if !meta.is_file()
+                || meta.nlink() != 1
+                || !matches!(meta.uid(), 0 | SERVER_UID)
+                || meta.mode() & 0o077 != 0
+                || !named.is_file()
+                || (named.dev(), named.ino()) != (meta.dev(), meta.ino())
+            {
+                return Err(
+                    "SQLite installation refuses foreign/symlink/hardlinked/nonprivate DB entries"
+                        .into(),
+                );
+            }
+            files.push(file);
+        }
+        Ok(files)
+    }
+
+    fn verify_admitted_file(&self, path: &Path, file: &std::fs::File) -> Result<(), String> {
+        use std::os::unix::fs::MetadataExt;
+        self.verify_literal()?;
+        let actual = file.metadata().map_err(|error| error.to_string())?;
+        let named = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+        if !named.is_file()
+            || actual.nlink() != 1
+            || !matches!(actual.uid(), 0 | SERVER_UID)
+            || (named.dev(), named.ino()) != (actual.dev(), actual.ino())
+            || self
+                .existing_inode
+                .is_some_and(|inode| inode != (actual.dev(), actual.ino()))
+        {
+            return Err("SQLite installation admitted DB inode/owner differs".into());
+        }
+        Ok(())
+    }
+
+    fn handoff(self, path: &Path) -> Result<(), String> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let admission = migrate::SqliteAdmission::installation_handoff(path)
+            .map_err(|error| format!("SQLite installation final admission: {error}"))?;
+        self.verify_admitted_file(path, admission.admitted_file())?;
+        let files = self.owned_entries(path)?;
+        self.verify_literal()?;
+        for file in files {
+            std::os::unix::fs::fchown(&file, Some(SERVER_UID), Some(SERVER_GID))
+                .map_err(|error| error.to_string())?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| error.to_string())?;
+            let meta = file.metadata().map_err(|error| error.to_string())?;
+            if meta.uid() != SERVER_UID || meta.gid() != SERVER_GID || meta.mode() & 0o777 != 0o600
+            {
+                return Err("SQLite installation file handoff unconfirmed".into());
+            }
+        }
+        self.verify_admitted_file(path, admission.admitted_file())?;
+        let parent = &self.ancestors.last().expect("dedicated directory").1;
+        parent
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+        std::os::unix::fs::fchown(parent, Some(SERVER_UID), Some(SERVER_GID))
+            .map_err(|error| error.to_string())?;
+        let meta = parent.metadata().map_err(|error| error.to_string())?;
+        if meta.uid() != SERVER_UID || meta.gid() != SERVER_GID || meta.mode() & 0o777 != 0o700 {
+            return Err("SQLite installation directory handoff unconfirmed".into());
+        }
+        self.verify_literal()?;
+        // Same exclusive admission is retained through the confirmed handoff.
+        drop(admission);
+        Ok(())
+    }
+}
+
+/// Steps 2-3 for explicit preparation without a signal cancellation owner.
 pub async fn prepare() -> Result<(), String> {
+    prepare_with_cancel(&tokio_util::sync::CancellationToken::new())
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// The signal owner keeps this future alive until cancellation has joined
+/// the actual SQLite migration owner. Dropping it is not an exit receipt.
+pub async fn prepare_with_cancel(
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<(), PreparationError> {
     // Preserve the owner-only PostgreSQL preparation entry: it does not need
     // to parse a normal app connection before deriving/checking that role.
     match std::env::var("FVOCI_DATABASE_BACKEND").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("postgres") => return prepare_postgres().await,
+        Err(std::env::VarError::NotPresent) | Ok("postgres") => {
+            return tokio::select! {
+                result = prepare_postgres() => result.map_err(PreparationError::Ordinary),
+                _ = cancel.cancelled() => Err(PreparationError::Cancelled { sqlite_drain: None }),
+            };
+        }
         Err(std::env::VarError::NotUnicode(_)) => {
             return Err("FVOCI_DATABASE_BACKEND must be Unicode".into())
         }
@@ -351,22 +731,82 @@ pub async fn prepare() -> Result<(), String> {
         crate::config::DatabaseSettings::Sqlite { path } => {
             // Preparation owns creation and the controlled migration actor;
             // normal server startup opens only this prepared existing file.
-            // The caller's SIGTERM/SIGINT cancellation drops the actor handle,
-            // whose existing owner finishes/quarantines the actual connection.
             let deadline = prepare_deadline()?;
             let meili = std::env::var("FVOCI_MEILI_URL")
                 .ok()
                 .filter(|value| !value.trim().is_empty());
             if let Some(url) = &meili {
-                wait_for_meili(url.trim(), deadline).await?;
+                tokio::select! {
+                    result = wait_for_meili(url.trim(), deadline) => result?,
+                    _ = cancel.cancelled() => return Err(PreparationError::Cancelled { sqlite_drain: None }),
+                }
             }
-            migrate::run_sqlite_migrations(&path)
-                .await
-                .map_err(|error| format!("SQLite preparation: {error}"))?;
+            if cancel.is_cancelled() {
+                return Err(PreparationError::Cancelled { sqlite_drain: None });
+            }
+            let install = if running_as_root()? {
+                Some(SqliteInstallDirectory::protect(&path)?)
+            } else {
+                None
+            };
+            #[cfg(not(feature = "db-tests"))]
+            let migration = migrate::start_sqlite_migration(&path).map_err(|error| {
+                PreparationError::Sqlite {
+                    original: Some(error),
+                    // No owner started; no invented close/join receipt.
+                    drain: None,
+                    control: None,
+                }
+            })?;
+            #[cfg(feature = "db-tests")]
+            let (migration, control) = start_preparation_migration_with_test_gate(&path).await?;
+            let outcome = migration.wait_with_cancel(cancel).await;
+            #[cfg(feature = "db-tests")]
+            let control_error = match control {
+                Some(helper) => match helper.await {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(error.to_string()),
+                    Err(error) => Some(error.to_string()),
+                },
+                None => None,
+            };
+            #[cfg(not(feature = "db-tests"))]
+            let control_error = None;
+            if outcome.result.is_err()
+                || !matches!(
+                    outcome.drain.as_ref(),
+                    Ok(migrate::SqliteMigrationDrain::Closed)
+                )
+                || control_error.is_some()
+            {
+                return Err(PreparationError::Sqlite {
+                    original: outcome.result.err(),
+                    drain: Some(outcome.drain),
+                    control: control_error,
+                });
+            }
+            tracing::info!(
+                drain = "Closed",
+                thread_joined = true,
+                "SQLite preparation owner finished"
+            );
+            if cancel.is_cancelled() {
+                return Err(PreparationError::Cancelled {
+                    sqlite_drain: Some(migrate::SqliteMigrationDrain::Closed),
+                });
+            }
+            if let Some(install) = install {
+                install.handoff(&path)?;
+            }
             if meili.is_some() {
                 let key_file = std::env::var("FVOCI_MEILI_KEY_FILE")
                     .unwrap_or_else(|_| DEFAULT_MEILI_KEY_FILE.to_string());
-                ensure_meili_key_file(Path::new(&key_file)).await?;
+                tokio::select! {
+                    result = ensure_meili_key_file(Path::new(&key_file)) => result?,
+                    _ = cancel.cancelled() => return Err(PreparationError::Cancelled {
+                        sqlite_drain: Some(migrate::SqliteMigrationDrain::Closed),
+                    }),
+                }
             }
             Ok(())
         }

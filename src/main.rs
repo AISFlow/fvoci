@@ -102,6 +102,61 @@ struct DrainOutcome {
     database: Result<(), String>,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("attachment transfer startup read has unknown settlement; owned backend close: {close:?}")]
+struct StartupTransferUnknown {
+    #[source]
+    original: sqlx::Error,
+    close: Result<(), String>,
+}
+
+async fn read_startup_attachment_transfer(
+    backend: &Backend,
+    unavailable: Option<fvoci_server::attachments::TransferUnavailable>,
+) -> Result<(), StartupTransferUnknown> {
+    #[cfg(feature = "db-tests")]
+    if std::env::var_os("FVOCI_TEST_STARTUP_TRANSFER_FINISH_CONTROL").is_some() {
+        let result =
+            fvoci_server::settings::attachment_transfer_rollback_propagation_control_backend(
+                backend,
+                unavailable,
+            )
+            .await;
+        tracing::warn!(
+            synthetic = true,
+            "settings finish propagation control after actual acknowledged read; not driver loss"
+        );
+        return finish_startup_attachment_transfer(backend, result).await;
+    }
+    let result = fvoci_server::settings::attachment_transfer_backend(backend, unavailable).await;
+    finish_startup_attachment_transfer(backend, result).await
+}
+
+async fn finish_startup_attachment_transfer(
+    backend: &Backend,
+    result: Result<fvoci_server::settings::EffectiveTransfer, sqlx::Error>,
+) -> Result<(), StartupTransferUnknown> {
+    match result {
+        Ok(transfer) if transfer.blocked => tracing::warn!(
+            reason = transfer.unavailable.map(|r| r.as_str()),
+            "attachment.transfer_mode_unavailable: stored presigned mode cannot apply; using proxy"
+        ),
+        Ok(transfer) => tracing::info!(mode = transfer.mode.as_str(), "attachment transfer mode"),
+        Err(original)
+            if fvoci_server::settings::attachment_transfer_finish_is_unknown(&original) =>
+        {
+            return Err(StartupTransferUnknown {
+                original,
+                // This closes the owned backend; it cannot certify settlement
+                // of the original failed stream, which remains in `original`.
+                close: backend.close().await,
+            });
+        }
+        Err(err) => tracing::warn!(%err, "attachment transfer mode not read at startup"),
+    }
+    Ok(())
+}
+
 // Remembers a null allocation so the office child can report a panic caused
 // by its address-space ceiling as a resource limit (`alloc_guard`).
 #[global_allocator]
@@ -325,6 +380,12 @@ async fn run_server(
     // advertisement. Tokio buffers signals received between install and recv.
     let shutdown_signals = install_shutdown_signals()?;
 
+    fvoci_server::config::ensure_storage_root(&config.storage)?;
+    let storage = ObjectStorage::from_settings(&config.storage)?
+        .with_presign_ttls(config.attachment_transfer.ttls);
+    storage.probe().await?;
+    read_startup_attachment_transfer(&backend, storage.presign_unavailable()).await?;
+
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     let addr = listener.local_addr()?;
     let public_origin =
@@ -356,23 +417,6 @@ async fn run_server(
         }
         None => None,
     };
-    fvoci_server::config::ensure_storage_root(&config.storage)?;
-    let storage = ObjectStorage::from_settings(&config.storage)?
-        .with_presign_ttls(config.attachment_transfer.ttls);
-    storage.probe().await?;
-    match fvoci_server::settings::attachment_transfer_backend(
-        &backend,
-        storage.presign_unavailable(),
-    )
-    .await
-    {
-        Ok(transfer) if transfer.blocked => tracing::warn!(
-            reason = transfer.unavailable.map(|r| r.as_str()),
-            "attachment.transfer_mode_unavailable: stored presigned mode cannot apply; using proxy"
-        ),
-        Ok(transfer) => tracing::info!(mode = transfer.mode.as_str(), "attachment transfer mode"),
-        Err(err) => tracing::warn!(%err, "attachment transfer mode not read at startup"),
-    }
     let search_embedder = fvoci_server::search::embed::Embedder::from_env()?;
     match search_embedder.as_ref() {
         Some(embedder) => tracing::info!(
@@ -447,9 +491,11 @@ async fn run_server(
         "integrations configured"
     );
     let identity = Arc::new(fvoci_server::identity::Identity::from_env(&public_origin)?);
-    if let Err(err) =
-        fvoci_server::push::ensure_vapid_keys_backend(&backend, identity.encryption_keys.as_deref())
-            .await
+    if let Err(err) = fvoci_server::push::vapid::ensure_vapid_keys_backend(
+        &backend,
+        identity.encryption_keys.as_deref(),
+    )
+    .await
     {
         tracing::warn!(%err, event = "push.skipped", reason = "vapid_keys_missing");
     }
@@ -1003,6 +1049,62 @@ fn shutdown_panic_error() -> Box<dyn std::error::Error> {
 #[cfg(test)]
 mod shutdown_outcome_tests {
     use super::*;
+
+    #[cfg(feature = "db-tests")]
+    #[tokio::test]
+    async fn startup_transfer_after_acknowledged_read_propagation_control() {
+        use fvoci_server::attachments::{TransferMode, TransferUnavailable};
+        let root =
+            std::env::temp_dir().join(format!("fvoci-startup-transfer-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("app.sqlite");
+        migrate::run_sqlite_migrations(&file).await.unwrap();
+        let pool = pool::connect_sqlite_app(&file, 1).await.unwrap();
+        let backend = Backend::Sqlite(pool.clone());
+        let default = fvoci_server::settings::attachment_transfer_backend(&backend, None)
+            .await
+            .unwrap();
+        assert_eq!(default.mode, TransferMode::Proxy);
+        assert!(!default.blocked);
+        finish_startup_attachment_transfer(&backend, Ok(default))
+            .await
+            .unwrap();
+        assert!(!pool.is_closed());
+        sqlx::query("INSERT INTO instance_settings(key,value) VALUES('attachmentTransfer','{\"mode\":\"presigned\"}')")
+            .execute(&pool).await.unwrap();
+        let stored = fvoci_server::settings::attachment_transfer_backend(
+            &backend,
+            Some(TransferUnavailable::StorageLocal),
+        )
+        .await
+        .unwrap();
+        assert!(stored.blocked);
+        assert_eq!(stored.mode, TransferMode::Proxy);
+        assert_eq!(stored.unavailable, Some(TransferUnavailable::StorageLocal));
+        finish_startup_attachment_transfer(&backend, Ok(stored))
+            .await
+            .unwrap();
+        assert!(!pool.is_closed());
+        // Real app connection/read/rollback ACK precedes this explicitly
+        // synthetic propagation marker. This is not provider-loss evidence.
+        let controlled =
+            fvoci_server::settings::attachment_transfer_rollback_propagation_control_backend(
+                &backend,
+                Some(TransferUnavailable::StorageLocal),
+            )
+            .await;
+        let error = finish_startup_attachment_transfer(&backend, controlled)
+            .await
+            .unwrap_err();
+        assert!(fvoci_server::settings::attachment_transfer_finish_is_unknown(&error.original));
+        assert!(error.close.is_ok());
+        assert!(pool.is_closed());
+        assert!(format!("{:?}", error.original)
+            .contains("synthetic original after acknowledged settings read"));
+        assert!(format!("{:?}", error.original)
+            .contains("synthetic unconfirmed rollback propagation control"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn final_task_join_cannot_escape_shutdown_deadline() {
