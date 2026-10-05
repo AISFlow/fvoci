@@ -75,6 +75,10 @@ impl RevisionScope {
     pub fn target(self) -> RevisionTarget {
         self.target
     }
+
+    pub fn project_id(self) -> Option<Uuid> {
+        self.project_id
+    }
 }
 
 impl From<RevisionTarget> for RevisionScope {
@@ -290,6 +294,104 @@ pub fn decode_revision_cursor(raw: &str) -> Option<RevisionCursor> {
 }
 
 impl OperationTx<'_, '_> {
+    /// Immutable source lookup on the caller's current OFF writer. The route
+    /// affiliation and current credential are checked here, without a side tx.
+    pub(crate) async fn off_revision_source(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+        scope: RevisionScope,
+        revision: Uuid,
+    ) -> Result<Result<RevisionDetail, RevisionDbError>, sqlx::Error> {
+        if let Err(error) = self
+            .authorize_revision_scope(workspace, actor, credential, scope, true)
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        match self.revision_detail_row(workspace, revision).await? {
+            Some((
+                id,
+                target_kind,
+                target_id,
+                reason,
+                created_by,
+                created_at,
+                restored_from_id,
+                content_json,
+                y_snapshot,
+            )) if scope.target.matches(&target_kind, target_id) => Ok(Ok(RevisionDetail {
+                meta: RevisionMeta {
+                    id,
+                    target_kind,
+                    target_id,
+                    reason,
+                    created_by,
+                    created_at,
+                    restored_from_id,
+                },
+                content_json,
+                y_snapshot,
+            })),
+            _ => Ok(Err(RevisionDbError::NotFound)),
+        }
+    }
+
+    /// Restore provenance belongs to the same forward native CAS commit. It is
+    /// deliberately not manual-revision snapshot deduplication.
+    pub(crate) async fn record_off_restored_revision(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+        intent: RestoreRevisionInput,
+        committed_tail: i64,
+        input: CreateRevisionInput,
+    ) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
+        if intent.expected_tail_seq.checked_add(1) != Some(committed_tail) {
+            return Ok(Err(RevisionDbError::RestoreConflict));
+        }
+        if let Err(error) = self
+            .authorize_revision_scope(workspace, actor, credential, intent.scope, true)
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        let id = Uuid::now_v7();
+        let target = intent.scope.target;
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query("INSERT INTO fvoci.revisions(id,workspace_id,target_kind,target_id,y_snapshot,encoding,content_json,text,reason,created_by,restored_from_id,restore_correlation_id,restore_base_tail_seq,restore_committed_tail_seq) VALUES($1,$2,$3,$4,$5,1,$6,$7,'restore',$8,$9,$10,$11,$12)")
+                    .bind(id).bind(workspace).bind(target.kind_str()).bind(target.id()).bind(&input.y_snapshot).bind(&input.content_json).bind(&input.text).bind(actor)
+                    .bind(intent.source_revision_id).bind(intent.correlation_id).bind(intent.expected_tail_seq).bind(committed_tail).execute(&mut ***tx).await?;
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                tx.execute("INSERT INTO revisions(id,workspace_id,target_kind,target_id,y_snapshot,encoding,content_json,text,reason,created_by,restored_from_id,restore_correlation_id,restore_base_tail_seq,restore_committed_tail_seq) VALUES(?1,?2,?3,?4,?5,1,?6,?7,'restore',?8,?9,?10,?11,?12)",
+                    &[Cell::uuid(id),Cell::uuid(workspace),Cell::text(target.kind_str()),Cell::uuid(target.id()),Cell::Blob(input.y_snapshot),Cell::json(&input.content_json)?,Cell::text(input.text),Cell::uuid(actor),Cell::uuid(intent.source_revision_id),Cell::uuid(intent.correlation_id),Cell::Integer(intent.expected_tail_seq),Cell::Integer(committed_tail)]).await?;
+            }
+        }
+        let mut payload = serde_json::json!({"restoreRequested":intent.source_revision_id,"restoredFromRevisionId":intent.source_revision_id,"restoredRevisionId":id,"correlationId":intent.correlation_id});
+        let key = match target {
+            RevisionTarget::Document(_) => "documentId",
+            RevisionTarget::Task(_) => "taskId",
+        };
+        payload[key] = serde_json::json!(target.id());
+        self.append_event(crate::db::identity::EventAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace),
+            actor_user_id: Some(actor),
+            verb: format!("{}.updated", target.kind_str()),
+            target_type: Some(target.kind_str().into()),
+            target_id: Some(target.id()),
+            payload,
+        })
+        .await?;
+        Ok(Ok(id))
+    }
+
     async fn revision_authorize_document(
         &mut self,
         workspace_id: Uuid,

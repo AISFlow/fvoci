@@ -1,7 +1,9 @@
 //! Boot-OFF wiki/project/task saves: native history, current authority, CAS, revision,
 //! outbox and stable command result share one reserved writer and one finish.
 use crate::collab::{
-    revision::{capture_revision_offline, prepare_off_body, OffBodyPrepareError},
+    revision::{
+        capture_revision_offline, prepare_off_body, prepare_off_restore, OffBodyPrepareError,
+    },
     CollabConfig,
 };
 use crate::config::RealtimeMode;
@@ -11,7 +13,10 @@ use crate::db::{
     collab::{
         AppendCollabInput, CollabDbError, CollabKind, CollabLoadState, ProjectDerivedBodyInput,
     },
-    revisions::{CreateRevisionInput, RevisionDbError, RevisionScope, RevisionTarget},
+    revisions::{
+        CreateRevisionInput, RestoreRevisionInput, RevisionDbError, RevisionDetail, RevisionScope,
+        RevisionTarget,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -101,6 +106,189 @@ impl Drop for NativeCancel {
     }
 }
 
+pub struct OffRestorePreview {
+    pub source: RevisionDetail,
+    pub current_content_json: Value,
+    pub current_tail: i64,
+}
+
+pub async fn create_off_revision(
+    backend: &Backend,
+    mode: RealtimeMode,
+    engine: CollabConfig,
+    workspace: Uuid,
+    scope: RevisionScope,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Uuid, BodySaveError> {
+    match capture_off_revision(
+        backend, mode, engine, workspace, scope, actor, credential, None,
+    )
+    .await?
+    {
+        OffRevisionCapture::Created(id) => Ok(id),
+        OffRevisionCapture::Preview(_) => Err(BodySaveError::Invalid),
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "restore preview binds one immutable source revision to the current native writer scope"
+)]
+pub async fn preview_off_restore(
+    backend: &Backend,
+    mode: RealtimeMode,
+    engine: CollabConfig,
+    workspace: Uuid,
+    scope: RevisionScope,
+    actor: Uuid,
+    credential: Uuid,
+    source: Uuid,
+) -> Result<OffRestorePreview, BodySaveError> {
+    match capture_off_revision(
+        backend,
+        mode,
+        engine,
+        workspace,
+        scope,
+        actor,
+        credential,
+        Some(source),
+    )
+    .await?
+    {
+        OffRevisionCapture::Preview(preview) => Ok(preview),
+        OffRevisionCapture::Created(_) => Err(BodySaveError::Invalid),
+    }
+}
+
+enum OffRevisionCapture {
+    Created(Uuid),
+    Preview(OffRestorePreview),
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "manual history and restore preview use the same current native writer scope"
+)]
+async fn capture_off_revision(
+    backend: &Backend,
+    mode: RealtimeMode,
+    engine: CollabConfig,
+    workspace: Uuid,
+    scope: RevisionScope,
+    actor: Uuid,
+    credential: Uuid,
+    source: Option<Uuid>,
+) -> Result<OffRevisionCapture, BodySaveError> {
+    if mode != RealtimeMode::Off {
+        return Err(BodySaveError::Invalid);
+    }
+    let kind = match scope.target() {
+        RevisionTarget::Document(_) => CollabKind::Document,
+        RevisionTarget::Task(_) => CollabKind::Task,
+    };
+    let mut tx = backend.begin_off_body().await?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let _cancel_on_drop = NativeCancel(cancelled.clone());
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        let (proof, native) = op
+            .load_off_body_writer(
+                mode,
+                kind,
+                workspace,
+                actor,
+                credential,
+                scope.target().id(),
+            )
+            .await?
+            .map_err(BodySaveError::Native)?;
+        op.authorize_revision_scope(workspace, actor, credential, scope, true)
+            .await?
+            .map_err(BodySaveError::Revision)?;
+        let detail = match source {
+            Some(id) => Some(
+                op.off_revision_source(workspace, actor, credential, scope, id)
+                    .await?
+                    .map_err(BodySaveError::Revision)?,
+            ),
+            None => None,
+        };
+        let snapshot = native.snapshot;
+        let tail = native.tail.into_iter().map(|row| row.payload).collect();
+        let check_cancel = cancelled.clone();
+        let captured = tokio::task::spawn_blocking(move || {
+            if check_cancel.load(Ordering::Acquire) {
+                return Err(BodySaveError::Cancelled);
+            }
+            let captured =
+                capture_revision_offline(engine.engine_bin, engine.limits, snapshot, tail)
+                    .map_err(|_| BodySaveError::Unavailable)?;
+            if check_cancel.load(Ordering::Acquire) {
+                return Err(BodySaveError::Cancelled);
+            }
+            Ok(captured)
+        })
+        .await
+        .map_err(|_| BodySaveError::Unavailable)??;
+        let result = if let Some(source) = detail {
+            OffRevisionCapture::Preview(OffRestorePreview {
+                source,
+                current_content_json: captured.content_json,
+                current_tail: native.tail_seq,
+            })
+        } else {
+            let text = crate::collab::revision::prepare_revision_text(&captured.content_json)
+                .map_err(|_| BodySaveError::Invalid)?;
+            let id = op
+                .create_manual_revision(
+                    workspace,
+                    actor,
+                    credential,
+                    scope,
+                    CreateRevisionInput {
+                        y_snapshot: captured.y_snapshot,
+                        content_json: captured.content_json,
+                        text,
+                        reason: "manual".into(),
+                    },
+                )
+                .await?
+                .map_err(BodySaveError::Revision)?;
+            OffRevisionCapture::Created(id)
+        };
+        op.authorize_revision_scope(workspace, actor, credential, scope, true)
+            .await?
+            .map_err(BodySaveError::Revision)?;
+        if !op.recheck_session(actor, credential).await?
+            || !op.verify_off_body_writer(proof).await?
+        {
+            return Err(BodySaveError::Native(CollabDbError::Forbidden));
+        }
+        Ok(result)
+    }
+    .await;
+    match result {
+        Ok(value) => {
+            tx.commit_with_cleanup()
+                .await
+                .map_err(|e| BodySaveError::CommitUnconfirmed(Box::new(e)))?;
+            Ok(value)
+        }
+        Err(original) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(BodySaveError::RollbackUnconfirmed {
+                    original: Box::new(original),
+                    cleanup,
+                });
+            }
+            Err(original)
+        }
+    }
+}
+
 pub async fn read_off_body(
     backend: &Backend,
     mode: RealtimeMode,
@@ -187,12 +375,35 @@ pub async fn save_off_body(
     engine: CollabConfig,
     request: OffBodyRequest,
 ) -> Result<SavedBody, BodySaveError> {
+    finish_off_save(backend, mode, engine, request, None).await
+}
+
+pub async fn restore_off_body(
+    backend: &Backend,
+    mode: RealtimeMode,
+    engine: CollabConfig,
+    request: OffBodyRequest,
+    source_revision: Uuid,
+) -> Result<SavedBody, BodySaveError> {
+    if source_revision.is_nil() || !request.update.is_empty() {
+        return Err(BodySaveError::Invalid);
+    }
+    finish_off_save(backend, mode, engine, request, Some(source_revision)).await
+}
+
+async fn finish_off_save(
+    backend: &Backend,
+    mode: RealtimeMode,
+    engine: CollabConfig,
+    request: OffBodyRequest,
+    source_revision: Option<Uuid>,
+) -> Result<SavedBody, BodySaveError> {
     if mode != RealtimeMode::Off
         || (matches!(request.target, RevisionTarget::Task(_)) && request.project.is_some())
         || request.expected_tail < 0
         || request.expected_tail == i64::MAX
         || request.command.is_nil()
-        || request.update.is_empty()
+        || (source_revision.is_none() && request.update.is_empty())
         || request.update.len() > super::collab::MAX_COLLAB_UPDATE_BYTES
     {
         return Err(BodySaveError::Invalid);
@@ -200,7 +411,15 @@ pub async fn save_off_body(
     let mut tx = backend.begin_off_body().await?;
     let cancelled = Arc::new(AtomicBool::new(false));
     let _cancel_on_drop = NativeCancel(cancelled.clone());
-    let result = save_in_writer(&mut tx.operation(), mode, engine, &request, cancelled).await;
+    let result = save_in_writer(
+        &mut tx.operation(),
+        mode,
+        engine,
+        &request,
+        cancelled,
+        source_revision,
+    )
+    .await;
     match result {
         Ok(saved) => {
             tx.commit_with_cleanup()
@@ -244,12 +463,23 @@ fn command_hash(request: &OffBodyRequest) -> String {
     hex::encode(hash.finalize())
 }
 
+fn restore_command_hash(request: &OffBodyRequest, source: &RevisionDetail) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"fvoci:off-forward-restore:v1\0");
+    hash.update(command_hash(request).as_bytes());
+    hash.update(source.meta.id.as_bytes());
+    hash.update((source.y_snapshot.len() as u64).to_be_bytes());
+    hash.update(&source.y_snapshot);
+    hex::encode(hash.finalize())
+}
+
 async fn save_in_writer(
     op: &mut OperationTx<'_, '_>,
     mode: RealtimeMode,
     engine: CollabConfig,
     request: &OffBodyRequest,
     cancelled: Arc<AtomicBool>,
+    source_revision: Option<Uuid>,
 ) -> Result<SavedBody, BodySaveError> {
     let OffBodyRequest {
         workspace,
@@ -279,7 +509,20 @@ async fn save_in_writer(
     op.authorize_revision_scope(*workspace, *actor, *credential, request.scope(), true)
         .await?
         .map_err(BodySaveError::Revision)?;
-    let hash = command_hash(request);
+    let source = match source_revision {
+        Some(id) => Some(
+            op.off_revision_source(*workspace, *actor, *credential, request.scope(), id)
+                .await?
+                .map_err(BodySaveError::Revision)?,
+        ),
+        None => None,
+    };
+    // Restores bind the immutable source, not a newly randomized forward
+    // update generated after a lost response. Current source auth precedes replay.
+    let hash = match &source {
+        Some(detail) => restore_command_hash(request, detail),
+        None => command_hash(request),
+    };
     if let Some((stored, result)) = op.body_save_receipt(*workspace, *command).await? {
         if stored != hash {
             return Err(BodySaveError::RequestMismatch);
@@ -313,14 +556,28 @@ async fn save_in_writer(
                 .iter()
                 .map(|row| row.payload.len() as i64)
                 .sum::<i64>()
-            + update.len() as i64
+            + if source.is_some() {
+                super::collab::MAX_COLLAB_UPDATE_BYTES as i64
+            } else {
+                update.len() as i64
+            }
             > super::collab::MAX_COLLAB_LOAD_BYTES;
     let generation = load.writer_generation;
     let snapshot = load.snapshot;
     let tail = load.tail.into_iter().map(|row| row.payload).collect();
     let payload = update.clone();
-    let native = tokio::task::spawn_blocking(move || {
-        prepare_off_body(
+    let restore_snapshot = source.as_ref().map(|detail| detail.y_snapshot.clone());
+    let native = tokio::task::spawn_blocking(move || match restore_snapshot {
+        Some(source) => prepare_off_restore(
+            engine.engine_bin,
+            engine.limits,
+            snapshot,
+            tail,
+            source,
+            compact_start,
+            &cancelled,
+        ),
+        None => prepare_off_body(
             engine.engine_bin,
             engine.limits,
             snapshot,
@@ -328,7 +585,7 @@ async fn save_in_writer(
             payload,
             compact_start,
             &cancelled,
-        )
+        ),
     })
     .await
     .map_err(|_| BodySaveError::Unavailable)?
@@ -356,7 +613,7 @@ async fn save_in_writer(
                 writer_generation: generation,
                 expected_tail_seq: *expected_tail,
                 op_id: *command,
-                payload: update,
+                payload: &native.update,
                 client_ip: client_ip.as_deref(),
             },
         )
@@ -384,21 +641,43 @@ async fn save_in_writer(
     .map_err(BodySaveError::Native)?;
     let text = crate::collab::revision::prepare_revision_text(&native.captured.content_json)
         .map_err(|_| BodySaveError::Invalid)?;
-    let revision = op
-        .create_manual_revision(
+    let revision_input = CreateRevisionInput {
+        y_snapshot: native.captured.y_snapshot,
+        content_json: native.captured.content_json,
+        text,
+        reason: if source.is_some() {
+            "restore"
+        } else {
+            "manual"
+        }
+        .into(),
+    };
+    let revision = if let Some(source) = source {
+        op.record_off_restored_revision(
+            *workspace,
+            *actor,
+            *credential,
+            RestoreRevisionInput {
+                scope: request.scope(),
+                source_revision_id: source.meta.id,
+                correlation_id: *command,
+                expected_tail_seq: *expected_tail,
+            },
+            seq,
+            revision_input,
+        )
+        .await?
+    } else {
+        op.create_manual_revision(
             *workspace,
             *actor,
             *credential,
             request.scope(),
-            CreateRevisionInput {
-                y_snapshot: native.captured.y_snapshot,
-                content_json: native.captured.content_json,
-                text,
-                reason: "manual".into(),
-            },
+            revision_input,
         )
         .await?
-        .map_err(BodySaveError::Revision)?;
+    }
+    .map_err(BodySaveError::Revision)?;
     op.compact_off_body(proof, seq, &native.complete_v1, client_ip.as_deref())
         .await?
         .map_err(BodySaveError::Native)?;
@@ -408,7 +687,12 @@ async fn save_in_writer(
         tail_seq: seq.to_string(),
         revision_id: revision,
     };
-    if !op.insert_body_save_receipt(request, &hash, &saved).await? {
+    let mut committed_request = request.clone();
+    committed_request.update = native.update;
+    if !op
+        .insert_body_save_receipt(&committed_request, &hash, &saved)
+        .await?
+    {
         return Err(BodySaveError::RequestMismatch);
     }
     // Current credential/target authorization is still locked and rechecked
@@ -601,6 +885,194 @@ mod sqlite_native_tests {
             (SELECT count(*) FROM revisions WHERE workspace_id=?1 AND target_kind='document' AND target_id=?2),
             (SELECT count(*) FROM document_collab_op_receipts WHERE workspace_id=?1 AND document_id=?2)")
             .bind(f.workspace.as_bytes().as_slice()).bind(f.document.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap()
+    }
+    #[tokio::test]
+    async fn off_restore_is_one_forward_cas_with_exact_provenance_replay_and_fk_rollback() {
+        let f = Fixture::new().await;
+        let credential = session(&f).await;
+        let original = request(&f, credential, "original text 😀").await;
+        let first = save_off_body(&f.backend, RealtimeMode::Off, engine(), original.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            create_off_revision(
+                &f.backend,
+                RealtimeMode::Off,
+                engine(),
+                f.workspace,
+                original.scope(),
+                f.user,
+                credential
+            )
+            .await
+            .unwrap(),
+            first.revision_id,
+            "explicit current manual history preserves snapshot deduplication"
+        );
+        let mut second = original.clone();
+        second.command = Uuid::now_v7();
+        second.expected_tail = 1;
+        let config = engine();
+        second.update = SeedEngine::new(config.engine_bin, config.limits).tiptap_to_yjs_update(
+            &json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":"added-block"},"content":[{"type":"text","text":"later text"}]}]}),
+        ).await.unwrap();
+        let second_saved = save_off_body(&f.backend, RealtimeMode::Off, engine(), second.clone())
+            .await
+            .unwrap();
+        let preview = preview_off_restore(
+            &f.backend,
+            RealtimeMode::Off,
+            engine(),
+            f.workspace,
+            original.scope(),
+            f.user,
+            credential,
+            first.revision_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(preview.current_tail, 2);
+        assert!(preview
+            .current_content_json
+            .to_string()
+            .contains("later text"));
+        assert!(!preview
+            .source
+            .content_json
+            .to_string()
+            .contains("later text"));
+        let mut restore = second.clone();
+        restore.command = Uuid::now_v7();
+        restore.expected_tail = 2;
+        restore.update.clear();
+        let before = counts(&f).await;
+        assert_eq!(before, (2, 2, 2, 2));
+        // Every restore effect is prepared on this actual reserved writer.
+        let mut tx = f.backend.begin_off_body().await.unwrap();
+        let staged = save_in_writer(
+            &mut tx.operation(),
+            RealtimeMode::Off,
+            engine(),
+            &restore,
+            Arc::new(AtomicBool::new(false)),
+            Some(first.revision_id),
+        )
+        .await
+        .unwrap();
+        let OperationTx::SqliteFamily(writer) = tx.operation() else {
+            panic!("actual SQLite writer")
+        };
+        let error = writer.execute("UPDATE body_save_commands SET document_id=?1,target_id=?1 WHERE workspace_id=?2 AND command_id=?3",
+            &[Cell::uuid(Uuid::now_v7()),Cell::uuid(f.workspace),Cell::uuid(restore.command)]).await.unwrap_err();
+        assert!(
+            error.to_string().contains("FOREIGN KEY"),
+            "same real FK failure: {error}"
+        );
+        tx.rollback().await.unwrap();
+        assert_eq!(counts(&f).await, before);
+        let absent: i64 = sqlx::query_scalar("SELECT count(*) FROM revisions WHERE id=?1")
+            .bind(staged.revision_id.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(absent, 0);
+        let saved = restore_off_body(
+            &f.backend,
+            RealtimeMode::Off,
+            engine(),
+            restore.clone(),
+            first.revision_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.tail_seq, "3");
+        assert_ne!(saved.revision_id, first.revision_id);
+        let provenance:(String,Vec<u8>,Vec<u8>,i64,i64) = sqlx::query_as("SELECT reason,restored_from_id,restore_correlation_id,restore_base_tail_seq,restore_committed_tail_seq FROM revisions WHERE id=?1")
+            .bind(saved.revision_id.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+        assert_eq!(
+            provenance,
+            (
+                "restore".into(),
+                first.revision_id.as_bytes().to_vec(),
+                restore.command.as_bytes().to_vec(),
+                2,
+                3
+            )
+        );
+        let after = counts(&f).await;
+        assert_eq!(after, (3, 3, 3, 3));
+        let replay = restore_off_body(
+            &f.backend,
+            RealtimeMode::Off,
+            engine(),
+            restore.clone(),
+            first.revision_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(replay.revision_id, saved.revision_id);
+        assert_eq!(counts(&f).await, after);
+        assert!(matches!(
+            restore_off_body(
+                &f.backend,
+                RealtimeMode::Off,
+                engine(),
+                restore.clone(),
+                second_saved.revision_id
+            )
+            .await,
+            Err(BodySaveError::RequestMismatch)
+        ));
+        let mut stale = restore.clone();
+        stale.command = Uuid::now_v7();
+        assert!(matches!(
+            restore_off_body(
+                &f.backend,
+                RealtimeMode::Off,
+                engine(),
+                stale,
+                first.revision_id
+            )
+            .await,
+            Err(BodySaveError::Conflict)
+        ));
+        assert_eq!(counts(&f).await, after);
+        let fresh = read_off_body(
+            &f.backend,
+            RealtimeMode::Off,
+            engine(),
+            f.workspace,
+            original.scope(),
+            f.user,
+            credential,
+        )
+        .await
+        .unwrap();
+        let text = fresh.content_json.to_string();
+        assert!(
+            text.contains("original text 😀")
+                && text.contains("off-stable-block")
+                && text.contains("bold")
+        );
+        assert!(!text.contains("later text") && !text.contains("added-block"));
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            restore_off_body(
+                &f.backend,
+                RealtimeMode::Off,
+                engine(),
+                restore,
+                first.revision_id
+            )
+            .await,
+            Err(BodySaveError::Native(CollabDbError::Forbidden))
+        ));
+        assert_eq!(counts(&f).await, after);
+        f.close().await;
     }
     #[tokio::test]
     async fn off_wiki_native_cas_receipt_replay_conflict_and_fresh_readback() {
@@ -1172,6 +1644,7 @@ mod sqlite_native_tests {
             engine(),
             &input,
             Arc::new(AtomicBool::new(false)),
+            None,
         )
         .await
         .unwrap();

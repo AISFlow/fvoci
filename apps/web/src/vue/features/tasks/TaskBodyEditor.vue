@@ -332,9 +332,10 @@ async function persistBody(): Promise<void> {
         :document-id="taskId"
         :project-id="null"
         target-kind="task"
-        :read-only="readOnly || realtimeOff"
+        :read-only="readOnly"
         :persist-now="canPersist ? persistBody : undefined"
-        :source-dirty="!!sourceDraft?.dirty || !!sourceDraft?.composing"
+        :after-restore="offBody?.load"
+        :source-dirty="!!sourceDraft?.dirty || !!sourceDraft?.composing || !!offBody?.dirty.value"
       />
     </div>
     <p v-if="persistError" role="alert" class="document-page__error">{{ persistError }}</p>

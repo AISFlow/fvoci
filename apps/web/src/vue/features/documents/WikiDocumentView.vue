@@ -829,9 +829,10 @@ function flashBlock(id: string): void {
             :workspace-id="workspaceId"
             :document-id="documentId"
             :project-id="null"
-            :read-only="readOnly || realtimeOff"
+            :read-only="readOnly"
             :persist-now="canPersist ? persistBody : undefined"
-            :source-dirty="!!sourceDraft?.dirty || !!sourceDraft?.composing"
+            :after-restore="realtimeOff ? offBody.load : undefined"
+            :source-dirty="!!sourceDraft?.dirty || !!sourceDraft?.composing || (realtimeOff && offBody.dirty.value)"
           />
         </div>
         <UCollapsible
