@@ -311,3 +311,78 @@ mod tests {
         f.close().await;
     }
 }
+
+/// Scheduler's claimed family batch. Cutoff/cursor/limit remain caller policy;
+/// this is not a hardcoded TTL or a global authority preflight. Every row uses
+/// the same real writer for its Uploads proof, current row/storage and COMMIT.
+/// PG callers retain run_stale_upload_gc and the detached JobClaim wrapper.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_stale_upload_gc_claimed_backend(
+    backend: &Backend,
+    storage: &ObjectStorage,
+    cutoff: DateTime<Utc>,
+    after: Option<StaleUploadCursor>,
+    limit: i64,
+    cancel: &CancellationToken,
+    proof: &crate::db::maintenance_claim::FamilyMaintenanceProof,
+    policy: crate::db::maintenance_claim::FamilyMaintenanceLeasePolicy,
+) -> Result<StaleUploadGcStats, sqlx::Error> {
+    use crate::db::attachments::{
+        gc_stale_upload_row_claimed_backend, upload_maintenance_must_stop, UploadMaintenanceStop,
+    };
+    if matches!(backend, Backend::Postgres(_)) {
+        return Err(sqlx::Error::Protocol(
+            "family Uploads proof cannot replace PostgreSQL detached job ownership".into(),
+        ));
+    }
+    if cancel.is_cancelled() {
+        return Err(sqlx::Error::AnyDriverError(Box::new(
+            UploadMaintenanceStop::Cancelled,
+        )));
+    }
+    let rows = list_stale_uploading_backend(backend, cutoff, after, limit).await?;
+    let full_batch = rows.len() as i64 >= limit;
+    let mut stats = StaleUploadGcStats::default();
+    let mut last = None;
+    for row in rows {
+        if cancel.is_cancelled() {
+            return Err(sqlx::Error::AnyDriverError(Box::new(
+                UploadMaintenanceStop::Cancelled,
+            )));
+        }
+        match gc_stale_upload_row_claimed_backend(
+            backend,
+            storage,
+            row.workspace_id,
+            row.id,
+            proof,
+            policy,
+            cancel,
+        )
+        .await
+        {
+            Ok(removed) => {
+                stats.claimed += 1;
+                if removed {
+                    stats.purged += 1;
+                }
+            }
+            Err(error)
+                if matches!(backend, Backend::LibsqlRemote(_))
+                    || upload_maintenance_must_stop(&error) =>
+            {
+                return Err(error)
+            }
+            Err(error) => {
+                stats.claimed += 1;
+                stats.failed += 1;
+                warn!(attachment_id=%row.id,error=%error,"maintenance.claimed_upload_gc_row_failed");
+            }
+        }
+        // Advance over each genuinely examined busy/failed/healthy tuple;
+        // uncertainty/loss returns above and grants no new resume receipt.
+        last = Some((row.created_at, row.id));
+    }
+    stats.resume_after = if full_batch { last } else { None };
+    Ok(stats)
+}
