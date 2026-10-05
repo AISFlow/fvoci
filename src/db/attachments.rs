@@ -8798,7 +8798,6 @@ mod upload_owned_adapter_tests {
             )
             .await
             .is_err());
-        drop(op);
         writer.rollback().await.unwrap();
         sqlx::query("UPDATE attachments SET variants='{}' WHERE id=?1")
             .bind(id_b.as_bytes().as_slice())
@@ -8818,7 +8817,6 @@ mod upload_owned_adapter_tests {
             )
             .await
             .unwrap());
-        drop(op);
         writer.rollback().await.unwrap();
         sqlx::query("UPDATE attachments SET variants='{}' WHERE id=?1")
             .bind(outside.as_bytes().as_slice())
@@ -8862,7 +8860,6 @@ mod upload_owned_adapter_tests {
             )
             .await
             .unwrap());
-        drop(op);
         writer.rollback().await.unwrap();
         literal(&s, &key).await;
         literal(&s, &original_b).await;
