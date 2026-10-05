@@ -3916,7 +3916,8 @@ mod selected_tests {
             candidate.graph.tasks[0].estimate = Some(json!(value));
             candidate.graph.tasks[0].estimate_unit = unit.map(str::to_owned);
             candidate.validate().unwrap();
-            candidate.graph.activity[1].changes = json!([{"field":"estimate","from":value,"to":value}]);
+            candidate.graph.activity[1].changes =
+                json!([{"field":"estimate","from":value,"to":value}]);
             candidate.validate().unwrap();
         }
         for value in [
@@ -3944,7 +3945,8 @@ mod selected_tests {
                 Err(crate::native_archive::ArchiveError::Invalid(_))
             ));
             candidate.graph.tasks[0].estimate = None;
-            candidate.graph.activity[1].changes = json!([{"field":"estimate","from":value,"to":null}]);
+            candidate.graph.activity[1].changes =
+                json!([{"field":"estimate","from":value,"to":null}]);
             assert!(matches!(
                 candidate.validate(),
                 Err(crate::native_archive::ArchiveError::Unsupported(reason))
