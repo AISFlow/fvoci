@@ -1411,7 +1411,18 @@ mod selected_document_origin_create_tests {
     use serde_json::{json, Value};
 
     /// Exact columns read back for the created task (unchanged query).
-    type CreatedTaskRow = (Vec<u8>, Vec<u8>, i64, String, String, String, String, i64, Vec<u8>, i64);
+    type CreatedTaskRow = (
+        Vec<u8>,
+        Vec<u8>,
+        i64,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        Vec<u8>,
+        i64,
+    );
 
     async fn setup() -> (Fixture, Uuid, Uuid) {
         let f = Fixture::new().await;

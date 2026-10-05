@@ -2659,7 +2659,18 @@ mod selected_project_create_tests {
     use crate::db::attachment_preview::tests::Fixture;
 
     /// Exact columns read back for the created root document (unchanged query).
-    type RootDocumentRow = (String, String, Option<Vec<u8>>, String, Vec<u8>, i64, String, i64, String, Vec<u8>);
+    type RootDocumentRow = (
+        String,
+        String,
+        Option<Vec<u8>>,
+        String,
+        Vec<u8>,
+        i64,
+        String,
+        i64,
+        String,
+        Vec<u8>,
+    );
 
     async fn credential(f: &Fixture) -> Uuid {
         let id = Uuid::now_v7();
