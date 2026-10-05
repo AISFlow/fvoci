@@ -908,7 +908,7 @@ mod selected_document_origin_read_tests {
             .await
             .unwrap();
         sqlx::query("INSERT INTO statuses(id,workspace_id,project_id,workflow_id,name,category,sort_key) VALUES(?1,?2,?3,?4,'Todo','todo','V')").bind(status.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(workflow.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
-        sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,created_by) VALUES(?1,?2,?3,1,?4,?5,?6)").bind(task.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(format!("작업 😀 {ordinal}")).bind(status.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,created_by,content_json) VALUES(?1,?2,?3,1,?4,?5,?6,?7)").bind(task.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(format!("작업 😀 {ordinal}")).bind(status.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(serde_json::json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":"literal-anchor"},"content":[{"type":"text","text":format!("작업 본문 😀 {ordinal}")}]}]}).to_string()).execute(&f.pool).await.unwrap();
         sqlx::query("INSERT INTO task_origins(workspace_id,task_id,document_id,request_id,request_hash,anchor) VALUES(?1,?2,?3,?4,'read-fixture','literal-anchor')").bind(f.workspace.as_bytes().as_slice()).bind(task.as_bytes().as_slice()).bind(f.document.as_bytes().as_slice()).bind(Uuid::now_v7().as_bytes().as_slice()).execute(&f.pool).await.unwrap();
         (project, task)
     }

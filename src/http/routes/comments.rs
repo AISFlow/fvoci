@@ -792,7 +792,7 @@ mod selected_wiki_auxiliary_http_tests {
             .await
             .unwrap();
         sqlx::query("INSERT INTO statuses(id,workspace_id,project_id,workflow_id,name,category,sort_key) VALUES(?1,?2,?3,?4,'Todo','todo','V')").bind(status.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(workflow.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
-        sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,created_by) VALUES(?1,?2,?3,17,'실제 작업 😀',?4,?5)").bind(task.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(status.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,created_by,content_json) VALUES(?1,?2,?3,17,'실제 작업 😀',?4,?5,?6)").bind(task.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(status.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(serde_json::json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":"source-block-17"},"content":[{"type":"text","text":"실제 작업 본문 😀"}]}]}).to_string()).execute(&f.pool).await.unwrap();
         sqlx::query("INSERT INTO task_origins(workspace_id,task_id,document_id,request_id,request_hash,anchor) VALUES(?1,?2,?3,?4,'literal-read-http','source-block-17')").bind(f.workspace.as_bytes().as_slice()).bind(task.as_bytes().as_slice()).bind(f.document.as_bytes().as_slice()).bind(Uuid::now_v7().as_bytes().as_slice()).execute(&f.pool).await.unwrap();
         (tag, comment, project, task)
     }
