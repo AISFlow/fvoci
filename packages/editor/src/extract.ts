@@ -1,7 +1,7 @@
 import { uuid } from "./uuid.js";
 import { emojiGlyph } from "./emoji-glyph.js";
 import type { TiptapDoc } from "./json.js";
-import type { Extensions } from "@tiptap/core";
+import type { Extensions, JSONContent } from "@tiptap/core";
 import { generateUniqueIds } from "@tiptap/extension-unique-id";
 
 /*
@@ -136,7 +136,9 @@ export function independentDraftBody(doc: TiptapDoc, extensions: Extensions): Ti
     if (typeof node.type === "string" && UNIQUE_ID_NODE_TYPE_SET.has(node.type) && node.attrs)
       delete node.attrs.id;
   });
-  return generateUniqueIds(next, extensions) as TiptapDoc;
+  // The pinned SDK validates this unknown-content DTO with Node.fromJSON using
+  // the current shared schema before assigning IDs; unknown nodes still throw.
+  return generateUniqueIds(next as JSONContent, extensions) as TiptapDoc;
 }
 
 export function replaceTiptapNodeById(

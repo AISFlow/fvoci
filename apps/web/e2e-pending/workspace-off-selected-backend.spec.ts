@@ -275,8 +275,10 @@ async function twoWriters(a: ActorPage, b: ActorPage, target: Target) {
         (mark: unknown) =>
           !!mark && typeof mark === "object" && "type" in mark && mark.type === "bold",
       )
-    )
-      bold.push(node.text ?? "");
+    ) {
+      if (typeof node.text !== "string") throw new Error("committed bold text must be a string");
+      bold.push(node.text);
+    }
   });
   expect(bold.join("")).toBe(winner);
   expectNative(current);
@@ -498,10 +500,13 @@ test.describe("selected normal main OFF", () => {
         "false",
       );
       expect(await readBody(a.page, target)).toEqual(conflict.current);
+      const displayId = committed.document.displayId;
+      if (typeof displayId !== "string" || displayId.length === 0)
+        throw new Error("committed copy displayId must be a nonempty string");
       const copy: Target = {
         id: committed.document.id,
         path: `/api/v1/workspaces/${workspaceId}/documents/${committed.document.id}`,
-        url: `/w/${admin.workspaceSlug}/${committed.document.displayId}`,
+        url: `/w/${admin.workspaceSlug}/${displayId}`,
       };
       expect(copy.id).not.toBe(target.id);
       const copied = await readBody(fresh.page, copy);
@@ -691,10 +696,23 @@ test.describe("selected normal main OFF", () => {
       // A new tab shares this exact session credential but owns a distinct draft.
       const secondPage = await a.context.newPage();
       const secondSockets: string[] = [];
+      const secondAccessStreams: ActorPage["accessStreams"] = [];
+      secondPage.on("response", (response) => {
+        if (new URL(response.url()).pathname.endsWith("/access-stream"))
+          secondAccessStreams.push({
+            status: response.status(),
+            contentType: response.headers()["content-type"] ?? "",
+          });
+      });
       secondPage.on("websocket", (socket) => secondSockets.push(socket.url()));
       const conflict = await twoWriters(
         a,
-        { context: a.context, page: secondPage, sockets: secondSockets },
+        {
+          context: a.context,
+          page: secondPage,
+          sockets: secondSockets,
+          accessStreams: secondAccessStreams,
+        },
         target,
       );
       await secondPage
