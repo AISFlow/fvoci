@@ -7666,7 +7666,7 @@ mod upload_owned_adapter_tests {
         assert_eq!(current(&f, id).await, ("uploading".into(), key.clone()));
         daily.release().await.unwrap();
         let claim = acquired(&f, MaintenanceJobKey::Uploads, policy()).await;
-        let stats = crate::jobs::uploads::run_stale_upload_gc_claimed_backend(
+        let stats = crate::jobs::run_stale_upload_gc_claimed_backend(
             &other,
             &s,
             Utc::now(),
@@ -8274,7 +8274,7 @@ mod upload_owned_adapter_tests {
             .await
             .unwrap();
         assert_eq!(listed.len(), 2);
-        let stats = crate::jobs::uploads::run_stale_upload_gc_claimed_backend(
+        let stats = crate::jobs::run_stale_upload_gc_claimed_backend(
             &other,
             &s,
             Utc::now(),
@@ -8400,7 +8400,7 @@ mod upload_owned_adapter_tests {
         let (id, key) = uploading(&f, &s).await;
         let (workspace_b, id_b, original_b, credential) = live_other_attachment(&f, &s, &key).await;
         let (orphan, orphan_key) = uploading(&f, &s).await;
-        let stats = crate::jobs::uploads::run_stale_upload_gc_claimed_backend(
+        let stats = crate::jobs::run_stale_upload_gc_claimed_backend(
             &other,
             &s,
             Utc::now(),
