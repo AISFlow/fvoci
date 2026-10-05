@@ -2637,7 +2637,8 @@ mod selected_import_tests {
                 json!({"literal":"한글 import receipt"})
             );
         }
-        let clear:(Option<Vec<u8>>,Option<Vec<u8>>,Option<i64>,i64)=sqlx::query_as("SELECT payload,lease_token,lease_until,(SELECT count(*) FROM import_deferred_events) FROM import_jobs WHERE id=?1").bind(job.id.as_bytes().as_slice()).fetch_one(&fresh).await.unwrap();
+        type ImportTerminalState = (Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>, i64);
+        let clear:ImportTerminalState=sqlx::query_as("SELECT payload,lease_token,lease_until,(SELECT count(*) FROM import_deferred_events) FROM import_jobs WHERE id=?1").bind(job.id.as_bytes().as_slice()).fetch_one(&fresh).await.unwrap();
         assert_eq!(clear, (None, None, None, 0));
         fresh.close().await;
         f.close().await;
