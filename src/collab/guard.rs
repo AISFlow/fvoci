@@ -7,11 +7,13 @@ use crate::collab::config::FamilyRoomTimings;
 use crate::db::backend::Backend;
 use crate::db::collab::COLLAB_ROOM_SESSION_LOCK_NAMESPACE;
 use crate::db::collab::{
-    activate_family_document_writer, append_collab_update_on_conn_timed,
-    append_family_document_room_update_timed, claim_writer_and_load_kind_backend,
-    release_family_document_room, renew_family_document_room, AppendCollabInput,
-    AppendCollabResult, ClaimWriterResult, CollabDbError, CollabDbStageTimings, CollabKind,
-    FamilyRoomDeliveryFence, FamilyRoomFence,
+    activate_family_document_writer, activate_family_task_writer,
+    append_collab_update_on_conn_timed, append_family_document_room_update_timed,
+    append_family_task_room_update_timed, claim_writer_and_load_kind_backend,
+    release_family_document_room, release_family_task_room, renew_family_document_room,
+    renew_family_task_room, AppendCollabInput, AppendCollabResult, ClaimWriterResult,
+    CollabDbError, CollabDbStageTimings, CollabKind, FamilyNativeRoomFence,
+    FamilyRoomDeliveryFence,
 };
 use crate::db::context::lock_key_from_uuid;
 
@@ -92,7 +94,7 @@ pub(crate) enum FamilyRoomOwnerRecord {
         deadline_expired: bool,
     },
     NativeWrite {
-        fence: FamilyRoomFence,
+        fence: FamilyNativeRoomFence,
         error: std::sync::Arc<sqlx::Error>,
     },
 }
@@ -106,8 +108,8 @@ pub(crate) enum BackendRoomGuard {
     Postgres(RoomGuard),
     Family {
         backend: Backend,
-        original: FamilyRoomFence,
-        current: FamilyRoomFence,
+        original: FamilyNativeRoomFence,
+        current: FamilyNativeRoomFence,
         writer_owner: Uuid,
         timings: FamilyRoomTimings,
         owner_records: FamilyRoomOwnerRecords,
@@ -117,7 +119,7 @@ pub(crate) enum BackendRoomGuard {
 impl BackendRoomGuard {
     pub(crate) fn family(
         backend: Backend,
-        fence: FamilyRoomFence,
+        fence: FamilyNativeRoomFence,
         timings: FamilyRoomTimings,
         owner_records: FamilyRoomOwnerRecords,
     ) -> Self {
@@ -141,9 +143,9 @@ impl BackendRoomGuard {
         } = self
         {
             let key = crate::collab::room::RoomKey(
-                current.workspace_id,
-                current.document_id,
-                crate::collab::wire::CollabKind::Document,
+                current.workspace(),
+                current.resource(),
+                current.kind(),
             );
             let previous = owner_records
                 .lock()
@@ -180,7 +182,7 @@ impl BackendRoomGuard {
         }
     }
 
-    pub(crate) fn family_fence(&self) -> Option<FamilyRoomFence> {
+    pub(crate) fn family_fence(&self) -> Option<FamilyNativeRoomFence> {
         match self {
             Self::Postgres(_) => None,
             Self::Family { current, .. } => Some(*current),
@@ -210,24 +212,39 @@ impl BackendRoomGuard {
                 writer_owner,
                 ..
             } => {
-                if kind != CollabKind::Document
-                    || original.workspace_id != workspace
-                    || original.document_id != resource
-                {
+                if !original.matches(kind, workspace, resource) {
                     return Ok(Err(CollabDbError::StaleWriter));
                 }
-                let claimed = activate_family_document_writer(
-                    backend,
-                    *original,
-                    actor,
-                    credential,
-                    *writer_owner,
-                )
-                .await?;
-                Ok(claimed.map(|claimed| {
-                    *current = claimed.fence;
-                    claimed.native
-                }))
+                match *original {
+                    FamilyNativeRoomFence::Document(fence) => {
+                        let claimed = activate_family_document_writer(
+                            backend,
+                            fence,
+                            actor,
+                            credential,
+                            *writer_owner,
+                        )
+                        .await?;
+                        Ok(claimed.map(|claim| {
+                            *current = FamilyNativeRoomFence::Document(claim.fence);
+                            claim.native
+                        }))
+                    }
+                    FamilyNativeRoomFence::Task(fence) => {
+                        let claimed = activate_family_task_writer(
+                            backend,
+                            fence,
+                            actor,
+                            credential,
+                            *writer_owner,
+                        )
+                        .await?;
+                        Ok(claimed.map(|claim| {
+                            *current = FamilyNativeRoomFence::Task(claim.fence);
+                            claim.native
+                        }))
+                    }
+                }
             }
         }
     }
@@ -250,12 +267,20 @@ impl BackendRoomGuard {
             Self::Family {
                 backend, current, ..
             } => {
-                if kind != CollabKind::Document {
-                    return Err(sqlx::Error::Protocol(
-                        "family task room ownership is pending".into(),
+                if !current.matches(kind, input.workspace_id, input.document_id) {
+                    return Ok((
+                        Err(CollabDbError::StaleWriter),
+                        CollabDbStageTimings::default(),
                     ));
                 }
-                append_family_document_room_update_timed(backend, *current, input).await
+                match *current {
+                    FamilyNativeRoomFence::Document(fence) => {
+                        append_family_document_room_update_timed(backend, fence, input).await
+                    }
+                    FamilyNativeRoomFence::Task(fence) => {
+                        append_family_task_room_update_timed(backend, fence, input).await
+                    }
+                }
             }
         }
     }
@@ -275,15 +300,14 @@ impl BackendRoomGuard {
         else {
             return Ok(true);
         };
-        if renew_family_document_room(backend, *current, timings.lease()).await? {
+        if Self::renew_fence(backend, *current, timings.lease()).await? {
             return Ok(true);
         }
-        let mut activated = *original;
-        activated.owner_token = *writer_owner;
+        let activated = original.with_owner(*writer_owner);
         if activated == *current {
             return Ok(false);
         }
-        if renew_family_document_room(backend, activated, timings.lease()).await? {
+        if Self::renew_fence(backend, activated, timings.lease()).await? {
             *current = activated;
             return Ok(true);
         }
@@ -306,6 +330,32 @@ impl BackendRoomGuard {
             })?
     }
 
+    async fn renew_fence(
+        backend: &Backend,
+        fence: FamilyNativeRoomFence,
+        lease: std::time::Duration,
+    ) -> Result<bool, sqlx::Error> {
+        match fence {
+            FamilyNativeRoomFence::Document(fence) => {
+                renew_family_document_room(backend, fence, lease).await
+            }
+            FamilyNativeRoomFence::Task(fence) => {
+                renew_family_task_room(backend, fence, lease).await
+            }
+        }
+    }
+    async fn release_fence(
+        backend: &Backend,
+        fence: FamilyNativeRoomFence,
+    ) -> Result<bool, sqlx::Error> {
+        match fence {
+            FamilyNativeRoomFence::Document(fence) => {
+                release_family_document_room(backend, fence).await
+            }
+            FamilyNativeRoomFence::Task(fence) => release_family_task_room(backend, fence).await,
+        }
+    }
+
     pub(crate) async fn release(self) -> Result<(), sqlx::Error> {
         match self {
             Self::Postgres(guard) => guard.release_confirmed().await,
@@ -316,13 +366,12 @@ impl BackendRoomGuard {
                 writer_owner,
                 ..
             } => {
-                if release_family_document_room(&backend, current).await? {
+                if Self::release_fence(&backend, current).await? {
                     return Ok(());
                 }
-                let mut activated = original;
-                activated.owner_token = writer_owner;
+                let activated = original.with_owner(writer_owner);
                 if activated != current {
-                    release_family_document_room(&backend, activated).await?;
+                    Self::release_fence(&backend, activated).await?;
                 }
                 Ok(())
             }

@@ -26,8 +26,8 @@ use crate::collab::room::{
 use crate::db::backend::Backend;
 use crate::db::collab::estimate_persisted_collab_bytes_kind;
 use crate::db::collab::{
-    abandon_family_document_room_start, acquire_family_document_room_for_start,
-    estimate_family_document_bytes, resolve_collab_admission_kind_backend,
+    abandon_family_native_room_start, acquire_family_native_room_for_start,
+    estimate_family_room_bytes, resolve_collab_admission_kind_backend,
 };
 
 #[cfg(feature = "db-tests")]
@@ -646,7 +646,7 @@ impl CollabHub {
             .get(&key)
             .map(|record| match record {
                 FamilyRoomOwnerRecord::Startup { owner, .. } => *owner,
-                FamilyRoomOwnerRecord::NativeWrite { fence, .. } => fence.owner_token,
+                FamilyRoomOwnerRecord::NativeWrite { fence, .. } => fence.owner(),
             })
     }
     #[cfg(feature = "db-tests")]
@@ -1170,7 +1170,7 @@ impl CollabHub {
                         error=?error.as_ref().map(|error|error.source_error()), "family startup owner remains unconfirmed");
                 }
                 FamilyRoomOwnerRecord::NativeWrite { fence, error } => {
-                    tracing::error!(workspace_id=%key.0,document_id=%key.1,fence=fence.fence,%error,
+                    tracing::error!(workspace_id=%key.0,document_id=%key.1,fence=fence.sequence(),%error,
                         "family native writer original remote outcome remains unconfirmed");
                 }
             }
@@ -1637,13 +1637,11 @@ impl CollabHub {
                     Ok((BackendRoomGuard::Postgres(guard), memory_reservation, None))
                 }
                 Backend::Sqlite(_) | Backend::LibsqlRemote(_) => {
-                    if key.2 != crate::collab::wire::CollabKind::Document {
-                        return Err(JoinError::UnsupportedKind);
-                    }
                     let (actor, credential) = identity.ok_or(JoinError::AdmissionDenied)?;
                     let timings = self.family_timings.ok_or(JoinError::EngineUnavailable)?;
-                    let bytes = estimate_family_document_bytes(
+                    let bytes = estimate_family_room_bytes(
                         &self.backend,
+                        key.2,
                         key.0,
                         actor,
                         credential,
@@ -1665,12 +1663,10 @@ impl CollabHub {
                     pause_for_hub_join_barrier(key.1,HUB_FAMILY_START_BEFORE_BEGIN).await;
                     let acquired = tokio::time::timeout(
                         Duration::from_millis(self.config.rpc_timeout_ms),
-                        acquire_family_document_room_for_start(
+                        acquire_family_native_room_for_start(
                         &self.backend,
-                        key.0,
-                        actor,
-                        credential,
-                        key.1,
+                        (key.2,key.0,key.1),
+                        (actor,credential),
                         acquisition_owner,
                         timings.lease(),
                     )).await;
@@ -1702,7 +1698,7 @@ impl CollabHub {
                             warn_join_db_error("hub.start_room.room_guard",key.0,key.1,error.source_error());
                             let cleaned = if error.may_reconcile() {
                                 matches!(tokio::time::timeout(Duration::from_millis(self.config.rpc_timeout_ms),
-                                    abandon_family_document_room_start(&self.backend,key.0,key.1,acquisition_owner)).await, Ok(Ok(())))
+                                    abandon_family_native_room_start(&self.backend,key.2,key.0,key.1,acquisition_owner)).await, Ok(Ok(())))
                             } else {
                                 // No exact original-stream cleanup receipt means
                                 // neither driver failure nor Drop proves cleanup.
