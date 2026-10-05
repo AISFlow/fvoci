@@ -317,14 +317,18 @@ pub fn maybe_run_helper() -> Option<i32> {
         extract_office(&source, kind, mode, max_output)
     };
     drop(source);
-    let json = match serde_json::to_vec(&outcome) {
+    Some(child_outcome(&outcome))
+}
+
+fn child_outcome(outcome: &OfficeOutcome) -> i32 {
+    let json = match serde_json::to_vec(outcome) {
         Ok(json) => json,
-        Err(err) => return Some(child_fail(&format!("serialize: {err}"))),
+        Err(err) => return child_fail(&format!("serialize: {err}")),
     };
     let mut stdout = std::io::stdout().lock();
     match stdout.write_all(&json).and_then(|()| stdout.flush()) {
-        Ok(()) => Some(0),
-        Err(err) => Some(child_fail(&format!("stdout: {err}"))),
+        Ok(()) => 0,
+        Err(err) => child_fail(&format!("stdout: {err}")),
     }
 }
 
@@ -471,3 +475,87 @@ pub async fn run_office_helper(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod returned_allocation_tests {
+    use super::{child_fail, child_outcome, OfficeOutcome};
+    use std::alloc::{GlobalAlloc, Layout};
+    use std::os::unix::process::ExitStatusExt;
+
+    const CHILD: &str = "FVOCI_UNIT_RETURNED_ALLOCATION_CHILD";
+
+    fn returned_allocation_control(kind: &str, test: &str) {
+        if std::env::var(CHILD).as_deref() == Ok(kind) {
+            // Leave headroom for the error reply, but make this specific
+            // allocation impossible under the real kernel address-space cap.
+            let status = std::fs::read_to_string("/proc/self/status").unwrap();
+            let current = status
+                .lines()
+                .find_map(|line| line.strip_prefix("VmSize:"))
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+                .checked_mul(1024)
+                .unwrap();
+            let ceiling = current.checked_add(64 * 1024 * 1024).unwrap();
+            document_extract_client::process::apply_rlimits_now(ceiling, 5).unwrap();
+            let layout = Layout::from_size_align(
+                usize::try_from(ceiling.checked_add(64 * 1024 * 1024).unwrap()).unwrap(),
+                16,
+            )
+            .unwrap();
+            // SAFETY: the layout is nonzero and valid. A successful allocation
+            // is immediately deallocated with the same allocator and layout.
+            let pointer = unsafe { crate::alloc_guard::RecordingAlloc.alloc(layout) };
+            if !pointer.is_null() {
+                unsafe { crate::alloc_guard::RecordingAlloc.dealloc(pointer, layout) };
+                panic!("allocation unexpectedly fit the address-space ceiling");
+            }
+            assert!(crate::alloc_guard::allocation_failed());
+            eprintln!("returned_allocation_null=true; allocation_failed=true; no panic");
+            let code = match kind {
+                "outcome" => child_outcome(&OfficeOutcome::Corrupt {
+                    detail: "zip: invalid zip".into(),
+                }),
+                "failure" => child_fail("returned input allocation error"),
+                _ => unreachable!(),
+            };
+            std::process::exit(code);
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--test-threads=1", "--nocapture"])
+            .env(CHILD, kind)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("returned_allocation_null=true; allocation_failed=true; no panic"));
+        assert_eq!(
+            output.status.signal(),
+            Some(libc::SIGABRT),
+            "status={} stdout={} stderr={stderr}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("zip: invalid zip"));
+        assert!(!stderr.contains("returned input allocation error"));
+    }
+
+    #[test]
+    fn returned_allocation_cannot_publish_an_ordinary_outcome() {
+        returned_allocation_control(
+            "outcome",
+            "documents::office::returned_allocation_tests::returned_allocation_cannot_publish_an_ordinary_outcome",
+        );
+    }
+
+    #[test]
+    fn returned_allocation_cannot_publish_a_worker_failure() {
+        returned_allocation_control(
+            "failure",
+            "documents::office::returned_allocation_tests::returned_allocation_cannot_publish_a_worker_failure",
+        );
+    }
+}
