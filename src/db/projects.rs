@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::backend::OperationTx;
-use crate::db::codec::Cell;
+use crate::db::backend::{Backend, DbTx, FamilyTx, OperationTx};
+use crate::db::codec::{Cell, FamilyRow};
 use crate::db::context::{
     begin_read, lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
 };
@@ -727,6 +727,227 @@ pub(crate) async fn workspace_removal_blocked_by_private_leads(
         }
     }
     Ok(false)
+}
+
+/// Selected project creation uses one current writer for authority, root,
+/// workflow, events and audit. Existing PostgreSQL callers keep their wrapper.
+pub async fn create_project_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    input: CreateProjectInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<ProjectRow, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return create_project(
+            pool,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            input,
+            client_ip,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        let mut users = vec![actor_user_id];
+        if let Some(lead) = input.lead_user_id {
+            if lead != actor_user_id { users.push(lead); }
+        }
+        users.sort_unstable();
+        op.lock_membership_users(&users).await?;
+        if !op.recheck_session(actor_user_id, session_id).await? {
+            return Ok(Err(ProjectDbError::Forbidden));
+        }
+        if !op.workspace_is_live(workspace_id).await? {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        if !op.membership_role(workspace_id, actor_user_id, true).await?
+            .is_some_and(|role| role.at_least(WorkspaceRole::Member)) {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        op.lock_tree(workspace_id).await?;
+        let project = Uuid::now_v7();
+        let root = Uuid::now_v7();
+        let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+        family.require_writer()?;
+        family.require_tenant(workspace_id)?;
+        let inserted = family.query(
+            "INSERT INTO projects(id,workspace_id,key,name,description,icon,visibility,status,next_number,created_by)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,'active',1,?8)
+             ON CONFLICT(workspace_id,key) DO NOTHING RETURNING id",
+            &[Cell::uuid(project),Cell::uuid(workspace_id),Cell::text(input.key),Cell::text(input.name.trim()),
+              Cell::optional_text(optional_text_to_db(input.description).as_deref()),
+              Cell::optional_text(optional_text_to_db(input.icon).as_deref()),
+              Cell::text(input.visibility),Cell::uuid(actor_user_id)],
+        ).await?;
+        if inserted.is_empty() { return Ok(Err(ProjectDbError::Conflict)); }
+        family.execute(
+            "INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')",
+            &[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace_id),Cell::uuid(project),Cell::uuid(actor_user_id)],
+        ).await?;
+        if let Some(lead) = input.lead_user_id.filter(|lead| *lead != actor_user_id) {
+            // Retain the PG ordering: duplicate key precedes a refused lead.
+            if !op.membership_role(workspace_id,lead,false).await?
+                .is_some_and(|role| role.at_least(WorkspaceRole::Member)) {
+                return Ok(Err(ProjectDbError::NotFound));
+            }
+            let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+            family.execute(
+                "INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')
+                 ON CONFLICT(workspace_id,project_id,user_id) DO UPDATE SET role='lead',updated_at=(unixepoch()*1000000 + CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)",
+                &[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace_id),Cell::uuid(project),Cell::uuid(lead)],
+            ).await?;
+            family.execute(
+                "UPDATE project_members SET role='member',updated_at=(unixepoch()*1000000 + CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)
+                 WHERE workspace_id=?1 AND project_id=?2 AND user_id=?3",
+                &[Cell::uuid(workspace_id),Cell::uuid(project),Cell::uuid(actor_user_id)],
+            ).await?;
+        }
+        let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+        let numbers = family.query(
+            "UPDATE projects SET next_number=next_number+1,updated_at=(unixepoch()*1000000 + CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)
+             WHERE workspace_id=?1 AND id=?2 RETURNING next_number-1",
+            &[Cell::uuid(workspace_id),Cell::uuid(project)],
+        ).await?;
+        let number = numbers.first().ok_or(sqlx::Error::RowNotFound)?.cell(0)?.int32()?;
+        family.execute(
+            "INSERT INTO documents(id,workspace_id,title,path,parent_id,sort_key,project_id,number,status,schema_version,content_json,created_by)
+             VALUES(?1,?2,?3,?4,NULL,'V',?5,?6,'published',?7,?8,?9)",
+            &[Cell::uuid(root),Cell::uuid(workspace_id),Cell::text(input.name.trim()),Cell::text(to_path_label(root)),
+              Cell::uuid(project),Cell::Integer(i64::from(number)),Cell::Integer(i64::from(DOCUMENT_SCHEMA_VERSION)),
+              Cell::json(&empty_document_json())?,Cell::uuid(actor_user_id)],
+        ).await?;
+        family.execute(
+            "UPDATE projects SET root_document_id=?3,updated_at=(unixepoch()*1000000 + CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)
+             WHERE workspace_id=?1 AND id=?2",
+            &[Cell::uuid(workspace_id),Cell::uuid(project),Cell::uuid(root)],
+        ).await?;
+        seed_project_workflow_family(family,workspace_id,project).await?;
+        let payload = json!({"projectId":project.to_string(),"key":input.key,"name":input.name.trim(),
+                             "visibility":input.visibility,"rootDocumentId":root.to_string()});
+        op.append_event(EventAppend {
+            id:Uuid::now_v7(),workspace_id:Some(workspace_id),actor_user_id:Some(actor_user_id),
+            verb:"project.created".into(),target_type:Some("project".into()),target_id:Some(project),payload:payload.clone(),
+        }).await?;
+        op.append_audit(AuditAppend {
+            id:Uuid::now_v7(),workspace_id:Some(workspace_id),actor_user_id:Some(actor_user_id),
+            verb:"project.created".into(),target_type:Some("project".into()),target_id:Some(project),payload,
+            ip:client_ip.map(str::to_string),
+        }).await?;
+        let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+        let rows = family.query(
+            "SELECT id,key,name,description,icon,visibility,root_document_id,status,created_by,created_at,updated_at
+             FROM projects WHERE workspace_id=?1 AND id=?2",
+            &[Cell::uuid(workspace_id),Cell::uuid(project)],
+        ).await?;
+        Ok(Ok(project_created_family_row(rows.first().ok_or(sqlx::Error::RowNotFound)?, workspace_id)?))
+    }.await;
+    finish_project_create(tx, result).await
+}
+
+async fn seed_project_workflow_family(
+    family: &mut FamilyTx,
+    workspace: Uuid,
+    project: Uuid,
+) -> Result<(), sqlx::Error> {
+    use crate::settings::messages::{Message, Messages};
+    family.require_writer()?;
+    family.require_tenant(workspace)?;
+    let workflow = Uuid::now_v7();
+    family
+        .execute(
+            "INSERT INTO workflows(id,workspace_id,project_id) VALUES(?1,?2,?3)",
+            &[
+                Cell::uuid(workflow),
+                Cell::uuid(workspace),
+                Cell::uuid(project),
+            ],
+        )
+        .await?;
+    // Read the current override through the same writer; reuse its canonical
+    // validation and field fallback, without another settings lease/transaction.
+    let rows = family
+        .query("SELECT value FROM instance_settings WHERE key='i18n'", &[])
+        .await?;
+    let raw = rows.first().map(|row| row.cell(0)?.value()).transpose()?;
+    let messages = Messages::from_row(raw.as_ref());
+    for (message, category, sort_key) in [
+        (Message::SeedStatusBacklog, "backlog", "V"),
+        (Message::SeedStatusTodo, "todo", "W"),
+        (Message::SeedStatusInProgress, "in_progress", "X"),
+        (Message::SeedStatusReview, "in_progress", "Y"),
+        (Message::SeedStatusDone, "done", "Z"),
+        (Message::SeedStatusCanceled, "canceled", "a"),
+    ] {
+        let name = messages.field(message, |name| {
+            crate::db::workflow_statuses::status_name_is_valid(name.trim())
+        });
+        family.execute("INSERT INTO statuses(id,workspace_id,project_id,workflow_id,name,category,sort_key) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            &[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace),Cell::uuid(project),Cell::uuid(workflow),
+              Cell::text(name),Cell::text(category),Cell::text(sort_key)]).await?;
+    }
+    Ok(())
+}
+
+fn project_created_family_row(
+    row: &FamilyRow,
+    workspace_id: Uuid,
+) -> Result<ProjectRow, sqlx::Error> {
+    Ok(ProjectRow {
+        id: row.cell(0)?.id()?,
+        workspace_id,
+        key: row.cell(1)?.string()?,
+        name: row.cell(2)?.string()?,
+        description: row.cell(3)?.optional(Cell::string)?,
+        icon: row.cell(4)?.optional(Cell::string)?,
+        visibility: row.cell(5)?.string()?,
+        root_document_id: row.cell(6)?.optional(Cell::id)?,
+        status: row.cell(7)?.string()?,
+        created_by: row.cell(8)?.id()?,
+        created_at: row.cell(9)?.datetime()?,
+        updated_at: row.cell(10)?.datetime()?,
+    })
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("project creation refused: {0:?}")]
+struct ProjectCreateRefusal(ProjectDbError);
+
+async fn finish_project_create(
+    tx: DbTx,
+    result: Result<Result<ProjectRow, ProjectDbError>, sqlx::Error>,
+) -> Result<Result<ProjectRow, ProjectDbError>, sqlx::Error> {
+    match result {
+        Ok(Ok(project)) => {
+            tx.commit_with_cleanup()
+                .await
+                .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+            Ok(Ok(project))
+        }
+        Ok(Err(refusal)) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(ProjectCreateRefusal(refusal))),
+                    cleanup,
+                ));
+            }
+            Ok(Err(refusal))
+        }
+        Err(original) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(original)),
+                    cleanup,
+                ));
+            }
+            Err(original)
+        }
+    }
 }
 
 pub async fn create_project(
@@ -2430,4 +2651,495 @@ pub async fn list_deleted_projects(
             },
         )
         .collect()))
+}
+
+#[cfg(test)]
+mod selected_project_create_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+
+    async fn credential(f: &Fixture) -> Uuid {
+        let id = Uuid::now_v7();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        tx.operation()
+            .create_session(
+                id,
+                f.user,
+                "project-create-test",
+                DateTime::from_timestamp_micros(Utc::now().timestamp_micros() + 86_400_000_000)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        id
+    }
+    async fn create(
+        f: &Fixture,
+        session: Uuid,
+        key: &str,
+        lead: Option<Uuid>,
+    ) -> Result<Result<ProjectRow, ProjectDbError>, sqlx::Error> {
+        create_project_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            session,
+            CreateProjectInput {
+                key,
+                name: "  실제 프로젝트 中 😀  ",
+                visibility: "private",
+                description: Some("  description  "),
+                icon: Some("  "),
+                lead_user_id: lead,
+            },
+            Some("127.0.0.1"),
+        )
+        .await
+    }
+    async fn counts(f: &Fixture) -> (i64, i64, i64, i64, i64, i64, i64) {
+        sqlx::query_as("SELECT (SELECT count(*) FROM projects),(SELECT count(*) FROM project_members),(SELECT count(*) FROM documents),(SELECT count(*) FROM workflows),(SELECT count(*) FROM statuses),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log)")
+            .fetch_one(&f.pool).await.unwrap()
+    }
+    async fn member(f: &Fixture, role: &str) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,?2,'Lead')")
+            .bind(id.as_bytes().as_slice())
+            .bind(format!("{id}@example.test"))
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,?3)")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(id.as_bytes().as_slice())
+            .bind(role)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_project_create_literal_root_workflow_i18n_lead_event_and_audit() {
+        let f = Fixture::new().await;
+        let session = credential(&f).await;
+        let lead = member(&f, "member").await;
+        let long = "가".repeat(101);
+        sqlx::query("INSERT INTO instance_settings(key,value) VALUES('i18n',?1)")
+            .bind(
+                json!({"overrides":{"seed.status.todo":long,"seed.status.done":"Shipped 中 😀"}})
+                    .to_string(),
+            )
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let project = create(&f, session, "LITERAL", Some(lead))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(project.workspace_id, f.workspace);
+        assert_eq!(project.created_by, f.user);
+        assert_eq!(project.key, "LITERAL");
+        assert_eq!(project.name, "실제 프로젝트 中 😀");
+        assert_eq!(project.visibility, "private");
+        assert_eq!(project.description.as_deref(), Some("description"));
+        assert_eq!(project.icon, None);
+        assert_eq!(project.status, "active");
+        let root = project.root_document_id.unwrap();
+        let row:(String,String,Option<Vec<u8>>,String,Vec<u8>,i64,String,i64,String,Vec<u8>) = sqlx::query_as("SELECT title,path,parent_id,sort_key,project_id,number,status,schema_version,content_json,created_by FROM documents WHERE workspace_id=?1 AND id=?2")
+            .bind(f.workspace.as_bytes().as_slice()).bind(root.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+        assert_eq!(row.0, project.name);
+        assert_eq!(row.1, to_path_label(root));
+        assert_eq!(row.2, None);
+        assert_eq!(row.3, "V");
+        assert_eq!(row.4, project.id.as_bytes());
+        assert_eq!(row.5, 1);
+        assert_eq!(row.6, "published");
+        assert_eq!(row.7, i64::from(DOCUMENT_SCHEMA_VERSION));
+        assert_eq!(
+            serde_json::from_str::<Value>(&row.8).unwrap(),
+            empty_document_json()
+        );
+        assert_eq!(row.9, f.user.as_bytes());
+        let next: (i64,) = sqlx::query_as("SELECT next_number FROM projects WHERE id=?1")
+            .bind(project.id.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(next.0, 2);
+        let roles: Vec<(Vec<u8>, String)> = sqlx::query_as(
+            "SELECT user_id,role FROM project_members WHERE project_id=?1 ORDER BY user_id",
+        )
+        .bind(project.id.as_bytes().as_slice())
+        .fetch_all(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(roles.len(), 2);
+        assert!(roles.contains(&(f.user.as_bytes().to_vec(), "member".into())));
+        assert!(roles.contains(&(lead.as_bytes().to_vec(), "lead".into())));
+        let mut read = f.backend.begin_read().await.unwrap();
+        let mut op = read.operation();
+        op.set_tenant(f.workspace).await.unwrap();
+        assert_eq!(
+            op.project_permission_by_id(f.workspace, f.user, project.id)
+                .await
+                .unwrap(),
+            Some(ProjectPermission::Edit)
+        );
+        assert_eq!(
+            op.project_permission_by_id(f.workspace, lead, project.id)
+                .await
+                .unwrap(),
+            Some(ProjectPermission::Manage)
+        );
+        read.commit().await.unwrap();
+        let statuses:Vec<(String,String,String)> = sqlx::query_as("SELECT s.name,s.category,s.sort_key FROM statuses s JOIN workflows w ON w.workspace_id=s.workspace_id AND w.id=s.workflow_id WHERE s.workspace_id=?1 AND s.project_id=?2 AND w.project_id=s.project_id ORDER BY s.sort_key")
+            .bind(f.workspace.as_bytes().as_slice()).bind(project.id.as_bytes().as_slice()).fetch_all(&f.pool).await.unwrap();
+        use crate::settings::messages::Message;
+        assert_eq!(
+            statuses,
+            vec![
+                (
+                    Message::SeedStatusBacklog.default_text().into(),
+                    "backlog".into(),
+                    "V".into()
+                ),
+                (
+                    Message::SeedStatusTodo.default_text().into(),
+                    "todo".into(),
+                    "W".into()
+                ),
+                (
+                    Message::SeedStatusInProgress.default_text().into(),
+                    "in_progress".into(),
+                    "X".into()
+                ),
+                (
+                    Message::SeedStatusReview.default_text().into(),
+                    "in_progress".into(),
+                    "Y".into()
+                ),
+                ("Shipped 中 😀".into(), "done".into(), "Z".into()),
+                (
+                    Message::SeedStatusCanceled.default_text().into(),
+                    "canceled".into(),
+                    "a".into()
+                ),
+            ]
+        );
+        let expected = json!({"projectId":project.id.to_string(),"key":"LITERAL","name":project.name,"visibility":"private","rootDocumentId":root.to_string()});
+        let event:(Vec<u8>,Vec<u8>,String,String,String) = sqlx::query_as("SELECT workspace_id,actor_user_id,verb,channel,payload FROM events WHERE target_type='project' AND target_id=?1")
+            .bind(project.id.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+        assert_eq!(event.0, f.workspace.as_bytes());
+        assert_eq!(event.1, f.user.as_bytes());
+        assert_eq!(event.2, "project.created");
+        assert_eq!(event.3, "web");
+        assert_eq!(serde_json::from_str::<Value>(&event.4).unwrap(), expected);
+        let audit:(Vec<u8>,Vec<u8>,String,String,String) = sqlx::query_as("SELECT workspace_id,actor_user_id,verb,payload,ip FROM audit_log WHERE target_type='project' AND target_id=?1")
+            .bind(project.id.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+        assert_eq!(audit.0, f.workspace.as_bytes());
+        assert_eq!(audit.1, f.user.as_bytes());
+        assert_eq!(audit.2, "project.created");
+        assert_eq!(serde_json::from_str::<Value>(&audit.3).unwrap(), expected);
+        assert_eq!(audit.4, "127.0.0.1");
+        // An invalid stored override map uses the existing whole-row fallback.
+        sqlx::query("UPDATE instance_settings SET value='{\"overrides\":{\"unknown\":\"bad\"}}' WHERE key='i18n'")
+            .execute(&f.pool).await.unwrap();
+        let fallback = create(&f, session, "FALLBACK", None)
+            .await
+            .unwrap()
+            .unwrap();
+        let done: (String,) =
+            sqlx::query_as("SELECT name FROM statuses WHERE project_id=?1 AND sort_key='Z'")
+                .bind(fallback.id.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(done.0, Message::SeedStatusDone.default_text());
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_project_create_current_actor_lead_tenant_denials_and_conflict_order() {
+        let f = Fixture::new().await;
+        let session = credential(&f).await;
+        let before = counts(&f).await;
+        let guest = member(&f, "guest").await;
+        assert!(matches!(
+            create_project_backend(
+                &f.backend,
+                f.workspace,
+                guest,
+                session,
+                CreateProjectInput {
+                    key: "WRONGACTOR",
+                    name: "No",
+                    visibility: "private",
+                    description: None,
+                    icon: None,
+                    lead_user_id: None
+                },
+                None
+            )
+            .await
+            .unwrap(),
+            Err(ProjectDbError::Forbidden)
+        ));
+        assert_eq!(counts(&f).await, before);
+        for lead in [guest, Uuid::now_v7()] {
+            assert!(matches!(
+                create(&f, session, "LEADDENY", Some(lead)).await.unwrap(),
+                Err(ProjectDbError::NotFound)
+            ));
+            assert_eq!(counts(&f).await, before);
+        }
+        assert!(matches!(
+            create(&f, Uuid::now_v7(), "DEAD", None).await.unwrap(),
+            Err(ProjectDbError::Forbidden)
+        ));
+        assert_eq!(counts(&f).await, before);
+        for (set, restore) in [
+            (
+                "UPDATE sessions SET revoked_at=1 WHERE id=?1",
+                "UPDATE sessions SET revoked_at=NULL WHERE id=?1",
+            ),
+            (
+                "UPDATE users SET suspended_at=1 WHERE id=?1",
+                "UPDATE users SET suspended_at=NULL WHERE id=?1",
+            ),
+        ] {
+            let id = if set.contains("sessions") {
+                session
+            } else {
+                f.user
+            };
+            sqlx::query(set)
+                .bind(id.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            assert!(matches!(
+                create(&f, session, "CURRENT", None).await.unwrap(),
+                Err(ProjectDbError::Forbidden)
+            ));
+            assert_eq!(counts(&f).await, before);
+            sqlx::query(restore)
+                .bind(id.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE memberships SET role='guest' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            create(&f, session, "GUEST", None).await.unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        assert_eq!(counts(&f).await, before);
+        sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            create(&f, session, "REMOVED", None).await.unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        assert_eq!(counts(&f).await, before);
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE workspaces SET deleted_at=1 WHERE id=?1")
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            create(&f, session, "DELETED", None).await.unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        assert_eq!(counts(&f).await, before);
+        sqlx::query("UPDATE workspaces SET deleted_at=NULL WHERE id=?1")
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let other = Uuid::now_v7();
+        sqlx::query("INSERT INTO workspaces(id,name,slug) VALUES(?1,'Other',?2)")
+            .bind(other.as_bytes().as_slice())
+            .bind(format!("other-{other}"))
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            create_project_backend(
+                &f.backend,
+                other,
+                f.user,
+                session,
+                CreateProjectInput {
+                    key: "TENANT",
+                    name: "Other",
+                    visibility: "workspace",
+                    description: None,
+                    icon: None,
+                    lead_user_id: None
+                },
+                None
+            )
+            .await
+            .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        assert_eq!(counts(&f).await, before);
+        let good = create(&f, session, "HEALTHY", None).await.unwrap().unwrap();
+        let after = counts(&f).await;
+        assert!(matches!(
+            create(&f, session, "HEALTHY", Some(guest)).await.unwrap(),
+            Err(ProjectDbError::Conflict)
+        ));
+        assert_eq!(counts(&f).await, after);
+        assert_eq!(good.created_by, f.user);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_project_create_event_audit_failures_rollback_all_rows_then_healthy_retry() {
+        let f = Fixture::new().await;
+        let session = credential(&f).await;
+        for (table, trigger) in [
+            ("events", "reject_project_event"),
+            ("audit_log", "reject_project_audit"),
+        ] {
+            let before = counts(&f).await;
+            sqlx::query(&format!("CREATE TRIGGER {trigger} BEFORE INSERT ON {table} WHEN NEW.verb='project.created' BEGIN SELECT RAISE(ABORT,'project publication failure'); END;"))
+                .execute(&f.pool).await.unwrap();
+            assert!(create(&f, session, "ROLLBACK", None).await.is_err());
+            assert_eq!(counts(&f).await, before);
+            let missing: (i64,) =
+                sqlx::query_as("SELECT count(*) FROM projects WHERE key='ROLLBACK'")
+                    .fetch_one(&f.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(missing.0, 0);
+            sqlx::query(&format!("DROP TRIGGER {trigger}"))
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let key = if table == "events" {
+                "RETRYEVENT"
+            } else {
+                "RETRYAUDIT"
+            };
+            let healthy = create(&f, session, key, None).await.unwrap().unwrap();
+            assert!(healthy.root_document_id.is_some());
+            assert_eq!(
+                counts(&f).await,
+                (
+                    before.0 + 1,
+                    before.1 + 1,
+                    before.2 + 1,
+                    before.3 + 1,
+                    before.4 + 6,
+                    before.5 + 1,
+                    before.6 + 1
+                )
+            );
+        }
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_project_create_concurrent_single_winner_and_waiting_writer_revocation() {
+        let mut f = Fixture::new().await;
+        let session = credential(&f).await;
+        f.pool.close().await;
+        f.pool = crate::db::pool::connect_sqlite_app(&f.path, 3)
+            .await
+            .unwrap();
+        f.backend = Backend::Sqlite(f.pool.clone());
+        let before = counts(&f).await;
+        let (left, right) = tokio::join!(
+            create(&f, session, "RACE", None),
+            create(&f, session, "RACE", None)
+        );
+        let results = [left.unwrap(), right.unwrap()];
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| matches!(r, Err(ProjectDbError::Conflict)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            counts(&f).await,
+            (
+                before.0 + 1,
+                before.1 + 1,
+                before.2 + 1,
+                before.3 + 1,
+                before.4 + 6,
+                before.5 + 1,
+                before.6 + 1
+            )
+        );
+        let after = counts(&f).await;
+        let mut revoker = f.backend.begin_write().await.unwrap();
+        let OperationTx::SqliteFamily(family) = revoker.operation() else {
+            unreachable!()
+        };
+        family
+            .execute(
+                "UPDATE sessions SET revoked_at=1 WHERE id=?1",
+                &[Cell::uuid(session)],
+            )
+            .await
+            .unwrap();
+        let backend = f.backend.clone();
+        let workspace = f.workspace;
+        let actor = f.user;
+        let (started, wait) = tokio::sync::oneshot::channel();
+        let pending = tokio::spawn(async move {
+            started.send(()).unwrap();
+            create_project_backend(
+                &backend,
+                workspace,
+                actor,
+                session,
+                CreateProjectInput {
+                    key: "WAITING",
+                    name: "Waiting",
+                    visibility: "private",
+                    description: None,
+                    icon: None,
+                    lead_user_id: None,
+                },
+                None,
+            )
+            .await
+        });
+        wait.await.unwrap();
+        revoker.commit().await.unwrap();
+        assert!(matches!(
+            pending.await.unwrap().unwrap(),
+            Err(ProjectDbError::Forbidden)
+        ));
+        assert_eq!(counts(&f).await, after);
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(session.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(create(&f, session, "WAITING", None).await.unwrap().is_ok());
+        f.close().await;
+    }
 }
