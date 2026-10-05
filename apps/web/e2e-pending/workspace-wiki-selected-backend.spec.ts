@@ -7,7 +7,7 @@
  * DB after Vue setup; its explicit inputs and fresh binary are required.
  */
 import { execFileSync } from "node:child_process";
-import { lstatSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import * as Y from "yjs";
@@ -577,3 +577,221 @@ test("selected normal main: Vue setup, stable wiki create, native persist, manua
     await Promise.all([closeCollabContext(ctxA, failed), closeCollabContext(ctxB, failed)]);
   }
 });
+
+type RestartCheckpoint = {
+  schema: 1;
+  source: string;
+  tree: string;
+  compiledSource: string;
+  selected: "postgres" | "sqlite";
+  stopped: { serverExit: 0; portClosed: true; recordedIdentitiesRetired: true };
+  seed: {
+    selected: string;
+    workspaceId: string;
+    document: DocumentMeta;
+    command: CreateBody;
+    firstAck: string;
+    finalAck: string;
+    persisted: BodyResponse;
+    revision: RevisionDetail;
+    creatorId: string;
+    freshActorId: string;
+    canonicalEmojiOracleControls: string[];
+    nativeHistoryOracleControls: string[];
+  };
+};
+
+function expectRestartCheckpoint(
+  checkpoint: RestartCheckpoint,
+  selected: string,
+  source: string,
+): void {
+  expect(source).toMatch(/^[0-9a-f]{40}$/);
+  expect(checkpoint.schema).toBe(1);
+  expect(checkpoint.source).toBe(source);
+  expect(checkpoint.compiledSource).toBe(source);
+  expect(checkpoint.tree).toMatch(/^[0-9a-f]{40}$/);
+  expect(checkpoint.selected).toBe(selected);
+  expect(checkpoint.stopped).toEqual({
+    serverExit: 0,
+    portClosed: true,
+    recordedIdentitiesRetired: true,
+  });
+  const seed = checkpoint.seed;
+  expect(seed.selected).toBe(selected);
+  for (const id of [
+    seed.workspaceId,
+    seed.document.id,
+    seed.command.commandId,
+    seed.revision.id,
+    seed.creatorId,
+    seed.freshActorId,
+    seed.firstAck,
+    seed.finalAck,
+  ])
+    expect(id).toMatch(UUID_RE);
+  expect(seed.firstAck).not.toBe(seed.finalAck);
+  expect(seed.freshActorId).not.toBe(seed.creatorId);
+  expect(seed.document.workspaceId).toBe(seed.workspaceId);
+  expect(seed.document.displayId).toBe(`WIKI-${String(seed.document.number)}`);
+  expect(seed.revision.targetId).toBe(seed.document.id);
+  expect(seed.revision.createdBy).toBe(seed.creatorId);
+  expect(seed.revision.reason).toBe("manual");
+  expect(seed.revision.contentJson).toEqual(seed.persisted.contentJson);
+  expect(seed.canonicalEmojiOracleControls).toHaveLength(6);
+  expect(seed.nativeHistoryOracleControls).toHaveLength(2);
+}
+
+function readRestartCheckpoint(path: string): RestartCheckpoint {
+  if (!isAbsolute(path)) throw new Error("restart checkpoint must be an explicit absolute file");
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const metadata = fstatSync(fd);
+    const named = lstatSync(path);
+    if (
+      !metadata.isFile() ||
+      metadata.nlink !== 1 ||
+      metadata.uid !== process.getuid?.() ||
+      (metadata.mode & 0o777) !== 0o600 ||
+      metadata.size > 128 * 1024 ||
+      named.dev !== metadata.dev ||
+      named.ino !== metadata.ino
+    )
+      throw new Error("restart checkpoint must be a bounded owned private regular file");
+    return JSON.parse(readFileSync(fd, "utf8")) as RestartCheckpoint;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// An explicit root checkpoint registers the second observation. Ordinary
+// selected runs still discover exactly the accepted original case above.
+// The root runs this title alone in a NEW browser process after server exit;
+// no seed helper, setup, editor write or native cache is reused here.
+if (process.env.FVOCI_E2E_SELECTED_RESTART_CHECKPOINT !== undefined) {
+  test("selected normal main restart: fresh actor reads persisted native history and manual revision", async ({
+    browser,
+    baseURL,
+  }, testInfo) => {
+    const selected = requiredFixtureInput("FVOCI_E2E_SELECTED_BACKEND");
+    expect(selected).toMatch(/^(postgres|sqlite)$/);
+    const source = requiredFixtureInput("FVOCI_E2E_SELECTED_RESTART_SOURCE");
+    const checkpoint = readRestartCheckpoint(
+      requiredFixtureInput("FVOCI_E2E_SELECTED_RESTART_CHECKPOINT"),
+    );
+    expectRestartCheckpoint(checkpoint, selected, source);
+    if (!baseURL) throw new Error("root-provided restarted normal-main baseURL is required");
+    const seed = checkpoint.seed;
+    const ctx = await newCollabContext(browser, baseURL);
+    const page = await ctx.newPage();
+    const wire = attachCollabWire(page);
+    const nativeWire = observeNativeWire(page);
+    const csp = watchCspViolations(page);
+    let failed = true;
+    try {
+      const setup = await page.request.get("/api/v1/setup");
+      expect(setup.status()).toBe(200);
+      expect(await setup.json()).toMatchObject({ needed: false });
+      await login(page, member.email, member.password);
+      const reader = await currentUser(page);
+      expect(reader.userId).toBe(seed.freshActorId);
+      expect(reader.userId).not.toBe(seed.creatorId);
+      const cookie = (await ctx.cookies()).find((entry) => entry.name === SESSION_COOKIE);
+      expect(cookie?.httpOnly).toBe(true);
+      expect(cookie?.sameSite).toBe("Lax");
+      const workspaces = await page.request.get("/api/v1/me/workspaces");
+      expect(workspaces.status()).toBe(200);
+      const workspace = (
+        (await workspaces.json()) as components["schemas"]["WorkspaceListResponse"]
+      ).items.find((item) => item.id === seed.workspaceId);
+      expect(workspace).toMatchObject({ slug: admin.workspaceSlug, role: "member" });
+      const documentPath = `/api/v1/workspaces/${seed.workspaceId}/documents/${seed.document.id}`;
+      const displayId = `WIKI-${String(seed.document.number)}`;
+      await openEditor(page, `/w/${admin.workspaceSlug}/${displayId}`);
+      await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
+      const retained = "동일한 저장 문장 한글😀";
+      const removed = "delete me";
+      await expectTokens(page, [retained, "새 편집"]);
+      await expectAwarenessTokenNotSession(wire, cookie?.value ?? "missing");
+      await expect(page.getByRole("button", { name: "저장", exact: true })).toBeEnabled();
+      const currentBody = await body(page, documentPath);
+      expect(currentBody).toEqual(seed.persisted);
+      const shape = await editorShape(page);
+      expectCanonicalContent(
+        shape.document,
+        retained,
+        removed,
+        documentNodeIds(seed.persisted.contentJson),
+      );
+      const currentMeta = await page.request.get(documentPath);
+      expect(currentMeta.status()).toBe(200);
+      expect(await currentMeta.json()).toMatchObject({
+        id: seed.document.id,
+        workspaceId: seed.workspaceId,
+        number: seed.document.number,
+        displayId: seed.document.displayId,
+        path: seed.document.path,
+        parentId: null,
+        projectId: null,
+        createdBy: seed.creatorId,
+      });
+      const currentRevision = await revision(page, documentPath, seed.revision.id);
+      expect(currentRevision).toEqual(seed.revision);
+      const room = `${seed.workspaceId}:document:${seed.document.id}`;
+      const native = nativeHistory(nativeWire, room, true);
+      let nativeControls: string[];
+      try {
+        nativeControls = expectNativeHistoryControls(currentRevision, native, retained, removed);
+      } finally {
+        native.destroy();
+      }
+      const oracleControls = expectCanonicalOracleControls(
+        currentBody.contentJson,
+        retained,
+        removed,
+        documentNodeIds(seed.persisted.contentJson),
+      );
+      const freshConnectionStart = nativeWire.length;
+      await page.reload();
+      await waitConnected(page);
+      await expectTokens(page, [retained, "새 편집"]);
+      expect(await editorShape(page)).toEqual(shape);
+      expect(await body(page, documentPath)).toEqual(seed.persisted);
+      const reloadedRevision = await revision(page, documentPath, seed.revision.id);
+      expect(reloadedRevision).toEqual(seed.revision);
+      const reloadedNative = nativeHistory(nativeWire.slice(freshConnectionStart), room, true);
+      try {
+        expectRetainedNative(reloadedRevision, reloadedNative, retained, removed);
+      } finally {
+        reloadedNative.destroy();
+      }
+      expect(csp).toEqual([]);
+      await testInfo.attach("selected-vue-restart-readback.json", {
+        contentType: "application/json",
+        body: Buffer.from(
+          JSON.stringify({
+            selected,
+            source,
+            tree: checkpoint.tree,
+            workspaceId: seed.workspaceId,
+            documentId: seed.document.id,
+            freshActorId: reader.userId,
+            sessionId: reader.sessionId,
+            persisted: currentBody,
+            revision: currentRevision,
+            firstAck: seed.firstAck,
+            finalAck: seed.finalAck,
+            ackPhase: "two pre-restart seed ACKs; readback performs no new edit",
+            canonicalEmojiOracleControls: oracleControls,
+            nativeHistoryOracleControls: nativeControls,
+            nativeHistoryReadback:
+              "fresh browser and reloaded connection server-received sync only",
+          }),
+        ),
+      });
+      failed = false;
+    } finally {
+      await closeCollabContext(ctx, failed);
+    }
+  });
+}
