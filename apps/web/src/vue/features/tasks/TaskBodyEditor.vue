@@ -50,7 +50,6 @@ const props = defineProps<{
   collabUser: CollabUser | null;
 }>();
 
-const realtimeOff = computed(() => !!props.offBody);
 const offBody = computed(() => props.offBody);
 const bodyDoc = computed(() => (props.offBody ? props.offBody.doc.value : props.session?.doc));
 const bodyGeneration = computed(() =>
