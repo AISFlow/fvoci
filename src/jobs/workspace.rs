@@ -90,13 +90,26 @@ pub(crate) async fn run_workspace_purge_family(
         return Err(super::MaintenanceConsumerError::Cancelled);
     }
     let mut read = backend.begin_read().await?;
-    let previous = read.operation().set_system().await?;
-    let ids = read
-        .operation()
-        .maintenance_deleted_workspaces(cutoff)
-        .await?;
-    read.operation().restore_system(previous).await?;
-    read.rollback().await?;
+    let result = async {
+        let previous = read.operation().set_system().await?;
+        let ids = read
+            .operation()
+            .maintenance_deleted_workspaces(cutoff)
+            .await?;
+        read.operation().restore_system(previous).await?;
+        Ok::<_, sqlx::Error>(ids)
+    }
+    .await;
+    let cleanup = read.rollback().await;
+    #[cfg(test)]
+    let cleanup = super::maintenance_test_hooks::enumeration_cleanup(
+        proof,
+        "workspaces",
+        None,
+        &result,
+        cleanup,
+    );
+    let ids = super::finish_maintenance_enumeration(result, cleanup)?;
     let mut stats = WorkspacePurgeStats::default();
     for workspace in ids.into_iter().take(WORKSPACE_PURGE_BATCH as usize) {
         if cancel.is_cancelled() {

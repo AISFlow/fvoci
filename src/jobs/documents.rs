@@ -143,10 +143,23 @@ pub(crate) async fn run_document_trash_purge_family(
     }
     let deadline = Instant::now() + limits.budget;
     let mut read = backend.begin_read().await?;
-    let previous = read.operation().set_system().await?;
-    let ids = read.operation().maintenance_live_workspace_ids().await?;
-    read.operation().restore_system(previous).await?;
-    read.rollback().await?;
+    let result = async {
+        let previous = read.operation().set_system().await?;
+        let ids = read.operation().maintenance_live_workspace_ids().await?;
+        read.operation().restore_system(previous).await?;
+        Ok::<_, sqlx::Error>(ids)
+    }
+    .await;
+    let cleanup = read.rollback().await;
+    #[cfg(test)]
+    let cleanup = super::maintenance_test_hooks::enumeration_cleanup(
+        proof,
+        "document-workspaces",
+        None,
+        &result,
+        cleanup,
+    );
+    let ids = super::finish_maintenance_enumeration(result, cleanup)?;
     let mut queue: VecDeque<(Uuid, Vec<Uuid>)> =
         ids.into_iter().map(|id| (id, Vec::new())).collect();
     let mut stats = DocumentPurgeStats::default();
@@ -166,13 +179,23 @@ pub(crate) async fn run_document_trash_purge_family(
         }
         let listed = async {
             let mut read = backend.begin_read().await?;
-            read.operation().set_tenant(workspace).await?;
-            let ids = read
-                .operation()
-                .maintenance_expired_documents(workspace, &examined, limits.batch)
-                .await?;
-            read.rollback().await?;
-            Ok::<_, sqlx::Error>(ids)
+            let result = async {
+                read.operation().set_tenant(workspace).await?;
+                read.operation()
+                    .maintenance_expired_documents(workspace, &examined, limits.batch)
+                    .await
+            }
+            .await;
+            let cleanup = read.rollback().await;
+            #[cfg(test)]
+            let cleanup = super::maintenance_test_hooks::enumeration_cleanup(
+                proof,
+                "workspace-documents",
+                Some(workspace),
+                &result,
+                cleanup,
+            );
+            super::finish_maintenance_enumeration(result, cleanup)
         }
         .await;
         let ids = match listed {
@@ -183,6 +206,10 @@ pub(crate) async fn run_document_trash_purge_family(
                         source: err,
                         abandon_claim: true,
                     });
+                }
+                let err = super::MaintenanceConsumerError::Database(err);
+                if err.stops_on_backend(backend) {
+                    return Err(err);
                 }
                 warn!(workspace_id=%workspace,error=%err,"maintenance.document_purge_list_failed");
                 continue;

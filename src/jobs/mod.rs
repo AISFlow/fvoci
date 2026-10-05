@@ -341,6 +341,25 @@ pub(crate) async fn commit_maintenance_writer(
         .map_err(MaintenanceConsumerError::CommitUnknown)
 }
 
+// These three maintenance enumerations end an actual borrowed read. A failed
+// explicit rollback is settlement uncertainty even when the read itself worked.
+fn finish_maintenance_enumeration(
+    result: Result<Vec<uuid::Uuid>, sqlx::Error>,
+    cleanup: Result<(), sqlx::Error>,
+) -> Result<Vec<uuid::Uuid>, sqlx::Error> {
+    match cleanup {
+        Ok(()) => result,
+        Err(cleanup) => {
+            let original = result
+                .err()
+                .map(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>);
+            Err(crate::db::backend::rollback_cleanup_unknown(
+                original, cleanup,
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod maintenance_test_hooks {
     use super::*;
@@ -358,6 +377,54 @@ pub(crate) mod maintenance_test_hooks {
         LazyLock::new(|| Mutex::new(Vec::new()));
     static DIGEST_BARRIERS: LazyLock<Mutex<Vec<(FamilyMaintenanceProof, Barrier)>>> =
         LazyLock::new(|| Mutex::new(Vec::new()));
+    type EnumerationFault = (
+        FamilyMaintenanceProof,
+        &'static str,
+        Option<Uuid>,
+        tokio::sync::oneshot::Sender<Vec<Uuid>>,
+    );
+    static ENUMERATION_FAULTS: LazyLock<Mutex<Vec<EnumerationFault>>> =
+        LazyLock::new(|| Mutex::new(Vec::new()));
+    pub(crate) fn arm_enumeration_cleanup(
+        proof: &FamilyMaintenanceProof,
+        phase: &'static str,
+        workspace: Option<Uuid>,
+    ) -> tokio::sync::oneshot::Receiver<Vec<Uuid>> {
+        let (observed, rx) = tokio::sync::oneshot::channel();
+        let mut faults = ENUMERATION_FAULTS.lock().unwrap();
+        assert!(!faults
+            .iter()
+            .any(|(p, s, w, _)| p == proof && *s == phase && *w == workspace));
+        faults.push((proof.clone(), phase, workspace, observed));
+        rx
+    }
+    pub(super) fn enumeration_cleanup(
+        proof: &FamilyMaintenanceProof,
+        phase: &'static str,
+        workspace: Option<Uuid>,
+        result: &Result<Vec<Uuid>, sqlx::Error>,
+        cleanup: Result<(), sqlx::Error>,
+    ) -> Result<(), sqlx::Error> {
+        let observed = {
+            let mut faults = ENUMERATION_FAULTS.lock().unwrap();
+            faults
+                .iter()
+                .position(|(p, s, w, _)| p == proof && *s == phase && *w == workspace)
+                .map(|position| faults.remove(position).3)
+        };
+        match (observed, result, cleanup) {
+            (Some(observed), Ok(ids), Ok(())) => {
+                // Real enumeration and real local rollback have acknowledged.
+                // This labelled synthetic returned error tests propagation;
+                // it does not simulate/prove an actual provider cleanup loss.
+                observed.send(ids.clone()).unwrap();
+                Err(sqlx::Error::Protocol(
+                    "synthetic enumeration cleanup error after acknowledged real rollback".into(),
+                ))
+            }
+            (_, _, cleanup) => cleanup,
+        }
+    }
     pub(crate) async fn wait_reached<T: std::fmt::Debug>(
         reached: tokio::sync::oneshot::Receiver<()>,
         job: &mut tokio::task::JoinHandle<T>,
@@ -1838,6 +1905,253 @@ mod selected_scheduler_tests {
                 .unwrap(),
             0
         );
+        f.finish().await;
+    }
+}
+
+#[cfg(test)]
+mod enumeration_finish_tests {
+    use super::*;
+    use family_maintenance_fixture::{acquired, policy, Fixture};
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn maintenance_enumeration_synthetic_after_real_ack_stops_loop_effects_release_then_healthy_progress(
+    ) {
+        for phase in ["workspaces", "document-workspaces", "workspace-documents"] {
+            let f = Fixture::new().await;
+            let second = f.other_workspace().await;
+            let control = f.other_workspace().await;
+            sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')")
+                .bind(control.as_bytes().as_slice())
+                .bind(f.user.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let storage = ObjectStorage::local(f.root.join("storage"));
+            let mut documents = Vec::new();
+            let mut keys = Vec::new();
+            for workspace in [f.workspace, second] {
+                let document = f.document(workspace).await;
+                let key = format!("enumeration-{document}");
+                f.stored_attachment(workspace, document, &key, None).await;
+                storage
+                    .put_bytes(&key, b"enumeration-literal-untouched".to_vec())
+                    .await
+                    .unwrap();
+                let expired = family_maintenance_now() - chrono::Duration::days(31);
+                sqlx::query("UPDATE documents SET deleted_at=?2 WHERE id=?1")
+                    .bind(document.as_bytes().as_slice())
+                    .bind(expired.timestamp_micros())
+                    .execute(&f.pool)
+                    .await
+                    .unwrap();
+                if phase == "workspaces" {
+                    sqlx::query("UPDATE workspaces SET deleted_at=?2 WHERE id=?1")
+                        .bind(workspace.as_bytes().as_slice())
+                        .bind(expired.timestamp_micros())
+                        .execute(&f.pool)
+                        .await
+                        .unwrap();
+                }
+                documents.push(document);
+                keys.push(key);
+            }
+            let token = Uuid::now_v7();
+            sqlx::query("INSERT INTO ics_tokens(id,workspace_id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,?4,1)")
+                .bind(token.as_bytes().as_slice()).bind(control.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice())
+                .bind(token.to_string()).execute(&f.pool).await.unwrap();
+            // Caller preparation precedes every BEGIN. The actual S16 owner
+            // admits replay of this SAME live identity without a new generation.
+            let requests = Arc::new(FamilyMaintenanceRequests {
+                uploads: FamilyMaintenanceClaimRequest::new(MaintenanceJobKey::Uploads),
+                revisions: FamilyMaintenanceClaimRequest::new(MaintenanceJobKey::Revisions),
+                daily: FamilyMaintenanceClaimRequest::new(MaintenanceJobKey::Daily),
+            });
+            let owner = acquired(&requests.daily, &f.backend).await;
+            let first_workspace = std::cmp::min(f.workspace, second);
+            let fault_workspace = (phase == "workspace-documents").then_some(first_workspace);
+            let observed = maintenance_test_hooks::arm_enumeration_cleanup(
+                owner.proof(),
+                phase,
+                fault_workspace,
+            );
+            let settings = MaintenanceSettings {
+                tick: Duration::from_millis(10),
+                interval: Duration::from_millis(10),
+                upload_gc_interval: Duration::from_millis(10),
+                revision_sweep_interval: Duration::from_millis(10),
+                ..MaintenanceSettings::default()
+            };
+            let cancel = CancellationToken::new();
+            let mut job = tokio::spawn(run_family_maintenance_loop(
+                settings,
+                f.backend.clone(),
+                storage.clone(),
+                Arc::new(Mailer::disabled()),
+                policy(),
+                requests.clone(),
+                cancel.clone(),
+            ));
+            let result = match tokio::time::timeout(Duration::from_secs(2), &mut job).await {
+                Ok(result) => result.unwrap(),
+                Err(_) => {
+                    cancel.cancel();
+                    let _ = job.await;
+                    panic!("typed enumeration uncertainty must stop the actual loop before another tick");
+                }
+            };
+            let error = result
+                .err()
+                .expect("cleanup uncertainty cannot become successful drain");
+            let MaintenanceConsumerError::Database(sqlx::Error::AnyDriverError(source)) = &error
+            else {
+                panic!("canonical read cleanup receipt must survive the actual loop: {error}");
+            };
+            let receipt = source
+                .downcast_ref::<crate::db::backend::RollbackCleanupUnknown>()
+                .unwrap();
+            assert!(
+                receipt.original.is_none(),
+                "successful enumeration has no fabricated original refusal"
+            );
+            assert!(matches!(&receipt.cleanup, sqlx::Error::Protocol(message)
+                if message == "synthetic enumeration cleanup error after acknowledged real rollback"));
+            assert!(error.stops_sweep());
+            assert!(error.cleanup_unconfirmed());
+            let listed = observed
+                .await
+                .expect("actual successful enumeration and real rollback ACK required");
+            if phase == "workspace-documents" {
+                let first_document = documents[usize::from(first_workspace == second)];
+                assert_eq!(listed, vec![first_document]);
+            } else {
+                assert!(listed.contains(&f.workspace) && listed.contains(&second));
+            }
+            for (document, key) in documents.iter().zip(&keys) {
+                let present: i64 = sqlx::query_scalar("SELECT count(*) FROM documents WHERE id=?1")
+                    .bind(document.as_bytes().as_slice())
+                    .fetch_one(&f.pool)
+                    .await
+                    .unwrap();
+                assert_eq!(present, 1, "first and second workspace remain untouched");
+                assert_eq!(
+                    storage.get_bytes(key).await.unwrap(),
+                    b"enumeration-literal-untouched"
+                );
+            }
+            let tokens: i64 = sqlx::query_scalar("SELECT count(*) FROM ics_tokens WHERE id=?1")
+                .bind(token.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                tokens, 1,
+                "next Daily token effect cannot run after uncertain read finish"
+            );
+            let claims: Vec<(i64, i64, Option<Vec<u8>>)> = sqlx::query_as(
+                "SELECT job_key,generation,owner_token FROM maintenance_job_claims WHERE job_key IN (1,8,9) ORDER BY job_key")
+                .fetch_all(&f.pool).await.unwrap();
+            assert_eq!(
+                claims
+                    .iter()
+                    .map(|(key, generation, _)| (*key, *generation))
+                    .collect::<Vec<_>>(),
+                vec![(1, 1), (8, 1), (9, 1)],
+                "no next tick can acquire another upload/revision generation"
+            );
+            assert!(
+                claims[0].2.is_some(),
+                "typed uncertainty must abandon before a release writer"
+            );
+            // Explicit fixture operator recovery follows acknowledged LOCAL
+            // rollback plus a synthetic propagation fault, not provider loss.
+            sqlx::query("UPDATE maintenance_job_claims SET expires_at=0 WHERE job_key=1")
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let healthy = run_daily_sweep_family(
+                &f.backend,
+                &storage,
+                &Mailer::disabled(),
+                &requests.daily,
+                policy(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            if phase == "workspaces" {
+                assert_eq!(healthy.workspace.purged, 2);
+            } else {
+                assert_eq!(healthy.documents.purged, 2);
+            }
+            assert_eq!(
+                healthy.ics_deleted, 1,
+                "known healthy read finish permits actual later work"
+            );
+            for key in &keys {
+                assert!(storage.get_bytes(key).await.is_err());
+            }
+            let claim: (i64, Option<Vec<u8>>) = sqlx::query_as(
+                "SELECT generation,owner_token FROM maintenance_job_claims WHERE job_key=1",
+            )
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                claim,
+                (2, None),
+                "healthy finish releases the monotonically new owner"
+            );
+            assert_eq!(owner.release().await.unwrap(), FamilyLeaseAction::Lost);
+            crate::db::migrate::assert_sqlite_schema_current(&f.backend)
+                .await
+                .unwrap();
+            f.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn maintenance_enumeration_retains_actual_wrong_tenant_driver_on_synthetic_cleanup_error()
+    {
+        let f = Fixture::new().await;
+        let other = f.other_workspace().await;
+        let mut read = f.backend.begin_read().await.unwrap();
+        read.operation().set_tenant(f.workspace).await.unwrap();
+        let result = read
+            .operation()
+            .maintenance_expired_documents(other, &[], 200)
+            .await;
+        assert!(matches!(&result, Err(sqlx::Error::Protocol(_))));
+        read.rollback().await.unwrap();
+        // Actual wrong-tenant driver refusal and actual rollback ACK precede
+        // this explicitly synthetic returned error; no provider claim follows.
+        let error = finish_maintenance_enumeration(
+            result,
+            Err(sqlx::Error::Protocol(
+                "synthetic returned cleanup error after real enumeration rollback ACK".into(),
+            )),
+        )
+        .err()
+        .unwrap();
+        assert!(crate::db::backend::is_rollback_cleanup_unknown(&error));
+        let sqlx::Error::AnyDriverError(source) = error else {
+            panic!("shared receipt required")
+        };
+        let receipt = source
+            .downcast_ref::<crate::db::backend::RollbackCleanupUnknown>()
+            .unwrap();
+        assert!(matches!(
+            receipt
+                .original
+                .as_ref()
+                .unwrap()
+                .downcast_ref::<sqlx::Error>(),
+            Some(sqlx::Error::Protocol(_))
+        ));
+        assert!(matches!(&receipt.cleanup,sqlx::Error::Protocol(message)
+            if message=="synthetic returned cleanup error after real enumeration rollback ACK"));
         f.finish().await;
     }
 }
