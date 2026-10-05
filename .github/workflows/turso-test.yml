@@ -1,0 +1,52 @@
+name: Turso test preparation (runtime unavailable)
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Fixed phase; all runtime phases are currently NOT IMPLEMENTED
+        type: choice
+        default: connection
+        options: [connection, crud, transactions, migration, persistence, restore, ui-ack]
+      destructive:
+        description: Explicit isolated test DB mutation confirmation (connection must be false)
+        type: boolean
+        default: false
+      expected_host:
+        description: Exact nonsecret isolated test DB hostname, without scheme or credentials
+        type: string
+        required: true
+      test_database_id:
+        description: Exact nonsecret isolated test DB identifier
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+# One fixed Environment/test DB, including future mutating phases. Never cancel
+# an earlier run or use a run ID as the serialization key.
+concurrency:
+  group: fvoci-turso-test-database
+  cancel-in-progress: false
+
+jobs:
+  admission:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'AISFlow/fvoci' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Pure admission fixtures (no credentials or network)
+        run: python3 scripts/selected-backend-ci/turso-test-fixtures.py
+      - name: Reject unavailable runtime before build or credential consumption
+        run: python3 scripts/selected-backend-ci/turso-test-guard.py
+
+# There is intentionally no Environment job or secret-consuming step yet.
+# Referencing a nonexistent Environment can create it without protections.
+# Root must register this workflow in the shared CI registry, then a separately
+# reviewed real driver must verify Environment existence/main-only policy before
+# a dedicated Environment job can consume secrets in its single runtime step.
