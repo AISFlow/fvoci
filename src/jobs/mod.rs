@@ -2036,7 +2036,7 @@ mod enumeration_finish_tests {
                     .unwrap();
                 assert_eq!(present, 1, "first and second workspace remain untouched");
                 assert_eq!(
-                    storage.get_bytes(key).await.unwrap(),
+                    storage.read_range(key, 0, 28).await.unwrap(),
                     b"enumeration-literal-untouched"
                 );
             }
@@ -2091,7 +2091,7 @@ mod enumeration_finish_tests {
                 "known healthy read finish permits actual later work"
             );
             for key in &keys {
-                assert!(storage.get_bytes(key).await.is_err());
+                assert_eq!(storage.head(key).await.unwrap(), None);
             }
             let claim: (i64, Option<Vec<u8>>) = sqlx::query_as(
                 "SELECT generation,owner_token FROM maintenance_job_claims WHERE job_key=1",
