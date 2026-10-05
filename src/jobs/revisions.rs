@@ -762,6 +762,12 @@ impl FamilyRevisionConsumer<'_> {
                 move || capture_revision_offline(bin, limits, snapshot, tail)
             })
             .await;
+            #[cfg(all(test, feature = "db-tests"))]
+            family_revision_native_tests::after_native(
+                self.proof,
+                family_revision_native_tests::Phase::Capture,
+            )
+            .await;
             // Recheck even a helper failure, and never renew an expired owner.
             if self.cancel.is_cancelled() {
                 return Err(super::MaintenanceConsumerError::Cancelled);
@@ -803,6 +809,12 @@ impl FamilyRevisionConsumer<'_> {
                         let limits = engine.limits;
                         move || revision_snapshots_equal_offline(bin, limits, &left, &right)
                     })
+                    .await;
+                    #[cfg(all(test, feature = "db-tests"))]
+                    family_revision_native_tests::after_native(
+                        self.proof,
+                        family_revision_native_tests::Phase::Comparison,
+                    )
                     .await;
                     if self.cancel.is_cancelled() {
                         return Err(super::MaintenanceConsumerError::Cancelled);
@@ -984,5 +996,671 @@ impl FamilyRevisionConsumer<'_> {
             }
         }
         Ok((deleted, workspace_after, false))
+    }
+}
+
+// The maintained native batch owns registration and an explicitly selected
+// freshly built helper. Default fast library tests never launch this resource.
+#[cfg(all(test, feature = "db-tests"))]
+mod family_revision_native_tests {
+    use super::*;
+    use crate::db::backend::Backend;
+    use crate::db::revisions::RevisionTarget;
+    use crate::jobs::family_maintenance_fixture::{acquired, policy, Fixture};
+    use crate::jobs::{FamilyMaintenanceProof, MaintenanceConsumerError, MaintenanceJobKey};
+    use std::sync::{LazyLock, Mutex};
+    use std::time::Duration;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Phase {
+        Capture,
+        Comparison,
+    }
+    type Barrier = (
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    );
+    static BARRIERS: LazyLock<Mutex<Vec<(FamilyMaintenanceProof, Phase, Barrier)>>> =
+        LazyLock::new(|| Mutex::new(Vec::new()));
+
+    fn arm(
+        proof: &FamilyMaintenanceProof,
+        phase: Phase,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (reached, rx) = tokio::sync::oneshot::channel();
+        let (proceed, go) = tokio::sync::oneshot::channel();
+        let mut barriers = BARRIERS.lock().unwrap();
+        assert!(!barriers.iter().any(|(p, s, _)| p == proof && *s == phase));
+        barriers.push((proof.clone(), phase, (reached, go)));
+        (rx, proceed)
+    }
+    pub(super) async fn after_native(proof: &FamilyMaintenanceProof, phase: Phase) {
+        let barrier = {
+            let mut barriers = BARRIERS.lock().unwrap();
+            barriers
+                .iter()
+                .position(|(p, s, _)| p == proof && *s == phase)
+                .map(|position| barriers.remove(position).2)
+        };
+        if let Some((reached, go)) = barrier {
+            reached.send(()).unwrap();
+            go.await.unwrap();
+        }
+    }
+
+    fn engine() -> RevisionMaintenanceEngine {
+        let selected = std::env::var("FVOCI_COLLAB_ENGINE")
+            .expect("explicit root-allocated FVOCI_COLLAB_ENGINE required; no fallback or skip");
+        assert!(
+            !selected.trim().is_empty(),
+            "native prerequisite cannot be empty"
+        );
+        let engine_bin = PathBuf::from(selected.trim());
+        let metadata = std::fs::metadata(&engine_bin).expect("allocated helper must exist");
+        assert!(
+            metadata.is_file() && metadata.len() > 0,
+            "allocated helper must be a nonempty file"
+        );
+        RevisionMaintenanceEngine {
+            engine_bin,
+            limits: Limits::for_tests(),
+        }
+    }
+    fn params() -> RevisionMaintenanceParams {
+        RevisionMaintenanceParams {
+            settings: RevisionSettings {
+                session_snapshot_enabled: false,
+                keep: 200,
+                snapshot_interval_hours: 24,
+            },
+            engine: Some(engine()),
+        }
+    }
+    fn fixture_bytes(name: &str) -> Vec<u8> {
+        std::fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("crates/collab-engine/fixtures")
+                .join(name),
+        )
+        .unwrap()
+    }
+    async fn seed_document(f: &Fixture) -> ScheduledRevisionCandidate {
+        let document = f.document(f.workspace).await;
+        let anchor = crate::jobs::family_maintenance_now() - chrono::Duration::hours(30);
+        let updated = anchor + chrono::Duration::hours(1);
+        sqlx::query("INSERT INTO document_states(workspace_id,document_id,state,created_at,updated_at) VALUES(?1,?2,?3,?4,?5)")
+            .bind(f.workspace.as_bytes().as_slice()).bind(document.as_bytes().as_slice())
+            .bind(fixture_bytes("structured.v1")).bind(anchor.timestamp_micros()).bind(updated.timestamp_micros())
+            .execute(&f.pool).await.unwrap();
+        ScheduledRevisionCandidate {
+            workspace_id: f.workspace,
+            target: RevisionTarget::Document(document),
+            writer_generation: 0,
+            state_updated_at: updated,
+            anchor_at: anchor,
+        }
+    }
+    async fn seed_task(f: &Fixture) -> Uuid {
+        let project = Uuid::now_v7();
+        let workflow = Uuid::now_v7();
+        let status = Uuid::now_v7();
+        let task = Uuid::now_v7();
+        sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'MAINT','maintenance','workspace',?3)")
+            .bind(project.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO workflows(id,workspace_id,project_id) VALUES(?1,?2,?3)")
+            .bind(workflow.as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO statuses(id,workspace_id,project_id,workflow_id,name,category,sort_key) VALUES(?1,?2,?3,?4,'todo','todo','V')")
+            .bind(status.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(workflow.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,content_json,created_by) VALUES(?1,?2,?3,1,'maintenance',?4,'{}',?5)")
+            .bind(task.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(status.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let anchor = crate::jobs::family_maintenance_now() - chrono::Duration::hours(30);
+        sqlx::query("INSERT INTO task_states(workspace_id,task_id,state,created_at,updated_at) VALUES(?1,?2,?3,?4,?5)")
+            .bind(f.workspace.as_bytes().as_slice()).bind(task.as_bytes().as_slice()).bind(fixture_bytes("structured.v1"))
+            .bind(anchor.timestamp_micros()).bind((anchor+chrono::Duration::hours(1)).timestamp_micros()).execute(&f.pool).await.unwrap();
+        task
+    }
+    async fn count(f: &Fixture) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM revisions")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap()
+    }
+    fn consumer<'a>(
+        backend: &'a Backend,
+        proof: &'a FamilyMaintenanceProof,
+        cancel: &'a CancellationToken,
+    ) -> FamilyRevisionConsumer<'a> {
+        FamilyRevisionConsumer {
+            backend,
+            proof,
+            policy: policy(),
+            cancel,
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_revision_native_capture_history_dedupe_tail_and_bounded_resume() {
+        let f = Fixture::new().await;
+        let params = params();
+        let mut first = None;
+        for _ in 0..20 {
+            let candidate = seed_document(&f).await;
+            first.get_or_insert(candidate);
+        }
+        let task = seed_task(&f).await;
+        let request =
+            crate::jobs::claim::FamilyMaintenanceClaimRequest::new(MaintenanceJobKey::Revisions);
+        let owner = acquired(&request, &f.backend).await;
+        let cancel = CancellationToken::new();
+        let (stats, resume) = run_revision_maintenance_batch_family(
+            &f.backend,
+            &params,
+            RevisionMaintenanceResume::default(),
+            owner.proof(),
+            policy(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stats.snapshots_attempted, 16);
+        assert_eq!(stats.snapshots_created, 16);
+        assert!(!resume.scheduled_phase_complete);
+        assert!(resume.target.is_some());
+        assert_eq!(count(&f).await, 16);
+        let (stats, resume) = run_revision_maintenance_batch_family(
+            &f.backend,
+            &params,
+            resume,
+            owner.proof(),
+            policy(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stats.snapshots_created, 5);
+        assert!(resume.sweep_complete());
+        assert_eq!(count(&f).await, 21);
+        let rows: Vec<(String, String, String, Option<Vec<u8>>, i64)> = sqlx::query_as(
+            "SELECT reason,content_json,text,created_by,encoding FROM revisions ORDER BY id",
+        )
+        .fetch_all(&f.pool)
+        .await
+        .unwrap();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../crates/collab-engine/fixtures/expectations.json"
+        ))
+        .unwrap();
+        for (reason, content, text, actor, encoding) in rows {
+            assert_eq!(reason, "scheduled");
+            assert_eq!(encoding, 1);
+            assert!(actor.is_none());
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&content).unwrap(),
+                expected["structured"]["prosemirror_json"]
+            );
+            for value in ["안녕 본문", "한글셀", "🚀"] {
+                assert!(text.contains(value), "{text}");
+            }
+        }
+        let task_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM revisions WHERE target_kind='task' AND target_id=?1",
+        )
+        .bind(task.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(task_rows, 1);
+        let first = first.unwrap();
+        let document = first.target.id();
+        assert!(matches!(
+            consumer(&f.backend, owner.proof(), &cancel)
+                .snapshot(params.engine.as_ref().unwrap(), first)
+                .await
+                .unwrap(),
+            ScheduledOutcome::Deduped
+        ));
+        assert_eq!(
+            count(&f).await,
+            21,
+            "equal native capture cannot publish a duplicate history row"
+        );
+        sqlx::query("INSERT INTO document_collab_updates(workspace_id,document_id,seq,op_id,payload) VALUES(?1,?2,1,?3,?4)")
+            .bind(f.workspace.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).bind(Uuid::now_v7().as_bytes().as_slice()).bind(fixture_bytes("followup_edit.v1")).execute(&f.pool).await.unwrap();
+        sqlx::query(
+            "UPDATE document_states SET tail_seq=1 WHERE workspace_id=?1 AND document_id=?2",
+        )
+        .bind(f.workspace.as_bytes().as_slice())
+        .bind(document.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        let candidate = ScheduledRevisionCandidate {
+            workspace_id: f.workspace,
+            target: RevisionTarget::Document(document),
+            writer_generation: 0,
+            state_updated_at: crate::jobs::family_maintenance_now(),
+            anchor_at: crate::jobs::family_maintenance_now() - chrono::Duration::hours(30),
+        };
+        assert!(matches!(
+            consumer(&f.backend, owner.proof(), &cancel)
+                .snapshot(params.engine.as_ref().unwrap(), candidate)
+                .await
+                .unwrap(),
+            ScheduledOutcome::Created
+        ));
+        assert_eq!(
+            count(&f).await,
+            22,
+            "different current durable tail must publish"
+        );
+        let text:String=sqlx::query_scalar("SELECT text FROM revisions WHERE target_id=?1 ORDER BY created_at DESC,id DESC LIMIT 1")
+            .bind(document.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+        assert!(text.contains("후속편집한글✨"), "{text}");
+        owner.release().await.unwrap();
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn selected_revision_native_late_cancel_capture_and_equal_noop_no_success() {
+        let engine = engine();
+        for phase in [Phase::Capture, Phase::Comparison] {
+            let f = Fixture::new().await;
+            let candidate = seed_document(&f).await;
+            let request = crate::jobs::claim::FamilyMaintenanceClaimRequest::new(
+                MaintenanceJobKey::Revisions,
+            );
+            let owner = acquired(&request, &f.backend).await;
+            let cancel = CancellationToken::new();
+            if phase == Phase::Comparison {
+                assert!(matches!(
+                    consumer(&f.backend, owner.proof(), &cancel)
+                        .snapshot(&engine, candidate.clone())
+                        .await
+                        .unwrap(),
+                    ScheduledOutcome::Created
+                ));
+            }
+            let before = count(&f).await;
+            let (reached, go) = arm(owner.proof(), phase);
+            let backend = f.backend.clone();
+            let proof = owner.proof().clone();
+            let child = cancel.clone();
+            let selected = engine.clone();
+            let mut job = tokio::spawn(async move {
+                consumer(&backend, &proof, &child)
+                    .snapshot(&selected, candidate)
+                    .await
+                    .map(|outcome| matches!(outcome, ScheduledOutcome::Created))
+            });
+            crate::jobs::maintenance_test_hooks::wait_reached(reached, &mut job).await;
+            cancel.cancel();
+            go.send(()).unwrap();
+            assert!(matches!(
+                job.await.unwrap(),
+                Err(MaintenanceConsumerError::Cancelled)
+            ));
+            assert_eq!(
+                count(&f).await,
+                before,
+                "cancel after awaited native work cannot count/publish a success"
+            );
+            owner.release().await.unwrap();
+            let healthy_request = crate::jobs::claim::FamilyMaintenanceClaimRequest::new(
+                MaintenanceJobKey::Revisions,
+            );
+            let healthy = acquired(&healthy_request, &f.backend).await;
+            assert_eq!(
+                healthy.proof().generation(),
+                2,
+                "healthy acquisition never resets generation"
+            );
+            let fresh = CancellationToken::new();
+            let candidate = {
+                let mut writer = consumer(&f.backend, healthy.proof(), &fresh)
+                    .candidates(f.workspace, None)
+                    .await
+                    .unwrap();
+                writer.remove(0)
+            };
+            let outcome = consumer(&f.backend, healthy.proof(), &fresh)
+                .snapshot(&engine, candidate)
+                .await
+                .unwrap();
+            assert!(if phase == Phase::Capture {
+                matches!(outcome, ScheduledOutcome::Created)
+            } else {
+                matches!(outcome, ScheduledOutcome::Deduped)
+            });
+            healthy.release().await.unwrap();
+            f.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_revision_wrong_expired_and_real_clock_expiry_after_native_no_effect() {
+        let engine = engine();
+        let f = Fixture::new().await;
+        let candidate = seed_document(&f).await;
+        let wrong_request =
+            crate::jobs::claim::FamilyMaintenanceClaimRequest::new(MaintenanceJobKey::Daily);
+        let wrong = acquired(&wrong_request, &f.backend).await;
+        let cancel = CancellationToken::new();
+        assert!(matches!(
+            consumer(&f.backend, wrong.proof(), &cancel)
+                .snapshot(&engine, candidate.clone())
+                .await,
+            Err(MaintenanceConsumerError::OwnershipLost)
+        ));
+        assert_eq!(count(&f).await, 0);
+        wrong.release().await.unwrap();
+        let request =
+            crate::jobs::claim::FamilyMaintenanceClaimRequest::new(MaintenanceJobKey::Revisions);
+        let short = crate::jobs::FamilyMaintenanceLeasePolicy::new(
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let owner =
+            match crate::jobs::GlobalJobClaim::try_claim(&f.backend, &request, short, &cancel)
+                .await
+                .unwrap()
+            {
+                crate::jobs::GlobalClaimAcquisition::Acquired(
+                    crate::jobs::GlobalJobClaim::Family(owner),
+                ) => owner,
+                _ => panic!("actual short live claim required"),
+            };
+        let (reached, go) = arm(owner.proof(), Phase::Capture);
+        let backend = f.backend.clone();
+        let proof = owner.proof().clone();
+        let selected = engine.clone();
+        let target = candidate.clone();
+        let mut job = tokio::spawn(async move {
+            let cancel = CancellationToken::new();
+            FamilyRevisionConsumer {
+                backend: &backend,
+                proof: &proof,
+                policy: short,
+                cancel: &cancel,
+            }
+            .snapshot(&selected, target)
+            .await
+            .map(|outcome| matches!(outcome, ScheduledOutcome::Created))
+        });
+        crate::jobs::maintenance_test_hooks::wait_reached(reached, &mut job).await;
+        // Actual DB clock passes the short lease while this same writer waits;
+        // no second writer fabricates an owner loss or provider acknowledgement.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        go.send(()).unwrap();
+        assert!(matches!(
+            job.await.unwrap(),
+            Err(MaintenanceConsumerError::OwnershipLost)
+        ));
+        assert_eq!(count(&f).await, 0);
+        assert!(
+            matches!(
+                consumer(&f.backend, owner.proof(), &cancel)
+                    .snapshot(&engine, candidate.clone())
+                    .await,
+                Err(MaintenanceConsumerError::OwnershipLost)
+            ),
+            "expired proof cannot be revived by renewal"
+        );
+        assert_eq!(count(&f).await, 0);
+        let recovered = acquired(&request, &f.backend).await;
+        assert_eq!(recovered.proof().generation(), 2);
+        assert!(
+            matches!(
+                consumer(&f.backend, owner.proof(), &cancel)
+                    .snapshot(&engine, candidate.clone())
+                    .await,
+                Err(MaintenanceConsumerError::OwnershipLost)
+            ),
+            "old generation cannot borrow the new live owner's writer proof"
+        );
+        assert_eq!(count(&f).await, 0);
+        assert!(matches!(
+            consumer(&f.backend, recovered.proof(), &cancel)
+                .snapshot(&engine, candidate)
+                .await
+                .unwrap(),
+            ScheduledOutcome::Created
+        ));
+        assert!(matches!(
+            owner.release().await.unwrap(),
+            crate::jobs::FamilyLeaseAction::Lost
+        ));
+        recovered.release().await.unwrap();
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn selected_revision_post_insert_source_refusal_and_real_fk_commit_roll_back_history() {
+        let engine = engine();
+        let f = Fixture::new().await;
+        let candidate = seed_document(&f).await;
+        let request =
+            crate::jobs::claim::FamilyMaintenanceClaimRequest::new(MaintenanceJobKey::Revisions);
+        let owner = acquired(&request, &f.backend).await;
+        let cancel = CancellationToken::new();
+        let mut stale = candidate.clone();
+        stale.writer_generation = 1;
+        assert!(matches!(
+            consumer(&f.backend, owner.proof(), &cancel)
+                .snapshot(&engine, stale)
+                .await
+                .unwrap(),
+            ScheduledOutcome::Skipped
+        ));
+        assert_eq!(count(&f).await, 0);
+        sqlx::query("CREATE TRIGGER maintenance_revision_source_change AFTER INSERT ON revisions WHEN NEW.target_kind='document' BEGIN UPDATE document_states SET writer_generation=writer_generation+1 WHERE workspace_id=NEW.workspace_id AND document_id=NEW.target_id; END")
+            .execute(&f.pool).await.unwrap();
+        let error = consumer(&f.backend, owner.proof(), &cancel)
+            .snapshot(&engine, candidate.clone())
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            MaintenanceConsumerError::RevisionRefused(RevisionDbError::NotFound)
+        ));
+        assert_eq!(
+            count(&f).await,
+            0,
+            "post-insert refusal must roll back rather than commit as skipped"
+        );
+        let generation: i64 = sqlx::query_scalar(
+            "SELECT writer_generation FROM document_states WHERE document_id=?1",
+        )
+        .bind(candidate.target.id().as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(generation, 0);
+        sqlx::query("DROP TRIGGER maintenance_revision_source_change")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        crate::jobs::maintenance_test_hooks::arm_commit_fault(owner.proof());
+        let error = consumer(&f.backend, owner.proof(), &cancel)
+            .snapshot(&engine, candidate.clone())
+            .await
+            .err()
+            .unwrap();
+        let MaintenanceConsumerError::CommitUnknown(receipt) = &error else {
+            panic!("real FK must fail at COMMIT: {error}")
+        };
+        assert!(
+            matches!(&receipt.source.source,sqlx::Error::Database(source) if source.code().as_deref()==Some("787"))
+        );
+        assert_eq!(
+            count(&f).await,
+            0,
+            "unknown commit cannot count history success"
+        );
+        let phantom: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM memberships WHERE user_id NOT IN (SELECT id FROM users)",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(phantom, 0, "failed real FK transaction rolled back locally");
+        assert!(matches!(
+            consumer(&f.backend, owner.proof(), &cancel)
+                .snapshot(&engine, candidate)
+                .await
+                .unwrap(),
+            ScheduledOutcome::Created
+        ));
+        assert_eq!(count(&f).await, 1);
+        crate::db::migrate::assert_sqlite_schema_current(&f.backend)
+            .await
+            .unwrap();
+        owner.release().await.unwrap();
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn selected_revision_gc_real_commit_failure_manual_history_caps_and_healthy_progress() {
+        let _engine = engine();
+        let f = Fixture::new().await;
+        let candidate = seed_document(&f).await;
+        sqlx::query("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<5003) INSERT INTO revisions(id,workspace_id,target_kind,target_id,y_snapshot,content_json,text,reason,created_at) SELECT randomblob(16),?1,'document',?2,?3,'{}','automatic',CASE WHEN i%2=0 THEN 'session' ELSE 'scheduled' END,i FROM n")
+            .bind(f.workspace.as_bytes().as_slice()).bind(candidate.target.id().as_bytes().as_slice()).bind(fixture_bytes("revision_snapshot.bin")).execute(&f.pool).await.unwrap();
+        let other_workspace = f.other_workspace().await;
+        let other_document = f.document(other_workspace).await;
+        let outside = Uuid::now_v7();
+        sqlx::query("INSERT INTO revisions(id,workspace_id,target_kind,target_id,y_snapshot,content_json,text,reason,created_at) VALUES(?1,?2,'document',?3,?4,'{}','outside immutable','session',-1)")
+            .bind(outside.as_bytes().as_slice()).bind(other_workspace.as_bytes().as_slice()).bind(other_document.as_bytes().as_slice())
+            .bind(fixture_bytes("revision_snapshot.bin")).execute(&f.pool).await.unwrap();
+        let manual = Uuid::now_v7();
+        sqlx::query("INSERT INTO revisions(id,workspace_id,target_kind,target_id,y_snapshot,content_json,text,reason,created_by,created_at) VALUES(?1,?2,'document',?3,?4,'{}','manual','manual',?5,0)")
+            .bind(manual.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(candidate.target.id().as_bytes().as_slice()).bind(fixture_bytes("revision_snapshot.bin")).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let request =
+            crate::jobs::claim::FamilyMaintenanceClaimRequest::new(MaintenanceJobKey::Revisions);
+        let owner = acquired(&request, &f.backend).await;
+        let cancel = CancellationToken::new();
+        crate::jobs::maintenance_test_hooks::arm_commit_fault(owner.proof());
+        let error = consumer(&f.backend, owner.proof(), &cancel)
+            .gc_round(f.workspace, 2)
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(error, MaintenanceConsumerError::CommitUnknown(_)));
+        assert_eq!(count(&f).await, 5005);
+        assert_eq!(
+            consumer(&f.backend, owner.proof(), &cancel)
+                .gc_round(f.workspace, 2)
+                .await
+                .unwrap(),
+            5000
+        );
+        assert_eq!(count(&f).await, 5);
+        assert_eq!(
+            consumer(&f.backend, owner.proof(), &cancel)
+                .gc_round(f.workspace, 2)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(count(&f).await, 4);
+        let remaining: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT reason,created_at FROM revisions WHERE workspace_id=?1 ORDER BY created_at",
+        )
+        .bind(f.workspace.as_bytes().as_slice())
+        .fetch_all(&f.pool)
+        .await
+        .unwrap();
+        let outside_row: (String, i64) =
+            sqlx::query_as("SELECT text,created_at FROM revisions WHERE workspace_id=?1 AND id=?2")
+                .bind(other_workspace.as_bytes().as_slice())
+                .bind(outside.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(outside_row, ("outside immutable".into(), -1));
+        assert_eq!(
+            remaining,
+            vec![
+                ("manual".into(), 0),
+                ("session".into(), 5002),
+                ("scheduled".into(), 5003)
+            ]
+        );
+        assert_eq!(
+            consumer(&f.backend, owner.proof(), &cancel)
+                .gc_round(f.workspace, 2)
+                .await
+                .unwrap(),
+            0
+        );
+        owner.release().await.unwrap();
+        f.finish().await;
+    }
+    #[tokio::test]
+    async fn selected_revision_batch_real_target_commit_failure_returns_no_resume_then_healthy_retry(
+    ) {
+        let f = Fixture::new().await;
+        let candidate = seed_document(&f).await;
+        let params = params();
+        let request =
+            crate::jobs::claim::FamilyMaintenanceClaimRequest::new(MaintenanceJobKey::Revisions);
+        let owner = acquired(&request, &f.backend).await;
+        let (reached, go) = arm(owner.proof(), Phase::Capture);
+        let backend = f.backend.clone();
+        let proof = owner.proof().clone();
+        let selected = params.clone();
+        let mut job = tokio::spawn(async move {
+            run_revision_maintenance_batch_family(
+                &backend,
+                &selected,
+                RevisionMaintenanceResume::default(),
+                &proof,
+                policy(),
+                &CancellationToken::new(),
+            )
+            .await
+        });
+        crate::jobs::maintenance_test_hooks::wait_reached(reached, &mut job).await;
+        // Scanner/page finishes have already settled. Arm the genuine deferred
+        // FK on the actual native target's final writer commit, not an oracle.
+        crate::jobs::maintenance_test_hooks::arm_commit_fault(owner.proof());
+        go.send(()).unwrap();
+        let result = job.await.unwrap();
+        assert!(matches!(&result,Err(MaintenanceConsumerError::CommitUnknown(_))),
+            "failed target finish must not return successful counts or an advanced resume: {result:?}");
+        assert_eq!(count(&f).await, 0);
+        let generation: i64 = sqlx::query_scalar(
+            "SELECT writer_generation FROM document_states WHERE document_id=?1",
+        )
+        .bind(candidate.target.id().as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(generation, 0);
+        let (stats, resume) = run_revision_maintenance_batch_family(
+            &f.backend,
+            &params,
+            RevisionMaintenanceResume::default(),
+            owner.proof(),
+            policy(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stats.snapshots_created, 1);
+        assert_eq!(stats.snapshots_attempted, 1);
+        assert!(resume.sweep_complete());
+        assert_eq!(count(&f).await, 1);
+        owner.release().await.unwrap();
+        f.finish().await;
     }
 }
