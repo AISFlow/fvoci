@@ -1,6 +1,8 @@
 import { uuid } from "./uuid.js";
 import { emojiGlyph } from "./emoji-glyph.js";
 import type { TiptapDoc } from "./json.js";
+import type { Extensions } from "@tiptap/core";
+import { generateUniqueIds } from "@tiptap/extension-unique-id";
 
 /*
  * WHY: 가드를 extractText 진입에만 두면 자식 content 재귀가 그대로 스택을 먹는다.
@@ -115,6 +117,17 @@ export const UNIQUE_ID_NODE_TYPES = [
 ] as const;
 
 const UNIQUE_ID_NODE_TYPE_SET: ReadonlySet<string> = new Set(UNIQUE_ID_NODE_TYPES);
+
+/** A new document owns new block identities; reference entity IDs stay intact.
+ * The caller supplies the maintained current editor extensions/schema. */
+export function independentDraftBody(doc: TiptapDoc, extensions: Extensions): TiptapDoc {
+  const next = structuredClone(doc);
+  walkTiptap(next, (node) => {
+    if (typeof node.type === "string" && UNIQUE_ID_NODE_TYPE_SET.has(node.type) && node.attrs)
+      delete node.attrs.id;
+  });
+  return generateUniqueIds(next, extensions) as TiptapDoc;
+}
 
 export function replaceTiptapNodeById(
   doc: TiptapDoc,
