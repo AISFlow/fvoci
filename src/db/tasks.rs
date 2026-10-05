@@ -3781,7 +3781,137 @@ pub(crate) struct ImportTaskRequest<'a> {
     pub assignee: Option<Uuid>,
 }
 
+pub(crate) struct OriginTaskCreate<'a, 'input> {
+    pub workspace_id: Uuid,
+    pub project_id: Uuid,
+    pub actor_user_id: Uuid,
+    pub task_id: Uuid,
+    pub input: &'a CreateTaskInput<'input>,
+    pub client_ip: Option<&'a str>,
+    pub channel: &'a str,
+}
+
 impl OperationTx<'_, '_> {
+    /// Origin authorization/replay happens in the caller's same writer. No
+    /// import claim, deferred event, autonomous transaction or parser is used.
+    pub(crate) async fn create_origin_task_family(
+        &mut self,
+        request: OriginTaskCreate<'_, '_>,
+    ) -> Result<Result<Uuid, ProjectDbError>, sqlx::Error> {
+        let r = request;
+        match self
+            .insert_task_row_family(
+                r.workspace_id,
+                r.project_id,
+                r.actor_user_id,
+                r.input,
+                r.task_id,
+            )
+            .await?
+        {
+            Ok(()) => {}
+            Err(error) => return Ok(Err(error)),
+        }
+        let payload = json!({"taskId":r.task_id.to_string(),"projectId":r.project_id.to_string(),"title":r.input.title.trim()});
+        self.append_event(EventAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(r.workspace_id),
+            actor_user_id: Some(r.actor_user_id),
+            verb: "task.created".into(),
+            target_type: Some("task".into()),
+            target_id: Some(r.task_id),
+            payload: payload.clone(),
+        })
+        .await?;
+        self.append_audit(AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(r.workspace_id),
+            actor_user_id: Some(r.actor_user_id),
+            verb: "task.created".into(),
+            target_type: Some("task".into()),
+            target_id: Some(r.task_id),
+            payload,
+            ip: r.client_ip.map(str::to_string),
+        })
+        .await?;
+        self.record_created_task_activity_family(
+            r.workspace_id,
+            r.actor_user_id,
+            r.task_id,
+            r.channel,
+        )
+        .await?;
+        Ok(Ok(r.task_id))
+    }
+
+    /// Selected counterpart of replace_task_assignees for the sole normal
+    /// origin caller's self assignment, after the same-writer personal owner proof.
+    pub(crate) async fn assign_origin_task_creator_family(
+        &mut self,
+        workspace: Uuid,
+        project: Uuid,
+        actor: Uuid,
+        task: Uuid,
+        client_ip: Option<&str>,
+    ) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+        if self
+            .membership_role(workspace, actor, false)
+            .await?
+            .is_none()
+        {
+            return Ok(Err(ProjectDbError::AssigneeIsNotAMember));
+        }
+        let Self::SqliteFamily(tx) = self else {
+            unreachable!("family origin assignee")
+        };
+        tx.require_writer()?;
+        tx.require_tenant(workspace)?;
+        let rows=tx.query("SELECT user_id FROM task_assignees WHERE workspace_id=?1 AND task_id=?2 ORDER BY user_id",&[Cell::uuid(workspace),Cell::uuid(task)]).await?;
+        let current = rows
+            .iter()
+            .map(|row| row.cell(0)?.id())
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+        let changed = current.as_slice() != [actor];
+        let added = if current.contains(&actor) {
+            vec![]
+        } else {
+            vec![actor]
+        };
+        if !current.contains(&actor) {
+            tx.execute("INSERT INTO task_assignees(workspace_id,task_id,user_id) VALUES(?1,?2,?3) ON CONFLICT(task_id,user_id) DO NOTHING",&[Cell::uuid(workspace),Cell::uuid(task),Cell::uuid(actor)]).await?;
+        }
+        for user in &current {
+            if *user != actor {
+                tx.execute("DELETE FROM task_assignees WHERE workspace_id=?1 AND task_id=?2 AND user_id=?3",&[Cell::uuid(workspace),Cell::uuid(task),Cell::uuid(*user)]).await?;
+            }
+        }
+        if changed {
+            let payload = json!({"taskId":task.to_string(),"projectId":project.to_string(),"assigneeIds":uuid_strings(&[actor]),"addedAssigneeIds":uuid_strings(&added)});
+            self.append_event(EventAppend {
+                id: Uuid::now_v7(),
+                workspace_id: Some(workspace),
+                actor_user_id: Some(actor),
+                verb: "task.updated".into(),
+                target_type: Some("task".into()),
+                target_id: Some(task),
+                payload: payload.clone(),
+            })
+            .await?;
+            self.append_audit(AuditAppend {
+                id: Uuid::now_v7(),
+                workspace_id: Some(workspace),
+                actor_user_id: Some(actor),
+                verb: "task.updated".into(),
+                target_type: Some("task".into()),
+                target_id: Some(task),
+                payload,
+                ip: client_ip.map(str::to_string),
+            })
+            .await?;
+        }
+        Ok(Ok(()))
+    }
+
     async fn import_task_authority(
         &mut self,
         claim: &ImportClaim,
@@ -3815,29 +3945,21 @@ impl OperationTx<'_, '_> {
         Ok(Ok(true))
     }
 
-    /// Family leaf of the existing task creation program: reuse current
-    /// authorization, hierarchy, sort allocation, schema and event/audit APIs.
-    async fn create_import_task_family(
+    /// The caller owns current authority and commit. Import and normal origin
+    /// creation share this exact hierarchy/status/number/sort/canonical row leaf.
+    async fn insert_task_row_family(
         &mut self,
-        request: &ImportTaskRequest<'_>,
+        workspace: Uuid,
+        project: Uuid,
+        actor: Uuid,
+        input: &CreateTaskInput<'_>,
         task_id: Uuid,
-        cancel: &CancellationToken,
-    ) -> Result<Result<Option<Uuid>, ProjectDbError>, sqlx::Error> {
-        let c = request.claim;
-        let workspace = c.workspace_id;
-        let project = request.project_id;
-        let input = &request.input;
-        match self.import_task_authority(c, project).await? {
-            Err(error) => return Ok(Err(error)),
-            Ok(false) => return Ok(Ok(None)),
-            Ok(true) => {}
-        }
-        if cancel.is_cancelled() {
-            return Ok(Ok(None));
-        }
+    ) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
         let Self::SqliteFamily(tx) = self else {
-            unreachable!("family leaf")
+            unreachable!("family task insertion")
         };
+        tx.require_writer()?;
+        tx.require_tenant(workspace)?;
         if input.task_type == "subtask" && input.parent_id.is_none() {
             return Ok(Err(ProjectDbError::Conflict));
         }
@@ -3916,17 +4038,67 @@ impl OperationTx<'_, '_> {
         let start = input.start_date.map(|d| d.to_string());
         let due = input.due_date.map(|d| d.to_string());
         tx.execute("INSERT INTO tasks(id,workspace_id,project_id,number,title,type,priority,status_id,start_date,due_date,parent_id,milestone_id,recurrence,sort_key,schema_version,content_json,created_by) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)", &[
-            Cell::uuid(task_id),Cell::uuid(workspace),Cell::uuid(project),Cell::Integer(i64::from(number)),Cell::text(input.title.trim()),Cell::text(input.task_type),Cell::text(input.priority),Cell::uuid(status),Cell::optional_text(start.as_deref()),Cell::optional_text(due.as_deref()),Cell::optional_uuid(input.parent_id),Cell::optional_uuid(input.milestone_id),input.recurrence.as_ref().map(Cell::json).transpose()?.unwrap_or(Cell::Null),Cell::text(sort),Cell::Integer(i64::from(DOCUMENT_SCHEMA_VERSION)),Cell::json(&empty_document_json())?,Cell::uuid(c.created_by)
+            Cell::uuid(task_id),Cell::uuid(workspace),Cell::uuid(project),Cell::Integer(i64::from(number)),Cell::text(input.title.trim()),Cell::text(input.task_type),Cell::text(input.priority),Cell::uuid(status),Cell::optional_text(start.as_deref()),Cell::optional_text(due.as_deref()),Cell::optional_uuid(input.parent_id),Cell::optional_uuid(input.milestone_id),input.recurrence.as_ref().map(Cell::json).transpose()?.unwrap_or(Cell::Null),Cell::text(sort),Cell::Integer(i64::from(DOCUMENT_SCHEMA_VERSION)),Cell::json(&empty_document_json())?,Cell::uuid(actor)
         ]).await?;
-        if let Some(assignee) = request.assignee {
-            tx.execute("INSERT INTO task_assignees(workspace_id,task_id,user_id) SELECT ?1,?2,?3 WHERE EXISTS(SELECT 1 FROM memberships WHERE workspace_id=?1 AND user_id=?3) ON CONFLICT DO NOTHING", &[Cell::uuid(workspace),Cell::uuid(task_id),Cell::uuid(assignee)]).await?;
-        }
+        Ok(Ok(()))
+    }
+
+    async fn record_created_task_activity_family(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        task_id: Uuid,
+        channel: &str,
+    ) -> Result<(), sqlx::Error> {
+        let Self::SqliteFamily(tx) = self else {
+            unreachable!("family task activity")
+        };
+        tx.require_writer()?;
+        tx.require_tenant(workspace)?;
         // The existing create activity uses an empty snapshot: diff_activity
         // produces this canonical empty created change, independently of CSV data.
         let changes = crate::tasks::activity::diff_activity(None, &ActivitySnapshot::new())
             .map(Value::Array)
             .unwrap_or_else(|| json!([]));
-        tx.execute("INSERT INTO task_activity(id,workspace_id,task_id,actor_user_id,channel,kind,changes) VALUES(?1,?2,?3,?4,'web','created',?5)", &[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace),Cell::uuid(task_id),Cell::uuid(c.created_by),Cell::json(&changes)?]).await?;
+        tx.execute("INSERT INTO task_activity(id,workspace_id,task_id,actor_user_id,channel,kind,changes) VALUES(?1,?2,?3,?4,?5,'created',?6)", &[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace),Cell::uuid(task_id),Cell::uuid(actor),Cell::text(channel),Cell::json(&changes)?]).await?;
+        Ok(())
+    }
+
+    /// Family leaf of the existing task creation program: reuse current
+    /// authorization, hierarchy, sort allocation, schema and event/audit APIs.
+    async fn create_import_task_family(
+        &mut self,
+        request: &ImportTaskRequest<'_>,
+        task_id: Uuid,
+        cancel: &CancellationToken,
+    ) -> Result<Result<Option<Uuid>, ProjectDbError>, sqlx::Error> {
+        let c = request.claim;
+        let workspace = c.workspace_id;
+        let project = request.project_id;
+        let input = &request.input;
+        match self.import_task_authority(c, project).await? {
+            Err(error) => return Ok(Err(error)),
+            Ok(false) => return Ok(Ok(None)),
+            Ok(true) => {}
+        }
+        if cancel.is_cancelled() {
+            return Ok(Ok(None));
+        }
+        match self
+            .insert_task_row_family(workspace, project, c.created_by, input, task_id)
+            .await?
+        {
+            Ok(()) => {}
+            Err(error) => return Ok(Err(error)),
+        }
+        let Self::SqliteFamily(tx) = self else {
+            unreachable!("family import assignment")
+        };
+        if let Some(assignee) = request.assignee {
+            tx.execute("INSERT INTO task_assignees(workspace_id,task_id,user_id) SELECT ?1,?2,?3 WHERE EXISTS(SELECT 1 FROM memberships WHERE workspace_id=?1 AND user_id=?3) ON CONFLICT DO NOTHING", &[Cell::uuid(workspace),Cell::uuid(task_id),Cell::uuid(assignee)]).await?;
+        }
+        self.record_created_task_activity_family(workspace, c.created_by, task_id, "web")
+            .await?;
         let fence = crate::db::documents::ImportFence {
             job_id: c.job_id,
             lease_token: c.lease_token,
@@ -4147,6 +4319,14 @@ mod selected_import_task_tests {
         let workflow = Uuid::now_v7();
         let status = Uuid::now_v7();
         sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'IMP','Import','private',?3)").bind(project.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        // Normal private-project creation installs the creator's lead grant;
+        // workspace admin status alone does not grant private-project access.
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')")
+            .bind(Uuid::now_v7().as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(project.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool).await.unwrap();
         sqlx::query("INSERT INTO workflows(id,workspace_id,project_id) VALUES(?1,?2,?3)")
             .bind(workflow.as_bytes().as_slice())
             .bind(f.workspace.as_bytes().as_slice())
@@ -4203,6 +4383,60 @@ mod selected_import_task_tests {
         let counts:(i64,i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM tasks),(SELECT next_number FROM projects),(SELECT count(*) FROM import_deferred_events),(SELECT count(*) FROM task_activity)").fetch_one(&f.pool).await.unwrap();
         assert_eq!(counts, (0, 1, 0, 0));
     }
+    #[tokio::test]
+    async fn import_selected_task_private_project_current_grant_required_then_healthy() {
+        let (f, c, project, status) = setup().await;
+        sqlx::query(
+            "DELETE FROM project_members WHERE workspace_id=?1 AND project_id=?2 AND user_id=?3",
+        )
+        .bind(f.workspace.as_bytes().as_slice())
+        .bind(project.as_bytes().as_slice())
+        .bind(f.user.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        assert!(matches!(
+            create_import_task_backend(
+                &f.backend,
+                request(&c, project, Some(status), None),
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        no_effects(&f).await;
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice())
+            .bind(project.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool).await.unwrap();
+        let id = create_import_task_backend(
+            &f.backend,
+            request(&c, project, Some(status), None),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let refs: String = sqlx::query_scalar("SELECT created_refs FROM import_jobs WHERE id=?1")
+            .bind(c.job_id.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<crate::db::import_jobs::ImportJobRefs>(&refs)
+                .unwrap()
+                .task_ids,
+            vec![id]
+        );
+        let row: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM tasks),(SELECT next_number FROM projects),(SELECT count(*) FROM import_deferred_events)")
+            .fetch_one(&f.pool).await.unwrap();
+        assert_eq!(row, (1, 2, 1));
+        f.close().await;
+    }
+
     #[tokio::test]
     async fn import_selected_task_rollback_control_retains_domain_and_healthy_retry() {
         let (f, c, project, status) = setup().await;
