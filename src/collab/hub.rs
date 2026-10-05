@@ -638,6 +638,11 @@ impl CollabHub {
             .len()
     }
 
+    #[cfg(all(test, feature = "db-tests"))]
+    pub(crate) fn family_owner_records_for_test(&self) -> FamilyRoomOwnerRecords {
+        self.pending_family_starts.clone()
+    }
+
     #[cfg(feature = "db-tests")]
     pub fn unresolved_family_owner(&self, key: RoomKey) -> Option<Uuid> {
         self.pending_family_starts

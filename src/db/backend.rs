@@ -835,16 +835,17 @@ impl Drop for RemoteTx {
 }
 
 #[cfg(all(test, feature = "db-tests"))]
-mod maintenance_claim_driver_tests {
+pub(crate) mod maintenance_claim_driver_tests {
     // Transport fixture, NOT Turso: pinned SDK emits real pipeline requests;
     // maintained full SQLite initializer/engine executes the actual SQL. Only
-    // this finish seam is exercised, not production TLS/admission/query cursors.
+    // finish seam is exercised. Room controls also use real PRAGMA/cursor
+    // admission; production TLS and external Turso remain unqualified.
     use super::*;
     use axum::{extract::State, response::IntoResponse, routing::post, Json, Router};
     use base64::Engine;
     use futures_util::StreamExt;
     use serde_json::{json, Value};
-    use sqlx::Connection;
+    use sqlx::{Column, Connection, Row, TypeInfo, ValueRef};
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU8, Ordering};
@@ -853,6 +854,7 @@ mod maintenance_claim_driver_tests {
     struct Stream {
         conn: sqlx::SqliteConnection,
         active: bool,
+        fault_on_finish: bool,
     }
     struct Model {
         pool: SqlitePool,
@@ -860,6 +862,7 @@ mod maintenance_claim_driver_tests {
         requests: Vec<Value>,
         sqlite_errors: Vec<String>,
         mode: Arc<AtomicU8>, // 1: COMMIT HTTP failure; 2: rollback failure; 3: truncated body.
+        fault_sql: Option<String>,
         loss_pause: Option<(
             tokio::sync::oneshot::Sender<()>,
             tokio::sync::oneshot::Receiver<()>,
@@ -868,6 +871,7 @@ mod maintenance_claim_driver_tests {
     fn control_sql(sql: &str) -> Option<&'static str> {
         let sql = sql.trim();
         match sql.strip_suffix(';').unwrap_or(sql).trim_end() {
+            "BEGIN" => Some("BEGIN"),
             "BEGIN IMMEDIATE" => Some("BEGIN IMMEDIATE"),
             "COMMIT" => Some("COMMIT"),
             "ROLLBACK" => Some("ROLLBACK"),
@@ -921,6 +925,7 @@ mod maintenance_claim_driver_tests {
             None => Stream {
                 conn: model.pool.acquire().await.unwrap().detach(),
                 active: false,
+                fault_on_finish: false,
             },
         };
         let mut responses = Vec::new();
@@ -933,31 +938,16 @@ mod maintenance_claim_driver_tests {
                     for step in request["batch"]["steps"].as_array().unwrap() {
                         let stmt = &step["stmt"];
                         let sql = stmt["sql"].as_str().unwrap();
-                        let mut query = sqlx::query(sql);
-                        for arg in stmt["args"].as_array().unwrap() {
-                            query = match arg["type"].as_str().unwrap() {
-                                "null" => query.bind(Option::<i64>::None),
-                                "integer" => query
-                                    .bind(arg["value"].as_str().unwrap().parse::<i64>().unwrap()),
-                                "text" => query.bind(arg["value"].as_str().unwrap().to_owned()),
-                                "blob" => query.bind(
-                                    base64::engine::general_purpose::STANDARD_NO_PAD
-                                        .decode(
-                                            arg["base64"].as_str().unwrap().trim_end_matches('='),
-                                        )
-                                        .unwrap(),
-                                ),
-                                other => panic!("unsupported fixture bind {other}"),
-                            };
+                        if model
+                            .fault_sql
+                            .as_ref()
+                            .is_some_and(|needle| sql.contains(needle))
+                        {
+                            stream.fault_on_finish = true;
                         }
-                        match query.execute(&mut stream.conn).await {
+                        match sqlite_statement(&mut stream, stmt).await {
                             Ok(result) => {
-                                match control_sql(sql) {
-                                    Some("BEGIN IMMEDIATE") => stream.active = true,
-                                    Some("COMMIT" | "ROLLBACK") => stream.active = false,
-                                    _ => {}
-                                }
-                                results.push(json!({"cols":[],"rows":[],"affected_row_count":result.rows_affected(),"last_insert_rowid":null}));
+                                results.push(result);
                                 errors.push(Value::Null);
                             }
                             Err(error) => {
@@ -989,16 +979,17 @@ mod maintenance_claim_driver_tests {
             };
             responses.push(json!({"type":"ok","response":response}));
         }
+        let fault_on_finish = model.fault_sql.is_none() || stream.fault_on_finish;
         if close {
             stream.conn.close().await.unwrap();
         } else {
             model.streams.insert(baton.clone(), stream);
         }
         let response = json!({"baton":if close { None } else { Some(baton) },"base_url":null,"results":responses});
-        if model.mode.load(Ordering::SeqCst) == 1 && has_sql("COMMIT") {
+        if model.mode.load(Ordering::SeqCst) == 1 && has_sql("COMMIT") && fault_on_finish {
             return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
-        if model.mode.load(Ordering::SeqCst) == 3 && has_sql("COMMIT") {
+        if model.mode.load(Ordering::SeqCst) == 3 && has_sql("COMMIT") && fault_on_finish {
             let (entered, go) = model.loss_pause.take().unwrap();
             let first = futures_util::stream::once(async move {
                 let _ = entered.send(());
@@ -1015,7 +1006,132 @@ mod maintenance_claim_driver_tests {
         }
         Json(response).into_response()
     }
-    struct Fixture {
+    // SQLx supplies both actual returned rows (including RETURNING/PRAGMA)
+    // and affected counts. No transport response invents database contents.
+    #[expect(
+        deprecated,
+        reason = "single bound SQLite statement needs both rows and QueryResult; raw_sql cannot bind Hrana args"
+    )]
+    async fn sqlite_statement(stream: &mut Stream, stmt: &Value) -> Result<Value, sqlx::Error> {
+        let sql = stmt["sql"].as_str().unwrap();
+        let mut query = sqlx::query(sql);
+        for arg in stmt["args"].as_array().unwrap() {
+            query = match arg["type"].as_str().unwrap() {
+                "null" => query.bind(Option::<i64>::None),
+                "integer" => query.bind(arg["value"].as_str().unwrap().parse::<i64>().unwrap()),
+                "float" => query.bind(arg["value"].as_f64().unwrap()),
+                "text" => query.bind(arg["value"].as_str().unwrap().to_owned()),
+                "blob" => query.bind(
+                    base64::engine::general_purpose::STANDARD_NO_PAD
+                        .decode(arg["base64"].as_str().unwrap().trim_end_matches('='))
+                        .unwrap(),
+                ),
+                other => panic!("unsupported fixture bind {other}"),
+            };
+        }
+        let mut cols = Vec::new();
+        let mut rows = Vec::new();
+        let mut affected = 0;
+        let mut results = query.fetch_many(&mut stream.conn);
+        while let Some(result) = results.next().await {
+            match result? {
+                sqlx::Either::Left(result) => affected += result.rows_affected(),
+                sqlx::Either::Right(row) => {
+                    if cols.is_empty() {
+                        cols = row
+                            .columns()
+                            .iter()
+                            .map(|col| json!({"name":col.name(),"decltype":null}))
+                            .collect();
+                    }
+                    let values = (0..row.len()).map(|i| {
+                        let value = row.try_get_raw(i)?;
+                        Ok(if value.is_null() { json!({"type":"null"}) } else {
+                            match value.type_info().name() {
+                                "INTEGER" | "BOOLEAN" => json!({"type":"integer","value":row.try_get::<i64,_>(i)?.to_string()}),
+                                "REAL" => json!({"type":"float","value":row.try_get::<f64,_>(i)?}),
+                                "TEXT" => json!({"type":"text","value":row.try_get::<String,_>(i)?}),
+                                "BLOB" => json!({"type":"blob","base64":base64::engine::general_purpose::STANDARD_NO_PAD.encode(row.try_get::<Vec<u8>,_>(i)?)}),
+                                other => panic!("unsupported actual SQLite value {other}"),
+                            }
+                        })
+                    }).collect::<Result<Vec<Value>,sqlx::Error>>()?;
+                    rows.push(values);
+                }
+            }
+        }
+        drop(results);
+        match control_sql(sql) {
+            Some("BEGIN" | "BEGIN IMMEDIATE") => stream.active = true,
+            Some("COMMIT" | "ROLLBACK") => stream.active = false,
+            _ => {}
+        }
+        Ok(json!({"cols":cols,"rows":rows,"affected_row_count":affected,"last_insert_rowid":null}))
+    }
+
+    async fn cursor(
+        State(state): State<Arc<tokio::sync::Mutex<Model>>>,
+        bytes: axum::body::Bytes,
+    ) -> axum::response::Response {
+        let body: Value = match serde_json::from_slice(&bytes) {
+            Ok(body) => body,
+            Err(_) => return axum::http::StatusCode::BAD_REQUEST.into_response(),
+        };
+        let mut model = state.lock().await;
+        model.requests.push(body.clone());
+        let baton = body["baton"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| Uuid::now_v7().to_string());
+        if body["baton"].is_string() && !model.streams.contains_key(&baton) {
+            return axum::http::StatusCode::GONE.into_response();
+        }
+        let mut stream = match model.streams.remove(&baton) {
+            Some(stream) => stream,
+            None => Stream {
+                conn: model.pool.acquire().await.unwrap().detach(),
+                active: false,
+                fault_on_finish: false,
+            },
+        };
+        let mut lines = vec![json!({"baton":baton,"base_url":null})];
+        for (step, item) in body["batch"]["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let stmt = &item["stmt"];
+            if model
+                .fault_sql
+                .as_ref()
+                .is_some_and(|needle| stmt["sql"].as_str().unwrap().contains(needle))
+            {
+                stream.fault_on_finish = true;
+            }
+            match sqlite_statement(&mut stream, stmt).await {
+                Ok(result) => {
+                    lines.push(json!({"type":"step_begin","step":step,"cols":result["cols"]}));
+                    for row in result["rows"].as_array().unwrap() {
+                        lines.push(json!({"type":"row","row":row}));
+                    }
+                    lines.push(json!({"type":"step_end","affected_row_count":result["affected_row_count"],"last_inserted_rowid":null}));
+                }
+                Err(error) => {
+                    model.sqlite_errors.push(format!("{error:?}"));
+                    lines.push(json!({"type":"step_error","step":step,"error":{"message":error.to_string(),"code":"SQLITE_ERROR"}}));
+                }
+            }
+        }
+        model.streams.insert(baton, stream);
+        let encoded = lines
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect::<String>();
+        encoded.into_response()
+    }
+
+    pub(crate) struct Fixture {
         root: PathBuf,
         endpoint: String,
         model: Arc<tokio::sync::Mutex<Model>>,
@@ -1032,7 +1148,15 @@ mod maintenance_claim_driver_tests {
             crate::db::migrate::run_sqlite_migrations(&path)
                 .await
                 .unwrap();
-            let pool = crate::db::pool::connect_sqlite_app(&path, 3).await.unwrap();
+            Self::new_at_path(root, &path).await
+        }
+        pub(crate) async fn for_existing_path(path: &std::path::Path) -> Self {
+            let root = std::env::temp_dir().join(format!("fvoci-task-driver-{}", Uuid::now_v7()));
+            std::fs::create_dir_all(&root).unwrap();
+            Self::new_at_path(root, path).await
+        }
+        async fn new_at_path(root: PathBuf, path: &std::path::Path) -> Self {
+            let pool = crate::db::pool::connect_sqlite_app(path, 3).await.unwrap();
             let mode = Arc::new(AtomicU8::new(0));
             let model = Arc::new(tokio::sync::Mutex::new(Model {
                 pool,
@@ -1040,6 +1164,7 @@ mod maintenance_claim_driver_tests {
                 requests: Vec::new(),
                 sqlite_errors: Vec::new(),
                 mode: mode.clone(),
+                fault_sql: None,
                 loss_pause: None,
             }));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1047,6 +1172,7 @@ mod maintenance_claim_driver_tests {
             let (stop, wait) = tokio::sync::oneshot::channel();
             let app = Router::new()
                 .route("/v3/pipeline", post(pipeline))
+                .route("/v3/cursor", post(cursor))
                 .with_state(model.clone());
             let server = tokio::spawn(async move {
                 axum::serve(listener, app)
@@ -1090,6 +1216,127 @@ mod maintenance_claim_driver_tests {
                 server,
                 mode,
             }
+        }
+        pub(crate) fn backend(&self) -> Backend {
+            self.backend.clone()
+        }
+        pub(crate) async fn fail_finish_for(&self, sql: &str, mode: u8) {
+            assert!(matches!(mode, 1 | 3));
+            let mut model = self.model.lock().await;
+            model.fault_sql = Some(sql.into());
+            if mode == 3 {
+                let (entered, _) = tokio::sync::oneshot::channel();
+                let (go, wait) = tokio::sync::oneshot::channel();
+                // Ordinary frame awaits the actual truncated response. The old
+                // cancellation control still supplies its own barrier below.
+                go.send(()).unwrap();
+                model.loss_pause = Some((entered, wait));
+            }
+            self.mode.store(mode, Ordering::SeqCst);
+        }
+        pub(crate) async fn sql_log(&self) -> Vec<String> {
+            self.model
+                .lock()
+                .await
+                .requests
+                .iter()
+                .flat_map(|body| {
+                    let batches: Vec<&Value> = if let Some(requests) = body["requests"].as_array() {
+                        requests
+                            .iter()
+                            .filter_map(|request| request.get("batch"))
+                            .collect()
+                    } else {
+                        body.get("batch").into_iter().collect()
+                    };
+                    batches
+                        .into_iter()
+                        .flat_map(|batch| {
+                            batch["steps"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|step| step["stmt"]["sql"].as_str().unwrap().to_owned())
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        }
+        pub(crate) async fn assert_original_finish_for(&self, needle: &str) {
+            let model = self.model.lock().await;
+            let selected = model
+                .requests
+                .iter()
+                .rev()
+                .find(|body| {
+                    if let Some(requests) = body["requests"].as_array() {
+                        requests.iter().any(|request| {
+                            request["batch"]["steps"].as_array().is_some_and(|steps| {
+                                steps.iter().any(|step| {
+                                    step["stmt"]["sql"].as_str().unwrap().contains(needle)
+                                })
+                            })
+                        })
+                    } else {
+                        body["batch"]["steps"].as_array().is_some_and(|steps| {
+                            steps
+                                .iter()
+                                .any(|step| step["stmt"]["sql"].as_str().unwrap().contains(needle))
+                        })
+                    }
+                })
+                .expect("selected operation reached actual SDK transport");
+            let baton = selected["baton"]
+                .as_str()
+                .expect("operation on the original admitted stream");
+            assert!(
+                model.requests.iter().any(|body| body["baton"] == baton
+                    && body["requests"].as_array().is_some_and(|requests| requests
+                        .iter()
+                        .any(|request| request["type"] == "close")
+                        && requests.iter().any(|request| request["batch"]["steps"]
+                            .as_array()
+                            .is_some_and(|steps| steps
+                                .iter()
+                                .any(|step| control_sql(step["stmt"]["sql"].as_str().unwrap())
+                                    == Some("COMMIT")))))),
+                "original stream COMMIT plus Close, not a new transaction acknowledgement"
+            );
+        }
+        pub(crate) async fn shutdown(self, uncertain: bool, expect_fk: bool) {
+            let result = self.backend.close().await;
+            if uncertain {
+                assert!(
+                    matches!(result, Err(sqlx::Error::AnyDriverError(ref error)) if error.downcast_ref::<RemoteSettlementUnconfirmed>().is_some())
+                );
+            } else {
+                result.unwrap();
+            }
+            let _ = self.stop.send(());
+            self.server.await.unwrap().unwrap();
+            let mut model = self.model.lock().await;
+            if expect_fk {
+                assert_eq!(model.sqlite_errors.len(), 1);
+                assert!(model.sqlite_errors[0].contains("FOREIGN KEY constraint failed"));
+            } else {
+                assert!(
+                    model.sqlite_errors.is_empty(),
+                    "unexpected real SQLite error: {:?}",
+                    model.sqlite_errors
+                );
+            }
+            for (_, mut stream) in model.streams.drain() {
+                if stream.active {
+                    sqlx::query("ROLLBACK")
+                        .execute(&mut stream.conn)
+                        .await
+                        .unwrap();
+                }
+                stream.conn.close().await.unwrap();
+            }
+            model.pool.close().await;
+            drop(model);
+            std::fs::remove_dir_all(self.root).unwrap();
         }
         async fn writer(&self) -> RemoteTx {
             let Backend::LibsqlRemote(owner) = &self.backend else {

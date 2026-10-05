@@ -893,6 +893,17 @@ enum RoomCommand {
         session_id: Uuid,
         reply: oneshot::Sender<Result<LiveProjection, BodyWriteError>>,
     },
+    // Test-only entry into the existing receipt/readback consumer on the actual
+    // hub-owned actor; errors still come from the original SDK transaction.
+    #[cfg(all(test, feature = "db-tests"))]
+    ReconcileForTest {
+        actor: Uuid,
+        credential: Uuid,
+        op_id: Uuid,
+        expected_tail: i64,
+        payload: Vec<u8>,
+        reply: oneshot::Sender<(Option<AppendCollabResult>, bool)>,
+    },
     Shutdown,
     #[cfg(feature = "db-tests")]
     Probe(oneshot::Sender<ActorProbe>),
@@ -914,6 +925,10 @@ fn reject_room_command(cmd: RoomCommand) {
         }
         RoomCommand::ProjectLive { reply, .. } => {
             let _ = reply.send(Err(BodyWriteError::Unavailable));
+        }
+        #[cfg(all(test, feature = "db-tests"))]
+        RoomCommand::ReconcileForTest { reply, .. } => {
+            let _ = reply.send((None, false));
         }
         RoomCommand::Leave(_) | RoomCommand::Frame { .. } | RoomCommand::Shutdown => {}
         #[cfg(feature = "db-tests")]
@@ -1070,6 +1085,30 @@ impl RoomHandle {
 
     pub async fn frame(&self, conn_id: Uuid, bytes: Vec<u8>) {
         let _ = self.tx.send(RoomCommand::Frame { conn_id, bytes }).await;
+    }
+
+    #[cfg(all(test, feature = "db-tests"))]
+    async fn reconcile_for_test(
+        &self,
+        actor: Uuid,
+        credential: Uuid,
+        op_id: Uuid,
+        expected_tail: i64,
+        payload: Vec<u8>,
+    ) -> (Option<AppendCollabResult>, bool) {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(RoomCommand::ReconcileForTest {
+                actor,
+                credential,
+                op_id,
+                expected_tail,
+                payload,
+                reply,
+            })
+            .await
+            .expect("live actor test command");
+        receive.await.expect("actual consumer completed")
     }
 
     pub async fn shutdown(&self) {
@@ -1598,6 +1637,19 @@ impl RoomActor {
                         }) => {
                             let _ = reply
                                 .send(self.handle_project_live(actor_user_id, session_id).await);
+                        }
+                        #[cfg(all(test, feature = "db-tests"))]
+                        Some(RoomCommand::ReconcileForTest {
+                            actor, credential, op_id, expected_tail, payload, reply,
+                        }) => {
+                            let digest = payload_digest(&payload);
+                            let result = self.reconcile_ambiguous_append(
+                                actor, credential, op_id, expected_tail, &payload, &digest,
+                            ).await;
+                            let reload = if result.is_none() {
+                                self.reload_primary_or_close_room().await
+                            } else { true };
+                            let _ = reply.send((result, reload));
                         }
                         Some(RoomCommand::Shutdown) => {
                             self.abort_session_revision_work();
@@ -2485,6 +2537,11 @@ impl RoomActor {
     }
 
     async fn reload_primary_or_close_room(&mut self) -> bool {
+        if self.is_remote_task_room() && self.guard_cleanup_failed {
+            // An uncertain original stream has already transferred its guard
+            // to the hub. A cache reload cannot supply its settlement receipt.
+            return false;
+        }
         match self.reload_primary_from_committed().await {
             Ok(()) => true,
             Err(err) => {
@@ -3012,7 +3069,11 @@ impl RoomActor {
                             error = %err,
                             "room fence connection lost during append"
                         );
-                        self.fatal_fence_lost().await;
+                        if self.is_remote_task_room() {
+                            self.fatal_remote_write_unconfirmed(err).await;
+                        } else {
+                            self.fatal_fence_lost().await;
+                        }
                         return;
                     }
                     Ok((result, _timings)) => result,
@@ -3225,6 +3286,10 @@ impl RoomActor {
                         }
                         None
                     }
+                    Err(error) if self.is_remote_task_room() => {
+                        self.fatal_remote_write_unconfirmed(error).await;
+                        None
+                    }
                     _ => {
                         self.fatal_room_divergence(actor_user_id, session_id).await;
                         None
@@ -3233,6 +3298,10 @@ impl RoomActor {
             }
             Ok(Err(CollabDbError::StaleWriter | CollabDbError::StaleCutoff)) => {
                 self.fatal_room_divergence(actor_user_id, session_id).await;
+                None
+            }
+            Err(error) if self.is_remote_task_room() => {
+                self.fatal_remote_write_unconfirmed(error).await;
                 None
             }
             Ok(Err(_)) | Err(_) => {
@@ -4722,5 +4791,391 @@ mod project_limit_tests {
                 "{kind:?} must stay operational"
             );
         }
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod remote_task_finish_tests {
+    use super::*;
+    use crate::collab::config::FamilyRoomTimings;
+    use crate::collab::guard::FamilyRoomOwnerRecord;
+    use crate::collab::hub::CollabHub;
+    use crate::collab::seed::SeedEngine;
+    use crate::collab::wire::{decode, SyncMessage};
+    use crate::db::attachment_preview::tests::Fixture;
+    use crate::db::backend::{
+        maintenance_claim_driver_tests::Fixture as DriverFixture, CommitCleanupUnknown,
+        CommitSettlement,
+    };
+    use crate::db::tasks::selected_task_detail_tests::setup;
+
+    const RELEASE: &str = "UPDATE task_collab_room_fences SET expires_at=?5 WHERE workspace_id=?1 AND task_id=?2 AND owner_token=?3 AND fence=?4";
+    const RECEIPT: &str =
+        "SELECT seq,payload_len,payload_sha256,actor_user_id FROM task_collab_op_receipts";
+    const LOAD: &str = "SELECT state,encoding,writer_generation,snapshot_cutoff_seq,tail_seq,updated_at FROM task_states";
+
+    // Concrete normal Task consumer fixture. SQL is executed by the maintained
+    // SQLite engine through the pinned SDK, native bytes by the actual child.
+    // This is not production TLS or an actual external Turso qualification.
+    struct TaskRoom {
+        f: Fixture,
+        driver: DriverFixture,
+        hub: CollabHub,
+        credential: Uuid,
+        key: RoomKey,
+        conn: Uuid,
+        lease: ConnectionLease,
+        handle: RoomHandle,
+        events: mpsc::Receiver<RoomClientEvent>,
+        cancel: watch::Receiver<Option<ConnectionCancel>>,
+        payload: Vec<u8>,
+        body: serde_json::Value,
+    }
+
+    async fn join(
+        hub: &CollabHub,
+        f: &Fixture,
+        credential: Uuid,
+        key: RoomKey,
+    ) -> (
+        Uuid,
+        ConnectionLease,
+        mpsc::Receiver<RoomClientEvent>,
+        watch::Receiver<Option<ConnectionCancel>>,
+    ) {
+        let conn = Uuid::now_v7();
+        let (events, receive) = mpsc::channel(64);
+        let (cancel, cancelled) = watch::channel(None);
+        let lease = hub
+            .join_room(
+                key,
+                RoomJoin {
+                    conn: AuthenticatedConnection {
+                        conn_id: conn,
+                        session: CollabSession {
+                            session_id: credential,
+                            user_id: f.user,
+                            given_name: "Task writer".into(),
+                            family_name: None,
+                            locale: "en".into(),
+                        },
+                        client_id: 701,
+                        read_only: false,
+                        routing_key: format!("{}:task:{}", key.0, key.1),
+                    },
+                    events,
+                    cancel: Some(cancel),
+                },
+            )
+            .await
+            .expect("actual current Task admission");
+        (conn, lease, receive, cancelled)
+    }
+
+    impl TaskRoom {
+        async fn new() -> Self {
+            let (f, credential, _, _, task) = setup().await;
+            let driver = DriverFixture::for_existing_path(&f.path).await;
+            let config = CollabConfig::from_env()
+                .expect("root must allocate the freshly qualified native engine; no fallback/skip");
+            let hub = CollabHub::new_backend(
+                config,
+                driver.backend(),
+                Some(FamilyRoomTimings::new(30_000, 5_000).unwrap()),
+            )
+            .unwrap();
+            let key = RoomKey::task(f.workspace, task);
+            let body = serde_json::json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":"89b4972a-8e36-4989-8899-23375f632fa1"},"content":[{"type":"text","text":"원래 Task 中 😀","marks":[{"type":"bold","attrs":{}}]}]}]});
+            let payload = SeedEngine::from_hub(&hub)
+                .tiptap_to_yjs_update(&body)
+                .await
+                .unwrap();
+            assert!(!is_empty_update(&payload));
+            let (conn, lease, mut events, cancel) = join(&hub, &f, credential, key).await;
+            let handle = hub.ensure_live_room(key).await.unwrap();
+            while events.try_recv().is_ok() {}
+            Self {
+                f,
+                driver,
+                hub,
+                credential,
+                key,
+                conn,
+                lease,
+                handle,
+                events,
+                cancel,
+                payload,
+                body,
+            }
+        }
+        async fn sync(&mut self) {
+            let frame = encode(&WireFrame::Document {
+                routing_key: format!("{}:task:{}", self.key.0, self.key.1),
+                room: None,
+                message: DocumentMessage::Sync(SyncMessage {
+                    step: SyncStep::Update,
+                    y_protocol: encode_sync_payload(SyncStep::Update, &self.payload),
+                }),
+            })
+            .unwrap();
+            self.handle.frame(self.conn, frame).await;
+            self.handle.probe().await; // Actual actor mailbox barrier, no polling retry.
+        }
+        fn drain_status(&mut self) -> (usize, usize) {
+            let (mut applied, mut rejected) = (0, 0);
+            while let Ok(event) = self.events.try_recv() {
+                let RoomClientEvent::Outbound(frame) = event else {
+                    continue;
+                };
+                let WireFrame::Document {
+                    message: DocumentMessage::SyncStatus { applied: ok },
+                    ..
+                } = decode(&frame.bytes).unwrap()
+                else {
+                    continue;
+                };
+                if ok {
+                    applied += 1;
+                } else {
+                    rejected += 1;
+                }
+            }
+            (applied, rejected)
+        }
+        async fn durable(&self) -> (i64, i64, i64) {
+            sqlx::query_as("SELECT (SELECT tail_seq FROM task_states WHERE workspace_id=?1 AND task_id=?2),(SELECT count(*) FROM task_collab_updates WHERE workspace_id=?1 AND task_id=?2),(SELECT count(*) FROM task_collab_op_receipts WHERE workspace_id=?1 AND task_id=?2)")
+                .bind(self.key.0.as_bytes().as_slice()).bind(self.key.1.as_bytes().as_slice()).fetch_one(&self.f.pool).await.unwrap()
+        }
+        fn assert_retained(&self, active: bool, fk: bool) -> Arc<sqlx::Error> {
+            let expected = self.lease.family_room_delivery.expect("actual typed lease");
+            let expected = if active {
+                expected.original.with_owner(expected.writer_owner)
+            } else {
+                expected.original
+            };
+            let records = self.hub.family_owner_records_for_test();
+            let records = records.lock().unwrap();
+            assert_eq!(records.len(), 1);
+            let FamilyRoomOwnerRecord::NativeWrite { fence, error } = records
+                .get(&self.key)
+                .expect("same hub retains this uncertain original owner")
+            else {
+                panic!("native uncertainty is not fabricated startup ownership")
+            };
+            assert_eq!(*fence, expected);
+            assert_eq!(fence.kind(), CollabKind::Task);
+            assert_eq!(
+                (fence.workspace(), fence.resource()),
+                (self.key.0, self.key.1)
+            );
+            let sqlx::Error::AnyDriverError(original) = error.as_ref() else {
+                panic!("original SDK finish error retained")
+            };
+            let unknown = original
+                .downcast_ref::<CommitCleanupUnknown>()
+                .expect("typed original COMMIT error, not a replacement protocol error");
+            assert_eq!(unknown.settlement, CommitSettlement::RemoteUnconfirmed);
+            assert!(!unknown.permits_reconciliation());
+            assert!(unknown.cleanup_error.is_none());
+            let sqlx::Error::AnyDriverError(source) = &unknown.source.source else {
+                panic!("SDK original source retained")
+            };
+            assert!(source.downcast_ref::<libsql::Error>().is_some());
+            if fk {
+                assert!(source.to_string().contains("FOREIGN KEY constraint failed"));
+            }
+            error.clone()
+        }
+        async fn assert_blocked(&mut self, active: bool, fk: bool) {
+            assert_eq!(
+                self.drain_status().0,
+                0,
+                "uncertain COMMIT cannot send success acknowledgement"
+            );
+            assert_eq!(
+                self.cancel
+                    .borrow()
+                    .as_ref()
+                    .expect("transport cancelled")
+                    .code,
+                1013
+            );
+            let original = self.assert_retained(active, fk);
+            assert!(
+                !self.driver.sql_log().await.iter().any(|sql| sql == RELEASE),
+                "no fresh lease release after unknown original finish"
+            );
+            self.handle.shutdown_after_queued().await;
+            self.handle.probe().await;
+            assert!(
+                matches!(
+                    self.hub.ensure_live_room(self.key).await,
+                    Err(JoinError::CapacityRetry)
+                ),
+                "actual same-hub successor remains refused by retained owner"
+            );
+            assert!(
+                Arc::ptr_eq(&original, &self.assert_retained(active, fk)),
+                "successor attempt cannot replace original error evidence"
+            );
+            assert!(!self.driver.sql_log().await.iter().any(|sql| sql == RELEASE));
+            assert!(
+                !self.hub.shutdown().await.is_clean(),
+                "unconfirmed owner is not a successful drain"
+            );
+            assert!(Arc::ptr_eq(&original, &self.assert_retained(active, fk)));
+            assert!(!self.driver.sql_log().await.iter().any(|sql| sql == RELEASE));
+        }
+        async fn close(self, uncertain: bool, fk: bool) {
+            drop(self.lease);
+            self.driver.shutdown(uncertain, fk).await;
+            self.f.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_task_normal_sync_fk_failed_and_lost_commit_retain_original_owner() {
+        // Real deferred-FK failure, HTTP error after a real COMMIT, and lost
+        // original COMMIT reply all retain uncertainty. None supplies a receipt.
+        for mode in [0, 1, 3] {
+            let mut room = TaskRoom::new().await;
+            if mode == 0 {
+                sqlx::query("CREATE TABLE on_task_sync_probe(workspace_id BLOB REFERENCES workspaces(id) DEFERRABLE INITIALLY DEFERRED)").execute(&room.f.pool).await.unwrap();
+                sqlx::query("CREATE TRIGGER reject_on_task_sync AFTER INSERT ON task_collab_op_receipts BEGIN INSERT INTO on_task_sync_probe VALUES(zeroblob(16)); END;").execute(&room.f.pool).await.unwrap();
+            } else {
+                room.driver
+                    .fail_finish_for("INSERT INTO task_collab_op_receipts", mode)
+                    .await;
+            }
+            room.sync().await;
+            room.driver
+                .assert_original_finish_for("INSERT INTO task_collab_op_receipts")
+                .await;
+            assert_eq!(room.durable().await, if mode == 0 { (0,0,0) } else { (1,1,1) }, "actual SQLite original transaction result is distinct from a deliverable confirmation");
+            room.assert_blocked(true, mode == 0).await;
+            room.close(true, mode == 0).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_task_ambiguous_receipt_and_readback_finish_retain_original_owner() {
+        for (receipt, mode) in [(true, 1), (true, 3), (false, 1), (false, 3)] {
+            let mut room = TaskRoom::new().await;
+            let op_id = if receipt {
+                room.sync().await;
+                assert_eq!(
+                    room.drain_status().0,
+                    1,
+                    "healthy initial confirmed operation"
+                );
+                let (bytes,payload): (Vec<u8>,Vec<u8>) = sqlx::query_as("SELECT op_id,payload FROM task_collab_updates WHERE workspace_id=?1 AND task_id=?2 AND seq=1")
+                    .bind(room.key.0.as_bytes().as_slice()).bind(room.key.1.as_bytes().as_slice()).fetch_one(&room.f.pool).await.unwrap();
+                assert_eq!(payload, room.payload);
+                Uuid::from_slice(&bytes).unwrap()
+            } else {
+                Uuid::now_v7()
+            };
+            room.driver
+                .fail_finish_for(if receipt { RECEIPT } else { LOAD }, mode)
+                .await;
+            let (ack, reloaded) = room
+                .handle
+                .reconcile_for_test(room.f.user, room.credential, op_id, 0, room.payload.clone())
+                .await;
+            room.driver
+                .assert_original_finish_for(if receipt { RECEIPT } else { LOAD })
+                .await;
+            assert!(
+                ack.is_none(),
+                "uncertain original receipt/load COMMIT cannot be an acknowledgement"
+            );
+            assert!(
+                !reloaded,
+                "cache reload is not settlement proof and cannot trigger fresh cleanup"
+            );
+            assert_eq!(
+                room.durable().await,
+                if receipt { (1, 1, 1) } else { (0, 0, 0) }
+            );
+            room.assert_blocked(receipt, false).await;
+            room.close(true, false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_task_definite_refusal_confirmed_cleanup_and_healthy_successor() {
+        let mut room = TaskRoom::new().await;
+        let original = room.lease.family_room_delivery.unwrap().original;
+        let (entered, continue_append) = arm_append_in_tx_reject_barrier(room.key.1).await;
+        let frame = encode(&WireFrame::Document {
+            routing_key: format!("{}:task:{}", room.key.0, room.key.1),
+            room: None,
+            message: DocumentMessage::Sync(SyncMessage {
+                step: SyncStep::Update,
+                y_protocol: encode_sync_payload(SyncStep::Update, &room.payload),
+            }),
+        })
+        .unwrap();
+        room.handle.frame(room.conn, frame).await;
+        entered.await.unwrap();
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(room.credential.as_bytes().as_slice())
+            .execute(&room.f.pool)
+            .await
+            .unwrap();
+        continue_append.send(()).unwrap();
+        room.handle.probe().await;
+        assert_eq!(
+            room.durable().await,
+            (0, 0, 0),
+            "current-session refusal has no durable update or receipt"
+        );
+        assert_eq!(room.drain_status().0, 0);
+        assert_eq!(room.cancel.borrow().as_ref().unwrap().code, 1008);
+        assert!(
+            room.hub.unresolved_family_owner(room.key).is_none(),
+            "definite domain refusal cannot become remote uncertainty"
+        );
+        room.handle.shutdown_after_queued().await;
+        room.handle.probe().await;
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(room.credential.as_bytes().as_slice())
+            .execute(&room.f.pool)
+            .await
+            .unwrap();
+        // Actual hub cleanup settles the first guard before admitting a new
+        // authenticated owner; no unknown record is manually cleared.
+        let (conn, lease, events, cancel) =
+            join(&room.hub, &room.f, room.credential, room.key).await;
+        let next = lease.family_room_delivery.unwrap().original;
+        assert_ne!(next.owner(), original.owner());
+        assert!(next.sequence() > original.sequence());
+        drop(room.lease);
+        room.lease = lease;
+        room.conn = conn;
+        room.events = events;
+        room.cancel = cancel;
+        room.handle = room.hub.ensure_live_room(room.key).await.unwrap();
+        room.sync().await;
+        assert_eq!(room.drain_status().0, 1);
+        assert_eq!(room.durable().await, (1, 1, 1));
+        let projected = room
+            .hub
+            .project_live(room.key, room.f.user, room.credential)
+            .await
+            .unwrap();
+        assert_eq!(projected.tail_seq, 1);
+        assert_eq!(
+            projected.content_json, room.body,
+            "same literal IDs, formatted text and native projection"
+        );
+        assert!(room.hub.unresolved_family_owner(room.key).is_none());
+        assert!(room.hub.shutdown().await.is_clean());
+        assert!(
+            room.driver.sql_log().await.iter().any(|sql| sql == RELEASE),
+            "confirmed healthy/domain paths still release their exact guard"
+        );
+        room.close(false, false).await;
     }
 }
