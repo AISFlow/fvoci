@@ -23,6 +23,32 @@ ORIGINAL_IDENTITY = H.CI.identity
 SHA = 'a' * 40
 TREE = 'b' * 40
 
+# Frozen c7 selected-status footer: test data, independent of checkout history.
+# Source c7ad4a2a9165a0dfb64ebc7f17150140b54ed1fe:scripts/run-web-e2e.sh
+# Exact suffix SHA256 14b99c809b2a3c0ed445774f334378e74f38db5ce0abe373e47abf30c43fcd06; preserves the unsafe original execution.
+ORIGINAL_C7_SELECTED_FOOTER = r"""selected_status=0
+if [[ "$SELECTED_BACKENDS" == true ]]; then
+  # Mandatory companion is attempted even after pending failure; keep its first status.
+  # Preparation/build and original pending suite keep the existing CI runner UID.
+  # Only this job-owned output/native prefix transfers to the1000 runtime actor.
+  : "${FVOCI_SELECTED_CI_SQLITE_PARENT:?required exact job-owned SQLite parent}"
+  python3 - "$SQLITE3_LIB_DIR" "$FVOCI_SELECTED_CI_SQLITE_PARENT" <<'PY_PARENT'
+from pathlib import Path
+import sys
+assert Path(sys.argv[1]).resolve().is_relative_to(Path(sys.argv[2]).resolve())
+PY_PARENT
+  sudo chown -R 1000:1000 "$FVOCI_SELECTED_CI_OUTPUT" "$FVOCI_SELECTED_CI_SQLITE_PARENT"
+  sudo install -d -o 1000 -g 1000 -m 0700 "$FVOCI_SELECTED_CI_OUTPUT/tmp"
+  docker_gid="$(stat -c %g /var/run/docker.sock)"
+  sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,PLAYWRIGHT_BROWSERS_PATH \
+    setpriv --reuid=1000 --regid=1000 --groups="$docker_gid" \
+    env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
+      python3 "$ROOT/scripts/run-selected-backend-e2e.py" run --output "$FVOCI_SELECTED_CI_OUTPUT" || selected_status=$?
+fi
+if [[ "$pending_status" -ne 0 ]]; then exit "$pending_status"; fi
+exit "$selected_status"
+"""
+
 
 class PacketTest(unittest.TestCase):
     def setUp(self):
@@ -440,7 +466,7 @@ def run(output):
             (output/'bundle.json').write_text(json.dumps({'binaries':{str(chrome):{}}}));(output/'bundle.json').chmod(0o600)
             source=(ROOT/'scripts/run-web-e2e.sh').read_text()
             if original:
-                source=subprocess.check_output(['git','show','c7ad4a2a9165a0dfb64ebc7f17150140b54ed1fe:scripts/run-web-e2e.sh'],cwd=ROOT,text=True)
+                source=ORIGINAL_C7_SELECTED_FOOTER
             footer=source[source.index('selected_status=0\n'):]
             environment={'PATH':str(fake)+':'+os.defpath,'ROOT':str(repo),'RUNNER_TEMP':str(temp),
                 'SELECTED_BACKENDS':'true','FVOCI_SELECTED_CI_OUTPUT':str(output),
@@ -683,6 +709,45 @@ m.prepare_browser(pathlib.Path(sys.argv[2]),sys.argv[3])
         self.assertFalse((self.output/'runtime-browser-stage.json').exists())
         self.asset.write_bytes(b'qualified supplemental asset')
         with self.assertRaises(FileExistsError):self.stage()
+
+
+class HistoricalFixturePortabilityTest(unittest.TestCase):
+    """Actual permission controls in an owned checkout without the c7 object."""
+    def test_permission_controls_without_historical_git_object(self):
+        self.assertEqual(hashlib.sha256(ORIGINAL_C7_SELECTED_FOOTER.encode()).hexdigest(),
+                         '14b99c809b2a3c0ed445774f334378e74f38db5ce0abe373e47abf30c43fcd06')
+        with tempfile.TemporaryDirectory(prefix='fvoci-no-history-fixture-') as tmp:
+            root = Path(tmp)
+            for name in ('scripts/fixtures/web-e2e/test-build-handoff.py',
+                         'scripts/selected-backend-ci/web-build-handoff.py',
+                         'scripts/run-selected-backend-e2e.py', 'scripts/run-web-e2e.sh'):
+                destination = root/name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes((ROOT/name).read_bytes())
+            subprocess.run(['git', 'init', '--quiet', str(root)], check=True)
+            missing = subprocess.run(['git', 'cat-file', '-e',
+                'c7ad4a2a9165a0dfb64ebc7f17150140b54ed1fe^{commit}'], cwd=root,
+                capture_output=True, text=True)
+            self.assertNotEqual(missing.returncode, 0)
+            result = subprocess.run([sys.executable, '-B',
+                str(root/'scripts/fixtures/web-e2e/test-build-handoff.py'),
+                'RuntimePermissionsTest'], cwd=root, capture_output=True, text=True,
+                env={**os.environ, 'PYTHONDONTWRITEBYTECODE':'1'})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            records = [json.loads(line) for line in result.stdout.splitlines()
+                       if line.startswith('{')]
+            original = next(record for record in records if record['control']=='original')
+            self.assertEqual(original['footer_exit'], 2)
+            self.assertTrue(original['err13'])
+            self.assertIsNone(original['marker'])
+            fixed = next(record for record in records if record['control']=='fixed')
+            self.assertEqual(fixed['footer_exit'], 0)
+            self.assertEqual(fixed['marker']['uid'], 1000)
+            self.assertEqual(fixed['marker']['gid'], 1000)
+            for control in ('unreadable', 'foreign', 'symlink', 'incomplete',
+                            'wrong-source', 'missing-process', 'live'):
+                self.assertTrue(any(record['control']==control and record['footer_exit']!=0
+                                    for record in records), control)
 
 
 if __name__=='__main__':unittest.main()
