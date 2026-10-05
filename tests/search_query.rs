@@ -40,6 +40,8 @@ async fn search_state(app_url: &str, meili: Option<MeiliConfig>) -> AppState {
     let storage_root = std::env::temp_dir().join(format!("fvoci-search-test-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
     AppState {
+        realtime_mode: fvoci_server::config::RealtimeMode::On,
+        native_engine: None,
         auth: Arc::new(AuthService {
             db: Db::new(pool),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),

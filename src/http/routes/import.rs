@@ -331,7 +331,9 @@ mod selected_import_route_tests {
 
     fn state(backend: Backend, storage: crate::attachments::ObjectStorage) -> AppState {
         AppState {
-            auth:Arc::new(crate::auth::AuthService{db:crate::db::Db::from_backend(backend),password_keys:crate::auth::password::Keyring::parse(r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,"test").unwrap()}),
+            realtime_mode: crate::config::RealtimeMode::On,
+        native_engine: None,
+        auth:Arc::new(crate::auth::AuthService{db:crate::db::Db::from_backend(backend),password_keys:crate::auth::password::Keyring::parse(r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,"test").unwrap()}),
             branding_name:"FVOCI".into(),public_origin:"http://localhost".into(),cookie_secure:false,rate_limiter:crate::http::rate_limit::RateLimiter::new(),storage,
             upload:crate::attachments::UploadLimits{part_size_bytes:24,max_file_size_bytes:1024,create_rate_per_5min:20,part_put_slots:crate::attachments::PartPutSlots::new(2)},
             collab:None,meili:None,search_embedder:None,markdown:None,import_wake:Some(Arc::new(tokio::sync::Notify::new())),import_extractor_available:false,preview_extract:None,quota:Default::default(),mailer:Arc::new(crate::mail::Mailer::disabled()),streams:AppState::fresh_streams(),

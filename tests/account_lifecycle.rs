@@ -226,7 +226,9 @@ impl Harness {
         let storage =
             storage.unwrap_or_else(|| ObjectStorage::from(LocalStorage::new(storage_root.clone())));
         let state = AppState {
-            auth: Arc::new(AuthService {
+            realtime_mode: fvoci_server::config::RealtimeMode::On,
+        native_engine: None,
+        auth: Arc::new(AuthService {
                 db: Db::new(app_pool.clone()),
                 password_keys: keyring(),
             }),

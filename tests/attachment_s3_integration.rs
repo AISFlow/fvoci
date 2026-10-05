@@ -174,6 +174,8 @@ async fn app_state_with_part_size(
 ) -> AppState {
     let pool = pool::connect_app(app_url).await.expect("app pool");
     AppState {
+        realtime_mode: fvoci_server::config::RealtimeMode::On,
+        native_engine: None,
         auth: Arc::new(AuthService {
             db: Db::new(pool),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),

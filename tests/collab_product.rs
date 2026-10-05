@@ -592,6 +592,8 @@ async fn collab_app_state_with_config(app_url: &str, cfg: CollabConfig) -> AppSt
         std::env::temp_dir().join(format!("fvoci-collab-product-store-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
     AppState {
+        realtime_mode: fvoci_server::config::RealtimeMode::On,
+        native_engine: None,
         auth: Arc::new(AuthService {
             db: Db::new(pool.clone()),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
@@ -645,6 +647,8 @@ async fn collab_app_state(
         std::env::temp_dir().join(format!("fvoci-collab-product-store-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
     let state = AppState {
+        realtime_mode: fvoci_server::config::RealtimeMode::On,
+        native_engine: None,
         auth: Arc::new(AuthService {
             db: Db::new(pool),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
