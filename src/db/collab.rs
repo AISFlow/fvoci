@@ -1458,6 +1458,20 @@ pub(crate) async fn load_tail_updates(
 }
 
 impl OperationTx<'_, '_> {
+    /// Current native head on the caller's existing writer. Scheduled native
+    /// capture retains this generation/cutoff/tail through helper settlement.
+    pub(crate) async fn durable_native_head(
+        &mut self,
+        kind: CollabKind,
+        workspace: Uuid,
+        resource: Uuid,
+    ) -> Result<Option<(i64, i64, i64)>, sqlx::Error> {
+        Ok(self
+            .native_append_fence(CollabTables::for_kind(kind), workspace, resource)
+            .await?
+            .map(|(_, generation, cutoff, tail)| (generation, cutoff, tail)))
+    }
+
     async fn native_append_fence(
         &mut self,
         t: &CollabTables,
