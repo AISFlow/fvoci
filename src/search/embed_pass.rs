@@ -632,8 +632,15 @@ mod backend_tests {
         let outcome = call.await;
         let observations = if barrier.is_ok() && rollback.is_ok() && outcome.is_ok() {
             Some((
-                vector_count(&f).await,
-                f.event_count("attachment.embedded").await,
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM attachment_text WHERE embedding IS NOT NULL",
+                )
+                .fetch_one(&f.pool)
+                .await,
+                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM events WHERE verb=?1")
+                    .bind("attachment.embedded")
+                    .fetch_one(&f.pool)
+                    .await,
             ))
         } else {
             None
@@ -655,6 +662,8 @@ mod backend_tests {
         backend_closed.unwrap();
         let outcome = outcome.unwrap().unwrap();
         let (vectors, events) = observations.unwrap();
+        let vectors = vectors.unwrap();
+        let events = events.unwrap();
         assert_eq!(outcome, EmbedPassOutcome::Cancelled);
         assert_eq!(
             vectors, 0,
