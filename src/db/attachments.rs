@@ -6972,13 +6972,13 @@ async fn rollback_import_attachment(
 }
 
 #[cfg(test)]
-mod import_rollback_test_hooks {
+pub(crate) mod import_rollback_test_hooks {
     use std::collections::HashSet;
     use std::sync::{LazyLock, Mutex};
     use uuid::Uuid;
     static FAULTS: LazyLock<Mutex<HashSet<(Uuid, bool)>>> =
         LazyLock::new(|| Mutex::new(HashSet::new()));
-    pub(super) fn arm(key: (Uuid, bool)) {
+    pub(crate) fn arm(key: (Uuid, bool)) {
         assert!(FAULTS.lock().unwrap().insert(key));
     }
     pub(super) fn after_actual_rollback(
