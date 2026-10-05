@@ -2502,7 +2502,7 @@ fn rows_collections(
 async fn insert_native_pg_record(
     tx: &mut Transaction<'_, Postgres>,
     table: &str,
-    mut value: Value,
+    value: Value,
     g: &Graph,
     workspace: Uuid,
     actor: Uuid,
@@ -2961,6 +2961,7 @@ mod selected_tests {
             assert_eq!(claim.job_id, job);
             let archive = archive_with_file();
             let file = &archive.graph.attachments[0];
+            let file_id = file.id;
             let key = Uuid::now_v7().to_string();
             stage_key_backend(
                 &self.backend,
@@ -2981,7 +2982,7 @@ mod selected_tests {
                 request,
                 hash,
                 archive,
-                BTreeMap::from([(file.id, key)]),
+                BTreeMap::from([(file_id, key)]),
             )
         }
         async fn finish(self) -> SdkCleanup {
