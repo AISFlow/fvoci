@@ -5212,8 +5212,36 @@ mod remote_task_finish_tests {
             (0, 0, 0),
             "current-session refusal has no durable update or receipt"
         );
-        assert_eq!(room.drain_status().0, 0);
-        assert_eq!(room.cancel.borrow().as_ref().unwrap().code, 1008);
+        // Definite refusal queues Close after the rejection status. Observe
+        // the same event channel as transport; the preemptive watch is only
+        // signalled if that ordered enqueue fails.
+        #[derive(Debug, PartialEq, Eq)]
+        enum RefusalEvent {
+            Status(bool),
+            Close(u16),
+        }
+        let mut refusal = Vec::new();
+        while let Ok(event) = room.events.try_recv() {
+            match event {
+                RoomClientEvent::Outbound(frame) => {
+                    if let WireFrame::Document {
+                        message: DocumentMessage::SyncStatus { applied },
+                        ..
+                    } = decode(&frame.bytes).unwrap()
+                    {
+                        refusal.push(RefusalEvent::Status(applied));
+                    }
+                }
+                RoomClientEvent::Close { code, .. } => {
+                    refusal.push(RefusalEvent::Close(code));
+                }
+            }
+        }
+        assert_eq!(
+            refusal,
+            [RefusalEvent::Status(false), RefusalEvent::Close(1008)],
+            "actual rejection before exactly one Close1008, with no success acknowledgement"
+        );
         assert!(
             room.hub.unresolved_family_owner(room.key).is_none(),
             "definite domain refusal cannot become remote uncertainty"
