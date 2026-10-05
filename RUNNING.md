@@ -77,16 +77,27 @@ its `fvoci` container, before the server starts, and needs none of the commands
 below; the developer Compose stack runs them in its `init` service.
 
 Run migrations and app-role grants **before** starting or upgrading `fvoci-server`. Stop old
-instances first: old binaries refuse a newer `fvoci.schema_migrations` version and cannot restart
-after migrate. Upgrade order is stop old → `fvoci-migrate` → `fvoci-migrate --grant-app-role` →
-start new; mixed-version rolling restart is not supported. The server connects only through
-`DATABASE_APP_URL`, requires the applied version to equal the compiled set, and exits nonzero
-with an operator message if the schema is missing, behind, newer than this binary, or unreadable.
-A newer database needs a matching or newer `fvoci-server`; do not run migrate from the old
-binary. The gate does not detect stale grants after a later migration; re-run `--grant-app-role`
+instances first: old binaries refuse a `fvoci.schema_migrations` ledger with receipts newer than
+their compiled lineage and cannot restart after migrate. The schema is a lineage of steps
+(`fvoci-postgres-060`, `migrations/postgres/060/`); every receipt records
+`(version, lineage, sql_sha256)` in the same transaction as its step. Upgrade order is stop old →
+`fvoci-migrate` → `fvoci-migrate --grant-app-role` → start new; mixed-version rolling restart is
+not supported. The server connects only through `DATABASE_APP_URL`, requires the receipts to equal
+the compiled lineage exactly (same lineage, contiguous versions, same digests), and exits nonzero
+with an operator message if the schema is missing, behind, newer than this binary, applied from a
+different text, of another lineage, or unreadable. A newer database needs a matching or newer
+`fvoci-server`; do not run migrate from the old binary. The gate does not detect stale grants after a later migration; re-run `--grant-app-role`
 after every upgrade that applies new migrations. `fvoci-server` itself does not run migrations and
 ignores `DATABASE_URL` / `FVOCI_MIGRATION_URL` if set; in the user install the image entrypoint
 (`fvoci-migrate --start`) migrates and grants before it starts the server.
+
+0.6 installs into an empty database only. A database created by the 0.1–0.5 development
+migrations (a `fvoci.schema_migrations` without a `lineage` column) is refused explicitly by
+`fvoci-migrate`, `fvoci-migrate --start` and `fvoci-server`; nothing in it is rewritten. Move its
+data with a current-format native archive: export from the old server, restore into the new
+install. The same applies to a SQLite file of the retired `fvoci-sqlite-current-v1` lineage
+(`FVOCI_DATABASE_BACKEND=sqlite` now uses `fvoci-sqlite-060`, `migrations/sqlite/060/`, with the
+same receipt contract).
 
 ## Create role, migrate, then grant
 
@@ -189,8 +200,6 @@ uplinks, and assembly time for multi-GiB files. The regression
 capped proxy stand-in only.
 
 Invalid upload-limit values fail startup instead of silently selecting defaults.
-After applying migration 006 to an existing Rust slice database, re-run
-`fvoci-migrate --grant-app-role` for the same application role before serving requests.
 This does not provide an importer for the original TypeScript installation.
 
 The app pool is closed explicitly on shutdown and before exiting on startup gate failures.
@@ -522,10 +531,9 @@ with `PATCH /api/v1/workspaces/{id}`. Role updates/removal use
 self-change restrictions and owner invariant. `POST /api/v1/me/personal-workspace`
 is idempotent; personal workspace metadata/members are immutable.
 
-Migration 003 adds the membership self-selection policy and personal-workspace
-constraints. **Re-run `fvoci-migrate --grant-app-role` after applying migration 003**
-to restrict the new helper function's EXECUTE grant to the app role. The tested
-upgrade is from this Rust slice's 001/002 schema, not from a TypeScript installation.
+The membership self-selection policy and the personal-workspace constraints are part
+of the baseline (step 02); the app role's EXECUTE on the helper functions comes from
+`--grant-app-role`.
 
 Workspace mutations write the body, event and audit in one transaction. Name and
 personal workspace events are deliberate additions to the source contract.
@@ -719,8 +727,8 @@ import/export, and deletion surfaces are shown as unavailable rather than faked.
 
 ## Native attachment text extraction
 
-After applying migration 007, rerun `fvoci-migrate --grant-app-role` with the existing
-app-role procedure. The no-argument claim function has a fixed search path and
+The claim function is part of the baseline (step 07) and is executable by the app role
+only after `--grant-app-role`. The no-argument claim function has a fixed search path and
 PUBLIC execution revoked. Its migration owner needs table-owner access; the
 runtime role remains non-superuser without BYPASSRLS.
 
@@ -977,7 +985,9 @@ with or without the owner password. Given the owner password
    password is reported as such, without waiting.
 3. **Preparation**, under a PostgreSQL advisory lock (concurrent starts run one
    after another). If migrations are pending while sessions of the app role are
-   open (another server is still running), it refuses and points to "Upgrade".
+   open (another server is still running), it refuses and points to "Upgrade". A
+   database of the retired development lineage is refused before any pending
+   count (see "Migrate and grant before server").
    Otherwise it creates the `NOBYPASSRLS` app role if missing, migrates (the
    same locked, transactional path as `fvoci-migrate`), applies the grants,
    checks that `FVOCI_APP_PASSWORD` opens the app role, and ensures the scoped
