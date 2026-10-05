@@ -184,6 +184,65 @@ function confirmed(result: SaveResult | null): SaveResult {
   return result;
 }
 
+function expectRevisionNative(body: Body, snapshotBytes: Uint8Array, content: unknown): void {
+  const live = new Y.Doc({ gc: false });
+  let historical: Y.Doc | undefined;
+  try {
+    Y.applyUpdate(live, Buffer.from(body.snapshotV1, "base64"));
+    for (const tail of body.tailV1) Y.applyUpdate(live, Buffer.from(tail, "base64"));
+    // Revision ySnapshot is a delete-set/state-vector Snapshot, not updateV1.
+    const snapshot = Y.decodeSnapshot(snapshotBytes);
+    expect(Y.equalSnapshots(snapshot, Y.snapshot(live))).toBe(true);
+    historical = Y.createDocFromSnapshot(live, snapshot);
+    expect(yDocToTiptapJson(historical)).toEqual(content);
+  } finally {
+    historical?.destroy();
+    live.destroy();
+  }
+}
+
+function revisionOracleNegatives(body: Body, snapshotBytes: Uint8Array, content: unknown): void {
+  const snapshot = Y.decodeSnapshot(snapshotBytes);
+  expect(snapshot.sv.size).toBeGreaterThan(0);
+  const wrongVector = new Map(snapshot.sv);
+  const [client, clock] = [...wrongVector][0]!;
+  wrongVector.set(client, clock + 1);
+  expect(() =>
+    expectRevisionNative(
+      body,
+      Y.encodeSnapshot(Y.createSnapshot(snapshot.ds, wrongVector)),
+      content,
+    ),
+  ).toThrow();
+  const deleted = new Y.Doc({ gc: false });
+  const wrongDecoder = new Y.Doc({ gc: false });
+  try {
+    // Maintained Yjs creates a real delete set; no byte parser or custom CRDT.
+    deleted.clientID = 353;
+    deleted.getText("negative").insert(0, "history");
+    deleted.getText("negative").delete(0, 1);
+    const generated = Y.snapshot(deleted);
+    expect(() => Y.applyUpdate(wrongDecoder, Y.encodeSnapshot(generated))).toThrow();
+    const wrongDeletes = Y.equalSnapshots(Y.createSnapshot(generated.ds, snapshot.sv), snapshot)
+      ? Y.createDeleteSet()
+      : generated.ds;
+    expect(() =>
+      expectRevisionNative(
+        body,
+        Y.encodeSnapshot(Y.createSnapshot(wrongDeletes, snapshot.sv)),
+        content,
+      ),
+    ).toThrow();
+  } finally {
+    deleted.destroy();
+    wrongDecoder.destroy();
+  }
+  expect(() => expectRevisionNative(body, snapshotBytes, { type: "doc", content: [] })).toThrow();
+  expect(() =>
+    expectRevisionNative(body, Buffer.from(body.snapshotV1, "base64"), content),
+  ).toThrow();
+}
+
 async function revision(page: Page, target: Target, result: SaveResult, body: Body): Promise<void> {
   const response = await page.request.get(`${target.path}/revisions/${result.revisionId}`);
   expect(response.status()).toBe(200);
@@ -194,13 +253,11 @@ async function revision(page: Page, target: Target, result: SaveResult, body: Bo
     reason: "manual",
     contentJson: body.contentJson,
   });
-  const native = new Y.Doc({ gc: false });
-  try {
-    Y.applyUpdate(native, Buffer.from(detail.ySnapshot, "base64"));
-    expect(yDocToTiptapJson(native)).toEqual(body.contentJson);
-  } finally {
-    native.destroy();
-  }
+  const current = await readBody(page, target);
+  expect(current).toEqual(body);
+  const bytes = Buffer.from(detail.ySnapshot, "base64");
+  expectRevisionNative(current, bytes, body.contentJson);
+  revisionOracleNegatives(current, bytes, body.contentJson);
 }
 
 async function wiki(page: Page): Promise<Target> {
