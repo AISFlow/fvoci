@@ -377,15 +377,19 @@ try:
       'owns_schema',EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='fvoci' AND pg_get_userbyid(nspowner)=current_user),
       'owns_tables',EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='fvoci' AND pg_get_userbyid(c.relowner)=current_user),
       'versions',(SELECT jsonb_agg(version ORDER BY version) FROM fvoci.schema_migrations),
+      'ledger',(SELECT jsonb_agg(jsonb_build_array(version,lineage,sql_sha256) ORDER BY version) FROM fvoci.schema_migrations),
       'rls',(SELECT jsonb_object_agg(c.relname,jsonb_build_object('enabled',c.relrowsecurity,'forced',c.relforcerowsecurity))
              FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='fvoci'
              AND c.relname IN('documents','document_states','document_collab_updates','wiki_create_commands','revisions')))
       FROM pg_roles r WHERE r.rolname=current_user""", app=True)
-    registry = (W / 'src/db/migrate.rs').read_text().split('const MIGRATIONS:', 1)[1].split('];', 1)[0]
-    expected_versions = [int(match) for match in re.findall(r'include_str!\("\.\./\.\./migrations/([0-9]{3})_', registry)]
+    registry = (W / 'src/db/migrate.rs').read_text().split('const POSTGRES_STEPS:', 1)[1].split('];', 1)[0]
+    expected_steps = re.findall(r'include_str!\("\.\./\.\./migrations/postgres/060/([0-9]{2})_[a-z_]+\.sql"\),\s*"([0-9a-f]{64})"', registry)
+    expected_versions = [int(number) for number, _ in expected_steps]
+    expected_ledger = [[version, 'fvoci-postgres-060', digest] for version, (_, digest) in zip(expected_versions, expected_steps)]
     assert flags['user'] == role and flags['version'] == '180003'
     assert not flags['superuser'] and not flags['bypassrls'] and not flags['owns_schema'] and not flags['owns_tables']
-    assert flags['versions'] == expected_versions and expected_versions == list(range(1, 56))
+    assert flags['versions'] == expected_versions and expected_versions == list(range(1, 13))
+    assert flags['ledger'] == expected_ledger
     assert len(flags['rls']) == 5 and all(row['enabled'] for row in flags['rls'].values())
     assert flags['rls']['revisions']['forced'] and flags['rls']['wiki_create_commands']['forced']
     key_metadata = command(['docker', 'exec', name, 'stat', '-c', '%u %g %a', '/run/fvoci/meili/api_key']).stdout.strip()

@@ -605,11 +605,7 @@ pub(crate) mod backend_tests {
                 .await
                 .unwrap();
             let mut tx = prepare.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
-            for ddl in [
-                include_str!("../../migrations/sqlite/001_current_schema.sql"),
-                include_str!("../../migrations/sqlite/002_wiki_create_commands.sql"),
-                include_str!("../../migrations/sqlite/003_collab_room_fences.sql"),
-            ] {
+            for ddl in crate::db::migrate::compiled_sqlite_sql() {
                 sqlx::raw_sql(ddl).execute(&mut *tx).await.unwrap();
             }
             tx.commit().await.unwrap();

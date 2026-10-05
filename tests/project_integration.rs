@@ -149,7 +149,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use fvoci_server::db::collab::{resolve_collab_admission, CollabDbError};
-use fvoci_server::db::{context, migrate};
+use fvoci_server::db::context;
 use project_harness::{
     add_workspace_user, admin_pool, app_pool, count_rows, create_project, drop_insert_fail_trigger,
     hold_membership_user_lock, http_request, insert_stored_attachment, install_insert_fail_trigger,
@@ -160,100 +160,6 @@ use project_harness::{
 use serde_json::{json, Value};
 use sqlx::Acquire;
 use uuid::Uuid;
-
-#[tokio::test]
-async fn migration_008_projects_schema_exists() {
-    let harness = TestDb::bootstrap().await;
-    let admin = admin_pool(&harness).await;
-    let version: Option<i32> =
-        sqlx::query_scalar("SELECT version FROM fvoci.schema_migrations WHERE version = 8")
-            .fetch_optional(&admin)
-            .await
-            .unwrap();
-    assert_eq!(version, Some(8));
-    admin.close().await;
-    harness.cleanup().await;
-}
-
-#[tokio::test]
-async fn migration_007_upgrades_to_008_projects() {
-    let harness = TestDb::bootstrap_through(7).await;
-    let admin = admin_pool(&harness).await;
-    let workspace_id = Uuid::now_v7();
-    let user_id = Uuid::now_v7();
-    let doc_id = Uuid::now_v7();
-    let path = doc_id.simple().to_string();
-    sqlx::query("INSERT INTO fvoci.users (id, email, given_name) VALUES ($1, $2, 'Owner')")
-        .bind(user_id)
-        .bind(format!("owner-{user_id}@example.com"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO fvoci.workspaces (id, slug, name, next_document_number)
-         VALUES ($1, 'acme', 'Acme', 1)",
-    )
-    .bind(workspace_id)
-    .execute(&admin)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'owner')",
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .execute(&admin)
-    .await
-    .unwrap();
-    sqlx::query(
-        r#"
-        INSERT INTO fvoci.documents (
-            id, workspace_id, title, icon, path, parent_id, sort_key, project_id, number,
-            status, schema_version, text, chosung, version, created_by, content_json, kind
-        ) VALUES (
-            $1, $2, 'Pre-upgrade doc', NULL, $3, NULL, 'V', NULL, 1,
-            'draft', 2, '', '', 1, $4, '{}'::jsonb, 'wiki'
-        )
-        "#,
-    )
-    .bind(doc_id)
-    .bind(workspace_id)
-    .bind(path)
-    .bind(user_id)
-    .execute(&admin)
-    .await
-    .unwrap();
-
-    migrate::run_migrations(&harness.admin_url)
-        .await
-        .expect("upgrade to 008");
-    let version: Option<i32> =
-        sqlx::query_scalar("SELECT version FROM fvoci.schema_migrations WHERE version = 8")
-            .fetch_optional(&admin)
-            .await
-            .unwrap();
-    assert_eq!(version, Some(8));
-    let has_projects: (bool,) = sqlx::query_as(
-        "SELECT EXISTS (
-            SELECT 1 FROM information_schema.tables
-            WHERE table_schema = 'fvoci' AND table_name = 'projects'
-        )",
-    )
-    .fetch_one(&admin)
-    .await
-    .unwrap();
-    assert!(has_projects.0);
-    let preserved: (String,) =
-        sqlx::query_as("SELECT title FROM fvoci.documents WHERE id = $1 AND workspace_id = $2")
-            .bind(doc_id)
-            .bind(workspace_id)
-            .fetch_one(&admin)
-            .await
-            .unwrap();
-    assert_eq!(preserved.0, "Pre-upgrade doc");
-    admin.close().await;
-    harness.cleanup().await;
-}
 
 #[tokio::test]
 async fn contract_create_workspace_visible_project() {

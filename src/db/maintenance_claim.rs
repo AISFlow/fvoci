@@ -579,7 +579,10 @@ mod tests {
             let gate = super::super::migrate::assert_sqlite_schema_current(&backend)
                 .await
                 .unwrap();
-            assert_eq!(gate.applied_steps, 6);
+            assert_eq!(
+                gate.applied_steps,
+                super::super::migrate::compiled_sqlite_steps().len()
+            );
             println!(
                 "S16 actual current schema4 {} {}",
                 gate.schema_sha256,

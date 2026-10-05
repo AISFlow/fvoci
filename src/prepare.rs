@@ -973,34 +973,30 @@ async fn refuse_upgrade_with_live_writers(
     names: &DbNames,
 ) -> Result<(), String> {
     let db = |e: sqlx::Error| e.to_string();
-    let bootstrapped: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.tables
-                        WHERE table_schema = 'fvoci' AND table_name = 'schema_migrations')",
-    )
-    .fetch_one(&mut *conn)
-    .await
-    .map_err(db)?;
-    if !bootstrapped {
-        return Ok(());
-    }
+    // The ledger is read on the owner connection: a retired development lineage
+    // or any receipt set that is not an exact prefix of the compiled lineage is
+    // refused here, before pending steps are counted.
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(owner_url)
         .await
         .map_err(db)?;
-    let applied: Vec<i32> =
-        sqlx::query_scalar("SELECT version FROM fvoci.schema_migrations ORDER BY version")
-            .fetch_all(&pool)
-            .await
-            .map_err(db)?;
-    pool.close().await;
-    let compiled = migrate::compiled_migration_versions();
-    if applied.iter().any(|v| !compiled.contains(v)) {
-        return Err(migrate::schema_gate(&applied, &compiled)
-            .err()
-            .unwrap_or_default());
+    let ledger = async {
+        let mut owner = pool.acquire().await?;
+        migrate::read_postgres_ledger(&mut owner).await
     }
-    let pending = compiled.iter().filter(|v| !applied.contains(v)).count();
+    .await;
+    pool.close().await;
+    let compiled = migrate::compiled_postgres_steps();
+    let pending = match ledger.map_err(db)? {
+        migrate::LedgerState::Unprepared => return Ok(()),
+        retired @ migrate::LedgerState::Retired { .. } => {
+            return Err(migrate::schema_gate(&retired, &compiled)
+                .err()
+                .unwrap_or_default());
+        }
+        migrate::LedgerState::Applied(applied) => migrate::pending_steps(&applied, &compiled)?,
+    };
     if pending == 0 {
         return Ok(());
     }

@@ -5947,7 +5947,7 @@ async fn native_archive_retained_guard_refuses_each_typed_branch_and_passes_unre
 #[tokio::test]
 async fn native_archive_retained_guard_cost_is_measured() {
     use fvoci_server::db::native_archive::RETAINED_PROVENANCE_SQL;
-    let harness = TestDb::bootstrap_through(53).await;
+    let harness = TestDb::bootstrap().await;
     let fx = fixture(&harness).await;
     let other =
         project_harness::add_workspace_user(&fx.admin, fx.workspace_id, "member", "cost-other")
@@ -6047,9 +6047,9 @@ async fn native_archive_retained_guard_cost_is_measured() {
         }
     };
     fill(fx.user_id, 2048).await;
-    // Historical populated 053 -> 054: the only change is the scalar index.
-    // Immutable timer history and every data table retain their fingerprints;
-    // FK, RLS/policy, trigger and app-role grant catalogs remain identical.
+    // A rerun of the current installer and grant must leave the immutable timer
+    // history, every data table fingerprint and the FK/RLS/policy/trigger/grant
+    // catalogs identical; the ledger pairs each receipt with the compiled text.
     let role: String = sqlx::query_scalar("SELECT current_user")
         .fetch_one(&fx.pool)
         .await
@@ -6067,7 +6067,7 @@ async fn native_archive_retained_guard_cost_is_measured() {
         .unwrap();
     let before_data = restore_database_effects(&fx.admin).await;
     let migration_metadata_sql =
-        "SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM fvoci.schema_migrations m";
+        "SELECT jsonb_agg(jsonb_build_object('version',version,'lineage',lineage,'sql_sha256',sql_sha256) ORDER BY version) FROM fvoci.schema_migrations";
     let before_migration_metadata: Value = sqlx::query_scalar(migration_metadata_sql)
         .fetch_one(&fx.admin)
         .await
@@ -6078,18 +6078,22 @@ async fn native_archive_retained_guard_cost_is_measured() {
             .fetch_all(&fx.admin)
             .await
             .unwrap();
-    assert_eq!(before_versions, (1..=53).collect::<Vec<_>>());
-    let absent: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_class WHERE relnamespace='fvoci'::regnamespace AND relname='task_timer_audit_user_id_idx'")
-        .fetch_one(&fx.admin).await.unwrap();
-    assert_eq!(absent, 0);
-    fvoci_server::db::migrate::run_migrations_through(&harness.admin_url, 54)
+    assert_eq!(
+        before_versions,
+        fvoci_server::db::migrate::compiled_migration_versions()
+    );
+    fvoci_server::db::migrate::run_migrations(&harness.admin_url)
         .await
         .unwrap();
-    // 054 is deliberately historical; the current gate must refuse it until
-    // the later wiki command migration and canonical role grants are applied.
-    assert!(fvoci_server::db::migrate::assert_schema_current(&fx.admin)
+    fvoci_server::db::migrate::grant_app_role(&harness.admin_url, &role)
         .await
-        .is_err());
+        .unwrap();
+    fvoci_server::db::migrate::assert_schema_current(&fx.admin)
+        .await
+        .unwrap();
+    fvoci_server::db::migrate::assert_app_role(&fx.pool)
+        .await
+        .unwrap();
     let after_security: Value = sqlx::query_scalar(security_sql)
         .bind(&role)
         .fetch_one(&fx.admin)
@@ -6112,7 +6116,7 @@ async fn native_archive_retained_guard_cost_is_measured() {
             .fetch_all(&fx.admin)
             .await
             .unwrap();
-    assert_eq!(versions, (1..=54).collect::<Vec<_>>());
+    assert_eq!(versions, before_versions);
     let index: Value = sqlx::query_scalar("SELECT jsonb_build_object('valid',i.indisvalid,'ready',i.indisready,'unique',i.indisunique,'keys',i.indnkeyatts,
         'attributes',(SELECT jsonb_agg(a.attname ORDER BY k.ord) FROM unnest(i.indkey) WITH ORDINALITY k(attnum,ord) JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum),
         'noPredicate',i.indpred IS NULL,'noExpression',i.indexprs IS NULL)
@@ -6126,11 +6130,12 @@ async fn native_archive_retained_guard_cost_is_measured() {
         .fetch_one(&fx.admin)
         .await
         .unwrap();
-    // schema_migrations stores versions/timestamps, not SQL checksums. Pair the
-    // actual database rows with source bytes from this frozen runner input.
+    assert_eq!(after_migration_metadata, before_migration_metadata);
+    // The ledger stores the SHA-256 of each compiled step text: pair the
+    // actual receipts with the source bytes of this frozen runner input.
     use sha2::{Digest, Sha256};
     let mut source_checksums: Vec<Value> = std::fs::read_dir(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations/postgres/060"),
     )
     .unwrap()
     .map(|entry| entry.unwrap().path())
@@ -6138,71 +6143,15 @@ async fn native_archive_retained_guard_cost_is_measured() {
     .map(|path| {
         let file = path.file_name().unwrap().to_str().unwrap();
         let version: i32 = file.split('_').next().unwrap().parse().unwrap();
-        json!({"version":version,"file":file,"sha256":format!("{:x}",Sha256::digest(std::fs::read(&path).unwrap()))})
+        json!({"version":version,"lineage":fvoci_server::db::migrate::POSTGRES_LINEAGE,"sql_sha256":format!("{:x}",Sha256::digest(std::fs::read(&path).unwrap()))})
     })
     .collect();
     source_checksums.sort_by_key(|row| row["version"].as_i64().unwrap());
-    assert_eq!(source_checksums.len(), 55);
-    println!(
-        "W8-HISTORICAL-054-FULL-SCHEMA {}",
-        json!({"beforeSecurity":before_security,"afterSecurity":after_security,
-            "beforeDataFingerprints":before_data,"afterDataFingerprints":after_data,
-            "beforeMigrationRows":before_migration_metadata,"afterMigrationRows":after_migration_metadata,
-            "frozenSourceChecksums":source_checksums.iter().filter(|row| row["version"].as_i64().unwrap() <= 54).collect::<Vec<_>>(),"databaseStoresChecksums":false})
+    assert_eq!(
+        source_checksums.len(),
+        fvoci_server::db::migrate::compiled_migration_count()
     );
-    println!(
-        "W8-HISTORICAL-054-CATALOG {}",
-        json!({"index":index,"role":role,"versions":versions,"securityUnchanged":true,"historyUnchanged":true})
-    );
-    measure("actor 2048, other 0").await;
-    fill(fx.user_id, 20_000 - 2048).await;
-    measure("actor 20000, other 0").await;
-    fill(other.user_id, 20_000).await;
-    measure("actor 20000, other 20000").await;
-
-    // Now advance the populated historical installation through canonical055.
-    // Its new table/FKs/RLS/grants are expected additions, while every legacy
-    // catalog entry, data fingerprint and immutable timer row must survive.
-    let historical_security = after_security;
-    let historical_data = restore_database_effects(&fx.admin).await;
-    let historical_history = timer_graph(&fx.admin, fx.user_id).await;
-    fvoci_server::db::migrate::run_migrations(&harness.admin_url)
-        .await
-        .unwrap();
-    fvoci_server::db::migrate::grant_app_role(&harness.admin_url, &role)
-        .await
-        .unwrap();
-    fvoci_server::db::migrate::assert_schema_current(&fx.admin)
-        .await
-        .unwrap();
-    fvoci_server::db::migrate::assert_app_role(&fx.pool)
-        .await
-        .unwrap();
-    let current_versions: Vec<i32> =
-        sqlx::query_scalar("SELECT version FROM fvoci.schema_migrations ORDER BY version")
-            .fetch_all(&fx.admin)
-            .await
-            .unwrap();
-    assert_eq!(current_versions, (1..=55).collect::<Vec<_>>());
-    let current_security: Value = sqlx::query_scalar(security_sql)
-        .bind(&role)
-        .fetch_one(&fx.admin)
-        .await
-        .unwrap();
-    let mut legacy_security = current_security.clone();
-    for (catalog, table_key, new_table) in [
-        ("fks", "table", "fvoci.wiki_create_commands"),
-        ("policies", "tablename", "wiki_create_commands"),
-        ("triggers", "table", "fvoci.wiki_create_commands"),
-        ("grants", "table_name", "wiki_create_commands"),
-        ("rls", "table", "wiki_create_commands"),
-    ] {
-        legacy_security[catalog]
-            .as_array_mut()
-            .unwrap()
-            .retain(|row| row[table_key] != new_table);
-    }
-    assert_eq!(legacy_security, historical_security);
+    assert_eq!(after_migration_metadata, json!(source_checksums));
     let wiki_security: (bool, bool, i64, i64) = sqlx::query_as(
         "SELECT c.relrowsecurity,c.relforcerowsecurity,
          (SELECT count(*) FROM pg_constraint WHERE conrelid=c.oid AND contype='f'),
@@ -6214,48 +6163,25 @@ async fn native_archive_retained_guard_cost_is_measured() {
     .await
     .unwrap();
     assert_eq!(wiki_security, (true, true, 3, 1));
-    let current_data = restore_database_effects(&fx.admin).await;
-    let new_table = current_data
+    let wiki_table = after_data
         .iter()
         .find(|row| row.0 == "wiki_create_commands")
         .unwrap();
-    assert_eq!(new_table.1, 0);
-    assert_eq!(new_table.2, "d41d8cd98f00b204e9800998ecf8427e");
-    assert_eq!(
-        without_versions(
-            current_data
-                .iter()
-                .filter(|row| row.0 != "wiki_create_commands")
-                .cloned()
-                .collect()
-        ),
-        without_versions(historical_data)
-    );
-    assert_eq!(timer_graph(&fx.admin, fx.user_id).await, historical_history);
-    let current_migration_metadata: Value = sqlx::query_scalar(migration_metadata_sql)
-        .fetch_one(&fx.admin)
-        .await
-        .unwrap();
-    assert_eq!(
-        current_migration_metadata
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|row| row["version"].as_i64().unwrap() <= 54)
-            .collect::<Vec<_>>(),
-        after_migration_metadata
-            .as_array()
-            .unwrap()
-            .iter()
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(wiki_table.1, 0);
+    assert_eq!(wiki_table.2, "d41d8cd98f00b204e9800998ecf8427e");
     println!(
-        "W8-CURRENT-055-FULL-SCHEMA {}",
-        json!({"security":current_security,"dataFingerprints":current_data,
-            "migrationRows":current_migration_metadata,"versions":current_versions,
-            "frozenSourceChecksums":source_checksums,"databaseStoresChecksums":false,
-            "legacySecurityUnchanged":true,"historyUnchanged":true})
+        "W8-CURRENT-060-FULL-SCHEMA {}",
+        json!({"beforeSecurity":before_security,"afterSecurity":after_security,
+            "beforeDataFingerprints":before_data,"afterDataFingerprints":after_data,
+            "migrationRows":after_migration_metadata,"versions":versions,
+            "frozenSourceChecksums":source_checksums,"databaseStoresChecksums":true,
+            "securityUnchanged":true,"historyUnchanged":true,"index":index,"role":role})
     );
+    measure("actor 2048, other 0").await;
+    fill(fx.user_id, 20_000 - 2048).await;
+    measure("actor 20000, other 0").await;
+    fill(other.user_id, 20_000).await;
+    measure("actor 20000, other 20000").await;
 
     let storage = fx.storage_root();
     fx.pool.close().await;

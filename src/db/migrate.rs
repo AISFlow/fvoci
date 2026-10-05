@@ -1,137 +1,221 @@
 use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
-const MIGRATIONS: &[(&str, i32)] = &[
-    (include_str!("../../migrations/001_schema.sql"), 1),
-    (include_str!("../../migrations/002_functions.sql"), 2),
-    (include_str!("../../migrations/003_workspace.sql"), 3),
-    (include_str!("../../migrations/004_documents.sql"), 4),
-    (include_str!("../../migrations/005_collab_updates.sql"), 5),
-    (include_str!("../../migrations/006_attachments.sql"), 6),
+/// One compiled schema step of a lineage: its 1-based version, module name,
+/// exact SQL text and the SHA-256 of that text pinned in the registry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompiledStep {
+    pub version: i32,
+    pub name: &'static str,
+    pub sql: &'static str,
+    pub sha256: &'static str,
+}
+
+/// A step receipt read from a database ledger.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppliedStep {
+    pub version: i32,
+    pub lineage: String,
+    pub sql_sha256: String,
+}
+
+/// What a PostgreSQL database's `fvoci.schema_migrations` says about itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LedgerState {
+    /// No `fvoci.schema_migrations` table: an empty database (or one that never
+    /// completed step 01).
+    Unprepared,
+    /// The retired development lineage (a ledger without a `lineage` column).
+    /// Its data is never converted in place.
+    Retired { versions: Vec<i32> },
+    /// Receipts of a baseline lineage, ascending by version.
+    Applied(Vec<AppliedStep>),
+}
+
+/// PostgreSQL new-install baseline lineage. Every step of a lineage is applied in
+/// order into an empty database; a later release appends steps to the same
+/// lineage. A re-baseline starts a new lineage name.
+pub const POSTGRES_LINEAGE: &str = "fvoci-postgres-060";
+
+/// SQLite-family (local SQLite and remote libSQL) new-install baseline lineage.
+/// These are executed steps, never PostgreSQL version markers.
+pub const SQLITE_LINEAGE: &str = "fvoci-sqlite-060";
+/// The retired SQLite-family development lineage, refused explicitly.
+pub const RETIRED_SQLITE_LINEAGE: &str = "fvoci-sqlite-current-v1";
+
+// Each step is one module of the baseline. The registry pins the SHA-256 of the
+// exact compiled text; the runner refuses to apply or accept a step whose text
+// no longer matches its pin, and records (version, lineage, sha256) in the same
+// transaction as the step's DDL. Add a step at the end; never edit an accepted one.
+const POSTGRES_STEPS: &[(&str, &str, &str)] = &[
     (
-        include_str!("../../migrations/007_attachment_extract.sql"),
-        7,
-    ),
-    (include_str!("../../migrations/008_projects.sql"), 8),
-    (include_str!("../../migrations/009_invitations.sql"), 9),
-    (include_str!("../../migrations/010_revisions.sql"), 10),
-    (include_str!("../../migrations/011_comments.sql"), 11),
-    (include_str!("../../migrations/012_api_tokens.sql"), 12),
-    (include_str!("../../migrations/013_outbox.sql"), 13),
-    (include_str!("../../migrations/014_search_index.sql"), 14),
-    (include_str!("../../migrations/015_task_labels.sql"), 15),
-    (include_str!("../../migrations/016_groups.sql"), 16),
-    (include_str!("../../migrations/017_task_milestones.sql"), 17),
-    (include_str!("../../migrations/018_notifications.sql"), 18),
-    (include_str!("../../migrations/019_schedule_ics.sql"), 19),
-    (include_str!("../../migrations/020_mail_reset.sql"), 20),
-    (include_str!("../../migrations/021_maintenance_gc.sql"), 21),
-    (include_str!("../../migrations/022_task_activity.sql"), 22),
-    (include_str!("../../migrations/023_import_jobs.sql"), 23),
-    (include_str!("../../migrations/024_share_stars.sql"), 24),
-    (
-        include_str!("../../migrations/025_account_lifecycle.sql"),
-        25,
-    ),
-    (include_str!("../../migrations/026_admin_console.sql"), 26),
-    (include_str!("../../migrations/027_integrations.sql"), 27),
-    (
-        include_str!("../../migrations/028_collections_views.sql"),
-        28,
-    ),
-    (include_str!("../../migrations/029_mfa_oidc.sql"), 29),
-    (
-        include_str!("../../migrations/030_attachments_complete.sql"),
-        30,
-    ),
-    // 031 is reserved by an open branch.
-    (
-        include_str!("../../migrations/031_attachment_embeddings.sql"),
-        31,
-    ),
-    (
-        include_str!("../../migrations/032_admin_user_erase.sql"),
-        32,
-    ),
-    (
-        include_str!("../../migrations/033_import_deferred_events.sql"),
-        33,
+        "01_core",
+        include_str!("../../migrations/postgres/060/01_core.sql"),
+        "89d671b0af6aa87767810b3f9585d318d2f8a931400042c733ec4d9b9812e72d",
     ),
     (
-        include_str!("../../migrations/034_task_time_entries.sql"),
-        34,
+        "02_identity",
+        include_str!("../../migrations/postgres/060/02_identity.sql"),
+        "5ba19c81003212a80f1865ddd2fde5f0e01fed4a5f40839c35c5e7b4b3bf5d5c",
     ),
     (
-        include_str!("../../migrations/035_identity_link_issuer.sql"),
-        35,
+        "03_workspaces",
+        include_str!("../../migrations/postgres/060/03_workspaces.sql"),
+        "6460f24a11f8cc47e7e839a585c961aa52f766f837ea614a2e1d781c6b05db49",
     ),
     (
-        include_str!("../../migrations/036_identity_link_template_repin.sql"),
-        36,
-    ),
-    (include_str!("../../migrations/037_task_collab.sql"), 37),
-    (
-        include_str!("../../migrations/038_oidc_legacy_issuer_fail_closed.sql"),
-        38,
-    ),
-    (include_str!("../../migrations/039_templates.sql"), 39),
-    (include_str!("../../migrations/040_web_push.sql"), 40),
-    (
-        include_str!("../../migrations/041_outbox_consumer_seed_repair.sql"),
-        41,
+        "04_events",
+        include_str!("../../migrations/postgres/060/04_events.sql"),
+        "7e12b1711f3ed1c9c1c9c8751de7769b323edfda868901d23941632ea1c1aca6",
     ),
     (
-        include_str!("../../migrations/042_secret_maintenance.sql"),
-        42,
+        "05_projects",
+        include_str!("../../migrations/postgres/060/05_projects.sql"),
+        "54479862b9f3087dba696d55cf0a41213999f540ac1675e3ce1d3f3039bccb23",
     ),
     (
-        include_str!("../../migrations/043_events_index_outbox_lag.sql"),
-        43,
+        "06_documents",
+        include_str!("../../migrations/postgres/060/06_documents.sql"),
+        "5b2d53388145e9dbe9509dfb8e7cc11d49d51f140a36eafaa669ad9fa12a1a30",
     ),
     (
-        include_str!("../../migrations/044_email_change_auth_generation.sql"),
-        44,
+        "07_attachments",
+        include_str!("../../migrations/postgres/060/07_attachments.sql"),
+        "038655eb9ebb657ee412ed8205ebd98566abff3c8679f66e910f354124784e8f",
     ),
     (
-        include_str!("../../migrations/045_personal_input_commands.sql"),
-        45,
-    ),
-    (include_str!("../../migrations/046_native_archives.sql"), 46),
-    (
-        include_str!("../../migrations/047_personal_transfer_commands.sql"),
-        47,
-    ),
-    (include_str!("../../migrations/048_task_timers.sql"), 48),
-    (
-        include_str!("../../migrations/049_task_estimate_unit.sql"),
-        49,
+        "08_collections",
+        include_str!("../../migrations/postgres/060/08_collections.sql"),
+        "cdc15a0de9ce2fd38a169e3f7e611b359a43adc2c0f330f04eaa6580f19b4239",
     ),
     (
-        include_str!("../../migrations/050_revision_restore_metadata.sql"),
-        50,
-    ),
-    (include_str!("../../migrations/051_zotero_readonly.sql"), 51),
-    (
-        include_str!("../../migrations/052_timer_receipt_restore_provenance.sql"),
-        52,
+        "09_notifications",
+        include_str!("../../migrations/postgres/060/09_notifications.sql"),
+        "42643610bef66a1908bd72b9e07775e99a453d1e9f77cb4e6f1ecbbe0f432de0",
     ),
     (
-        include_str!("../../migrations/053_timer_receipt_historical_run.sql"),
-        53,
+        "10_integrations",
+        include_str!("../../migrations/postgres/060/10_integrations.sql"),
+        "3d55991ea9581bee6d63cb04b649c0b8bb01ecb235efb26152c10e14cb5464ca",
     ),
     (
-        include_str!("../../migrations/054_timer_audit_actor_index.sql"),
-        54,
+        "11_imports",
+        include_str!("../../migrations/postgres/060/11_imports.sql"),
+        "a3a20d34e637a5f7a88851e3eef21ce96ca68b43a35583667ca80a6f57bf1f27",
     ),
     (
-        include_str!("../../migrations/055_wiki_create_commands.sql"),
-        55,
-    ),
-    (
-        include_str!("../../migrations/056_body_save_commands.sql"),
-        56,
+        "12_operations",
+        include_str!("../../migrations/postgres/060/12_operations.sql"),
+        "5783e5cd70fcf7e67d908c8088851354e5c9d8579cba9f51c3b7762795ffb5ba",
     ),
 ];
+
+const SQLITE_STEPS: &[(&str, &str, &str)] = &[
+    (
+        "01_core",
+        include_str!("../../migrations/sqlite/060/01_core.sql"),
+        "d57046979d66dee08592750db106220bd244d8cd89faef2cbc682d2b15d9b903",
+    ),
+    (
+        "02_identity",
+        include_str!("../../migrations/sqlite/060/02_identity.sql"),
+        "6ec58d924591a5c0d7e3c2ae9a0ed385e1517fd9cf5110abd4a3f5a4c36b83ed",
+    ),
+    (
+        "03_workspaces",
+        include_str!("../../migrations/sqlite/060/03_workspaces.sql"),
+        "f35dd5bdbd22aea0f1f102e602121e5644a834aaca3c21329a2363edba5ce45d",
+    ),
+    (
+        "04_events",
+        include_str!("../../migrations/sqlite/060/04_events.sql"),
+        "f0112ff64c73060cc6eba093e5d0f6f26a455438997e303bbdc62d36810b1c4c",
+    ),
+    (
+        "05_projects",
+        include_str!("../../migrations/sqlite/060/05_projects.sql"),
+        "f49faf57942ba68126107c8e3e950663263fd14ae4dc2ae1e721aa2d59e8438d",
+    ),
+    (
+        "06_documents",
+        include_str!("../../migrations/sqlite/060/06_documents.sql"),
+        "2ef7c969db051af6382e33cb0368d03b2dc7190f1c5954b1d853f80aee229cb3",
+    ),
+    (
+        "07_attachments",
+        include_str!("../../migrations/sqlite/060/07_attachments.sql"),
+        "b1c475434ab3bd2189ffdd088d656bed28a8fe802d3847ec21a18c4a580e6d0d",
+    ),
+    (
+        "08_collections",
+        include_str!("../../migrations/sqlite/060/08_collections.sql"),
+        "24d9684e45e74bc4dfac864f0ebbf1ac5723dbed0142f56eddce269b0b2a0154",
+    ),
+    (
+        "09_notifications",
+        include_str!("../../migrations/sqlite/060/09_notifications.sql"),
+        "431c178474c5ea5149b3bb6e081259d72034fdf6ef61f0230c0fd680a53e717f",
+    ),
+    (
+        "10_integrations",
+        include_str!("../../migrations/sqlite/060/10_integrations.sql"),
+        "58ba69967d340d81b0f42d16238645857548e0fcbdc78750c5163f6cc2465629",
+    ),
+    (
+        "11_imports",
+        include_str!("../../migrations/sqlite/060/11_imports.sql"),
+        "29981388ae1330dbafb88252ac5e9b1cdde5a9ec4e9d94a3a383c5d72172a746",
+    ),
+    (
+        "12_operations",
+        include_str!("../../migrations/sqlite/060/12_operations.sql"),
+        "090c90eb21943c93bd159c11423e9afdfd99a96f89ce849192fa705dc5b35423",
+    ),
+];
+
+fn steps_of(registry: &'static [(&'static str, &'static str, &'static str)]) -> Vec<CompiledStep> {
+    registry
+        .iter()
+        .enumerate()
+        .map(|(index, (name, sql, sha256))| CompiledStep {
+            version: (index + 1) as i32,
+            name,
+            sql,
+            sha256,
+        })
+        .collect()
+}
+
+/// The PostgreSQL baseline steps compiled into this binary, ascending.
+pub fn compiled_postgres_steps() -> Vec<CompiledStep> {
+    steps_of(POSTGRES_STEPS)
+}
+
+/// The SQLite-family baseline steps compiled into this binary, ascending.
+pub fn compiled_sqlite_steps() -> Vec<CompiledStep> {
+    steps_of(SQLITE_STEPS)
+}
+
+/// The exact compiled SQLite-family DDL, in order. Test fixtures that build a
+/// current-schema file without the runner execute these texts verbatim.
+pub fn compiled_sqlite_sql() -> impl Iterator<Item = &'static str> {
+    SQLITE_STEPS.iter().map(|(_, sql, _)| *sql)
+}
+
+/// Number of PostgreSQL steps compiled into this binary.
+pub fn compiled_migration_count() -> usize {
+    POSTGRES_STEPS.len()
+}
+
+/// Latest PostgreSQL step version compiled into this binary.
+pub fn latest_migration_version() -> i32 {
+    POSTGRES_STEPS.len() as i32
+}
+
+/// Every PostgreSQL step version compiled into this binary, ascending.
+pub fn compiled_migration_versions() -> Vec<i32> {
+    (1..=POSTGRES_STEPS.len() as i32).collect()
+}
 
 pub(crate) const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
 
@@ -141,67 +225,153 @@ const APP_ROLE_PLACEHOLDER: &str = ":\"app_role\"";
 pub const SCHEMA_GATE_OPERATOR_HINT: &str =
     "run `fvoci-migrate` then `fvoci-migrate --grant-app-role <app-role>` before starting fvoci-server";
 
-/// Number of migrations compiled into this binary. Versions may have gaps
-/// (a number reserved by an unmerged branch), so this is not the latest version.
-pub fn compiled_migration_count() -> usize {
-    MIGRATIONS.len()
+/// Operator message for a database carrying the retired development lineage.
+pub const RETIRED_LINEAGE_HINT: &str = "this database carries the retired FVOCI development \
+    migration lineage, which 0.6 does not upgrade in place; install into an empty database and \
+    move the data with a current-format native archive (export from the old server, restore here)";
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
 }
 
-/// Latest migration version compiled into this binary.
-pub fn latest_migration_version() -> i32 {
-    MIGRATIONS.last().map(|(_, version)| *version).unwrap_or(0)
-}
-
-/// Every migration version compiled into this binary, ascending.
-pub fn compiled_migration_versions() -> Vec<i32> {
-    MIGRATIONS.iter().map(|(_, version)| *version).collect()
-}
-
-/// Compares the applied migration set with the compiled one. Every compiled
-/// version must be applied and nothing else may be: a version number that
-/// merges after a higher one (031 after 032) is still required, so the check
-/// is on the set, not on `max(version)`.
-pub fn schema_gate(applied: &[i32], compiled: &[i32]) -> Result<(), String> {
-    let expected = compiled.last().copied().unwrap_or(0);
-    if applied.is_empty() {
+fn verify_compiled_digest(step: &CompiledStep) -> Result<(), String> {
+    if sha256_hex(step.sql.as_bytes()) != step.sha256 {
         return Err(format!(
-            "database has no applied migrations (expected version {expected}); {SCHEMA_GATE_OPERATOR_HINT}"
-        ));
-    }
-    let unknown: Vec<i32> = applied
-        .iter()
-        .copied()
-        .filter(|version| !compiled.contains(version))
-        .collect();
-    if !unknown.is_empty() {
-        return Err(format!(
-            "database schema has migrations {unknown:?} newer than this binary ({expected}); deploy a matching fvoci-server"
-        ));
-    }
-    let missing: Vec<i32> = compiled
-        .iter()
-        .copied()
-        .filter(|version| !applied.contains(version))
-        .collect();
-    if !missing.is_empty() {
-        return Err(format!(
-            "database schema is missing migrations {missing:?} and is behind compiled version {expected}; {SCHEMA_GATE_OPERATOR_HINT}"
+            "compiled step {} ({}) does not match its registry digest; this binary is corrupt",
+            step.version, step.name
         ));
     }
     Ok(())
 }
 
-/// Verifies the connected database matches the compiled migration set.
-pub async fn assert_schema_current(pool: &PgPool) -> Result<(), String> {
-    let applied = sqlx::query_scalar::<_, i32>(
-        "SELECT version FROM fvoci.schema_migrations ORDER BY version",
+/// Compares a ledger with the compiled lineage. Every compiled step must be
+/// applied with the same lineage and digest, in order, and nothing else may be
+/// recorded. The database ledger is never modified by this check.
+pub fn schema_gate(ledger: &LedgerState, compiled: &[CompiledStep]) -> Result<(), String> {
+    let expected = compiled.len() as i32;
+    match ledger {
+        LedgerState::Unprepared => Err(format!(
+            "database has no applied migrations (expected {POSTGRES_LINEAGE} version {expected}); {SCHEMA_GATE_OPERATOR_HINT}"
+        )),
+        LedgerState::Retired { versions } => Err(format!(
+            "database schema ledger has development migrations {versions:?} without a lineage; {RETIRED_LINEAGE_HINT}"
+        )),
+        LedgerState::Applied(applied) => {
+            let pending = pending_steps(applied, compiled)?;
+            if pending > 0 {
+                let missing: Vec<i32> = compiled[compiled.len() - pending..]
+                    .iter()
+                    .map(|step| step.version)
+                    .collect();
+                return Err(format!(
+                    "database schema is missing migrations {missing:?} and is behind compiled version {expected}; {SCHEMA_GATE_OPERATOR_HINT}"
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Number of compiled steps a ledger of this lineage still lacks (0 when
+/// current). Any receipt that is not an exact prefix of the compiled lineage
+/// (foreign lineage, altered digest, gap, or a version newer than this binary)
+/// is an error, never a count.
+pub fn pending_steps(applied: &[AppliedStep], compiled: &[CompiledStep]) -> Result<usize, String> {
+    let expected = compiled.len() as i32;
+    if applied.is_empty() {
+        return Err(format!(
+            "database has no applied migrations (a schema ledger without receipts; expected {POSTGRES_LINEAGE} version {expected}); {SCHEMA_GATE_OPERATOR_HINT}"
+        ));
+    }
+    if applied.len() > compiled.len() {
+        let newer: Vec<i32> = applied[compiled.len()..]
+            .iter()
+            .map(|step| step.version)
+            .collect();
+        return Err(format!(
+            "database schema has migrations {newer:?} newer than this binary ({expected}); deploy a matching fvoci-server"
+        ));
+    }
+    for (index, (receipt, step)) in applied.iter().zip(compiled).enumerate() {
+        let position = (index + 1) as i32;
+        if receipt.lineage != POSTGRES_LINEAGE {
+            return Err(format!(
+                "database schema receipt {} belongs to lineage {:?}, not {POSTGRES_LINEAGE}; install into an empty database",
+                receipt.version, receipt.lineage
+            ));
+        }
+        if receipt.version != position {
+            return Err(format!(
+                "database schema receipts are not contiguous (receipt {} at position {position}); {SCHEMA_GATE_OPERATOR_HINT}",
+                receipt.version
+            ));
+        }
+        if receipt.sql_sha256 != step.sha256 {
+            return Err(format!(
+                "database schema step {} ({}) was applied from a different text (digest {}); deploy the fvoci-server that applied it",
+                step.version, step.name, receipt.sql_sha256
+            ));
+        }
+    }
+    Ok(compiled.len() - applied.len())
+}
+
+/// Reads the ledger. Works inside a migration transaction or on a plain
+/// connection of the app role (SELECT on fvoci.schema_migrations is granted).
+pub async fn read_postgres_ledger(conn: &mut PgConnection) -> Result<LedgerState, sqlx::Error> {
+    let bootstrapped: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'fvoci' AND table_name = 'schema_migrations'
+        )",
     )
-    .fetch_all(pool)
-    .await
-    .map_err(|error| {
+    .fetch_one(&mut *conn)
+    .await?;
+    if !bootstrapped {
+        return Ok(LedgerState::Unprepared);
+    }
+    let has_lineage: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'fvoci' AND table_name = 'schema_migrations'
+              AND column_name = 'lineage'
+        )",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    if !has_lineage {
+        let versions: Vec<i32> =
+            sqlx::query_scalar("SELECT version FROM fvoci.schema_migrations ORDER BY version")
+                .fetch_all(&mut *conn)
+                .await?;
+        return Ok(LedgerState::Retired { versions });
+    }
+    let rows: Vec<(i32, String, String)> = sqlx::query_as(
+        "SELECT version, lineage, sql_sha256 FROM fvoci.schema_migrations ORDER BY version",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(LedgerState::Applied(
+        rows.into_iter()
+            .map(|(version, lineage, sql_sha256)| AppliedStep {
+                version,
+                lineage,
+                sql_sha256,
+            })
+            .collect(),
+    ))
+}
+
+/// Verifies the connected database matches the compiled lineage exactly.
+pub async fn assert_schema_current(pool: &PgPool) -> Result<(), String> {
+    let mut conn = pool.acquire().await.map_err(|error| {
         format!("cannot read fvoci.schema_migrations ({error}); {SCHEMA_GATE_OPERATOR_HINT}")
     })?;
-    schema_gate(&applied, &compiled_migration_versions())
+    let ledger = read_postgres_ledger(&mut conn).await.map_err(|error| {
+        format!("cannot read fvoci.schema_migrations ({error}); {SCHEMA_GATE_OPERATOR_HINT}")
+    })?;
+    schema_gate(&ledger, &compiled_postgres_steps())
 }
 
 // PostgreSQL grants EXECUTE to PUBLIC when a function is created. Revoke it for
@@ -226,8 +396,8 @@ END
 $$;
 "#;
 
-// Migrations 016, 018 and 040 call unqualified `uuidv7()`, a built-in only
-// from PostgreSQL 18. On 16 and 17 this creates `public.uuidv7()` with the
+// Step 09 declares `uuidv7()` column defaults, a built-in only from
+// PostgreSQL 18. On 16 and 17 this creates `public.uuidv7()` with the
 // RFC 9562 section 5.7 layout: 48-bit Unix milliseconds from
 // clock_timestamp(), version 7, and the RFC variant and remaining 74 bits
 // taken from built-in gen_random_uuid() (CSPRNG). A clock outside the
@@ -328,7 +498,7 @@ $preflight$;
 "#;
 
 /// Runs the version-specific preflight under the migration lock in its own
-/// transaction, before any migration is applied.
+/// transaction, before any step is applied.
 async fn preflight(pool: &PgPool) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -345,6 +515,9 @@ pub async fn run_migrations(url: &str) -> Result<(), sqlx::Error> {
     run_migrations_through(url, i32::MAX).await
 }
 
+/// Applies the compiled lineage up to `max_version` (every step when larger
+/// than the lineage). A partially applied lineage is resumed from its next
+/// step; anything that is not an exact prefix of the compiled lineage is refused.
 pub async fn run_migrations_through(url: &str, max_version: i32) -> Result<(), sqlx::Error> {
     let pool = PgPoolOptions::new().max_connections(2).connect(url).await?;
     let result = apply_migrations(&pool, max_version).await;
@@ -352,48 +525,67 @@ pub async fn run_migrations_through(url: &str, max_version: i32) -> Result<(), s
     result
 }
 
+fn ledger_error(message: String) -> sqlx::Error {
+    sqlx::Error::Protocol(message)
+}
+
 async fn apply_migrations(pool: &PgPool, max_version: i32) -> Result<(), sqlx::Error> {
     preflight(pool).await?;
-    for (sql, version) in MIGRATIONS {
-        if *version > max_version {
+    let compiled = compiled_postgres_steps();
+    for step in &compiled {
+        if step.version > max_version {
             continue;
         }
+        verify_compiled_digest(step).map_err(ledger_error)?;
         let mut tx = pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(MIGRATION_LOCK_KEY)
             .execute(&mut *tx)
             .await?;
 
-        let bootstrapped: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                SELECT 1 FROM information_schema.tables
-                WHERE table_schema = 'fvoci' AND table_name = 'schema_migrations'
-            )",
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-
-        if bootstrapped {
-            let applied: Option<i32> = sqlx::query_scalar(
-                "SELECT version FROM fvoci.schema_migrations WHERE version = $1",
-            )
-            .bind(version)
-            .fetch_optional(&mut *tx)
-            .await?;
-            if applied.is_some() {
+        let applied = match read_postgres_ledger(&mut tx).await? {
+            LedgerState::Unprepared => Vec::new(),
+            LedgerState::Retired { versions } => {
+                tx.rollback().await?;
+                return Err(ledger_error(format!(
+                    "database schema ledger has development migrations {versions:?} without a lineage; {RETIRED_LINEAGE_HINT}"
+                )));
+            }
+            LedgerState::Applied(applied) => applied,
+        };
+        if !applied.is_empty() || step.version > 1 {
+            let pending = match pending_steps(&applied, &compiled).map_err(ledger_error) {
+                Ok(pending) => pending,
+                Err(error) => {
+                    tx.rollback().await?;
+                    return Err(error);
+                }
+            };
+            let next = (compiled.len() - pending + 1) as i32;
+            if step.version < next {
                 tx.rollback().await?;
                 continue;
             }
+            if step.version != next {
+                tx.rollback().await?;
+                return Err(ledger_error(format!(
+                    "database schema is at step {} but step {} was requested; {SCHEMA_GATE_OPERATOR_HINT}",
+                    next - 1,
+                    step.version
+                )));
+            }
         }
 
-        sqlx::raw_sql(sql).execute(&mut *tx).await?;
+        sqlx::raw_sql(step.sql).execute(&mut *tx).await?;
         sqlx::raw_sql(REVOKE_PUBLIC_DEFINER_EXECUTE)
             .execute(&mut *tx)
             .await?;
         sqlx::query(
-            "INSERT INTO fvoci.schema_migrations (version) VALUES ($1) ON CONFLICT DO NOTHING",
+            "INSERT INTO fvoci.schema_migrations (version, lineage, sql_sha256) VALUES ($1, $2, $3)",
         )
-        .bind(version)
+        .bind(step.version)
+        .bind(POSTGRES_LINEAGE)
+        .bind(step.sha256)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -586,338 +778,6 @@ pub async fn assert_app_role(pool: &PgPool) -> Result<(), String> {
 
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use sha2::{Digest, Sha256};
-
-    // Applied migrations are skipped by version, so editing an accepted file would
-    // silently diverge existing installations. Add a new migration instead and
-    // append its digest here when it is accepted.
-    const ACCEPTED_MIGRATION_SHA256: &[(i32, &str)] = &[
-        (
-            1,
-            "1ed4ce976b341c67fca4932c59f4de151e904697df7ca5ecef3c15d25b2d1680",
-        ),
-        (
-            2,
-            "c929fff47207a0fa8d59dd18cb7ad28b36101eab91aba34e744f4e03e9bf1f4e",
-        ),
-        (
-            3,
-            "dd8741c56d5e2a2b3ab2fd177c72ee506b82eaa1a0c44cd3ac54c31865e292b0",
-        ),
-        (
-            4,
-            "a1a3720d7d57649779093c3eee7fd7f3d2e09e3a9870295c6a5c278e6e19d1ec",
-        ),
-        (
-            5,
-            "320f5c989410c0e03f05ec5056e96fb55854b54d8452ccb7f197ef5a7523989b",
-        ),
-        (
-            6,
-            "f567d29c7deca648adc0b2b80dda54feae59906bb02453fb62e729df788772d8",
-        ),
-        (
-            7,
-            "36752ac87f153e689ba298b5cfab6c9a1375b34b1ec3dc839942d36da8c0b0fa",
-        ),
-        (
-            8,
-            "03a94479c2f4e44f2a79e1dfe30f5f3c697eccfb35525b34dacc21f243bb030b",
-        ),
-        (
-            9,
-            "640c6063ba24cbe90a00dbd98cf54945752265fbfceef9221ee027bfa26289b6",
-        ),
-        (
-            10,
-            "64594b33a13df1ed29479d4b07d692850e0c806b0b76749cc0316e3eaea8dfa8",
-        ),
-        (
-            11,
-            "ab17b10baa2533ebccaf994ae5c4d1d0f1ce7bc82a56f9e77371c483f48bf3e5",
-        ),
-        (
-            12,
-            "b8964ac88a75c2b5e4264c25de083810971e350550214c61bdd08de6ed695912",
-        ),
-        (
-            13,
-            "2ac42b2dc796dddd23d48574135c9e0c50c60cb55c6c3d9960b7faffe9c66708",
-        ),
-        (
-            14,
-            "c772193b7b97c1484d6339c69c32a18d8b46644d3cc9700db1b7222157ec0637",
-        ),
-        (
-            15,
-            "8b6a424957ef8a5a67804ea8b3f3d9990bbff43c91ab4dad10f2b682e864ce35",
-        ),
-        (
-            16,
-            "68dcd7c2f0edd54ee4ba4638dda9edbceef4e58b6174e537fb92c9abfe006ff5",
-        ),
-        (
-            17,
-            "f09ba97f766cfa3265c7383b9fd91c6f6fe747581bf7156807f5beffdda84846",
-        ),
-        (
-            18,
-            "5999d2f08f5f62f274c445e965bdf938c84b90b52b5557fa60b81f5e29ba002c",
-        ),
-        (
-            19,
-            "5da12540460cbda0b823d7e63025ab8e3b371c90cfa1acb09b7b342a8f9b4fc6",
-        ),
-        (
-            20,
-            "cd4e1ec73457fed4f759ddbeff9d998a690afde5c3c4f6779ea20b45baf13fb4",
-        ),
-        (
-            21,
-            "7a9e03487d30c9e92e4f8b93e69d0bbc1b1ac20771161c6a71ba8ed48a90a50c",
-        ),
-        (
-            22,
-            "62ed9fa9bdc77189975c11ddf420a4dccf79ee039f6d2548355f85e6ed6eba3c",
-        ),
-        (
-            23,
-            "29b0d5367efb66f104a66794f1c3a3b4a41917e946c7a8077eb316eee700a32c",
-        ),
-        (
-            24,
-            "9fcd7f5d12faa7d3108278e95753bca4b60f3f4529b65caf3c94f1f5944a1921",
-        ),
-        (
-            25,
-            "265edf3e23543c631c2f515607304e67edf056bab9f5537506739a8e5464d175",
-        ),
-        (
-            26,
-            "fc1035798930f9c1c96f654066a8552f03d0700be02199b7f2de9072fc75588d",
-        ),
-        (
-            27,
-            "abb60b87ee539663e93c9fa68b8eb986748c2acccd210c0f655c061b378c9d68",
-        ),
-        (
-            28,
-            "99627ccc208879f385340ee888f25cfd7e85f2a57b692a9cfc8cfb2280f7216d",
-        ),
-        (
-            29,
-            "fa1870fbfc05a77fe6efbe9adaa59f22b275b5faef7fb09712f214374a3df531",
-        ),
-        (
-            30,
-            "c5fb3f817fb536b10dd9ab68b626b9cd598c2a4198eded19b2dd8d58c385d1e8",
-        ),
-        (
-            31,
-            "c098b60993d173feb3c7f2f4c33a7c4df7a90c6515aa656a1e96400e871ec643",
-        ),
-        (
-            32,
-            "dbf49b5d5bf969376406208582f976bd9cc4d04a8b2d76d90fee53d2902b3687",
-        ),
-        (
-            33,
-            "4c8310a5380b5e1fa165fb7d3ebc0cdd4237af60ce102551061d37aa4e53fa7b",
-        ),
-        (
-            34,
-            "a15a3adb05357c2ac6e8cb70265b7b8319d18c3a934f1ef4658bb0cbe4cee7a4",
-        ),
-        (
-            35,
-            "9ab2a7432d458d2663e3caa796cf9ac71a6cda1117a94d1ccdeb5c8bc8585b69",
-        ),
-        (
-            36,
-            "6932eba2f27535ac16801d00bafbf5fa1c25e6b0f84c4ff42ea63957103e576c",
-        ),
-        (
-            37,
-            "4a67badc60a646dc99a7b7698800cb309a3b1bcae76bf8fb5be7531b58e33b81",
-        ),
-        (
-            38,
-            "03d965d84b895263df58bf5520c23ca8e1acc444f082ca20306bcb388a29a487",
-        ),
-        (
-            39,
-            "27713b14583fd331f0679244e359ade3ae4a2427d8db06210cbfd4d6dc4f34d5",
-        ),
-        (
-            40,
-            "ed2db8ff0ab33ce59fd098d0370e05464779d5197799a16054bf43b7e2b6f33f",
-        ),
-        (
-            41,
-            "1d86261505a7065283f7a27b53399e2628602464c576ed36fe7a6a2ff2ff6137",
-        ),
-        (
-            42,
-            "b30c81994d86829c682b69c0f849b08575cdb64e17466a39d26f35ae12344431",
-        ),
-        (
-            43,
-            "a513c4f1c24e1c0c65c49e78e12131cc82931036c59c377956b5348fe8ce22c8",
-        ),
-        (
-            44,
-            "bfabdbe0270e7275212aa45489405d2651526b34108c6d50ff718e243c363d5d",
-        ),
-        (
-            45,
-            "34ba8efcdc7d13f9921611aba74a1a9bc13c88c25d8ffcb35282de4919b9f561",
-        ),
-        (
-            46,
-            "28a0fcfd7b95711c7bd6e17d49c331a26411046551c0ce3bf6509fb48120a1ad",
-        ),
-        (
-            47,
-            "2ec47baddc7570820e2101a8c7dbce72ca7678d84dbf2683e4a463c0b05ac47b",
-        ),
-        (
-            48,
-            "b7f943996e9cc9918c90ceb780db285708a31c165368064cd17eb0a5f14ed787",
-        ),
-        (
-            49,
-            "ea1cc0783489ce6866a46c6b1363e5bfd89e76f026f27d0ca7615b02c2ece219",
-        ),
-        (
-            50,
-            "201e77d18302c25e2b933168d4678a6bb27e251454f1d9d42e5f3aa0ceda09bf",
-        ),
-        (
-            51,
-            "aa9315e174e62a101045fd5f254bf98e9f2ca70a08e801e2862d7c0aaaf50008",
-        ),
-        (
-            52,
-            "7472a27beda41856d5c93e6a428a0913571696c2727759a6dcf5eabcf78253f3",
-        ),
-        (
-            53,
-            "1fac26baa0b5ebaaf97312131dfd10cfb024ad4e516307a95dea5a3653fe5a89",
-        ),
-        (
-            54,
-            "53a6ed1058565b61305ed34c41b90a80a2d3f0dd55a4d818813672b1ac43afbc",
-        ),
-        (
-            55,
-            "dc60f939985a5c000d57a7f266c12c247373601f92759630b324b22b4a29af45",
-        ),
-        (
-            56,
-            "c7f5f0907a02e3120678b1f5032358e277e819e14f0c2506f280217c50896ebe",
-        ),
-    ];
-
-    #[test]
-    fn accepted_migrations_are_immutable_and_ordered() {
-        assert_eq!(MIGRATIONS.len(), ACCEPTED_MIGRATION_SHA256.len());
-        for ((sql, version), (expected_version, expected)) in
-            MIGRATIONS.iter().zip(ACCEPTED_MIGRATION_SHA256)
-        {
-            assert_eq!(version, expected_version, "migration order changed");
-            let digest: String = Sha256::digest(sql.as_bytes())
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect();
-            assert_eq!(
-                &digest, expected,
-                "accepted migration {version:03} changed; add a new migration instead"
-            );
-        }
-    }
-
-    #[test]
-    fn schema_gate_distinguishes_ahead_behind_gap_and_empty() {
-        let compiled = compiled_migration_versions();
-        let expected = latest_migration_version();
-        assert!(schema_gate(&compiled, &compiled).is_ok());
-
-        let mut behind = compiled.clone();
-        behind.pop();
-        let behind = schema_gate(&behind, &compiled).unwrap_err();
-        assert!(
-            behind.contains(&format!("behind compiled version {expected}")),
-            "{behind}"
-        );
-        assert!(behind.contains(SCHEMA_GATE_OPERATOR_HINT), "{behind}");
-
-        // A lower version merged after a higher one: max(version) matches but
-        // the set does not. The server must still refuse to start.
-        let mut gap = compiled.clone();
-        let removed = gap.remove(gap.len() - 2);
-        let gap = schema_gate(&gap, &compiled).unwrap_err();
-        assert!(
-            gap.contains(&format!("missing migrations [{removed}]")),
-            "{gap}"
-        );
-        assert!(gap.contains(SCHEMA_GATE_OPERATOR_HINT), "{gap}");
-
-        let mut ahead = compiled.clone();
-        ahead.push(expected + 1);
-        let ahead = schema_gate(&ahead, &compiled).unwrap_err();
-        assert!(
-            ahead.contains(&format!("newer than this binary ({expected})")),
-            "{ahead}"
-        );
-        assert!(ahead.contains("deploy a matching fvoci-server"), "{ahead}");
-        assert!(!ahead.contains("fvoci-migrate"), "{ahead}");
-
-        let empty = schema_gate(&[], &compiled).unwrap_err();
-        assert!(empty.contains("no applied migrations"), "{empty}");
-        assert!(empty.contains(SCHEMA_GATE_OPERATOR_HINT), "{empty}");
-    }
-
-    #[test]
-    fn grant_sql_quotes_role_and_replaces_every_placeholder() {
-        let sql = app_role_grant_sql("app\"x");
-        assert!(!sql.contains(APP_ROLE_PLACEHOLDER));
-        assert!(sql.contains("TO \"app\"\"x\";"));
-        assert!(!sql.contains("BEGIN") && !sql.contains("COMMIT"));
-    }
-}
-
-/// SQLite-family lineage: these are executed steps, never PG version markers.
-pub const SQLITE_LINEAGE: &str = "fvoci-sqlite-current-v1";
-const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
-    (
-        include_str!("../../migrations/sqlite/001_current_schema.sql"),
-        "0d49ad2c13bcc7942e95441f9965ff3a60f8982b10b3baa55d4b46e00420965f",
-    ),
-    (
-        include_str!("../../migrations/sqlite/002_wiki_create_commands.sql"),
-        "8460c39b4f0815fabf9e13e958ab6a99f2415ad10b59e04bd6de397724abe45c",
-    ),
-    (
-        include_str!("../../migrations/sqlite/003_collab_room_fences.sql"),
-        "fd9b35411378d7485c40f9fcac2821121eb260c1a09dc7bdeb08a72608ba6d70",
-    ),
-    (
-        include_str!("../../migrations/sqlite/004_maintenance_claims.sql"),
-        "6e034f6aa3f69b6c7a4ac4ff13035e5276ec7e840eb73d97a78a1456105dbade",
-    ),
-    (
-        include_str!("../../migrations/sqlite/005_body_save_commands.sql"),
-        "9a2536646bf6122733fce68e6ad1a5bdbd3ce1c96a22016a4e7715dc0e7df219",
-    ),
-    (
-        include_str!("../../migrations/sqlite/006_task_collab_room_fences.sql"),
-        "afd7c8da06fe0280a8c0813d288581fd19a4249d4f28b0f082dca3603ad277ea",
-    ),
-];
 
 /// Held by the actual server for its entire joined runtime, or exclusively
 /// by preparation until every migration connection has closed. Locks use
@@ -1296,21 +1156,20 @@ async fn apply_sqlite_migrations(
     backend: &super::backend::Backend,
     cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<(), sqlx::Error> {
-    for (index, (sql, digest)) in SQLITE_MIGRATIONS.iter().enumerate() {
-        apply_sqlite_migration_step(backend, index, sql, digest, cancel).await?;
+    for step in compiled_sqlite_steps() {
+        apply_sqlite_migration_step(backend, &step, cancel).await?;
     }
     assert_sqlite_schema_current(backend).await.map(|_| ())
 }
 
 async fn apply_sqlite_migration_step(
     backend: &super::backend::Backend,
-    index: usize,
-    sql: &'static str,
-    digest: &'static str,
+    step: &CompiledStep,
     cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<(), sqlx::Error> {
     use super::backend::DbTransaction;
     use super::codec::Cell;
+    let index = (step.version - 1) as usize;
     if cancel.is_some_and(|token| token.is_cancelled()) {
         return Err(schema_error(
             "SQLite migration cancelled after in-flight work settled",
@@ -1327,13 +1186,13 @@ async fn apply_sqlite_migration_step(
         verify_sqlite_objects(family, applied.len()).await?;
         if index < applied.len() { return Ok(false); }
         if index != applied.len() { return Err(schema_error("SQLite migration gap")); }
-        verify_compiled_sqlite_digest(sql, digest)?;
+        verify_compiled_digest(step).map_err(schema_error)?;
         if cancel.is_some_and(|token| token.is_cancelled()) { return Err(schema_error("SQLite migration cancelled before DDL")); }
-        family.apply_migration_batch(sql).await?;
+        family.apply_migration_batch(step.sql).await?;
         if cancel.is_some_and(|token| token.is_cancelled()) { return Err(schema_error("SQLite migration cancelled after DDL; rollback before marker/commit")); }
         family.execute(
             "INSERT INTO schema_migrations(version,lineage,sql_sha256,applied_at) VALUES(?1,?2,?3,unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)",
-            &[Cell::Integer((index + 1) as i64), Cell::text(SQLITE_LINEAGE), Cell::text(digest)],
+            &[Cell::Integer(step.version as i64), Cell::text(SQLITE_LINEAGE), Cell::text(step.sha256)],
         ).await?;
         verify_sqlite_objects(family, index + 1).await?;
         Ok(true)
@@ -1359,10 +1218,38 @@ async fn apply_sqlite_migration_step(
     Ok(())
 }
 
+/// How the compiled DDL text reached the engine, and therefore what text the
+/// engine's `sqlite_schema` stores.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SqliteSchemaMode {
+    /// Local SQLite: SQLx executes the compiled text verbatim.
+    Raw,
+    /// Remote libSQL (hrana): the pinned SDK parses every statement with
+    /// libsql-sqlite3-parser and sends its re-rendered text. The reference
+    /// engine is fed the same rendering (`sdk_rendered_statements`).
+    SdkRendered,
+}
+
+impl SqliteSchemaMode {
+    fn of(family: &super::backend::FamilyTx) -> Self {
+        match family {
+            super::backend::FamilyTx::Local(_) => Self::Raw,
+            super::backend::FamilyTx::Remote(_) => Self::SdkRendered,
+        }
+    }
+    fn provenance(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::SdkRendered => "sdk-rendered",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct SqliteCapability {
     pub lineage: &'static str,
     pub applied_steps: usize,
+    pub mode: SqliteSchemaMode,
     pub schema_sha256: String,
 }
 
@@ -1383,6 +1270,7 @@ pub async fn assert_sqlite_schema_current(
         Ok(SqliteCapability {
             lineage: SQLITE_LINEAGE,
             applied_steps: applied.len(),
+            mode: SqliteSchemaMode::of(family),
             schema_sha256,
         })
     }
@@ -1397,16 +1285,6 @@ pub async fn assert_sqlite_schema_current(
             tx.rollback().await,
         )),
     }
-}
-
-fn verify_compiled_sqlite_digest(sql: &str, digest: &str) -> Result<(), sqlx::Error> {
-    use sha2::{Digest, Sha256};
-    if hex::encode(Sha256::digest(sql.as_bytes())) != digest {
-        return Err(schema_error(
-            "compiled SQLite migration digest does not match its registry",
-        ));
-    }
-    Ok(())
 }
 
 type SqliteApplied = (i64, String, String);
@@ -1440,18 +1318,26 @@ async fn sqlite_applied(
         })
         .collect()
 }
+
 fn verify_sqlite_applied(applied: &[SqliteApplied], complete: bool) -> Result<(), sqlx::Error> {
-    if applied.len() > SQLITE_MIGRATIONS.len()
-        || (complete && applied.len() != SQLITE_MIGRATIONS.len())
+    let compiled = compiled_sqlite_steps();
+    if applied
+        .iter()
+        .any(|(_, lineage, _)| lineage == RETIRED_SQLITE_LINEAGE)
     {
+        return Err(schema_error(format!(
+            "SQLite schema carries the retired lineage {RETIRED_SQLITE_LINEAGE}; {RETIRED_LINEAGE_HINT}"
+        )));
+    }
+    if applied.len() > compiled.len() || (complete && applied.len() != compiled.len()) {
         return Err(schema_error(
             "SQLite schema is ahead, incomplete or unprepared",
         ));
     }
     for (index, (version, lineage, digest)) in applied.iter().enumerate() {
-        let (sql, expected) = SQLITE_MIGRATIONS[index];
-        verify_compiled_sqlite_digest(sql, expected)?;
-        if *version != (index + 1) as i64 || lineage != SQLITE_LINEAGE || digest != expected {
+        let step = &compiled[index];
+        verify_compiled_digest(step).map_err(schema_error)?;
+        if *version != step.version as i64 || lineage != SQLITE_LINEAGE || digest != step.sha256 {
             return Err(schema_error(
                 "SQLite schema has a gap, foreign lineage or changed digest",
             ));
@@ -1460,17 +1346,60 @@ fn verify_sqlite_applied(applied: &[SqliteApplied], complete: bool) -> Result<()
     Ok(())
 }
 
+/// The statements the pinned libsql SDK (0.9.30, hrana) sends for one compiled
+/// step. Its `parser::Statement::parse` parses the whole text with
+/// libsql-sqlite3-parser and sends `Cmd::to_string()` of every statement; the
+/// one exception is a text that holds exactly one statement which is a
+/// `CREATE TABLE`, sent as the original text. Nothing here lowercases,
+/// strips or normalizes SQL: the rendering is the maintained parser's own, and
+/// the remote engine stores exactly that text in `sqlite_schema`.
+pub fn sdk_rendered_statements(sql: &str) -> Result<Vec<String>, sqlx::Error> {
+    use fallible_iterator::FallibleIterator;
+    use libsql_sqlite3_parser::ast::{Cmd, Stmt};
+    use libsql_sqlite3_parser::lexer::sql::Parser;
+    let mut parser = Box::new(Parser::new(sql.as_bytes()));
+    let mut commands = Vec::new();
+    while let Some(command) = parser
+        .next()
+        .map_err(|error| schema_error(format!("SDK parser rejected compiled DDL: {error}")))?
+    {
+        commands.push(command);
+    }
+    if commands.len() == 1 && matches!(commands[0], Cmd::Stmt(Stmt::CreateTable { .. })) {
+        return Ok(vec![sql.to_string()]);
+    }
+    Ok(commands.iter().map(|command| command.to_string()).collect())
+}
+
 const SQLITE_OBJECTS: &str = "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type COLLATE BINARY,name COLLATE BINARY";
 type SqliteObject = (String, String, String, String);
+
+/// Exact comparison of the engine's stored definitions with the reference.
+/// Every row must match byte for byte: a changed CHECK/FK/default/predicate/
+/// trigger body, a missing, extra or renamed object all differ in the stored
+/// text. Identifier case never differs between the two sides because both
+/// receive the same text.
+fn compare_sqlite_objects(
+    expected: &[SqliteObject],
+    actual: &[SqliteObject],
+) -> Result<(), sqlx::Error> {
+    if actual != expected {
+        return Err(schema_error("SQLite schema definitions differ from compiled capability; unmarked/populated or altered schema refused"));
+    }
+    Ok(())
+}
+
 /// Ask the pinned engine to compile the fixed DDL in a separate reference
 /// connection. This validates every actual table/index/trigger definition;
 /// no handwritten SQL parser, guessed column inventory or marker-only gate.
+/// For a remote engine the reference receives the SDK's own rendering of the
+/// same steps, so the comparison stays byte-exact without any normalizer.
 async fn verify_sqlite_objects(
     family: &mut super::backend::FamilyTx,
     steps: usize,
 ) -> Result<String, sqlx::Error> {
-    use sha2::{Digest, Sha256};
     use sqlx::Connection;
+    let mode = SqliteSchemaMode::of(family);
     let mut reference = sqlx::SqliteConnection::connect_with(
         &sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
@@ -1485,9 +1414,18 @@ async fn verify_sqlite_objects(
         if pin.0 != super::pool::SQLITE_VERSION || pin.1 != super::pool::SQLITE_SOURCE_ID {
             return Err(schema_error("SQLite schema reference engine pin mismatch"));
         }
-        for (sql, digest) in SQLITE_MIGRATIONS.iter().take(steps) {
-            verify_compiled_sqlite_digest(sql, digest)?;
-            sqlx::raw_sql(sql).execute(&mut reference).await?;
+        for step in compiled_sqlite_steps().iter().take(steps) {
+            verify_compiled_digest(step).map_err(schema_error)?;
+            match mode {
+                SqliteSchemaMode::Raw => {
+                    sqlx::raw_sql(step.sql).execute(&mut reference).await?;
+                }
+                SqliteSchemaMode::SdkRendered => {
+                    for statement in sdk_rendered_statements(step.sql)? {
+                        sqlx::raw_sql(&statement).execute(&mut reference).await?;
+                    }
+                }
+            }
         }
         sqlx::query_as::<_, SqliteObject>(SQLITE_OBJECTS)
             .fetch_all(&mut reference)
@@ -1512,12 +1450,13 @@ async fn verify_sqlite_objects(
             ))
         })
         .collect::<Result<Vec<SqliteObject>, sqlx::Error>>()?;
-    if actual != expected {
-        return Err(schema_error("SQLite schema definitions differ from compiled capability; unmarked/populated or altered schema refused"));
-    }
-    let bytes = serde_json::to_vec(&(SQLITE_LINEAGE, steps, actual))
+    compare_sqlite_objects(&expected, &actual)?;
+    let bytes = serde_json::to_vec(&(SQLITE_LINEAGE, steps, mode.provenance(), actual))
         .map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
-    Ok(hex::encode(Sha256::digest(bytes)))
+    Ok(hex::encode({
+        use sha2::{Digest, Sha256};
+        Sha256::digest(bytes)
+    }))
 }
 
 #[cfg(test)]
@@ -1572,103 +1511,272 @@ mod sqlite_rollback_tests {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Applied steps are skipped by version and verified by digest, so editing an
+    // accepted step would refuse every existing installation. Add a new step
+    // instead and pin its digest in the registry when it is accepted.
+    #[test]
+    fn compiled_steps_match_their_registry_digests_and_are_contiguous() {
+        for (lineage, steps) in [
+            (POSTGRES_LINEAGE, compiled_postgres_steps()),
+            (SQLITE_LINEAGE, compiled_sqlite_steps()),
+        ] {
+            assert_eq!(steps.len(), 12, "{lineage} has twelve baseline modules");
+            let mut names = std::collections::BTreeSet::new();
+            for (index, step) in steps.iter().enumerate() {
+                assert_eq!(
+                    step.version,
+                    index as i32 + 1,
+                    "{lineage} versions are contiguous"
+                );
+                assert!(
+                    names.insert(step.name),
+                    "{lineage} step name {} repeats",
+                    step.name
+                );
+                assert!(
+                    step.name.starts_with(&format!("{:02}_", step.version)),
+                    "{lineage} step {} is named {}",
+                    step.version,
+                    step.name
+                );
+                verify_compiled_digest(step)
+                    .unwrap_or_else(|error| panic!("{lineage}: {error}; add a new step instead"));
+            }
+        }
+        assert_eq!(compiled_migration_count(), 12);
+        assert_eq!(latest_migration_version(), 12);
+        assert_eq!(compiled_migration_versions(), (1..=12).collect::<Vec<_>>());
+        let pg: Vec<&str> = compiled_postgres_steps().iter().map(|s| s.name).collect();
+        let sq: Vec<&str> = compiled_sqlite_steps().iter().map(|s| s.name).collect();
+        assert_eq!(pg, sq, "both engines use the same module names and order");
+    }
+
+    #[test]
+    fn baseline_ledger_texts_pin_their_lineage() {
+        let pg = compiled_postgres_steps()[0].sql;
+        assert!(
+            pg.contains("CREATE TABLE fvoci.schema_migrations ("),
+            "{pg}"
+        );
+        assert!(pg.contains(&format!("lineage = '{POSTGRES_LINEAGE}'")));
+        let sq = compiled_sqlite_steps()[0].sql;
+        assert!(sq.contains("CREATE TABLE schema_migrations ("), "{sq}");
+        assert!(sq.contains(&format!("lineage='{SQLITE_LINEAGE}'")));
+        assert_ne!(SQLITE_LINEAGE, RETIRED_SQLITE_LINEAGE);
+    }
+
+    fn receipts(steps: &[CompiledStep]) -> Vec<AppliedStep> {
+        steps
+            .iter()
+            .map(|step| AppliedStep {
+                version: step.version,
+                lineage: POSTGRES_LINEAGE.into(),
+                sql_sha256: step.sha256.into(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn schema_gate_distinguishes_current_behind_ahead_altered_foreign_retired_and_empty() {
+        let compiled = compiled_postgres_steps();
+        let expected = latest_migration_version();
+        let current = receipts(&compiled);
+        assert!(schema_gate(&LedgerState::Applied(current.clone()), &compiled).is_ok());
+        assert_eq!(pending_steps(&current, &compiled).unwrap(), 0);
+
+        let mut behind = current.clone();
+        behind.pop();
+        assert_eq!(pending_steps(&behind, &compiled).unwrap(), 1);
+        let behind = schema_gate(&LedgerState::Applied(behind), &compiled).unwrap_err();
+        assert!(behind.contains("missing migrations [12]"), "{behind}");
+        assert!(
+            behind.contains(&format!("behind compiled version {expected}")),
+            "{behind}"
+        );
+        assert!(behind.contains(SCHEMA_GATE_OPERATOR_HINT), "{behind}");
+
+        // A receipt set that is not a prefix (a middle step missing) is never a count.
+        let mut gap = current.clone();
+        gap.remove(gap.len() - 2);
+        let gap = schema_gate(&LedgerState::Applied(gap), &compiled).unwrap_err();
+        assert!(gap.contains("not contiguous"), "{gap}");
+        assert!(gap.contains(SCHEMA_GATE_OPERATOR_HINT), "{gap}");
+
+        let mut ahead = current.clone();
+        ahead.push(AppliedStep {
+            version: expected + 1,
+            lineage: POSTGRES_LINEAGE.into(),
+            sql_sha256: "0".repeat(64),
+        });
+        let ahead = schema_gate(&LedgerState::Applied(ahead), &compiled).unwrap_err();
+        assert!(
+            ahead.contains(&format!("newer than this binary ({expected})")),
+            "{ahead}"
+        );
+        assert!(ahead.contains("deploy a matching fvoci-server"), "{ahead}");
+        assert!(!ahead.contains("fvoci-migrate"), "{ahead}");
+
+        let mut altered = current.clone();
+        altered[3].sql_sha256 = "f".repeat(64);
+        let altered = schema_gate(&LedgerState::Applied(altered), &compiled).unwrap_err();
+        assert!(
+            altered.contains("step 4 (04_events) was applied from a different text"),
+            "{altered}"
+        );
+
+        let mut foreign = current.clone();
+        foreign[0].lineage = "fvoci-postgres-999".into();
+        let foreign = schema_gate(&LedgerState::Applied(foreign), &compiled).unwrap_err();
+        assert!(
+            foreign.contains("belongs to lineage \"fvoci-postgres-999\""),
+            "{foreign}"
+        );
+
+        let empty = schema_gate(&LedgerState::Unprepared, &compiled).unwrap_err();
+        assert!(empty.contains("no applied migrations"), "{empty}");
+        assert!(empty.contains(SCHEMA_GATE_OPERATOR_HINT), "{empty}");
+
+        let receipts_only = schema_gate(&LedgerState::Applied(Vec::new()), &compiled).unwrap_err();
+        assert!(
+            receipts_only.contains("without receipts"),
+            "{receipts_only}"
+        );
+
+        let retired = schema_gate(
+            &LedgerState::Retired {
+                versions: (1..=55).collect(),
+            },
+            &compiled,
+        )
+        .unwrap_err();
+        assert!(
+            retired.contains("development migrations [1, 2"),
+            "{retired}"
+        );
+        assert!(retired.contains(RETIRED_LINEAGE_HINT), "{retired}");
+        assert!(
+            !retired.contains("fvoci-migrate --grant-app-role"),
+            "{retired}"
+        );
+    }
+
+    #[test]
+    fn grant_sql_quotes_role_and_replaces_every_placeholder() {
+        let sql = app_role_grant_sql("app\"x");
+        assert!(!sql.contains(APP_ROLE_PLACEHOLDER));
+        assert!(sql.contains("TO \"app\"\"x\";"));
+        assert!(!sql.contains("BEGIN") && !sql.contains("COMMIT"));
+    }
+
+    #[test]
+    fn retired_sqlite_lineage_is_refused_by_name_before_any_digest_check() {
+        let error =
+            verify_sqlite_applied(&[(1, RETIRED_SQLITE_LINEAGE.into(), "0".repeat(64))], false)
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains(RETIRED_SQLITE_LINEAGE), "{error}");
+        assert!(error.contains(RETIRED_LINEAGE_HINT), "{error}");
+        let foreign = verify_sqlite_applied(&[(1, "other".into(), "0".repeat(64))], false)
+            .unwrap_err()
+            .to_string();
+        assert!(foreign.contains("foreign lineage"), "{foreign}");
+    }
+
+    #[test]
+    fn sdk_rendering_keeps_a_lone_create_table_verbatim_and_rerenders_batches() {
+        let lone = compiled_sqlite_steps()[0].sql;
+        assert_eq!(
+            sdk_rendered_statements(lone).unwrap(),
+            vec![lone.to_string()]
+        );
+        let batch = "CREATE TABLE groups (id BLOB PRIMARY KEY NOT NULL) STRICT;\nCREATE INDEX groups_idx ON groups(id) WHERE id IS NOT NULL;";
+        let rendered = sdk_rendered_statements(batch).unwrap();
+        assert_eq!(rendered.len(), 2);
+        // The maintained parser may render a keyword-fallback identifier with the
+        // keyword's spelling; SQLite identifiers are case-insensitive, so both
+        // texts name the same table. The reference and the remote receive this
+        // same text, so only its determinism and shape matter here.
+        assert!(
+            rendered[0]
+                .to_lowercase()
+                .starts_with("create table groups"),
+            "{}",
+            rendered[0]
+        );
+        assert!(
+            rendered[1].to_lowercase().contains("where"),
+            "{}",
+            rendered[1]
+        );
+        assert_eq!(
+            sdk_rendered_statements(batch).unwrap(),
+            rendered,
+            "rendering is deterministic"
+        );
+        let error = sdk_rendered_statements("CREATE TABLE (")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("SDK parser rejected"), "{error}");
+        for step in compiled_sqlite_steps() {
+            let rendered = sdk_rendered_statements(step.sql).unwrap();
+            assert!(!rendered.is_empty(), "{} renders", step.name);
+        }
+    }
+
+    #[test]
+    fn sqlite_object_comparison_refuses_any_changed_missing_extra_or_renamed_definition() {
+        let row = |t: &str, n: &str, tbl: &str, sql: &str| {
+            (
+                t.to_string(),
+                n.to_string(),
+                tbl.to_string(),
+                sql.to_string(),
+            )
+        };
+        let expected = vec![
+            row(
+                "index",
+                "a_idx",
+                "a",
+                "CREATE INDEX a_idx ON a(x) WHERE x>0",
+            ),
+            row("table", "a", "a", "CREATE TABLE a (x INTEGER CHECK (x>0))"),
+            row(
+                "trigger",
+                "a_t",
+                "a",
+                "CREATE TRIGGER a_t BEFORE DELETE ON a BEGIN SELECT RAISE(ABORT,'no'); END",
+            ),
+        ];
+        assert!(compare_sqlite_objects(&expected, &expected).is_ok());
+        let mut altered_check = expected.clone();
+        altered_check[1].3 = "CREATE TABLE a (x INTEGER CHECK (x>=0))".into();
+        assert!(compare_sqlite_objects(&expected, &altered_check).is_err());
+        let mut altered_predicate = expected.clone();
+        altered_predicate[0].3 = "CREATE INDEX a_idx ON a(x)".into();
+        assert!(compare_sqlite_objects(&expected, &altered_predicate).is_err());
+        let mut altered_trigger = expected.clone();
+        altered_trigger[2].3 = altered_trigger[2].3.replace("ABORT", "IGNORE");
+        assert!(compare_sqlite_objects(&expected, &altered_trigger).is_err());
+        let missing = expected[..2].to_vec();
+        assert!(compare_sqlite_objects(&expected, &missing).is_err());
+        let mut extra = expected.clone();
+        extra.push(row("table", "b", "b", "CREATE TABLE b (y)"));
+        assert!(compare_sqlite_objects(&expected, &extra).is_err());
+        let mut renamed = expected.clone();
+        renamed[1].1 = "A".into();
+        assert!(compare_sqlite_objects(&expected, &renamed).is_err());
+    }
+}
+
 #[cfg(all(test, feature = "db-tests"))]
 mod maintenance_claim_migration_tests {
     use super::super::backend::Backend;
     use super::*;
-    #[tokio::test]
-    async fn populated_005_to_task_fence_006_preserves_lineage_and_restarts_current_catalog() {
-        let root =
-            std::env::temp_dir().join(format!("fvoci-off-task-upgrade-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("app.sqlite");
-        let admission = SqliteAdmission::migration(&path).unwrap();
-        let preparation = super::super::pool::connect_sqlite_prepare(&path)
-            .await
-            .unwrap();
-        let backend = Backend::Sqlite(preparation.pool.clone());
-        for (index, (sql, digest)) in SQLITE_MIGRATIONS.iter().take(5).enumerate() {
-            apply_sqlite_migration_step(&backend, index, sql, digest, None)
-                .await
-                .unwrap();
-        }
-        let workspace = uuid::Uuid::now_v7();
-        sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES(?1,'off-five-upgrade','preserved005 literal')")
-            .bind(workspace.as_bytes().as_slice()).execute(&preparation.pool).await.unwrap();
-        sqlx::query("UPDATE collab_fence_counter SET next_fence=17 WHERE id=1")
-            .execute(&preparation.pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE maintenance_job_claims SET generation=7 WHERE job_key=8")
-            .execute(&preparation.pool)
-            .await
-            .unwrap();
-        let old_markers: Vec<i64> =
-            sqlx::query_scalar("SELECT version FROM schema_migrations ORDER BY version")
-                .fetch_all(&preparation.pool)
-                .await
-                .unwrap();
-        assert_eq!(old_markers, vec![1, 2, 3, 4, 5]);
-        assert!(
-            assert_sqlite_schema_current(&backend).await.is_err(),
-            "005 cannot masquerade as current006"
-        );
-        preparation.close_confirmed().await.unwrap();
-        drop(admission);
-        run_sqlite_migrations(&path).await.unwrap();
-        let pool = super::super::pool::connect_sqlite_app(&path, 1)
-            .await
-            .unwrap();
-        let backend = Backend::Sqlite(pool.clone());
-        let current = assert_sqlite_schema_current(&backend).await.unwrap();
-        assert_eq!(current.applied_steps, 6);
-        let preserved: (String,i64,i64) = sqlx::query_as("SELECT name,(SELECT next_fence FROM collab_fence_counter WHERE id=1),(SELECT generation FROM maintenance_job_claims WHERE job_key=8) FROM workspaces WHERE id=?1")
-            .bind(workspace.as_bytes().as_slice()).fetch_one(&pool).await.unwrap();
-        assert_eq!(preserved, ("preserved005 literal".into(), 17, 7));
-        let fk: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(fk, 1);
-        let wrong_task = uuid::Uuid::now_v7();
-        let owner = uuid::Uuid::now_v7();
-        let error=sqlx::query("INSERT INTO task_collab_room_fences(workspace_id,task_id,owner_token,fence,expires_at) VALUES(?1,?2,?3,17,1)")
-            .bind(workspace.as_bytes().as_slice()).bind(wrong_task.as_bytes().as_slice()).bind(owner.as_bytes().as_slice())
-            .execute(&pool).await.unwrap_err();
-        assert!(error
-            .as_database_error()
-            .unwrap()
-            .is_foreign_key_violation());
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM task_collab_room_fences")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(count, 0);
-        backend.close().await.unwrap();
-        run_sqlite_migrations(&path).await.unwrap();
-        let pool = super::super::pool::connect_sqlite_app(&path, 1)
-            .await
-            .unwrap();
-        let backend = Backend::Sqlite(pool.clone());
-        let restarted = assert_sqlite_schema_current(&backend).await.unwrap();
-        assert_eq!(restarted.applied_steps, 6);
-        assert_eq!(restarted.schema_sha256, current.schema_sha256);
-        let markers: Vec<i64> =
-            sqlx::query_scalar("SELECT version FROM schema_migrations ORDER BY version")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(markers, vec![1, 2, 3, 4, 5, 6]);
-        let counter: i64 =
-            sqlx::query_scalar("SELECT next_fence FROM collab_fence_counter WHERE id=1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(counter, 17);
-        backend.close().await.unwrap();
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
     #[tokio::test]
     async fn maintenance_claim_migration_current_populated_restart_and_gap_refusal() {
         let root = std::env::temp_dir().join(format!("fvoci-s16-migrate-{}", uuid::Uuid::now_v7()));
@@ -1680,7 +1788,7 @@ mod maintenance_claim_migration_tests {
             .unwrap();
         let backend = Backend::Sqlite(pool.clone());
         let before = assert_sqlite_schema_current(&backend).await.unwrap();
-        assert_eq!(before.applied_steps, 6);
+        assert_eq!(before.applied_steps, 12);
         let workspace = uuid::Uuid::now_v7();
         sqlx::query(
             "INSERT INTO workspaces(id,slug,name) VALUES(?1,'s16-populated','preserved literal')",
@@ -1700,7 +1808,7 @@ mod maintenance_claim_migration_tests {
             .unwrap();
         let backend = Backend::Sqlite(pool.clone());
         let current = assert_sqlite_schema_current(&backend).await.unwrap();
-        assert_eq!(current.applied_steps, 6);
+        assert_eq!(current.applied_steps, 12);
         assert_eq!(current.schema_sha256, before.schema_sha256);
         let preserved: String = sqlx::query_scalar("SELECT name FROM workspaces WHERE id=?1")
             .bind(workspace.as_bytes().as_slice())
@@ -1728,7 +1836,7 @@ mod maintenance_claim_migration_tests {
             .await
             .unwrap();
         assert_eq!(fk, 1);
-        sqlx::query("DELETE FROM schema_migrations WHERE version=2")
+        sqlx::query("DELETE FROM schema_migrations WHERE version=12")
             .execute(&pool)
             .await
             .unwrap();
@@ -1780,53 +1888,51 @@ mod maintenance_claim_migration_tests {
 }
 
 #[cfg(all(test, feature = "db-tests"))]
-mod maintenance_claim_upgrade_tests {
+mod baseline_prefix_resume_tests {
     use super::super::backend::Backend;
     use super::*;
     #[tokio::test]
-    async fn maintenance_claim_migration_populated_three_to_four_atomic_upgrade() {
+    async fn populated_eleven_step_prefix_resumes_to_the_complete_lineage_atomically() {
         let root = std::env::temp_dir().join(format!("fvoci-s16-upgrade-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("app.sqlite");
-        // Historical exact registry prefix, executed by the SAME maintained
-        // per-step initializer and actual preparation/admission owner.
+        // An interrupted install: an exact prefix of this lineage, executed by the
+        // SAME maintained per-step initializer and actual preparation/admission owner.
+        // This is modern install interruption/resume, not an old-lineage upgrade.
         let admission = SqliteAdmission::migration(&path).unwrap();
         let preparation = super::super::pool::connect_sqlite_prepare(&path)
             .await
             .unwrap();
         let backend = Backend::Sqlite(preparation.pool.clone());
-        for (index, (sql, digest)) in SQLITE_MIGRATIONS.iter().take(3).enumerate() {
-            apply_sqlite_migration_step(&backend, index, sql, digest, None)
+        for step in compiled_sqlite_steps().iter().take(11) {
+            apply_sqlite_migration_step(&backend, step, None)
                 .await
                 .unwrap();
         }
         let workspace = uuid::Uuid::now_v7();
         sqlx::query(
-            "INSERT INTO workspaces(id,slug,name) VALUES(?1,'s16-upgrade','populated003 literal')",
+            "INSERT INTO workspaces(id,slug,name) VALUES(?1,'s16-upgrade','populated011 literal')",
         )
         .bind(workspace.as_bytes().as_slice())
         .execute(&preparation.pool)
         .await
         .unwrap();
-        assert!(
-            assert_sqlite_schema_current(&backend).await.is_err(),
-            "old prefix is never current6"
-        );
-        // Preserve the original populated003 -> exact004 upgrade proof before
-        // advancing this same database to the new current006 capability.
-        let (sql, digest) = SQLITE_MIGRATIONS[3];
-        apply_sqlite_migration_step(&backend, 3, sql, digest, None)
+        // Carried from the retired 005->006 fixture: a live monotonic fence counter
+        // written before the resume must survive it (step 06 seeds next_fence=1).
+        sqlx::query("UPDATE collab_fence_counter SET next_fence=17 WHERE id=1")
+            .execute(&preparation.pool)
             .await
             .unwrap();
-        let markers: Vec<i64> =
+        let old_markers: Vec<i64> =
             sqlx::query_scalar("SELECT version FROM schema_migrations ORDER BY version")
                 .fetch_all(&preparation.pool)
                 .await
                 .unwrap();
-        assert_eq!(markers, vec![1, 2, 3, 4]);
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM maintenance_job_claims WHERE owner_token IS NULL AND generation=0 AND expires_at IS NULL")
-            .fetch_one(&preparation.pool).await.unwrap();
-        assert_eq!(count, 9);
+        assert_eq!(old_markers, (1..=11).collect::<Vec<i64>>());
+        assert!(
+            assert_sqlite_schema_current(&backend).await.is_err(),
+            "old prefix is never the complete lineage"
+        );
         preparation.close_confirmed().await.unwrap();
         drop(admission);
         run_sqlite_migrations(&path).await.unwrap();
@@ -1834,27 +1940,81 @@ mod maintenance_claim_upgrade_tests {
             .await
             .unwrap();
         let backend = Backend::Sqlite(pool.clone());
-        assert_eq!(
-            assert_sqlite_schema_current(&backend)
-                .await
-                .unwrap()
-                .applied_steps,
-            6
-        );
-        let name: String = sqlx::query_scalar("SELECT name FROM workspaces WHERE id=?1")
-            .bind(workspace.as_bytes().as_slice())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(name, "populated003 literal");
+        let current = assert_sqlite_schema_current(&backend).await.unwrap();
+        assert_eq!(current.applied_steps, 12);
+        let preserved: (String, i64) = sqlx::query_as(
+            "SELECT name,(SELECT next_fence FROM collab_fence_counter WHERE id=1) FROM workspaces WHERE id=?1",
+        )
+        .bind(workspace.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(preserved, ("populated011 literal".into(), 17));
         let markers: Vec<i64> =
             sqlx::query_scalar("SELECT version FROM schema_migrations ORDER BY version")
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(markers, vec![1, 2, 3, 4, 5, 6]);
-        let count:i64=sqlx::query_scalar("SELECT count(*) FROM maintenance_job_claims WHERE owner_token IS NULL AND generation=0 AND expires_at IS NULL").fetch_one(&pool).await.unwrap();
+        assert_eq!(markers, (1..=12).collect::<Vec<i64>>());
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM maintenance_job_claims WHERE owner_token IS NULL AND generation=0 AND expires_at IS NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(count, 9);
+        // Carried controls: the app connection enforces foreign keys, and a fence
+        // row for an unknown task has no effect (FK violation, nothing written).
+        let fk: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(fk, 1);
+        let wrong_task = uuid::Uuid::now_v7();
+        let owner = uuid::Uuid::now_v7();
+        let error = sqlx::query("INSERT INTO task_collab_room_fences(workspace_id,task_id,owner_token,fence,expires_at) VALUES(?1,?2,?3,17,1)")
+            .bind(workspace.as_bytes().as_slice())
+            .bind(wrong_task.as_bytes().as_slice())
+            .bind(owner.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        assert!(error
+            .as_database_error()
+            .unwrap()
+            .is_foreign_key_violation());
+        let fences: i64 = sqlx::query_scalar("SELECT count(*) FROM task_collab_room_fences")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(fences, 0);
+        // A claim generation advanced by the product (step 12 seeds generation 0)
+        // must survive an installer rerun on the complete lineage, which must be
+        // a no-op: same receipts, same schema digest, same counter.
+        sqlx::query("UPDATE maintenance_job_claims SET generation=7 WHERE job_key=8")
+            .execute(&pool)
+            .await
+            .unwrap();
+        backend.close().await.unwrap();
+        run_sqlite_migrations(&path).await.unwrap();
+        let pool = super::super::pool::connect_sqlite_app(&path, 1)
+            .await
+            .unwrap();
+        let backend = Backend::Sqlite(pool.clone());
+        let restarted = assert_sqlite_schema_current(&backend).await.unwrap();
+        assert_eq!(restarted.applied_steps, 12);
+        assert_eq!(restarted.schema_sha256, current.schema_sha256);
+        let markers: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM schema_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(markers, (1..=12).collect::<Vec<i64>>());
+        let (counter, generation, untouched): (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT next_fence FROM collab_fence_counter WHERE id=1),(SELECT generation FROM maintenance_job_claims WHERE job_key=8),(SELECT count(*) FROM maintenance_job_claims WHERE generation=0)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((counter, generation, untouched), (17, 7, 8));
         backend.close().await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
