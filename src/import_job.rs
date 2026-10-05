@@ -2380,7 +2380,9 @@ mod native_failure_propagation_tests {
         // Exercise the final allowed attempt: an acknowledged incomplete
         // compensation retries below that bound, and fails at the bound.
         // Keep the same refs/object and let the actual next job follow it.
-        sqlx::query("UPDATE import_jobs SET lease_until=1,attempts=?2 WHERE id=?1")
+        // The acknowledged retry released both lease fields. Make that same
+        // unleased job due through the maintained backoff predicate.
+        sqlx::query("UPDATE import_jobs SET lease_token=NULL,lease_until=NULL,updated_at=1,attempts=?2 WHERE id=?1")
             .bind(jobs[0].id.as_bytes().as_slice())
             .bind(IMPORT_MAX_ATTEMPTS - 1)
             .execute(&f.pool)
