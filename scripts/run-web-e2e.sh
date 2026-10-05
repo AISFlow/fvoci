@@ -302,6 +302,7 @@ PY_PARENT
   # code/input ancestry. Inaccessible files fail before private ownership moves.
   runtime_groups="$(python3 "$ROOT/scripts/run-selected-backend-e2e.py" permissions \
     --output "$FVOCI_SELECTED_CI_OUTPUT" --sqlite-parent "$FVOCI_SELECTED_CI_SQLITE_PARENT" --docker-gid "$docker_gid")"
+  export PLAYWRIGHT_BROWSERS_PATH="$FVOCI_SELECTED_CI_OUTPUT/browser"
   sudo chown -h -R 1000:1000 "$FVOCI_SELECTED_CI_OUTPUT" "$FVOCI_SELECTED_CI_SQLITE_PARENT"
   sudo install -d -o 1000 -g 1000 -m 0700 "$FVOCI_SELECTED_CI_OUTPUT/tmp"
   sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,PLAYWRIGHT_BROWSERS_PATH \

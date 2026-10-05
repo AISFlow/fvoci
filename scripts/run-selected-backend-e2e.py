@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import stat
 import shutil
 import subprocess
 import sys
@@ -111,11 +112,79 @@ def build_env():
     return {k:hashlib.sha256(os.environ[k].encode()).hexdigest() for k in sorted(names)}
 
 
+def browser_inventory(directory, owner=None, metadata=False):
+    """The regular-file closure used by staging, admission and runtime hashing."""
+    directory = Path(directory)
+    assert not directory.is_symlink() and directory.is_dir(), 'invalid browser directory'
+    files = {}
+    for path in [directory, *sorted(directory.rglob('*'))]:
+        facts = path.lstat()
+        assert stat.S_ISREG(facts.st_mode) or stat.S_ISDIR(facts.st_mode), 'nonregular browser asset'
+        if owner is not None:
+            assert (facts.st_uid, facts.st_gid) == owner and owner[1] >= 1000, 'foreign or privileged browser asset'
+        key = str(path.relative_to(directory))
+        if stat.S_ISREG(facts.st_mode):
+            digest = sha(path)
+            files[key] = {'sha256':digest, 'mode':stat.S_IMODE(facts.st_mode)} if metadata else digest
+        elif metadata:
+            files[key] = {'directory':True, 'mode':stat.S_IMODE(facts.st_mode)}
+    assert files, 'empty browser closure'
+    return files
+
+
+def prepare_browser(output, chromium):
+    # Never repair a shared cache's ownership/modes. Copy only the installed
+    # Chromium runtime components into this exclusively owned output prefix.
+    runner = os.getuid()
+    assert runner >= 1000, 'nonprivileged browser preparation owner required'
+    chromium = Path(chromium)
+    cache = chromium.parent.parent.parent
+    assert re.fullmatch(r'chromium-[0-9]+', chromium.parent.parent.name)
+    assert not cache.is_symlink() and (cache.stat().st_uid, cache.stat().st_gid) == (runner, os.getgid()) and os.getgid() >= 1000
+    components = sorted(p for p in cache.iterdir()
+                        if re.fullmatch(r'(chromium|chromium_headless_shell|ffmpeg)-[0-9]+', p.name))
+    assert chromium.parent.parent in components
+    before = {p.name: browser_inventory(p, (runner, os.getgid())) for p in components}
+    source_metadata = {p.name: browser_inventory(p, (runner, os.getgid()), metadata=True) for p in components}
+    destination = output/'browser'
+    destination.mkdir(mode=0o700)  # exclusive; no reuse of a prior run
+    for component in components:
+        shutil.copytree(component, destination/component.name)
+    # Restrict only positively created copies, preserving all bytes and execute
+    # bits. The later transfer gives1000 ownership, including owner-only assets.
+    for path in destination.rglob('*'):
+        facts = path.lstat()
+        assert facts.st_uid == runner and (stat.S_ISREG(facts.st_mode) or stat.S_ISDIR(facts.st_mode))
+        path.chmod(0o700 if path.is_dir() or facts.st_mode & 0o111 else 0o600)
+    assert {p.name: browser_inventory(p, (runner, os.getgid()), metadata=True) for p in components} == source_metadata, 'browser source changed during copy'
+    assert {p.name: browser_inventory(destination/p.name) for p in components} == before, 'browser copy differs'
+    write(output/'runtime-browser-stage.json', {'source':os.environ['GITHUB_SHA'],
+          'cache':str(destination), 'chromium':str(destination/chromium.relative_to(cache)), 'files':before,
+          'metadata':{p.name:browser_inventory(destination/p.name, (runner, os.getgid()), metadata=True) for p in components}})
+    return destination/chromium.relative_to(cache)
+
+
+def admitted_browser(output):
+    receipt = read(output/'runtime-browser-stage.json')
+    assert receipt['source'] == os.environ['GITHUB_SHA']
+    directory = output/'browser'
+    assert receipt['cache'] == str(directory) and os.environ.get('PLAYWRIGHT_BROWSERS_PATH') == str(directory)
+    assert directory.stat().st_uid == 1000 and directory.stat().st_mode & 0o777 == 0o700
+    actual = {p.name: browser_inventory(p, (1000, 1000)) for p in directory.iterdir()}
+    assert actual == receipt['files'], 'current private browser assets differ'
+    assert {p.name:browser_inventory(p,(1000,1000),metadata=True) for p in directory.iterdir()} == receipt['metadata'], 'current private browser metadata differs'
+    chromium = Path(receipt['chromium'])
+    assert chromium.is_relative_to(directory) and chromium.is_file()
+    return str(chromium)
+
+
 def runtime_access(files,browser):
     # Real mode/ownership/access checks occur as the actual1000 runtime process.
     assert os.getuid()==os.getgid()==1000
     for path in files:
         assert Path(path).is_file() and os.access(path,os.R_OK), ('input is inaccessible to runtime1000',path)
+    chromium = Path(browser['chromium']['path'])
+    assert browser_inventory(chromium.parent) == browser['chromium_directory_files'], 'current browser assets differ'
     for path in (browser['bun']['path'],browser['chromium']['path']):
         assert os.access(path,os.R_OK|os.X_OK), ('browser executable is inaccessible to runtime1000',path)
 
@@ -139,9 +208,12 @@ def runtime_permissions(output, sqlite_parent, docker_gid):
     assert read(output/'after.json') == before
     bun = str(Path(shutil.which('bun')).resolve())
     chromium = call([bun, '--eval', "console.log(require('@playwright/test').chromium.executablePath())"])
+    # Hash and admit the complete consumed asset closure before ownership moves.
+    chromium = str(prepare_browser(output, chromium))
     files = {str(ROOT/p): os.R_OK for p in before['tracked']}
     files.update({p: os.R_OK for p in before['external']})
     files.update({p: os.R_OK|os.X_OK for p in read(output/'bundle.json')['binaries']})
+    files.update({str(Path(chromium).parent/p): os.R_OK for p in browser_inventory(Path(chromium).parent)})
     files.update({bun: os.R_OK|os.X_OK, chromium: os.R_OK|os.X_OK})
     # These two private prefixes will change owner; their outside ancestors will not.
     accessible = {p: mask for p, mask in files.items()
@@ -320,8 +392,10 @@ def run(output):
     owner=identity('run', output);before=read(output/'before.json');assert read(output/'after.json')==before
     runtime=output/'runtime';runtime.mkdir(mode=0o700)
     bun=str(Path(shutil.which('bun')).resolve());chromium=call([bun,'--eval',"console.log(require('@playwright/test').chromium.executablePath())"])
+    if os.environ.get('FVOCI_SELECTED_EXECUTION_MODE', 'github-ci') == 'github-ci':
+        assert chromium == admitted_browser(output), 'Playwright did not resolve the admitted private browser'
     browser={'bun':{'path':bun,'sha256':sha(bun)},'chromium':{'path':chromium,'sha256':sha(chromium)},
-             'chromium_directory_files':{str(f.relative_to(Path(chromium).parent)):sha(f) for f in Path(chromium).parent.rglob('*') if f.is_file()}}
+             'chromium_directory_files':browser_inventory(Path(chromium).parent)}
     runtime_access(before['external'],browser)
     bundle=read(output/'bundle.json');web=read(output/'web-receipt.json');abi=read(output/'abi-receipt.json')
     for executable in bundle['binaries']:

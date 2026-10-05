@@ -396,11 +396,16 @@ class RuntimePermissionsTest(unittest.TestCase):
             # only Git allocation lookup and the downstream product boundary.
             replacements=ast.parse("""
 def identity(*args):return 'owned-permission-fixture'
+def prepare_browser(output, chromium):
+    # Legacy39 controls isolate the original source/native ownership boundary;
+    # the separate BrowserAssetsTest exercises the real private-copy boundary.
+    return Path(chromium)
 def run(output):
     assert os.getuid()==os.getgid()==1000
     assert output.stat().st_uid==1000 and output.stat().st_mode & 0o777 == 0o700
     before=read(output/'before.json')
-    runtime_access(before['external'], {'bun':{'path':before['fixture_bun']},'chromium':{'path':before['fixture_chrome']}})
+    runtime_access(before['external'], {'bun':{'path':before['fixture_bun']},'chromium':{'path':before['fixture_chrome']},
+        'chromium_directory_files':browser_inventory(Path(before['fixture_chrome']).parent)})
     write(output/'fixture-marker.json', {'uid':os.getuid(),'gid':os.getgid(),'groups':os.getgroups()})
     if before['fixture_incomplete']:
         (output/'runtime').mkdir()
@@ -553,6 +558,135 @@ print(json.dumps({'output':facts(o),'sqlite':facts(s),'header':facts(root/'repo/
                 self.assertEqual(output.stat().st_mode & 0o777,0o700)
             finally:
                 subprocess.run(['sudo','-n','chown','-R',str(os.getuid())+':'+str(os.getgid()),str(root)],check=True)
+
+
+
+class BrowserAssetsTest(unittest.TestCase):
+    """Owned POSIX data/subprocess only: no Chromium, Bun or native execution."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='fvoci-browser-assets-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.cache = self.root/'cache'
+        self.component = self.cache/'chromium-1243'
+        self.directory = self.component/'chrome-linux64'
+        self.directory.mkdir(parents=True)
+        self.chrome = self.directory/'chrome'
+        self.chrome.write_bytes(b'NOT a browser executable')
+        self.chrome.chmod(0o755)
+        self.asset = self.directory/'deb.deps'
+        self.asset.write_bytes(b'qualified supplemental asset')
+        self.asset.chmod(0o600)
+        shell = self.cache/'chromium_headless_shell-1243';shell.mkdir()
+        (shell/'headless_shell').write_bytes(b'NOT executable');(shell/'headless_shell').chmod(0o700)
+        ffmpeg = self.cache/'ffmpeg-1011';ffmpeg.mkdir();(ffmpeg/'ffmpeg-linux').write_bytes(b'NOT executable');(ffmpeg/'ffmpeg-linux').chmod(0o700)
+        self.output = self.root/'output';self.output.mkdir(mode=0o700)
+        self.environment = patch.dict(os.environ, GITHUB_SHA=SHA)
+        self.environment.start();self.addCleanup(self.environment.stop)
+
+    def stage(self):return H.CI.prepare_browser(self.output, str(self.chrome))
+
+    def test_complete_private_copy_preserves_bytes_and_all_installed_chromium_components(self):
+        current = self.stage()
+        with patch.dict(os.environ, PLAYWRIGHT_BROWSERS_PATH=str(self.output/'browser')):
+            self.assertEqual(H.CI.admitted_browser(self.output), str(current))
+        receipt = H.CI.read(self.output/'runtime-browser-stage.json')
+        self.assertEqual(set(receipt['files']), {'chromium-1243','chromium_headless_shell-1243','ffmpeg-1011'})
+        self.assertEqual((current.parent/'deb.deps').read_bytes(), self.asset.read_bytes())
+        self.assertEqual(self.asset.stat().st_mode & 0o777,0o600)
+        self.assertEqual(self.cache.stat().st_uid,os.getuid())
+        H.CI.runtime_access({}, {'bun':{'path':'/bin/true'}, 'chromium':{'path':str(current)},
+                               'chromium_directory_files':H.CI.browser_inventory(current.parent)})
+        self.assertEqual(os.getuid(),1000);self.assertEqual(os.getgid(),1000)
+
+    def test_original_executable_only_preflight_misses_real_supplemental_permission_failure(self):
+        # A fresh runner1001 cache with an owner-only asset: exact kernel refusal,
+        # not a claim about the unavailable remote inode's mode/ACL.
+        try:
+            subprocess.run(['sudo','-n','chmod','755',str(self.root)],check=True)
+            subprocess.run(['sudo','-n','chown','-R','1001:1001',str(self.cache)],check=True)
+            program="""import os,pathlib,sys
+chrome=pathlib.Path(sys.argv[1])
+assert os.access(chrome,os.R_OK|os.X_OK)
+try:(chrome.parent/'deb.deps').read_bytes()
+except PermissionError:print('executable-preflight-OK supplemental-read-DENIED');sys.exit(13)
+raise AssertionError('fixture must refuse supplemental read')
+"""
+            result=subprocess.run(['sudo','-n','setpriv','--reuid=1000','--regid=1000','--groups=1001',sys.executable,'-c',program,str(self.chrome)],capture_output=True,text=True)
+            self.assertEqual(result.returncode,13,result.stderr)
+            self.assertIn('supplemental-read-DENIED',result.stdout)
+            # Real nonprivileged runner1001 stages the same bytes; runtime1000
+            # owns only the newly created copy, never the shared source cache.
+            subprocess.run(['sudo','-n','chown','1001:1001',str(self.output)],check=True)
+            module=self.root/'run-selected-backend-e2e.py'
+            module.write_bytes((ROOT/'scripts/run-selected-backend-e2e.py').read_bytes());module.chmod(0o644)
+            prepare="""import importlib.util,pathlib,sys
+s=importlib.util.spec_from_file_location('owned',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+m.prepare_browser(pathlib.Path(sys.argv[2]),sys.argv[3])
+"""
+            staged=subprocess.run(['sudo','-n','setpriv','--reuid=1001','--regid=1001','--clear-groups','env','GITHUB_SHA='+SHA,'PYTHONDONTWRITEBYTECODE=1',sys.executable,'-c',prepare,str(module),str(self.output),str(self.chrome)],capture_output=True,text=True)
+            self.assertEqual(staged.returncode,0,staged.stderr)
+            subprocess.run(['sudo','-n','chown','-R','1000:1000',str(self.output)],check=True)
+            current=self.output/'browser/chromium-1243/chrome-linux64/chrome'
+            with patch.dict(os.environ,PLAYWRIGHT_BROWSERS_PATH=str(self.output/'browser')):
+                self.assertEqual(H.CI.admitted_browser(self.output),str(current))
+            runtime=subprocess.run(['sudo','-n','setpriv','--reuid=1000','--regid=1000','--clear-groups',sys.executable,'-c',
+                "import pathlib,sys;print((pathlib.Path(sys.argv[1]).parent/'deb.deps').read_text())",str(current)],capture_output=True,text=True)
+            self.assertEqual(runtime.returncode,0,runtime.stderr)
+            self.assertIn('qualified supplemental asset',runtime.stdout)
+            source=subprocess.check_output(['sudo','-n','stat','-c','%u:%g:%a',str(self.asset)],text=True).strip()
+            self.assertEqual(source,'1001:1001:600')
+            print(json.dumps({'control':'original-incomplete-preflight-and-fixed-private-copy','original_exit':result.returncode,
+                              'stage_exit':staged.returncode,'runtime_read_exit':runtime.returncode,'source_mode_preserved':source,'runtime_supplementary_groups':[]}),flush=True)
+        finally:
+            subprocess.run(['sudo','-n','chown','-R',str(os.getuid())+':'+str(os.getgid()),str(self.root)],check=True)
+
+    def test_unreadable_asset_refused_before_copy_or_runtime(self):
+        self.asset.chmod(0)
+        try:
+            with self.assertRaises(PermissionError):self.stage()
+            self.assertFalse((self.output/'browser').exists())
+        finally:self.asset.chmod(0o600)
+
+    def test_foreign_root_group_and_symlink_assets_refused(self):
+        for uid,gid in ((1001,1001),(0,1000),(1000,0),(1000,2000)):
+            with self.subTest(uid=uid,gid=gid):
+                try:
+                    subprocess.run(['sudo','-n','chown',str(uid)+':'+str(gid),str(self.asset)],check=True)
+                    with self.assertRaisesRegex(AssertionError,'foreign or privileged'):self.stage()
+                    self.assertFalse((self.output/'browser').exists())
+                finally:subprocess.run(['sudo','-n','chown',str(os.getuid())+':'+str(os.getgid()),str(self.asset)],check=True)
+        self.asset.unlink();self.asset.symlink_to(self.chrome)
+        with self.assertRaisesRegex(AssertionError,'nonregular'):self.stage()
+
+    def test_runtime_new_missing_changed_and_unreadable_assets_refused(self):
+        current=self.stage()
+        with patch.dict(os.environ,PLAYWRIGHT_BROWSERS_PATH=str(self.output/'browser')):
+            for change in ('new','missing','changed','unreadable','mode','directory'):
+                with self.subTest(change=change):
+                    asset=current.parent/'deb.deps'
+                    if change=='new':(current.parent/'unexpected').write_bytes(b'new')
+                    elif change=='missing':asset.unlink()
+                    elif change=='changed':asset.write_bytes(b'drift')
+                    elif change=='mode':asset.chmod(0o640)
+                    elif change=='directory':(current.parent/'unexpected-empty').mkdir()
+                    else:asset.chmod(0)
+                    with self.assertRaises((AssertionError,PermissionError)):H.CI.admitted_browser(self.output)
+                    if change=='new':(current.parent/'unexpected').unlink()
+                    elif change=='directory':(current.parent/'unexpected-empty').rmdir()
+                    else:asset.chmod(0o600) if asset.exists() else None;asset.write_bytes(b'qualified supplemental asset');asset.chmod(0o600)
+
+    def test_source_drift_during_copy_and_occupied_prefix_refused(self):
+        original=H.CI.shutil.copytree
+        def mutate(source,destination,*args,**kwargs):
+            result=original(source,destination,*args,**kwargs)
+            if source==self.component:self.asset.write_bytes(b'drift')
+            return result
+        with patch.object(H.CI.shutil,'copytree',side_effect=mutate):
+            with self.assertRaisesRegex(AssertionError,'source changed'):self.stage()
+        self.assertFalse((self.output/'runtime-browser-stage.json').exists())
+        self.asset.write_bytes(b'qualified supplemental asset')
+        with self.assertRaises(FileExistsError):self.stage()
 
 
 if __name__=='__main__':unittest.main()
