@@ -2110,7 +2110,7 @@ mod selected_comment_write_tests {
             .unwrap();
         assert_eq!(chosung, to_chosung("실제 댓글 中 😀"));
         let expected = json!({"commentId":reply.id.to_string(),"documentId":f.document.to_string(),"taskId":null,
-            "mentionedUserIds":[f.user,member].into_iter().collect::<BTreeSet<_>>().into_iter().map(|id|id.to_string()).collect::<Vec<_>>(),
+            "mentionedUserIds":([f.user,member].into_iter().collect::<BTreeSet<_>>().into_iter().map(|id|id.to_string()).collect::<Vec<_>>()),
             "mentionedGroupIds":[group.to_string()],"parentId":parent.id.to_string()});
         let event: (String, String, String) =
             sqlx::query_as("SELECT verb,channel,payload FROM events WHERE target_id=?1")
