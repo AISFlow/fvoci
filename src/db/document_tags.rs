@@ -419,9 +419,11 @@ pub async fn list_document_tags_backend(
             || op.membership_role(workspace_id,actor.user_id,false).await?.is_none()
         { return Ok(Err(TagDbError::NotFound)); }
         let Some(document) = op.document_row(workspace_id,document_id).await? else { return Ok(Err(TagDbError::NotFound)); };
-        let matches = match affiliation { Affiliation::Wiki => document.project_id.is_none(),Affiliation::Project(project) => document.project_id==Some(project) };
+        // DocumentRow stores project_id in its ninth tuple field.
+        let project_id = document.8;
+        let matches = match affiliation { Affiliation::Wiki => project_id.is_none(),Affiliation::Project(project) => project_id==Some(project) };
         if !matches { return Ok(Err(TagDbError::NotFound)); }
-        let permission = if let Some(project) = document.project_id {
+        let permission = if let Some(project) = project_id {
             op.project_permission_by_id(workspace_id,actor.user_id,project).await?.unwrap_or(crate::projects::ProjectPermission::None)
         } else { op.document_permission(workspace_id,actor.user_id,document_id,true).await? };
         if !permission.at_least(crate::projects::ProjectPermission::View) { return Ok(Err(TagDbError::NotFound)); }

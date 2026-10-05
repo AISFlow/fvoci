@@ -137,7 +137,9 @@ async fn origin_read_source(
     let Some(row) = op.document_row(workspace, document).await? else {
         return Ok(None);
     };
-    let permission = if let Some(project) = row.project_id {
+    // DocumentRow stores project_id in its ninth tuple field.
+    let source_project = row.8;
+    let permission = if let Some(project) = source_project {
         op.project_permission_by_id(workspace, actor, project)
             .await?
             .unwrap_or(ProjectPermission::None)
@@ -147,7 +149,7 @@ async fn origin_read_source(
     };
     Ok(permission
         .at_least(ProjectPermission::View)
-        .then_some(row.project_id))
+        .then_some(source_project))
 }
 
 /// Current-Edit picker; both policy and result are read in one selected snapshot.
@@ -235,7 +237,10 @@ async fn family_origin_page(
     family.require_tenant(workspace)?;
     // One predicate is shared by authorized count and pagination. Filtering
     // precedes LIMIT; direct and group viewer grants are visible here.
-    let from_where = "FROM task_origins o
+    // Compile both statements from the same predicate into static SQL.
+    macro_rules! origin_page_sql {
+        ($select:literal, $tail:literal) => {
+            concat!($select, " ", "FROM task_origins o
         JOIN tasks t ON t.workspace_id=o.workspace_id AND t.id=o.task_id AND t.deleted_at IS NULL
         JOIN projects tp ON tp.workspace_id=t.workspace_id AND tp.id=t.project_id AND tp.deleted_at IS NULL
         AND ((tp.visibility='workspace' AND ?2=0)
@@ -243,7 +248,9 @@ async fn family_origin_page(
          OR EXISTS(SELECT 1 FROM project_members pm JOIN group_members gm ON gm.workspace_id=pm.workspace_id AND gm.group_id=pm.group_id WHERE pm.workspace_id=tp.workspace_id AND pm.project_id=tp.id AND gm.user_id=?3 AND pm.group_id IS NOT NULL))
         JOIN documents d ON d.workspace_id=o.workspace_id AND d.id=o.document_id AND d.deleted_at IS NULL
         LEFT JOIN projects dp ON dp.workspace_id=d.workspace_id AND dp.id=d.project_id
-        WHERE o.workspace_id=?1 AND o.document_id=?4";
+        WHERE o.workspace_id=?1 AND o.document_id=?4", $tail)
+        };
+    }
     let args = [
         Cell::uuid(workspace),
         Cell::Integer(i64::from(guest)),
@@ -251,7 +258,7 @@ async fn family_origin_page(
         Cell::uuid(document),
     ];
     let count_rows = family
-        .query(&format!("SELECT count(*) {from_where}"), &args)
+        .query(origin_page_sql!("SELECT count(*)", ""), &args)
         .await?;
     let total = count_rows
         .first()
@@ -263,7 +270,7 @@ async fn family_origin_page(
         Cell::optional_uuid(after),
         Cell::Integer(limit.saturating_add(1)),
     ]);
-    let rows = family.query(&format!("SELECT o.task_id,o.document_id,tp.key,t.number,t.title,dp.key,d.number,d.title,o.anchor {from_where} AND (?5 IS NULL OR o.task_id>?5) ORDER BY o.task_id LIMIT ?6"),&page_args).await?;
+    let rows = family.query(origin_page_sql!("SELECT o.task_id,o.document_id,tp.key,t.number,t.title,dp.key,d.number,d.title,o.anchor", " AND (?5 IS NULL OR o.task_id>?5) ORDER BY o.task_id LIMIT ?6"),&page_args).await?;
     let mut items = rows
         .iter()
         .map(|row| {
