@@ -1410,6 +1410,9 @@ mod selected_document_origin_create_tests {
     use crate::db::attachment_preview::tests::Fixture;
     use serde_json::{json, Value};
 
+    /// Exact columns read back for the created task (unchanged query).
+    type CreatedTaskRow = (Vec<u8>, Vec<u8>, i64, String, String, String, String, i64, Vec<u8>, i64);
+
     async fn setup() -> (Fixture, Uuid, Uuid) {
         let f = Fixture::new().await;
         let credential = Uuid::now_v7();
@@ -1553,7 +1556,7 @@ mod selected_document_origin_create_tests {
         let DocumentTaskOutcome::Created(task) = first else {
             panic!("fresh command must create")
         };
-        let row:(Vec<u8>,Vec<u8>,i64,String,String,String,String,i64,Vec<u8>,i64)=sqlx::query_as("SELECT workspace_id,project_id,number,title,type,priority,content_json,schema_version,created_by,version FROM tasks WHERE id=?1")
+        let row: CreatedTaskRow = sqlx::query_as("SELECT workspace_id,project_id,number,title,type,priority,content_json,schema_version,created_by,version FROM tasks WHERE id=?1")
             .bind(task.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
         assert_eq!(row.0, f.workspace.as_bytes());
         assert_eq!(row.1, project.as_bytes());
