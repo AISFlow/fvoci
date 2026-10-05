@@ -1284,112 +1284,6 @@ async fn duplicate_by_id(
     .await
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn dedicated_draft_route_keeps_source_destination_parent_and_current_create_limits() {
-        let workspace = Uuid::now_v7();
-        let actor = Uuid::now_v7();
-        let credential = Uuid::now_v7();
-        let source = Uuid::now_v7();
-        let source_project = Uuid::now_v7();
-        let destination_project = Uuid::now_v7();
-        let parent = Uuid::now_v7();
-        let raw = serde_json::json!({"commandId":Uuid::now_v7(),"sourceKind":"document","sourceId":source,
-            "sourceProjectId":source_project,"parentId":parent,"title":" private 😀 ","contentJson":{"type":"doc","content":[]}});
-        let request = parse_off_draft_request(
-            workspace,
-            Some(destination_project),
-            actor,
-            credential,
-            serde_json::from_value(raw.clone()).unwrap(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(request.source.project_id(), Some(source_project));
-        assert_eq!(
-            request.source.target(),
-            crate::db::revisions::RevisionTarget::Document(source)
-        );
-        assert_eq!(request.destination_project, Some(destination_project));
-        assert_eq!(request.parent, Some(parent));
-        assert_eq!(request.title, "private 😀");
-        for change in ["parent", "kind", "task_project", "nil", "title", "ref"] {
-            let mut refused = raw.clone();
-            match change {
-                "parent" => {
-                    refused.as_object_mut().unwrap().remove("parentId");
-                }
-                "kind" => refused["sourceKind"] = serde_json::json!("unregistered"),
-                "task_project" => refused["sourceKind"] = serde_json::json!("task"),
-                "nil" => refused["commandId"] = serde_json::json!(Uuid::nil()),
-                "title" => refused["title"] = serde_json::json!("x".repeat(301)),
-                _ => {
-                    refused["contentJson"] = serde_json::json!({"type":"doc","content":[{"type":"attachment","attrs":{"id":"bad-ref"}}]})
-                }
-            }
-            assert!(
-                parse_off_draft_request(
-                    workspace,
-                    Some(destination_project),
-                    actor,
-                    credential,
-                    serde_json::from_value(refused).unwrap(),
-                    None
-                )
-                .is_err(),
-                "{change} cannot become implicit create rights or content"
-            );
-        }
-        let task = serde_json::json!({"commandId":Uuid::now_v7(),"sourceKind":"task","sourceId":source,"parentId":null,"title":"Task private copy","contentJson":{"type":"doc","content":[]}});
-        let parsed = parse_off_draft_request(
-            workspace,
-            None,
-            actor,
-            credential,
-            serde_json::from_value(task).unwrap(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            parsed.source.target(),
-            crate::db::revisions::RevisionTarget::Task(source)
-        );
-        assert_eq!(parsed.source.project_id(), None);
-        assert_eq!(parsed.destination_project, None);
-    }
-
-    #[test]
-    fn body_input_requires_exactly_one_field() {
-        assert!(matches!(
-            parse_body_input(br##"{"contentMd":"# a"}"##),
-            Ok(BodyInput::Markdown(_))
-        ));
-        assert!(matches!(
-            parse_body_input(br#"{"contentJson":{"type":"doc","content":[]}}"#),
-            Ok(BodyInput::Json(_))
-        ));
-        for bad in [
-            &br#"{}"#[..],
-            br#"{"contentMd":"a","contentJson":{}}"#,
-            br#"{"contentMd":1}"#,
-            br#"{"other":1}"#,
-            br#"[]"#,
-        ] {
-            assert!(parse_body_input(bad).is_err());
-        }
-    }
-
-    #[test]
-    fn block_input_rejects_foreign_attrs_id() {
-        assert!(parse_block_input(br#"{"type":"paragraph","attrs":{"id":"b"}}"#, "b").is_ok());
-        assert!(parse_block_input(br#"{"type":"paragraph","attrs":{"id":"x"}}"#, "b").is_err());
-        assert!(parse_block_input(br#"{"type":""}"#, "b").is_err());
-        assert!(parse_block_input(br#"{"type":"p","extra":1}"#, "b").is_err());
-    }
-}
-
 fn require_realtime_writer(state: &AppState) -> Result<(), DocumentApiError> {
     if state.realtime_mode != crate::config::RealtimeMode::On {
         return Err(coded(
@@ -1816,4 +1710,110 @@ pub(crate) async fn save_versioned_body_inner(
         tail_seq: saved.tail_seq,
         revision_id: saved.revision_id,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn dedicated_draft_route_keeps_source_destination_parent_and_current_create_limits() {
+        let workspace = Uuid::now_v7();
+        let actor = Uuid::now_v7();
+        let credential = Uuid::now_v7();
+        let source = Uuid::now_v7();
+        let source_project = Uuid::now_v7();
+        let destination_project = Uuid::now_v7();
+        let parent = Uuid::now_v7();
+        let raw = serde_json::json!({"commandId":Uuid::now_v7(),"sourceKind":"document","sourceId":source,
+            "sourceProjectId":source_project,"parentId":parent,"title":" private 😀 ","contentJson":{"type":"doc","content":[]}});
+        let request = parse_off_draft_request(
+            workspace,
+            Some(destination_project),
+            actor,
+            credential,
+            serde_json::from_value(raw.clone()).unwrap(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(request.source.project_id(), Some(source_project));
+        assert_eq!(
+            request.source.target(),
+            crate::db::revisions::RevisionTarget::Document(source)
+        );
+        assert_eq!(request.destination_project, Some(destination_project));
+        assert_eq!(request.parent, Some(parent));
+        assert_eq!(request.title, "private 😀");
+        for change in ["parent", "kind", "task_project", "nil", "title", "ref"] {
+            let mut refused = raw.clone();
+            match change {
+                "parent" => {
+                    refused.as_object_mut().unwrap().remove("parentId");
+                }
+                "kind" => refused["sourceKind"] = serde_json::json!("unregistered"),
+                "task_project" => refused["sourceKind"] = serde_json::json!("task"),
+                "nil" => refused["commandId"] = serde_json::json!(Uuid::nil()),
+                "title" => refused["title"] = serde_json::json!("x".repeat(301)),
+                _ => {
+                    refused["contentJson"] = serde_json::json!({"type":"doc","content":[{"type":"attachment","attrs":{"id":"bad-ref"}}]})
+                }
+            }
+            assert!(
+                parse_off_draft_request(
+                    workspace,
+                    Some(destination_project),
+                    actor,
+                    credential,
+                    serde_json::from_value(refused).unwrap(),
+                    None
+                )
+                .is_err(),
+                "{change} cannot become implicit create rights or content"
+            );
+        }
+        let task = serde_json::json!({"commandId":Uuid::now_v7(),"sourceKind":"task","sourceId":source,"parentId":null,"title":"Task private copy","contentJson":{"type":"doc","content":[]}});
+        let parsed = parse_off_draft_request(
+            workspace,
+            None,
+            actor,
+            credential,
+            serde_json::from_value(task).unwrap(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.source.target(),
+            crate::db::revisions::RevisionTarget::Task(source)
+        );
+        assert_eq!(parsed.source.project_id(), None);
+        assert_eq!(parsed.destination_project, None);
+    }
+
+    #[test]
+    fn body_input_requires_exactly_one_field() {
+        assert!(matches!(
+            parse_body_input(br##"{"contentMd":"# a"}"##),
+            Ok(BodyInput::Markdown(_))
+        ));
+        assert!(matches!(
+            parse_body_input(br#"{"contentJson":{"type":"doc","content":[]}}"#),
+            Ok(BodyInput::Json(_))
+        ));
+        for bad in [
+            &br#"{}"#[..],
+            br#"{"contentMd":"a","contentJson":{}}"#,
+            br#"{"contentMd":1}"#,
+            br#"{"other":1}"#,
+            br#"[]"#,
+        ] {
+            assert!(parse_body_input(bad).is_err());
+        }
+    }
+
+    #[test]
+    fn block_input_rejects_foreign_attrs_id() {
+        assert!(parse_block_input(br#"{"type":"paragraph","attrs":{"id":"b"}}"#, "b").is_ok());
+        assert!(parse_block_input(br#"{"type":"paragraph","attrs":{"id":"x"}}"#, "b").is_err());
+        assert!(parse_block_input(br#"{"type":""}"#, "b").is_err());
+        assert!(parse_block_input(br#"{"type":"p","extra":1}"#, "b").is_err());
+    }
 }
