@@ -281,7 +281,7 @@ pub fn pending_steps(applied: &[AppliedStep], compiled: &[CompiledStep]) -> Resu
     let expected = compiled.len() as i32;
     if applied.is_empty() {
         return Err(format!(
-            "database has a schema ledger without receipts (expected {POSTGRES_LINEAGE} version {expected}); {SCHEMA_GATE_OPERATOR_HINT}"
+            "database has no applied migrations (a schema ledger without receipts; expected {POSTGRES_LINEAGE} version {expected}); {SCHEMA_GATE_OPERATOR_HINT}"
         ));
     }
     if applied.len() > compiled.len() {
