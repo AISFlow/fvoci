@@ -15,8 +15,11 @@ the new ledger exactly (version, lineage, sql_sha256, applied_at) NOT NULL with
 contiguous receipts from 1, the single lineage fvoci-postgres-060 and distinct
 64-hex digests; otherwise the ledger difference is reported as a failure. Both
 sides' ledger definitions and rows are printed in the report, never compared as
-application catalog. No other object is excluded or normalized. Everything
-else must match: tables/columns (type, typmod, default, null, identity,
+application catalog. When the app role's privileges are dumped, its ledger
+privileges are validated the same way (exactly SELECT on the table and on each
+ledger column of that side's shape, so the new side gains SELECT on lineage and
+sql_sha256 and nothing else) and every other grant is compared strictly. No
+other object is excluded or normalized. Everything else must match: tables/columns (type, typmod, default, null, identity,
 collation, column ACL), constraints (pg_get_constraintdef), indexes
 (pg_get_indexdef), triggers, policies, RLS flags, table ACLs, sequences,
 functions (signature, language, result, arguments, security/volatility/
@@ -78,6 +81,23 @@ def validate_ledger_transition(old_tables, old_rows, new_tables, new_rows):
                 break
     return problems
 
+
+def validate_ledger_privileges(old_role, new_role):
+    """The app role's ledger privileges are validated explicitly, not ignored:
+    table privileges on schema_migrations must be exactly SELECT on both sides and
+    column privileges exactly SELECT on every ledger column of that side's shape
+    (the new side therefore gains SELECT on lineage and sql_sha256 and nothing
+    else). Any write privilege, any missing SELECT or any other column fails."""
+    problems = []
+    for side, role, columns in (("old", old_role, OLD_LEDGER_COLUMNS), ("new", new_role, NEW_LEDGER_COLUMNS)):
+        table_privs = sorted({x["privilege"] for x in role["table_privileges"] if x.get("table") == LEDGER_TABLE})
+        if table_privs != ["SELECT"]:
+            problems.append(f"LEDGER app_role {side} table privileges on {LEDGER_TABLE} are {table_privs}, expected ['SELECT'] only")
+        column_privs = sorted((x["column"], x["privilege"]) for x in role["column_privileges"] if x.get("table") == LEDGER_TABLE)
+        expected = sorted((c, "SELECT") for c in columns)
+        if column_privs != expected:
+            problems.append(f"LEDGER app_role {side} column privileges on {LEDGER_TABLE} are {column_privs}, expected {expected}")
+    return problems
 
 
 def load(path):
@@ -159,9 +179,10 @@ def main():
         report.append("NOTE app_role privileges dumped for only one side")
     elif "app_role" in old:
         a, b = old["app_role"], new["app_role"]
+        report.extend(validate_ledger_privileges(a, b))
         for field in ("table_privileges", "column_privileges", "routine_privileges"):
-            sa = {json.dumps(x, sort_keys=True) for x in a[field]}
-            sb = {json.dumps(x, sort_keys=True) for x in b[field]}
+            sa = {json.dumps(x, sort_keys=True) for x in a[field] if x.get("table") != LEDGER_TABLE}
+            sb = {json.dumps(x, sort_keys=True) for x in b[field] if x.get("table") != LEDGER_TABLE}
             for item in sorted(sa - sb):
                 report.append(f"MISSING app_role.{field} {item}")
             for item in sorted(sb - sa):

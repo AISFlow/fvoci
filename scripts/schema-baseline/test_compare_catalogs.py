@@ -40,6 +40,19 @@ def catalog(ledger_columns, ledger_rows, users_default="now()"):
     }
 
 
+def with_role(cat, ledger_columns, extra_table=(), extra_column=(), drop_column=()):
+    cat = copy.deepcopy(cat)
+    table_privileges = [{"table": "schema_migrations", "privilege": "SELECT"}, {"table": "users", "privilege": "SELECT"}, {"table": "users", "privilege": "INSERT"}]
+    column_privileges = [{"table": "schema_migrations", "column": c, "privilege": "SELECT"} for c in ledger_columns]
+    column_privileges += [{"table": "users", "column": c, "privilege": p} for c in ("id", "email") for p in ("SELECT", "INSERT")]
+    table_privileges += list(extra_table)
+    column_privileges += list(extra_column)
+    column_privileges = [x for x in column_privileges if (x["table"], x["column"], x["privilege"]) not in set(drop_column)]
+    cat["app_role"] = {"table_privileges": table_privileges, "column_privileges": column_privileges,
+                       "routine_privileges": [{"routine": "fvoci.app_now()", "execute": True}], "sequence_usage": True, "schema_usage": True}
+    return cat
+
+
 def run(old, new):
     with tempfile.TemporaryDirectory() as d:
         a, b = os.path.join(d, "a.json"), os.path.join(d, "b.json")
@@ -53,7 +66,56 @@ NEW_LEDGER = catalog(["version", "lineage", "sql_sha256", "applied_at"],
                      [{"version": v, "lineage": "fvoci-postgres-060", "sql_sha256": f"{v:064x}"} for v in range(1, 13)])
 
 
+OLD_ROLE = with_role(OLD_LEDGER, ["version", "applied_at"])
+NEW_ROLE = with_role(NEW_LEDGER, ["version", "lineage", "sql_sha256", "applied_at"])
+
+
 class CompareCatalogs(unittest.TestCase):
+    def test_role_inclusive_ledger_select_expansion_passes(self):
+        rc, out = run(OLD_ROLE, NEW_ROLE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("RESULT: PASS", out)
+        self.assertNotIn("app_role", "\n".join(l for l in out.splitlines() if l.startswith(("EXTRA", "MISSING", "DIFF"))))
+
+    def test_unauthorized_or_incomplete_ledger_privileges_fail(self):
+        cases = {
+            "new INSERT on ledger table": with_role(NEW_LEDGER, ["version", "lineage", "sql_sha256", "applied_at"], extra_table=[{"table": "schema_migrations", "privilege": "INSERT"}]),
+            "new UPDATE on lineage column": with_role(NEW_LEDGER, ["version", "lineage", "sql_sha256", "applied_at"], extra_column=[{"table": "schema_migrations", "column": "lineage", "privilege": "UPDATE"}]),
+            "new DELETE on ledger table": with_role(NEW_LEDGER, ["version", "lineage", "sql_sha256", "applied_at"], extra_table=[{"table": "schema_migrations", "privilege": "DELETE"}]),
+            "new SELECT missing on sql_sha256": with_role(NEW_LEDGER, ["version", "lineage", "applied_at"]),
+            "new SELECT on a column the ledger does not have": with_role(NEW_LEDGER, ["version", "lineage", "sql_sha256", "applied_at", "note"]),
+            "new table SELECT missing": with_role(NEW_LEDGER, ["version", "lineage", "sql_sha256", "applied_at"], drop_column=[]),
+        }
+        cases["new table SELECT missing"]["app_role"]["table_privileges"] = [x for x in cases["new table SELECT missing"]["app_role"]["table_privileges"] if x["table"] != "schema_migrations"]
+        for label, new in cases.items():
+            rc, out = run(OLD_ROLE, new)
+            self.assertEqual(rc, 1, f"{label}: {out}")
+            self.assertIn("LEDGER app_role new", out, label)
+        old = with_role(OLD_LEDGER, ["version", "applied_at", "lineage"])
+        rc, out = run(old, NEW_ROLE)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("LEDGER app_role old column privileges", out)
+
+    def test_non_ledger_grant_differences_still_fail(self):
+        new = with_role(NEW_LEDGER, ["version", "lineage", "sql_sha256", "applied_at"], extra_column=[{"table": "users", "column": "email", "privilege": "UPDATE"}])
+        rc, out = run(OLD_ROLE, new)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('EXTRA app_role.column_privileges {"column": "email", "privilege": "UPDATE", "table": "users"}', out)
+        new = with_role(NEW_LEDGER, ["version", "lineage", "sql_sha256", "applied_at"], drop_column=[("users", "id", "SELECT")])
+        rc, out = run(OLD_ROLE, new)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("MISSING app_role.column_privileges", out)
+        new = copy.deepcopy(NEW_ROLE)
+        new["app_role"]["routine_privileges"][0]["execute"] = False
+        rc, out = run(OLD_ROLE, new)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("app_role.routine_privileges", out)
+        new = copy.deepcopy(NEW_ROLE)
+        new["app_role"]["sequence_usage"] = False
+        rc, out = run(OLD_ROLE, new)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("DIFF app_role.sequence_usage", out)
+
     def test_ledger_table_and_rows_are_the_only_declared_exception(self):
         rc, out = run(OLD_LEDGER, NEW_LEDGER)
         self.assertEqual(rc, 0, out)
