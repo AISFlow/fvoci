@@ -2486,7 +2486,7 @@ mod maintenance_operation_tests {
         assert_eq!(tasks[0].target, RevisionTarget::Task(task));
         assert!(tx
             .operation()
-            .list_scheduled_revision_candidates(other_workspace, Some(after), 2)
+            .list_scheduled_revision_candidates(other_workspace, None, 2)
             .await
             .is_err());
         assert!(matches!(
@@ -2560,6 +2560,21 @@ mod maintenance_operation_tests {
             .await
             .unwrap());
         tx.commit_with_cleanup().await.unwrap();
+        // Otherwise identical valid arguments reach the actual tenant guard
+        // above; a fresh writer with the matching tenant succeeds.
+        let mut other_tx = backend.begin_write().await.unwrap();
+        other_tx
+            .operation()
+            .set_tenant(other_workspace)
+            .await
+            .unwrap();
+        assert!(other_tx
+            .operation()
+            .list_scheduled_revision_candidates(other_workspace, None, 2)
+            .await
+            .unwrap()
+            .is_empty());
+        other_tx.rollback().await.unwrap();
         let stored: Vec<(Vec<u8>, String, Option<Vec<u8>>)> =
             sqlx::query_as("SELECT id,reason,created_by FROM revisions ORDER BY id")
                 .fetch_all(&pool)
@@ -2591,13 +2606,60 @@ mod maintenance_operation_tests {
             tx.rollback().await.unwrap();
         }
         let manual = Uuid::now_v7();
-        for (id, reason, at) in [
-            (manual, "manual", 1_i64),
-            (Uuid::now_v7(), "session", 2),
-            (Uuid::now_v7(), "scheduled", 3),
+        let task_manual = Uuid::now_v7();
+        let other_parent_revision = Uuid::now_v7();
+        let other_target = Uuid::now_v7();
+        let other_tenant_revisions = [Uuid::now_v7(), Uuid::now_v7()];
+        sqlx::query("INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,'Other tenant',?3,'V',1,'draft',2,?4,?5)")
+            .bind(other_target.as_bytes().as_slice()).bind(other_workspace.as_bytes().as_slice()).bind(other_target.simple().to_string()).bind(actor.as_bytes().as_slice()).bind(crate::db::documents::empty_document_json().to_string()).execute(&pool).await.unwrap();
+        for (id, row_workspace, target_kind, target_id, reason, at) in [
+            (manual, workspace, "document", documents[1], "manual", 1_i64),
+            (
+                Uuid::now_v7(),
+                workspace,
+                "document",
+                documents[1],
+                "session",
+                2,
+            ),
+            (
+                Uuid::now_v7(),
+                workspace,
+                "document",
+                documents[1],
+                "scheduled",
+                3,
+            ),
+            (task_manual, workspace, "task", task, "manual", 1),
+            (Uuid::now_v7(), workspace, "task", task, "session", 2),
+            (Uuid::now_v7(), workspace, "task", task, "scheduled", 3),
+            (
+                other_parent_revision,
+                workspace,
+                "document",
+                documents[0],
+                "session",
+                4,
+            ),
+            (
+                other_tenant_revisions[0],
+                other_workspace,
+                "document",
+                other_target,
+                "session",
+                2,
+            ),
+            (
+                other_tenant_revisions[1],
+                other_workspace,
+                "document",
+                other_target,
+                "scheduled",
+                3,
+            ),
         ] {
-            sqlx::query("INSERT INTO revisions(id,workspace_id,target_kind,target_id,y_snapshot,encoding,content_json,text,reason,created_at) VALUES(?1,?2,'document',?3,?4,1,?5,'',?6,?7)")
-                .bind(id.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(documents[1].as_bytes().as_slice()).bind([0_u8,0].as_slice()).bind(crate::db::documents::empty_document_json().to_string()).bind(reason).bind(at).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO revisions(id,workspace_id,target_kind,target_id,y_snapshot,encoding,content_json,text,reason,created_at,created_by) VALUES(?1,?2,?3,?4,?5,1,?6,'',?7,?8,?9)")
+                .bind(id.as_bytes().as_slice()).bind(row_workspace.as_bytes().as_slice()).bind(target_kind).bind(target_id.as_bytes().as_slice()).bind([0_u8,0].as_slice()).bind(crate::db::documents::empty_document_json().to_string()).bind(reason).bind(at).bind((reason=="manual").then(||actor.as_bytes().to_vec())).execute(&pool).await.unwrap();
         }
         let mut tx = backend.begin_write().await.unwrap();
         tx.operation().set_tenant(workspace).await.unwrap();
@@ -2619,7 +2681,7 @@ mod maintenance_operation_tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap(),
-            5
+            11
         );
         let mut tx = backend.begin_write().await.unwrap();
         tx.operation().set_tenant(workspace).await.unwrap();
@@ -2635,7 +2697,7 @@ mod maintenance_operation_tests {
                 .gc_revision_automatic_rows(workspace, 1, 5000)
                 .await
                 .unwrap(),
-            1
+            3
         );
         assert_eq!(
             tx.operation()
@@ -2650,14 +2712,41 @@ mod maintenance_operation_tests {
             .await
             .unwrap());
         tx.commit_with_cleanup().await.unwrap();
-        let retained: Vec<Vec<u8>> = sqlx::query_scalar("SELECT id FROM revisions ORDER BY id")
-            .fetch_all(&pool)
+        let mut fresh = backend.begin_write().await.unwrap();
+        fresh.operation().set_tenant(workspace).await.unwrap();
+        assert_eq!(
+            fresh
+                .operation()
+                .latest_scheduled_revision_head(workspace, RevisionTarget::Task(task))
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            task_revision
+        );
+        let OperationTx::SqliteFamily(writer) = fresh.operation() else {
+            panic!("fresh actual writer")
+        };
+        let retained: Vec<Vec<u8>> = writer
+            .query("SELECT id FROM revisions ORDER BY id", &[])
             .await
-            .unwrap();
-        assert_eq!(retained.len(), 3);
-        for id in [manual, revision, task_revision] {
+            .unwrap()
+            .iter()
+            .map(|row| row.cell(0).unwrap().bytes().unwrap())
+            .collect();
+        assert_eq!(retained.len(), 7);
+        for id in [
+            manual,
+            revision,
+            task_manual,
+            task_revision,
+            other_parent_revision,
+            other_tenant_revisions[0],
+            other_tenant_revisions[1],
+        ] {
             assert!(retained.iter().any(|bytes| bytes == id.as_bytes()));
         }
+        fresh.rollback().await.unwrap();
         claim.release().await.unwrap();
         backend.close().await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
