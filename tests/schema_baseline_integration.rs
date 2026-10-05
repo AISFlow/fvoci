@@ -133,6 +133,8 @@ async fn sdk_rendering_reproduces_archived_remote_sqlite_schema_rows() {
 #[tokio::test]
 async fn baseline_sqlite_steps_render_to_the_same_structural_catalog() {
     use sqlx::Connection;
+    /// PRAGMA foreign_key_list row: id, seq, table, from, to, on_update, on_delete, match.
+    type ForeignKeyRow = (i64, i64, String, String, String, String, String, String);
     async fn structure(sql_texts: Vec<String>) -> Value {
         let mut conn = sqlx::SqliteConnection::connect_with(
             &sqlx::sqlite::SqliteConnectOptions::new()
@@ -157,7 +159,7 @@ async fn baseline_sqlite_steps_render_to_the_same_structural_catalog() {
                     .fetch_all(&mut conn)
                     .await
                     .unwrap();
-            let fks: Vec<(i64, i64, String, String, String, String, String, String)> =
+            let fks: Vec<ForeignKeyRow> =
                 sqlx::query_as(&format!("PRAGMA foreign_key_list(\"{table}\")"))
                     .fetch_all(&mut conn)
                     .await
