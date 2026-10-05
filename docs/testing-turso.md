@@ -22,11 +22,13 @@ chat, an issue, a log, or an artifact:
   or `https://` URL; no userinfo, query, fragment, custom port, replica, sync,
   local fallback, or production endpoint. The preparation guard restricts hosts
   to `*.turso.io`; another host requires explicit reviewed admission.
-- `FVOCI_TEST_TURSO_AUTH_TOKEN`: a token scoped to that database alone. Use a
-  short expiry and the CLI's `--read-only` option for the first connection phase.
-  Later authorized internal schema/data CRUD and DDL need a database write
-  token; never use an organization/account/platform API or billing token. Do
-  not delete or recreate the service database. See [Turso database tokens](https://docs.turso.tech/cli/db/tokens/create).
+- `FVOCI_TEST_TURSO_AUTH_TOKEN`: one short-expiry **read/write token scoped to
+  that database alone**, supporting the authorized isolated schema/data CRUD
+  and DDL. Do not select `--read-only`, which would require replacement for
+  those later tests. The initial connection phase still performs no destructive
+  data/schema operation. Never use an organization/account/admin/platform API
+  or billing token; do not delete or recreate the service database. See
+  [Turso database tokens](https://docs.turso.tech/cli/db/tokens/create).
 
 Set these nonsecret **Environment variables** and confirm the same host/ID in
 the dispatch inputs:
@@ -37,9 +39,11 @@ the dispatch inputs:
   mutating phase needs this value `true` **and** the dispatch boolean
   `destructive=true`; connection requires `destructive=false`.
 
+Registration may proceed while the driver and registry work remain pending.
 Secret-name presence can be confirmed through Settings without displaying
-values. The current empty Environment inventory proves no registration or
-readiness. Prepared source is not a dispatchable default-branch workflow:
+values; registration does not make the missing consumer ready. The current
+empty Environment inventory proves no registration or readiness. Prepared
+source is not a dispatchable default-branch workflow:
 `workflow_dispatch` requires the workflow on the default branch. Only reviewed
 trusted-main adoption can enable this path; never run an unreviewed PR/fork or
 arbitrary ref with secrets. See [GitHub manual dispatch](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch).
