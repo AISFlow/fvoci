@@ -320,22 +320,22 @@ pub fn pending_steps(applied: &[AppliedStep], compiled: &[CompiledStep]) -> Resu
 /// Reads the ledger. Works inside a migration transaction or on a plain
 /// connection of the app role (SELECT on fvoci.schema_migrations is granted).
 pub async fn read_postgres_ledger(conn: &mut PgConnection) -> Result<LedgerState, sqlx::Error> {
-    let bootstrapped: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-            SELECT 1 FROM information_schema.tables
-            WHERE table_schema = 'fvoci' AND table_name = 'schema_migrations'
-        )",
-    )
-    .fetch_one(&mut *conn)
-    .await?;
+    // Probe the catalog, not information_schema: information_schema only lists
+    // relations and columns the current role has a privilege on, so an app role
+    // without grants would see a migrated database as unprepared instead of
+    // failing to read its ledger (permission denied surfaces below as "cannot read").
+    let bootstrapped: bool =
+        sqlx::query_scalar("SELECT to_regclass('fvoci.schema_migrations') IS NOT NULL")
+            .fetch_one(&mut *conn)
+            .await?;
     if !bootstrapped {
         return Ok(LedgerState::Unprepared);
     }
     let has_lineage: bool = sqlx::query_scalar(
         "SELECT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_schema = 'fvoci' AND table_name = 'schema_migrations'
-              AND column_name = 'lineage'
+            SELECT 1 FROM pg_catalog.pg_attribute
+            WHERE attrelid = 'fvoci.schema_migrations'::regclass
+              AND attname = 'lineage' AND attnum > 0 AND NOT attisdropped
         )",
     )
     .fetch_one(&mut *conn)

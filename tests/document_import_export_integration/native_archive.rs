@@ -5430,7 +5430,10 @@ async fn native_archive_post053_command_only_guard_refuses_full_and_omitted_hist
             .fetch_all(&fx.admin)
             .await
             .unwrap();
-    assert_eq!(versions, (1..=55).collect::<Vec<_>>());
+    assert_eq!(
+        versions,
+        fvoci_server::db::migrate::compiled_migration_versions()
+    );
     let run = archive.graph.timer_runs[0].id;
     let task = archive.graph.timer_runs[0].task_id;
     let historical: Value = sqlx::query_scalar(
@@ -7617,7 +7620,10 @@ async fn native_archive_current55_collections_tags_and_command_guard_share_one_r
                     .fetch_all(&inst.admin)
                     .await
                     .unwrap();
-            assert_eq!(versions, (1..=55).collect::<Vec<_>>());
+            assert_eq!(
+                versions,
+                fvoci_server::db::migrate::compiled_migration_versions()
+            );
             let owner = if foreign {
                 project_harness::add_workspace_user(
                     &inst.admin,

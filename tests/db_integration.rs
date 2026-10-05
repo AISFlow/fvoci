@@ -4512,7 +4512,7 @@ async fn server_exits_on_unmigrated_database() {
     assert_schema_gate_process_failure(
         &output,
         &[
-            "cannot read fvoci.schema_migrations",
+            "database has no applied migrations",
             migrate::SCHEMA_GATE_OPERATOR_HINT,
         ],
     );

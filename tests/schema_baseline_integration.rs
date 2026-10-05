@@ -391,3 +391,181 @@ async fn postgres_catalog_dump() {
     .unwrap();
     eprintln!("wrote {out}");
 }
+
+/// Genuine app-role ledger controls on a throwaway database reached through
+/// `TEST_DATABASE_URL` (the migration-owner server URL, as in
+/// tests/db_integration.rs). The gate must tell an unreadable ledger (no schema
+/// USAGE, or USAGE without table SELECT) apart from a missing one (unprepared),
+/// from a receipts-only one and from the retired lineage, and it must never
+/// rewrite a ledger while classifying it: the destructive shapes are read
+/// inside owner transactions that are rolled back.
+#[tokio::test]
+async fn app_role_gate_tells_unreadable_missing_empty_retired_and_current_ledgers_apart() {
+    use rand::RngCore;
+    use sqlx::postgres::PgPoolOptions;
+    let admin_base = std::env::var("TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))
+        .expect("TEST_DATABASE_URL missing");
+    let mut server = url::Url::parse(&admin_base).expect("database url");
+    server.set_path("");
+    let server_url = server.to_string().trim_end_matches('/').to_string();
+    let db_name = format!("fvoci_test_{}", uuid::Uuid::now_v7().simple());
+    let role = format!("fvoci_app_{db_name}");
+    let mut password_bytes = [0u8; 24];
+    rand::rng().fill_bytes(&mut password_bytes);
+    let password = hex::encode(password_bytes);
+    let server_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&server_url)
+        .await
+        .expect("connect server");
+    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
+        .execute(&server_pool)
+        .await
+        .expect("create database");
+    let mut owner_url = url::Url::parse(&server_url).expect("server url");
+    owner_url.set_path(&format!("/{db_name}"));
+    let owner_url = owner_url.to_string();
+    let owner = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&owner_url)
+        .await
+        .expect("connect owner");
+    sqlx::query(&format!(
+        "CREATE ROLE \"{role}\" LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS"
+    ))
+    .execute(&owner)
+    .await
+    .expect("create role");
+    let mut app_url = url::Url::parse(&owner_url).expect("owner url");
+    app_url.set_username(&role).ok();
+    app_url.set_password(Some(&password)).ok();
+    let app = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(app_url.as_str())
+        .await
+        .expect("connect app role");
+
+    // 1. Missing ledger: unprepared for the owner and the app role alike, never "cannot read".
+    {
+        let mut conn = owner.acquire().await.unwrap();
+        assert_eq!(
+            migrate::read_postgres_ledger(&mut conn).await.unwrap(),
+            migrate::LedgerState::Unprepared
+        );
+    }
+    for pool in [&owner, &app] {
+        let error = migrate::assert_schema_current(pool).await.unwrap_err();
+        assert!(
+            error.contains("database has no applied migrations"),
+            "{error}"
+        );
+        assert!(
+            error.contains(migrate::SCHEMA_GATE_OPERATOR_HINT),
+            "{error}"
+        );
+        assert!(!error.contains("cannot read"), "{error}");
+    }
+    migrate::run_migrations(&owner_url).await.expect("migrate");
+
+    // 2. Ungranted role without schema USAGE: the ledger is unreadable, not empty.
+    let error = migrate::assert_schema_current(&app).await.unwrap_err();
+    assert!(
+        error.contains("cannot read fvoci.schema_migrations"),
+        "{error}"
+    );
+    assert!(error.contains("permission denied"), "{error}");
+    assert!(!error.contains("no applied migrations"), "{error}");
+
+    // 3. Schema USAGE without table SELECT: still unreadable, still not empty.
+    sqlx::query(&format!("GRANT USAGE ON SCHEMA fvoci TO \"{role}\""))
+        .execute(&owner)
+        .await
+        .unwrap();
+    let error = migrate::assert_schema_current(&app).await.unwrap_err();
+    assert!(
+        error.contains("cannot read fvoci.schema_migrations"),
+        "{error}"
+    );
+    assert!(error.contains("permission denied"), "{error}");
+    assert!(!error.contains("no applied migrations"), "{error}");
+
+    // 4. Current: the maintained grants make the ledger readable and the gate passes.
+    migrate::grant_app_role(&owner_url, &role)
+        .await
+        .expect("grant app role");
+    migrate::assert_schema_current(&app).await.unwrap();
+    {
+        let mut conn = app.acquire().await.unwrap();
+        match migrate::read_postgres_ledger(&mut conn).await.unwrap() {
+            migrate::LedgerState::Applied(steps) => {
+                assert_eq!(
+                    steps.iter().map(|step| step.version).collect::<Vec<_>>(),
+                    migrate::compiled_migration_versions()
+                );
+                assert!(steps
+                    .iter()
+                    .all(|step| step.lineage == migrate::POSTGRES_LINEAGE));
+            }
+            other => panic!("current ledger misread as {other:?}"),
+        }
+    }
+
+    // 5. Receipts-only and retired shapes, classified inside rolled-back owner
+    //    transactions: the real ledger is never rewritten.
+    let mut tx = owner.begin().await.unwrap();
+    sqlx::query("DELETE FROM fvoci.schema_migrations")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let receipts_only = migrate::read_postgres_ledger(&mut tx).await.unwrap();
+    assert_eq!(receipts_only, migrate::LedgerState::Applied(Vec::new()));
+    let error =
+        migrate::schema_gate(&receipts_only, &migrate::compiled_postgres_steps()).unwrap_err();
+    assert!(error.contains("without receipts"), "{error}");
+    assert!(!error.contains("cannot read"), "{error}");
+    tx.rollback().await.unwrap();
+    let mut tx = owner.begin().await.unwrap();
+    sqlx::query("ALTER TABLE fvoci.schema_migrations DROP COLUMN lineage")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let retired = migrate::read_postgres_ledger(&mut tx).await.unwrap();
+    assert_eq!(
+        retired,
+        migrate::LedgerState::Retired {
+            versions: migrate::compiled_migration_versions()
+        }
+    );
+    let error = migrate::schema_gate(&retired, &migrate::compiled_postgres_steps()).unwrap_err();
+    assert!(error.contains(migrate::RETIRED_LINEAGE_HINT), "{error}");
+    tx.rollback().await.unwrap();
+
+    // 6. Nothing changed: the app role still passes and every receipt is intact.
+    migrate::assert_schema_current(&app).await.unwrap();
+    let receipts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.schema_migrations WHERE lineage = $1")
+            .bind(migrate::POSTGRES_LINEAGE)
+            .fetch_one(&owner)
+            .await
+            .unwrap();
+    assert_eq!(receipts as usize, migrate::compiled_migration_count());
+
+    app.close().await;
+    owner.close().await;
+    sqlx::query(&format!(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{db_name}'"
+    ))
+    .execute(&server_pool)
+    .await
+    .ok();
+    sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db_name}\""))
+        .execute(&server_pool)
+        .await
+        .expect("drop database");
+    sqlx::query(&format!("DROP ROLE IF EXISTS \"{role}\""))
+        .execute(&server_pool)
+        .await
+        .expect("drop role");
+    server_pool.close().await;
+}
