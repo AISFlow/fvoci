@@ -1018,7 +1018,7 @@ mod selected_task_origin_http_tests {
                 .unwrap()
                 .unwrap();
         let history: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM task_updates WHERE workspace_id=?1 AND task_id=?2",
+            "SELECT count(*) FROM task_collab_updates WHERE workspace_id=?1 AND task_id=?2",
         )
         .bind(f.workspace.as_bytes().as_slice())
         .bind(task.as_bytes().as_slice())
@@ -1066,7 +1066,7 @@ mod selected_task_origin_http_tests {
         assert_eq!(after.1, i64::from(before.meta.version));
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM task_updates WHERE workspace_id=?1 AND task_id=?2"
+                "SELECT count(*) FROM task_collab_updates WHERE workspace_id=?1 AND task_id=?2"
             )
             .bind(f.workspace.as_bytes().as_slice())
             .bind(task.as_bytes().as_slice())
