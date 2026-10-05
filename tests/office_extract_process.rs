@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use fvoci_server::documents::office::{
     run_office_helper, OfficeCancelled, OfficeKind, OfficeLimits, OfficeMode, OfficeOutcome,
 };
+use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 fn helper() -> PathBuf {
@@ -116,6 +117,11 @@ async fn address_space_ceiling_kills_the_child_not_the_server() {
         ..OfficeLimits::import()
     };
     let bytes = office_fixtures::docx("t", &[&"x".repeat(1 << 20)]);
+    eprintln!(
+        "limited fixture bytes={} sha256={}",
+        bytes.len(),
+        hex::encode(Sha256::digest(&bytes))
+    );
     let out = run(bytes, OfficeKind::Docx, OfficeMode::Text, limits).await;
     match out {
         OfficeOutcome::ResourceLimit { detail } => {
@@ -125,6 +131,27 @@ async fn address_space_ceiling_kills_the_child_not_the_server() {
             )
         }
         other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn address_space_fixture_is_healthy_with_the_normal_ceiling() {
+    let bytes = office_fixtures::docx("t", &[&"x".repeat(1 << 20)]);
+    eprintln!(
+        "healthy fixture bytes={} sha256={}",
+        bytes.len(),
+        hex::encode(Sha256::digest(&bytes))
+    );
+    match run(
+        bytes,
+        OfficeKind::Docx,
+        OfficeMode::Text,
+        OfficeLimits::import(),
+    )
+    .await
+    {
+        OfficeOutcome::Ok { text, .. } => assert!(text.contains(&"x".repeat(1000))),
+        other => panic!("normal address-space ceiling: {other:?}"),
     }
 }
 
