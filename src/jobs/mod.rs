@@ -572,7 +572,7 @@ pub(crate) mod family_maintenance_fixture {
             let gate = crate::db::migrate::assert_sqlite_schema_current(&backend)
                 .await
                 .unwrap();
-            assert_eq!(gate.applied_steps, 5);
+            assert_eq!(gate.applied_steps, 6);
             let fk: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
                 .fetch_one(&pool)
                 .await
