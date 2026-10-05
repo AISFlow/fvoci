@@ -398,7 +398,6 @@ impl OperationTx<'_, '_> {
     }
     /// Metadata only. Does not set system/tenant or authorize business writes.
     /// Caller keeps this actual writer through effects and repeats before COMMIT.
-    #[cfg(test)]
     pub(crate) async fn check_family_maintenance_claim(
         &mut self,
         proof: &FamilyMaintenanceProof,
