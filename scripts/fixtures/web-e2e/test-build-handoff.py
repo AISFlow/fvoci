@@ -580,24 +580,57 @@ class BrowserAssetsTest(unittest.TestCase):
         shell = self.cache/'chromium_headless_shell-1243';shell.mkdir()
         (shell/'headless_shell').write_bytes(b'NOT executable');(shell/'headless_shell').chmod(0o700)
         ffmpeg = self.cache/'ffmpeg-1011';ffmpeg.mkdir();(ffmpeg/'ffmpeg-linux').write_bytes(b'NOT executable');(ffmpeg/'ffmpeg-linux').chmod(0o700)
-        self.output = self.root/'output';self.output.mkdir(mode=0o700)
+        # The private runtime copy has its own /tmp parent, independently of
+        # the preparation actor's private source cache and checkout ancestors.
+        self.output_tmp = tempfile.TemporaryDirectory(prefix='fvoci-browser-output-')
+        self.addCleanup(self.output_tmp.cleanup)
+        self.output = Path(self.output_tmp.name)
         self.environment = patch.dict(os.environ, GITHUB_SHA=SHA)
         self.environment.start();self.addCleanup(self.environment.stop)
 
-    def stage(self):return H.CI.prepare_browser(self.output, str(self.chrome))
+    def stage(self, output=None):return H.CI.prepare_browser(self.output if output is None else output, str(self.chrome))
+
+    def runtime_probe(self):
+        # Copy the actual helper into the exclusively owned runtime prefix;
+        # preparation may be1001, while admission/access always execute as1000.
+        module=self.output/'run-selected-backend-e2e.py'
+        module.write_bytes((ROOT/'scripts/run-selected-backend-e2e.py').read_bytes());module.chmod(0o600)
+        program="""import importlib.util,json,os,pathlib,sys
+s=importlib.util.spec_from_file_location('owned',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+output=pathlib.Path(sys.argv[2]);current=m.admitted_browser(output)
+m.runtime_access({}, {'bun':{'path':'/bin/true'},'chromium':{'path':current},
+                      'chromium_directory_files':m.browser_inventory(pathlib.Path(current).parent)})
+print(json.dumps({'admitted':current,'uid':os.getuid(),'gid':os.getgid(),'groups':os.getgroups(),
+                  'supplemental':(pathlib.Path(current).parent/'deb.deps').read_text()}))
+"""
+        try:
+            subprocess.run(['sudo','-n','chown','-R','1000:1000',str(self.output)],check=True)
+            return subprocess.run(['sudo','-n','setpriv','--reuid=1000','--regid=1000','--clear-groups',
+                'env','GITHUB_SHA='+SHA,'PYTHONDONTWRITEBYTECODE=1',
+                'PLAYWRIGHT_BROWSERS_PATH='+str(self.output/'browser'),sys.executable,'-B','-c',
+                program,str(module),str(self.output)],capture_output=True,text=True)
+        finally:
+            subprocess.run(['sudo','-n','chown','-R',str(os.getuid())+':'+str(os.getgid()),str(self.output)],check=True)
 
     def test_complete_private_copy_preserves_bytes_and_all_installed_chromium_components(self):
         current = self.stage()
-        with patch.dict(os.environ, PLAYWRIGHT_BROWSERS_PATH=str(self.output/'browser')):
-            self.assertEqual(H.CI.admitted_browser(self.output), str(current))
+        result=self.runtime_probe()
+        self.assertEqual(result.returncode,0,result.stderr)
+        runtime=json.loads(result.stdout)
+        self.assertEqual(runtime['admitted'],str(current))
         receipt = H.CI.read(self.output/'runtime-browser-stage.json')
         self.assertEqual(set(receipt['files']), {'chromium-1243','chromium_headless_shell-1243','ffmpeg-1011'})
         self.assertEqual((current.parent/'deb.deps').read_bytes(), self.asset.read_bytes())
         self.assertEqual(self.asset.stat().st_mode & 0o777,0o600)
         self.assertEqual(self.cache.stat().st_uid,os.getuid())
-        H.CI.runtime_access({}, {'bun':{'path':'/bin/true'}, 'chromium':{'path':str(current)},
-                               'chromium_directory_files':H.CI.browser_inventory(current.parent)})
-        self.assertEqual(os.getuid(),1000);self.assertEqual(os.getgid(),1000)
+        self.assertEqual(runtime['uid'],1000);self.assertEqual(runtime['gid'],1000)
+        self.assertEqual(runtime['groups'],[])
+        self.assertEqual(self.output.stat().st_uid,os.getuid())
+        self.assertEqual(self.output.stat().st_mode & 0o777,0o700)
+        print(json.dumps({'control':'private-browser-actor-roundtrip','preparation_uid':os.getuid(),
+                          'preparation_gid':os.getgid(),'runtime_uid':runtime['uid'],'runtime_gid':runtime['gid'],
+                          'runtime_groups':runtime['groups'],'admission_exit':result.returncode,
+                          'returned_owner':self.output.stat().st_uid,'returned_mode':self.output.stat().st_mode & 0o777}),flush=True)
 
     def test_original_executable_only_preflight_misses_real_supplemental_permission_failure(self):
         # A fresh runner1001 cache with an owner-only asset: exact kernel refusal,
@@ -626,18 +659,20 @@ m.prepare_browser(pathlib.Path(sys.argv[2]),sys.argv[3])
 """
             staged=subprocess.run(['sudo','-n','setpriv','--reuid=1001','--regid=1001','--clear-groups','env','GITHUB_SHA='+SHA,'PYTHONDONTWRITEBYTECODE=1',sys.executable,'-c',prepare,str(module),str(self.output),str(self.chrome)],capture_output=True,text=True)
             self.assertEqual(staged.returncode,0,staged.stderr)
-            subprocess.run(['sudo','-n','chown','-R','1000:1000',str(self.output)],check=True)
+            subprocess.run(['sudo','-n','chown','-R',str(os.getuid())+':'+str(os.getgid()),str(self.output)],check=True)
             current=self.output/'browser/chromium-1243/chrome-linux64/chrome'
-            with patch.dict(os.environ,PLAYWRIGHT_BROWSERS_PATH=str(self.output/'browser')):
-                self.assertEqual(H.CI.admitted_browser(self.output),str(current))
-            runtime=subprocess.run(['sudo','-n','setpriv','--reuid=1000','--regid=1000','--clear-groups',sys.executable,'-c',
-                "import pathlib,sys;print((pathlib.Path(sys.argv[1]).parent/'deb.deps').read_text())",str(current)],capture_output=True,text=True)
-            self.assertEqual(runtime.returncode,0,runtime.stderr)
-            self.assertIn('qualified supplemental asset',runtime.stdout)
+            admitted=self.runtime_probe()
+            self.assertEqual(admitted.returncode,0,admitted.stderr)
+            self.assertEqual(json.loads(admitted.stdout)['admitted'],str(current))
+            self.assertEqual(json.loads(admitted.stdout)['uid'],1000)
+            self.assertEqual(json.loads(admitted.stdout)['gid'],1000)
+            self.assertEqual(json.loads(admitted.stdout)['groups'],[])
+            self.assertEqual(admitted.returncode,0,admitted.stderr)
+            self.assertIn('qualified supplemental asset',json.loads(admitted.stdout)['supplemental'])
             source=subprocess.check_output(['sudo','-n','stat','-c','%u:%g:%a',str(self.asset)],text=True).strip()
             self.assertEqual(source,'1001:1001:600')
             print(json.dumps({'control':'original-incomplete-preflight-and-fixed-private-copy','original_exit':result.returncode,
-                              'stage_exit':staged.returncode,'runtime_read_exit':runtime.returncode,'source_mode_preserved':source,'runtime_supplementary_groups':[]}),flush=True)
+                              'stage_exit':staged.returncode,'runtime_read_exit':admitted.returncode,'source_mode_preserved':source,'runtime_supplementary_groups':[]}),flush=True)
         finally:
             subprocess.run(['sudo','-n','chown','-R',str(os.getuid())+':'+str(os.getgid()),str(self.root)],check=True)
 
@@ -649,12 +684,17 @@ m.prepare_browser(pathlib.Path(sys.argv[2]),sys.argv[3])
         finally:self.asset.chmod(0o600)
 
     def test_foreign_root_group_and_symlink_assets_refused(self):
-        for uid,gid in ((1001,1001),(0,1000),(1000,0),(1000,2000)):
+        foreign=max(os.getuid(),os.getgid(),1000)+1
+        for index,(uid,gid) in enumerate(((foreign,foreign),(0,os.getgid()),(os.getuid(),0),(os.getuid(),foreign))):
             with self.subTest(uid=uid,gid=gid):
                 try:
                     subprocess.run(['sudo','-n','chown',str(uid)+':'+str(gid),str(self.asset)],check=True)
-                    with self.assertRaisesRegex(AssertionError,'foreign or privileged'):self.stage()
-                    self.assertFalse((self.output/'browser').exists())
+                    output=self.output/('negative-'+str(index));output.mkdir(mode=0o700)
+                    with self.assertRaisesRegex(AssertionError,'foreign or privileged'):self.stage(output)
+                    self.assertFalse((output/'browser').exists())
+                    print(json.dumps({'control':'browser-foreign-owner-refused','preparation_uid':os.getuid(),
+                                      'preparation_gid':os.getgid(),'asset_uid':uid,'asset_gid':gid,
+                                      'copy_created':False}),flush=True)
                 finally:subprocess.run(['sudo','-n','chown',str(os.getuid())+':'+str(os.getgid()),str(self.asset)],check=True)
         self.asset.unlink();self.asset.symlink_to(self.chrome)
         with self.assertRaisesRegex(AssertionError,'nonregular'):self.stage()
@@ -671,7 +711,9 @@ m.prepare_browser(pathlib.Path(sys.argv[2]),sys.argv[3])
                     elif change=='mode':asset.chmod(0o640)
                     elif change=='directory':(current.parent/'unexpected-empty').mkdir()
                     else:asset.chmod(0)
-                    with self.assertRaises((AssertionError,PermissionError)):H.CI.admitted_browser(self.output)
+                    result=self.runtime_probe()
+                    self.assertNotEqual(result.returncode,0)
+                    self.assertRegex(result.stderr,'AssertionError|PermissionError')
                     if change=='new':(current.parent/'unexpected').unlink()
                     elif change=='directory':(current.parent/'unexpected-empty').rmdir()
                     else:asset.chmod(0o600) if asset.exists() else None;asset.write_bytes(b'qualified supplemental asset');asset.chmod(0o600)
