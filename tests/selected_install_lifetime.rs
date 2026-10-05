@@ -87,14 +87,16 @@ impl Inputs {
             );
         }
         assert!(env.contains_key("FVOCI_PUBLIC_ORIGIN"));
-        // The candidate executables are built under the builder's home, which a
-        // hosted runner keeps at 0750 for its own UID; the real entrypoint execs
-        // its sibling server (and the server its collab engine) as service UID
-        // 1000, which cannot traverse that home ("Permission denied (os error
-        // 13)"). Stage byte-identical root-owned 0755 copies in a root-owned
-        // directory that only the service group may traverse, verify them
-        // against the same root receipts, and run those. Nothing outside the
-        // run root is chmodded.
+        // Observed on hosted CI (install lifetime jobs): after a normal prepare,
+        // the real entrypoint execs its sibling server as service UID 1000 from
+        // the builder's target directory under the runner home and fails with
+        // "Permission denied (os error 13)"; the server would exec its collab
+        // engine from the same place. The denying ancestor was not captured
+        // (a runner home closed to other UIDs is the likely cause, not a proven
+        // one). Independent of which component denies, stage byte-identical
+        // root-owned 0755 copies in a root-owned directory that only the
+        // service group may traverse, verify them against the same root
+        // receipts, and run those. Nothing outside the run root is chmodded.
         let bin = root.join(format!("bin-{}", Uuid::now_v7()));
         std::fs::create_dir(&bin).unwrap();
         let directory = std::fs::File::open(&bin).unwrap();
