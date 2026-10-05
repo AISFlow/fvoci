@@ -716,7 +716,7 @@ test.describe("selected normal main OFF", () => {
       await openOff(fresh.page, target);
       expect(await readBody(fresh.page, target)).toEqual(current);
       const denied = await other.page.request.get(`${target.path}/body/versioned`);
-      expect(denied.status()).toBe(403);
+      expect(denied.status()).toBe(404);
       await secondPage.close();
       expect([...a.sockets, ...secondSockets, ...fresh.sockets, ...other.sockets]).toEqual([]);
     } finally {
@@ -905,10 +905,10 @@ test.describe("selected normal main OFF", () => {
       } finally {
         release();
       }
-      expect((await refused).status()).toBe(403);
+      expect((await refused).status()).toBe(404);
       expect(await readBody(owner.page, target)).toEqual(before);
       const replay = await peer.page.request.put(path, { data: command });
-      expect(replay.status()).toBe(403);
+      expect(replay.status()).toBe(404);
       expect(await readBody(owner.page, target)).toEqual(before);
       await expect(
         peer.page.locator('.fvoci-editor .ProseMirror[contenteditable="true"]'),
