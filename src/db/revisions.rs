@@ -2382,6 +2382,11 @@ mod maintenance_operation_tests {
                 .bind(workspace.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).bind([0_u8,0].as_slice()).execute(&pool).await.unwrap();
         }
         let project = Uuid::now_v7();
+        let other_target = Uuid::now_v7();
+        sqlx::query("INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,'Other tenant',?3,'V',1,'draft',2,?4,?5)")
+            .bind(other_target.as_bytes().as_slice()).bind(other_workspace.as_bytes().as_slice()).bind(other_target.simple().to_string()).bind(actor.as_bytes().as_slice()).bind(crate::db::documents::empty_document_json().to_string()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO document_states(workspace_id,document_id,state,encoding,writer_generation,created_at,updated_at) VALUES(?1,?2,?3,1,7,1000000,2000000)")
+            .bind(other_workspace.as_bytes().as_slice()).bind(other_target.as_bytes().as_slice()).bind([0_u8,0].as_slice()).execute(&pool).await.unwrap();
         let workflow = Uuid::now_v7();
         let status = Uuid::now_v7();
         let task = Uuid::from_u128(1);
@@ -2486,6 +2491,11 @@ mod maintenance_operation_tests {
         assert_eq!(tasks[0].target, RevisionTarget::Task(task));
         assert!(tx
             .operation()
+            .list_scheduled_revision_candidates(other_workspace, Some(after), 2)
+            .await
+            .is_err());
+        assert!(tx
+            .operation()
             .list_scheduled_revision_candidates(other_workspace, None, 2)
             .await
             .is_err());
@@ -2568,12 +2578,16 @@ mod maintenance_operation_tests {
             .set_tenant(other_workspace)
             .await
             .unwrap();
-        assert!(other_tx
+        let other_candidates = other_tx
             .operation()
             .list_scheduled_revision_candidates(other_workspace, None, 2)
             .await
-            .unwrap()
-            .is_empty());
+            .unwrap();
+        assert_eq!(other_candidates.len(), 1);
+        assert_eq!(
+            other_candidates[0].target,
+            RevisionTarget::Document(other_target)
+        );
         other_tx.rollback().await.unwrap();
         let stored: Vec<(Vec<u8>, String, Option<Vec<u8>>)> =
             sqlx::query_as("SELECT id,reason,created_by FROM revisions ORDER BY id")
@@ -2608,10 +2622,7 @@ mod maintenance_operation_tests {
         let manual = Uuid::now_v7();
         let task_manual = Uuid::now_v7();
         let other_parent_revision = Uuid::now_v7();
-        let other_target = Uuid::now_v7();
         let other_tenant_revisions = [Uuid::now_v7(), Uuid::now_v7()];
-        sqlx::query("INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,'Other tenant',?3,'V',1,'draft',2,?4,?5)")
-            .bind(other_target.as_bytes().as_slice()).bind(other_workspace.as_bytes().as_slice()).bind(other_target.simple().to_string()).bind(actor.as_bytes().as_slice()).bind(crate::db::documents::empty_document_json().to_string()).execute(&pool).await.unwrap();
         for (id, row_workspace, target_kind, target_id, reason, at) in [
             (manual, workspace, "document", documents[1], "manual", 1_i64),
             (
