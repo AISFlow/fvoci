@@ -19,9 +19,18 @@ fi
 CI_SHARD_COUNT=8
 CI_SHARD=""
 SPEC_ARGS=()
+SELECTED_BACKENDS=false
 
 while (($# > 0)); do
   case "$1" in
+    --with-selected-backends)
+      if [[ "$SELECTED_BACKENDS" == true ]]; then
+        echo "--with-selected-backends may be supplied only once" >&2
+        exit 1
+      fi
+      SELECTED_BACKENDS=true
+      shift
+      ;;
     --ci-shard)
       CI_SHARD="${2:?--ci-shard requires an index}"
       shift 2
@@ -66,10 +75,23 @@ build_current_artifacts() {
   bun --bun run build
 
   cd "$ROOT"
-  cargo build --locked --offline --bin fvoci-e2e-fixture --features db-tests
-  cargo build --locked --offline --bin fvoci-server --bin fvoci-migrate
-  CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" cargo build --locked --offline \
-    --manifest-path "$ROOT/crates/collab-engine/Cargo.toml" --features worker --bin collab-engine
+  if [[ "$SELECTED_BACKENDS" == true ]]; then
+    python3 "$ROOT/scripts/run-selected-backend-e2e.py" record-before --output "$FVOCI_SELECTED_CI_OUTPUT"
+    python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name main -- \
+      cargo build --locked --offline --features db-tests,api-schema --bin fvoci-server --bin fvoci-migrate --bin fvoci-e2e-fixture --message-format=json-render-diagnostics
+    python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name lib -- \
+      cargo test --locked --offline --features db-tests,api-schema --lib --no-run --message-format=json-render-diagnostics
+    python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name install -- \
+      cargo test --locked --offline --features db-tests,api-schema --test selected_install_lifetime --no-run --message-format=json-render-diagnostics
+    CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name engine -- \
+      cargo build --locked --offline --manifest-path "$ROOT/crates/collab-engine/Cargo.toml" --features worker --bin collab-engine --message-format=json-render-diagnostics
+    python3 "$ROOT/scripts/run-selected-backend-e2e.py" record-after --output "$FVOCI_SELECTED_CI_OUTPUT"
+  else
+    cargo build --locked --offline --bin fvoci-e2e-fixture --features db-tests
+    cargo build --locked --offline --bin fvoci-server --bin fvoci-migrate
+    CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" cargo build --locked --offline \
+      --manifest-path "$ROOT/crates/collab-engine/Cargo.toml" --features worker --bin collab-engine
+  fi
 }
 
 run_ci_shard() {
@@ -136,6 +158,15 @@ run_ci_shard() {
   echo "=== web e2e shard ${shard_index}: all groups passed ===" >&2
 }
 
+if [[ "$SELECTED_BACKENDS" == true ]]; then
+  if [[ -n "$CI_SHARD" || "${FVOCI_E2E_PENDING:-}" != 1 || ${#SPEC_ARGS[@]} -ne 0 ]]; then
+    echo "--with-selected-backends requires the whole pending suite and cannot combine shard/spec/grep options" >&2
+    exit 1
+  fi
+  : "${FVOCI_SELECTED_CI_OUTPUT:?required private current cohort output}"
+  : "${GITHUB_ACTIONS:?selected companion requires its allocated GitHub job}"
+fi
+
 require_prepared
 
 if [[ -n "$CI_SHARD" ]]; then
@@ -148,4 +179,26 @@ if [[ -n "$CI_SHARD" ]]; then
 fi
 
 build_current_artifacts
-bash "$ROOT/scripts/web-e2e-run-group.sh" "${SPEC_ARGS[@]}"
+pending_status=0
+bash "$ROOT/scripts/web-e2e-run-group.sh" "${SPEC_ARGS[@]}" || pending_status=$?
+selected_status=0
+if [[ "$SELECTED_BACKENDS" == true ]]; then
+  # Mandatory companion is attempted even after pending failure; keep its first status.
+  # Preparation/build and original pending suite keep the existing CI runner UID.
+  # Only this job-owned output/native prefix transfers to the1000 runtime actor.
+  : "${FVOCI_SELECTED_CI_SQLITE_PARENT:?required exact job-owned SQLite parent}"
+  python3 - "$SQLITE3_LIB_DIR" "$FVOCI_SELECTED_CI_SQLITE_PARENT" <<'PY_PARENT'
+from pathlib import Path
+import sys
+assert Path(sys.argv[1]).resolve().is_relative_to(Path(sys.argv[2]).resolve())
+PY_PARENT
+  sudo chown -R 1000:1000 "$FVOCI_SELECTED_CI_OUTPUT" "$FVOCI_SELECTED_CI_SQLITE_PARENT"
+  sudo install -d -o 1000 -g 1000 -m 0700 "$FVOCI_SELECTED_CI_OUTPUT/tmp"
+  docker_gid="$(stat -c %g /var/run/docker.sock)"
+  sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,PLAYWRIGHT_BROWSERS_PATH \
+    setpriv --reuid=1000 --regid=1000 --groups="$docker_gid" \
+    env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
+      python3 "$ROOT/scripts/run-selected-backend-e2e.py" run --output "$FVOCI_SELECTED_CI_OUTPUT" || selected_status=$?
+fi
+if [[ "$pending_status" -ne 0 ]]; then exit "$pending_status"; fi
+exit "$selected_status"

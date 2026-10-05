@@ -261,11 +261,19 @@ jobs:
           bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-wire.test.ts ./apps/web/e2e-pending/collab-restart.test.ts
           bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-helpers.test.ts
           (cd apps/web && bun --bun x --no-install tsc -p e2e-pending/collab-tsconfig.json)
-      - name: Real React collaborative editing with PostgreSQL app role
+      - name: Pending collaboration and mandatory selected normal PostgreSQL/SQLite restart
         id: browser
         env:
-          FVOCI_E2E_PENDING: '1'
-        run: bash scripts/run-web-e2e.sh
+          FVOCI_E2E_PENDING: "1"
+        run: |
+          set -euo pipefail
+          # Only this ephemeral CI job's checkout/SQLite input/target/report ownership.
+          # No account creation/global Git setting or operating resource changes.
+          export FVOCI_SELECTED_CI_OUTPUT="$RUNNER_TEMP/fvoci-selected-current"
+          export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"
+          mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
+          export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
+          bash scripts/run-web-e2e.sh --with-selected-backends
       - name: Retain failed browser DOM diagnostics
         if: failure() && steps.browser.outputs.failure-artifacts != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -280,6 +288,17 @@ jobs:
             ${{ steps.browser.outputs.failure-artifacts }}/net-events.log
           retention-days: 3
           if-no-files-found: warn
+
+      - name: Retain selected current build and runtime diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: selected-normal-diagnostics-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/fvoci-selected-current/*-stderr.log
+            ${{ runner.temp }}/fvoci-selected-current/*-stage.json
+            ${{ runner.temp }}/fvoci-selected-current/*-driver.log
+            ${{ runner.temp }}/fvoci-selected-current/selected-ci-receipt.json
 
   web-ci-gate:
     name: web-ci-gate
