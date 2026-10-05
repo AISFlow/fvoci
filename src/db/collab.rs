@@ -210,13 +210,72 @@ pub struct FamilyRoomFence {
 }
 
 /// Distinct task lineage. A document lease cannot authorize a task mutation.
-/// Fields remain private; the current ON task hub still refuses family rooms.
+/// Fields remain private; only the current authorized Task writer prepares it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FamilyTaskRoomFence {
     workspace_id: Uuid,
     task_id: Uuid,
     owner_token: Uuid,
     fence: i64,
+}
+
+/// Typed ON room lineage. Document ownership never certifies a Task writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FamilyNativeRoomFence {
+    Document(FamilyRoomFence),
+    Task(FamilyTaskRoomFence),
+}
+impl FamilyNativeRoomFence {
+    pub(crate) fn kind(self) -> CollabKind {
+        match self {
+            Self::Document(_) => CollabKind::Document,
+            Self::Task(_) => CollabKind::Task,
+        }
+    }
+    pub(crate) fn workspace(self) -> Uuid {
+        match self {
+            Self::Document(f) => f.workspace_id,
+            Self::Task(f) => f.workspace_id,
+        }
+    }
+    pub(crate) fn resource(self) -> Uuid {
+        match self {
+            Self::Document(f) => f.document_id,
+            Self::Task(f) => f.task_id,
+        }
+    }
+    pub(crate) fn owner(self) -> Uuid {
+        match self {
+            Self::Document(f) => f.owner_token,
+            Self::Task(f) => f.owner_token,
+        }
+    }
+    pub(crate) fn sequence(self) -> i64 {
+        match self {
+            Self::Document(f) => f.fence,
+            Self::Task(f) => f.fence,
+        }
+    }
+    pub(crate) fn matches(self, kind: CollabKind, workspace: Uuid, resource: Uuid) -> bool {
+        self.kind() == kind && self.workspace() == workspace && self.resource() == resource
+    }
+    pub(crate) fn with_owner(self, owner: Uuid) -> Self {
+        match self {
+            Self::Document(mut f) => {
+                f.owner_token = owner;
+                Self::Document(f)
+            }
+            Self::Task(mut f) => {
+                f.owner_token = owner;
+                Self::Task(f)
+            }
+        }
+    }
+}
+
+pub(crate) struct FamilyNativeRoomClaim {
+    pub(crate) fence: FamilyNativeRoomFence,
+    pub(crate) native: ClaimWriterResult,
 }
 
 /// Prepared on a borrowed writer; the caller must confirm that same commit
@@ -231,7 +290,7 @@ pub struct PreparedFamilyTaskRoomClaim {
 /// operations; HTTP clients never choose or serialize this room/head proof.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FamilyNativeConsumerProof {
-    pub(crate) room: FamilyRoomFence,
+    pub(crate) room: FamilyNativeRoomFence,
     pub(crate) generation: i64,
     pub(crate) tail: i64,
 }
@@ -241,7 +300,7 @@ pub(crate) struct FamilyNativeConsumerProof {
 /// successor or a purged/recreated document can never match this lineage.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FamilyRoomDeliveryFence {
-    pub(crate) original: FamilyRoomFence,
+    pub(crate) original: FamilyNativeRoomFence,
     pub(crate) writer_owner: Uuid,
 }
 
@@ -377,25 +436,45 @@ impl OperationTx<'_, '_> {
 }
 
 impl OperationTx<'_, '_> {
+    pub(crate) async fn verify_family_native_room_fence(
+        &mut self,
+        fence: FamilyNativeRoomFence,
+    ) -> Result<bool, sqlx::Error> {
+        match fence {
+            FamilyNativeRoomFence::Document(fence) => self.verify_family_room_fence(fence).await,
+            FamilyNativeRoomFence::Task(fence) => self.verify_family_task_room_fence(fence).await,
+        }
+    }
     async fn family_room_native_head(
         &mut self,
         proof: FamilyNativeConsumerProof,
     ) -> Result<Option<(i64, i64)>, sqlx::Error> {
-        if !self.verify_family_room_fence(proof.room).await? {
+        if !self.verify_family_native_room_fence(proof.room).await? {
             return Ok(None);
         }
         let Self::SqliteFamily(family) = self else {
             return Ok(None);
         };
-        let rows=family.query("SELECT writer_generation,tail_seq FROM document_states WHERE workspace_id=?1 AND document_id=?2",
-            &[Cell::uuid(proof.room.workspace_id),Cell::uuid(proof.room.document_id)]).await?;
+        let sql = match proof.room.kind() {
+            CollabKind::Document => "SELECT writer_generation,tail_seq FROM document_states WHERE workspace_id=?1 AND document_id=?2",
+            CollabKind::Task => "SELECT writer_generation,tail_seq FROM task_states WHERE workspace_id=?1 AND task_id=?2",
+        };
+        let rows = family
+            .query(
+                sql,
+                &[
+                    Cell::uuid(proof.room.workspace()),
+                    Cell::uuid(proof.room.resource()),
+                ],
+            )
+            .await?;
         let head = rows
             .first()
             .map(|row| -> Result<(i64, i64), sqlx::Error> {
                 Ok((row.cell(0)?.integer()?, row.cell(1)?.integer()?))
             })
             .transpose()?;
-        if !self.verify_family_room_fence(proof.room).await? {
+        if !self.verify_family_native_room_fence(proof.room).await? {
             return Ok(None);
         }
         Ok(head)
@@ -424,39 +503,33 @@ pub(crate) async fn verify_room_native_consumer(
     let Some(proof) = proof else {
         return Ok(Err(CollabDbError::StaleWriter));
     };
-    if kind != CollabKind::Document
-        || proof.room.workspace_id != workspace
-        || proof.room.document_id != resource
-    {
+    if !proof.room.matches(kind, workspace, resource) {
         return Ok(Err(CollabDbError::StaleWriter));
     }
     let mut tx = backend.begin_write().await?;
-    tx.operation().set_tenant(workspace).await?;
-    if let Err(error) = tx
-        .operation()
-        .authorize_collab_read(
-            kind,
-            workspace,
-            actor,
-            credential,
-            resource,
-            &mut CollabDbStageTimings::default(),
-        )
-        .await?
-    {
-        tx.rollback().await?;
-        return Ok(Err(error));
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        if let Err(error) = op
+            .authorize_collab_read(
+                kind,
+                workspace,
+                actor,
+                credential,
+                resource,
+                &mut CollabDbStageTimings::default(),
+            )
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        if !op.verify_family_native_consumer_proof(proof).await? {
+            return Ok(Err(CollabDbError::StaleWriter));
+        }
+        Ok(Ok(()))
     }
-    if !tx
-        .operation()
-        .verify_family_native_consumer_proof(proof)
-        .await?
-    {
-        tx.rollback().await?;
-        return Ok(Err(CollabDbError::StaleWriter));
-    }
-    tx.commit().await.map_err(|unknown| unknown.source)?;
-    Ok(Ok(()))
+    .await;
+    finish_native_room_operation(tx, kind, result).await
 }
 
 /// Ambiguous room receipts carry current lineage + native generation. The
@@ -473,30 +546,29 @@ pub(crate) async fn verify_room_collab_operation(
     let Some(proof) = proof else {
         return Ok(Err(CollabDbError::StaleWriter));
     };
-    if kind != CollabKind::Document
-        || proof.room.workspace_id != input.workspace_id
-        || proof.room.document_id != input.document_id
+    if !proof
+        .room
+        .matches(kind, input.workspace_id, input.document_id)
     {
         return Ok(Err(CollabDbError::StaleWriter));
     }
     let mut tx = backend.begin_write().await?;
-    tx.operation().set_tenant(input.workspace_id).await?;
-    let result = tx.operation().verify_native_operation(kind, input).await?;
-    if let Ok(receipt) = &result {
-        let head = tx.operation().family_room_native_head(proof).await?;
-        if !head
-            .is_some_and(|(generation, tail)| generation == proof.generation && tail >= receipt.seq)
-        {
-            tx.rollback().await?;
-            return Ok(Err(CollabDbError::StaleWriter));
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(input.workspace_id).await?;
+        let result = op.verify_native_operation(kind, input).await?;
+        if let Ok(receipt) = &result {
+            let head = op.family_room_native_head(proof).await?;
+            if !head.is_some_and(|(generation, tail)| {
+                generation == proof.generation && tail >= receipt.seq
+            }) {
+                return Ok(Err(CollabDbError::StaleWriter));
+            }
         }
+        Ok(result)
     }
-    if result.is_ok() {
-        tx.commit().await.map_err(|unknown| unknown.source)?;
-    } else {
-        tx.rollback().await?;
-    }
-    Ok(result)
+    .await;
+    finish_native_room_operation(tx, kind, result).await
 }
 
 /// Atomically authorize, claim the family document room and claim native
@@ -647,6 +719,59 @@ pub async fn arm_family_room_start_reply_fault(
     (receive, send)
 }
 
+pub(crate) async fn acquire_family_native_room_for_start(
+    backend: &Backend,
+    target: (CollabKind, Uuid, Uuid),
+    identity: (Uuid, Uuid),
+    owner: Uuid,
+    lease: std::time::Duration,
+) -> Result<Result<FamilyNativeRoomClaim, CollabDbError>, FamilyRoomStartError> {
+    let (kind, workspace, resource) = target;
+    let (actor, credential) = identity;
+    if kind == CollabKind::Document {
+        return acquire_family_document_room_for_start(
+            backend, workspace, actor, credential, resource, owner, lease,
+        )
+        .await
+        .map(|result| {
+            result.map(|claim| FamilyNativeRoomClaim {
+                fence: FamilyNativeRoomFence::Document(claim.fence),
+                native: claim.native,
+            })
+        });
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = tx
+        .operation()
+        .prepare_family_task_room_claim(
+            (workspace, resource),
+            identity,
+            owner,
+            lease,
+            NativeLoadMode::Reader,
+        )
+        .await;
+    let claim = match result {
+        Ok(Ok(claim)) => claim,
+        other => {
+            return finish_family_task_room(tx, other)
+                .await
+                .map(|result| {
+                    result.map(|claim| FamilyNativeRoomClaim {
+                        fence: FamilyNativeRoomFence::Task(claim.fence),
+                        native: claim.native,
+                    })
+                })
+                .map_err(FamilyRoomStartError::Database)
+        }
+    };
+    finish_family_room_start(tx, resource).await?;
+    Ok(Ok(FamilyNativeRoomClaim {
+        fence: FamilyNativeRoomFence::Task(claim.fence),
+        native: claim.native,
+    }))
+}
+
 pub(crate) async fn acquire_family_document_room_for_start(
     backend: &Backend,
     workspace: Uuid,
@@ -670,8 +795,16 @@ pub(crate) async fn acquire_family_document_room_for_start(
         Ok(prepared) => prepared,
         Err(error) => return Ok(Err(error)),
     };
+    finish_family_room_start(tx, document).await?;
+    Ok(Ok(claim))
+}
+
+async fn finish_family_room_start(
+    tx: DbTransaction<'_>,
+    _resource: Uuid,
+) -> Result<(), FamilyRoomStartError> {
     #[cfg(feature = "db-tests")]
-    let fault = ROOM_START_REPLY_FAULTS.lock().await.remove(&document);
+    let fault = ROOM_START_REPLY_FAULTS.lock().await.remove(&_resource);
     #[cfg(feature = "db-tests")]
     if let Some(fault) = fault {
         if fault.committed {
@@ -689,7 +822,7 @@ pub(crate) async fn acquire_family_document_room_for_start(
         });
     }
     commit_family_room_start(tx).await?;
-    Ok(Ok(claim))
+    Ok(())
 }
 
 /// Until an accepted public SDK boundary proves settlement of the original
@@ -697,17 +830,17 @@ pub(crate) async fn acquire_family_document_room_for_start(
 /// Local SQLite retains SQLx's serialized rollback-queue contract; the actual
 /// local lost-reply controls below observe actual COMMIT/rollback separately.
 async fn commit_family_room_start(tx: DbTransaction<'_>) -> Result<(), FamilyRoomStartError> {
-    let remote = matches!(&tx, DbTransaction::SqliteFamily(FamilyTx::Remote(_)));
-    tx.commit()
-        .await
-        .map_err(|unknown| FamilyRoomStartError::Commit {
-            source: unknown.source,
-            settlement: if remote {
-                FamilyRoomStartSettlement::RemoteUnconfirmed
-            } else {
-                FamilyRoomStartSettlement::LocalSqlx
-            },
-        })
+    tx.commit_with_cleanup().await.map_err(|unknown| {
+        let settlement = if unknown.permits_reconciliation() {
+            FamilyRoomStartSettlement::LocalSqlx
+        } else {
+            FamilyRoomStartSettlement::RemoteUnconfirmed
+        };
+        FamilyRoomStartError::Commit {
+            source: sqlx::Error::AnyDriverError(Box::new(unknown)),
+            settlement,
+        }
+    })
 }
 
 async fn prepare_family_document_room_claim<'a>(
@@ -2301,7 +2434,7 @@ enum NativeLoadMode {
 
 #[derive(Clone, Copy)]
 enum NativeWriteScope<'a> {
-    Room(Option<FamilyRoomFence>),
+    Room(Option<FamilyNativeRoomFence>),
     Off(OffBodyWriter),
     Import(&'a crate::db::import_jobs::ImportClaim),
     SyncImport {
@@ -2490,7 +2623,7 @@ pub(crate) async fn load_room_collab_readonly(
     actor: Uuid,
     credential: Uuid,
     resource: Uuid,
-    fence: Option<FamilyRoomFence>,
+    fence: Option<FamilyNativeRoomFence>,
 ) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
     if matches!(backend, Backend::Postgres(_)) {
         return load_collab_readonly_kind_backend(
@@ -2501,28 +2634,26 @@ pub(crate) async fn load_room_collab_readonly(
     let Some(fence) = fence else {
         return Ok(Err(CollabDbError::StaleWriter));
     };
-    if kind != CollabKind::Document
-        || fence.workspace_id != workspace
-        || fence.document_id != resource
-    {
+    if !fence.matches(kind, workspace, resource) {
         return Ok(Err(CollabDbError::StaleWriter));
     }
     let mut tx = backend.begin_write().await?;
-    tx.operation().set_tenant(workspace).await?;
-    if !tx.operation().verify_family_room_fence(fence).await? {
-        tx.rollback().await?;
-        return Ok(Err(CollabDbError::StaleWriter));
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        if !op.verify_family_native_room_fence(fence).await? {
+            return Ok(Err(CollabDbError::StaleWriter));
+        }
+        let result = op
+            .load_collab_native_readonly(kind, workspace, actor, credential, resource)
+            .await?;
+        if result.is_err() || !op.verify_family_native_room_fence(fence).await? {
+            return Ok(result.and(Err(CollabDbError::StaleWriter)));
+        }
+        Ok(result)
     }
-    let result = tx
-        .operation()
-        .load_collab_native_readonly(kind, workspace, actor, credential, resource)
-        .await?;
-    if result.is_err() || !tx.operation().verify_family_room_fence(fence).await? {
-        tx.rollback().await?;
-        return Ok(result.and(Err(CollabDbError::StaleWriter)));
-    }
-    tx.commit().await.map_err(|unknown| unknown.source)?;
-    Ok(result)
+    .await;
+    finish_native_room_operation(tx, kind, result).await
 }
 
 pub async fn claim_writer_and_load(
@@ -2878,9 +3009,16 @@ pub(crate) async fn append_family_document_room_update_timed(
         pool_wait_us: acquire_started.elapsed().as_micros() as u64,
         ..Default::default()
     };
-    append_collab_update_in_tx(tx, CollabKind::Document, input, timings, None, Some(fence))
-        .await
-        .map(|(result, timings)| (result.map(|(appended, _)| appended), timings))
+    append_collab_update_in_tx(
+        tx,
+        CollabKind::Document,
+        input,
+        timings,
+        None,
+        Some(FamilyNativeRoomFence::Document(fence)),
+    )
+    .await
+    .map(|(result, timings)| (result.map(|(appended, _)| appended), timings))
 }
 
 impl OperationTx<'_, '_> {
@@ -2893,7 +3031,7 @@ impl OperationTx<'_, '_> {
         input: AppendCollabInput<'_>,
         timings: CollabDbStageTimings,
         restore: Option<&crate::db::revisions::RestoreRevisionAppend>,
-        room_fence: Option<FamilyRoomFence>,
+        room_fence: Option<FamilyNativeRoomFence>,
     ) -> Result<
         (
             Result<(PreparedNativeAppend, Option<Uuid>), CollabDbError>,
@@ -2928,10 +3066,8 @@ impl OperationTx<'_, '_> {
                 && proof.actor == actor
                 && proof.credential == credential
                 && self.verify_off_body_writer(proof).await?),
-            NativeWriteScope::Room(Some(fence)) => Ok(kind == CollabKind::Document
-                && fence.workspace_id == workspace
-                && fence.document_id == resource
-                && self.verify_family_room_fence(fence).await?),
+            NativeWriteScope::Room(Some(fence)) => Ok(fence.matches(kind, workspace, resource)
+                && self.verify_family_native_room_fence(fence).await?),
             NativeWriteScope::Room(None) => Ok(matches!(self, Self::Postgres(_))),
             NativeWriteScope::Import(claim) => {
                 if kind != CollabKind::Document
@@ -3245,7 +3381,7 @@ async fn append_collab_update_in_tx(
     input: AppendCollabInput<'_>,
     timings: CollabDbStageTimings,
     restore: Option<&crate::db::revisions::RestoreRevisionAppend>,
-    room_fence: Option<FamilyRoomFence>,
+    room_fence: Option<FamilyNativeRoomFence>,
 ) -> Result<
     (
         Result<(AppendCollabResult, Option<Uuid>), CollabDbError>,
@@ -3273,7 +3409,16 @@ async fn append_collab_update_in_tx(
     };
     let prepared_result = match result {
         Err(error) => {
-            tx.rollback().await?;
+            if kind == CollabKind::Task && matches!(&tx, DbTransaction::SqliteFamily(_)) {
+                if let Err(cleanup) = tx.rollback().await {
+                    return Err(crate::db::backend::rollback_cleanup_unknown(
+                        Some(Box::new(TaskRoomRefusal(error))),
+                        cleanup,
+                    ));
+                }
+            } else {
+                tx.rollback().await?;
+            }
             return Ok((Err(error), timings));
         }
         Ok(prepared) => prepared,
@@ -3282,7 +3427,14 @@ async fn append_collab_update_in_tx(
     let committed_new_restore =
         restore.is_some() && matches!(prepared_result.0, PreparedNativeAppend::Appended { .. });
     let commit_started = Instant::now();
-    tx.commit().await.map_err(|error| error.source)?;
+    if matches!(&tx, DbTransaction::SqliteFamily(_)) {
+        tx.commit_with_cleanup()
+            .await
+            .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+    } else {
+        tx.commit().await.map_err(|error| error.source)?;
+    }
+
     timings.commit_us = commit_started.elapsed().as_micros() as u64;
     #[cfg(feature = "db-tests")]
     if committed_new_restore {
@@ -3462,24 +3614,29 @@ pub async fn compact_collab_snapshot_kind_backend(
     input: CompactCollabInput<'_>,
     room_fence: Option<FamilyRoomFence>,
 ) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
+    compact_collab_snapshot_in_room(
+        backend,
+        kind,
+        input,
+        room_fence.map(FamilyNativeRoomFence::Document),
+    )
+    .await
+}
+
+pub(crate) async fn compact_collab_snapshot_in_room(
+    backend: &Backend,
+    kind: CollabKind,
+    input: CompactCollabInput<'_>,
+    room_fence: Option<FamilyNativeRoomFence>,
+) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
     if let Err(error) = validate_compaction_snapshot(input.new_snapshot) {
         return Ok(Err(error));
     }
     let mut tx = backend.begin_write().await?;
-    let result = tx
-        .operation()
-        .compact_native(kind, input, room_fence)
-        .await?;
-    match result {
-        Ok(prepared) => {
-            tx.commit().await.map_err(|unknown| unknown.source)?;
-            Ok(Ok(prepared.load))
-        }
-        Err(error) => {
-            tx.rollback().await?;
-            Ok(Err(error))
-        }
-    }
+    let result = tx.operation().compact_native(kind, input, room_fence).await;
+    finish_native_room_operation(tx, kind, result)
+        .await
+        .map(|result| result.map(|prepared| prepared.load))
 }
 
 /// Uncommitted compaction result. Borrowed callers must finish their same
@@ -3501,7 +3658,7 @@ impl OperationTx<'_, '_> {
         &mut self,
         kind: CollabKind,
         input: CompactCollabInput<'_>,
-        room_fence: Option<FamilyRoomFence>,
+        room_fence: Option<FamilyNativeRoomFence>,
     ) -> Result<Result<PreparedNativeCompaction, CollabDbError>, sqlx::Error> {
         let t = CollabTables::for_kind(kind);
         let CompactCollabInput {
@@ -3523,10 +3680,8 @@ impl OperationTx<'_, '_> {
             let Some(fence) = room_fence else {
                 return Ok(Err(CollabDbError::StaleWriter));
             };
-            if kind != CollabKind::Document
-                || fence.workspace_id != workspace_id
-                || fence.document_id != document_id
-                || !self.verify_family_room_fence(fence).await?
+            if !fence.matches(kind, workspace_id, document_id)
+                || !self.verify_family_native_room_fence(fence).await?
             {
                 return Ok(Err(CollabDbError::StaleWriter));
             }
@@ -3608,7 +3763,7 @@ impl OperationTx<'_, '_> {
             Err(error) => return Ok(Err(error)),
         };
         if let Some(fence) = room_fence {
-            if !self.verify_family_room_fence(fence).await? {
+            if !self.verify_family_native_room_fence(fence).await? {
                 return Ok(Err(CollabDbError::StaleWriter));
             }
         }
@@ -3939,8 +4094,9 @@ pub async fn estimate_persisted_collab_bytes_kind(
 
 /// Current reader authority precedes the family estimate. This reads lengths
 /// before loading native bytes so the hub can reserve helper memory first.
-pub(crate) async fn estimate_family_document_bytes(
+pub(crate) async fn estimate_family_room_bytes(
     backend: &Backend,
+    kind: CollabKind,
     workspace: Uuid,
     actor: Uuid,
     credential: Uuid,
@@ -3959,7 +4115,7 @@ pub(crate) async fn estimate_family_document_bytes(
     if let Err(error) = tx
         .operation()
         .authorize_collab_read(
-            CollabKind::Document,
+            kind,
             workspace,
             actor,
             credential,
@@ -3976,7 +4132,13 @@ pub(crate) async fn estimate_family_document_bytes(
             "family estimate requires family transaction".into(),
         ));
     };
-    let rows = family.query("SELECT length(ds.state),coalesce((SELECT sum(length(payload)) FROM document_collab_updates u WHERE u.workspace_id=ds.workspace_id AND u.document_id=ds.document_id AND u.seq>ds.snapshot_cutoff_seq),0) FROM document_states ds WHERE ds.workspace_id=?1 AND ds.document_id=?2", &[Cell::uuid(workspace),Cell::uuid(document)]).await?;
+    let sql=match kind {
+        CollabKind::Document=>"SELECT length(ds.state),coalesce((SELECT sum(length(payload)) FROM document_collab_updates u WHERE u.workspace_id=ds.workspace_id AND u.document_id=ds.document_id AND u.seq>ds.snapshot_cutoff_seq),0) FROM document_states ds WHERE ds.workspace_id=?1 AND ds.document_id=?2",
+        CollabKind::Task=>"SELECT length(ds.state),coalesce((SELECT sum(length(payload)) FROM task_collab_updates u WHERE u.workspace_id=ds.workspace_id AND u.task_id=ds.task_id AND u.seq>ds.snapshot_cutoff_seq),0) FROM task_states ds WHERE ds.workspace_id=?1 AND ds.task_id=?2",
+    };
+    let rows = family
+        .query(sql, &[Cell::uuid(workspace), Cell::uuid(document)])
+        .await?;
     let bytes = match rows.first() {
         Some(row) => row
             .cell(0)?
@@ -4011,17 +4173,27 @@ pub async fn project_derived_body_kind_backend(
     input: ProjectDerivedBodyInput,
     room_fence: Option<FamilyRoomFence>,
 ) -> Result<Result<ProjectDerivedBodyResult, CollabDbError>, sqlx::Error> {
+    project_derived_body_in_room(
+        backend,
+        kind,
+        input,
+        room_fence.map(FamilyNativeRoomFence::Document),
+    )
+    .await
+}
+
+pub(crate) async fn project_derived_body_in_room(
+    backend: &Backend,
+    kind: CollabKind,
+    input: ProjectDerivedBodyInput,
+    room_fence: Option<FamilyNativeRoomFence>,
+) -> Result<Result<ProjectDerivedBodyResult, CollabDbError>, sqlx::Error> {
     let mut tx = backend.begin_write().await?;
     let result = tx
         .operation()
         .project_collab_derived_body(kind, input, room_fence)
-        .await?;
-    if result.is_ok() {
-        tx.commit().await.map_err(|unknown| unknown.source)?;
-    } else {
-        tx.rollback().await?;
-    }
-    Ok(result)
+        .await;
+    finish_native_room_operation(tx, kind, result).await
 }
 
 impl OperationTx<'_, '_> {
@@ -4031,7 +4203,7 @@ impl OperationTx<'_, '_> {
         &mut self,
         kind: CollabKind,
         input: ProjectDerivedBodyInput,
-        room_fence: Option<FamilyRoomFence>,
+        room_fence: Option<FamilyNativeRoomFence>,
     ) -> Result<Result<ProjectDerivedBodyResult, CollabDbError>, sqlx::Error> {
         self.project_collab_derived_body_owned(kind, input, NativeWriteScope::Room(room_fence))
             .await
@@ -4569,6 +4741,17 @@ impl OperationTx<'_, '_> {
         owner: Uuid,
         lease: std::time::Duration,
     ) -> Result<Result<PreparedFamilyTaskRoomClaim, CollabDbError>, sqlx::Error> {
+        self.prepare_family_task_room_claim(target, identity, owner, lease, NativeLoadMode::Writer)
+            .await
+    }
+    async fn prepare_family_task_room_claim(
+        &mut self,
+        target: (Uuid, Uuid),
+        identity: (Uuid, Uuid),
+        owner: Uuid,
+        lease: std::time::Duration,
+        mode: NativeLoadMode,
+    ) -> Result<Result<PreparedFamilyTaskRoomClaim, CollabDbError>, sqlx::Error> {
         let (workspace, task) = target;
         let (actor, credential) = identity;
         if owner.is_nil() {
@@ -4582,14 +4765,7 @@ impl OperationTx<'_, '_> {
             ));
         }
         let mut native = match self
-            .load_collab_native(
-                CollabKind::Task,
-                workspace,
-                actor,
-                credential,
-                task,
-                NativeLoadMode::Writer,
-            )
+            .load_collab_native(CollabKind::Task, workspace, actor, credential, task, mode)
             .await?
         {
             Ok(native) => native,
@@ -4602,7 +4778,7 @@ impl OperationTx<'_, '_> {
             Ok(claim) => claim,
             Err(error) => return Ok(Err(error)),
         };
-        if new_owner {
+        if new_owner && matches!(mode, NativeLoadMode::Writer) {
             let Some(generation) = self
                 .bump_native_writer_generation(
                     CollabTables::for_kind(CollabKind::Task),
@@ -4757,5 +4933,876 @@ impl OperationTx<'_, '_> {
         let changed=tx.execute("UPDATE task_collab_room_fences SET expires_at=?5 WHERE workspace_id=?1 AND task_id=?2 AND owner_token=?3 AND fence=?4",
             &[Cell::uuid(fence.workspace_id),Cell::uuid(fence.task_id),Cell::uuid(fence.owner_token),Cell::Integer(fence.fence),Cell::Integer(now)]).await?;
         Ok(changed == 1)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Task room operation refused: {0:?}")]
+struct TaskRoomRefusal(CollabDbError);
+
+/// Finish this original Task operation only; a fresh observer is not a receipt.
+async fn finish_family_task_room<T>(
+    tx: DbTransaction<'_>,
+    result: Result<Result<T, CollabDbError>, sqlx::Error>,
+) -> Result<Result<T, CollabDbError>, sqlx::Error> {
+    match result {
+        Ok(Ok(value)) => {
+            tx.commit_with_cleanup()
+                .await
+                .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+            Ok(Ok(value))
+        }
+        Ok(Err(refusal)) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(TaskRoomRefusal(refusal))),
+                    cleanup,
+                ));
+            }
+            Ok(Err(refusal))
+        }
+        Err(original) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(original)),
+                    cleanup,
+                ));
+            }
+            Err(original)
+        }
+    }
+}
+
+/// Document and PG callers retain their existing settlement path. Task room
+/// consumers preserve the original writer's typed finish and awaited cleanup.
+async fn finish_native_room_operation<T>(
+    tx: DbTransaction<'_>,
+    kind: CollabKind,
+    result: Result<Result<T, CollabDbError>, sqlx::Error>,
+) -> Result<Result<T, CollabDbError>, sqlx::Error> {
+    if kind == CollabKind::Task && matches!(&tx, DbTransaction::SqliteFamily(_)) {
+        return finish_family_task_room(tx, result).await;
+    }
+    let result = result?;
+    if result.is_ok() {
+        tx.commit().await.map_err(|unknown| unknown.source)?;
+    } else {
+        tx.rollback().await?;
+    }
+    Ok(result)
+}
+
+pub(crate) async fn activate_family_task_writer(
+    backend: &Backend,
+    guard: FamilyTaskRoomFence,
+    actor: Uuid,
+    credential: Uuid,
+    writer_owner: Uuid,
+) -> Result<Result<PreparedFamilyTaskRoomClaim, CollabDbError>, sqlx::Error> {
+    if writer_owner.is_nil() || writer_owner == guard.owner_token {
+        return Err(sqlx::Error::Protocol(
+            "Task writer requires a distinct stable activation owner".into(),
+        ));
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let mut op=tx.operation();
+        let mut native=match op.load_collab_native(CollabKind::Task,guard.workspace_id,actor,credential,guard.task_id,NativeLoadMode::Writer).await? {
+            Ok(native)=>native,Err(error)=>return Ok(Err(error)),
+        };
+        let mut activated=guard;
+        activated.owner_token=writer_owner;
+        if !op.verify_family_task_room_fence(activated).await? {
+            if !op.verify_family_task_room_fence(guard).await? { return Ok(Err(CollabDbError::StaleWriter)); }
+            let OperationTx::SqliteFamily(family)=&mut op else { return Err(sqlx::Error::Protocol("Task activation requires family writer".into())); };
+            let now=family_room_now(family).await?;
+            let changed=family.execute("UPDATE task_collab_room_fences SET owner_token=?5 WHERE workspace_id=?1 AND task_id=?2 AND owner_token=?3 AND fence=?4 AND expires_at>?6",&[Cell::uuid(guard.workspace_id),Cell::uuid(guard.task_id),Cell::uuid(guard.owner_token),Cell::Integer(guard.fence),Cell::uuid(writer_owner),Cell::Integer(now)]).await?;
+            if changed!=1 { return Ok(Err(CollabDbError::StaleWriter)); }
+            let Some(generation)=op.bump_native_writer_generation(CollabTables::for_kind(CollabKind::Task),guard.workspace_id,guard.task_id).await? else { return Ok(Err(CollabDbError::NotFound)); };
+            native.writer_generation=generation;native.load.writer_generation=generation;
+        }
+        if !op.verify_family_task_room_fence(activated).await? { return Ok(Err(CollabDbError::StaleWriter)); }
+        Ok(Ok(PreparedFamilyTaskRoomClaim { fence:activated,native }))
+    }.await;
+    finish_family_task_room(tx, result).await
+}
+
+pub(crate) async fn renew_family_task_room(
+    backend: &Backend,
+    fence: FamilyTaskRoomFence,
+    lease: std::time::Duration,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(fence.workspace_id).await?;
+        Ok(Ok(op.renew_family_task_room_fence(fence, lease).await?))
+    }
+    .await;
+    finish_family_task_room(tx, result)
+        .await?
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(TaskRoomRefusal(error))))
+}
+pub(crate) async fn release_family_task_room(
+    backend: &Backend,
+    fence: FamilyTaskRoomFence,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(fence.workspace_id).await?;
+        Ok(Ok(op.release_family_task_room_fence(fence).await?))
+    }
+    .await;
+    finish_family_task_room(tx, result)
+        .await?
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(TaskRoomRefusal(error))))
+}
+
+pub(crate) async fn abandon_family_task_room_start(
+    backend: &Backend,
+    workspace: Uuid,
+    task: Uuid,
+    owner: Uuid,
+) -> Result<(), sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let mut op=tx.operation();op.set_tenant(workspace).await?;
+        let OperationTx::SqliteFamily(family)=&mut op else { return Err(sqlx::Error::Protocol("Task startup cleanup requires family writer".into())); };
+        let rows=family.query("SELECT fence FROM task_collab_room_fences WHERE workspace_id=?1 AND task_id=?2 AND owner_token=?3",&[Cell::uuid(workspace),Cell::uuid(task),Cell::uuid(owner)]).await?;
+        if let Some(row)=rows.first() {
+            let sequence=row.cell(0)?.integer()?;
+            if sequence<=0 { return Err(sqlx::Error::Protocol("invalid Task startup fence".into())); }
+            let fence=FamilyTaskRoomFence {workspace_id:workspace,task_id:task,owner_token:owner,fence:sequence};
+            if !op.release_family_task_room_fence(fence).await? { return Err(sqlx::Error::Protocol("Task startup cleanup scope changed".into())); }
+        }
+        Ok(Ok(()))
+    }.await;
+    finish_family_task_room(tx, result)
+        .await?
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(TaskRoomRefusal(error))))
+}
+
+pub(crate) async fn append_family_task_room_update_timed(
+    backend: &Backend,
+    fence: FamilyTaskRoomFence,
+    input: AppendCollabInput<'_>,
+) -> Result<
+    (
+        Result<AppendCollabResult, CollabDbError>,
+        CollabDbStageTimings,
+    ),
+    sqlx::Error,
+> {
+    if matches!(backend, Backend::Postgres(_)) {
+        return Err(sqlx::Error::Protocol(
+            "PG Task append retains detached session guard".into(),
+        ));
+    }
+    if input.payload.is_empty() || input.payload.len() > MAX_COLLAB_UPDATE_BYTES {
+        return Ok((
+            Err(CollabDbError::PayloadTooLarge),
+            CollabDbStageTimings::default(),
+        ));
+    }
+    let started = Instant::now();
+    let tx = backend.begin_write().await?;
+    let timings = CollabDbStageTimings {
+        pool_wait_us: started.elapsed().as_micros() as u64,
+        ..Default::default()
+    };
+    append_collab_update_in_tx(
+        tx,
+        CollabKind::Task,
+        input,
+        timings,
+        None,
+        Some(FamilyNativeRoomFence::Task(fence)),
+    )
+    .await
+    .map(|(result, timings)| (result.map(|(append, _)| append), timings))
+}
+
+pub(crate) async fn abandon_family_native_room_start(
+    backend: &Backend,
+    kind: CollabKind,
+    workspace: Uuid,
+    resource: Uuid,
+    owner: Uuid,
+) -> Result<(), sqlx::Error> {
+    match kind {
+        CollabKind::Document => {
+            abandon_family_document_room_start(backend, workspace, resource, owner).await
+        }
+        CollabKind::Task => {
+            abandon_family_task_room_start(backend, workspace, resource, owner).await
+        }
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod selected_on_task_room_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+    use crate::db::tasks::selected_task_detail_tests::setup;
+
+    async fn state(f: &Fixture, task: Uuid) -> (Option<i64>, Option<i64>, i64, i64, i64, i64) {
+        sqlx::query_as("SELECT (SELECT writer_generation FROM task_states WHERE workspace_id=?1 AND task_id=?2),(SELECT tail_seq FROM task_states WHERE workspace_id=?1 AND task_id=?2),(SELECT count(*) FROM task_collab_updates WHERE workspace_id=?1 AND task_id=?2),(SELECT count(*) FROM task_collab_op_receipts WHERE workspace_id=?1 AND task_id=?2),(SELECT count(*) FROM revisions WHERE workspace_id=?1 AND target_kind='task' AND target_id=?2),(SELECT count(*) FROM task_collab_room_fences WHERE workspace_id=?1 AND task_id=?2)")
+            .bind(f.workspace.as_bytes().as_slice()).bind(task.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap()
+    }
+    async fn start(
+        f: &Fixture,
+        credential: Uuid,
+        task: Uuid,
+        owner: Uuid,
+    ) -> FamilyNativeRoomClaim {
+        acquire_family_native_room_for_start(
+            &f.backend,
+            (CollabKind::Task, f.workspace, task),
+            (f.user, credential),
+            owner,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    }
+    fn task_fence(fence: FamilyNativeRoomFence) -> FamilyTaskRoomFence {
+        let FamilyNativeRoomFence::Task(fence) = fence else {
+            panic!("actual Task room lineage required")
+        };
+        fence
+    }
+
+    #[tokio::test]
+    async fn on_task_reader_activation_wrong_native_proofs_expiry_and_healthy_successor() {
+        let (f, credential, _, _, task) = setup().await;
+        let owner = Uuid::now_v7();
+        let reader = start(&f, credential, task, owner).await;
+        assert_eq!(
+            reader.native.writer_generation, 0,
+            "reader startup never activates a writer"
+        );
+        let stable = reader.fence;
+        let proof = FamilyNativeConsumerProof {
+            room: stable,
+            generation: 0,
+            tail: 0,
+        };
+        verify_room_native_consumer(
+            &f.backend,
+            CollabKind::Task,
+            f.workspace,
+            f.user,
+            credential,
+            task,
+            Some(proof),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let before = state(&f, task).await;
+        let document = FamilyNativeRoomFence::Document(FamilyRoomFence {
+            workspace_id: f.workspace,
+            document_id: task,
+            owner_token: owner,
+            fence: stable.sequence(),
+        });
+        for wrong in [
+            FamilyNativeConsumerProof {
+                room: document,
+                ..proof
+            },
+            FamilyNativeConsumerProof {
+                room: stable.with_owner(Uuid::now_v7()),
+                ..proof
+            },
+            FamilyNativeConsumerProof {
+                generation: 1,
+                ..proof
+            },
+            FamilyNativeConsumerProof { tail: 1, ..proof },
+        ] {
+            assert_eq!(
+                verify_room_native_consumer(
+                    &f.backend,
+                    CollabKind::Task,
+                    f.workspace,
+                    f.user,
+                    credential,
+                    task,
+                    Some(wrong)
+                )
+                .await
+                .unwrap(),
+                Err(CollabDbError::StaleWriter)
+            );
+            assert_eq!(state(&f, task).await, before);
+        }
+        assert_eq!(
+            load_room_collab_readonly(
+                &f.backend,
+                CollabKind::Task,
+                f.workspace,
+                f.user,
+                credential,
+                task,
+                Some(document)
+            )
+            .await
+            .unwrap()
+            .unwrap_err(),
+            CollabDbError::StaleWriter
+        );
+        let writer_owner = Uuid::now_v7();
+        let active = activate_family_task_writer(
+            &f.backend,
+            task_fence(stable),
+            f.user,
+            credential,
+            writer_owner,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(active.native.writer_generation, 1);
+        let replay = activate_family_task_writer(
+            &f.backend,
+            task_fence(stable),
+            f.user,
+            credential,
+            writer_owner,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            replay.native.writer_generation, 1,
+            "same logical activation cannot advance generation twice"
+        );
+        assert_eq!(replay.fence, active.fence);
+        sqlx::query(
+            "UPDATE task_collab_room_fences SET expires_at=1 WHERE workspace_id=?1 AND task_id=?2",
+        )
+        .bind(f.workspace.as_bytes().as_slice())
+        .bind(task.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        assert!(!renew_family_task_room(
+            &f.backend,
+            active.fence,
+            std::time::Duration::from_secs(60)
+        )
+        .await
+        .unwrap());
+        assert!(matches!(
+            activate_family_task_writer(
+                &f.backend,
+                task_fence(stable),
+                f.user,
+                credential,
+                writer_owner
+            )
+            .await
+            .unwrap(),
+            Err(CollabDbError::StaleWriter)
+        ));
+        let next = start(&f, credential, task, Uuid::now_v7()).await;
+        assert!(next.fence.sequence() > stable.sequence());
+        assert!(!release_family_task_room(&f.backend, active.fence)
+            .await
+            .unwrap());
+        let next = activate_family_task_writer(
+            &f.backend,
+            task_fence(next.fence),
+            f.user,
+            credential,
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(next.native.writer_generation, 2);
+        let mut check = f.backend.begin_write().await.unwrap();
+        check.operation().set_tenant(f.workspace).await.unwrap();
+        assert!(check
+            .operation()
+            .verify_family_task_room_fence(next.fence)
+            .await
+            .unwrap());
+        check.commit_with_cleanup().await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn on_task_original_deferred_fk_commit_error_no_ack_then_healthy_start() {
+        let (f, credential, _, _, task) = setup().await;
+        let before = state(&f, task).await;
+        let counter: i64 =
+            sqlx::query_scalar("SELECT next_fence FROM collab_fence_counter WHERE id=1")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        sqlx::query("CREATE TABLE on_task_deferred_probe(workspace_id BLOB REFERENCES workspaces(id) DEFERRABLE INITIALLY DEFERRED)").execute(&f.pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_on_task_start AFTER INSERT ON task_collab_room_fences BEGIN INSERT INTO on_task_deferred_probe VALUES(zeroblob(16)); END;").execute(&f.pool).await.unwrap();
+        let error = match acquire_family_native_room_for_start(
+            &f.backend,
+            (CollabKind::Task, f.workspace, task),
+            (f.user, credential),
+            Uuid::now_v7(),
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("actual original writer COMMIT must fail, never issue ownership ACK"),
+        };
+        let FamilyRoomStartError::Commit {
+            source,
+            settlement: FamilyRoomStartSettlement::LocalSqlx,
+        } = error
+        else {
+            panic!("failure must originate at actual deferred COMMIT")
+        };
+        let sqlx::Error::AnyDriverError(error) = source else {
+            panic!("original typed cleanup receipt required")
+        };
+        let original = error
+            .downcast_ref::<crate::db::backend::CommitCleanupUnknown>()
+            .expect("no stripped original COMMIT metadata");
+        assert!(original
+            .source
+            .source
+            .as_database_error()
+            .unwrap()
+            .is_foreign_key_violation());
+        assert!(original.permits_reconciliation());
+        assert_eq!(state(&f, task).await, before);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT next_fence FROM collab_fence_counter WHERE id=1")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            counter
+        );
+        sqlx::query("DROP TRIGGER reject_on_task_start")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("DROP TABLE on_task_deferred_probe")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let healthy = start(&f, credential, task, Uuid::now_v7()).await;
+        assert_eq!(healthy.native.writer_generation, 0);
+        assert_eq!(healthy.fence.sequence(), counter);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn on_task_cancel_borrowed_start_before_commit_and_lost_reply_keeps_stable_owner() {
+        let (f, credential, _, _, task) = setup().await;
+        let before = state(&f, task).await;
+        let backend = f.backend.clone();
+        let workspace = f.workspace;
+        let actor = f.user;
+        let owner = Uuid::now_v7();
+        let (send, reached) = tokio::sync::oneshot::channel();
+        let pending = tokio::spawn(async move {
+            let mut tx = backend.begin_write().await.unwrap();
+            tx.operation()
+                .prepare_family_task_room_claim(
+                    (workspace, task),
+                    (actor, credential),
+                    owner,
+                    std::time::Duration::from_secs(60),
+                    NativeLoadMode::Reader,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            send.send(()).unwrap();
+            std::future::pending::<()>().await;
+            tx.commit_with_cleanup().await.unwrap();
+        });
+        reached.await.unwrap();
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            state(&f, task).await,
+            before,
+            "actual SQLite rollback queue precedes next connection read"
+        );
+        let owner = Uuid::now_v7();
+        let (committed, release) = arm_family_room_start_reply_fault(task, true).await;
+        let backend = f.backend.clone();
+        let pending = tokio::spawn(async move {
+            acquire_family_native_room_for_start(
+                &backend,
+                (CollabKind::Task, workspace, task),
+                (actor, credential),
+                owner,
+                std::time::Duration::from_secs(60),
+            )
+            .await
+        });
+        committed.await.unwrap();
+        release.send(()).unwrap();
+        let result = pending.await.unwrap();
+        assert!(
+            matches!(
+                result,
+                Err(FamilyRoomStartError::Commit {
+                    settlement: FamilyRoomStartSettlement::LocalSqlx,
+                    ..
+                })
+            ),
+            "actual local lost reply is uncertainty, not ownership success"
+        );
+        let same = start(&f, credential, task, owner).await;
+        let replay = start(&f, credential, task, owner).await;
+        assert_eq!(same.fence, replay.fence);
+        assert_eq!(same.native.writer_generation, 0);
+        assert_eq!(state(&f, task).await, (Some(0), Some(0), 0, 0, 0, 1));
+        assert!(release_family_task_room(&f.backend, task_fence(same.fence))
+            .await
+            .unwrap());
+        let successor = start(&f, credential, task, Uuid::now_v7()).await;
+        assert!(successor.fence.sequence() > same.fence.sequence());
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn on_task_native_append_revision_wrong_scope_current_revocation_and_new_client_history()
+    {
+        let (f, credential, _, _, task) = setup().await;
+        let reader = start(&f, credential, task, Uuid::now_v7()).await;
+        let writer = activate_family_task_writer(
+            &f.backend,
+            task_fence(reader.fence),
+            f.user,
+            credential,
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let fence = FamilyNativeRoomFence::Task(writer.fence);
+        let engine = crate::collab::CollabConfig::from_env()
+            .expect("root-qualified current native engine is required, never skip");
+        let json = serde_json::json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":"on-task-native-block"},"content":[{"type":"text","text":"actual ON Task 😀","marks":[{"type":"bold"}]}]}]});
+        let update = crate::collab::seed::SeedEngine::new(engine.engine_bin.clone(), engine.limits)
+            .tiptap_to_yjs_update(&json)
+            .await
+            .unwrap();
+        let before = state(&f, task).await;
+        for (proof, generation, tail) in [
+            (
+                FamilyNativeRoomFence::Document(FamilyRoomFence {
+                    workspace_id: f.workspace,
+                    document_id: task,
+                    owner_token: fence.owner(),
+                    fence: fence.sequence(),
+                }),
+                1,
+                0,
+            ),
+            (fence.with_owner(Uuid::now_v7()), 1, 0),
+            (fence, 2, 0),
+            (fence, 1, 1),
+        ] {
+            let mut tx = f.backend.begin_write().await.unwrap();
+            let result = tx
+                .operation()
+                .append_collab_native(
+                    CollabKind::Task,
+                    AppendCollabInput {
+                        workspace_id: f.workspace,
+                        actor_user_id: f.user,
+                        session_id: credential,
+                        document_id: task,
+                        writer_generation: generation,
+                        expected_tail_seq: tail,
+                        op_id: Uuid::now_v7(),
+                        payload: &update,
+                        client_ip: None,
+                    },
+                    CollabDbStageTimings::default(),
+                    None,
+                    Some(proof),
+                )
+                .await
+                .unwrap()
+                .0;
+            assert!(matches!(
+                result,
+                Err(CollabDbError::StaleWriter | CollabDbError::StaleCutoff)
+            ));
+            tx.rollback().await.unwrap();
+            assert_eq!(state(&f, task).await, before);
+        }
+        let operation = Uuid::now_v7();
+        // A genuine native update must not be acknowledged when its receipt
+        // insert succeeds but this original writer's deferred FK COMMIT fails.
+        sqlx::query("CREATE TABLE on_task_append_probe(workspace_id BLOB REFERENCES workspaces(id) DEFERRABLE INITIALLY DEFERRED)").execute(&f.pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_on_task_append AFTER INSERT ON task_collab_op_receipts BEGIN INSERT INTO on_task_append_probe VALUES(zeroblob(16)); END;").execute(&f.pool).await.unwrap();
+        let error = append_family_task_room_update_timed(
+            &f.backend,
+            writer.fence,
+            AppendCollabInput {
+                workspace_id: f.workspace,
+                actor_user_id: f.user,
+                session_id: credential,
+                document_id: task,
+                writer_generation: 1,
+                expected_tail_seq: 0,
+                op_id: operation,
+                payload: &update,
+                client_ip: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        let sqlx::Error::AnyDriverError(error) = error else {
+            panic!("typed original native COMMIT failure required");
+        };
+        let unknown = error
+            .downcast_ref::<crate::db::backend::CommitCleanupUnknown>()
+            .unwrap();
+        assert!(unknown
+            .source
+            .source
+            .as_database_error()
+            .unwrap()
+            .is_foreign_key_violation());
+        assert!(unknown.permits_reconciliation());
+        assert_eq!(
+            state(&f, task).await,
+            before,
+            "failed COMMIT produces no tail, operation receipt or history"
+        );
+        sqlx::query("DROP TRIGGER reject_on_task_append")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("DROP TABLE on_task_append_probe")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        // Current credential is checked again after the real native producer.
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(append_family_task_room_update_timed(
+            &f.backend,
+            writer.fence,
+            AppendCollabInput {
+                workspace_id: f.workspace,
+                actor_user_id: f.user,
+                session_id: credential,
+                document_id: task,
+                writer_generation: 1,
+                expected_tail_seq: 0,
+                op_id: operation,
+                payload: &update,
+                client_ip: None,
+            },
+        )
+        .await
+        .unwrap()
+        .0
+        .is_err());
+        assert_eq!(state(&f, task).await, before);
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        // The same logical operation now makes one healthy confirmed append.
+        let result = append_family_task_room_update_timed(
+            &f.backend,
+            writer.fence,
+            AppendCollabInput {
+                workspace_id: f.workspace,
+                actor_user_id: f.user,
+                session_id: credential,
+                document_id: task,
+                writer_generation: 1,
+                expected_tail_seq: 0,
+                op_id: operation,
+                payload: &update,
+                client_ip: None,
+            },
+        )
+        .await
+        .unwrap()
+        .0
+        .unwrap();
+        assert_eq!(result, AppendCollabResult::Committed { seq: 1 });
+        let load = load_room_collab_readonly(
+            &f.backend,
+            CollabKind::Task,
+            f.workspace,
+            f.user,
+            credential,
+            task,
+            Some(fence),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(load.tail_seq, 1);
+        assert_eq!(load.tail[0].payload, update);
+        let captured = tokio::task::spawn_blocking(move || {
+            crate::collab::revision::capture_revision_offline(
+                engine.engine_bin,
+                engine.limits,
+                load.snapshot,
+                load.tail.into_iter().map(|row| row.payload).collect(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            captured.content_json, json,
+            "fresh maintained native reader preserves literal IDs, marks and text"
+        );
+        let prepared =
+            crate::collab::derived_body::prepare_derived_body(captured.content_json.clone())
+                .unwrap();
+        project_derived_body_in_room(
+            &f.backend,
+            CollabKind::Task,
+            ProjectDerivedBodyInput::new(f.workspace, f.user, credential, task, 1, 1, prepared),
+            Some(fence),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let proof = FamilyNativeConsumerProof {
+            room: fence,
+            generation: 1,
+            tail: 1,
+        };
+        let input = crate::db::revisions::CreateRevisionInput {
+            text: crate::collab::revision::prepare_revision_text(&captured.content_json).unwrap(),
+            content_json: captured.content_json,
+            y_snapshot: captured.y_snapshot,
+            reason: "manual".into(),
+        };
+        let saved = crate::db::revisions::create_manual_revision_with_room_proof(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            crate::db::revisions::RevisionTarget::Task(task).into(),
+            input.clone(),
+            Some(proof),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let before = state(&f, task).await;
+        assert_eq!(before, (Some(1), Some(1), 1, 1, 1, 1));
+        assert!(!saved.is_nil());
+        let mut wrong = proof;
+        wrong.room = FamilyNativeRoomFence::Document(FamilyRoomFence {
+            workspace_id: f.workspace,
+            document_id: task,
+            owner_token: fence.owner(),
+            fence: fence.sequence(),
+        });
+        assert!(
+            crate::db::revisions::create_manual_revision_with_room_proof(
+                &f.backend,
+                f.workspace,
+                f.user,
+                credential,
+                crate::db::revisions::RevisionTarget::Task(task).into(),
+                input.clone(),
+                Some(wrong)
+            )
+            .await
+            .unwrap()
+            .is_err()
+        );
+        assert_eq!(state(&f, task).await, before);
+        // Revoke current authority after actual native capture, before publication/replay.
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(verify_room_native_consumer(
+            &f.backend,
+            CollabKind::Task,
+            f.workspace,
+            f.user,
+            credential,
+            task,
+            Some(proof)
+        )
+        .await
+        .unwrap()
+        .is_err());
+        assert!(
+            crate::db::revisions::create_manual_revision_with_room_proof(
+                &f.backend,
+                f.workspace,
+                f.user,
+                credential,
+                crate::db::revisions::RevisionTarget::Task(task).into(),
+                input,
+                Some(proof)
+            )
+            .await
+            .unwrap()
+            .is_err()
+        );
+        assert_eq!(state(&f, task).await, before);
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let new_client = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        let body: String =
+            sqlx::query_scalar("SELECT content_json FROM tasks WHERE workspace_id=?1 AND id=?2")
+                .bind(f.workspace.as_bytes().as_slice())
+                .bind(task.as_bytes().as_slice())
+                .fetch_one(&new_client)
+                .await
+                .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+            json
+        );
+        new_client.close().await;
+        verify_room_native_consumer(
+            &f.backend,
+            CollabKind::Task,
+            f.workspace,
+            f.user,
+            credential,
+            task,
+            Some(proof),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        f.close().await;
     }
 }

@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::collab::derived_body::PreparedDerivedBody;
 use crate::db::backend::{Backend, DbTx, OperationTx};
 use crate::db::codec::{Cell, FamilyRow};
-use crate::db::collab::{CollabKind, FamilyNativeConsumerProof, FamilyRoomFence};
+use crate::db::collab::{CollabKind, FamilyNativeConsumerProof, FamilyNativeRoomFence};
 use crate::db::context::{set_system, set_tenant};
 use crate::db::projects::{load_live_project, project_permission};
 use crate::db::workspace::workspace_is_live;
@@ -682,16 +682,16 @@ pub async fn authorize_revision_target_backend(
 #[error("revision authorization refused: {0:?}")]
 struct RevisionAuthorizationRefusal(RevisionDbError);
 
-async fn finish_revision_authorization(
+async fn finish_revision_authorization<T>(
     tx: DbTx,
-    result: Result<Result<(), RevisionDbError>, sqlx::Error>,
-) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
+    result: Result<Result<T, RevisionDbError>, sqlx::Error>,
+) -> Result<Result<T, RevisionDbError>, sqlx::Error> {
     match result {
-        Ok(Ok(())) => {
+        Ok(Ok(value)) => {
             tx.commit_with_cleanup()
                 .await
                 .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
-            Ok(Ok(()))
+            Ok(Ok(value))
         }
         Ok(Err(refusal)) => {
             if let Err(cleanup) = tx.rollback().await {
@@ -923,6 +923,13 @@ pub async fn create_manual_revision_backend(
     .await
 }
 
+fn target_collab_kind(target: RevisionTarget) -> CollabKind {
+    match target {
+        RevisionTarget::Document(_) => CollabKind::Document,
+        RevisionTarget::Task(_) => CollabKind::Task,
+    }
+}
+
 pub(crate) async fn create_manual_revision_with_room_proof(
     backend: &Backend,
     workspace: Uuid,
@@ -932,18 +939,34 @@ pub(crate) async fn create_manual_revision_with_room_proof(
     input: CreateRevisionInput,
     proof: Option<FamilyNativeConsumerProof>,
 ) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
+    let task_room = matches!(
+        proof.map(|proof| proof.room),
+        Some(FamilyNativeRoomFence::Task(_))
+    ) && !matches!(backend, Backend::Postgres(_));
     let mut tx = backend.begin_write().await?;
     let result = if proof.is_some() {
         tx.operation()
             .create_manual_revision_with_room_proof(
                 workspace, actor, credential, scope, input, proof,
             )
-            .await?
+            .await
     } else {
         tx.operation()
             .create_manual_revision(workspace, actor, credential, scope, input)
-            .await?
+            .await
     };
+    finish_room_revision(tx, task_room, result).await
+}
+
+async fn finish_room_revision<T>(
+    tx: DbTx,
+    task_room: bool,
+    result: Result<Result<T, RevisionDbError>, sqlx::Error>,
+) -> Result<Result<T, RevisionDbError>, sqlx::Error> {
+    if task_room {
+        return finish_revision_authorization(tx, result).await;
+    }
+    let result = result?;
     if result.is_ok() {
         tx.commit().await.map_err(|unknown| unknown.source)?;
     } else {
@@ -1079,9 +1102,11 @@ impl OperationTx<'_, '_> {
             return Ok(Err(error));
         }
         if let Some(proof) = proof {
-            if proof.room.workspace_id != workspace
-                || scope.target != RevisionTarget::Document(proof.room.document_id)
-                || !self.verify_family_native_consumer_proof(proof).await?
+            if !proof.room.matches(
+                target_collab_kind(scope.target),
+                workspace,
+                scope.target.id(),
+            ) || !self.verify_family_native_consumer_proof(proof).await?
             {
                 return Ok(Err(RevisionDbError::NotFound));
             }
@@ -1383,17 +1408,16 @@ impl OperationTx<'_, '_> {
         &mut self,
         workspace: Uuid,
         target: RevisionTarget,
-        fence: Option<FamilyRoomFence>,
+        fence: Option<FamilyNativeRoomFence>,
         expected: Option<i64>,
     ) -> Result<bool, sqlx::Error> {
         let Some(fence) = fence else {
             return Ok(false);
         };
-        if target != RevisionTarget::Document(fence.document_id) || workspace != fence.workspace_id
-        {
+        if !fence.matches(target_collab_kind(target), workspace, target.id()) {
             return Ok(false);
         }
-        if !self.verify_family_room_fence(fence).await? {
+        if !self.verify_family_native_room_fence(fence).await? {
             return Ok(false);
         }
         Ok(self
@@ -1476,82 +1500,77 @@ pub(crate) async fn load_durable_collab_for_room_backend(
     backend: &Backend,
     workspace: Uuid,
     target: RevisionTarget,
-    fence: Option<FamilyRoomFence>,
+    fence: Option<FamilyNativeRoomFence>,
 ) -> Result<Result<DurableCollabSnapshot, RevisionDbError>, sqlx::Error> {
     if let Backend::Postgres(pool) = backend {
         return load_durable_collab_for_system(pool, workspace, target).await;
     }
     let mut tx = backend.begin_write().await?;
-    tx.operation().set_tenant(workspace).await?;
-    if !tx
-        .operation()
-        .current_room_revision_scope(workspace, target, fence, None)
-        .await?
-    {
-        tx.rollback().await?;
-        return Ok(Err(RevisionDbError::NotFound));
-    }
-    let load = tx
-        .operation()
-        .load_durable_native_source(CollabKind::Document, workspace, target.id())
-        .await?;
-    let load = match load {
-        Ok(load) => load,
-        Err(_) => {
-            tx.rollback().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        if !op
+            .current_room_revision_scope(workspace, target, fence, None)
+            .await?
+        {
             return Ok(Err(RevisionDbError::NotFound));
         }
-    };
-    if !tx
-        .operation()
-        .current_room_revision_scope(workspace, target, fence, Some(load.writer_generation))
-        .await?
-    {
-        tx.rollback().await?;
-        return Ok(Err(RevisionDbError::NotFound));
+        let load = match op
+            .load_durable_native_source(target_collab_kind(target), workspace, target.id())
+            .await?
+        {
+            Ok(load) => load,
+            Err(_) => return Ok(Err(RevisionDbError::NotFound)),
+        };
+        if !op
+            .current_room_revision_scope(workspace, target, fence, Some(load.writer_generation))
+            .await?
+        {
+            return Ok(Err(RevisionDbError::NotFound));
+        }
+        Ok(Ok(DurableCollabSnapshot {
+            snapshot: load.snapshot,
+            tail: load.tail.into_iter().map(|row| row.payload).collect(),
+            tail_seq: load.tail_seq,
+            snapshot_cutoff_seq: load.snapshot_cutoff_seq,
+        }))
     }
-    tx.commit().await.map_err(|unknown| unknown.source)?;
-    Ok(Ok(DurableCollabSnapshot {
-        snapshot: load.snapshot,
-        tail: load.tail.into_iter().map(|row| row.payload).collect(),
-        tail_seq: load.tail_seq,
-        snapshot_cutoff_seq: load.snapshot_cutoff_seq,
-    }))
+    .await;
+    finish_room_revision(tx, matches!(target, RevisionTarget::Task(_)), result).await
 }
 
 pub(crate) async fn latest_revision_y_snapshot_for_room_backend(
     backend: &Backend,
     workspace: Uuid,
     target: RevisionTarget,
-    fence: Option<FamilyRoomFence>,
+    fence: Option<FamilyNativeRoomFence>,
 ) -> Result<Option<(Uuid, Vec<u8>)>, sqlx::Error> {
     if let Backend::Postgres(pool) = backend {
         return latest_revision_y_snapshot(pool, workspace, target).await;
     }
     let mut tx = backend.begin_write().await?;
-    tx.operation().set_tenant(workspace).await?;
-    if !tx
-        .operation()
-        .current_room_revision_scope(workspace, target, fence, None)
-        .await?
-    {
-        tx.rollback().await?;
-        return Err(sqlx::Error::Protocol("room revision scope lost".into()));
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        if !op
+            .current_room_revision_scope(workspace, target, fence, None)
+            .await?
+        {
+            return Ok(Err(RevisionDbError::NotFound));
+        }
+        let head = op.latest_revision_head(workspace, target).await?;
+        if !op
+            .current_room_revision_scope(workspace, target, fence, None)
+            .await?
+        {
+            return Ok(Err(RevisionDbError::NotFound));
+        }
+        Ok(Ok(head))
     }
-    let head = tx
-        .operation()
-        .latest_revision_head(workspace, target)
-        .await?;
-    if !tx
-        .operation()
-        .current_room_revision_scope(workspace, target, fence, None)
+    .await;
+    finish_room_revision(tx, matches!(target, RevisionTarget::Task(_)), result)
         .await?
-    {
-        tx.rollback().await?;
-        return Err(sqlx::Error::Protocol("room revision scope lost".into()));
-    }
-    tx.commit().await.map_err(|unknown| unknown.source)?;
-    Ok(head)
+        .map_err(|_| sqlx::Error::Protocol("room revision scope lost".into()))
 }
 
 pub(crate) async fn create_system_revision_for_room_backend(
@@ -1561,52 +1580,53 @@ pub(crate) async fn create_system_revision_for_room_backend(
     input: CreateRevisionInput,
     expected_generation: i64,
     head_fence: SystemRevisionHead,
-    room_fence: Option<FamilyRoomFence>,
+    room_fence: Option<FamilyNativeRoomFence>,
 ) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
+    let task_room =
+        matches!(target, RevisionTarget::Task(_)) && !matches!(backend, Backend::Postgres(_));
     let mut tx = backend.begin_write().await?;
-    tx.operation().set_tenant(workspace).await?;
-    let current = if matches!(backend, Backend::Postgres(_)) {
-        tx.operation()
-            .lock_system_revision_target(workspace, target, Some(expected_generation))
-            .await?
-            .is_ok()
-    } else {
-        tx.operation()
-            .current_room_revision_scope(workspace, target, room_fence, Some(expected_generation))
-            .await?
-    };
-    if !current {
-        tx.rollback().await?;
-        return Ok(Err(RevisionDbError::NotFound));
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        let current = if matches!(backend, Backend::Postgres(_)) {
+            op.lock_system_revision_target(workspace, target, Some(expected_generation))
+                .await?
+                .is_ok()
+        } else {
+            op.current_room_revision_scope(workspace, target, room_fence, Some(expected_generation))
+                .await?
+        };
+        if !current {
+            return Ok(Err(RevisionDbError::NotFound));
+        }
+        let recent = op.latest_revision_head(workspace, target).await?;
+        if !head_fence.matches_current(recent.clone()) {
+            return Ok(Err(RevisionDbError::StaleRevisionHead));
+        }
+        let id = if let Some((id, _)) = recent.filter(|(_, bytes)| bytes == &input.y_snapshot) {
+            id
+        } else {
+            let id = Uuid::now_v7();
+            op.insert_revision(workspace, target, id, None, &input, SESSION_REASON)
+                .await?;
+            id
+        };
+        if !matches!(backend, Backend::Postgres(_))
+            && !op
+                .current_room_revision_scope(
+                    workspace,
+                    target,
+                    room_fence,
+                    Some(expected_generation),
+                )
+                .await?
+        {
+            return Ok(Err(RevisionDbError::NotFound));
+        }
+        Ok(Ok(id))
     }
-    let recent = tx
-        .operation()
-        .latest_revision_head(workspace, target)
-        .await?;
-    if !head_fence.matches_current(recent.clone()) {
-        tx.rollback().await?;
-        return Ok(Err(RevisionDbError::StaleRevisionHead));
-    }
-    let id = if let Some((id, _)) = recent.filter(|(_, bytes)| bytes == &input.y_snapshot) {
-        id
-    } else {
-        let id = Uuid::now_v7();
-        tx.operation()
-            .insert_revision(workspace, target, id, None, &input, SESSION_REASON)
-            .await?;
-        id
-    };
-    if !matches!(backend, Backend::Postgres(_))
-        && !tx
-            .operation()
-            .current_room_revision_scope(workspace, target, room_fence, Some(expected_generation))
-            .await?
-    {
-        tx.rollback().await?;
-        return Ok(Err(RevisionDbError::NotFound));
-    }
-    tx.commit().await.map_err(|unknown| unknown.source)?;
-    Ok(Ok(id))
+    .await;
+    finish_room_revision(tx, task_room, result).await
 }
 
 pub async fn resolve_restore(

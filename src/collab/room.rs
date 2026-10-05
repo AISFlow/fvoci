@@ -56,12 +56,13 @@ use crate::collab::wire::CollabKind;
 use crate::collab::wire::{encode, AuthMessage, DocumentMessage, SyncStep, WireFrame};
 use crate::collab::y_sync::{encode_sync_payload, is_empty_update, parse_sync_payload};
 use crate::db::collab::{
-    append_collab_restore_kind, compact_collab_snapshot_kind_backend, load_room_collab_readonly,
-    project_derived_body_kind_backend, resolve_collab_admission_kind_backend,
-    verify_room_collab_operation, verify_room_native_consumer, AppendCollabInput,
-    AppendCollabResult, ClaimWriterResult, CollabDbError, CompactCollabInput,
-    FamilyNativeConsumerProof, FamilyRoomDeliveryFence, FamilyRoomFence, ProjectDerivedBodyInput,
-    ProjectDerivedBodyResult, VerifyCollabInput,
+    append_collab_restore_kind,
+    compact_collab_snapshot_in_room as compact_collab_snapshot_kind_backend,
+    load_room_collab_readonly, project_derived_body_in_room as project_derived_body_kind_backend,
+    resolve_collab_admission_kind_backend, verify_room_collab_operation,
+    verify_room_native_consumer, AppendCollabInput, AppendCollabResult, ClaimWriterResult,
+    CollabDbError, CompactCollabInput, FamilyNativeConsumerProof, FamilyNativeRoomFence,
+    FamilyRoomDeliveryFence, ProjectDerivedBodyInput, ProjectDerivedBodyResult, VerifyCollabInput,
 };
 use crate::db::collab_delivery::{check_delivery_admission_kind_backend, DeliveryAdmission};
 use crate::db::identity::LiveSession;
@@ -1620,11 +1621,15 @@ impl RoomActor {
                     self.poll_acl().await;
                 }
                 _ = renew_tick.tick(), if renew_interval.is_some() && !self.fence_lost => {
-                    let renewed = if let Some(guard) = self.room_guard.as_mut() {
-                        matches!(tokio::time::timeout(Duration::from_millis(self.config.rpc_timeout_ms),
-                            guard.renew()).await, Ok(Ok(true)))
-                    } else { false };
-                    if !renewed { self.fatal_fence_lost().await; }
+                    let renewal = if let Some(guard) = self.room_guard.as_mut() {
+                        Some(tokio::time::timeout(Duration::from_millis(self.config.rpc_timeout_ms), guard.renew()).await)
+                    } else { None };
+                    match renewal {
+                        Some(Ok(Ok(true))) => {},
+                        Some(Ok(Err(error))) if self.is_remote_task_room() => self.fatal_remote_write_unconfirmed(error).await,
+                        Some(Err(_)) if self.is_remote_task_room() => self.fatal_remote_write_unconfirmed(sqlx::Error::Protocol("Task lease renewal deadline expired; original finish unconfirmed".into())).await,
+                        _ => self.fatal_fence_lost().await,
+                    }
                 }
             }
             self.finish_pending_lease_drops().await;
@@ -1834,14 +1839,22 @@ impl RoomActor {
     async fn capture_committed_revision_primary(
         &mut self,
     ) -> Result<CapturedRevision, RevisionCaptureError> {
-        let durable = load_durable_collab_for_room_backend(
+        let durable = match load_durable_collab_for_room_backend(
             &self.backend,
             self.workspace_id,
             self.revision_target(),
             self.family_fence(),
         )
         .await
-        .map_err(|_| RevisionCaptureError::Unavailable)?;
+        {
+            Ok(durable) => durable,
+            Err(error) => {
+                if self.is_remote_task_room() {
+                    self.fatal_remote_write_unconfirmed(error).await;
+                }
+                return Err(RevisionCaptureError::Unavailable);
+            }
+        };
         let durable = durable.map_err(|_| RevisionCaptureError::Unavailable)?;
         self.committed.snapshot = durable.snapshot;
         self.committed.tail_payloads = durable.tail;
@@ -1996,7 +2009,11 @@ impl RoomActor {
                     error = %err,
                     "collab.session_revision_head_read_failed"
                 );
-                self.abort_session_revision_work();
+                if self.is_remote_task_room() {
+                    self.fatal_remote_write_unconfirmed(err).await;
+                } else {
+                    self.abort_session_revision_work();
+                }
                 return true;
             }
         };
@@ -2095,6 +2112,9 @@ impl RoomActor {
                     error = %err,
                     "collab.session_revision_persist_failed"
                 );
+                if self.is_remote_task_room() {
+                    self.fatal_remote_write_unconfirmed(err).await;
+                }
                 true
             }
         };
@@ -2163,26 +2183,27 @@ impl RoomActor {
         credential: Uuid,
     ) -> Result<Option<FamilyNativeConsumerProof>, ()> {
         let proof = self.native_consumer_proof();
-        if matches!(
-            verify_room_native_consumer(
-                &self.backend,
-                self.kind,
-                self.workspace_id,
-                actor,
-                credential,
-                self.document_id,
-                proof
-            )
-            .await,
-            Ok(Ok(()))
-        ) {
-            return Ok(proof);
+        let checked = verify_room_native_consumer(
+            &self.backend,
+            self.kind,
+            self.workspace_id,
+            actor,
+            credential,
+            self.document_id,
+            proof,
+        )
+        .await;
+        match checked {
+            Ok(Ok(())) => return Ok(proof),
+            Err(error) if self.is_remote_task_room() => {
+                self.fatal_remote_write_unconfirmed(error).await;
+            }
+            _ => self.fatal_fence_lost().await,
         }
-        self.fatal_fence_lost().await;
         Err(())
     }
 
-    fn family_fence(&self) -> Option<FamilyRoomFence> {
+    fn family_fence(&self) -> Option<FamilyNativeRoomFence> {
         self.room_guard
             .as_ref()
             .and_then(BackendRoomGuard::family_fence)
@@ -2202,7 +2223,7 @@ impl RoomActor {
         let Some(guard) = self.room_guard.as_mut() else {
             return Ok(Err(CollabDbError::StaleWriter));
         };
-        guard
+        let result = guard
             .claim_writer(
                 &self.backend,
                 self.kind,
@@ -2211,7 +2232,21 @@ impl RoomActor {
                 credential,
                 self.document_id,
             )
-            .await
+            .await;
+        if self.is_remote_task_room() {
+            match result {
+                Err(error) => {
+                    // Preserve the original writer's failure in the hub and
+                    // stop this room. A new reader is not a finish receipt.
+                    self.fatal_remote_write_unconfirmed(error).await;
+                    return Err(sqlx::Error::Protocol(
+                        "Task native activation outcome remains unconfirmed".into(),
+                    ));
+                }
+                confirmed => return confirmed,
+            }
+        }
+        result
     }
 
     async fn handle_join(&mut self, join: RoomJoin) -> Result<JoinAdmission, JoinError> {
@@ -2268,7 +2303,7 @@ impl RoomActor {
             }
             self.writer_generation = Some(claim.writer_generation);
         } else if self.writer_generation.is_none() && read_only {
-            let load = load_room_collab_readonly(
+            let load = match load_room_collab_readonly(
                 &self.backend,
                 self.kind,
                 self.workspace_id,
@@ -2278,15 +2313,21 @@ impl RoomActor {
                 self.family_fence(),
             )
             .await
-            .map_err(|err| {
-                warn_join_db_error(
-                    "room.handle_join.load_readonly",
-                    self.workspace_id,
-                    self.document_id,
-                    &err,
-                );
-                JoinError::DbError
-            })?;
+            {
+                Ok(load) => load,
+                Err(err) => {
+                    warn_join_db_error(
+                        "room.handle_join.load_readonly",
+                        self.workspace_id,
+                        self.document_id,
+                        &err,
+                    );
+                    if self.is_remote_task_room() {
+                        self.fatal_remote_write_unconfirmed(err).await;
+                    }
+                    return Err(JoinError::DbError);
+                }
+            };
             let load = load.map_err(|_| JoinError::AdmissionDenied)?;
             self.set_committed_from_load(&load);
             if let Err(err) = self.reload_primary_from_committed().await {
@@ -2394,6 +2435,10 @@ impl RoomActor {
         for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
             self.close_connection(conn_id, code, reason).await;
         }
+    }
+
+    fn is_remote_task_room(&self) -> bool {
+        self.kind == CollabKind::Task && matches!(self.backend, Backend::LibsqlRemote(_))
     }
 
     async fn fatal_remote_write_unconfirmed(&mut self, error: sqlx::Error) {
@@ -3557,6 +3602,9 @@ impl RoomActor {
                     error = %err,
                     "collab derived body db failure"
                 );
+                if self.is_remote_task_room() {
+                    self.fatal_remote_write_unconfirmed(err).await;
+                }
                 ProjectDerivedOutcome::DbFailed
             }
         }
@@ -3926,6 +3974,10 @@ impl RoomActor {
                     self.fatal_room_divergence(actor_user_id, session_id).await;
                     format!("persist-failed:{request_id}")
                 }
+                Err(error) if self.is_remote_task_room() => {
+                    self.fatal_remote_write_unconfirmed(error).await;
+                    format!("persist-failed:{request_id}")
+                }
                 _ => {
                     self.compact_unhealthy = true;
                     self.compact_retry_at_tail_len = Some(self.committed.tail_payloads.len());
@@ -3976,7 +4028,7 @@ impl RoomActor {
         // Without a writer generation nothing fences out-of-room appends
         // (import, a newer writer), so the committed tail may be behind.
         if !self.committed_loaded || self.writer_generation.is_none() {
-            let load = load_room_collab_readonly(
+            let load = match load_room_collab_readonly(
                 &self.backend,
                 self.kind,
                 self.workspace_id,
@@ -3986,7 +4038,15 @@ impl RoomActor {
                 self.family_fence(),
             )
             .await
-            .map_err(|_| RevisionCaptureError::Unavailable)?;
+            {
+                Ok(load) => load,
+                Err(error) => {
+                    if self.is_remote_task_room() {
+                        self.fatal_remote_write_unconfirmed(error).await;
+                    }
+                    return Err(RevisionCaptureError::Unavailable);
+                }
+            };
             let load = load.map_err(|_| RevisionCaptureError::Unavailable)?;
             self.set_committed_from_load(&load);
             self.reload_primary_from_committed()
