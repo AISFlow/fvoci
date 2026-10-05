@@ -605,27 +605,54 @@ mod backend_tests {
         let call = tokio::spawn(async move {
             run_embed_pass_backend(&backend, &embedder, &mut EmbedBackoff::default(), &c).await
         });
-        provider.seen().await;
-        assert_eq!(f.pool.num_idle(), 1); // Provider wait owns no app connection.
-        provider.state.release.notify_one();
-        tokio::time::timeout(Duration::from_secs(5), async {
+        let mut phase = "provider request";
+        let barrier = tokio::time::timeout(Duration::from_secs(5), async {
+            provider.state.seen.notified().await;
+            phase = "read connection return while provider blocked";
+            // SQLx returns a committed pooled connection asynchronously. Keep
+            // the response blocked until the sole connection is truly idle.
+            while f.pool.num_idle() != 1 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(f.pool.num_idle(), 1); // Provider wait owns no app connection.
+            provider.state.release.notify_one();
+            phase = "writer acquisition behind reservation";
             while f.pool.num_idle() != 0 {
                 tokio::task::yield_now().await;
             }
         })
-        .await
-        .unwrap(); // The sole embedding task now awaits its writer.
+        .await; // Both pool observations share the original five-second budget.
         cancel.cancel();
-        reservation.rollback().await.unwrap();
-        let outcome = call.await.unwrap().unwrap();
-        let vectors = vector_count(&f).await;
-        let events = f.event_count("attachment.embedded").await;
-        provider.finish().await;
+        provider.state.release.notify_one();
+        if barrier.is_err() {
+            call.abort();
+        }
+        let rollback = reservation.rollback().await;
+        let outcome = call.await;
+        let observations = if barrier.is_ok() && rollback.is_ok() && outcome.is_ok() {
+            Some((
+                vector_count(&f).await,
+                f.event_count("attachment.embedded").await,
+            ))
+        } else {
+            None
+        };
+        provider.cancel.cancel();
+        let provider_stopped = provider.join.await;
         other.close().await;
-        f.backend.close().await.unwrap();
+        let backend_closed = f.backend.close().await;
         f.pool.close().await;
         // Resources and the original failure database are closed before the
         // oracle; on failure its directory is deliberately retained.
+        assert!(
+            barrier.is_ok(),
+            "embedding cancellation barrier failed during {phase}"
+        );
+        rollback.unwrap();
+        provider_stopped.unwrap();
+        backend_closed.unwrap();
+        let outcome = outcome.unwrap().unwrap();
+        let (vectors, events) = observations.unwrap();
         assert_eq!(outcome, EmbedPassOutcome::Cancelled);
         assert_eq!(
             vectors, 0,

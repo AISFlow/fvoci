@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -228,6 +230,139 @@ class PacketTest(unittest.TestCase):
         m['payload_sha256']=H.CI.sha(archive);self.change_manifest(m)
         with self.assertRaises(AssertionError):H.consume()
         self.assertFalse((self.output/'before.json').exists())
+
+    def test_input_diagnostics_are_bounded_hashes_not_paths_or_values(self):
+        private = 'https://private.invalid/token-secret'
+        before = {**self.inputs(), 'status': private, 'unknown-private-field': private}
+        current = {**before, 'untracked': {f'{private}/{i}': private for i in range(600)}}
+        self.put('before.json', before); self.put('after.json', before)
+        with patch.object(H.CI, 'inputs', return_value=current):
+            with self.assertRaisesRegex(AssertionError, 'current physical inputs differ'):H.qualify(self.output)
+        files = sorted(self.output.glob('handoff-input-*-safe.json'))
+        self.assertEqual(len(files), 4)
+        for file in files:
+            self.assertNotIn(private, file.read_text())
+            self.assertNotIn('unknown-private-field', file.read_text())
+            self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o600)
+            self.assertLess(file.stat().st_size, 256 * 1024)
+        record = self.get('handoff-input-current-safe.json')['fields']['untracked']
+        self.assertEqual(record['count'], 600); self.assertEqual(len(record['entries']), 512)
+        self.assertTrue(record['truncated'])
+        delta = self.get('handoff-input-delta-safe.json')['after_current']['untracked']
+        self.assertEqual(delta['count'], 600); self.assertEqual(len(delta['entries']), 512)
+        self.assertTrue(delta['truncated'])
+        saved = {p: p.read_bytes() for p in files}
+        with self.assertRaises(FileExistsError):H.input_diagnostics(self.output, before, before, current)
+        self.assertEqual(saved, {p:p.read_bytes() for p in files})
+
+
+class FreshImportTest(unittest.TestCase):
+    """Fresh Python entrypoint; real loader/input guard, data-only tool boundary."""
+    DRIVER = r'''
+import ast, hashlib, importlib.util, json, pathlib, sys
+root, output, header = map(pathlib.Path, sys.argv[1:4])
+mode, mutation = sys.argv[4:6]
+tracked = ['scripts/selected-backend-ci/web-build-handoff.py', 'scripts/run-selected-backend-e2e.py']
+sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+def inputs():
+    others = {str(p.relative_to(root)):sha(p) for p in root.rglob('*') if p.is_file() and str(p.relative_to(root)) not in tracked}
+    return {'head':'a'*40, 'tree':'b'*40, 'status':json.dumps(sorted(others)),
+            'tracked':{n:sha(root/n) for n in tracked}, 'external':{str(header):sha(header)}, 'untracked':others}
+before = inputs()
+for name in ('before.json','after.json'):(output/name).write_text(json.dumps(before))
+(output/'build-env-inputs.json').write_text('{}')
+if mutation == 'tracked':
+    with (root/tracked[1]).open('ab') as f:f.write(b'\n# real tracked mutation\n')
+elif mutation == 'header':header.write_bytes(b'changed actual header')
+elif mutation == 'untracked':(root/'private-token-secret').write_bytes(b'private-value-secret')
+class Boundary(Exception):pass
+original_spec = importlib.util.spec_from_file_location
+class Loader:
+    def __init__(self, original):self.original = original
+    def create_module(self, spec):return self.original.create_module(spec)
+    def exec_module(self, module):
+        self.original.exec_module(module)
+        module.inputs = inputs
+        def stop():raise Boundary()
+        module.build_env = stop
+def fixture_spec(name, path, *args, **kwargs):
+    spec = original_spec(name, path, *args, **kwargs)
+    if name == 'selected_ci':spec.loader = Loader(spec.loader)
+    return spec
+importlib.util.spec_from_file_location = fixture_spec
+def context(job):
+    if mode != 'export':raise Boundary()
+    return {'source':'a'*40,'tree':'b'*40}
+path = root/tracked[0]
+tree = ast.parse(path.read_bytes(), filename=str(path))
+# Substitute only the allocation/tool context; keep the import, main dispatch,
+# export and strict qualify guard intact. Never execute compiler/ELF tools.
+tree.body[-1:-1] = ast.parse('context = fixture_context\npaths = fixture_paths\n').body
+ast.fix_missing_locations(tree)
+sys.argv = [str(path), mode]
+outcome = 'unexpected return'
+try:
+    exec(compile(tree,str(path),'exec'), {'__name__':'__main__','__file__':str(path),
+         'fixture_context':context,'fixture_paths':lambda:(output,output.parent/'packet')})
+except Boundary:outcome = 'tool boundary'
+except AssertionError as error:outcome = str(error)
+after = inputs()
+print(json.dumps({'outcome':outcome, 'added':sorted(set(after['untracked'])-set(before['untracked'])),
+                  'changed':sorted(k for k in before if before[k] != after[k]),
+                  'packet':(output.parent/'packet').exists()}))
+'''
+
+    def run_fresh(self, *, original=False, mutation='', mode='export'):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp);root = base/'repo';root.mkdir()
+            output = base/'output';output.mkdir(mode=0o700)
+            header = base/'header';header.write_bytes(b'actual header fixture')
+            for name in ('scripts/selected-backend-ci/web-build-handoff.py', 'scripts/run-selected-backend-e2e.py'):
+                target = root/name;target.parent.mkdir(parents=True,exist_ok=True)
+                data = (ROOT/name).read_text()
+                if original and name.endswith('web-build-handoff.py'):
+                    self.assertEqual(data.count('sys.dont_write_bytecode = True'), 1)
+                    data = data.replace('sys.dont_write_bytecode = True', 'sys.dont_write_bytecode = False')
+                target.write_text(data)
+            result = subprocess.run([sys.executable, '-c', self.DRIVER, str(root), str(output), str(header), mode, mutation],
+                                    capture_output=True, text=True, env={'PATH':os.defpath})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            record = json.loads(result.stdout)
+            safe = sorted(output.glob('handoff-input-*-safe.json'))
+            for file in safe:
+                self.assertNotIn(str(base), file.read_text())
+                self.assertNotIn('private-token-secret', file.read_text())
+                self.assertNotIn('private-value-secret', file.read_text())
+            self.assertFalse(record['packet'])
+            return record, len(safe)
+
+    def test_original_bytecode_import_changes_live_map_and_is_refused(self):
+        record, count = self.run_fresh(original=True)
+        self.assertEqual(record['outcome'], 'current physical inputs differ')
+        self.assertEqual(record['changed'], ['status','untracked'])
+        self.assertEqual(len(record['added']), 1)
+        self.assertRegex(record['added'][0], r'^scripts/__pycache__/run-selected-backend-e2e\.cpython-\d+\.pyc$')
+        self.assertEqual(count, 4)
+
+    def test_fixed_export_preserves_inputs_and_reaches_next_tool_boundary(self):
+        record, count = self.run_fresh()
+        self.assertEqual(record, {'outcome':'tool boundary','added':[],'changed':[],'packet':False})
+        self.assertEqual(count, 0)
+
+    def test_fixed_admit_and_consume_imports_preserve_inputs(self):
+        for mode in ('admit','consume'):
+            with self.subTest(mode=mode):
+                record, count = self.run_fresh(mode=mode)
+                self.assertEqual(record, {'outcome':'tool boundary','added':[],'changed':[],'packet':False})
+                self.assertEqual(count, 0)
+
+    def test_real_tracked_header_and_untracked_drift_still_refused(self):
+        for mutation, fields in [('tracked',['tracked']), ('header',['external']), ('untracked',['status','untracked'])]:
+            with self.subTest(mutation=mutation):
+                record, count = self.run_fresh(mutation=mutation)
+                self.assertEqual(record['outcome'], 'current physical inputs differ')
+                self.assertEqual(record['changed'], fields)
+                self.assertEqual(count, 4)
 
 
 if __name__=='__main__':unittest.main()

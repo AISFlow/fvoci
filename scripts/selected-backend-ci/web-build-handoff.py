@@ -11,8 +11,11 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 import tarfile
 
+# Importing the CI helper must not change its qualified untracked input map.
+sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("selected_ci", ROOT / "scripts/run-selected-backend-e2e.py")
 CI = importlib.util.module_from_spec(spec)
@@ -58,9 +61,55 @@ def read(output, name):
     return json.loads(regular(output / name).read_bytes())
 
 
+def input_diagnostics(output, before, after, current):
+    """Bounded hash-only evidence; never serialize paths, status or env values."""
+    fields = ("head", "tree", "status", "tracked", "external", "untracked")
+    limit = 512
+
+    def fingerprint(value):
+        return digest(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
+
+    def snapshot(value):
+        result = {"sha256": fingerprint(value), "fields": {}}
+        for field in fields:
+            item = value.get(field)
+            record = {"sha256": fingerprint(item)}
+            if isinstance(item, dict):
+                entries = sorted((fingerprint(k), fingerprint(v)) for k, v in item.items())
+                record.update(count=len(entries), entries=dict(entries[:limit]),
+                              truncated=len(entries) > limit)
+            result["fields"][field] = record
+        return result
+
+    def delta(left, right):
+        result = {}
+        for field in fields:
+            a, b = left.get(field), right.get(field)
+            if a == b:
+                continue
+            record = {"before_sha256": fingerprint(a), "after_sha256": fingerprint(b)}
+            if isinstance(a, dict) and isinstance(b, dict):
+                changes = sorted((fingerprint(k), fingerprint(a.get(k)), fingerprint(b.get(k)))
+                                 for k in a.keys() | b.keys() if k not in a or k not in b or a[k] != b[k])
+                record.update(count=len(changes), entries=changes[:limit],
+                              truncated=len(changes) > limit)
+            result[field] = record
+        return result
+
+    for name, value in (("before", before), ("after", after), ("current", current)):
+        CI.write(output / f"handoff-input-{name}-safe.json", snapshot(value))
+    CI.write(output / "handoff-input-delta-safe.json",
+             {"schema": 1, "entry_limit": limit, "before_after": delta(before, after),
+              "after_current": delta(after, current)})
+    print("handoff input mismatch: see bounded handoff-input-*-safe.json hashes", file=sys.stderr)
+
+
 def qualify(output):
     before = read(output, "before.json")
-    assert before == read(output, "after.json") == CI.inputs(), "current physical inputs differ"
+    after, current = read(output, "after.json"), CI.inputs()
+    if not before == after == current:
+        input_diagnostics(output, before, after, current)
+    assert before == after == current, "current physical inputs differ"
     assert read(output, "build-env-inputs.json") == CI.build_env(), "compiler environment differs"
     receipt = read(output, "compile-receipt.json")
     assert receipt["source"] == before["head"] and receipt["tree"] == before["tree"]

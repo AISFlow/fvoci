@@ -335,6 +335,10 @@ jobs:
           path: |
             ${{ runner.temp }}/fvoci-selected-current/*-stderr.log
             ${{ runner.temp }}/fvoci-selected-current/*-stage.json
+            ${{ runner.temp }}/fvoci-selected-current/handoff-input-before-safe.json
+            ${{ runner.temp }}/fvoci-selected-current/handoff-input-after-safe.json
+            ${{ runner.temp }}/fvoci-selected-current/handoff-input-current-safe.json
+            ${{ runner.temp }}/fvoci-selected-current/handoff-input-delta-safe.json
 
   collaboration-flow:
     needs: [ci-plan, collaboration-build]
@@ -452,6 +456,10 @@ jobs:
             ${{ runner.temp }}/fvoci-selected-current/*-stage.json
             ${{ runner.temp }}/fvoci-selected-current/*-driver.log
             ${{ runner.temp }}/fvoci-selected-current/selected-ci-receipt.json
+            ${{ runner.temp }}/fvoci-selected-current/handoff-input-before-safe.json
+            ${{ runner.temp }}/fvoci-selected-current/handoff-input-after-safe.json
+            ${{ runner.temp }}/fvoci-selected-current/handoff-input-current-safe.json
+            ${{ runner.temp }}/fvoci-selected-current/handoff-input-delta-safe.json
 
   web-ci-gate:
     name: web-ci-gate
