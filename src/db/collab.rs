@@ -5491,7 +5491,7 @@ mod selected_on_task_room_tests {
         let fence = FamilyNativeRoomFence::Task(writer.fence);
         let engine = crate::collab::CollabConfig::from_env()
             .expect("root-qualified current native engine is required, never skip");
-        let json = serde_json::json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":"on-task-native-block"},"content":[{"type":"text","text":"actual ON Task 😀","marks":[{"type":"bold"}]}]}]});
+        let json = serde_json::json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":"on-task-native-block"},"content":[{"type":"text","text":"actual ON Task 😀","marks":[{"type":"bold","attrs":{}}]}]}]});
         let update = crate::collab::seed::SeedEngine::new(engine.engine_bin.clone(), engine.limits)
             .tiptap_to_yjs_update(&json)
             .await

@@ -961,6 +961,13 @@ pub(crate) mod maintenance_claim_driver_tests {
                     }
                     json!({"type":"batch","result":{"step_results":results,"step_errors":errors}})
                 }
+                "describe" => match sqlite_describe(&mut stream, request).await {
+                    Ok(result) => json!({"type":"describe","result":result}),
+                    Err(error) => {
+                        responses.push(json!({"type":"error","error":{"message":error.to_string(),"code":"SQLITE_ERROR"}}));
+                        continue;
+                    }
+                },
                 "get_autocommit" => json!({"type":"get_autocommit","is_autocommit":!stream.active}),
                 "close" => {
                     // The actual original SQLite transaction is settled here,
@@ -1006,6 +1013,75 @@ pub(crate) mod maintenance_claim_driver_tests {
         }
         Json(response).into_response()
     }
+    // Describe prepares on the same SQLx-owned SQLite handle, without stepping
+    // the statement. The pinned SQLite engine supplies Hrana metadata; neither
+    // the test service nor the SDK invents columns, parameters or readonly flags.
+    async fn sqlite_describe(stream: &mut Stream, request: &Value) -> Result<Value, sqlx::Error> {
+        use std::ffi::{CStr, CString};
+        use std::ptr::NonNull;
+
+        struct Prepared(NonNull<libsqlite3_sys::sqlite3_stmt>);
+        impl Drop for Prepared {
+            fn drop(&mut self) {
+                // SAFETY: this uniquely owned statement is finalized once,
+                // before the SQLx exclusive native-handle guard is released.
+                unsafe { libsqlite3_sys::sqlite3_finalize(self.0.as_ptr()) };
+            }
+        }
+        let sql = request["sql"]
+            .as_str()
+            .filter(|_| request["sql_id"].is_null())
+            .ok_or_else(|| sqlx::Error::Protocol("fixture describe requires literal SQL".into()))?;
+        let sql = CString::new(sql)
+            .map_err(|_| sqlx::Error::Protocol("fixture describe SQL contains NUL".into()))?;
+        let mut handle = stream.conn.lock_handle().await?;
+        let db = handle.as_raw_handle().as_ptr();
+        let mut statement = std::ptr::null_mut();
+        // SAFETY: SQLx holds the exclusive handle guard; SQL is NUL-terminated,
+        // and SQLite owns the prepared statement until the local guard drops.
+        let code = unsafe {
+            libsqlite3_sys::sqlite3_prepare_v2(
+                db,
+                sql.as_ptr(),
+                -1,
+                &mut statement,
+                std::ptr::null_mut(),
+            )
+        };
+        let statement = NonNull::new(statement).map(Prepared);
+        if code != libsqlite3_sys::SQLITE_OK {
+            // SAFETY: SQLite's error message is valid while the handle guard
+            // is held. Copy it before another operation can replace it.
+            let message = unsafe { CStr::from_ptr(libsqlite3_sys::sqlite3_errmsg(db)) };
+            return Err(sqlx::Error::Protocol(format!(
+                "SQLite describe failed ({code}): {}",
+                message.to_string_lossy()
+            )));
+        }
+        let statement = statement
+            .ok_or_else(|| sqlx::Error::Protocol("fixture describe has no statement".into()))?;
+        // SAFETY: all metadata pointers are SQLite-owned for this live prepared
+        // statement; copy them before finalize. No sqlite3_step is performed.
+        let result = unsafe {
+            let text = |ptr: *const std::ffi::c_char| {
+                (!ptr.is_null()).then(|| CStr::from_ptr(ptr).to_string_lossy().into_owned())
+            };
+            let stmt = statement.0.as_ptr();
+            let params = (1..=libsqlite3_sys::sqlite3_bind_parameter_count(stmt))
+                .map(|i| json!({"name":text(libsqlite3_sys::sqlite3_bind_parameter_name(stmt, i))}))
+                .collect::<Vec<_>>();
+            let cols = (0..libsqlite3_sys::sqlite3_column_count(stmt))
+                .map(|i| {
+                    let name = text(libsqlite3_sys::sqlite3_column_name(stmt, i))
+                        .ok_or_else(|| sqlx::Error::Protocol("SQLite column name unavailable".into()))?;
+                    Ok(json!({"name":name,"decltype":text(libsqlite3_sys::sqlite3_column_decltype(stmt, i))}))
+                })
+                .collect::<Result<Vec<_>, sqlx::Error>>()?;
+            json!({"params":params,"cols":cols,"is_explain":libsqlite3_sys::sqlite3_stmt_isexplain(stmt)!=0,"is_readonly":libsqlite3_sys::sqlite3_stmt_readonly(stmt)!=0})
+        };
+        Ok(result)
+    }
+
     // SQLx supplies both actual returned rows (including RETURNING/PRAGMA)
     // and affected counts. No transport response invents database contents.
     #[expect(
@@ -1458,6 +1534,135 @@ pub(crate) mod maintenance_claim_driver_tests {
             "Ok disposal/None attempt error must not permit fresh observation"
         );
     }
+    #[tokio::test]
+    async fn maintenance_claim_driver_describe_real_metadata_no_effect_and_sql_error() {
+        let f = Fixture::new().await;
+        let pool = f.model.lock().await.pool.clone();
+        sqlx::query("CREATE TABLE describe_probe(id INTEGER PRIMARY KEY,label TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO describe_probe VALUES(1,'original 中 😀')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let tx = f.writer().await;
+        let sql = "SELECT id AS original_id,label,:named AS bound FROM describe_probe WHERE id=?1 AND label=?";
+        // Actual unmodified SDK prepare must decode the pipeline describe reply.
+        let prepared = tx.connection().prepare(sql).await.unwrap();
+        assert_eq!(prepared.column_count(), 3);
+        let columns = prepared.columns();
+        assert_eq!(
+            columns.iter().map(|c| c.name()).collect::<Vec<_>>(),
+            vec!["original_id", "label", "bound"]
+        );
+        let baton = {
+            let model = f.model.lock().await;
+            let request = model
+                .requests
+                .iter()
+                .rev()
+                .find(|body| {
+                    body["requests"].as_array().is_some_and(|requests| {
+                        requests
+                            .iter()
+                            .any(|r| r["type"] == "describe" && r["sql"] == sql)
+                    })
+                })
+                .expect("actual SDK describe reached its original stream");
+            request["baton"].as_str().unwrap().to_owned()
+        };
+        let client = reqwest::Client::new();
+        let describe = |request: Value| {
+            client
+                .post(format!("{}/v3/pipeline", f.endpoint))
+                .json(&json!({"baton":baton,"requests":[request]}))
+        };
+        let body: Value = describe(json!({"type":"describe","sql":sql}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["baton"], baton);
+        assert_eq!(
+            body["results"][0]["response"]["result"],
+            json!({
+                "params":[{"name":"?1"},{"name":":named"},{"name":null}],
+                "cols":[{"name":"original_id","decltype":"INTEGER"},
+                        {"name":"label","decltype":"TEXT"},{"name":"bound","decltype":null}],
+                "is_explain":false,"is_readonly":true
+            })
+        );
+        let write_sql = "UPDATE describe_probe SET label=?1 WHERE id=?2 RETURNING id,label";
+        let write: Value = describe(json!({"type":"describe","sql":write_sql}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            write["results"][0]["response"]["result"]["is_readonly"],
+            false
+        );
+        assert_eq!(
+            write["results"][0]["response"]["result"]["params"],
+            json!([{"name":"?1"},{"name":"?2"}])
+        );
+        let explain: Value =
+            describe(json!({"type":"describe","sql":"EXPLAIN SELECT id FROM describe_probe"}))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+        assert_eq!(
+            explain["results"][0]["response"]["result"]["is_explain"],
+            true
+        );
+        assert!(
+            tx.connection()
+                .prepare("SELECT missing FROM describe_probe")
+                .await
+                .is_err(),
+            "invalid SQL cannot become fabricated successful metadata"
+        );
+        for request in [
+            json!({"type":"describe","sql_id":1}),
+            json!({"type":"describe","sql":""}),
+            json!({"type":"describe","sql":"SELECT\u{0}1"}),
+        ] {
+            let refused: Value = describe(request)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(refused["results"][0]["type"], "error");
+            assert!(refused["results"][0].get("response").is_none());
+        }
+        let original: (i64, String) = sqlx::query_as("SELECT id,label FROM describe_probe")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            original,
+            (1, "original 中 😀".into()),
+            "preparing write/explain/invalid SQL neither steps nor modifies data"
+        );
+        drop(columns);
+        drop(prepared);
+        DbTransaction::SqliteFamily(FamilyTx::Remote(tx))
+            .commit_with_cleanup()
+            .await
+            .unwrap();
+        f.shutdown(false, false).await;
+    }
+
     #[tokio::test]
     async fn maintenance_claim_driver_fk_close_does_not_rollback_new_stream() {
         for (sql, expected) in [
