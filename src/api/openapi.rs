@@ -391,6 +391,7 @@ impl Modify for CookieSecurityAddon {
             AiSuggestLinksOutput,
             AiSuggestedDocument,
             SetupStatusResponse,
+            crate::config::RealtimeMode,
             BrandingOutput,
             SetupBody,
             SetupResponse,

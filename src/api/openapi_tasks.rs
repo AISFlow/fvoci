@@ -7,7 +7,9 @@ use crate::api::personal_input_dto::{
 };
 use utoipa::OpenApi;
 
-use crate::api::documents_dto::PatchBlockInput;
+use crate::api::documents_dto::{
+    PatchBlockInput, SaveVersionedBodyInput, SaveVersionedBodyResponse, VersionedBodyResponse,
+};
 use crate::api::dto::{
     OkResponse, PatchTaskBody, ProblemResponse, TaskListResponse, TaskMetaOutput, TaskOutput,
     WorkflowStatusOutput, WorkspaceStatusOutput,
@@ -29,6 +31,8 @@ use crate::api::tasks_dto::{
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        read_versioned_task_body,
+        save_versioned_task_body,
         create_personal_input,
         list_time_entries,
         create_time_entry,
@@ -576,3 +580,28 @@ fn create_personal_input() {}
     )
 )]
 fn preview_restore_task_revision() {}
+
+#[utoipa::path(
+    get,path="/api/v1/workspaces/{workspace_id}/tasks/{task_id}/body/versioned",tag="tasks",
+    security(("fvoci_session"=[]),("bearer_api_token"=["tasks.read"])),
+    params(("workspace_id"=String,description="Workspace id"),("task_id"=String,description="Task id")),
+    responses((status=200,description="Authorized native OFF edit start and opaque version",body=VersionedBodyResponse),
+        (status=404,description="Unavailable or unauthorized target",body=ProblemResponse),
+        (status=409,description="Writer mode mismatch",body=ProblemResponse),
+        (status=503,description="Native engine or finish unconfirmed",body=ProblemResponse))
+)]
+fn read_versioned_task_body() {}
+
+#[utoipa::path(
+    put,path="/api/v1/workspaces/{workspace_id}/tasks/{task_id}/body/versioned",tag="tasks",
+    security(("fvoci_session"=[]),("bearer_api_token"=["tasks.write"])),
+    params(("workspace_id"=String,description="Workspace id"),("task_id"=String,description="Task id")),
+    request_body=SaveVersionedBodyInput,
+    responses((status=200,description="Confirmed atomic body/revision/receipt result",body=SaveVersionedBodyResponse),
+        (status=400,description="Invalid command, native update or opaque version",body=ProblemResponse),
+        (status=404,description="Unavailable or unauthorized target",body=ProblemResponse),
+        (status=409,description="Version, command or writer mode conflict",body=ProblemResponse),
+        (status=413,description="Body/native history limit",body=ProblemResponse),
+        (status=503,description="Unconfirmed save; retain exact command and draft",body=ProblemResponse))
+)]
+fn save_versioned_task_body() {}

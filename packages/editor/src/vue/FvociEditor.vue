@@ -28,7 +28,7 @@ import {
   useTemplateRef,
   watch,
 } from "vue";
-import type * as Y from "yjs";
+import * as Y from "yjs";
 import type { AttachmentBlockBridge, AttachmentUploadResult } from "../attachment-model.js";
 import {
   createFvociEditorExtensions,
@@ -76,7 +76,8 @@ import { VUE_NODE_VIEWS } from "./node-views.js";
 // through slots.
 const props = defineProps<{
   ydoc: Y.Doc;
-  provider: HocuspocusProvider;
+  /** Absent in boot-fixed OFF mode; the host still owns the native history document. */
+  provider?: HocuspocusProvider;
   user: FvociCollabUser;
   editable: boolean;
   ariaLabel?: string;
@@ -91,6 +92,8 @@ const props = defineProps<{
   modeScope?: string | number;
   /** Existing scoped durable ACK barrier; rejects failed/old/wrong ACKs. */
   waitForSave?: () => Promise<boolean>;
+  /** OFF host-owned unapplied Markdown text and the exact native capture base. */
+  sourceBuffer?: { text: string; baseV1: Uint8Array } | null;
 }>();
 /** The live editor once it exists, and null when it is torn down. */
 type SourceDraftState = Readonly<{
@@ -105,6 +108,7 @@ const emit = defineEmits<{
   ready: [editor: Editor | null];
   "mode-change": [mode: EditorMode];
   "source-dirty": [state: SourceDraftState];
+  "source-buffer": [buffer: { text: string; baseV1: Uint8Array } | null];
 }>();
 defineSlots<{
   toolbar?(props: { editor: Editor }): unknown;
@@ -136,6 +140,8 @@ const proposal = shallowRef<SourceProposal | null>(null);
 const draftDirty = ref(false);
 const sourceStale = ref(false);
 const draftOwner = markRaw({});
+let sourceBase: Uint8Array | null = null;
+let restoredBuffer = false;
 let draftMounted = false;
 const sourceDraftState = computed<SourceDraftState>(() => ({
   owner: draftOwner,
@@ -268,6 +274,11 @@ function onSourceInput(event: Event): void {
   draftDirty.value = event.target.value !== capture.value?.source;
   proposal.value = null;
   modeError.value = null;
+  if (sourceBase)
+    emit(
+      "source-buffer",
+      draftDirty.value ? { text: event.target.value, baseV1: sourceBase } : null,
+    );
 }
 
 function sourceBlocked(): boolean {
@@ -421,12 +432,14 @@ function refreshSource(): void {
   const current = editor.value;
   if (!current || sourceBlocked()) return;
   capture.value = sourceSession.capture(current.state.doc);
+  sourceBase = props.provider ? null : Y.encodeStateAsUpdate(props.ydoc);
   // Uncontrolled field: peer updates and Vue renders never overwrite typing.
   if (sourceField.value) sourceField.value.value = capture.value.source;
   draftDirty.value = false;
   sourceStale.value = false;
   proposal.value = null;
   modeError.value = null;
+  emit("source-buffer", null);
 }
 
 function applySource(): void {
@@ -706,9 +719,29 @@ function isGuardedTextField(target: EventTarget | null, host: HTMLElement | null
 
 const host = useTemplateRef<HTMLDivElement>("host");
 
+function restoreSourceBuffer(current: Editor): void {
+  if (props.sourceBuffer && !restoredBuffer) {
+    restoredBuffer = true;
+    const buffer = props.sourceBuffer;
+    const currentBytes = Y.encodeStateAsUpdate(props.ydoc);
+    const matches =
+      buffer.baseV1.length === currentBytes.length &&
+      buffer.baseV1.every((byte, index) => byte === currentBytes[index]);
+    capture.value = matches ? sourceSession.capture(current.state.doc) : null;
+    sourceBase = buffer.baseV1;
+    mode.value = "markdown";
+    draftDirty.value = true;
+    sourceStale.value = !matches;
+    if (!matches) modeError.value = t("editor.mode.stale");
+    void nextTick(() => {
+      if (sourceField.value && !current.isDestroyed) sourceField.value.value = buffer.text;
+    });
+  }
+}
 // WHY: 문서·태스크 본문은 페이지당 편집기 하나다 — 전역 keydown 은 이 호스트 하나만 본다.
 watch(editor, (current, _previous, onCleanup) => {
   if (!current) return;
+  restoreSourceBuffer(current);
   emit("ready", current);
   activeBlockPos.value = keyboardBlockPos(current);
   const onTransaction = ({

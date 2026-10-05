@@ -123,10 +123,41 @@ export function useCollabRoom(
   name: string,
   user: MaybeRefOrGetter<CollabUser | null>,
   authorization?: MaybeRefOrGetter<CollabRoomAuthorization | null>,
+  enabled: MaybeRefOrGetter<boolean> = true,
+): CollabRoom {
+  const doc = markRaw(new Y.Doc({ gc: false }));
+  const active = shallowRef<CollabRoom | null>(null);
+  let lifetime: EffectScope | null = null;
+  watch(
+    () => toValue(enabled),
+    (allow) => {
+      lifetime?.stop();
+      lifetime = null;
+      active.value = null;
+      // A pending boot-policy query is also closed: no socket, provider or
+      // awareness may be created before the server explicitly selects ON.
+      if (allow !== true) return;
+      lifetime = effectScope();
+      active.value = lifetime.run(() => createRealtimeRoom(name, user, authorization, doc)) ?? null;
+    },
+    { immediate: true, flush: "sync" },
+  );
+  onScopeDispose(() => {
+    lifetime?.stop();
+    lifetime = null;
+    active.value = null;
+  });
+  return { name, doc, session: computed(() => active.value?.session.value ?? null) };
+}
+
+function createRealtimeRoom(
+  name: string,
+  user: MaybeRefOrGetter<CollabUser | null>,
+  authorization: MaybeRefOrGetter<CollabRoomAuthorization | null> | undefined,
+  doc: Y.Doc,
 ): CollabRoom {
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
   const url = `${proto}://${window.location.host}/collab`;
-  const doc = markRaw(new Y.Doc({ gc: false }));
 
   /* WHY: #664 — 서버는 연결이 접속 때 선언한 awareness clientId 하나만 받는다. clientId 는
    * Y.Doc 의 것이라 우리가 만들어 token 으로 넘긴다. #683 — 선언이 거부되면 clientID 를 갈고

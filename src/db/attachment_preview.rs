@@ -529,7 +529,7 @@ pub(crate) mod tests {
             let gate = crate::db::migrate::assert_sqlite_schema_current(&backend)
                 .await
                 .unwrap();
-            assert_eq!(gate.applied_steps, 4);
+            assert_eq!(gate.applied_steps, 6);
             // The accepted full schema is commit254f3f2 + compiled001–003,
             // not a numeric254 object inventory. The maintained gate above
             // compares every canonical object name/type/definition and receipt.

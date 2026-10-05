@@ -16,7 +16,7 @@ use crate::api::dto::{
 use crate::auth::session::SessionUser;
 use crate::db::documents::{CreateDocumentInput, UpdateDocumentMetaInput};
 use crate::db::project_documents::{
-    create_project_document, get_project_document, list_project_document_tree,
+    create_project_document, get_project_document, list_project_document_tree_backend,
     move_project_document, reorder_project_document, restore_project_document,
     trash_project_document, update_project_document_meta,
 };
@@ -127,42 +127,20 @@ async fn list_tree(
         Some(workspace_id),
     )
     .await?;
-    let result = list_project_document_tree(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/project_documents.rs")
-            .map_err(internal)?,
+    let result = list_project_document_tree_backend(
+        &state.auth.db.pool,
         workspace_id,
         project_id,
         user_id,
         session_id,
+        tag,
     )
     .await
     .map_err(internal)?;
-    let tagged = match tag {
-        Some(tag) => Some(
-            crate::db::document_tags::tagged_document_id_set(
-                state
-                    .auth
-                    .db
-                    .pool
-                    .postgres("src/http/routes/project_documents.rs")
-                    .map_err(internal)?,
-                workspace_id,
-                tag,
-            )
-            .await
-            .map_err(internal)?,
-        ),
-        None => None,
-    };
     match result {
         Ok(nodes) => Ok(Json(TreeResponse {
             items: nodes
                 .into_iter()
-                .filter(|n| tagged.as_ref().is_none_or(|ids| ids.contains(&n.id)))
                 .map(|node| TreeNodeResponse {
                     id: node.id.to_string(),
                     workspace_id: node.workspace_id.to_string(),

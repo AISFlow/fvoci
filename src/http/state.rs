@@ -10,6 +10,10 @@ use crate::streams::StreamHub;
 
 #[derive(Clone)]
 pub struct AppState {
+    /// Immutable boot-selected writer policy, also reported to the editor UI.
+    pub realtime_mode: crate::config::RealtimeMode,
+    /// Boot-captured isolated native producer config, retained when realtime is OFF.
+    pub native_engine: Option<crate::collab::CollabConfig>,
     pub auth: Arc<AuthService>,
     pub branding_name: String,
     /// The public origin as `guard::normalize_public_origin` returns it

@@ -35,7 +35,7 @@ use crate::collab::room::{BodyWriteError, RoomKey};
 use crate::collab::seed::{SeedEngine, SeedError};
 use crate::db::revisions::{authorize_revision_target, RevisionDbError, RevisionTarget};
 use crate::db::task_origins::{
-    create_document_task, get_task_origin,
+    create_document_task_backend as create_document_task, get_task_origin,
     list_document_task_origins_backend as list_document_task_origins, origin_request_hash,
     task_projects_backend as task_projects, DocumentTaskRequest, TaskOriginDbError,
     TASK_ORIGIN_ANCHOR_MAX_CHARS,
@@ -58,6 +58,14 @@ const PATCH_BLOCK_ATTEMPTS: usize = 3;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route(
+            "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/body/versioned",
+            get(get_versioned_task_body)
+                .put(save_versioned_task_body)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    (crate::db::collab::MAX_COLLAB_UPDATE_BYTES * 4).div_ceil(3) + 4096,
+                )),
+        )
+        .route(
             "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/blocks/{block_id}",
             patch(patch_task_block),
         )
@@ -77,6 +85,49 @@ pub fn router() -> Router<AppState> {
             "/api/v1/workspaces/{workspace_id}/documents/{document_id}/task-origins",
             get(document_task_origins),
         )
+}
+
+async fn get_versioned_task_body(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace, task)): Path<(Uuid, Uuid)>,
+) -> Result<
+    Json<crate::api::documents_dto::VersionedBodyResponse>,
+    crate::http::routes::documents::DocumentApiError,
+> {
+    super::document_body::read_versioned_body_inner(
+        state,
+        headers,
+        jar,
+        workspace,
+        RevisionTarget::Task(task),
+        None,
+    )
+    .await
+}
+async fn save_versioned_task_body(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path((workspace, task)): Path<(Uuid, Uuid)>,
+    body: Bytes,
+) -> Result<
+    Json<crate::api::documents_dto::SaveVersionedBodyResponse>,
+    crate::http::routes::documents::DocumentApiError,
+> {
+    super::document_body::save_versioned_body_inner(
+        state,
+        headers,
+        jar,
+        peer,
+        workspace,
+        RevisionTarget::Task(task),
+        None,
+        body,
+    )
+    .await
 }
 
 fn coded(status: StatusCode, code: &'static str, title: &str) -> TaskApiError {
@@ -235,6 +286,13 @@ async fn patch_task_block(
     Path((workspace_id, task_id, block_id)): Path<(Uuid, Uuid, String)>,
     body: Bytes,
 ) -> Result<Json<TaskMetaOutput>, TaskApiError> {
+    if state.realtime_mode != crate::config::RealtimeMode::On {
+        return Err(coded(
+            StatusCode::CONFLICT,
+            "body_writer_mode_mismatch",
+            "body writer mode mismatch",
+        ));
+    }
     check_origin(&headers, &state.public_origin)?;
     let node = parse_block_input(&body, &block_id)?;
     let auth = auth(
@@ -399,12 +457,7 @@ async fn create_task_from_document(
     );
     let ip = peer_ip(peer.ip());
     let outcome = create_document_task(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/task_body.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         auth.user_id,
         auth.credential_id,

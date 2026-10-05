@@ -338,6 +338,24 @@ async fn create_target_revision(
     {
         return Err(AppError::rate_limited(retry_after).into());
     }
+    if state.realtime_mode == crate::config::RealtimeMode::Off {
+        let id = crate::db::body_save::create_off_revision(
+            &state.auth.db.pool,
+            state.realtime_mode,
+            state.native_engine.clone().ok_or_else(collab_unavailable)?,
+            workspace_id,
+            scope,
+            user_id,
+            credential_id,
+        )
+        .await
+        .map_err(map_off_revision_error)?;
+        return Ok((
+            StatusCode::CREATED,
+            Json(RevisionCreateResponse { id: id.to_string() }),
+        )
+            .into_response());
+    }
     match authorize_revision_target_backend(
         &state.auth.db.pool,
         workspace_id,
@@ -541,6 +559,31 @@ async fn restore_target_revision(
     {
         return Err(AppError::rate_limited(retry_after).into());
     }
+    if state.realtime_mode == crate::config::RealtimeMode::Off {
+        let saved = crate::db::body_save::restore_off_body(
+            &state.auth.db.pool,
+            state.realtime_mode,
+            state.native_engine.clone().ok_or_else(collab_unavailable)?,
+            crate::db::body_save::OffBodyRequest {
+                workspace: workspace_id,
+                target: scope.target(),
+                project: scope.project_id(),
+                actor: user_id,
+                credential: credential_id,
+                command: restore_body.correlation_id,
+                expected_tail: expected_tail_seq,
+                update: Vec::new(),
+                client_ip: Some(peer_ip(peer.ip())),
+            },
+            revision_id,
+        )
+        .await
+        .map_err(map_off_revision_error)?;
+        return Ok(Json(RevisionRestoreResponse {
+            restored: true,
+            revision_id: saved.revision_id.to_string(),
+        }));
+    }
     let snap = resolve_restore(
         state
             .auth
@@ -669,6 +712,25 @@ async fn preview_restore_target(
 ) -> Result<Json<RevisionRestorePreviewResponse>, RevisionApiError> {
     let (user_id, credential_id) =
         revision_credential(&state, &headers, &jar, workspace_id, scope.target(), true).await?;
+    if state.realtime_mode == crate::config::RealtimeMode::Off {
+        let preview = crate::db::body_save::preview_off_restore(
+            &state.auth.db.pool,
+            state.realtime_mode,
+            state.native_engine.clone().ok_or_else(collab_unavailable)?,
+            workspace_id,
+            scope,
+            user_id,
+            credential_id,
+            revision_id,
+        )
+        .await
+        .map_err(map_off_revision_error)?;
+        return Ok(Json(RevisionRestorePreviewResponse {
+            source: detail_response(preview.source),
+            current_content_json: preview.current_content_json,
+            current_tail_seq: preview.current_tail.to_string(),
+        }));
+    }
     // The immutable source must belong to this exact route target. A preview
     // is for an editable restore; viewing history alone does not permit it.
     resolve_restore(
@@ -842,6 +904,47 @@ fn collab_unavailable() -> RevisionApiError {
         code: "collab_unavailable",
         title: "collab unavailable".into(),
         params: None,
+    }
+}
+
+fn map_off_revision_error(error: crate::db::body_save::BodySaveError) -> RevisionApiError {
+    use crate::db::body_save::BodySaveError;
+    use crate::db::collab::CollabDbError;
+    let unconfirmed = || RevisionApiError::Coded {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "body_save_unconfirmed",
+        title: "history write is unconfirmed".into(),
+        params: None,
+    };
+    match error {
+        BodySaveError::Conflict
+        | BodySaveError::RequestMismatch
+        | BodySaveError::Native(CollabDbError::StaleWriter | CollabDbError::StaleCutoff) => {
+            restore_conflict()
+        }
+        BodySaveError::Revision(error) => map_revision_error(error),
+        BodySaveError::Native(
+            CollabDbError::PayloadTooLarge | CollabDbError::StateBudgetExceeded,
+        ) => AppError::from_code(ProblemCode::InvalidInput).into(),
+        BodySaveError::Native(_) => AppError::from_code(ProblemCode::NotFound).into(),
+        BodySaveError::Invalid => AppError::from_code(ProblemCode::InvalidInput).into(),
+        BodySaveError::Unavailable | BodySaveError::Cancelled => collab_unavailable(),
+        BodySaveError::CommitUnconfirmed(error) => {
+            tracing::warn!(%error, settlement=?error.settlement,"OFF history finish unconfirmed");
+            unconfirmed()
+        }
+        BodySaveError::RollbackUnconfirmed { original, cleanup } => {
+            tracing::warn!(%original,%cleanup,"OFF history rollback unconfirmed");
+            unconfirmed()
+        }
+        BodySaveError::Database(error) => {
+            if matches!(&error, sqlx::Error::AnyDriverError(driver) if driver.downcast_ref::<crate::db::backend::RemoteSettlementUnconfirmed>().is_some())
+            {
+                unconfirmed()
+            } else {
+                internal(error).into()
+            }
+        }
     }
 }
 

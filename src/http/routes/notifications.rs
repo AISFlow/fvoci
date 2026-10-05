@@ -331,6 +331,8 @@ mod family_http_regressions {
 
     fn app(f: &Fixture) -> axum::Router {
         let state = AppState {
+            realtime_mode: crate::config::RealtimeMode::On,
+            native_engine: None,
             auth: std::sync::Arc::new(crate::auth::AuthService {
                 db: crate::db::Db::from_backend(f.backend.clone()),
                 password_keys: crate::auth::password::Keyring::parse(PEPPER, "test").unwrap(),

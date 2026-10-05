@@ -490,6 +490,8 @@ pub async fn collab_app_state_with_pool(
         std::env::temp_dir().join(format!("fvoci-collab-proj-store-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
     let state = AppState {
+        realtime_mode: fvoci_server::config::RealtimeMode::On,
+        native_engine: None,
         auth: Arc::new(AuthService {
             db: Db::from_backend(hub.backend().clone()),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),

@@ -6,6 +6,36 @@ import { api, ensureOk } from "@/lib/api";
 // otherwise.
 
 export type PatchDocumentBody = components["schemas"]["PatchDocumentBody"];
+export type OffDraftCreateBody = components["schemas"]["OffDraftCreateBody"];
+export type OffDraftCreateResponse = components["schemas"]["OffDraftCreateResponse"];
+
+/** One captured logical draft publication; callers retain body.commandId and
+ * the exact body across unknown outcomes. Separate publications choose once anew. */
+export async function createDocumentFromDraft(
+  workspaceId: string,
+  projectId: string | null,
+  body: OffDraftCreateBody,
+  signal?: AbortSignal,
+): Promise<OffDraftCreateResponse> {
+  return projectId
+    ? ensureOk(
+        await api.POST(
+          "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/from-draft",
+          {
+            signal,
+            params: { path: { workspace_id: workspaceId, project_id: projectId } },
+            body,
+          },
+        ),
+      )
+    : ensureOk(
+        await api.POST("/api/v1/workspaces/{workspace_id}/documents/from-draft", {
+          signal,
+          params: { path: { workspace_id: workspaceId } },
+          body,
+        }),
+      );
+}
 
 export interface DocumentScope {
   workspaceId: string;

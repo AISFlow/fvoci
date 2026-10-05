@@ -98,6 +98,19 @@ impl Backend {
                 .map(|tx| DbTx::SqliteFamily(FamilyTx::Remote(tx))),
         }
     }
+
+    /// OFF body reads/writes cannot observe a remote predecessor whose finish
+    /// is still active or explicitly unconfirmed. Local writers use the normal
+    /// transaction reservation. This is not a fabricated remote Close receipt.
+    pub(crate) async fn begin_off_body(&self) -> Result<DbTx, sqlx::Error> {
+        match self {
+            Self::LibsqlRemote(remote) => remote
+                .begin_admitted(true, true)
+                .await
+                .map(|tx| DbTransaction::SqliteFamily(FamilyTx::Remote(tx))),
+            _ => self.begin_write().await,
+        }
+    }
     pub async fn begin_read(&self) -> Result<DbTx, sqlx::Error> {
         match self {
             Self::Postgres(pool) => super::context::begin_read(pool).await.map(DbTx::Postgres),
@@ -531,6 +544,14 @@ impl RemoteDatabase {
         }))
     }
     async fn begin(self: &Arc<Self>, write: bool) -> Result<RemoteTx, sqlx::Error> {
+        self.begin_admitted(write, false).await
+    }
+
+    async fn begin_admitted(
+        self: &Arc<Self>,
+        write: bool,
+        off_body: bool,
+    ) -> Result<RemoteTx, sqlx::Error> {
         self.reap_finished();
         let permit = self
             .admission
@@ -545,6 +566,14 @@ impl RemoteDatabase {
                 .expect("remote lifecycle mutex poisoned");
             if state.closing {
                 return Err(sqlx::Error::PoolClosed);
+            }
+            if off_body && state.unconfirmed_finish {
+                return Err(sqlx::Error::AnyDriverError(Box::new(
+                    RemoteSettlementUnconfirmed,
+                )));
+            }
+            if off_body && state.active != 0 {
+                return Err(sqlx::Error::PoolTimedOut);
             }
             state.active += 1;
         }

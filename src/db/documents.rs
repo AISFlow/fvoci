@@ -1785,7 +1785,7 @@ impl OperationTx<'_, '_> {
         }
     }
 
-    async fn wiki_parent(
+    pub(crate) async fn wiki_parent(
         &mut self,
         workspace: Uuid,
         parent: Uuid,
@@ -1800,7 +1800,7 @@ impl OperationTx<'_, '_> {
         }
     }
 
-    async fn last_wiki_sort_key(
+    pub(crate) async fn last_wiki_sort_key(
         &mut self,
         workspace: Uuid,
         parent: Option<Uuid>,
@@ -1862,7 +1862,7 @@ impl OperationTx<'_, '_> {
         Ok(())
     }
 
-    async fn wiki_create_receipt(
+    pub(crate) async fn wiki_create_receipt(
         &mut self,
         workspace: Uuid,
         command: Uuid,
@@ -1877,7 +1877,7 @@ impl OperationTx<'_, '_> {
         }
     }
 
-    async fn insert_wiki_create_receipt(
+    pub(crate) async fn insert_wiki_create_receipt(
         &mut self,
         workspace: Uuid,
         command: Uuid,

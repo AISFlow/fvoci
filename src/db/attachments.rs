@@ -4528,6 +4528,66 @@ impl crate::db::backend::OperationTx<'_, '_> {
         }
         Ok(Ok(att))
     }
+    /// Admit a usable stored source reference in the caller's tenant writer.
+    /// This is the existing download/View policy, including archived parents;
+    /// it neither requires upload ownership nor grants destination/recipient
+    /// access. The caller owns reference publication, rechecks and tx finish.
+    pub(crate) async fn authorize_stored_attachment_reference(
+        &mut self,
+        workspace: Uuid,
+        id: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+    ) -> Result<Result<AttachmentRow, AttachmentDbError>, sqlx::Error> {
+        self.lock_membership_users(&[actor]).await?;
+        if !self.recheck_session(actor, credential).await? {
+            return Ok(Err(AttachmentDbError::Forbidden));
+        }
+        let source = match self
+            .upload_actor_row(workspace, id, actor, credential, false)
+            .await?
+        {
+            Ok(row) => row,
+            Err(error) => return Ok(Err(error)),
+        };
+        let parent = source.parent();
+        match self
+            .upload_parent_access(workspace, actor, parent, true)
+            .await?
+        {
+            Ok(access) if access.permission.at_least(ProjectPermission::View) => {}
+            Ok(_) => return Ok(Err(AttachmentDbError::Forbidden)),
+            Err(error) => return Ok(Err(error)),
+        }
+        // Parent before child. PG needs a real row lock against replacement,
+        // deletion and scan publication; the family already owns its writer.
+        if let Self::Postgres(tx) = self {
+            sqlx::query(
+                "SELECT id FROM fvoci.attachments WHERE workspace_id=$1 AND id=$2 FOR SHARE",
+            )
+            .bind(workspace)
+            .bind(id)
+            .fetch_optional(&mut ***tx)
+            .await?;
+        }
+        // A lock wait may have changed the row. Return only current locked data,
+        // and refuse a moved parent rather than acquire parents out of order.
+        let current = match self
+            .upload_actor_row(workspace, id, actor, credential, false)
+            .await?
+        {
+            Ok(row) => row,
+            Err(error) => return Ok(Err(error)),
+        };
+        if current.parent() != parent || current.status != "stored" {
+            return Ok(Err(AttachmentDbError::NotFound));
+        }
+        if current.scan_status == "infected" {
+            return Ok(Err(AttachmentDbError::Infected));
+        }
+        Ok(Ok(current))
+    }
+
     async fn upload_event(
         &mut self,
         workspace: Uuid,
@@ -9302,5 +9362,610 @@ mod upload_owned_adapter_tests {
         literal(&s, &key).await;
         literal(&s, &original_b).await;
         f.close().await;
+    }
+}
+
+#[cfg(test)]
+mod stored_reference_tests {
+    use super::*;
+    use crate::auth::{password::Keyring, token, AuthService};
+    use crate::db::attachment_preview::tests::Fixture;
+    use crate::db::backend::Backend;
+    use crate::db::Db;
+
+    fn auth(backend: Backend) -> AuthService {
+        AuthService {
+            db: Db::from_backend(backend),
+            password_keys: Keyring::parse(
+                r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                "test",
+            )
+            .unwrap(),
+        }
+    }
+    async fn sqlite_identity(f: &Fixture, user: Uuid) -> (Uuid, String) {
+        let credential = Uuid::now_v7();
+        let token = token::new_token();
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,?4)")
+            .bind(credential.as_bytes().as_slice())
+            .bind(user.as_bytes().as_slice())
+            .bind(token.hash)
+            .bind((Utc::now() + chrono::Duration::days(30)).timestamp_micros())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let identity = auth(f.backend.clone())
+            .session_user(&token.token)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(Uuid::parse_str(&identity.user_id).unwrap(), user);
+        assert_eq!(Uuid::parse_str(&identity.session_id).unwrap(), credential);
+        (credential, token.token)
+    }
+    async fn sqlite_admit(
+        f: &Fixture,
+        id: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+    ) -> Result<AttachmentRow, AttachmentDbError> {
+        let mut outer = f.backend.begin_write().await.unwrap();
+        let result = {
+            let mut op = outer.operation();
+            op.set_tenant(f.workspace).await.unwrap();
+            op.authorize_stored_attachment_reference(f.workspace, id, actor, credential)
+                .await
+                .unwrap()
+        };
+        outer.rollback().await.unwrap();
+        result
+    }
+    async fn sqlite_observable(f: &Fixture, id: Uuid) -> (String, String, String, i64, i64, i64) {
+        sqlx::query_as("SELECT storage_key,status,variants,(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT count(*) FROM attachment_object_cleanups) FROM attachments WHERE id=?1")
+            .bind(id.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn attachment_reference_sqlite_viewer_archived_parent_borrows_outer_rollback() {
+        let f = Fixture::new().await;
+        let (id, task) = f.task_attachment().await;
+        let viewer = Uuid::now_v7();
+        sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,'reference-viewer@example.test','Viewer')")
+            .bind(viewer.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'guest')")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(viewer.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let project: Vec<u8> = sqlx::query_scalar("SELECT project_id FROM tasks WHERE id=?1")
+            .bind(task.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'viewer')")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(&project).bind(viewer.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(&project).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("UPDATE projects SET visibility='private',status='archived' WHERE id=?1")
+            .bind(&project)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE tasks SET archived_at=1 WHERE id=?1")
+            .bind(task.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let (credential, _) = sqlite_identity(&f, viewer).await;
+        let before = sqlite_observable(&f, id).await;
+        let mut outer = f.backend.begin_write().await.unwrap();
+        {
+            let mut op = outer.operation();
+            op.set_tenant(f.workspace).await.unwrap();
+            let access = op
+                .upload_parent_access(f.workspace, viewer, AttachmentParent::Task(task), true)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(access.permission, ProjectPermission::View);
+            assert_eq!(access.writable, Err(AttachmentDbError::ProjectArchived));
+            let row = op
+                .authorize_stored_attachment_reference(f.workspace, id, viewer, credential)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.id, id);
+            assert_eq!(row.storage_key, before.0);
+            assert_ne!(row.uploader_id, viewer);
+            assert!(matches!(
+                op.upload_actor_row(f.workspace, id, viewer, credential, true)
+                    .await
+                    .unwrap(),
+                Err(AttachmentDbError::Forbidden)
+            ));
+            // Still borrowed: the owner can continue its transaction, then undo it.
+            let OperationTx::SqliteFamily(writer) = op else {
+                unreachable!()
+            };
+            writer
+                .execute(
+                    "UPDATE tasks SET title='outer rollback sentinel' WHERE id=?1",
+                    &[Cell::uuid(task)],
+                )
+                .await
+                .unwrap();
+        }
+        outer.rollback().await.unwrap();
+        let title: String = sqlx::query_scalar("SELECT title FROM tasks WHERE id=?1")
+            .bind(task.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(title, "S31");
+        assert_eq!(sqlite_observable(&f, id).await, before);
+        // Source reader admission does not grant a separate recipient access.
+        let (owner_credential, _) = sqlite_identity(&f, f.user).await;
+        assert!(sqlite_admit(&f, id, f.user, owner_credential).await.is_ok());
+        sqlx::query("DELETE FROM project_members WHERE user_id=?1")
+            .bind(viewer.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            sqlite_admit(&f, id, viewer, credential).await,
+            Err(AttachmentDbError::Forbidden)
+        ));
+        assert_eq!(sqlite_observable(&f, id).await, before);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn attachment_reference_sqlite_current_auth_stored_infected_and_no_effects() {
+        let f = Fixture::new().await;
+        let (id, key) = f.attachment(10, "image/png").await;
+        let (credential, bearer) = sqlite_identity(&f, f.user).await;
+        let before = sqlite_observable(&f, id).await;
+        assert_eq!(
+            sqlite_admit(&f, id, f.user, credential)
+                .await
+                .unwrap()
+                .storage_key,
+            key
+        );
+        assert!(matches!(
+            sqlite_admit(&f, Uuid::now_v7(), f.user, credential).await,
+            Err(AttachmentDbError::NotFound)
+        ));
+        assert!(matches!(
+            sqlite_admit(&f, id, f.user, Uuid::now_v7()).await,
+            Err(AttachmentDbError::Forbidden)
+        ));
+        sqlx::query("UPDATE attachments SET scan_status='infected' WHERE id=?1")
+            .bind(id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(
+            get_attachment_meta_backend(&f.backend, f.workspace, id, f.user, credential)
+                .await
+                .unwrap()
+                .is_ok()
+        );
+        assert!(matches!(
+            open_download_backend(&f.backend, f.workspace, id, f.user, credential)
+                .await
+                .unwrap(),
+            Err(AttachmentDbError::Infected)
+        ));
+        assert!(matches!(
+            sqlite_admit(&f, id, f.user, credential).await,
+            Err(AttachmentDbError::Infected)
+        ));
+        sqlx::query("UPDATE attachments SET scan_status='clean',status='uploading',size_bytes=NULL,completed_at=NULL WHERE id=?1")
+            .bind(id.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert!(matches!(
+            sqlite_admit(&f, id, f.user, credential).await,
+            Err(AttachmentDbError::NotFound)
+        ));
+        sqlx::query("UPDATE attachments SET scan_status='skipped',status='stored',size_bytes=reserved_size_bytes,completed_at=1 WHERE id=?1")
+            .bind(id.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(auth(f.backend.clone())
+            .session_user(&bearer)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(matches!(
+            sqlite_admit(&f, id, f.user, credential).await,
+            Err(AttachmentDbError::Forbidden)
+        ));
+        let (fresh, _) = sqlite_identity(&f, f.user).await;
+        sqlx::query("UPDATE users SET suspended_at=1 WHERE id=?1")
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            sqlite_admit(&f, id, f.user, fresh).await,
+            Err(AttachmentDbError::Forbidden)
+        ));
+        sqlx::query("UPDATE users SET suspended_at=NULL WHERE id=?1")
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE documents SET deleted_at=1 WHERE id=?1")
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            sqlite_admit(&f, id, f.user, fresh).await,
+            Err(AttachmentDbError::NotFound)
+        ));
+        sqlx::query("UPDATE documents SET deleted_at=NULL WHERE id=?1")
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(sqlite_admit(&f, id, f.user, fresh).await.is_ok());
+        sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            sqlite_admit(&f, id, f.user, fresh).await,
+            Err(AttachmentDbError::Forbidden)
+        ));
+        assert_eq!(sqlite_observable(&f, id).await, before);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn attachment_reference_sqlite_tenant_writer_fences_and_healthy_reuse() {
+        let f = Fixture::new().await;
+        let (id, _) = f.attachment(10, "image/png").await;
+        let (credential, _) = sqlite_identity(&f, f.user).await;
+        let before = sqlite_observable(&f, id).await;
+        let mut read = f.backend.begin_read().await.unwrap();
+        read.operation().set_tenant(f.workspace).await.unwrap();
+        assert!(read
+            .operation()
+            .authorize_stored_attachment_reference(f.workspace, id, f.user, credential)
+            .await
+            .is_err());
+        read.rollback().await.unwrap();
+        let mut wrong = f.backend.begin_write().await.unwrap();
+        wrong.operation().set_tenant(Uuid::now_v7()).await.unwrap();
+        assert!(wrong
+            .operation()
+            .authorize_stored_attachment_reference(f.workspace, id, f.user, credential)
+            .await
+            .is_err());
+        wrong.rollback().await.unwrap();
+        let other_workspace = Uuid::now_v7();
+        sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES(?1,'reference-other','Other')")
+            .bind(other_workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')")
+            .bind(other_workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let mut other = f.backend.begin_write().await.unwrap();
+        other.operation().set_tenant(other_workspace).await.unwrap();
+        assert!(matches!(
+            other
+                .operation()
+                .authorize_stored_attachment_reference(other_workspace, id, f.user, credential)
+                .await
+                .unwrap(),
+            Err(AttachmentDbError::NotFound)
+        ));
+        other.rollback().await.unwrap();
+        assert!(sqlite_admit(&f, id, f.user, credential).await.is_ok());
+        assert_eq!(sqlite_observable(&f, id).await, before);
+        f.close().await;
+    }
+
+    #[cfg(feature = "db-tests")]
+    #[tokio::test]
+    async fn attachment_reference_pg_restricted_auth_borrowed_rollback_and_current_gates() {
+        // Maintained migrations and grants, isolated DB+LOGIN app role. Missing
+        // provisioner URL is a failure, never an ignored/mock/superuser test.
+        let provisioner = std::env::var("TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))
+            .expect("isolated PG provisioner URL");
+        let mut server = url::Url::parse(&provisioner).unwrap();
+        server.set_path("/postgres");
+        let admin_server = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(server.as_str())
+            .await
+            .unwrap();
+        let database = format!("fvoci_reference_{}", Uuid::now_v7().simple());
+        let role = format!("fvoci_app_{}", Uuid::now_v7().simple());
+        let password = token::new_token().hash;
+        sqlx::query(&format!("CREATE DATABASE \"{database}\""))
+            .execute(&admin_server)
+            .await
+            .unwrap();
+        let mut database_url = server.clone();
+        database_url.set_path(&format!("/{database}"));
+        crate::db::migrate::run_migrations(database_url.as_str())
+            .await
+            .unwrap();
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(database_url.as_str())
+            .await
+            .unwrap();
+        sqlx::query(&format!(
+            "CREATE ROLE \"{role}\" LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS"
+        ))
+        .execute(&admin)
+        .await
+        .unwrap();
+        crate::db::migrate::apply_app_role_grants(&admin, &role)
+            .await
+            .unwrap();
+        let mut app_url = database_url;
+        app_url.set_username(&role).unwrap();
+        app_url.set_password(Some(&password)).unwrap();
+        let app = crate::db::pool::connect_app_with_max(app_url.as_str(), 2)
+            .await
+            .unwrap();
+        let flags: (bool, bool, bool) = sqlx::query_as(
+            "SELECT rolcanlogin,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user",
+        )
+        .fetch_one(&app)
+        .await
+        .unwrap();
+        assert_eq!(flags, (true, false, false));
+        let rls:(bool,bool) = sqlx::query_as("SELECT relrowsecurity,relforcerowsecurity FROM pg_class WHERE oid='fvoci.attachments'::regclass").fetch_one(&app).await.unwrap();
+        assert_eq!(rls, (true, false));
+        let workspace = Uuid::now_v7();
+        let owner = Uuid::now_v7();
+        let viewer = Uuid::now_v7();
+        let document = Uuid::now_v7();
+        let project = Uuid::now_v7();
+        let id = Uuid::now_v7();
+        let credential = Uuid::now_v7();
+        let session = token::new_token();
+        let key = Uuid::now_v7().to_string();
+        for (user, email) in [
+            (owner, "reference-owner@example.test"),
+            (viewer, "reference-viewer@example.test"),
+        ] {
+            sqlx::query("INSERT INTO fvoci.users(id,email,given_name) VALUES($1,$2,'Reference')")
+                .bind(user)
+                .bind(email)
+                .execute(&admin)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO fvoci.workspaces(id,slug,name) VALUES($1,'reference','Reference')",
+        )
+        .bind(workspace)
+        .execute(&admin)
+        .await
+        .unwrap();
+        for (user, role) in [(owner, "owner"), (viewer, "guest")] {
+            sqlx::query(
+                "INSERT INTO fvoci.memberships(workspace_id,user_id,role) VALUES($1,$2,$3)",
+            )
+            .bind(workspace)
+            .bind(user)
+            .bind(role)
+            .execute(&admin)
+            .await
+            .unwrap();
+        }
+        sqlx::query("INSERT INTO fvoci.projects(id,workspace_id,key,name,visibility,status,created_by) VALUES($1,$2,'REF','Reference','private','archived',$3)").bind(project).bind(workspace).bind(owner).execute(&admin).await.unwrap();
+        sqlx::query("INSERT INTO fvoci.project_members(id,workspace_id,project_id,user_id,role) VALUES($1,$2,$3,$4,'viewer')").bind(Uuid::now_v7()).bind(workspace).bind(project).bind(viewer).execute(&admin).await.unwrap();
+        sqlx::query("INSERT INTO fvoci.documents(id,workspace_id,project_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES($1,$2,$3,'Reference',$4,'V',1,'published',2,$5,'{\"type\":\"doc\",\"content\":[]}')").bind(document).bind(workspace).bind(project).bind(document.simple().to_string()).bind(owner).execute(&admin).await.unwrap();
+        sqlx::query("INSERT INTO fvoci.attachments(id,workspace_id,document_id,uploader_id,status,name,size_bytes,reserved_size_bytes,storage_key,completed_at) VALUES($1,$2,$3,$4,'stored','reference.bin',10,10,$5,now())").bind(id).bind(workspace).bind(document).bind(owner).bind(&key).execute(&admin).await.unwrap();
+        sqlx::query("INSERT INTO fvoci.sessions(id,user_id,token_hash,expires_at) VALUES($1,$2,$3,now()+interval '30 days')").bind(credential).bind(viewer).bind(&session.hash).execute(&admin).await.unwrap();
+        let backend = Backend::Postgres(app.clone());
+        let identity = auth(backend.clone())
+            .session_user(&session.token)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(Uuid::parse_str(&identity.user_id).unwrap(), viewer);
+        assert_eq!(Uuid::parse_str(&identity.session_id).unwrap(), credential);
+        let before:(i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM fvoci.events),(SELECT count(*) FROM fvoci.audit_log),(SELECT count(*) FROM fvoci.attachment_object_cleanups)").fetch_one(&admin).await.unwrap();
+        let mut outer = backend.begin_write().await.unwrap();
+        {
+            let mut op = outer.operation();
+            op.set_tenant(workspace).await.unwrap();
+            let access = op
+                .upload_parent_access(
+                    workspace,
+                    viewer,
+                    AttachmentParent::Document(document),
+                    true,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(access.permission, ProjectPermission::View);
+            assert_eq!(access.writable, Err(AttachmentDbError::ProjectArchived));
+            let row = op
+                .authorize_stored_attachment_reference(workspace, id, viewer, credential)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.storage_key, key);
+            assert_ne!(row.uploader_id, viewer);
+            assert!(matches!(
+                op.upload_actor_row(workspace, id, viewer, credential, true)
+                    .await
+                    .unwrap(),
+                Err(AttachmentDbError::Forbidden)
+            ));
+            let mut contending = app.begin().await.unwrap();
+            crate::db::context::set_tenant(&mut contending, workspace)
+                .await
+                .unwrap();
+            let blocked=sqlx::query("SELECT id FROM fvoci.attachments WHERE workspace_id=$1 AND id=$2 FOR UPDATE NOWAIT")
+                .bind(workspace).bind(id).fetch_one(&mut *contending).await.unwrap_err();
+            assert_eq!(
+                blocked.as_database_error().unwrap().code().as_deref(),
+                Some("55P03")
+            );
+            contending.rollback().await.unwrap();
+            let OperationTx::Postgres(tx) = op else {
+                unreachable!()
+            };
+            sqlx::query("UPDATE fvoci.documents SET title='outer rollback sentinel' WHERE id=$1")
+                .bind(document)
+                .execute(&mut **tx)
+                .await
+                .unwrap();
+        }
+        outer.rollback().await.unwrap();
+        let mut fresh_lock = app.begin().await.unwrap();
+        crate::db::context::set_tenant(&mut fresh_lock, workspace)
+            .await
+            .unwrap();
+        sqlx::query(
+            "SELECT id FROM fvoci.attachments WHERE workspace_id=$1 AND id=$2 FOR UPDATE NOWAIT",
+        )
+        .bind(workspace)
+        .bind(id)
+        .fetch_one(&mut *fresh_lock)
+        .await
+        .unwrap();
+        fresh_lock.rollback().await.unwrap();
+        let title: String = sqlx::query_scalar("SELECT title FROM fvoci.documents WHERE id=$1")
+            .bind(document)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+        assert_eq!(title, "Reference");
+        // Each assertion uses a fresh outer transaction/current row; all reads
+        // and authorization are the actual app role, not the provisioning pool.
+        for expected in [
+            AttachmentDbError::Infected,
+            AttachmentDbError::NotFound,
+            AttachmentDbError::Forbidden,
+        ] {
+            match expected {
+                AttachmentDbError::Infected => {
+                    sqlx::query("UPDATE fvoci.attachments SET scan_status='infected' WHERE id=$1")
+                        .bind(id)
+                        .execute(&admin)
+                        .await
+                        .unwrap();
+                }
+                AttachmentDbError::NotFound => {
+                    sqlx::query("UPDATE fvoci.attachments SET scan_status='clean',status='uploading',size_bytes=NULL,completed_at=NULL WHERE id=$1").bind(id).execute(&admin).await.unwrap();
+                }
+                _ => {
+                    sqlx::query("UPDATE fvoci.attachments SET status='stored',size_bytes=10,completed_at=now() WHERE id=$1").bind(id).execute(&admin).await.unwrap();
+                    sqlx::query("UPDATE fvoci.sessions SET revoked_at=now() WHERE id=$1")
+                        .bind(credential)
+                        .execute(&admin)
+                        .await
+                        .unwrap();
+                }
+            }
+            let mut outer = backend.begin_write().await.unwrap();
+            outer.operation().set_tenant(workspace).await.unwrap();
+            let result = outer
+                .operation()
+                .authorize_stored_attachment_reference(workspace, id, viewer, credential)
+                .await
+                .unwrap();
+            assert_eq!(result.unwrap_err(), expected);
+            outer.rollback().await.unwrap();
+        }
+        assert!(auth(backend.clone())
+            .session_user(&session.token)
+            .await
+            .unwrap()
+            .is_none());
+        sqlx::query("UPDATE fvoci.sessions SET revoked_at=NULL WHERE id=$1")
+            .bind(credential)
+            .execute(&admin)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM fvoci.project_members WHERE workspace_id=$1 AND user_id=$2")
+            .bind(workspace)
+            .bind(viewer)
+            .execute(&admin)
+            .await
+            .unwrap();
+        let mut denied = backend.begin_write().await.unwrap();
+        denied.operation().set_tenant(workspace).await.unwrap();
+        assert!(matches!(
+            denied
+                .operation()
+                .authorize_stored_attachment_reference(workspace, id, viewer, credential)
+                .await
+                .unwrap(),
+            Err(AttachmentDbError::Forbidden)
+        ));
+        denied.rollback().await.unwrap();
+        let other_workspace = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO fvoci.workspaces(id,slug,name) VALUES($1,'reference-other','Other')",
+        )
+        .bind(other_workspace)
+        .execute(&admin)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO fvoci.memberships(workspace_id,user_id,role) VALUES($1,$2,'member')",
+        )
+        .bind(other_workspace)
+        .bind(viewer)
+        .execute(&admin)
+        .await
+        .unwrap();
+        let mut other = backend.begin_write().await.unwrap();
+        other.operation().set_tenant(other_workspace).await.unwrap();
+        assert!(matches!(
+            other
+                .operation()
+                .authorize_stored_attachment_reference(other_workspace, id, viewer, credential)
+                .await
+                .unwrap(),
+            Err(AttachmentDbError::NotFound)
+        ));
+        other.rollback().await.unwrap();
+        let after:(i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM fvoci.events),(SELECT count(*) FROM fvoci.audit_log),(SELECT count(*) FROM fvoci.attachment_object_cleanups)").fetch_one(&admin).await.unwrap();
+        assert_eq!(after, before);
+        let stored: (String, String) =
+            sqlx::query_as("SELECT storage_key,status FROM fvoci.attachments WHERE id=$1")
+                .bind(id)
+                .fetch_one(&admin)
+                .await
+                .unwrap();
+        assert_eq!(stored, (key, "stored".into()));
+        backend.close().await.unwrap();
+        app.close().await;
+        admin.close().await;
+        sqlx::query(&format!("DROP DATABASE \"{database}\""))
+            .execute(&admin_server)
+            .await
+            .unwrap();
+        sqlx::query(&format!("DROP ROLE \"{role}\""))
+            .execute(&admin_server)
+            .await
+            .unwrap();
+        admin_server.close().await;
     }
 }

@@ -18,6 +18,26 @@ pub const DEFAULT_UPLOAD_INCOMPLETE_TTL_HOURS: u64 = 24;
 pub const DEFAULT_REVISION_KEEP: u32 = 200;
 pub const DEFAULT_REVISION_SNAPSHOT_INTERVAL_HOURS: u32 = 24;
 
+/// Server-wide writer policy, read once before startup. A request cannot toggle it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "api-schema", derive(utoipa::ToSchema))]
+pub enum RealtimeMode {
+    #[default]
+    On,
+    Off,
+}
+
+impl RealtimeMode {
+    pub fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value {
+            None | Some("on") => Ok(Self::On),
+            Some("off") => Ok(Self::Off),
+            Some(_) => Err("FVOCI_REALTIME_MODE must be on or off".into()),
+        }
+    }
+}
+
 /// Automatic revision policy (source `packages/config`).
 #[derive(Clone, Copy, Debug)]
 pub struct RevisionSettings {
@@ -213,6 +233,7 @@ impl DatabaseSettings {
 }
 
 pub struct Config {
+    pub realtime_mode: RealtimeMode,
     pub bind: SocketAddr,
     pub database: DatabaseSettings,
     pub password_keys: Keyring,
@@ -236,6 +257,7 @@ pub struct Config {
 impl Clone for Config {
     fn clone(&self) -> Self {
         Self {
+            realtime_mode: self.realtime_mode,
             bind: self.bind,
             database: self.database.clone(),
             password_keys: self.password_keys.clone(),
@@ -258,6 +280,7 @@ impl Clone for Config {
 impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
+            .field("realtime_mode", &self.realtime_mode)
             .field("bind", &self.bind)
             .field("database", &self.database)
             .field("branding_name", &self.branding_name)
@@ -278,6 +301,7 @@ impl fmt::Debug for Config {
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
+        let realtime_mode = RealtimeMode::parse(env_unicode("FVOCI_REALTIME_MODE")?.as_deref())?;
         let bind = env::var("FVOCI_BIND")
             .unwrap_or_else(|_| "127.0.0.1:0".to_string())
             .parse()
@@ -339,6 +363,7 @@ impl Config {
         )?;
 
         Ok(Self {
+            realtime_mode,
             bind,
             database,
             password_keys,

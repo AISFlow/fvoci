@@ -295,6 +295,8 @@ mod trace_tests {
             .connect_lazy("postgres://fvoci:fvoci@127.0.0.1:1/none")
             .expect("lazy pool");
         AppState {
+            realtime_mode: crate::config::RealtimeMode::On,
+            native_engine: None,
             auth: Arc::new(crate::auth::AuthService {
                 db: crate::db::Db::new(pool),
                 password_keys: crate::auth::password::Keyring::parse(

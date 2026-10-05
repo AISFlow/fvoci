@@ -25,6 +25,8 @@ async fn app_state() -> AppState {
         std::env::temp_dir().join(format!("fvoci-static-test-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
     AppState {
+        realtime_mode: fvoci_server::config::RealtimeMode::On,
+        native_engine: None,
         auth: Arc::new(AuthService {
             db: Db::new(pool),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
@@ -602,6 +604,8 @@ async fn probe_state() -> AppState {
         .connect_lazy("postgres://postgres:postgres@127.0.0.1:1/none")
         .expect("lazy pool");
     AppState {
+        realtime_mode: fvoci_server::config::RealtimeMode::On,
+        native_engine: None,
         auth: Arc::new(AuthService {
             db: Db::new(pool),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),

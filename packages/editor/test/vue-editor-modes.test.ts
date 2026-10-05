@@ -469,10 +469,12 @@ await test("actual mode entry refreshes a clean generated projection after rich 
   const stale = Vue.ref(false);
   const controls = runInNewContext(
     ts.transpileModule(
-      `(()=>{let previewAbort=null,modeLifetime=0,bookmark=null,storedMarks=null,restoreEditorFocus=false;${statements.map((statement) => statement.getText(parsed)).join("\n")};return {changeMode};})()`,
+      `(()=>{let previewAbort=null,modeLifetime=0,bookmark=null,storedMarks=null,restoreEditorFocus=false,sourceBase=null;${statements.map((statement) => statement.getText(parsed)).join("\n")};return {changeMode};})()`,
       { compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.ESNext } },
     ).outputText,
     {
+      Y,
+      props: { provider: {}, ydoc },
       editor: Vue.shallowRef(live.editor),
       sourceSession: source,
       sourceBlocked: () => false,

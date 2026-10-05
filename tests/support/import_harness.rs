@@ -146,6 +146,8 @@ pub async fn fixture_with_runner(harness: &TestDb, spawn_runner: bool) -> Fixtur
         .map(|handle| handle.wake.clone())
         .unwrap_or_else(|| Arc::new(tokio::sync::Notify::new()));
     let state = AppState {
+        realtime_mode: fvoci_server::config::RealtimeMode::On,
+        native_engine: None,
         auth: Arc::new(AuthService {
             db: Db::new(pool.clone()),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),

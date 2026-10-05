@@ -26,6 +26,7 @@ async fn setup_status(
 ) -> Result<Json<SetupStatusResponse>, AppError> {
     let needed = state.auth.setup_needed().await.map_err(internal)?;
     Ok(Json(SetupStatusResponse {
+        realtime_mode: state.realtime_mode,
         needed,
         branding: BrandingOutput {
             name: crate::settings::current_values_with_license_backend(

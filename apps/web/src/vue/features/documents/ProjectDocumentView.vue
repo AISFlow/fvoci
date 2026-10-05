@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { FvociEditor, type TiptapEditor } from "@fvoci/editor/vue";
+import { UNIQUE_ID_NODE_TYPES } from "@fvoci/editor/extract";
 import "@fvoci/editor/styles.css";
 import { formatPersonName, t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
@@ -24,15 +25,18 @@ import {
   type DocumentScope,
   moveDocument,
   type PatchDocumentBody,
+  type OffDraftCreateResponse,
   patchDocument,
   trashDocument,
 } from "@/features/documents/document-api";
+import { compareRevisionProjections } from "@/features/documents/revision-diff";
+import { useOffWikiBody } from "../../composables/useOffWikiBody";
 import { projectAncestors } from "@/features/documents/project-ancestors";
 import { projectDocumentsQuery } from "@/features/projects/queries";
 import { createProjectDocumentAttachmentBridge } from "@/features/workspace/attachment-upload";
 import { loadErrorMessage, ProblemError } from "@/lib/api";
 import { documentPath, formatDisplayId, projectPath, trashPath } from "@/lib/href";
-import { meQuery } from "@/lib/queries";
+import { meQuery, setupStatusQuery } from "@/lib/queries";
 import { projectDocumentMetaQuery } from "@/lib/queries/documents";
 import { collabRoomName, useCollabRoom } from "../../collab/useCollabRoom";
 import AppLink from "../../components/AppLink.vue";
@@ -90,6 +94,9 @@ const queryClient = useQueryClient();
 const router = useRouter();
 const route = useRoute();
 const me = useQuery(meQuery);
+const setup = useQuery(setupStatusQuery);
+const realtimeOn = computed(() => setup.data.value?.realtimeMode === "on");
+const realtimeOff = computed(() => setup.data.value?.realtimeMode === "off");
 const projectId = computed(() => props.project.id);
 const metaQuery = useQuery(() =>
   projectDocumentMetaQuery(props.workspaceId, projectId.value, props.documentId),
@@ -105,6 +112,28 @@ const collabUser = computed(() => {
   const data = me.data.value;
   return data ? collabUserOf(data.userId, formatPersonName(data, data.locale)) : null;
 });
+const offBody = useOffWikiBody(
+  () => {
+    const actor = me.data.value;
+    if (
+      !actor?.userId ||
+      !actor.sessionId ||
+      metaQuery.data.value?.id !== props.documentId ||
+      (me.error.value instanceof ProblemError && [401, 403].includes(me.error.value.status)) ||
+      (metaQuery.error.value instanceof ProblemError &&
+        [401, 403, 404].includes(metaQuery.error.value.status))
+    )
+      return null;
+    return {
+      actorId: actor.userId,
+      credentialId: actor.sessionId,
+      workspaceId: props.workspaceId,
+      targetId: props.documentId,
+      projectId: props.project.id,
+    };
+  },
+  () => realtimeOff.value,
+);
 const room = useCollabRoom(
   collabRoomName(props.workspaceId, "document", props.documentId),
   collabUser,
@@ -126,8 +155,36 @@ const room = useCollabRoom(
           : null,
     };
   },
+  () => realtimeOn.value,
 );
 const session = room.session;
+const bodyDoc = computed(() => (realtimeOff.value ? offBody.doc.value : session.value?.doc));
+const bodyGeneration = computed(() =>
+  realtimeOff.value ? `off:${offBody.generation.value}` : session.value?.generation,
+);
+const offComparisons = computed(() => {
+  const bodies = offBody.comparison.value;
+  if (!bodies) return [];
+  const projection = (id: string, contentJson: unknown) => ({
+    id,
+    targetKind: "document",
+    targetId: props.documentId,
+    contentJson,
+  });
+  return [
+    compareRevisionProjections(
+      projection("start", bodies.start),
+      projection("mine", bodies.mine),
+      UNIQUE_ID_NODE_TYPES,
+    ),
+    compareRevisionProjections(
+      projection("start", bodies.start),
+      projection("current", bodies.current),
+      UNIQUE_ID_NODE_TYPES,
+    ),
+  ];
+});
+
 const { mentionItems, entityResolver } = useEditorEntities(
   () => props.workspaceId,
   () =>
@@ -208,9 +265,9 @@ watch(
     () => scope.value.projectId,
     () => props.slug,
     () => collabUser.value?.id,
-    () => session.value?.doc,
+    () => bodyDoc.value,
     () => session.value?.provider,
-    () => session.value?.generation,
+    () => bodyGeneration.value,
   ],
   () => {
     operationLifecycle += 1;
@@ -224,7 +281,7 @@ function captureOperation(): DocumentOperation {
   return { scope: { ...scope.value }, slug: props.slug, lifecycle: operationLifecycle };
 }
 function currentOperation(operation: DocumentOperation): boolean {
-  return operation.lifecycle === operationLifecycle && session.value !== null;
+  return operation.lifecycle === operationLifecycle && !!bodyDoc.value;
 }
 
 const trashDoc = useMutation({
@@ -305,9 +362,16 @@ const saving = computed(() => patchMeta.isPending.value);
 const archived = computed(() => meta.value?.status === "archived");
 const projectReadOnly = computed(() => !props.project.canEdit || props.project.archived);
 const readOnly = computed(
-  () => archived.value || projectReadOnly.value || (session.value?.readOnly ?? false),
+  () =>
+    archived.value ||
+    projectReadOnly.value ||
+    (realtimeOff.value
+      ? !offBody.doc.value || !offBody.writable.value
+      : (session.value?.readOnly ?? false)),
 );
-const ready = computed(() => Boolean(session.value?.synced && collabUser.value));
+const ready = computed(() =>
+  Boolean(collabUser.value && (realtimeOff.value ? offBody.doc.value : session.value?.synced)),
+);
 
 const headerReadOnly = computed(
   () =>
@@ -328,9 +392,9 @@ watch(
     () => props.slug,
     () => me.data.value?.userId,
     () => me.data.value?.sessionId,
-    () => session.value?.doc,
+    () => bodyDoc.value,
     () => session.value?.provider,
-    () => session.value?.generation,
+    () => bodyGeneration.value,
     headerReadOnly,
   ],
   () => {
@@ -341,7 +405,9 @@ watch(
   { flush: "sync" },
 );
 
-const refusalNote = computed(() => collabRefusalNote(session.value?.status, ready.value));
+const refusalNote = computed(() =>
+  realtimeOff.value ? null : collabRefusalNote(session.value?.status, ready.value),
+);
 const badge = computed(() =>
   session.value
     ? collabBadge(
@@ -355,8 +421,9 @@ const canPersist = computed(
   () =>
     ready.value &&
     !readOnly.value &&
-    session.value !== null &&
-    session.value.status === "connected" &&
+    (realtimeOff.value
+      ? !offBody.saving.value && !offBody.conflict.value
+      : session.value !== null && session.value.status === "connected") &&
     !persisting.value,
 );
 
@@ -431,9 +498,9 @@ watch(
     () => me.data.value?.userId,
     () => me.data.value?.sessionId,
     () => me.error.value instanceof ProblemError && me.error.value.status === 401,
-    () => session.value?.doc,
+    () => bodyDoc.value,
     () => session.value?.provider,
-    () => session.value?.generation,
+    () => bodyGeneration.value,
     () => session.value?.status,
     readOnly,
   ],
@@ -447,6 +514,52 @@ watch(
 onScopeDispose(() => {
   persistLifecycle.value++;
 });
+
+const copyTitle = ref("");
+const copiedDraft = shallowRef<OffDraftCreateResponse | null>(null);
+const copyParentId = ref("");
+const copyTargets = computed(() =>
+  (tree.data.value?.items ?? []).filter((node) => node.projectId === projectId.value),
+);
+watch(
+  persistLifecycle,
+  () => {
+    copyTitle.value = "";
+    copyParentId.value = "";
+    copiedDraft.value = null;
+  },
+  { flush: "sync" },
+);
+watch(
+  () => meta.value?.parentId,
+  (parent) => {
+    if (!copyParentId.value && !offBody.pendingDistinct.value) copyParentId.value = parent ?? "";
+  },
+  { immediate: true },
+);
+async function copyOffDraft(): Promise<void> {
+  const lifetime = persistLifecycle.value;
+  const current = offBody.draft.value;
+  if (
+    !realtimeOff.value ||
+    !current ||
+    (!offBody.pendingDistinct.value &&
+      (sourceDraft.value?.dirty || sourceDraft.value?.composing)) ||
+    (!copyParentId.value && !offBody.pendingDistinct.value)
+  )
+    return;
+  const copied = await offBody.createDistinct({
+    projectId: scope.value.projectId,
+    parentId: copyParentId.value || null,
+    title: copyTitle.value.trim() || t("doc.duplicate.suffix", { title: meta.value?.title ?? "" }),
+    icon: meta.value?.icon,
+  });
+  if (lifetime !== persistLifecycle.value || offBody.draft.value !== current || !copied) return;
+  copiedDraft.value = copied;
+  await queryClient.invalidateQueries({
+    queryKey: projectDocumentsQuery(props.workspaceId, projectId.value).queryKey,
+  });
+}
 
 const sourceEditor = shallowRef<InstanceType<typeof FvociEditor> | null>(null);
 const sourceDraftDialogId = computed(() => `source-draft-leave-${props.documentId}`);
@@ -517,6 +630,18 @@ const readonlyCommittedBody = useReadonlyCommittedBody(() => {
   };
 });
 async function waitForEditorSave(): Promise<boolean> {
+  if (realtimeOff.value) {
+    const current = offBody.draft.value;
+    if (!current || sourceAuthRetired.value) return false;
+    if (!readOnly.value) await persistBody();
+    return (
+      (await offBody.verifyCommitted()) &&
+      current === offBody.draft.value &&
+      current.active &&
+      !sourceAuthRetired.value
+    );
+  }
+
   const before = readSaveSession();
   const lifetime = persistLifecycle.value;
   const target = `${scope.value.workspaceId}:${scope.value.documentId}:${scope.value.projectId ?? ""}`;
@@ -560,6 +685,15 @@ async function waitForEditorSave(): Promise<boolean> {
 }
 
 async function persistBody(): Promise<void> {
+  if (realtimeOff.value) {
+    if (!canPersist.value || sourceAuthRetired.value) throw new Error("Body save unavailable");
+    if (!(await offBody.save())) throw new Error("Body save did not confirm the current draft");
+    await queryClient.invalidateQueries({
+      queryKey: ["revisions", props.workspaceId, "document", props.documentId],
+    });
+    return;
+  }
+
   const current = session.value;
   if (!current || !canPersist.value) throw new Error("collab persist unavailable");
   const lifetime = persistLifecycle.value;
@@ -708,7 +842,23 @@ function refOf(number: number): string {
         />
         <div class="document-page__collab">
           <span
-            v-if="badge"
+            v-if="realtimeOff"
+            class="document-page__collab-status"
+            data-body-mode="off"
+            :data-body-persisted="offBody.durable.value ? 'true' : 'false'"
+          >
+            {{
+              !offBody.doc.value
+                ? t("load.loading")
+                : offBody.saving.value
+                  ? t("version.saving")
+                  : offBody.dirty.value || offBody.sourceBuffer.value
+                    ? t("doc.off.draft")
+                    : t("doc.off.saved")
+            }}
+          </span>
+          <span
+            v-else-if="badge"
             :class="`document-page__collab-status document-page__collab-status--${badge.tone}`"
             :data-collab-status="session?.status"
             :data-collab-pending="session?.pending ? 'true' : 'false'"
@@ -733,7 +883,12 @@ function refOf(number: number): string {
             :project-id="project.id"
             :read-only="readOnly"
             :persist-now="canPersist ? persistBody : undefined"
-            :source-dirty="!!sourceDraft?.dirty || !!sourceDraft?.composing"
+            :after-restore="realtimeOff ? offBody.load : undefined"
+            :source-dirty="
+              !!sourceDraft?.dirty ||
+              !!sourceDraft?.composing ||
+              (realtimeOff && offBody.dirty.value)
+            "
           />
         </div>
         <UCollapsible
@@ -847,15 +1002,142 @@ function refOf(number: number): string {
         {{ t("doc.collab.unauthorized") }}
       </p>
       <p v-if="refusalNote" class="document-page__body-note" role="status">{{ t(refusalNote) }}</p>
+      <p v-if="realtimeOff && offBody.error.value" role="alert">{{
+        loadErrorMessage(offBody.error.value)
+      }}</p>
+      <p v-if="realtimeOff && offBody.storageError.value" role="alert">{{
+        t("doc.off.storageFailed")
+      }}</p>
+      <UButton
+        v-if="
+          realtimeOff && (!offBody.doc.value || !offBody.writable.value) && !offBody.loading.value
+        "
+        @click="offBody.load"
+        >{{ t("load.retry") }}</UButton
+      >
+      <section
+        v-if="realtimeOff && offBody.comparison.value"
+        :aria-label="t('version.compare')"
+        data-testid="off-body-conflict"
+      >
+        <p role="alert">{{ t("doc.off.conflict") }}</p>
+        <div v-for="(difference, index) in offComparisons" :key="difference.afterId">
+          <h3>{{ index === 0 ? t("doc.off.mine") : t("doc.off.current") }}</h3>
+          <p v-for="limit in difference.limits" :key="limit">{{ t(`version.diff.${limit}`) }}</p>
+          <div v-for="change in difference.changes" :key="change.key">
+            <p
+              >{{ t(`version.diff.${change.kind}`) }} ·
+              {{ (change.after ?? change.before)?.blockId }}</p
+            >
+            <del>{{ change.before?.text }}</del> → <ins>{{ change.after?.text }}</ins>
+            <pre v-if="change.values">{{ JSON.stringify(change.values, null, 2) }}</pre>
+          </div>
+        </div>
+        <details
+          ><summary>{{ t("doc.off.start") }}</summary
+          ><pre>{{ JSON.stringify(offBody.comparison.value.start, null, 2) }}</pre>
+        </details>
+        <details
+          ><summary>{{ t("doc.off.mine") }}</summary
+          ><pre>{{ JSON.stringify(offBody.comparison.value.mine, null, 2) }}</pre>
+        </details>
+        <details
+          ><summary>{{ t("doc.off.current") }}</summary
+          ><pre>{{ JSON.stringify(offBody.comparison.value.current, null, 2) }}</pre>
+        </details>
+        <UButton
+          v-if="offBody.conflict.value"
+          :disabled="offBody.saving.value || offBody.creating.value"
+          @click="offBody.editCurrent"
+          >{{ t("doc.off.editCurrent") }}</UButton
+        >
+        <label>
+          {{ t("doc.duplicate.title") }}
+          <input
+            v-model="copyTitle"
+            maxlength="300"
+            :disabled="offBody.creating.value || !!offBody.pendingDistinct.value"
+            :placeholder="t('doc.duplicate.title')"
+          />
+        </label>
+        <label>
+          {{ t("doc.move.parentLabel") }}
+          <select
+            v-model="copyParentId"
+            :disabled="offBody.creating.value || !!offBody.pendingDistinct.value"
+            :aria-label="t('doc.move.parentLabel')"
+          >
+            <option value="">{{ t("doc.move.parentLabel") }}</option>
+            <option v-for="node in copyTargets" :key="node.id" :value="node.id">{{
+              node.title
+            }}</option>
+          </select>
+        </label>
+        <UButton
+          :disabled="
+            offBody.creating.value ||
+            offBody.saving.value ||
+            (!copyParentId && !offBody.pendingDistinct.value) ||
+            (!offBody.pendingDistinct.value && (!!sourceDraft?.dirty || !!sourceDraft?.composing))
+          "
+          @click="copyOffDraft"
+        >
+          {{ offBody.creating.value ? t("doc.duplicate.pending") : t("doc.duplicate.submit") }}
+        </UButton>
+        <p>{{ t("doc.off.referenceAccess") }}</p>
+        <p v-if="copiedDraft" role="status">
+          {{ t("doc.duplicate.done") }}
+          <a
+            :href="
+              documentPath(
+                slug,
+                copiedDraft.document.displayId ||
+                  formatDisplayId(project.key, copiedDraft.document.number),
+              )
+            "
+            >{{ copiedDraft.document.title }}</a
+          >
+        </p>
+      </section>
+      <section
+        v-if="
+          realtimeOff && !offBody.comparison.value && (offBody.pendingDistinct.value || copiedDraft)
+        "
+        class="document-off-compare"
+        role="status"
+      >
+        <template v-if="offBody.pendingDistinct.value">
+          <p>{{ t("doc.duplicate.pending") }}: {{ offBody.pendingDistinct.value.body.title }}</p>
+          <UButton
+            :disabled="offBody.creating.value || offBody.saving.value"
+            @click="copyOffDraft"
+            >{{ t("load.retry") }}</UButton
+          >
+        </template>
+        <p v-if="copiedDraft">
+          {{ t("doc.duplicate.done") }}
+          <a
+            :href="
+              documentPath(
+                slug,
+                copiedDraft.document.displayId ||
+                  formatDisplayId(project.key, copiedDraft.document.number),
+              )
+            "
+            >{{ copiedDraft.document.title }}</a
+          >
+        </p>
+      </section>
       <QueryLoading v-if="!ready && session?.status !== 'unauthorized' && !refusalNote" />
       <FvociEditor
-        v-if="ready && session && collabUser"
+        v-if="ready && bodyDoc && collabUser"
         ref="sourceEditor"
-        :key="session.generation"
+        :key="bodyGeneration"
         :mode-scope="persistLifecycle"
         :wait-for-save="waitForEditorSave"
-        :ydoc="session.doc"
-        :provider="session.provider"
+        :ydoc="bodyDoc"
+        :provider="session?.provider"
+        :source-buffer="realtimeOff ? offBody.sourceBuffer.value : null"
         :user="collabUser"
         :editable="!readOnly"
         :aria-label="t('doc.body.a11y')"
@@ -865,6 +1147,7 @@ function refOf(number: number): string {
         :attachment-bridge="attachmentBridge"
         :url-embed="UrlEmbed"
         @source-dirty="onSourceDraft"
+        @source-buffer="realtimeOff && offBody.receiveSourceBuffer($event)"
         @ready="editor = $event"
       >
         <template #toolbar="{ editor: live }">
@@ -887,7 +1170,7 @@ function refOf(number: number): string {
       :insert-blocked-reason="
         readOnly
           ? t('doc.readOnly')
-          : session?.status === 'connected'
+          : (realtimeOff && ready) || session?.status === 'connected'
             ? null
             : t('ai.document.loading')
       "

@@ -1313,6 +1313,8 @@ mod upload_session_route_tests {
     const BODY: &[u8] = b"S18 actual selected HTTP upload -> fresh client original bytes";
     fn state(backend: Backend, storage: crate::attachments::ObjectStorage) -> AppState {
         AppState {
+            realtime_mode: crate::config::RealtimeMode::On,
+            native_engine: None,
             auth:Arc::new(crate::auth::AuthService{db:crate::db::Db::from_backend(backend),password_keys:crate::auth::password::Keyring::parse(r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,"test").unwrap()}),
             branding_name:"FVOCI".into(),public_origin:"http://localhost".into(),cookie_secure:false,rate_limiter:crate::http::rate_limit::RateLimiter::new(),storage,
             upload:crate::attachments::UploadLimits{part_size_bytes:24,max_file_size_bytes:1024,create_rate_per_5min:20,part_put_slots:crate::attachments::PartPutSlots::new(2)},
