@@ -2997,10 +2997,13 @@ mod selected_tests {
             let physical = std::fs::read(f.root.join(key)).unwrap();
             let gate = f.driver.arm_commit_response_loss();
             let (backend, current, graph, staged, expected) = (f.backend.clone(), claim.clone(), archive.clone(), keys.clone(), hash.clone());
-            let publication = tokio::spawn(async move {
+            let mut publication = tokio::spawn(async move {
                 publish_backend(&backend, &current, &graph, &staged, &crate::db::quota::StorageQuota::Unlimited, &expected, &CancellationToken::new()).await
             });
-            gate.wait_upstream_response().await.unwrap();
+            tokio::select! {
+                response = gate.wait_upstream_response() => response.unwrap(),
+                early = &mut publication => panic!("publication finished before upstream COMMIT fault gate: {early:?}"),
+            }
             assert!(!publication.is_finished());
             let lost = f.driver.exchanges().into_iter().find(|exchange| exchange.reply_lost).unwrap();
             sdk_closed_finish_response(&lost, true, true); // Original COMMIT+Close accepted upstream before cut.
