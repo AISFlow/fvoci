@@ -5829,7 +5829,7 @@ mod upload_session_tests {
             .unwrap();
         assert_eq!(completed.status, "stored");
         let mut expected = vec![b'c'; part_size as usize];
-        expected.extend_from_slice(&vec![b'b'; 1000]);
+        expected.extend_from_slice(&[b'b'; 1000]);
         assert_eq!(
             s.read_range(&att.storage_key, 0, expected.len() as u64 - 1)
                 .await
