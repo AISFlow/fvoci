@@ -689,4 +689,51 @@ m.prepare_browser(pathlib.Path(sys.argv[2]),sys.argv[3])
         with self.assertRaises(FileExistsError):self.stage()
 
 
+class HistoricalFixturePortabilityTest(unittest.TestCase):
+    """Actual permission controls in an owned checkout without the c7 object."""
+    def test_permission_controls_without_historical_git_object(self):
+        self.assertEqual(hashlib.sha256(ORIGINAL_C7_SELECTED_FOOTER.encode()).hexdigest(),
+                         '14b99c809b2a3c0ed445774f334378e74f38db5ce0abe373e47abf30c43fcd06')
+        with tempfile.TemporaryDirectory(prefix='fvoci-no-history-fixture-') as tmp:
+            root = Path(tmp)
+            for name in ('scripts/fixtures/web-e2e/test-build-handoff.py',
+                         'scripts/selected-backend-ci/web-build-handoff.py',
+                         'scripts/run-selected-backend-e2e.py', 'scripts/run-web-e2e.sh'):
+                destination = root/name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes((ROOT/name).read_bytes())
+            subprocess.run(['git', 'init', '--quiet', str(root)], check=True)
+            missing = subprocess.run(['git', 'cat-file', '-e',
+                'c7ad4a2a9165a0dfb64ebc7f17150140b54ed1fe^{commit}'], cwd=root,
+                capture_output=True, text=True)
+            self.assertNotEqual(missing.returncode, 0)
+            result = subprocess.run([sys.executable, '-B',
+                str(root/'scripts/fixtures/web-e2e/test-build-handoff.py'),
+                'RuntimePermissionsTest'], cwd=root, capture_output=True, text=True,
+                env={**os.environ, 'PYTHONDONTWRITEBYTECODE':'1'})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            records = [json.loads(line) for line in result.stdout.splitlines()
+                       if line.startswith('{')]
+            original = next(record for record in records if record['control']=='original')
+            self.assertEqual(original['footer_exit'], 2)
+            self.assertTrue(original['err13'])
+            self.assertIsNone(original['marker'])
+            fixed = next(record for record in records
+                         if record['control']=='fixed' and record['selected_exit']==0)
+            self.assertEqual(fixed['footer_exit'], 0)
+            self.assertEqual(fixed['marker']['uid'], 1000)
+            self.assertEqual(fixed['marker']['gid'], 1000)
+            failed = next(record for record in records
+                          if record['control']=='fixed' and record['selected_exit']==7)
+            self.assertEqual(failed['footer_exit'], 7)
+            for control in ('unreadable', 'foreign', 'symlink', 'incomplete',
+                            'wrong-source', 'missing-process', 'live'):
+                self.assertTrue(any(record['control']==control and record['footer_exit']!=0
+                                    for record in records), control)
+            print(json.dumps({'control':'no-history-checkout','historical_object_exit':missing.returncode,
+                              'original_guard_exit':original['footer_exit'], 'original_err13':original['err13'],
+                              'fixed_guard_exit':fixed['footer_exit'], 'first_child_status':failed['footer_exit'],
+                              'negative_controls':7}), flush=True)
+
+
 if __name__=='__main__':unittest.main()
