@@ -131,7 +131,7 @@ async fn baseline_sqlite_steps_render_to_the_same_structural_catalog() {
     /// (the parser's own tokenizer; whitespace is never a token, string literals
     /// keep their inner bytes), which is exact for everything SQLite evaluates.
     fn default_tokens(expr: &str) -> Vec<(String, String)> {
-        use libsql_sqlite3_parser::lexer::{scan::Scanner, sql::Tokenizer};
+        use libsql_sqlite3_parser::lexer::{sql::Tokenizer, Scanner};
         let mut scanner = Scanner::new(Tokenizer::new());
         let bytes = expr.as_bytes();
         let mut out = Vec::new();
