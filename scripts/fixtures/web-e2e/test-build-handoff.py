@@ -740,14 +740,22 @@ class HistoricalFixturePortabilityTest(unittest.TestCase):
             self.assertEqual(original['footer_exit'], 2)
             self.assertTrue(original['err13'])
             self.assertIsNone(original['marker'])
-            fixed = next(record for record in records if record['control']=='fixed')
+            fixed = next(record for record in records
+                         if record['control']=='fixed' and record['selected_exit']==0)
             self.assertEqual(fixed['footer_exit'], 0)
             self.assertEqual(fixed['marker']['uid'], 1000)
             self.assertEqual(fixed['marker']['gid'], 1000)
+            failed = next(record for record in records
+                          if record['control']=='fixed' and record['selected_exit']==7)
+            self.assertEqual(failed['footer_exit'], 7)
             for control in ('unreadable', 'foreign', 'symlink', 'incomplete',
                             'wrong-source', 'missing-process', 'live'):
                 self.assertTrue(any(record['control']==control and record['footer_exit']!=0
                                     for record in records), control)
+            print(json.dumps({'control':'no-history-checkout','historical_object_exit':missing.returncode,
+                              'original_guard_exit':original['footer_exit'], 'original_err13':original['err13'],
+                              'fixed_guard_exit':fixed['footer_exit'], 'first_child_status':failed['footer_exit'],
+                              'negative_controls':7}), flush=True)
 
 
 if __name__=='__main__':unittest.main()
