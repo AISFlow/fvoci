@@ -5108,6 +5108,39 @@ mod remote_task_finish_tests {
     async fn remote_task_ambiguous_receipt_and_readback_finish_retain_original_owner() {
         for (receipt, mode) in [(true, 1), (true, 3), (false, 1), (false, 3)] {
             let mut room = TaskRoom::new().await;
+            // Writable join confirms activation before any Sync or receipt.
+            // Witness that exact owner before arming an uncertain finish;
+            // no fresh observer may settle or replace it after the failure.
+            let delivery = room.lease.family_room_delivery.expect("actual typed lease");
+            let (workspace, task, owner, fence, generation): (
+                Vec<u8>, Vec<u8>, Vec<u8>, i64, i64,
+            ) = sqlx::query_as(
+                "SELECT f.workspace_id, f.task_id, f.owner_token, f.fence, s.writer_generation FROM task_collab_room_fences AS f JOIN task_states AS s ON s.workspace_id = f.workspace_id AND s.task_id = f.task_id WHERE f.workspace_id = ?1 AND f.task_id = ?2",
+            )
+            .bind(room.key.0.as_bytes().as_slice())
+            .bind(room.key.1.as_bytes().as_slice())
+            .fetch_one(&room.f.pool)
+            .await
+            .unwrap();
+            let workspace = Uuid::from_slice(&workspace).unwrap();
+            let task = Uuid::from_slice(&task).unwrap();
+            let owner = Uuid::from_slice(&owner).unwrap();
+            assert_eq!(delivery.original.kind(), CollabKind::Task);
+            assert!(workspace == room.key.0 && workspace == delivery.original.workspace());
+            assert!(task == room.key.1 && task == delivery.original.resource());
+            assert!(
+                owner == delivery.writer_owner,
+                "confirmed join activation owner"
+            );
+            assert_eq!(fence, delivery.original.sequence());
+            assert_eq!(generation, 1, "one confirmed writable join activation");
+            let witnessed = delivery.original.with_owner(owner);
+            assert!(witnessed == delivery.original.with_owner(delivery.writer_owner));
+            assert_eq!(witnessed.sequence(), delivery.original.sequence());
+            assert!(
+                witnessed != delivery.original,
+                "original owner is wrong even with the same Task scope and fence sequence"
+            );
             eprintln!("P102 diagnostic subcase receipt={receipt} mode={mode}");
             let op_id = if receipt {
                 room.sync().await;
@@ -5146,7 +5179,7 @@ mod remote_task_finish_tests {
                 room.durable().await,
                 if receipt { (1, 1, 1) } else { (0, 0, 0) }
             );
-            room.assert_blocked(receipt, false).await;
+            room.assert_blocked(true, false).await;
             room.close(true, false).await;
         }
     }
