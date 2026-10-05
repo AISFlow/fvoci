@@ -4691,6 +4691,46 @@ function assertJointRestoreAppend(
   expect(receipt.payload_sha256).toMatch(/^\\x[0-9a-f]{64}$/);
 }
 
+// Observation-only projections deliberately omit global timerRows, session IDs,
+// identity passthrough fields, bodies, URLs, headers and error messages.
+function jointRestorePhaseState(state: {
+  tail: string;
+  updates: number;
+  estimate: string | null;
+  unit: string | null;
+  updatedAt: string;
+  receipts: {
+    seq: string;
+    op_id: string;
+    actor_user_id: string;
+    payload_len: number;
+    payload_sha256: string;
+  }[];
+}) {
+  return {
+    tail: state.tail,
+    updates: state.updates,
+    estimate: state.estimate,
+    unit: state.unit,
+    updatedAt: state.updatedAt,
+    receipts: state.receipts.map((receipt) => ({
+      seq: receipt.seq,
+      opId: receipt.op_id,
+      actorId: receipt.actor_user_id,
+      payloadLength: receipt.payload_len,
+      payloadSha256: receipt.payload_sha256,
+    })),
+  };
+}
+
+function writeJointRestorePhaseObservation(output: string, observation: object): void {
+  // Never replace an earlier run's observation, including on failure.
+  writeFileSync(output, JSON.stringify(observation, null, 2) + "\n", {
+    flag: "wx",
+    mode: 0o600,
+  });
+}
+
 test("one ordinary task restore preserves paused timer and explicit estimate while its stale estimate intent conflicts", async ({
   page,
   browser,
@@ -4920,204 +4960,367 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
   } finally {
     await peerContext.close();
   }
-  // Capture E0 after the peer commit. The restore alone must retire its exact
-  // microsecond timestamp; no-op persist must not manufacture that conflict.
-  await page.reload();
-  await expect(widget.getByTestId("timer-state")).toHaveText("일시정지");
-  const current = await page.request.get(timerUrl);
-  expect(current.ok()).toBe(true);
-  const e0 = z.object({ estimate: estimateShape }).parse(await current.json()).estimate;
-  const beforeRestore = readState();
-  expect(e0.value).toBe("15");
-  expect(e0.unit).toBe("minutes");
-  expect(e0.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|\+00:00)$/);
-  expect(
-    diagnosticSql(
-      `SELECT (updated_at='${e0.updatedAt}'::timestamptz)::text FROM fvoci.tasks WHERE workspace_id='${fixture.workspaceId}' AND id='${goal.taskId}'`,
-    ),
-    "E0 exact microsecond timestamp matches real task row",
-  ).toBe("true");
-  expect(beforeRestore.identity).toMatchObject({
-    task: goal.taskId,
-    project: project.projectId,
-    origins: [{ document_id: notes.id, task_id: goal.taskId }],
-  });
-  const estimateEditor = widget.getByTestId("task-estimate-editor");
-  await estimateEditor.getByText("예상 시간 설정", { exact: true }).click();
-  await estimateEditor.getByLabel("예상 시간(분)", { exact: true }).fill("25");
-  await estimateEditor.getByLabel("예상 시간 변경 사유", { exact: true }).fill("복원 전 예상 의도");
-  let release = () => {};
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const commandShape = z.object({
-    requestId: z.string().uuid(),
-    expectedActorId: z.string().uuid(),
-    expectedSessionId: z.string().uuid(),
-    expected: estimateShape,
-    minutes: z.literal(25),
-    reason: z.literal("복원 전 예상 의도"),
-  });
-  let heldBody: z.infer<typeof commandShape> | undefined;
-  const estimateRoute = (url: URL) => url.pathname === timerUrl + "/estimate";
-  let heldContinuation: Promise<void> | undefined;
-  let primaryFailure: { error: unknown } | undefined;
-  const cleanupFailures: unknown[] = [];
-  await page.route(estimateRoute, async (route) => {
-    if (route.request().method() !== "POST") return route.continue();
-    heldContinuation = (async () => {
-      heldBody = commandShape.parse(route.request().postDataJSON());
-      await gate;
-      await route.continue();
-    })();
-    await heldContinuation;
-  });
-  try {
-    await estimateEditor.getByRole("button", { name: "예상 시간 저장", exact: true }).click();
-    await expect.poll(() => heldBody !== undefined).toBe(true);
-    if (!heldBody) throw new Error("real mounted estimate intent missing");
-    expect(heldBody.expected).toEqual(e0);
-    expect(heldBody.expectedActorId).toBe(fixture.actor.userId);
-    expect(heldBody.expectedSessionId).toBe(fixture.actor.sessionId);
-    await expect(
-      estimateEditor.getByRole("button", { name: "예상 시간 저장", exact: true }),
-    ).toBeDisabled();
-    await page.getByTestId("revision-history").click();
-    const revisionsBefore = await history();
-    await page
-      .getByTestId("revision-item")
-      .nth(revisionsBefore.findIndex((item) => item.id === source.id))
-      .getByTestId("revision-restore")
-      .click();
-    await expect(page.getByTestId("revision-restore-preview")).toHaveAttribute(
-      "data-source-revision",
-      source.id,
-    );
-    expect(readState().updatedAt, "preview's no-op persist keeps exact E0").toBe(
-      beforeRestore.updatedAt,
-    );
-    const restoredResponse = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        response.url().endsWith(`/revisions/${source.id}/restore`),
-    );
-    await page.getByTestId("revision-restore-confirm").click();
-    const restoredReply = await restoredResponse;
-    expect(restoredReply.status()).toBe(200);
-    const restored = z.object({ revisionId: z.string().uuid() }).parse(await restoredReply.json());
-    expect(restored.revisionId).not.toBe(source.id);
-    await expect(editor).toContainText("원본 본문");
-    expect(await body()).toEqual(sourceBody);
-    const afterRestore = readState();
-    assertJointTimerEstimatePreserved(beforeRestore, afterRestore);
-    expect(afterRestore.updatedAt).not.toBe(beforeRestore.updatedAt);
-    assertJointRestoreAppend(beforeRestore, afterRestore, fixture.actor.userId);
-    const restoreDetail = await page.request.get(base + "/revisions/" + restored.revisionId);
-    expect(restoreDetail.ok()).toBe(true);
-    z.object({
-      reason: z.literal("restore"),
-      restoredFromId: z.literal(source.id),
-      contentJson: z.unknown(),
-    }).parse(await restoreDetail.json());
-    expect(await (await page.request.get(base + "/revisions/" + source.id)).json()).toEqual(
-      sourceDetail,
-    );
-    expect((await history()).filter((item) => item.id === restored.revisionId)).toHaveLength(1);
-    const staleReply = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" && response.url().endsWith(timerUrl + "/estimate"),
-    );
-    release();
-    const stale = await staleReply;
-    expect(stale.status()).toBe(409);
-    z.object({ params: z.object({ code: z.literal("estimate_changed") }) }).parse(
-      await stale.json(),
-    );
-    await expect(
-      estimateEditor.getByRole("button", { name: "예상 시간 저장", exact: true }),
-    ).toBeEnabled();
-    await expect(estimateEditor.getByLabel("예상 시간(분)", { exact: true })).toHaveValue("25");
-    await expect(estimateEditor.getByLabel("예상 시간 변경 사유", { exact: true })).toHaveValue(
-      "복원 전 예상 의도",
-    );
-    await expect(estimateEditor).toContainText("예상 시간이 다른 곳에서 변경되었습니다");
-    const afterStale = readState();
-    assertJointTimerEstimatePreserved(beforeRestore, afterStale);
-    expect(afterStale.updatedAt).toBe(afterRestore.updatedAt);
-    const freshContext = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  const phaseStates: { phase: string; state: ReturnType<typeof jointRestorePhaseState> }[] = [];
+  const phaseNetwork: {
+    phase: "preview" | "restore";
+    status: number | null;
+    currentTailSeq?: string;
+    expectedTailSeq?: string;
+    correlationId?: string;
+    revisionId?: string;
+  }[] = [];
+  const phaseReads: Promise<void>[] = [];
+  const phaseErrors: string[] = [];
+  const restoreRequests = new WeakMap<
+    import("@playwright/test").Request,
+    (typeof phaseNetwork)[number]
+  >();
+  const observeRequest = (request: import("@playwright/test").Request) => {
+    if (
+      request.method() !== "POST" ||
+      new URL(request.url()).pathname !== `${base}/revisions/${source.id}/restore`
+    )
+      return;
+    const record: (typeof phaseNetwork)[number] = { phase: "restore", status: null };
+    phaseNetwork.push(record);
+    restoreRequests.set(request, record);
     try {
-      const fresh = await freshContext.newPage();
-      await login(fresh, fixture.email, credentials.password);
-      const freshActor = identityShape.parse(
-        await (await fresh.request.get("/api/v1/auth/me")).json(),
-      );
-      expect(freshActor.userId).toBe(fixture.actor.userId);
-      expect(freshActor.sessionId).not.toBe(fixture.actor.sessionId);
-      await fresh.goto(detail);
-      await expect(fresh.locator(".fvoci-editor .ProseMirror")).toContainText("원본 본문");
-      const freshWidget = fresh.getByTestId(`task-stopwatch-${goal.taskId}`);
-      await expect(freshWidget.getByTestId("timer-state")).toHaveText("일시정지");
-      await expect(freshWidget.getByTestId("timer-estimate")).toHaveText("예상 15분");
-      expect(timerShape.parse(await (await fresh.request.get(timerUrl)).json()).run).toEqual(
-        paused.run,
-      );
-      const freshBody = await fresh.request.get(base);
-      expect(
-        z.object({ contentJson: z.unknown() }).parse(await freshBody.json()).contentJson,
-      ).toEqual(sourceBody);
-      const freshHistory = await fresh.request.get(base + "/revisions");
-      expect(
-        z
-          .object({ items: z.array(z.object({ id: z.string() })) })
-          .parse(await freshHistory.json())
-          .items.some((item) => item.id === restored.revisionId),
-      ).toBe(true);
-      assertJointTimerEstimatePreserved(beforeRestore, readState());
-    } finally {
-      await freshContext.close();
+      const intent = z
+        .object({ expectedTailSeq: z.string().regex(/^\d+$/), correlationId: z.string().uuid() })
+        .parse(request.postDataJSON());
+      record.expectedTailSeq = intent.expectedTailSeq;
+      record.correlationId = intent.correlationId;
+    } catch {
+      phaseErrors.push("restore-request-observation-unavailable");
     }
-    await testInfo.attach("same-task-restore-timer-estimate", {
-      body: JSON.stringify({
-        taskId: goal.taskId,
-        source: source.id,
-        restored: restored.revisionId,
-        pausedRun: paused.run,
-        expected: e0,
-        afterRestoreUpdatedAt: afterRestore.updatedAt,
-        estimateRequestId: heldBody.requestId,
-        before: beforeRestore,
-        afterRestore,
-        afterStale,
-        staleStatus: stale.status(),
+  };
+  const observeResponse = (response: import("@playwright/test").Response) => {
+    const pathname = new URL(response.url()).pathname;
+    const phase =
+      pathname === `${base}/revisions/${source.id}/restore-preview`
+        ? "preview"
+        : pathname === `${base}/revisions/${source.id}/restore`
+          ? "restore"
+          : undefined;
+    if (!phase) return;
+    if (response.request().method() !== (phase === "preview" ? "GET" : "POST")) return;
+    const record: (typeof phaseNetwork)[number] | undefined =
+      phase === "restore"
+        ? restoreRequests.get(response.request())
+        : { phase, status: response.status() };
+    if (!record) {
+      phaseErrors.push("restore-request-response-binding-unavailable");
+      return;
+    }
+    record.status = response.status();
+    if (phase === "preview") phaseNetwork.push(record);
+    // Body reads observe the already-issued response; no request, flush or
+    // additional await is inserted before the original confirm/append oracle.
+    phaseReads.push(
+      (async () => {
+        if (phase === "restore") {
+          if (response.status() === 200)
+            record.revisionId = z
+              .object({ revisionId: z.string().uuid() })
+              .parse(await response.json()).revisionId;
+        } else if (response.status() === 200) {
+          record.currentTailSeq = z
+            .object({ currentTailSeq: z.string().regex(/^\d+$/) })
+            .parse(await response.json()).currentTailSeq;
+        }
+      })().catch(() => {
+        phaseErrors.push(`${phase}-observation-unavailable`);
       }),
-      contentType: "application/json",
+    );
+  };
+  page.on("request", observeRequest);
+  page.on("response", observeResponse);
+  let phasePrimaryFailed = false;
+  try {
+    // Capture E0 after the peer commit. The restore alone must retire its exact
+    // microsecond timestamp; no-op persist must not manufacture that conflict.
+    await page.reload();
+    await expect(widget.getByTestId("timer-state")).toHaveText("일시정지");
+    const current = await page.request.get(timerUrl);
+    expect(current.ok()).toBe(true);
+    const e0 = z.object({ estimate: estimateShape }).parse(await current.json()).estimate;
+    const beforeRestore = readState();
+    phaseStates.push({ phase: "beforeRestore", state: jointRestorePhaseState(beforeRestore) });
+    expect(e0.value).toBe("15");
+    expect(e0.unit).toBe("minutes");
+    expect(e0.updatedAt).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|\+00:00)$/,
+    );
+    expect(
+      diagnosticSql(
+        `SELECT (updated_at='${e0.updatedAt}'::timestamptz)::text FROM fvoci.tasks WHERE workspace_id='${fixture.workspaceId}' AND id='${goal.taskId}'`,
+      ),
+      "E0 exact microsecond timestamp matches real task row",
+    ).toBe("true");
+    expect(beforeRestore.identity).toMatchObject({
+      task: goal.taskId,
+      project: project.projectId,
+      origins: [{ document_id: notes.id, task_id: goal.taskId }],
     });
-  } catch (error) {
-    primaryFailure = { error };
-  } finally {
-    release();
-    try {
+    const estimateEditor = widget.getByTestId("task-estimate-editor");
+    await estimateEditor.getByText("예상 시간 설정", { exact: true }).click();
+    await estimateEditor.getByLabel("예상 시간(분)", { exact: true }).fill("25");
+    await estimateEditor
+      .getByLabel("예상 시간 변경 사유", { exact: true })
+      .fill("복원 전 예상 의도");
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const commandShape = z.object({
+      requestId: z.string().uuid(),
+      expectedActorId: z.string().uuid(),
+      expectedSessionId: z.string().uuid(),
+      expected: estimateShape,
+      minutes: z.literal(25),
+      reason: z.literal("복원 전 예상 의도"),
+    });
+    let heldBody: z.infer<typeof commandShape> | undefined;
+    const estimateRoute = (url: URL) => url.pathname === timerUrl + "/estimate";
+    let heldContinuation: Promise<void> | undefined;
+    let primaryFailure: { error: unknown } | undefined;
+    const cleanupFailures: unknown[] = [];
+    await page.route(estimateRoute, async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      heldContinuation = (async () => {
+        heldBody = commandShape.parse(route.request().postDataJSON());
+        await gate;
+        await route.continue();
+      })();
       await heldContinuation;
+    });
+    try {
+      await estimateEditor.getByRole("button", { name: "예상 시간 저장", exact: true }).click();
+      await expect.poll(() => heldBody !== undefined).toBe(true);
+      if (!heldBody) throw new Error("real mounted estimate intent missing");
+      expect(heldBody.expected).toEqual(e0);
+      expect(heldBody.expectedActorId).toBe(fixture.actor.userId);
+      expect(heldBody.expectedSessionId).toBe(fixture.actor.sessionId);
+      await expect(
+        estimateEditor.getByRole("button", { name: "예상 시간 저장", exact: true }),
+      ).toBeDisabled();
+      await page.getByTestId("revision-history").click();
+      const revisionsBefore = await history();
+      await page
+        .getByTestId("revision-item")
+        .nth(revisionsBefore.findIndex((item) => item.id === source.id))
+        .getByTestId("revision-restore")
+        .click();
+      await expect(page.getByTestId("revision-restore-preview")).toHaveAttribute(
+        "data-source-revision",
+        source.id,
+      );
+      expect(readState().updatedAt, "preview's no-op persist keeps exact E0").toBe(
+        beforeRestore.updatedAt,
+      );
+      const restoredResponse = page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          response.url().endsWith(`/revisions/${source.id}/restore`),
+      );
+      await page.getByTestId("revision-restore-confirm").click();
+      const restoredReply = await restoredResponse;
+      expect(restoredReply.status()).toBe(200);
+      const restored = z
+        .object({ revisionId: z.string().uuid() })
+        .parse(await restoredReply.json());
+      expect(restored.revisionId).not.toBe(source.id);
+      await expect(editor).toContainText("원본 본문");
+      expect(await body()).toEqual(sourceBody);
+      const afterRestore = readState();
+      phaseStates.push({
+        phase: "afterRestore-before-append-oracle",
+        state: jointRestorePhaseState(afterRestore),
+      });
+      assertJointTimerEstimatePreserved(beforeRestore, afterRestore);
+      expect(afterRestore.updatedAt).not.toBe(beforeRestore.updatedAt);
+      assertJointRestoreAppend(beforeRestore, afterRestore, fixture.actor.userId);
+      const restoreDetail = await page.request.get(base + "/revisions/" + restored.revisionId);
+      expect(restoreDetail.ok()).toBe(true);
+      z.object({
+        reason: z.literal("restore"),
+        restoredFromId: z.literal(source.id),
+        contentJson: z.unknown(),
+      }).parse(await restoreDetail.json());
+      expect(await (await page.request.get(base + "/revisions/" + source.id)).json()).toEqual(
+        sourceDetail,
+      );
+      expect((await history()).filter((item) => item.id === restored.revisionId)).toHaveLength(1);
+      const staleReply = page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" && response.url().endsWith(timerUrl + "/estimate"),
+      );
+      release();
+      const stale = await staleReply;
+      expect(stale.status()).toBe(409);
+      z.object({ params: z.object({ code: z.literal("estimate_changed") }) }).parse(
+        await stale.json(),
+      );
+      await expect(
+        estimateEditor.getByRole("button", { name: "예상 시간 저장", exact: true }),
+      ).toBeEnabled();
+      await expect(estimateEditor.getByLabel("예상 시간(분)", { exact: true })).toHaveValue("25");
+      await expect(estimateEditor.getByLabel("예상 시간 변경 사유", { exact: true })).toHaveValue(
+        "복원 전 예상 의도",
+      );
+      await expect(estimateEditor).toContainText("예상 시간이 다른 곳에서 변경되었습니다");
+      const afterStale = readState();
+      phaseStates.push({ phase: "afterStale", state: jointRestorePhaseState(afterStale) });
+      assertJointTimerEstimatePreserved(beforeRestore, afterStale);
+      expect(afterStale.updatedAt).toBe(afterRestore.updatedAt);
+      const freshContext = await browser.newContext({ baseURL: new URL(page.url()).origin });
+      try {
+        const fresh = await freshContext.newPage();
+        await login(fresh, fixture.email, credentials.password);
+        const freshActor = identityShape.parse(
+          await (await fresh.request.get("/api/v1/auth/me")).json(),
+        );
+        expect(freshActor.userId).toBe(fixture.actor.userId);
+        expect(freshActor.sessionId).not.toBe(fixture.actor.sessionId);
+        await fresh.goto(detail);
+        await expect(fresh.locator(".fvoci-editor .ProseMirror")).toContainText("원본 본문");
+        const freshWidget = fresh.getByTestId(`task-stopwatch-${goal.taskId}`);
+        await expect(freshWidget.getByTestId("timer-state")).toHaveText("일시정지");
+        await expect(freshWidget.getByTestId("timer-estimate")).toHaveText("예상 15분");
+        expect(timerShape.parse(await (await fresh.request.get(timerUrl)).json()).run).toEqual(
+          paused.run,
+        );
+        const freshBody = await fresh.request.get(base);
+        expect(
+          z.object({ contentJson: z.unknown() }).parse(await freshBody.json()).contentJson,
+        ).toEqual(sourceBody);
+        const freshHistory = await fresh.request.get(base + "/revisions");
+        expect(
+          z
+            .object({ items: z.array(z.object({ id: z.string() })) })
+            .parse(await freshHistory.json())
+            .items.some((item) => item.id === restored.revisionId),
+        ).toBe(true);
+        assertJointTimerEstimatePreserved(beforeRestore, readState());
+      } finally {
+        await freshContext.close();
+      }
+      await testInfo.attach("same-task-restore-timer-estimate", {
+        body: JSON.stringify({
+          taskId: goal.taskId,
+          source: source.id,
+          restored: restored.revisionId,
+          pausedRun: paused.run,
+          expected: e0,
+          afterRestoreUpdatedAt: afterRestore.updatedAt,
+          estimateRequestId: heldBody.requestId,
+          before: beforeRestore,
+          afterRestore,
+          afterStale,
+          staleStatus: stale.status(),
+        }),
+        contentType: "application/json",
+      });
     } catch (error) {
-      cleanupFailures.push(error);
+      primaryFailure = { error };
+    } finally {
+      release();
+      try {
+        await heldContinuation;
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
+      try {
+        await page.unroute(estimateRoute);
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
+      if (cleanupFailures.length) {
+        testInfo.annotations.push({
+          type: "estimate-route-cleanup-error",
+          description: cleanupFailures
+            .map((error) =>
+              error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+            )
+            .join("\n"),
+        });
+      }
+    }
+    if (primaryFailure) throw primaryFailure.error;
+    if (cleanupFailures.length)
+      throw new AggregateError(cleanupFailures, "held estimate route cleanup failed");
+  } catch (error) {
+    phasePrimaryFailed = true;
+    throw error;
+  } finally {
+    page.off("request", observeRequest);
+    page.off("response", observeResponse);
+    await Promise.all(phaseReads);
+    // This owner-diagnostic read happens AFTER the original scenario and its
+    // held-estimate cleanup. It is not an immediate commit or app-role witness.
+    let storedRestores:
+      | {
+          id: string;
+          actorId: string | null;
+          sourceRevisionId: string | null;
+          correlationId: string | null;
+          baseTailSeq: string | null;
+          committedTailSeq: string | null;
+        }[]
+      | null = null;
+    try {
+      storedRestores = z
+        .array(
+          z.object({
+            id: z.string().uuid(),
+            actorId: z.string().uuid().nullable(),
+            sourceRevisionId: z.string().uuid().nullable(),
+            correlationId: z.string().uuid().nullable(),
+            baseTailSeq: z.string().regex(/^\d+$/).nullable(),
+            committedTailSeq: z.string().regex(/^\d+$/).nullable(),
+          }),
+        )
+        .parse(
+          JSON.parse(
+            diagnosticSql(
+              `SELECT coalesce(jsonb_agg(jsonb_build_object('id',id,'actorId',created_by,'sourceRevisionId',restored_from_id,'correlationId',restore_correlation_id,'baseTailSeq',restore_base_tail_seq::text,'committedTailSeq',restore_committed_tail_seq::text) ORDER BY created_at,id),'[]'::jsonb) FROM fvoci.revisions WHERE workspace_id='${fixture.workspaceId}' AND target_kind='task' AND target_id='${goal.taskId}' AND reason='restore'`,
+            ),
+          ),
+        );
+    } catch {
+      phaseErrors.push("stored-restore-observation-unavailable");
     }
     try {
-      await page.unroute(estimateRoute);
-    } catch (error) {
-      cleanupFailures.push(error);
-    }
-    if (cleanupFailures.length) {
-      testInfo.annotations.push({
-        type: "estimate-route-cleanup-error",
-        description: cleanupFailures
-          .map((error) =>
-            error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-          )
-          .join("\n"),
+      const output = testInfo.outputPath("joint-restore-phase-observation.json");
+      writeJointRestorePhaseObservation(output, {
+        format: "joint-restore-phase-v1",
+        workspaceId: fixture.workspaceId,
+        taskId: goal.taskId,
+        actorId: fixture.actor.userId,
+        pausedRunId: paused.run?.id ?? null,
+        sourceRevisionId: source.id,
+        sourceBodySha256: createHash("sha256").update(JSON.stringify(sourceBody)).digest("hex"),
+        scenario: phasePrimaryFailed ? "failed" : "completed",
+        states: phaseStates,
+        network: phaseNetwork,
+        storedRestoresAfterScenarioCleanup: storedRestores,
+        observationErrors: phaseErrors,
       });
+      await testInfo.attach("joint-restore-phase-observation", {
+        path: output,
+        contentType: "application/json",
+      });
+    } catch {
+      phaseErrors.push("phase-file-or-attachment-unavailable");
+    }
+    if (phaseErrors.length) {
+      testInfo.annotations.push({
+        type: "joint-restore-observation-error",
+        description: phaseErrors.join(","),
+      });
+      // Preserve a genuine original failure; an observer failure also refuses
+      // a would-be successful case instead of silently losing the evidence.
+      if (!phasePrimaryFailed) throw new Error("joint restore phase observation incomplete");
     }
   }
-  if (primaryFailure) throw primaryFailure.error;
-  if (cleanupFailures.length)
-    throw new AggregateError(cleanupFailures, "held estimate route cleanup failed");
 });
