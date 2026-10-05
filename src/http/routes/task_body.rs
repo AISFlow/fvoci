@@ -35,7 +35,7 @@ use crate::collab::room::{BodyWriteError, RoomKey};
 use crate::collab::seed::{SeedEngine, SeedError};
 use crate::db::revisions::{authorize_revision_target, RevisionDbError, RevisionTarget};
 use crate::db::task_origins::{
-    create_document_task, get_task_origin,
+    create_document_task_backend as create_document_task, get_task_origin,
     list_document_task_origins_backend as list_document_task_origins, origin_request_hash,
     task_projects_backend as task_projects, DocumentTaskRequest, TaskOriginDbError,
     TASK_ORIGIN_ANCHOR_MAX_CHARS,
@@ -399,12 +399,7 @@ async fn create_task_from_document(
     );
     let ip = peer_ip(peer.ip());
     let outcome = create_document_task(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/task_body.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         auth.user_id,
         auth.credential_id,
