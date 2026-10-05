@@ -98,6 +98,13 @@ pub enum Request {
         #[serde(default = "encoding_v1")]
         encoding: u8,
     },
+    /// New-document copy only: canonical fresh Doc seed with new configured
+    /// block ids. Resource references and the session Doc remain untouched.
+    SeedIndependentFromTiptap {
+        content_json: String,
+        #[serde(default = "encoding_v1")]
+        encoding: u8,
+    },
 }
 
 fn encoding_v1() -> u8 {
@@ -115,7 +122,8 @@ impl Request {
             | Self::RestoreFromSnapshot { encoding, .. }
             | Self::ArchiveRestoreFromSnapshot { encoding, .. }
             | Self::ReplaceFromUpdate { encoding, .. }
-            | Self::SeedFromTiptap { encoding, .. } => *encoding,
+            | Self::SeedFromTiptap { encoding, .. }
+            | Self::SeedIndependentFromTiptap { encoding, .. } => *encoding,
             Self::Ping
             | Self::Snapshot
             | Self::Inspect
@@ -144,7 +152,8 @@ impl Request {
             Self::RestoreFromSnapshot { snap_b64, .. }
             | Self::ArchiveRestoreFromSnapshot { snap_b64, .. } => snap_b64.len() as u64,
             Self::ReplaceFromUpdate { update_b64, .. } => update_b64.len() as u64,
-            Self::SeedFromTiptap { content_json, .. } => content_json.len() as u64,
+            Self::SeedFromTiptap { content_json, .. }
+            | Self::SeedIndependentFromTiptap { content_json, .. } => content_json.len() as u64,
             Self::Load {
                 snapshot_b64,
                 tail_b64,
@@ -342,4 +351,49 @@ pub fn preflight_wire_json(v: &Value, limits: &Limits) -> Result<(), EngineStatu
 
 fn cap_b64_field(name: &str, s: &str, limits: &Limits) -> Result<(), EngineStatus> {
     cap_blob(name, b64::decoded_len_estimate(s.len()), limits)
+}
+
+#[cfg(test)]
+mod independent_seed_tests {
+    use super::*;
+
+    #[test]
+    fn additive_independent_wire_preserves_legacy_and_preflight_caps() {
+        let legacy = Request::SeedFromTiptap {
+            content_json: "{}".into(),
+            encoding: 1,
+        };
+        assert_eq!(
+            serde_json::to_value(&legacy).expect("legacy wire"),
+            serde_json::json!({"op":"seed_from_tiptap","content_json":"{}","encoding":1})
+        );
+        let independent: Request = serde_json::from_value(serde_json::json!({
+            "op":"seed_independent_from_tiptap","content_json":"{}"
+        }))
+        .expect("additive wire default encoding");
+        assert!(matches!(
+            &independent,
+            Request::SeedIndependentFromTiptap { encoding: 1, .. }
+        ));
+        assert_eq!(independent.payload_bytes(), 2);
+        assert!(independent.preflight(&Limits::for_tests()).is_ok());
+        let tiny = Limits {
+            max_input_bytes: 1,
+            ..Limits::for_tests()
+        };
+        assert!(matches!(
+            independent.preflight(&tiny),
+            Err(EngineStatus::ResourceLimit {
+                kind: LimitKind::Input,
+                ..
+            })
+        ));
+        assert!(matches!(
+            legacy.preflight(&tiny),
+            Err(EngineStatus::ResourceLimit {
+                kind: LimitKind::Input,
+                ..
+            })
+        ));
+    }
 }
