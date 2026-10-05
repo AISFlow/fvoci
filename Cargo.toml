@@ -360,3 +360,5 @@ opt-level = 3
 # ships the fix.
 [patch.crates-io]
 markdown = { path = "vendor/markdown" }
+# Borrowed typed Hrana code accessor; exact upstream delta is documented in PATCHES.md.
+libsql = { path = "vendor/libsql-0.9.30" }

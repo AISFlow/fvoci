@@ -1,0 +1,632 @@
+[
+  {
+    "path": ".cargo_vcs_info.json",
+    "bytes": 100,
+    "mode": "0o644",
+    "sha256": "0609006a343097dbf5733530da7286dba721ecd04bc60abc90f71787f1ed0c4b",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "Cargo.lock",
+    "bytes": 71572,
+    "mode": "0o644",
+    "sha256": "abd8ff2eb49aa8fef770d10d0474e7697606dd79c11e62fa7c30f0229911d853",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "Cargo.toml",
+    "bytes": 6531,
+    "mode": "0o644",
+    "sha256": "b0683d9aaf97908397aab8db6292cf72cdb740246ef2009bc387efb6025df7fc",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "Cargo.toml.orig",
+    "bytes": 4171,
+    "mode": "0o644",
+    "sha256": "c9393a164fcad65cd57cc961d734e92f4b3b0c47df5b3a55aff95d14184bbe1a",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "DEVELOPING.md",
+    "bytes": 418,
+    "mode": "0o644",
+    "sha256": "c2254784d244e3def241668dd2a0423d552d6e14cad5b8ff3a89926f6aa4b1fc",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "README.md",
+    "bytes": 794,
+    "mode": "0o644",
+    "sha256": "e5ca11f6504282ed3473a6de6a85e02556390d1f27dda427a2279791b7752a71",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "assets/test/snapshot.snap",
+    "bytes": 8288,
+    "mode": "0o644",
+    "sha256": "38a7a4f42b2da722093324657491246e04946ea24635a37483a1543561f392a7",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "benches/benchmark.rs",
+    "bytes": 7713,
+    "mode": "0o644",
+    "sha256": "985e2a4e3693910adfeb205e3c0844f7b53b0053d0c38103934805dec7b9df75",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "examples/deserialization.rs",
+    "bytes": 1408,
+    "mode": "0o644",
+    "sha256": "2e8e417a285e470b6f51e6e99086c2cf19d22892df0cba6dd3dd189f56a9cc7c",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "examples/encryption_local.rs",
+    "bytes": 2383,
+    "mode": "0o644",
+    "sha256": "803f7ffdfe1abe86b86cabd363e78d9b4c585aac4ca5cdc9c5e21e98b85a7f60",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "examples/encryption_remote.rs",
+    "bytes": 2432,
+    "mode": "0o644",
+    "sha256": "2ce4fb560836ea483773bbf75853c7cd30690493f4d0aba7852c4256504951eb",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "examples/encryption_sync.rs",
+    "bytes": 2582,
+    "mode": "0o644",
+    "sha256": "66b6f68f4b443bd6d03ea9326e7900203f7b985b93fc9af35141a9df2c78a6c2",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "examples/example.rs",
+    "bytes": 1128,
+    "mode": "0o644",
+    "sha256": "c8de90e50bf4600581066edd38a9f4ea065db72f1bff8b799089177ea5a55f08",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "examples/example_v2.rs",
+    "bytes": 1137,
+    "mode": "0o644",
+    "sha256": "a04eb0f5cf384f02d63f80de47c828d8e9a042cfc5f77eb3bb3085c645c625f6",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "examples/flutter.rs",
+    "bytes": 1381,
+    "mode": "0o644",
+    "sha256": "71bd46ae7ee58bac6bd39ab0e501ced21c47d9a1abec2c89a14359e182d77e41",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "examples/local_sync.rs",
+    "bytes": 2029,
+    "mode": "0o644",
+    "sha256": "605d20d6d83f246316fdab781ed9099e6d40a2402c0697717973cca153b0480f",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "examples/offline_writes.rs",
+    "bytes": 2334,
+    "mode": "0o644",
+    "sha256": "9424ebade6a39ee06e0d745050cfd26f8015c0c5ca97e9f211ca8fd496cbc7ff",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "examples/remote_sync.rs",
+    "bytes": 2487,
+    "mode": "0o644",
+    "sha256": "fafee133325653d2881607ecd2ac5d50c665d6b7d4206f305d76957be33faa02",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "examples/replica.rs",
+    "bytes": 2672,
+    "mode": "0o644",
+    "sha256": "73b31e67424b41b9c0b6a7801890d5fa4edb2b8d280cc3007054aab4c4a4c795",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "examples/transaction.rs",
+    "bytes": 1049,
+    "mode": "0o644",
+    "sha256": "0a7935c05dcba154bfd7d46dbb6ae6e4d9af3e47323243770199a13266044cf3",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/auth.rs",
+    "bytes": 7995,
+    "mode": "0o644",
+    "sha256": "026f437413552ae2f2d6bd696f9e6a918330858d83a159398b544387e220f993",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/connection.rs",
+    "bytes": 10236,
+    "mode": "0o644",
+    "sha256": "c0d2521854ebb97c216871fd07d4faddc71175a5403ecfd84acdd8aa6eda8ec8",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/database/builder.rs",
+    "bytes": 32959,
+    "mode": "0o644",
+    "sha256": "016bef9b25c66bafbc51c28751d402f2e477d224a8fb34a2ea68ac1cc2e8b899",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/database.rs",
+    "bytes": 29624,
+    "mode": "0o644",
+    "sha256": "4491e0e52b1d0e88662d633075d9a60f7144c7a2cb52c5b4f3df10a6d488a26b",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/de.rs",
+    "bytes": 2641,
+    "mode": "0o644",
+    "sha256": "3d00cc32cf9f628ada837692e7e48db16ad46eae35dcf9514c06039e5de48105",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/errors.rs",
+    "bytes": 4114,
+    "mode": "0o644",
+    "sha256": "28c6eb8dbadffee82de46951968e149b96e027e4c69da4f07b2b7ecc10463734",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/hrana/connection.rs",
+    "bytes": 2661,
+    "mode": "0o644",
+    "sha256": "db953e57433cc884751eb323172c83fc8f64b650cbc0c91610d53a789fa8b148",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/hrana/cursor.rs",
+    "bytes": 15011,
+    "mode": "0o644",
+    "sha256": "29d98cd8453145320aacad732654e44f7befedafc922285b0a83f354ac9c7080",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/hrana/hyper.rs",
+    "bytes": 14619,
+    "mode": "0o644",
+    "sha256": "ab62495e9458fe3d44cb23424fc2fae7b5dcc6ccc7d2e20e6c1625ae2a45f560",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/hrana/mod.rs",
+    "bytes": 14017,
+    "mode": "0o644",
+    "sha256": "8d699af8a1c153ad7c38c5aff81b8b7dc182d3b5a1b85db3084f60c1546ee761",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/hrana/stream.rs",
+    "bytes": 18725,
+    "mode": "0o644",
+    "sha256": "34532ac2bd7861588aa34ff1172f8682060c9ee9980c66f6ce46b3aa99bab208",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/hrana/transaction.rs",
+    "bytes": 2410,
+    "mode": "0o644",
+    "sha256": "f60f6de73492192cafd68955cd22d9da9616f76692af92871d73c9c1ddc8dedb",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/lib.rs",
+    "bytes": 6030,
+    "mode": "0o644",
+    "sha256": "85acb61fc42aa9860fae2109f17c23595b89e8ae0fcfda39b41aea853eb5f3c5",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/load_extension_guard.rs",
+    "bytes": 679,
+    "mode": "0o644",
+    "sha256": "c3a3f4d1256d439480a19743e17a55f841462da7766c7cfceb0782304738ad3a",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/local/connection.rs",
+    "bytes": 29494,
+    "mode": "0o644",
+    "sha256": "4b355fd4cd916e15cc0ffef028034eb22d041c63140acb9f4191ba2cd034f401",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/local/database.rs",
+    "bytes": 16318,
+    "mode": "0o644",
+    "sha256": "ee25b813ad6f4ec3b155733f1ad77fd17d4ca243231bc08318f37af64493d381",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/local/impls.rs",
+    "bytes": 5923,
+    "mode": "0o644",
+    "sha256": "7c1b29ebfae1eeb8d77860aa6cff19e76427a60d6a726b84fb4ee45b249e5a61",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/local/mod.rs",
+    "bytes": 852,
+    "mode": "0o644",
+    "sha256": "58fa1c2defca31e2fee4fea0dcd39ad449b175c77d1d82a54f7857386505c90f",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/local/rows.rs",
+    "bytes": 10643,
+    "mode": "0o644",
+    "sha256": "bd66fc7fc496a23f9be1d66c99a30a413fbcfe23cf3f201c455238088c38db06",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/local/statement.rs",
+    "bytes": 11959,
+    "mode": "0o644",
+    "sha256": "8ae4311682d291869310f5d273662b4a368c55ee0fa57241882b5eb6ed38059e",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/local/transaction.rs",
+    "bytes": 2385,
+    "mode": "0o644",
+    "sha256": "f28a07aac6d0e1e1b8da097cb00e1fbb4afbb76376705a97e6ea28ee26168f75",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/macros.rs",
+    "bytes": 2563,
+    "mode": "0o644",
+    "sha256": "c3c1ee580aa276e95c22c43272f6e0032721d146b1dea912898d60209b22fdb1",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/params.rs",
+    "bytes": 12122,
+    "mode": "0o644",
+    "sha256": "f1ff5ead2894daf6cc0687f0400902003cb1d9f6abb7a58f62348807f3eeb3c3",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/parser.rs",
+    "bytes": 10378,
+    "mode": "0o644",
+    "sha256": "5997dfbe0bd72f23b116ac946909ddef072da8e082660871d129c88a7266e1fe",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/replication/client.rs",
+    "bytes": 6756,
+    "mode": "0o644",
+    "sha256": "f4465e648652dd2a944911b62ee2b133a61f8859451d7c2a5f7f5dc2ecae2d9a",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/replication/connection.rs",
+    "bytes": 31236,
+    "mode": "0o644",
+    "sha256": "31ea981759195b485e839935fae3b77ca7f614f8844147f709eac5f9826711ec",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/replication/local_client.rs",
+    "bytes": 4297,
+    "mode": "0o644",
+    "sha256": "2d8049d90080e7c4b8b530ed26d66ffaa4bb8ff69269a2d90aefd4badd526538",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/replication/mod.rs",
+    "bytes": 13564,
+    "mode": "0o644",
+    "sha256": "3584e827dafe507e0e0378ff71b40fbc0ca9c3731d1708f8861c12eb63b3a892",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/replication/remote_client.rs",
+    "bytes": 14423,
+    "mode": "0o644",
+    "sha256": "9a3856aba43bb322d8089f4565ecd640505d4d2e2305ee358de16198215405bb",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/rows.rs",
+    "bytes": 8036,
+    "mode": "0o644",
+    "sha256": "e2ad56df832e758a5b33038bbadf841a64c39e08474e8ffd266bed09d068ab2b",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/statement.rs",
+    "bytes": 3278,
+    "mode": "0o644",
+    "sha256": "5d5e5cabf6e3e1f6cfabbc6c7c302513f0f54120b2e6b3f78abcb38c3c54db51",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/sync/connection.rs",
+    "bytes": 6087,
+    "mode": "0o644",
+    "sha256": "2546875e4b3bba225c90213ac788ed2a7758d3cd3fbd1a76e0bb7d5e3150a050",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/sync/statement.rs",
+    "bytes": 1863,
+    "mode": "0o644",
+    "sha256": "38a4a06add41e15fb14639186152e6da2124cbf240dbffe2cf18d3b729d58bba",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/sync/test.rs",
+    "bytes": 19684,
+    "mode": "0o644",
+    "sha256": "82383737f91fe6e3492476625217aa028b9097fe0a9a6b56d993b92a932e28d7",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/sync/transaction.rs",
+    "bytes": 1074,
+    "mode": "0o644",
+    "sha256": "d34544e189dfc826b92b1866d7ecab7f09083dcb27be018da9c09b06ca565127",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/sync.rs",
+    "bytes": 37489,
+    "mode": "0o644",
+    "sha256": "539bec9e312891a68baf2638f0a3c8cf6a0cb7ce64180c2e0511d31b0b2a4e23",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/transaction.rs",
+    "bytes": 1309,
+    "mode": "0o644",
+    "sha256": "0c3ca190ab41e55e84a7f7b575d9bcc03d9ad39e0c04ac65e8765394728e27c3",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/util/box_clone_service.rs",
+    "bytes": 2274,
+    "mode": "0o644",
+    "sha256": "1c87d5e3829ed5141e9fe9a397aca5d28a797a03fda82130f4424a6b01ff3330",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/util/http.rs",
+    "bytes": 761,
+    "mode": "0o644",
+    "sha256": "5861d0a8d21e44e186a6d68e39dbc641130a99f908a626f995e306aae278a42f",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/util/mod.rs",
+    "bytes": 488,
+    "mode": "0o644",
+    "sha256": "178d58915350eac757e2f4c1d27a152c273beba717794ca79d00ca73c7333bfa",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/value.rs",
+    "bytes": 23303,
+    "mode": "0o644",
+    "sha256": "543fd48e33287eb87592b7b70c829dbdb9acbc9ebd65e9522458734cfa07c1cd",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/wasm/cloudflare.rs",
+    "bytes": 3095,
+    "mode": "0o644",
+    "sha256": "ec1a922df442269fefd5f7da1145b433589488f8bf3acf9b6c68e5c73fe5473d",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/wasm/mod.rs",
+    "bytes": 6012,
+    "mode": "0o644",
+    "sha256": "1dc8b00c266dfe0737fa2e132741693e36d25d17ca74d8ea6e3a742784f3211b",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "src/wasm/rows.rs",
+    "bytes": 1545,
+    "mode": "0o644",
+    "sha256": "234022b2c669048701caa22252c9fecf792a78c612f7217e64ea54ceadd73987",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "tests/encryption.rs",
+    "bytes": 1795,
+    "mode": "0o644",
+    "sha256": "d9a0727ba117580b4bcbe794ba7281432249dc9c9595b42176c202b40eff9c49",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "tests/integration_tests.rs",
+    "bytes": 25506,
+    "mode": "0o644",
+    "sha256": "07760cd9a9298114c28fce5129c71edf1f9d3a6724b4f1361deb4976ec886c06",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "tests/replication.rs",
+    "bytes": 4568,
+    "mode": "0o644",
+    "sha256": "3476776af2d4e02d69101e35324205f864fdc0793912371df62b6c801e108ffd",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "tests/template.db",
+    "bytes": 8192,
+    "mode": "0o644",
+    "sha256": "00d4b935fa63507872b5f7973e423ca830effe2bddcd350555b53937135920b8",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "tests/template.db-wal",
+    "bytes": 0,
+    "mode": "0o644",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  },
+  {
+    "path": "tests/test.db",
+    "bytes": 12288,
+    "mode": "0o644",
+    "sha256": "286f27ba3ba35005c54d44747cb79f9cb9d19956d51479a01641190e5619b6e8",
+    "cachedSourceEqual": true,
+    "originalExtractedMode": "0o644",
+    "cacheMode": "0o644"
+  }
+]

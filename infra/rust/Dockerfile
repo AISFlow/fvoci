@@ -35,6 +35,8 @@ COPY crates/document-extract ./crates/document-extract
 COPY crates/document-extract-client ./crates/document-extract-client
 # markdown-rs with one local fix, wired by `[patch.crates-io]` (vendor/markdown/PATCHES.md).
 COPY vendor/markdown ./vendor/markdown
+# Same-version libsql typed Hrana accessor; retained upstream source and local provenance.
+COPY vendor/libsql-0.9.30 ./vendor/libsql-0.9.30
 
 FROM rust-sources AS rust-deps
 RUN cargo fetch --locked \
@@ -102,6 +104,7 @@ WORKDIR /opt/fvoci
 COPY --from=rust-build --chown=root:root /src/target/release/fvoci-server /src/target/release/fvoci-migrate ./bin/
 COPY --from=rust-build --chown=root:root /src/target/release/collab-engine ./bin/
 COPY --from=rust-build --chown=root:root /src/crates/vendor/yrs-0.28.0/LICENSE ./share/licenses/yrs-0.28.0/
+COPY --from=rust-build --chown=root:root /src/vendor/libsql-0.9.30/LICENSE.md ./share/licenses/libsql-0.9.30/
 COPY --from=rust-build --chown=root:root /src/target/release/document-extract ./bin/
 # PDF export fonts (SIL OFL 1.1), read by the export child at run time (FVOCI_EXPORT_FONT_DIR).
 COPY --chown=root:root packages/editor/src/fonts/*.ttf ./share/fonts/

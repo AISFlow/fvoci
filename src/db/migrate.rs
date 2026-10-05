@@ -1152,6 +1152,254 @@ pub(crate) async fn initialize_family_backend_for_test(
     apply_sqlite_migrations(backend, None).await
 }
 
+/// Receipts and structural digest of the SQLite-family ledger as read on a
+/// consumer's own writer stream (see `turso_test_schema_in_writer`).
+#[cfg(all(test, feature = "db-tests"))]
+#[allow(dead_code)] // consumed only by the ON migration-phase consumer in db::turso_test
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TursoTestSchemaSnapshot {
+    /// `(version, lineage, sql_sha256, applied_at)` rows in version order; the
+    /// stored `applied_at` microseconds are validated as an instant but returned
+    /// raw, never renormalized.
+    pub receipts: Vec<(i64, String, String, i64)>,
+    /// Same digest `assert_sqlite_schema_current` reports for a complete
+    /// lineage; for a prefix it covers exactly the first `expected_steps`.
+    pub schema_sha256: String,
+}
+
+/// The verified manual Turso job supplies exactly these values for the
+/// mutating migration phase. They are consumer-test guards only; the product
+/// never reads them and no credential or database identity is read here.
+#[cfg(all(test, feature = "db-tests"))]
+#[allow(dead_code)] // consumed only by the ON migration-phase consumer in db::turso_test
+const TURSO_TEST_MIGRATION_FLAGS: [(&str, &str); 4] = [
+    ("FVOCI_TEST_TURSO_MIGRATION_SELECTED", "1"),
+    ("FVOCI_TEST_TURSO_PHASE", "migration"),
+    ("FVOCI_TEST_TURSO_DESTRUCTIVE", "true"),
+    ("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "true"),
+];
+
+/// The one flag-value check both helpers share. `lookup` is the process
+/// environment in the helpers; the pure negative proof below passes a map so
+/// no test mutates the process environment.
+#[cfg(all(test, feature = "db-tests"))]
+fn turso_test_require_migration_flags(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<(), sqlx::Error> {
+    for (name, expected) in TURSO_TEST_MIGRATION_FLAGS {
+        if lookup(name).as_deref() != Some(expected) {
+            return Err(schema_error(format!(
+                "turso test helper refused: {name} must be exactly {expected:?} for the mutating migration phase"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+fn turso_test_process_flag(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+/// Applies the first `through` compiled SQLite-family steps to the explicit
+/// remote test database, then validates exactly that prefix.
+///
+/// `through` is `0` (blank: nothing applied, ledger absent), `11` (the prefix
+/// the consumer resumes from) or `compiled_sqlite_steps().len()` (current).
+/// Every guard runs before any effect: the backend must be `LibsqlRemote` and
+/// the four job flags must be present with their exact values. Each step is
+/// applied by the maintained `apply_sqlite_migration_step`, which owns its own
+/// reserved stream (begin/DDL/receipt/commit or rollback) exactly as a product
+/// installation does; a step already recorded is left untouched. The closing
+/// validation reads the ledger on an own read stream and compares the actual
+/// catalog with a reference built from the same `through` steps: for a prefix
+/// this is deliberately the partial structure of those steps and is never
+/// reported as a complete lineage, which only `verify_sqlite_applied(.., true)`
+/// (the product gate) asserts.
+#[cfg(all(test, feature = "db-tests"))]
+#[allow(dead_code)] // consumed only by the ON migration-phase consumer in db::turso_test
+pub(crate) async fn turso_test_apply_prefix(
+    backend: &super::backend::Backend,
+    through: usize,
+) -> Result<(), sqlx::Error> {
+    use super::backend::DbTransaction;
+    if !matches!(backend, super::backend::Backend::LibsqlRemote(_)) {
+        return Err(schema_error(
+            "turso test helper requires the explicit remote libSQL backend",
+        ));
+    }
+    turso_test_require_migration_flags(turso_test_process_flag)?;
+    let compiled = compiled_sqlite_steps();
+    if through > compiled.len() {
+        return Err(schema_error(format!(
+            "turso test prefix {through} exceeds the compiled lineage of {} steps",
+            compiled.len()
+        )));
+    }
+    for step in compiled.iter().take(through) {
+        apply_sqlite_migration_step(backend, step, None).await?;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let DbTransaction::SqliteFamily(family) = &mut tx else {
+            return Err(schema_error(
+                "turso test prefix validation requires an actual SQLite-family handle",
+            ));
+        };
+        let applied = sqlite_applied(family).await?;
+        verify_sqlite_applied(&applied, through == compiled.len())?;
+        if applied.len() != through {
+            return Err(schema_error(format!(
+                "turso test prefix expected {through} receipts, found {}",
+                applied.len()
+            )));
+        }
+        verify_sqlite_objects(family, through).await.map(|_| ())
+    }
+    .await;
+    match result {
+        Ok(()) => tx.rollback().await,
+        Err(error) => Err(sqlite_validation_error_after_rollback(
+            error,
+            tx.rollback().await,
+        )),
+    }
+}
+
+/// Reads the ledger receipts and the structural digest on the consumer's own
+/// already reserved writer stream. Nothing here begins, commits, rolls back or
+/// detaches that stream: the consumer that owns the original request keeps the
+/// finish (and any rollback after its own FK failure) and the readback.
+///
+/// Guards run before the first query: the stream must be remote, the four
+/// manual-phase flags must be present with their exact values, and the stream
+/// must hold the writer reservation.
+///
+/// `expected_steps` is the number of receipts the stream must see (`0` blank,
+/// `11` prefix, `compiled_sqlite_steps().len()` current). The receipts are
+/// verified against the compiled lineage; completeness is asserted only when
+/// `expected_steps` is the whole lineage, and the digest covers exactly the
+/// first `expected_steps` steps, so a prefix digest is a prefix fact, never a
+/// current-schema claim.
+#[cfg(all(test, feature = "db-tests"))]
+#[allow(dead_code)] // consumed only by the ON migration-phase consumer in db::turso_test
+pub(crate) async fn turso_test_schema_in_writer(
+    family: &mut super::backend::FamilyTx,
+    expected_steps: usize,
+) -> Result<TursoTestSchemaSnapshot, sqlx::Error> {
+    if !matches!(family, super::backend::FamilyTx::Remote(_)) {
+        return Err(schema_error(
+            "turso test writer snapshot requires the explicit remote libSQL stream",
+        ));
+    }
+    // Same manual-phase flags as the prefix helper, checked before any query
+    // on the borrowed stream (which is neither begun nor finished here).
+    turso_test_require_migration_flags(turso_test_process_flag)?;
+    family.require_writer()?;
+    let compiled = compiled_sqlite_steps();
+    if expected_steps > compiled.len() {
+        return Err(schema_error(format!(
+            "turso test snapshot expects {expected_steps} steps beyond the compiled lineage of {}",
+            compiled.len()
+        )));
+    }
+    let exists = family
+        .query(
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='schema_migrations'",
+            &[],
+        )
+        .await?;
+    let receipts: Vec<(i64, String, String, i64)> = if exists[0].cell(0)?.integer()? == 0 {
+        Vec::new()
+    } else {
+        family
+            .query(
+                "SELECT version,lineage,sql_sha256,applied_at FROM schema_migrations ORDER BY version",
+                &[],
+            )
+            .await?
+            .iter()
+            .map(|row| {
+                let applied_at = row.cell(3)?;
+                // Validate the stored instant exactly as the product does, but
+                // return the raw microseconds the engine stored.
+                applied_at.datetime()?;
+                Ok((
+                    row.cell(0)?.integer()?,
+                    row.cell(1)?.string()?,
+                    row.cell(2)?.string()?,
+                    applied_at.integer()?,
+                ))
+            })
+            .collect::<Result<_, sqlx::Error>>()?
+    };
+    let applied: Vec<SqliteApplied> = receipts
+        .iter()
+        .map(|(version, lineage, digest, _)| (*version, lineage.clone(), digest.clone()))
+        .collect();
+    verify_sqlite_applied(&applied, expected_steps == compiled.len())?;
+    if applied.len() != expected_steps {
+        return Err(schema_error(format!(
+            "turso test snapshot expected {expected_steps} receipts, found {}",
+            applied.len()
+        )));
+    }
+    let schema_sha256 = verify_sqlite_objects(family, expected_steps).await?;
+    Ok(TursoTestSchemaSnapshot {
+        receipts,
+        schema_sha256,
+    })
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod turso_test_helper_guards {
+    use super::{turso_test_require_migration_flags, TURSO_TEST_MIGRATION_FLAGS};
+    use std::collections::BTreeMap;
+
+    fn lookup(map: &BTreeMap<&'static str, &'static str>) -> impl Fn(&str) -> Option<String> + '_ {
+        move |name| map.get(name).map(|value| value.to_string())
+    }
+
+    #[test]
+    fn exact_four_manual_phase_flags_are_required_before_any_query() {
+        let complete: BTreeMap<_, _> = TURSO_TEST_MIGRATION_FLAGS.into_iter().collect();
+        assert_eq!(complete.len(), 4);
+        turso_test_require_migration_flags(lookup(&complete)).unwrap();
+        // Absent flag, wrong phase, connection-phase values and a true-looking
+        // but inexact spelling are each refused by name, with no data access.
+        for (name, value) in [
+            ("FVOCI_TEST_TURSO_MIGRATION_SELECTED", None),
+            ("FVOCI_TEST_TURSO_PHASE", Some("connection")),
+            ("FVOCI_TEST_TURSO_DESTRUCTIVE", Some("false")),
+            ("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", Some("True")),
+            ("FVOCI_TEST_TURSO_MIGRATION_SELECTED", Some("1 ")),
+        ] {
+            let mut map = complete.clone();
+            match value {
+                Some(value) => {
+                    map.insert(name, value);
+                }
+                None => {
+                    map.remove(name);
+                }
+            }
+            let error = turso_test_require_migration_flags(lookup(&map))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(name), "{name} {value:?}: {error}");
+            assert!(error.contains("mutating migration phase"), "{error}");
+        }
+        let empty = BTreeMap::new();
+        let error = turso_test_require_migration_flags(lookup(&empty))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("FVOCI_TEST_TURSO_MIGRATION_SELECTED"),
+            "{error}"
+        );
+    }
+}
+
 async fn apply_sqlite_migrations(
     backend: &super::backend::Backend,
     cancel: Option<&tokio_util::sync::CancellationToken>,
