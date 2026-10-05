@@ -2869,7 +2869,7 @@ mod selected_tests {
         }
         async fn new_with_setup_failure(
             inject_setup_failure: bool,
-        ) -> Result<Self, SdkSetupFailure> {
+        ) -> Result<Self, Box<SdkSetupFailure>> {
             use futures_util::FutureExt;
             let sqld = PathBuf::from(
                 std::env::var_os("FVOCI_TEST_SQLD")
@@ -2882,14 +2882,14 @@ mod selected_tests {
             let database = match driver.database().await {
                 Ok(database) => database,
                 Err(error) => {
-                    return Err(SdkSetupFailure {
+                    return Err(Box::new(SdkSetupFailure {
                         primary: Box::new(format!("actual SDK builder failed: {error}")),
                         cleanup: SdkCleanup {
                             close: Ok(()),
                             recovery_close: Ok(()),
                             receipt: driver.finish().await,
                         },
-                    });
+                    }));
                 }
             };
             let backend = Backend::LibsqlRemote(std::sync::Arc::new(
@@ -2920,14 +2920,14 @@ mod selected_tests {
             if let Err(panic) = setup {
                 let close = backend.close().await;
                 let receipt = driver.finish().await;
-                return Err(SdkSetupFailure {
+                return Err(Box::new(SdkSetupFailure {
                     primary: panic,
                     cleanup: SdkCleanup {
                         close,
                         recovery_close: Ok(()),
                         receipt,
                     },
-                });
+                }));
             }
             Ok(Self {
                 driver,
