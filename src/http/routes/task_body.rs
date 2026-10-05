@@ -33,14 +33,17 @@ use crate::auth::scopes::{grants_api_token_scope, ApiTokenScope};
 use crate::collab::derived_body::{prepare_derived_body, DerivedBodyError};
 use crate::collab::room::{BodyWriteError, RoomKey};
 use crate::collab::seed::{SeedEngine, SeedError};
-use crate::db::revisions::{authorize_revision_target, RevisionDbError, RevisionTarget};
+use crate::db::revisions::{
+    authorize_revision_target_backend as authorize_revision_target, RevisionDbError, RevisionTarget,
+};
 use crate::db::task_origins::{
-    create_document_task_backend as create_document_task, get_task_origin,
+    create_document_task_backend as create_document_task,
+    get_task_origin_backend as get_task_origin,
     list_document_task_origins_backend as list_document_task_origins, origin_request_hash,
     task_projects_backend as task_projects, DocumentTaskRequest, TaskOriginDbError,
     TASK_ORIGIN_ANCHOR_MAX_CHARS,
 };
-use crate::db::tasks::{get_task, CreateTaskInput};
+use crate::db::tasks::{get_task_backend as get_task, CreateTaskInput};
 use crate::documents::blocks::{replace_node_by_id, BlockNode};
 use crate::error::{AppError, ProblemCode};
 use crate::http::authz::{require_request_auth, Access, RequestAuth};
@@ -248,12 +251,7 @@ async fn patch_task_block(
     revision_write_limit(&state, auth.user_id).await?;
     // Trashed → 404, no edit → 404, archived task/project → 409 (`assertTaskWritable`).
     authorize_revision_target(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/task_body.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -303,12 +301,7 @@ async fn patch_task_block(
         }
     }
     let task = get_task(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/task_body.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         task_id,
         auth.user_id,
@@ -563,12 +556,7 @@ async fn task_origin(
     .await?;
     require_extra_scope(&auth, ApiTokenScope::TasksRead)?;
     let page = get_task_origin(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/task_body.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -580,4 +568,585 @@ async fn task_origin(
     .map_err(internal)?
     .map_err(map_origin_error)?;
     Ok(Json(origin_response(page)))
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod selected_task_origin_http_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+    use crate::db::lookup::selected_lookup_tests::session;
+    use crate::db::tasks::selected_task_detail_tests::setup;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn state(f: &Fixture) -> AppState {
+        AppState {
+            auth:Arc::new(crate::auth::AuthService{db:crate::db::Db::from_backend(f.backend.clone()),password_keys:crate::auth::password::Keyring::parse(r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,"test").unwrap()}),
+            branding_name:"FVOCI".into(),public_origin:"http://localhost".into(),cookie_secure:false,rate_limiter:crate::http::rate_limit::RateLimiter::new(),storage:crate::attachments::ObjectStorage::local(f.root.join("task-origin-http-storage")),
+            upload:crate::attachments::UploadLimits{part_size_bytes:24,max_file_size_bytes:1024,create_rate_per_5min:20,part_put_slots:crate::attachments::PartPutSlots::new(2)},
+            collab:None,meili:None,search_embedder:None,markdown:None,import_wake:None,import_extractor_available:false,preview_extract:None,quota:Default::default(),mailer:Arc::new(crate::mail::Mailer::disabled()),streams:AppState::fresh_streams(),
+        }
+    }
+
+    async fn call(
+        app: Router,
+        method: &str,
+        path: &str,
+        cookie: Option<&str>,
+        bearer: Option<&str>,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        let mut request = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header("origin", "http://localhost");
+        if let Some(cookie) = cookie {
+            request = request.header("cookie", format!("fvoci_session={cookie}"));
+        }
+        if let Some(token) = bearer {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        let payload = if let Some(body) = body {
+            request = request.header("content-type", "application/json");
+            axum::body::Body::from(body.to_string())
+        } else {
+            axum::body::Body::empty()
+        };
+        let mut request = request.body(payload).unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+        let response = app.oneshot(request).await.unwrap();
+        let code = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        (code, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_task_origin_inverse_http_normal_create_replay_literal_scopes_current_denial()
+    {
+        let (f, credential, cookie, project, _) = setup().await;
+        let app = router().with_state(state(&f));
+        let create_path = format!(
+            "/api/v1/workspaces/{}/documents/{}/tasks",
+            f.workspace, f.document
+        );
+        let command = Uuid::now_v7();
+        let input = json!({"projectId":project,"requestId":command,"anchor":"http-origin-block","task":{"title":"HTTP 태스크 中 😀"}});
+        let (code, created) = call(
+            app.clone(),
+            "POST",
+            &create_path,
+            Some(&cookie),
+            None,
+            Some(input.clone()),
+        )
+        .await;
+        assert_eq!(code, StatusCode::CREATED, "{created}");
+        let task = Uuid::parse_str(created["taskId"].as_str().unwrap()).unwrap();
+        let (code, replay) = call(
+            app.clone(),
+            "POST",
+            &create_path,
+            Some(&cookie),
+            None,
+            Some(input.clone()),
+        )
+        .await;
+        assert_eq!(code, StatusCode::CREATED);
+        assert_eq!(replay, created);
+        let mut changed = input;
+        changed["task"]["title"] = json!("Changed");
+        let (code, problem) = call(
+            app.clone(),
+            "POST",
+            &create_path,
+            Some(&cookie),
+            None,
+            Some(changed),
+        )
+        .await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert_eq!(problem["code"], "document_version_mismatch");
+        let count:i64=sqlx::query_scalar("SELECT count(*) FROM task_origins WHERE workspace_id=?1 AND document_id=?2 AND request_id=?3").bind(f.workspace.as_bytes().as_slice()).bind(f.document.as_bytes().as_slice()).bind(command.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+        assert_eq!(count, 1);
+        let path = format!("/api/v1/workspaces/{}/tasks/{task}/origin", f.workspace);
+        let expected = json!({"count":1,"items":[{"taskId":task,"documentId":f.document,"taskDisplayId":"ORIGIN-3","documentDisplayId":"WIKI-1","taskTitle":"HTTP 태스크 中 😀","documentTitle":"S31","anchor":"http-origin-block"}],"nextCursor":null});
+        let (code, body) = call(app.clone(), "GET", &path, Some(&cookie), None, None).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, expected);
+        for suffix in ["?limit=0", "?limit=101", "?after=invalid", "?limit=bad"] {
+            let (code, _) = call(
+                app.clone(),
+                "GET",
+                &format!("{path}{suffix}"),
+                Some(&cookie),
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(code, StatusCode::BAD_REQUEST);
+        }
+        let (code, body) = call(
+            app.clone(),
+            "GET",
+            &format!("{path}?after={task}&limit=1"),
+            Some(&cookie),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, json!({"count":0,"items":[],"nextCursor":null}));
+        let mut capable = None;
+        for scopes in [
+            json!(["documents.read"]),
+            json!(["tasks.read"]),
+            json!(["documents.read", "tasks.read"]),
+        ] {
+            let token = crate::auth::token::new_token();
+            sqlx::query("INSERT INTO api_tokens(id,workspace_id,user_id,token_hash,name,scopes) VALUES(?1,?2,?3,?4,'Inverse',?5)").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(&token.hash).bind(scopes.to_string()).execute(&f.pool).await.unwrap();
+            let (code, body) =
+                call(app.clone(), "GET", &path, None, Some(&token.token), None).await;
+            if scopes.as_array().unwrap().len() == 2 {
+                assert_eq!(code, StatusCode::OK);
+                assert_eq!(body, expected);
+                capable = Some(token);
+            } else {
+                assert_eq!(code, StatusCode::NOT_FOUND);
+                assert_eq!(body["code"], "not_found");
+            }
+        }
+        let capable = capable.unwrap();
+        for cookie in [None, Some("stale")] {
+            let (code, body) = call(app.clone(), "GET", &path, cookie, None, None).await;
+            assert_eq!(code, StatusCode::UNAUTHORIZED);
+            assert_eq!(body["code"], "authentication_required");
+        }
+        let (code, _) = call(
+            app.clone(),
+            "GET",
+            &path,
+            Some("stale"),
+            Some(&capable.token),
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::UNAUTHORIZED);
+        let wrong = format!("/api/v1/workspaces/{}/tasks/{task}/origin", Uuid::now_v7());
+        assert_eq!(
+            call(app.clone(), "GET", &wrong, None, Some(&capable.token), None)
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        let other = Uuid::now_v7();
+        sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,?2,'Other')")
+            .bind(other.as_bytes().as_slice())
+            .bind(format!("{other}@example.test"))
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(other.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let (_, other_cookie) = session(&f, other).await;
+        assert_eq!(
+            call(app.clone(), "GET", &path, Some(&other_cookie), None, None)
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        sqlx::query("UPDATE memberships SET role='guest' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let (code, hidden) = call(app.clone(), "GET", &path, Some(&cookie), None, None).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(hidden, json!({"count":0,"items":[],"nextCursor":null}));
+        sqlx::query("UPDATE memberships SET role='owner' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            call(app.clone(), "GET", &path, Some(&cookie), None, None)
+                .await
+                .1,
+            expected
+        );
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            call(app, "GET", &path, Some(&cookie), None, None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        f.close().await;
+    }
+
+    async fn native_state(f: &Fixture) -> (AppState, Arc<crate::collab::CollabHub>) {
+        let config = crate::collab::config::CollabConfig::from_env()
+            .expect("root-qualified FVOCI_COLLAB_ENGINE required for actual native route oracle");
+        let hub = Arc::new(
+            crate::collab::CollabHub::new_backend(
+                config,
+                f.backend.clone(),
+                Some(crate::collab::config::FamilyRoomTimings::new(30_000, 5_000).unwrap()),
+            )
+            .unwrap(),
+        );
+        let mut state = state(f);
+        state.collab = Some(hub.clone());
+        (state, hub)
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_task_body_patch_native_literal_ids_scopes_archives_and_tail_conflict() {
+        let (f, credential, cookie, project, task) = setup().await;
+        let admission = crate::db::migrate::SqliteAdmission::server(&f.path).unwrap();
+        let (state, hub) = native_state(&f).await;
+        let app = router().with_state(state);
+        let key = RoomKey::task(f.workspace, task);
+        let original = json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":"b-1"},"content":[{"type":"text","text":"原 본문 中 😀"}]},{"type":"paragraph","attrs":{"id":"b-2"},"content":[{"type":"text","text":"둘째"}]}]});
+        let seed = SeedEngine::from_hub(&hub)
+            .tiptap_to_yjs_update(&original)
+            .await
+            .unwrap();
+        hub.replace_body(key, f.user, credential, seed, None)
+            .await
+            .unwrap();
+        let initial =
+            crate::db::tasks::get_task_backend(&f.backend, f.workspace, task, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(initial.content_json["content"][0]["attrs"]["id"], "b-1");
+        assert_eq!(
+            initial.content_json["content"][0]["content"][0]["text"],
+            "原 본문 中 😀"
+        );
+        let path = format!("/api/v1/workspaces/{}/tasks/{task}/blocks/b-2", f.workspace);
+        let patch = json!({"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"수정 中 😀"}]});
+        let (code, meta) = call(
+            app.clone(),
+            "PATCH",
+            &path,
+            Some(&cookie),
+            None,
+            Some(patch.clone()),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{meta}");
+        assert_eq!(meta["id"], task.to_string());
+        assert_eq!(meta["projectId"], project.to_string());
+        let fresh = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        let detail = crate::db::tasks::get_task_backend(
+            &crate::db::backend::Backend::Sqlite(fresh.clone()),
+            f.workspace,
+            task,
+            f.user,
+            credential,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            detail.content_json["content"][0],
+            initial.content_json["content"][0]
+        );
+        assert_eq!(detail.content_json["content"][1]["attrs"]["id"], "b-2");
+        assert_eq!(detail.content_json["content"][1]["type"], "heading");
+        assert_eq!(
+            detail.content_json["content"][1]["content"],
+            patch["content"]
+        );
+        let (code, problem) = call(
+            app.clone(),
+            "PATCH",
+            &path,
+            Some(&cookie),
+            None,
+            Some(json!({"type":"paragraph","attrs":{"id":"other"}})),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(problem["code"], "invalid_document_body");
+        let missing = format!(
+            "/api/v1/workspaces/{}/tasks/{task}/blocks/nope",
+            f.workspace
+        );
+        assert_eq!(
+            call(
+                app.clone(),
+                "PATCH",
+                &missing,
+                Some(&cookie),
+                None,
+                Some(patch.clone())
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        for (scopes, allowed) in [
+            (json!(["tasks.read"]), false),
+            (json!(["tasks.write"]), true),
+        ] {
+            let token = crate::auth::token::new_token();
+            sqlx::query("INSERT INTO api_tokens(id,workspace_id,user_id,token_hash,name,scopes) VALUES(?1,?2,?3,?4,'Patch',?5)").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(&token.hash).bind(scopes.to_string()).execute(&f.pool).await.unwrap();
+            let (code, body) = call(
+                app.clone(),
+                "PATCH",
+                &path,
+                None,
+                Some(&token.token),
+                Some(json!({"type":"paragraph","content":[{"type":"text","text":"PAT 中 😀"}]})),
+            )
+            .await;
+            assert_eq!(
+                code,
+                if allowed {
+                    StatusCode::OK
+                } else {
+                    StatusCode::NOT_FOUND
+                },
+                "{body}"
+            );
+        }
+        sqlx::query("UPDATE project_members SET role='viewer' WHERE workspace_id=?1 AND project_id=?2 AND user_id=?3")
+            .bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert_eq!(
+            call(
+                app.clone(),
+                "PATCH",
+                &path,
+                Some(&cookie),
+                None,
+                Some(patch.clone())
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        sqlx::query("UPDATE project_members SET role='lead' WHERE workspace_id=?1 AND project_id=?2 AND user_id=?3")
+            .bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        for (table, assignment, restore, expected) in [
+            (
+                "tasks",
+                "archived_at=1",
+                "archived_at=NULL",
+                "task_archived",
+            ),
+            (
+                "projects",
+                "status='archived'",
+                "status='active'",
+                "project_archived",
+            ),
+        ] {
+            let id = if table == "tasks" { task } else { project };
+            sqlx::query(&format!("UPDATE {table} SET {assignment} WHERE id=?1"))
+                .bind(id.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let (code, body) = call(
+                app.clone(),
+                "PATCH",
+                &path,
+                Some(&cookie),
+                None,
+                Some(patch.clone()),
+            )
+            .await;
+            assert_eq!(code, StatusCode::CONFLICT);
+            assert_eq!(body["code"], expected);
+            sqlx::query(&format!("UPDATE {table} SET {restore} WHERE id=?1"))
+                .bind(id.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+        }
+        let live = hub.project_live(key, f.user, credential).await.unwrap();
+        let seed = SeedEngine::from_hub(&hub)
+            .tiptap_to_yjs_update(&original)
+            .await
+            .unwrap();
+        assert!(matches!(
+            hub.replace_body(key, f.user, credential, seed, Some(live.tail_seq - 1))
+                .await,
+            Err(BodyWriteError::Conflict)
+        ));
+        assert!(hub.shutdown().await.is_clean());
+        fresh.close().await;
+        drop(admission);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_task_body_patch_native_current_revoke_after_projection_no_publish_then_healthy(
+    ) {
+        let (f, credential, cookie, project, task) = setup().await;
+        let admission = crate::db::migrate::SqliteAdmission::server(&f.path).unwrap();
+        let (state, hub) = native_state(&f).await;
+        let app = router().with_state(state);
+        let key = RoomKey::task(f.workspace, task);
+        let original = json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":"b-1"},"content":[{"type":"text","text":"原 中 😀"}]}]});
+        let seed = SeedEngine::from_hub(&hub)
+            .tiptap_to_yjs_update(&original)
+            .await
+            .unwrap();
+        hub.replace_body(key, f.user, credential, seed, None)
+            .await
+            .unwrap();
+        let before =
+            crate::db::tasks::get_task_backend(&f.backend, f.workspace, task, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap();
+        let history: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM task_updates WHERE workspace_id=?1 AND task_id=?2",
+        )
+        .bind(f.workspace.as_bytes().as_slice())
+        .bind(task.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        let path = format!("/api/v1/workspaces/{}/tasks/{task}/blocks/b-1", f.workspace);
+        let patch = json!({"type":"paragraph","content":[{"type":"text","text":"不应发布 中 😀"}]});
+        let (reached, proceed) = crate::collab::room::arm_native_consumer_barrier(
+            task,
+            crate::collab::room::NATIVE_PROJECT_FINAL_PROOF,
+        )
+        .await;
+        let pending = tokio::spawn({
+            let app = app.clone();
+            let path = path.clone();
+            let cookie = cookie.clone();
+            let patch = patch.clone();
+            async move { call(app, "PATCH", &path, Some(&cookie), None, Some(patch)).await }
+        });
+        tokio::time::timeout(hub.rpc_timeout(), reached)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut revoke = f.backend.begin_write().await.unwrap();
+        let crate::db::backend::OperationTx::SqliteFamily(writer) = revoke.operation() else {
+            unreachable!()
+        };
+        writer.execute("DELETE FROM project_members WHERE workspace_id=?1 AND project_id=?2 AND user_id=?3",&[crate::db::codec::Cell::uuid(f.workspace),crate::db::codec::Cell::uuid(project),crate::db::codec::Cell::uuid(f.user)]).await.unwrap();
+        revoke.commit().await.unwrap();
+        proceed.send(()).unwrap();
+        let (code, problem) = pending.await.unwrap();
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(problem["code"], "collab_unavailable");
+        let after: (String, i64) =
+            sqlx::query_as("SELECT content_json,version FROM tasks WHERE id=?1")
+                .bind(task.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&after.0).unwrap(),
+            before.content_json
+        );
+        assert_eq!(after.1, i64::from(before.meta.version));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM task_updates WHERE workspace_id=?1 AND task_id=?2"
+            )
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(task.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+            history
+        );
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let (code, meta) = call(
+            app.clone(),
+            "PATCH",
+            &path,
+            Some(&cookie),
+            None,
+            Some(patch),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{meta}");
+        assert_eq!(meta["id"], task.to_string());
+        let healthy =
+            crate::db::tasks::get_task_backend(&f.backend, f.workspace, task, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(healthy.content_json["content"][0]["attrs"]["id"], "b-1");
+        assert_eq!(
+            healthy.content_json["content"][0]["content"][0]["text"],
+            "不应发布 中 😀"
+        );
+        // Cancel a real route while its native projection is suspended. The
+        // actor may finish the read; cancellation must not publish the PATCH.
+        let live = hub.project_live(key, f.user, credential).await.unwrap();
+        let (reached, proceed) = crate::collab::room::arm_native_consumer_barrier(
+            task,
+            crate::collab::room::NATIVE_PROJECT_FINAL_PROOF,
+        )
+        .await;
+        let cancelled = tokio::spawn({
+            let app = app.clone();
+            let path = path.clone();
+            let cookie = cookie.clone();
+            async move {
+                call(
+                    app,
+                    "PATCH",
+                    &path,
+                    Some(&cookie),
+                    None,
+                    Some(
+                        json!({"type":"paragraph","content":[{"type":"text","text":"Cancelled"}]}),
+                    ),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(hub.rpc_timeout(), reached)
+            .await
+            .unwrap()
+            .unwrap();
+        cancelled.abort();
+        assert!(cancelled.await.unwrap_err().is_cancelled());
+        proceed.send(()).unwrap();
+        let observed = hub.project_live(key, f.user, credential).await.unwrap();
+        assert_eq!(observed.content_json, live.content_json);
+        assert_eq!(observed.tail_seq, live.tail_seq);
+        let (code, meta) = call(app,"PATCH",&path,Some(&cookie),None,Some(json!({"type":"paragraph","content":[{"type":"text","text":"Healthy after cancel 中 😀"}]}))).await;
+        assert_eq!(code, StatusCode::OK, "{meta}");
+        let next =
+            crate::db::tasks::get_task_backend(&f.backend, f.workspace, task, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(next.content_json["content"][0]["attrs"]["id"], "b-1");
+        assert_eq!(
+            next.content_json["content"][0]["content"][0]["text"],
+            "Healthy after cancel 中 😀"
+        );
+        assert!(hub.shutdown().await.is_clean());
+        drop(admission);
+        f.close().await;
+    }
 }

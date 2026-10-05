@@ -868,6 +868,137 @@ fn editable_project_sql(project_alias: &str, guest_param: u32, actor_param: u32)
 
 /// Source `listTaskOrigin` (`GET tasks/{id}/origin`): the task must be visible;
 /// an origin whose document the caller cannot view is omitted (200, empty).
+pub async fn get_task_origin_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    task_id: Uuid,
+    after: Option<Uuid>,
+    limit: i64,
+) -> Result<Result<TaskOriginPage, TaskOriginDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return get_task_origin(
+            pool,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            task_id,
+            after,
+            limit,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = match &mut tx {
+        DbTx::SqliteFamily(family) => {
+            get_task_origin_family(
+                family,
+                workspace_id,
+                actor_user_id,
+                session_id,
+                task_id,
+                after,
+                limit,
+            )
+            .await
+        }
+        DbTx::Postgres(_) => Err(sqlx::Error::Protocol(
+            "family task origin requires selected family transaction".into(),
+        )),
+    };
+    finish_origin_operation(tx, result).await
+}
+
+async fn get_task_origin_family(
+    family: &mut FamilyTx,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    task: Uuid,
+    after: Option<Uuid>,
+    limit: i64,
+) -> Result<Result<TaskOriginPage, TaskOriginDbError>, sqlx::Error> {
+    let mut op = OperationTx::SqliteFamily(&mut *family);
+    op.set_tenant(workspace).await?;
+    if !op.session_is_live(actor, credential).await? {
+        return Ok(Err(TaskOriginDbError::Forbidden));
+    }
+    if !op.workspace_is_live(workspace).await?
+        || op.membership_role(workspace, actor, false).await?.is_none()
+    {
+        return Ok(Err(TaskOriginDbError::NotFound));
+    }
+    let rows = family
+        .query(
+            "SELECT project_id FROM tasks WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",
+            &[Cell::uuid(workspace), Cell::uuid(task)],
+        )
+        .await?;
+    let Some(row) = rows.first() else {
+        return Ok(Err(TaskOriginDbError::NotFound));
+    };
+    let project = row.cell(0)?.id()?;
+    if !OperationTx::SqliteFamily(&mut *family)
+        .project_permission_by_id(workspace, actor, project)
+        .await?
+        .unwrap_or(ProjectPermission::None)
+        .at_least(ProjectPermission::View)
+    {
+        return Ok(Err(TaskOriginDbError::NotFound));
+    }
+    let rows = family.query(
+        "SELECT o.task_id,o.document_id,tp.key,t.number,t.title,dp.key,d.number,d.title,o.anchor
+         FROM task_origins o
+         JOIN tasks t ON t.workspace_id=o.workspace_id AND t.id=o.task_id AND t.deleted_at IS NULL
+         JOIN projects tp ON tp.workspace_id=t.workspace_id AND tp.id=t.project_id
+         JOIN documents d ON d.workspace_id=o.workspace_id AND d.id=o.document_id AND d.deleted_at IS NULL
+         LEFT JOIN projects dp ON dp.workspace_id=d.workspace_id AND dp.id=d.project_id
+         WHERE o.workspace_id=?1 AND o.task_id=?2 AND (?3 IS NULL OR o.task_id>?3)
+         ORDER BY o.task_id LIMIT ?4",
+        &[Cell::uuid(workspace),Cell::uuid(task),Cell::optional_uuid(after),Cell::Integer(limit.saturating_add(1))],
+    ).await?;
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        if origin_read_source(
+            &mut OperationTx::SqliteFamily(&mut *family),
+            workspace,
+            actor,
+            credential,
+            row.cell(1)?.id()?,
+        )
+        .await?
+        .is_none()
+        {
+            continue;
+        }
+        items.push(origin_item_from_row((
+            row.cell(0)?.id()?,
+            row.cell(1)?.id()?,
+            row.cell(2)?.optional(Cell::string)?,
+            row.cell(3)?.int32()?,
+            row.cell(4)?.string()?,
+            row.cell(5)?.optional(Cell::string)?,
+            row.cell(6)?.int32()?,
+            row.cell(7)?.string()?,
+            row.cell(8)?.optional(Cell::string)?,
+        )));
+    }
+    let count = items.len();
+    let next_cursor = if items.len() as i64 > limit {
+        items.truncate(limit as usize);
+        items.last().map(|item| item.task_id)
+    } else {
+        None
+    };
+    Ok(Ok(TaskOriginPage {
+        items,
+        count,
+        next_cursor,
+    }))
+}
+
+/// Preserved PostgreSQL task-origin reader.
 pub async fn get_task_origin(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1533,6 +1664,426 @@ mod selected_document_origin_create_tests {
     async fn state(f: &Fixture, project: Uuid) -> (i64, i64, i64, i64, i64, i64, i64) {
         sqlx::query_as("SELECT (SELECT count(*) FROM tasks),(SELECT count(*) FROM task_origins),(SELECT next_number FROM projects WHERE id=?1),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT count(*) FROM task_activity),(SELECT count(*) FROM task_assignees)")
             .bind(project.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap()
+    }
+
+    async fn inverse(
+        f: &Fixture,
+        credential: Uuid,
+        task: Uuid,
+    ) -> Result<Result<TaskOriginPage, TaskOriginDbError>, sqlx::Error> {
+        get_task_origin_backend(&f.backend, f.workspace, f.user, credential, task, None, 50).await
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_task_origin_inverse_normal_new_client_literal_replay_and_cursor() {
+        let (f, credential, project) = setup().await;
+        let command = Uuid::now_v7();
+        let hash = command_hash(
+            f.user,
+            project,
+            "Inverse 中 😀",
+            Some("literal-source-block"),
+            false,
+        );
+        let task = create(
+            &f,
+            credential,
+            request(f.document, project, command, "Inverse 中 😀", &hash),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .task_id();
+        let before = state(&f, project).await;
+        let expected = TaskOriginPage {
+            items: vec![TaskOriginItem {
+                task_id: task,
+                document_id: f.document,
+                task_display_id: "ORIGIN-2".into(),
+                document_display_id: "WIKI-1".into(),
+                task_title: "Inverse 中 😀".into(),
+                document_title: "S31".into(),
+                anchor: Some("literal-source-block".into()),
+            }],
+            count: 1,
+            next_cursor: None,
+        };
+        assert_eq!(
+            inverse(&f, credential, task).await.unwrap().unwrap(),
+            expected
+        );
+        let client = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            get_task_origin_backend(
+                &Backend::Sqlite(client.clone()),
+                f.workspace,
+                f.user,
+                credential,
+                task,
+                None,
+                1
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+            expected
+        );
+        for after in [
+            Some(Uuid::nil()),
+            Some(task),
+            Some(Uuid::from_u128(u128::MAX)),
+        ] {
+            let page = get_task_origin_backend(
+                &f.backend,
+                f.workspace,
+                f.user,
+                credential,
+                task,
+                after,
+                1,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                page,
+                if after == Some(Uuid::nil()) {
+                    expected.clone()
+                } else {
+                    TaskOriginPage {
+                        items: vec![],
+                        count: 0,
+                        next_cursor: None,
+                    }
+                }
+            );
+        }
+        assert_eq!(
+            create(
+                &f,
+                credential,
+                request(f.document, project, command, "Inverse 中 😀", &hash)
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+            DocumentTaskOutcome::Replayed(task)
+        );
+        assert_eq!(state(&f, project).await, before);
+        assert_eq!(
+            inverse(&f, credential, task).await.unwrap().unwrap(),
+            expected
+        );
+        // Archive is not a read denial. Trash hides the source without hiding the task.
+        sqlx::query("UPDATE tasks SET archived_at=1 WHERE id=?1")
+            .bind(task.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET status='archived' WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            inverse(&f, credential, task).await.unwrap().unwrap(),
+            expected
+        );
+        sqlx::query("UPDATE documents SET deleted_at=1 WHERE id=?1")
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            inverse(&f, credential, task).await.unwrap().unwrap(),
+            TaskOriginPage {
+                items: vec![],
+                count: 0,
+                next_cursor: None
+            }
+        );
+        sqlx::query("UPDATE documents SET deleted_at=NULL WHERE id=?1")
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            inverse(&f, credential, task).await.unwrap().unwrap(),
+            expected
+        );
+        client.close().await;
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_task_origin_inverse_current_group_source_target_credentials_and_tenant() {
+        let (f, credential, project) = setup().await;
+        let command = Uuid::now_v7();
+        let hash = command_hash(
+            f.user,
+            project,
+            "Private",
+            Some("literal-source-block"),
+            false,
+        );
+        let task = create(
+            &f,
+            credential,
+            request(f.document, project, command, "Private", &hash),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .task_id();
+        let empty = TaskOriginPage {
+            items: vec![],
+            count: 0,
+            next_cursor: None,
+        };
+        // A real current Guest with target Edit has no wiki source View.
+        sqlx::query("UPDATE memberships SET role='guest' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(inverse(&f, credential, task).await.unwrap().unwrap(), empty);
+        let group = Uuid::now_v7();
+        sqlx::query("INSERT INTO groups(id,workspace_id,name) VALUES(?1,?2,'Inverse viewers')")
+            .bind(group.as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO group_members(workspace_id,group_id,user_id) VALUES(?1,?2,?3)")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(group.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO document_members(id,workspace_id,document_id,group_id,role) VALUES(?1,?2,?3,?4,'viewer')").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.document.as_bytes().as_slice()).bind(group.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert_eq!(
+            inverse(&f, credential, task).await.unwrap().unwrap().items[0].document_id,
+            f.document
+        );
+        let mut revoke = f.backend.begin_write().await.unwrap();
+        let OperationTx::SqliteFamily(writer) = revoke.operation() else {
+            unreachable!()
+        };
+        writer.execute("DELETE FROM document_members WHERE workspace_id=?1 AND document_id=?2 AND group_id=?3", &[Cell::uuid(f.workspace),Cell::uuid(f.document),Cell::uuid(group)]).await.unwrap();
+        revoke.commit().await.unwrap();
+        assert_eq!(inverse(&f, credential, task).await.unwrap().unwrap(), empty);
+        sqlx::query("UPDATE memberships SET role='owner' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            inverse(&f, credential, task).await.unwrap().unwrap().count,
+            1
+        );
+        // Current source affiliation retires wiki's workspace grant.
+        let source = create_project_fixture(&f, credential, "SOURCE").await;
+        let parent: Vec<u8> =
+            sqlx::query_scalar("SELECT root_document_id FROM projects WHERE id=?1")
+                .bind(source.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        let parent = Uuid::from_slice(&parent).unwrap();
+        sqlx::query(
+            "UPDATE documents SET project_id=?1,parent_id=?2,number=17,path=?3 WHERE id=?4",
+        )
+        .bind(source.as_bytes().as_slice())
+        .bind(parent.as_bytes().as_slice())
+        .bind(format!(
+            "{}.{}",
+            crate::db::documents::to_path_label(parent),
+            crate::db::documents::to_path_label(f.document)
+        ))
+        .bind(f.document.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE projects SET next_number=18 WHERE id=?1")
+            .bind(source.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM project_members WHERE project_id=?1 AND user_id=?2")
+            .bind(source.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(inverse(&f, credential, task).await.unwrap().unwrap(), empty);
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'viewer')").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(source.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let visible = inverse(&f, credential, task).await.unwrap().unwrap();
+        assert_eq!(visible.items[0].document_display_id, "SOURCE-17");
+        assert!(matches!(
+            get_task_origin_backend(
+                &f.backend,
+                Uuid::now_v7(),
+                f.user,
+                credential,
+                task,
+                None,
+                50
+            )
+            .await
+            .unwrap(),
+            Err(TaskOriginDbError::NotFound)
+        ));
+        assert!(matches!(
+            get_task_origin_backend(
+                &f.backend,
+                f.workspace,
+                Uuid::now_v7(),
+                credential,
+                task,
+                None,
+                50
+            )
+            .await
+            .unwrap(),
+            Err(TaskOriginDbError::Forbidden)
+        ));
+        for (table, column, id) in [
+            ("sessions", "revoked_at", credential),
+            ("users", "suspended_at", f.user),
+            ("users", "deleted_at", f.user),
+            ("tasks", "deleted_at", task),
+            ("projects", "deleted_at", project),
+            ("workspaces", "deleted_at", f.workspace),
+        ] {
+            sqlx::query(&format!("UPDATE {table} SET {column}=1 WHERE id=?1"))
+                .bind(id.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let denied = inverse(&f, credential, task).await.unwrap();
+            if table == "sessions" || table == "users" {
+                assert!(matches!(denied, Err(TaskOriginDbError::Forbidden)));
+            } else {
+                assert!(matches!(denied, Err(TaskOriginDbError::NotFound)));
+            }
+            sqlx::query(&format!("UPDATE {table} SET {column}=NULL WHERE id=?1"))
+                .bind(id.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                inverse(&f, credential, task).await.unwrap().unwrap(),
+                visible
+            );
+        }
+        sqlx::query("DELETE FROM project_members WHERE project_id=?1 AND user_id=?2")
+            .bind(project.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            inverse(&f, credential, task).await.unwrap(),
+            Err(TaskOriginDbError::NotFound)
+        ));
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,group_id,role) VALUES(?1,?2,?3,?4,'viewer')").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(group.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert_eq!(
+            inverse(&f, credential, task).await.unwrap().unwrap(),
+            visible
+        );
+        sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            inverse(&f, credential, task).await.unwrap(),
+            Err(TaskOriginDbError::NotFound)
+        ));
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_task_origin_inverse_original_decode_rollback_fk_then_healthy_read() {
+        let (f, credential, project) = setup().await;
+        let hash = command_hash(
+            f.user,
+            project,
+            "Decode",
+            Some("literal-source-block"),
+            false,
+        );
+        let task = create(
+            &f,
+            credential,
+            request(f.document, project, Uuid::now_v7(), "Decode", &hash),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .task_id();
+        let expected = inverse(&f, credential, task).await.unwrap().unwrap();
+        let updated: i64 = sqlx::query_scalar("SELECT updated_at FROM documents WHERE id=?1")
+            .bind(f.document.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        // Valid INTEGER storage, outside chrono's supported instant. No schema weakening.
+        sqlx::query("UPDATE documents SET updated_at=?1 WHERE id=?2")
+            .bind(i64::MAX)
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(
+            matches!(inverse(&f, credential, task).await.unwrap_err(), sqlx::Error::Protocol(message) if message == "SQLite instant out of range")
+        );
+        let mut repair = f.backend.begin_write().await.unwrap();
+        let OperationTx::SqliteFamily(writer) = repair.operation() else {
+            unreachable!()
+        };
+        writer
+            .execute(
+                "UPDATE documents SET updated_at=?1 WHERE id=?2",
+                &[Cell::Integer(updated), Cell::uuid(f.document)],
+            )
+            .await
+            .unwrap();
+        repair.commit().await.unwrap();
+        assert_eq!(
+            inverse(&f, credential, task).await.unwrap().unwrap(),
+            expected
+        );
+        let fk = sqlx::query(
+            "UPDATE task_origins SET document_id=?1 WHERE workspace_id=?2 AND task_id=?3",
+        )
+        .bind(Uuid::now_v7().as_bytes().as_slice())
+        .bind(f.workspace.as_bytes().as_slice())
+        .bind(task.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap_err();
+        assert!(fk
+            .as_database_error()
+            .is_some_and(|error| error.is_foreign_key_violation()));
+        assert_eq!(
+            inverse(&f, credential, task).await.unwrap().unwrap(),
+            expected
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        f.close().await;
     }
 
     #[tokio::test]
