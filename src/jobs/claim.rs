@@ -83,7 +83,6 @@ impl Drop for JobClaim {
     }
 }
 
-
 pub use crate::db::maintenance_claim::{
     FamilyLeaseAction, FamilyMaintenanceClaim, FamilyMaintenanceClaimRequest,
     FamilyMaintenanceLeasePolicy, FamilyMaintenanceProof, MaintenanceClaimError, MaintenanceJobKey,

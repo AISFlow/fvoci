@@ -1762,13 +1762,11 @@ impl OperationTx<'_, '_> {
                     .bind(workspace)
                     .execute(&mut ***tx)
                     .await?;
-                sqlx::query(
-                    "DELETE FROM fvoci.workspaces WHERE id=$1 AND deleted_at IS NOT NULL",
-                )
-                .bind(workspace)
-                .execute(&mut ***tx)
-                .await?
-                .rows_affected()
+                sqlx::query("DELETE FROM fvoci.workspaces WHERE id=$1 AND deleted_at IS NOT NULL")
+                    .bind(workspace)
+                    .execute(&mut ***tx)
+                    .await?
+                    .rows_affected()
             }
             Self::SqliteFamily(tx) => {
                 tx.require_writer()?;
@@ -1800,12 +1798,11 @@ impl OperationTx<'_, '_> {
                     &[Cell::uuid(workspace)],
                 )
                 .await?;
-                tx
-                    .execute(
-                        "DELETE FROM workspaces WHERE id=?1 AND deleted_at IS NOT NULL",
-                        &[Cell::uuid(workspace)],
-                    )
-                    .await?
+                tx.execute(
+                    "DELETE FROM workspaces WHERE id=?1 AND deleted_at IS NOT NULL",
+                    &[Cell::uuid(workspace)],
+                )
+                .await?
             }
         };
         if deleted != 1 {

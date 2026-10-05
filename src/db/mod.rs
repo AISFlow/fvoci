@@ -27,13 +27,13 @@ pub mod integrations;
 pub mod invitations;
 pub mod labels;
 pub mod legal;
-pub mod lookup;
-pub mod magic;
-pub mod maintenance_claim;
 #[cfg(all(test, feature = "db-tests"))]
 #[path = "../../tests/support/libsql_finish_fixture.rs"]
 pub(crate) mod libsql_finish_fixture;
+pub mod lookup;
+pub mod magic;
 pub(crate) mod mail_digest;
+pub mod maintenance_claim;
 pub mod mfa;
 pub mod migrate;
 pub mod milestones;

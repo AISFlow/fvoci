@@ -38,11 +38,11 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::attachments::ObjectStorage;
+use crate::db::backend::OperationTx;
+use crate::db::codec::Cell;
 use crate::db::context::{lock_tree, set_system, set_tenant};
 use crate::db::documents::{TRASH_PURGE_MARGIN_DAYS, TRASH_RETENTION_DAYS};
 use crate::db::identity::{append_event_channel, EventAppend};
-use crate::db::backend::OperationTx;
-use crate::db::codec::Cell;
 
 /// Upper bound for one attachment key's storage cleanup (multipart aborts and
 /// the object delete); a slow backend fails that document for this sweep.
