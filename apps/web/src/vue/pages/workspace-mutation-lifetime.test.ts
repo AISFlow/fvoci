@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
@@ -112,6 +113,7 @@ function harness(file: string) {
     replace: () => Promise.resolve(),
   };
   const injected = {
+    crypto: webcrypto,
     ...Vue,
     useNavigationError,
     t: (key: string) => key,

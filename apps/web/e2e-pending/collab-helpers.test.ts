@@ -37,31 +37,33 @@ await test("wiki fixture keeps one command on lost-response replay and gives dis
   let loseResponse = true;
   const page = {
     request: {
-      async get(url: string) {
+      get(url: string) {
         assert.equal(url, "/api/v1/me/workspaces");
-        return {
+        return Promise.resolve({
           ok: () => true,
-          json: async () => ({ items: [{ id: workspaceId, slug: "acme" }] }),
-        };
+          json: () => Promise.resolve({ items: [{ id: workspaceId, slug: "acme" }] }),
+        });
       },
-      async post(url: string, { data }: { data: (typeof requests)[number] }) {
-        assert.equal(url, `/api/v1/workspaces/${workspaceId}/documents`);
-        assert.equal(data.parentId, null);
-        assert.match(
-          data.commandId,
-          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-        );
-        requests.push({ ...data });
-        const doc = documents.get(data.commandId) ?? {
-          id: crypto.randomUUID(),
-          displayId: `WIKI-${documents.size + 1}`,
-        };
-        documents.set(data.commandId, doc);
-        if (loseResponse) {
-          loseResponse = false;
-          throw new Error("response lost after commit");
-        }
-        return { ok: () => true, json: async () => doc };
+      post(url: string, { data }: { data: (typeof requests)[number] }) {
+        return Promise.resolve().then(() => {
+          assert.equal(url, `/api/v1/workspaces/${workspaceId}/documents`);
+          assert.equal(data.parentId, null);
+          assert.match(
+            data.commandId,
+            /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+          );
+          requests.push({ ...data });
+          const doc = documents.get(data.commandId) ?? {
+            id: crypto.randomUUID(),
+            displayId: `WIKI-${String(documents.size + 1)}`,
+          };
+          documents.set(data.commandId, doc);
+          if (loseResponse) {
+            loseResponse = false;
+            throw new Error("response lost after commit");
+          }
+          return { ok: () => true, json: () => Promise.resolve(doc) };
+        });
       },
     },
   } as unknown as Page;
