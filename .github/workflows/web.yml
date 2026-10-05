@@ -511,15 +511,10 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: selected-normal-diagnostics-${{ github.run_attempt }}
+          # The private1000 prefix is published only after strict retirement.
           path: |
-            ${{ runner.temp }}/fvoci-selected-current/*-stderr.log
-            ${{ runner.temp }}/fvoci-selected-current/*-stage.json
-            ${{ runner.temp }}/fvoci-selected-current/*-driver.log
-            ${{ runner.temp }}/fvoci-selected-current/selected-ci-receipt.json
-            ${{ runner.temp }}/fvoci-selected-current/handoff-input-before-safe.json
-            ${{ runner.temp }}/fvoci-selected-current/handoff-input-after-safe.json
-            ${{ runner.temp }}/fvoci-selected-current/handoff-input-current-safe.json
-            ${{ runner.temp }}/fvoci-selected-current/handoff-input-delta-safe.json
+            ${{ steps.browser.outputs.selected-safe-diagnostics }}
+            ${{ steps.browser.outputs.selected-private-diagnostics }}
 
   web-ci-gate:
     name: web-ci-gate

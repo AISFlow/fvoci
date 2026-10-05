@@ -403,7 +403,7 @@ class RuntimePermissionsTest(unittest.TestCase):
     """
     DOCKER_GID = 986
 
-    def case(self, *, original=False, fault='', exit_code=0):
+    def case(self, *, original=False, fault='', exit_code=0, pending_exit=0):
         self.assertEqual(subprocess.run(['sudo','-n','true'],capture_output=True).returncode,0,
                          'this real permission fixture needs its explicit owned-temp sudo boundary')
         with tempfile.TemporaryDirectory(prefix='fvoci-permission-fixture-') as tmp:
@@ -436,7 +436,7 @@ def run(output):
     if before['fixture_incomplete']:
         (output/'runtime').mkdir()
         write(output/'install-allocation.json', {})
-    if before['fixture_fault'] in ('closed','wrong-source','missing-process','live','wrong-flow','dropped-off','duplicate-root','foreign-owner'):
+    if before['fixture_fault'] in ('closed','wrong-source','missing-process','live','wrong-flow','dropped-off','duplicate-root','foreign-owner','missing-port','invalid-port','missing-pid','unsafe-canary'):
         runtime=output/'runtime';runtime.mkdir()
         runs=[]
         for lane,flow in selected_runs():
@@ -453,8 +453,16 @@ def run(output):
             if before['fixture_fault']=='live':facts['recorded_process_identities_retired']=False
             if before['fixture_fault']=='wrong-flow' and flow=='off':facts['selected_flow']='on'
             if before['fixture_fault']=='foreign-owner':facts['root_owner']='foreign'
+            if lane=='sqlite':
+                facts['final_exit_code']=before['fixture_exit']
+                if before['fixture_fault'] in ('missing-port','unsafe-canary'):facts.pop('owned_loopback_port_closed')
+                if before['fixture_fault']=='invalid-port':facts['owned_loopback_port_closed']='PRIVATE_CANARY_URL'
+                if before['fixture_fault']=='missing-pid':facts.pop('recorded_process_identities_retired')
+                if before['fixture_fault']=='unsafe-canary':
+                    facts['original_driver_failure']={'message':'PRIVATE_CANARY_URL secret=PRIVATE_CANARY_SECRET'}
+                    facts['session']='PRIVATE_CANARY_SESSION';facts['headers']={'Authorization':'PRIVATE_CANARY_SECRET'}
             write(root/'receipt.json',facts)
-            runs.append({'lane':lane,'flow':flow,'actualSource':before['head'],'runRoot':str(root),'exit':0})
+            runs.append({'lane':lane,'flow':flow,'actualSource':before['head'],'runRoot':str(root),'exit':facts['final_exit_code']})
         if before['fixture_fault']=='dropped-off':runs.pop()
         if before['fixture_fault']=='duplicate-root':runs[-1]['runRoot']=runs[2]['runRoot']
         write(output/'selected-ci-receipt.json',{'owner':identity(),'source':before['head'],'tree':before['tree'],'runs':runs})
@@ -476,9 +484,16 @@ def run(output):
                 'SELECTED_BACKENDS':'true','FVOCI_SELECTED_CI_OUTPUT':str(output),
                 'FVOCI_SELECTED_CI_SQLITE_PARENT':str(sqlite),'SQLITE3_LIB_DIR':str(lib),
                 'CI':'true','GITHUB_ACTIONS':'true','GITHUB_JOB':'collaboration-flow',
-                'GITHUB_SHA':SHA,'GITHUB_REPOSITORY':'fixture/owned','GITHUB_RUN_ID':'1','GITHUB_RUN_ATTEMPT':'1'}
-            script=temp/'footer.sh';script.write_text('set -euo pipefail\npending_status=0\n'+footer)
+                'GITHUB_OUTPUT':str(temp/'github-output'),'GITHUB_SHA':SHA,'GITHUB_REPOSITORY':'fixture/owned','GITHUB_RUN_ID':'1','GITHUB_RUN_ATTEMPT':'1'}
+            script=temp/'footer.sh';script.write_text('set -euo pipefail\npending_status='+str(pending_exit)+'\n'+footer)
+            if fault in ('destination-occupied','destination-symlink','destination-foreign','destination-mode'):
+                destination=temp/'fvoci-selected-diagnostics'
+                if fault=='destination-symlink':destination.symlink_to(output,target_is_directory=True)
+                else:
+                    destination.mkdir(mode=0o700)
+                    if fault=='destination-mode':destination.chmod(0o755)
             subprocess.run(['sudo','-n','chown','-R','0:1001',str(temp)],check=True)
+            if fault=='destination-foreign':subprocess.run(['sudo','-n','chown','1001:1001',str(destination)],check=True)
             subprocess.run(['sudo','-n','chmod','750',str(temp),str(repo)],check=True)
             if fault=='unreadable':subprocess.run(['sudo','-n','chmod','600',str(header)],check=True)
             if fault=='foreign':subprocess.run(['sudo','-n','chown','1001:1001',str(native)],check=True)
@@ -494,7 +509,16 @@ def facts(p):
  x=p.stat();return {'uid':x.st_uid,'gid':x.st_gid,'mode':x.st_mode & 0o777}
 def optional(name):
  p=o/name;return json.loads(p.read_text()) if p.exists() else None
-print(json.dumps({'output':facts(o),'sqlite':facts(s),'header':facts(root/'repo/header'),
+d=root/'fvoci-selected-diagnostics'
+def safe_optional(name):
+ p=d/name;return json.loads(p.read_text()) if p.exists() else None
+published=(root/'github-output').read_text() if (root/'github-output').exists() else ''
+print(json.dumps({'diagnostics':facts(d) if d.exists() else None,
+ 'safe_ownership':safe_optional('ownership-stage.json'),'safe_launcher':safe_optional('launcher-stage.json'),
+ 'private_published':'selected-private-diagnostics<<' in published,
+ 'safe_published':'selected-safe-diagnostics=' in published,
+ 'diagnostic_modes':{p.name:p.stat().st_mode & 0o777 for p in d.iterdir() if p.is_file()} if d.exists() else {},
+ 'output':facts(o),'sqlite':facts(s),'header':facts(root/'repo/header'),
  'marker':optional('fixture-marker.json'),'stage':optional('runtime-access-stage.json'),'close':optional('runtime-close-stage.json')}))
 """
                 inspected=subprocess.run(['sudo','-n',sys.executable,'-c',collector,str(temp)],capture_output=True,text=True,check=True)
@@ -584,6 +608,96 @@ print(json.dumps({'output':facts(o),'sqlite':facts(s),'header':facts(root/'repo/
                 self.assertEqual(output.stat().st_mode & 0o777,0o700)
             finally:
                 subprocess.run(['sudo','-n','chown','-R',str(os.getuid())+':'+str(os.getgid()),str(root)],check=True)
+
+
+    def test_missing_or_invalid_closure_preserves_actual_driver_and_launcher_error(self):
+        for fault in ('missing-port','invalid-port','missing-pid','unsafe-canary'):
+            with self.subTest(fault=fault):
+                result,facts=self.case(fault=fault,exit_code=7)
+                self.assertEqual(result.returncode,7,result.stderr)
+                self.assertIsNone(facts['close'])
+                self.assertEqual(facts['output'],{'uid':1000,'gid':1000,'mode':0o700})
+                self.assertEqual(facts['diagnostics'],{'uid':0,'gid':1001,'mode':0o700})
+                self.assertFalse(facts['private_published']);self.assertTrue(facts['safe_published'])
+                self.assertTrue(all(mode==0o600 for mode in facts['diagnostic_modes'].values()))
+                summary=facts['safe_ownership'];lane=summary['lanes'][-1]
+                self.assertFalse(summary['ownership_return_qualified'])
+                self.assertEqual(summary['phase'],'sqlite')
+                self.assertEqual(lane['launcher_observed_driver_exit'],7)
+                self.assertEqual(lane['receipt_final_exit'],7)
+                self.assertEqual(len(lane['receipt_sha256']),64)
+                self.assertEqual(facts['safe_launcher'],{'actual_launcher_exit':7,'ownership_return_exit':1,'selected_final_exit':7,'pending_exit':0})
+                self.assertNotIn('PRIVATE_CANARY',json.dumps(summary))
+                key='recorded_process_identities_retired' if fault=='missing-pid' else 'owned_loopback_port_closed'
+                self.assertIn(key,lane['invalid_required_fields'] if fault=='invalid-port' else lane['missing_required_fields'])
+                self.assertIsNone(lane['closure_facts'][key])
+
+    def test_absent_port_proof_cannot_convert_zero_launcher_to_success(self):
+        result,facts=self.case(fault='missing-port')
+        self.assertEqual(result.returncode,1,result.stderr)
+        self.assertEqual(facts['safe_launcher']['actual_launcher_exit'],0)
+        self.assertFalse(facts['safe_ownership']['ownership_return_qualified'])
+        self.assertFalse(facts['private_published'])
+
+    def test_qualified_return_publishes_original_allowlist_and_partial_refusal_only_safe_summary(self):
+        result,facts=self.case(fault='closed',exit_code=7)
+        self.assertEqual(result.returncode,7,result.stderr)
+        self.assertTrue(facts['safe_ownership']['ownership_return_qualified'])
+        self.assertTrue(facts['private_published'])
+        for fault in ('incomplete','wrong-source','missing-process','live'):
+            with self.subTest(fault=fault):
+                result,facts=self.case(fault=fault,exit_code=7)
+                self.assertEqual(result.returncode,7,result.stderr)
+                self.assertFalse(facts['safe_ownership']['ownership_return_qualified'])
+                self.assertFalse(facts['private_published'])
+                self.assertEqual(facts['safe_launcher']['actual_launcher_exit'],7)
+
+    def test_pending_first_error_kept_with_observed_selected_and_closure_errors(self):
+        result,facts=self.case(fault='missing-port',exit_code=7,pending_exit=13)
+        self.assertEqual(result.returncode,13,result.stderr)
+        self.assertEqual(facts['safe_launcher']['actual_launcher_exit'],7)
+        self.assertEqual(facts['safe_launcher']['selected_final_exit'],7)
+        self.assertEqual(facts['safe_launcher']['pending_exit'],13)
+        self.assertFalse(facts['safe_ownership']['ownership_return_qualified'])
+
+    def test_nonroot_uploader_reads_only_its_owned_safe_prefix_when_runtime_stays_private(self):
+        with tempfile.TemporaryDirectory(prefix='fvoci-safe-upload-fixture-') as tmp:
+            root=Path(tmp);safe=root/'safe';private=root/'private'
+            safe.mkdir(mode=0o700);private.mkdir(mode=0o700)
+            (safe/'ownership-stage.json').write_text(json.dumps({'ownership_return_qualified':False,'lanes':[]}))
+            (safe/'ownership-stage.json').chmod(0o600)
+            (private/'receipt.json').write_text('PRIVATE_CANARY_SECRET')
+            try:
+                subprocess.run(['sudo','-n','chmod','755',str(root)],check=True)
+                subprocess.run(['sudo','-n','chown','-R','1001:1001',str(safe)],check=True)
+                subprocess.run(['sudo','-n','chown','-R','1000:1000',str(private)],check=True)
+                probe="""import json,pathlib,sys
+root=pathlib.Path(sys.argv[1]);safe=root/'safe';private=root/'private'
+assert safe.stat().st_mode & 0o777==0o700
+assert (safe/'ownership-stage.json').stat().st_mode & 0o777==0o600
+receipt=json.loads((safe/'ownership-stage.json').read_text())
+assert receipt['ownership_return_qualified'] is False
+try:list(private.iterdir())
+except PermissionError:print('safe-upload-readable;private-runtime-denied')
+else:raise AssertionError('private runtime became upload-readable')
+"""
+                result=subprocess.run(['sudo','-n','setpriv','--reuid=1001','--regid=1001','--clear-groups',sys.executable,'-B','-c',probe,str(root)],capture_output=True,text=True)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertIn('safe-upload-readable;private-runtime-denied',result.stdout)
+                self.assertNotIn('PRIVATE_CANARY',result.stdout)
+                self.assertEqual(private.stat().st_uid,1000)
+            finally:
+                subprocess.run(['sudo','-n','chown','-h','-R',str(os.getuid())+':'+str(os.getgid()),str(root)],check=True)
+
+    def test_diagnostics_destination_occupied_symlink_foreign_or_mode_refused_before_transfer(self):
+        for fault in ('destination-occupied','destination-symlink','destination-foreign','destination-mode'):
+            with self.subTest(fault=fault):
+                result,facts=self.case(fault=fault)
+                self.assertNotEqual(result.returncode,0)
+                self.assertIsNone(facts['marker']);self.assertIsNone(facts['safe_launcher'])
+                self.assertFalse(facts['safe_published']);self.assertFalse(facts['private_published'])
+                self.assertEqual(facts['output'],{'uid':0,'gid':1001,'mode':0o700})
+
 
 
 
