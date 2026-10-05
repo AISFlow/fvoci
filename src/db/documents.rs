@@ -713,8 +713,78 @@ pub(crate) struct ImportNativeSeed<'a> {
     pub prepared: crate::collab::derived_body::PreparedDerivedBody,
 }
 
+/// Closed current job owners: a synchronous pending job has no async lease.
+/// Both variants use the same publisher and native program on one writer.
+#[derive(Clone, Copy)]
+pub(crate) enum ImportDocumentOwner<'a> {
+    Async(&'a crate::db::import_jobs::ImportClaim),
+    Sync {
+        workspace: Uuid,
+        job: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+    },
+}
+
+impl ImportDocumentOwner<'_> {
+    pub(crate) fn workspace(self) -> Uuid {
+        match self {
+            Self::Async(claim) => claim.workspace_id,
+            Self::Sync { workspace, .. } => workspace,
+        }
+    }
+    pub(crate) fn actor(self) -> Uuid {
+        match self {
+            Self::Async(claim) => claim.created_by,
+            Self::Sync { actor, .. } => actor,
+        }
+    }
+    pub(crate) fn credential(self) -> Uuid {
+        match self {
+            Self::Async(claim) => claim.session_id,
+            Self::Sync { credential, .. } => credential,
+        }
+    }
+    pub(crate) async fn hold(self, op: &mut OperationTx<'_, '_>) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Async(claim) => op.hold_import_claim(claim).await,
+            Self::Sync {
+                workspace,
+                job,
+                actor,
+                ..
+            } => op.hold_sync_import_job(workspace, job, actor).await,
+        }
+    }
+    pub(crate) async fn contains_document(
+        self,
+        op: &mut OperationTx<'_, '_>,
+        document: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Async(claim) => {
+                op.import_claim_contains_ref(
+                    claim,
+                    crate::db::import_jobs::ImportRefKind::Document,
+                    &document.to_string(),
+                )
+                .await
+            }
+            Self::Sync {
+                workspace,
+                job,
+                actor,
+                ..
+            } => {
+                op.sync_import_contains_document_ref(workspace, job, actor, document)
+                    .await
+            }
+        }
+    }
+}
+
 pub(crate) struct ImportDocumentPublication<'a> {
-    pub claim: &'a crate::db::import_jobs::ImportClaim,
+    pub owner: ImportDocumentOwner<'a>,
     pub title: &'a str,
     pub parent_id: Option<Uuid>,
     pub native: Option<ImportNativeSeed<'a>>,
@@ -755,12 +825,15 @@ pub(crate) async fn publish_import_document_backend(
     if cancel.is_cancelled() {
         return Err(ImportPublicationError::Cancelled);
     }
-    let claim = input.claim;
+    let owner = input.owner;
+    let workspace = owner.workspace();
+    let actor = owner.actor();
+    let credential = owner.credential();
     let mut tx = backend.begin_write().await?;
     let result: Result<Uuid, ImportPublicationError> = async {
         let mut op = tx.operation();
-        op.set_tenant(claim.workspace_id).await?;
-        op.require_import_admin(claim.workspace_id, claim.created_by, claim.session_id)
+        op.set_tenant(workspace).await?;
+        op.require_import_admin(workspace, actor, credential)
             .await?
             .map_err(|error| {
                 ImportPublicationError::Document(match error {
@@ -768,35 +841,46 @@ pub(crate) async fn publish_import_document_backend(
                     crate::db::import_jobs::ImportDbError::Forbidden => DocumentDbError::Forbidden,
                 })
             })?;
-        op.lock_tree(claim.workspace_id).await?;
+        op.lock_tree(workspace).await?;
         if cancel.is_cancelled() {
             return Err(ImportPublicationError::Cancelled);
         }
-        if !op.hold_import_claim(claim).await? {
+        if !owner.hold(&mut op).await? {
             return Err(ImportPublicationError::Fenced);
         }
         let document = create_wiki_document_operation(
             &mut op,
-            claim.workspace_id,
-            claim.created_by,
-            claim.session_id,
+            workspace,
+            actor,
+            credential,
             CreateDocumentInput {
                 parent_id: input.parent_id,
                 title: input.title,
                 icon: None,
             },
             None,
-            Some(ImportFence {
-                job_id: claim.job_id,
-                lease_token: claim.lease_token,
-            }),
+            match owner {
+                ImportDocumentOwner::Async(claim) => Some(ImportFence {
+                    job_id: claim.job_id,
+                    lease_token: claim.lease_token,
+                }),
+                ImportDocumentOwner::Sync { .. } => None,
+            },
         )
         .await?
         .map_err(ImportPublicationError::Document)?
         .ok_or(ImportPublicationError::Fenced)?;
+        if let ImportDocumentOwner::Sync { job, .. } = owner {
+            if !op
+                .append_sync_import_document_ref(workspace, job, actor, document.id)
+                .await?
+            {
+                return Err(ImportPublicationError::Fenced);
+            }
+        }
         if let Some(native) = input.native {
             op.initialize_import_document_native(
-                claim,
+                owner,
                 document.id,
                 native.op_id,
                 native.update,
@@ -808,18 +892,10 @@ pub(crate) async fn publish_import_document_backend(
         if cancel.is_cancelled() {
             return Err(ImportPublicationError::Cancelled);
         }
-        if !op.hold_import_claim(claim).await?
-            || !op
-                .import_claim_contains_ref(
-                    claim,
-                    crate::db::import_jobs::ImportRefKind::Document,
-                    &document.id.to_string(),
-                )
-                .await?
-        {
+        if !owner.hold(&mut op).await? || !owner.contains_document(&mut op, document.id).await? {
             return Err(ImportPublicationError::Fenced);
         }
-        op.require_import_admin(claim.workspace_id, claim.created_by, claim.session_id)
+        op.require_import_admin(workspace, actor, credential)
             .await?
             .map_err(|_| ImportPublicationError::Document(DocumentDbError::Forbidden))?;
         if cancel.is_cancelled() {

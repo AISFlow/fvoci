@@ -2285,6 +2285,12 @@ enum NativeLoadMode {
 enum NativeWriteScope<'a> {
     Room(Option<FamilyRoomFence>),
     Import(&'a crate::db::import_jobs::ImportClaim),
+    SyncImport {
+        workspace: Uuid,
+        job: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+    },
 }
 
 impl OperationTx<'_, '_> {
@@ -2924,6 +2930,29 @@ impl OperationTx<'_, '_> {
                 )
                 .await
             }
+            NativeWriteScope::SyncImport {
+                workspace: owned_workspace,
+                job,
+                actor: owned_actor,
+                credential: owned_credential,
+            } => {
+                if kind != CollabKind::Document
+                    || workspace != owned_workspace
+                    || actor != owned_actor
+                    || credential != owned_credential
+                {
+                    return Ok(false);
+                }
+                if self
+                    .require_import_admin(workspace, actor, credential)
+                    .await?
+                    .is_err()
+                {
+                    return Ok(false);
+                }
+                self.sync_import_contains_document_ref(workspace, job, actor, resource)
+                    .await
+            }
         }
     }
 
@@ -3139,7 +3168,7 @@ impl OperationTx<'_, '_> {
                 },
                 match write_scope {
                     NativeWriteScope::Import(claim) => Some(claim),
-                    NativeWriteScope::Room(_) => None,
+                    NativeWriteScope::Room(_) | NativeWriteScope::SyncImport { .. } => None,
                 },
             )
             .await?
@@ -4063,7 +4092,7 @@ impl OperationTx<'_, '_> {
                     document_id,
                     match write_scope {
                         NativeWriteScope::Import(claim) => Some(claim),
-                        NativeWriteScope::Room(_) => None,
+                        NativeWriteScope::Room(_) | NativeWriteScope::SyncImport { .. } => None,
                     },
                 )
                 .await?
@@ -4095,23 +4124,36 @@ impl OperationTx<'_, '_> {
     /// on this writer; an existing state or retained room lineage is refused.
     pub(crate) async fn initialize_import_document_native(
         &mut self,
-        claim: &crate::db::import_jobs::ImportClaim,
+        owner: super::documents::ImportDocumentOwner<'_>,
         document: Uuid,
         op_id: Uuid,
         seed: &[u8],
         prepared: PreparedDerivedBody,
     ) -> Result<Result<(), CollabDbError>, sqlx::Error> {
         let kind = CollabKind::Document;
-        let scope = NativeWriteScope::Import(claim);
-        let workspace = claim.workspace_id;
+        let scope = match owner {
+            super::documents::ImportDocumentOwner::Async(claim) => NativeWriteScope::Import(claim),
+            super::documents::ImportDocumentOwner::Sync {
+                workspace,
+                job,
+                actor,
+                credential,
+            } => NativeWriteScope::SyncImport {
+                workspace,
+                job,
+                actor,
+                credential,
+            },
+        };
+        let workspace = owner.workspace();
         if !self
             .current_native_write_scope(
                 scope,
                 kind,
                 workspace,
                 document,
-                claim.created_by,
-                claim.session_id,
+                owner.actor(),
+                owner.credential(),
             )
             .await?
         {
@@ -4133,8 +4175,8 @@ impl OperationTx<'_, '_> {
             .load_collab_native(
                 kind,
                 workspace,
-                claim.created_by,
-                claim.session_id,
+                owner.actor(),
+                owner.credential(),
                 document,
                 NativeLoadMode::ClaimWriter,
             )
@@ -4148,8 +4190,8 @@ impl OperationTx<'_, '_> {
                 kind,
                 AppendCollabInput {
                     workspace_id: workspace,
-                    actor_user_id: claim.created_by,
-                    session_id: claim.session_id,
+                    actor_user_id: owner.actor(),
+                    session_id: owner.credential(),
                     document_id: document,
                     writer_generation: native.writer_generation,
                     expected_tail_seq: native.load.tail_seq,
@@ -4170,8 +4212,8 @@ impl OperationTx<'_, '_> {
             kind,
             ProjectDerivedBodyInput::new(
                 workspace,
-                claim.created_by,
-                claim.session_id,
+                owner.actor(),
+                owner.credential(),
                 document,
                 native.writer_generation,
                 seq,
