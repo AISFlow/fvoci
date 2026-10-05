@@ -751,7 +751,7 @@ RUST_SELECTED_INSTALL_STEP = "Selected SQLite install lifetime controls"
 RUST_SELECTED_INSTALL_TARGET = "selected_install_lifetime"
 RUST_SELECTED_INSTALL_IF = "matrix.shard == 'b' && matrix.pg_major == '18'"
 # Bind the actual owned setup, compiler artifact selection and execution/count gate.
-RUST_SELECTED_INSTALL_RUN_SHA256 = "a4abb9ef086fb864aae3d2c5a5d26d467304923465eafc35ace01d084e8b79b9"
+RUST_SELECTED_INSTALL_RUN_SHA256 = "52996bd6cfcfc23baa6066cb096464f931e538895f7aee5b7c42650b47c77bad"
 RUST_POSTGRES_INTEGRATION_STEP = "PostgreSQL integration tests"
 RUST_S3_INTEGRATION_STEP = "S3-compatible storage integration tests (pinned test server)"
 RUST_COLLAB_INTEGRATION_STEP = "WebSocket, PostgreSQL and native helper integration tests"

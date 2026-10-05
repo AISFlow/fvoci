@@ -303,7 +303,7 @@ jobs:
           server = executable("fvoci-server", "bin", False)
           migrate = executable("fvoci-migrate", "bin", False)
           test = executable("selected_install_lifetime", "test", True)
-          assert server.parent() == migrate.parent()
+          assert server.parent == migrate.parent
           engine = pathlib.Path(sys.argv[2])
           for file in (server, migrate, test, engine):
               assert file.is_absolute() and stat.S_ISREG(file.lstat().st_mode), file

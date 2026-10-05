@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -1073,6 +1074,44 @@ class RustSuiteRegistryTest(unittest.TestCase):
                 fx.mutate_rust_workflow(mutate)
                 errors = SEL.verify_workflow_registry(fx.root)
                 self.assertIn(expected, "\n".join(errors))
+
+    def _execute_selected_install_artifact_prefix(self, migrate_parent: str) -> dict:
+        jobs, err = SEL._rust_workflow_jobs(ROOT)
+        self.assertIsNone(err)
+        step = next(item for item in jobs["postgres"]["steps"] if item.get("name") == SEL.RUST_SELECTED_INSTALL_STEP)
+        body = step["run"].split("<<'PYINSTALL'\n", 1)[1].rsplit("\nPYINSTALL", 1)[0]
+        # Execute actual artifact parsing through its first top-level assertion.
+        # Stop before filesystem ownership/setup or any product child launch.
+        assertion = next(node for node in ast.parse(body).body if isinstance(node, ast.Assert))
+        prefix = "\n".join(body.splitlines()[:assertion.end_lineno])
+        records = [
+            {
+                "reason": "compiler-artifact", "target": {"name": name, "kind": [kind]},
+                "profile": {"test": is_test}, "features": ["db-tests"],
+                "executable": str(Path(parent) / name),
+            }
+            for name, kind, is_test, parent in (
+                ("fvoci-server", "bin", False, "/fixture/bin"),
+                ("fvoci-migrate", "bin", False, migrate_parent),
+                ("selected_install_lifetime", "test", True, "/fixture/bin/deps"),
+            )
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "compiler-artifacts.jsonl"
+            artifact_path.write_text("\n".join(json.dumps(record) for record in records))
+            namespace: dict = {}
+            with mock.patch.object(sys, "argv", ["selected-install-extracted.py", str(artifact_path)]):
+                exec(compile(prefix, "selected-install-workflow-prefix.py", "exec"), namespace)
+            return namespace
+
+    def test_selected_install_actual_artifact_paths_reach_healthy_assertion(self) -> None:
+        namespace = self._execute_selected_install_artifact_prefix("/fixture/bin")
+        self.assertEqual(namespace["server"], Path("/fixture/bin/fvoci-server"))
+        self.assertEqual(namespace["migrate"], Path("/fixture/bin/fvoci-migrate"))
+
+    def test_selected_install_actual_artifact_paths_reject_unequal_parent(self) -> None:
+        with self.assertRaises(AssertionError):
+            self._execute_selected_install_artifact_prefix("/fixture/other-bin")
 
     def test_selected_install_exact_supported_execution_scope(self) -> None:
         with RustSuiteRegistryFixture() as fx:
