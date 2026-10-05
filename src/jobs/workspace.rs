@@ -163,7 +163,6 @@ async fn purge_one_family(
         for object in &keys {
             if tx.operation().attachment_cleanup_key_referenced_globally(workspace, object,
                 crate::db::attachments::AttachmentCleanupReferenceExclusion::DoomedRows(&doomed)).await? {
-                tx.operation().restore_system(previous).await?;
                 return Ok(PurgeOne::Skipped);
             }
         }
@@ -175,7 +174,6 @@ async fn purge_one_family(
             renew_maintenance_writer(&mut tx, proof, key, policy, cancel).await?;
             if tx.operation().attachment_cleanup_key_referenced_globally(workspace, &object,
                 crate::db::attachments::AttachmentCleanupReferenceExclusion::DoomedRows(&doomed)).await? {
-                tx.operation().restore_system(previous).await?;
                 return Ok(PurgeOne::Skipped);
             }
             match storage.purge_key(&object).await {
@@ -190,11 +188,11 @@ async fn purge_one_family(
             PurgeOne::StorageFailed { failed }
         } else {
             renew_maintenance_writer(&mut tx, proof, key, policy, cancel).await?;
-            tx.operation().set_system().await?;
+            let cascade_previous = tx.operation().set_system().await?;
             let purged = tx.operation().maintenance_purge_workspace(workspace).await?;
+            tx.operation().restore_system(cascade_previous).await?;
             if purged.purged { PurgeOne::Purged { storage_deleted: deleted } } else { PurgeOne::Skipped }
         };
-        tx.operation().restore_system(previous).await?;
         Ok(outcome)
     }.await;
     let outcome = match result {
