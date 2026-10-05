@@ -79,7 +79,7 @@
     "react": "19.3.0",
     "typescript": "5.9.3",
     "vue": "3.5.43",
-    "vue-tsc": "3.3.11"
+    "vue-tsc": "3.3.12"
   },
   "peerDependencies": {
     "vue": "^3.5.43"
