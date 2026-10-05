@@ -81,7 +81,7 @@ function installSelectedMember(selected: string): string | undefined {
 }
 
 async function currentUser(page: Page): Promise<SessionUser> {
-  const response = await page.request.get("/api/v1/me");
+  const response = await page.request.get("/api/v1/auth/me");
   expect(response.status()).toBe(200);
   const user = (await response.json()) as SessionUser;
   expect(user.userId).toMatch(UUID_RE);
