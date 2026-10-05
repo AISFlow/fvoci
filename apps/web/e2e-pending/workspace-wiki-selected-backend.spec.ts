@@ -7,10 +7,14 @@
  * DB after Vue setup; its explicit inputs and fresh binary are required.
  */
 import { execFileSync } from "node:child_process";
-import { lstatSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import * as Y from "yjs";
+import { MessageType } from "@hocuspocus/provider";
+import * as decoding from "lib0/decoding";
+import * as encoding from "lib0/encoding";
+import * as sync from "y-protocols/sync";
 import { yDocToTiptapJson } from "../../../packages/editor/src/collab-tiptap";
 import { emojiGlyph } from "../../../packages/editor/src/emoji-glyph";
 import { extractText, walkTiptap, type TiptapWalkNode } from "../../../packages/editor/src/extract";
@@ -34,7 +38,8 @@ import {
   persistBody,
   waitConnected,
 } from "./collab-helpers";
-import { SESSION_COOKIE, UUID_RE } from "./collab-wire";
+import { decodeHocuspocusFrame, frameBytes, SESSION_COOKIE, UUID_RE } from "./collab-wire";
+import { expectSelectedWikiAuxiliary } from "./workspace-wiki-selected-auxiliary";
 
 type DocumentMeta = components["schemas"]["DocumentMetaResponse"];
 type RevisionDetail = components["schemas"]["RevisionDetailResponse"];
@@ -215,13 +220,79 @@ function expectCanonicalOracleControls(
   return controls.map(([label]) => label);
 }
 
-function expectRetainedNative(detail: RevisionDetail, retained: string, removed: string): void {
-  // This is a read-only oracle using maintained Yjs, never an editor reset,
-  // JSON reseed, native parser, or server-side JavaScript fallback.
-  const update = Uint8Array.from(Buffer.from(detail.ySnapshot, "base64"));
+type NativeWireFrame = { direction: "sent" | "received"; room: string; bytes: Uint8Array };
+
+function observeNativeWire(page: Page): NativeWireFrame[] {
+  const frames: NativeWireFrame[] = [];
+  const syncTypes: readonly number[] = [MessageType.Sync];
+  page.on("websocket", (socket) => {
+    if (!socket.url().includes("/collab")) return;
+    const observe = (direction: "sent" | "received", payload: string | Buffer) => {
+      const bytes = frameBytes(payload);
+      const frame = decodeHocuspocusFrame(bytes);
+      if (frame?.kind === "other" && syncTypes.includes(frame.type))
+        frames.push({ direction, room: frame.routingKey, bytes: Uint8Array.from(bytes) });
+    };
+    socket.on("framesent", (frame) => {
+      observe("sent", frame.payload);
+    });
+    socket.on("framereceived", (frame) => {
+      observe("received", frame.payload);
+    });
+  });
+  return frames;
+}
+
+function nativeHistory(frames: NativeWireFrame[], room: string, receivedOnly: boolean): Y.Doc {
+  const native = new Y.Doc({ gc: false });
+  try {
+    let receivedStep2 = 0;
+    for (const frame of frames) {
+      if (frame.room !== room || (receivedOnly && frame.direction !== "received")) continue;
+      // Reuse the existing Hocuspocus frame filter and installed public codecs.
+      // The response encoder is a local sink: no reply is sent to any socket.
+      const decoder = decoding.createDecoder(frame.bytes);
+      expect(decoding.readVarString(decoder)).toBe(room);
+      expect(decoding.readVarUint(decoder)).toBe(MessageType.Sync);
+      const kind = sync.readSyncMessage(
+        decoder,
+        encoding.createEncoder(),
+        native,
+        null,
+        (error) => {
+          throw error;
+        },
+      );
+      expect(decoder.pos).toBe(frame.bytes.length);
+      if (frame.direction === "received" && kind === sync.messageYjsSyncStep2) receivedStep2++;
+    }
+    expect(receivedStep2, "real server full-sync response is required").toBeGreaterThan(0);
+    return native;
+  } catch (error) {
+    native.destroy();
+    throw error;
+  }
+}
+
+function expectRetainedNative(
+  detail: RevisionDetail,
+  native: Y.Doc,
+  retained: string,
+  removed: string,
+): void {
+  // Revision ySnapshot is a DSSV snapshot, not a full update. Its full retained
+  // native history comes only from observed real sync frames (gc=false).
+  const snapshot = Y.decodeSnapshot(Uint8Array.from(Buffer.from(detail.ySnapshot, "base64")));
+  expect(snapshot.sv.size).toBeGreaterThan(0);
+  expect(snapshot.ds.clients.size, "revision snapshot retains the deletion set").toBeGreaterThan(0);
+  expect(
+    Y.equalSnapshots(Y.snapshot(native), snapshot),
+    "revision matches observed native state",
+  ).toBe(true);
+  const update = Y.encodeStateAsUpdate(native);
   expect(update.byteLength).toBeGreaterThan(2);
   const decoded = Y.decodeUpdate(update);
-  expect(decoded.ds.clients.size, "the native snapshot retains the deletion set").toBeGreaterThan(
+  expect(decoded.ds.clients.size, "full native history retains the deletion set").toBeGreaterThan(
     0,
   );
   const retainedStrings = decoded.structs.flatMap((struct) =>
@@ -232,21 +303,59 @@ function expectRetainedNative(detail: RevisionDetail, retained: string, removed:
   expect(retainedStrings.join(""), "deleted source bytes survive the native history").toContain(
     removed,
   );
-  const native = new Y.Doc({ gc: false });
+  const xml: unknown = native.getXmlFragment("prosemirror").toJSON();
+  if (typeof xml !== "string") throw new Error("native XML serialization must be a string");
+  expect([...native.share.keys()]).toEqual(["prosemirror"]);
+  const ids = documentNodeIds(detail.contentJson);
+  expectCanonicalContent(yDocToTiptapJson(native), retained, removed, ids);
+  expect(xml).not.toContain(removed);
+  for (const id of ids) expect(xml).toContain(id);
+  const historical = new Y.Doc({ gc: false });
   try {
-    Y.applyUpdate(native, update);
-    const xml: unknown = native.getXmlFragment("prosemirror").toJSON();
-    if (typeof xml !== "string") throw new Error("native XML serialization must be a string");
-    // Named emoji atoms are intentional schema nodes. Read the native update
-    // through the same maintained converter and glyph mapping as the editor.
-    const ids = documentNodeIds(detail.contentJson);
-    expectCanonicalContent(yDocToTiptapJson(native), retained, removed, ids);
-    expect(xml).not.toContain(removed);
-    expect(ids.length).toBeGreaterThan(0);
-    for (const id of ids) expect(xml).toContain(id);
+    Y.createDocFromSnapshot(native, snapshot, historical);
+    const content = yDocToTiptapJson(historical);
+    expect(content).toEqual(detail.contentJson);
+    expectCanonicalContent(content, retained, removed, ids);
   } finally {
-    native.destroy();
+    historical.destroy();
   }
+}
+
+function expectNativeHistoryControls(
+  detail: RevisionDetail,
+  native: Y.Doc,
+  retained: string,
+  removed: string,
+): string[] {
+  expectRetainedNative(detail, native, retained, removed);
+  const snapshot = Y.decodeSnapshot(Buffer.from(detail.ySnapshot, "base64"));
+  const wrongVector = new Map(snapshot.sv);
+  const first = wrongVector.entries().next().value;
+  if (!first) throw new Error("nonempty native snapshot state vector is required");
+  wrongVector.set(first[0], first[1] + 1);
+  const wrongSnapshot = Y.encodeSnapshot(Y.createSnapshot(snapshot.ds, wrongVector));
+  expect(() => {
+    expectRetainedNative(
+      { ...detail, ySnapshot: Buffer.from(wrongSnapshot).toString("base64") },
+      native,
+      retained,
+      removed,
+    );
+  }, "a valid but wrong revision snapshot must fail").toThrow();
+  const missingHistory = new Y.Doc({ gc: true });
+  try {
+    // A native-byte observer copy only, never a live editor or JSON reseed.
+    Y.applyUpdate(missingHistory, Y.encodeStateAsUpdate(native));
+    missingHistory.gc = false;
+    expect(Y.equalSnapshots(Y.snapshot(missingHistory), snapshot)).toBe(true);
+    expect(yDocToTiptapJson(missingHistory)).toEqual(detail.contentJson);
+    expect(() => {
+      expectRetainedNative(detail, missingHistory, retained, removed);
+    }, "matching text/snapshot without deleted native source bytes must fail").toThrow();
+  } finally {
+    missingHistory.destroy();
+  }
+  return ["valid wrong snapshot", "same text and snapshot but missing deleted native source bytes"];
 }
 
 test("selected normal main: Vue setup, stable wiki create, native persist, manual revision and fresh actor readback", async ({
@@ -265,6 +374,8 @@ test("selected normal main: Vue setup, stable wiki create, native persist, manua
   const pageB = await ctxB.newPage();
   const wireA = attachCollabWire(pageA);
   const wireB = attachCollabWire(pageB);
+  const nativeWireA = observeNativeWire(pageA);
+  const nativeWireB = observeNativeWire(pageB);
   const cspA = watchCspViolations(pageA);
   const cspB = watchCspViolations(pageB);
   let failed = true;
@@ -369,7 +480,14 @@ test("selected normal main: Vue setup, stable wiki create, native persist, manua
       restoredFromId: null,
     });
     expect(saved.contentJson).toEqual(persisted.contentJson);
-    expectRetainedNative(saved, retained, removed);
+    const room = `${workspace.id}:document:${meta.id}`;
+    const nativeA = nativeHistory(nativeWireA, room, false);
+    let nativeControls: string[];
+    try {
+      nativeControls = expectNativeHistoryControls(saved, nativeA, retained, removed);
+    } finally {
+      nativeA.destroy();
+    }
 
     const fixtureUser = installSelectedMember(selected ?? "missing");
     await login(pageB, member.email, member.password);
@@ -402,13 +520,28 @@ test("selected normal main: Vue setup, stable wiki create, native persist, manua
     });
     const freshRevision = await revision(pageB, documentPath, revisionId);
     expect(freshRevision).toEqual(saved);
-    expectRetainedNative(freshRevision, retained, removed);
+    // The fresh actor's server-received full sync must independently contain
+    // retained history; the creator's local edit cache cannot satisfy this.
+    const nativeB = nativeHistory(nativeWireB, room, true);
+    try {
+      expectRetainedNative(freshRevision, nativeB, retained, removed);
+    } finally {
+      nativeB.destroy();
+    }
     // A new page/socket in the independent context reads durable state again.
+    const freshConnectionStart = nativeWireB.length;
     await pageB.reload();
     await waitConnected(pageB);
     await expectTokens(pageB, [retained, "새 편집"]);
     expect(await editorShape(pageB)).toEqual(beforeRevision);
-    expect(await revision(pageB, documentPath, revisionId)).toEqual(saved);
+    const reloadedRevision = await revision(pageB, documentPath, revisionId);
+    expect(reloadedRevision).toEqual(saved);
+    const reloadedNative = nativeHistory(nativeWireB.slice(freshConnectionStart), room, true);
+    try {
+      expectRetainedNative(reloadedRevision, reloadedNative, retained, removed);
+    } finally {
+      reloadedNative.destroy();
+    }
     expect(cspA).toEqual([]);
     expect(cspB).toEqual([]);
     await testInfo.attach("selected-vue-native-readback.json", {
@@ -425,6 +558,13 @@ test("selected normal main: Vue setup, stable wiki create, native persist, manua
             persisted,
             revision: saved,
             canonicalEmojiOracleControls: oracleControls,
+            nativeHistoryOracleControls: nativeControls,
+            nativeHistoryReadback: {
+              room,
+              creator: "observed sent and received native sync",
+              freshActor: "server-received native sync only",
+              reloadedActor: "new connection server-received native sync only",
+            },
             creatorId: creator.userId,
             freshActorId: reader.userId,
           },
@@ -433,8 +573,243 @@ test("selected normal main: Vue setup, stable wiki create, native persist, manua
         ),
       ),
     });
+    if (process.env.FVOCI_E2E_SELECTED_AUXILIARY !== undefined) {
+      expect(process.env.FVOCI_E2E_SELECTED_AUXILIARY).toBe("normal-api");
+      await expectSelectedWikiAuxiliary({
+        browser,
+        baseURL,
+        ownerPage: pageA,
+        selected: selected ?? "missing",
+        workspaceId: workspace.id,
+        document: meta,
+        creatorId: creator.userId,
+        sourceBlockId: documentNodeIds(persisted.contentJson)[0],
+        reader,
+        persisted,
+        revision: saved,
+        testInfo,
+      });
+    }
     failed = false;
   } finally {
     await Promise.all([closeCollabContext(ctxA, failed), closeCollabContext(ctxB, failed)]);
   }
 });
+
+type RestartCheckpoint = {
+  schema: 1;
+  source: string;
+  tree: string;
+  compiledSource: string;
+  selected: "postgres" | "sqlite";
+  stopped: { serverExit: 0; portClosed: true; recordedIdentitiesRetired: true };
+  seed: {
+    selected: string;
+    workspaceId: string;
+    document: DocumentMeta;
+    command: CreateBody;
+    firstAck: string;
+    finalAck: string;
+    persisted: BodyResponse;
+    revision: RevisionDetail;
+    creatorId: string;
+    freshActorId: string;
+    canonicalEmojiOracleControls: string[];
+    nativeHistoryOracleControls: string[];
+  };
+};
+
+function expectRestartCheckpoint(
+  checkpoint: RestartCheckpoint,
+  selected: string,
+  source: string,
+): void {
+  expect(source).toMatch(/^[0-9a-f]{40}$/);
+  expect(checkpoint.schema).toBe(1);
+  expect(checkpoint.source).toBe(source);
+  expect(checkpoint.compiledSource).toBe(source);
+  expect(checkpoint.tree).toMatch(/^[0-9a-f]{40}$/);
+  expect(checkpoint.selected).toBe(selected);
+  expect(checkpoint.stopped).toEqual({
+    serverExit: 0,
+    portClosed: true,
+    recordedIdentitiesRetired: true,
+  });
+  const seed = checkpoint.seed;
+  expect(seed.selected).toBe(selected);
+  for (const id of [
+    seed.workspaceId,
+    seed.document.id,
+    seed.command.commandId,
+    seed.revision.id,
+    seed.creatorId,
+    seed.freshActorId,
+    seed.firstAck,
+    seed.finalAck,
+  ])
+    expect(id).toMatch(UUID_RE);
+  expect(seed.firstAck).not.toBe(seed.finalAck);
+  expect(seed.freshActorId).not.toBe(seed.creatorId);
+  expect(seed.document.workspaceId).toBe(seed.workspaceId);
+  expect(seed.document.displayId).toBe(`WIKI-${String(seed.document.number)}`);
+  expect(seed.revision.targetId).toBe(seed.document.id);
+  expect(seed.revision.createdBy).toBe(seed.creatorId);
+  expect(seed.revision.reason).toBe("manual");
+  expect(seed.revision.contentJson).toEqual(seed.persisted.contentJson);
+  expect(seed.canonicalEmojiOracleControls).toHaveLength(6);
+  expect(seed.nativeHistoryOracleControls).toHaveLength(2);
+}
+
+function readRestartCheckpoint(path: string): RestartCheckpoint {
+  if (!isAbsolute(path)) throw new Error("restart checkpoint must be an explicit absolute file");
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const metadata = fstatSync(fd);
+    const named = lstatSync(path);
+    if (
+      !metadata.isFile() ||
+      metadata.nlink !== 1 ||
+      metadata.uid !== process.getuid?.() ||
+      (metadata.mode & 0o777) !== 0o600 ||
+      metadata.size > 128 * 1024 ||
+      named.dev !== metadata.dev ||
+      named.ino !== metadata.ino
+    )
+      throw new Error("restart checkpoint must be a bounded owned private regular file");
+    return JSON.parse(readFileSync(fd, "utf8")) as RestartCheckpoint;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// An explicit root checkpoint registers the second observation. Ordinary
+// selected runs still discover exactly the accepted original case above.
+// The root runs this title alone in a NEW browser process after server exit;
+// no seed helper, setup, editor write or native cache is reused here.
+if (process.env.FVOCI_E2E_SELECTED_RESTART_CHECKPOINT !== undefined) {
+  test("selected normal main restart: fresh actor reads persisted native history and manual revision", async ({
+    browser,
+    baseURL,
+  }, testInfo) => {
+    const selected = requiredFixtureInput("FVOCI_E2E_SELECTED_BACKEND");
+    expect(selected).toMatch(/^(postgres|sqlite)$/);
+    const source = requiredFixtureInput("FVOCI_E2E_SELECTED_RESTART_SOURCE");
+    const checkpoint = readRestartCheckpoint(
+      requiredFixtureInput("FVOCI_E2E_SELECTED_RESTART_CHECKPOINT"),
+    );
+    expectRestartCheckpoint(checkpoint, selected, source);
+    if (!baseURL) throw new Error("root-provided restarted normal-main baseURL is required");
+    const seed = checkpoint.seed;
+    const ctx = await newCollabContext(browser, baseURL);
+    const page = await ctx.newPage();
+    const wire = attachCollabWire(page);
+    const nativeWire = observeNativeWire(page);
+    const csp = watchCspViolations(page);
+    let failed = true;
+    try {
+      const setup = await page.request.get("/api/v1/setup");
+      expect(setup.status()).toBe(200);
+      expect(await setup.json()).toMatchObject({ needed: false });
+      await login(page, member.email, member.password);
+      const reader = await currentUser(page);
+      expect(reader.userId).toBe(seed.freshActorId);
+      expect(reader.userId).not.toBe(seed.creatorId);
+      const cookie = (await ctx.cookies()).find((entry) => entry.name === SESSION_COOKIE);
+      expect(cookie?.httpOnly).toBe(true);
+      expect(cookie?.sameSite).toBe("Lax");
+      const workspaces = await page.request.get("/api/v1/me/workspaces");
+      expect(workspaces.status()).toBe(200);
+      const workspace = (
+        (await workspaces.json()) as components["schemas"]["WorkspaceListResponse"]
+      ).items.find((item) => item.id === seed.workspaceId);
+      expect(workspace).toMatchObject({ slug: admin.workspaceSlug, role: "member" });
+      const documentPath = `/api/v1/workspaces/${seed.workspaceId}/documents/${seed.document.id}`;
+      const displayId = `WIKI-${String(seed.document.number)}`;
+      await openEditor(page, `/w/${admin.workspaceSlug}/${displayId}`);
+      await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
+      const retained = "동일한 저장 문장 한글😀";
+      const removed = "delete me";
+      await expectTokens(page, [retained, "새 편집"]);
+      await expectAwarenessTokenNotSession(wire, cookie?.value ?? "missing");
+      await expect(page.getByRole("button", { name: "저장", exact: true })).toBeEnabled();
+      const currentBody = await body(page, documentPath);
+      expect(currentBody).toEqual(seed.persisted);
+      const shape = await editorShape(page);
+      expectCanonicalContent(
+        shape.document,
+        retained,
+        removed,
+        documentNodeIds(seed.persisted.contentJson),
+      );
+      const currentMeta = await page.request.get(documentPath);
+      expect(currentMeta.status()).toBe(200);
+      expect(await currentMeta.json()).toMatchObject({
+        id: seed.document.id,
+        workspaceId: seed.workspaceId,
+        number: seed.document.number,
+        displayId: seed.document.displayId,
+        path: seed.document.path,
+        parentId: null,
+        projectId: null,
+        createdBy: seed.creatorId,
+      });
+      const currentRevision = await revision(page, documentPath, seed.revision.id);
+      expect(currentRevision).toEqual(seed.revision);
+      const room = `${seed.workspaceId}:document:${seed.document.id}`;
+      const native = nativeHistory(nativeWire, room, true);
+      let nativeControls: string[];
+      try {
+        nativeControls = expectNativeHistoryControls(currentRevision, native, retained, removed);
+      } finally {
+        native.destroy();
+      }
+      const oracleControls = expectCanonicalOracleControls(
+        currentBody.contentJson,
+        retained,
+        removed,
+        documentNodeIds(seed.persisted.contentJson),
+      );
+      const freshConnectionStart = nativeWire.length;
+      await page.reload();
+      await waitConnected(page);
+      await expectTokens(page, [retained, "새 편집"]);
+      expect(await editorShape(page)).toEqual(shape);
+      expect(await body(page, documentPath)).toEqual(seed.persisted);
+      const reloadedRevision = await revision(page, documentPath, seed.revision.id);
+      expect(reloadedRevision).toEqual(seed.revision);
+      const reloadedNative = nativeHistory(nativeWire.slice(freshConnectionStart), room, true);
+      try {
+        expectRetainedNative(reloadedRevision, reloadedNative, retained, removed);
+      } finally {
+        reloadedNative.destroy();
+      }
+      expect(csp).toEqual([]);
+      await testInfo.attach("selected-vue-restart-readback.json", {
+        contentType: "application/json",
+        body: Buffer.from(
+          JSON.stringify({
+            selected,
+            source,
+            tree: checkpoint.tree,
+            workspaceId: seed.workspaceId,
+            documentId: seed.document.id,
+            freshActorId: reader.userId,
+            sessionId: reader.sessionId,
+            persisted: currentBody,
+            revision: currentRevision,
+            firstAck: seed.firstAck,
+            finalAck: seed.finalAck,
+            ackPhase: "two pre-restart seed ACKs; readback performs no new edit",
+            canonicalEmojiOracleControls: oracleControls,
+            nativeHistoryOracleControls: nativeControls,
+            nativeHistoryReadback:
+              "fresh browser and reloaded connection server-received sync only",
+          }),
+        ),
+      });
+      failed = false;
+    } finally {
+      await closeCollabContext(ctx, failed);
+    }
+  });
+}
