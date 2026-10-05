@@ -10,7 +10,15 @@ export async function readVersionedBody(
   documentId: string,
   signal?: AbortSignal,
   projectId?: string | null,
+  kind: "document" | "task" = "document",
 ) {
+  if (kind === "task")
+    return ensureOk(
+      await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/body/versioned", {
+        signal,
+        params: { path: { workspace_id: workspaceId, task_id: documentId } },
+      }),
+    );
   if (projectId)
     return ensureOk(
       await api.GET(
@@ -36,7 +44,15 @@ export async function saveVersionedBody(
   documentId: string,
   body: BodySaveCommand,
   projectId?: string | null,
+  kind: "document" | "task" = "document",
 ) {
+  if (kind === "task")
+    return ensureOk(
+      await api.PUT("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/body/versioned", {
+        body,
+        params: { path: { workspace_id: workspaceId, task_id: documentId } },
+      }),
+    );
   if (projectId)
     return ensureOk(
       await api.PUT(

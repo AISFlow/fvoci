@@ -51,3 +51,25 @@ test("project and wiki native body requests bind exact route scope, command and 
   expect(calls[1]!.options.body).toBe(command);
   expect(calls[3]!.options.body).toBe(command);
 });
+
+test("task scope wins over project metadata and retains its exact native command", async () => {
+  const calls: { path: string; options: any }[] = [];
+  const capture = async (path: string, options: any) => {
+    calls.push({ path, options });
+    return { data: {} };
+  };
+  const adapter = runInNewContext(`${script}\n({ readVersionedBody, saveVersionedBody })`, {
+    api: { GET: capture, PUT: capture },
+    ensureOk: (reply: any) => reply.data,
+  });
+  const signal = new AbortController().signal;
+  const command = { commandId: "stable-task", expectedTailSeq: "7", updateV1: "exact-task-bytes" };
+  await adapter.readVersionedBody("ws", "task", signal, "project", "task");
+  await adapter.saveVersionedBody("ws", "task", command, "project", "task");
+  for (const call of calls) {
+    expect(call.path).toBe("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/body/versioned");
+    expect(call.options.params.path).toEqual({ workspace_id: "ws", task_id: "task" });
+  }
+  expect(calls[0]!.options.signal).toBe(signal);
+  expect(calls[1]!.options.body).toBe(command);
+});

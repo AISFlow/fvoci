@@ -957,7 +957,11 @@ function refOf(number: number): string {
         t("doc.off.storageFailed")
       }}</p>
       <UButton
-        v-if="realtimeOff && !offBody.doc.value && !offBody.loading.value"
+        v-if="
+          realtimeOff &&
+          (!offBody.doc.value || !offBody.draft.value?.start.writable) &&
+          !offBody.loading.value
+        "
         @click="offBody.load"
         >{{ t("load.retry") }}</UButton
       >

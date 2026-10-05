@@ -1,4 +1,4 @@
-//! Boot-OFF wiki saves: native history, current authority, CAS, revision,
+//! Boot-OFF wiki/project/task saves: native history, current authority, CAS, revision,
 //! outbox and stable command result share one reserved writer and one finish.
 use crate::collab::{
     revision::{capture_revision_offline, prepare_off_body, OffBodyPrepareError},
@@ -53,7 +53,7 @@ pub enum BodySaveError {
 #[derive(Clone)]
 pub struct OffBodyRequest {
     pub workspace: Uuid,
-    pub document: Uuid,
+    pub target: RevisionTarget,
     pub project: Option<Uuid>,
     pub actor: Uuid,
     pub credential: Uuid,
@@ -64,9 +64,17 @@ pub struct OffBodyRequest {
 }
 impl OffBodyRequest {
     fn scope(&self) -> RevisionScope {
-        match self.project {
-            Some(project) => RevisionScope::project_document(project, self.document),
-            None => RevisionTarget::Document(self.document).into(),
+        match (self.target, self.project) {
+            (RevisionTarget::Document(document), Some(project)) => {
+                RevisionScope::project_document(project, document)
+            }
+            _ => self.target.into(),
+        }
+    }
+    fn kind(&self) -> CollabKind {
+        match self.target {
+            RevisionTarget::Document(_) => CollabKind::Document,
+            RevisionTarget::Task(_) => CollabKind::Task,
         }
     }
 }
@@ -93,7 +101,7 @@ impl Drop for NativeCancel {
     }
 }
 
-pub async fn read_off_document_body(
+pub async fn read_off_body(
     backend: &Backend,
     mode: RealtimeMode,
     engine: CollabConfig,
@@ -102,8 +110,10 @@ pub async fn read_off_document_body(
     actor: Uuid,
     credential: Uuid,
 ) -> Result<OffBodySource, BodySaveError> {
-    let RevisionTarget::Document(document) = scope.target() else {
-        return Err(BodySaveError::Invalid);
+    let document = scope.target().id();
+    let kind = match scope.target() {
+        RevisionTarget::Document(_) => CollabKind::Document,
+        RevisionTarget::Task(_) => CollabKind::Task,
     };
     let mut tx = backend.begin_off_body().await?;
     let result = async {
@@ -113,14 +123,7 @@ pub async fn read_off_document_body(
             .await?
             .map_err(BodySaveError::Revision)?;
         let native = op
-            .load_off_body_read(
-                mode,
-                CollabKind::Document,
-                workspace,
-                actor,
-                credential,
-                document,
-            )
+            .load_off_body_read(mode, kind, workspace, actor, credential, document)
             .await?
             .map_err(BodySaveError::Native)?;
         let snapshot = native.snapshot.clone();
@@ -139,7 +142,7 @@ pub async fn read_off_document_body(
         }
         let writable = op
             .authorize_collab_write(
-                CollabKind::Document,
+                kind,
                 workspace,
                 actor,
                 credential,
@@ -178,13 +181,14 @@ pub async fn read_off_document_body(
     }
 }
 
-pub async fn save_off_document_body(
+pub async fn save_off_body(
     backend: &Backend,
     mode: RealtimeMode,
     engine: CollabConfig,
     request: OffBodyRequest,
 ) -> Result<SavedBody, BodySaveError> {
     if mode != RealtimeMode::Off
+        || (matches!(request.target, RevisionTarget::Task(_)) && request.project.is_some())
         || request.expected_tail < 0
         || request.expected_tail == i64::MAX
         || request.command.is_nil()
@@ -218,16 +222,17 @@ pub async fn save_off_document_body(
 
 fn command_hash(request: &OffBodyRequest) -> String {
     let mut hash = Sha256::new();
-    match request.project {
-        Some(project) => {
+    match (request.target, request.project) {
+        (RevisionTarget::Document(_), Some(project)) => {
             hash.update(b"fvoci:off-project-body:v1\0");
             hash.update(project.as_bytes());
         }
-        None => hash.update(b"fvoci:off-wiki-body:v1\0"),
+        (RevisionTarget::Task(_), _) => hash.update(b"fvoci:off-task-body:v1\0"),
+        (RevisionTarget::Document(_), None) => hash.update(b"fvoci:off-wiki-body:v1\0"),
     }
     for id in [
         request.workspace,
-        request.document,
+        request.target.id(),
         request.actor,
         request.credential,
     ] {
@@ -248,7 +253,7 @@ async fn save_in_writer(
 ) -> Result<SavedBody, BodySaveError> {
     let OffBodyRequest {
         workspace,
-        document,
+        target,
         project: _,
         actor,
         credential,
@@ -257,19 +262,20 @@ async fn save_in_writer(
         update,
         client_ip,
     } = request;
+    let document = target.id();
     op.set_tenant(*workspace).await?;
     let (proof, load) = op
         .load_off_body_writer(
             mode,
-            CollabKind::Document,
+            request.kind(),
             *workspace,
             *actor,
             *credential,
-            *document,
+            document,
         )
         .await?
         .map_err(BodySaveError::Native)?;
-    // Reuse the exact route's current wiki/project affiliation and authority.
+    // Reuse the exact route's current document/task affiliation and authority.
     op.authorize_revision_scope(*workspace, *actor, *credential, request.scope(), true)
         .await?
         .map_err(BodySaveError::Revision)?;
@@ -281,7 +287,7 @@ async fn save_in_writer(
         let saved: SavedBody =
             serde_json::from_value(result).map_err(|_| BodySaveError::Invalid)?;
         if saved.command_id != *command
-            || saved.target_id != *document
+            || saved.target_id != document
             || saved.tail_seq
                 != expected_tail
                     .checked_add(1)
@@ -346,7 +352,7 @@ async fn save_in_writer(
                 workspace_id: *workspace,
                 actor_user_id: *actor,
                 session_id: *credential,
-                document_id: *document,
+                document_id: document,
                 writer_generation: generation,
                 expected_tail_seq: *expected_tail,
                 op_id: *command,
@@ -357,13 +363,18 @@ async fn save_in_writer(
         .await?
         .map_err(BodySaveError::Native)?
         .seq();
+    // The command namespace can collide with an older ON/native operation.
+    // A duplicate native ACK is not a newly committed expected+1 body save.
+    if seq != expected_tail.checked_add(1).ok_or(BodySaveError::Invalid)? {
+        return Err(BodySaveError::RequestMismatch);
+    }
     op.project_off_body(
         proof,
         ProjectDerivedBodyInput::new(
             *workspace,
             *actor,
             *credential,
-            *document,
+            document,
             generation,
             seq,
             prepared,
@@ -393,7 +404,7 @@ async fn save_in_writer(
         .map_err(BodySaveError::Native)?;
     let saved = SavedBody {
         command_id: *command,
-        target_id: *document,
+        target_id: document,
         tail_seq: seq.to_string(),
         revision_id: revision,
     };
@@ -437,18 +448,27 @@ impl OperationTx<'_, '_> {
             serde_json::to_value(saved).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
         let payload_hash = Sha256::digest(&request.update).to_vec();
         let committed = request.expected_tail + 1;
+        let target = request.target.id();
+        let kind = request.target.kind_str();
+        let (document, task) = match request.target {
+            RevisionTarget::Document(id) => (Some(id), None),
+            RevisionTarget::Task(id) => (None, Some(id)),
+        };
         match self {
             Self::Postgres(tx) => {
-                let count=sqlx::query("INSERT INTO fvoci.body_save_commands(workspace_id,command_id,actor_user_id,credential_id,target_kind,target_id,document_id,expected_tail_seq,committed_tail_seq,request_hash,payload_hash,result_json) VALUES($1,$2,$3,$4,'document',$5,$5,$6,$7,$8,$9,$10) ON CONFLICT(workspace_id,command_id) DO NOTHING")
-                    .bind(request.workspace).bind(request.command).bind(request.actor).bind(request.credential).bind(request.document)
-                    .bind(request.expected_tail).bind(committed).bind(hash).bind(payload_hash).bind(result).execute(&mut ***tx).await?.rows_affected();
+                let count=sqlx::query("INSERT INTO fvoci.body_save_commands(workspace_id,command_id,actor_user_id,credential_id,target_kind,target_id,document_id,task_id,expected_tail_seq,committed_tail_seq,request_hash,payload_hash,result_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(workspace_id,command_id) DO NOTHING")
+                    .bind(request.workspace).bind(request.command).bind(request.actor).bind(request.credential)
+                    .bind(kind).bind(target).bind(document).bind(task).bind(request.expected_tail).bind(committed)
+                    .bind(hash).bind(payload_hash).bind(result).execute(&mut ***tx).await?.rows_affected();
                 Ok(count == 1)
             }
             Self::SqliteFamily(tx) => {
                 tx.require_writer()?;
                 tx.require_tenant(request.workspace)?;
-                let count=tx.execute("INSERT INTO body_save_commands(workspace_id,command_id,actor_user_id,credential_id,target_kind,target_id,document_id,expected_tail_seq,committed_tail_seq,request_hash,payload_hash,result_json) VALUES(?1,?2,?3,?4,'document',?5,?5,?6,?7,?8,?9,?10) ON CONFLICT(workspace_id,command_id) DO NOTHING",
-                    &[Cell::uuid(request.workspace),Cell::uuid(request.command),Cell::uuid(request.actor),Cell::uuid(request.credential),Cell::uuid(request.document),Cell::Integer(request.expected_tail),Cell::Integer(committed),Cell::text(hash),Cell::Blob(payload_hash),Cell::json(&result)?]).await?;
+                let count = tx.execute("INSERT INTO body_save_commands(workspace_id,command_id,actor_user_id,credential_id,target_kind,target_id,document_id,task_id,expected_tail_seq,committed_tail_seq,request_hash,payload_hash,result_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(workspace_id,command_id) DO NOTHING",
+                    &[Cell::uuid(request.workspace),Cell::uuid(request.command),Cell::uuid(request.actor),Cell::uuid(request.credential),
+                    Cell::text(kind),Cell::uuid(target),Cell::optional_uuid(document),Cell::optional_uuid(task),Cell::Integer(request.expected_tail),Cell::Integer(committed),
+                    Cell::text(hash),Cell::Blob(payload_hash),Cell::json(&result)?]).await?;
                 Ok(count == 1)
             }
         }
@@ -462,7 +482,7 @@ mod policy_tests {
     fn command_binding_covers_content_version_target_and_current_identity() {
         let request = OffBodyRequest {
             workspace: Uuid::now_v7(),
-            document: Uuid::now_v7(),
+            target: RevisionTarget::Document(Uuid::now_v7()),
             project: None,
             actor: Uuid::now_v7(),
             credential: Uuid::now_v7(),
@@ -472,10 +492,11 @@ mod policy_tests {
             client_ip: None,
         };
         let original = command_hash(&request);
-        let mutations: [fn(&mut OffBodyRequest); 7] = [
+        let mutations: [fn(&mut OffBodyRequest); 8] = [
             |r| r.workspace = Uuid::now_v7(),
-            |r| r.document = Uuid::now_v7(),
+            |r| r.target = RevisionTarget::Document(Uuid::now_v7()),
             |r| r.project = Some(Uuid::now_v7()),
+            |r| r.target = RevisionTarget::Task(r.target.id()),
             |r| r.actor = Uuid::now_v7(),
             |r| r.credential = Uuid::now_v7(),
             |r| r.expected_tail += 1,
@@ -544,7 +565,7 @@ mod sqlite_native_tests {
                 "content":[{"type":"text","text":text,"marks":[{"type":"bold"}]}]}]})).await.unwrap();
         OffBodyRequest {
             workspace: f.workspace,
-            document: f.document,
+            target: RevisionTarget::Document(f.document),
             project: None,
             actor: f.user,
             credential,
@@ -554,6 +575,26 @@ mod sqlite_native_tests {
             client_ip: Some("127.0.0.1".into()),
         }
     }
+    async fn task_target(f: &Fixture) -> Uuid {
+        let (_, task) = f.task_attachment().await;
+        // This is a newly created fixture target, not an existing history reseed.
+        sqlx::query("UPDATE tasks SET content_json=?1 WHERE workspace_id=?2 AND id=?3")
+            .bind(crate::db::documents::empty_document_json().to_string())
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(task.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        task
+    }
+    async fn task_counts(f: &Fixture, task: Uuid) -> (i64, i64, i64, i64) {
+        sqlx::query_as("SELECT (SELECT tail_seq FROM task_states WHERE workspace_id=?1 AND task_id=?2),
+            (SELECT count(*) FROM body_save_commands WHERE workspace_id=?1 AND target_kind='task' AND target_id=?2),
+            (SELECT count(*) FROM revisions WHERE workspace_id=?1 AND target_kind='task' AND target_id=?2),
+            (SELECT count(*) FROM task_collab_op_receipts WHERE workspace_id=?1 AND task_id=?2)")
+            .bind(f.workspace.as_bytes().as_slice()).bind(task.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap()
+    }
+
     async fn counts(f: &Fixture) -> (i64, i64, i64, i64) {
         sqlx::query_as("SELECT (SELECT tail_seq FROM document_states WHERE workspace_id=?1 AND document_id=?2),
             (SELECT count(*) FROM body_save_commands WHERE workspace_id=?1),
@@ -567,7 +608,7 @@ mod sqlite_native_tests {
         let credential = session(&f).await;
         let one = request(&f, credential, "one actual writer 😀").await;
         let two = request(&f, credential, "second conflicting writer").await;
-        let saved = save_off_document_body(&f.backend, RealtimeMode::Off, engine(), one.clone())
+        let saved = save_off_body(&f.backend, RealtimeMode::Off, engine(), one.clone())
             .await
             .unwrap();
         assert_eq!(saved.command_id, one.command);
@@ -576,11 +617,11 @@ mod sqlite_native_tests {
         let before = counts(&f).await;
         assert_eq!(before, (1, 1, 1, 1));
         assert!(matches!(
-            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), two).await,
+            save_off_body(&f.backend, RealtimeMode::Off, engine(), two).await,
             Err(BodySaveError::Conflict)
         ));
         assert_eq!(counts(&f).await, before);
-        let replay = save_off_document_body(&f.backend, RealtimeMode::Off, engine(), one.clone())
+        let replay = save_off_body(&f.backend, RealtimeMode::Off, engine(), one.clone())
             .await
             .unwrap();
         assert_eq!(replay.revision_id, saved.revision_id);
@@ -588,11 +629,11 @@ mod sqlite_native_tests {
         let mut changed = one.clone();
         changed.update.push(0);
         assert!(matches!(
-            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), changed).await,
+            save_off_body(&f.backend, RealtimeMode::Off, engine(), changed).await,
             Err(BodySaveError::RequestMismatch)
         ));
         assert_eq!(counts(&f).await, before);
-        let reader = read_off_document_body(
+        let reader = read_off_body(
             &f.backend,
             RealtimeMode::Off,
             engine(),
@@ -616,7 +657,7 @@ mod sqlite_native_tests {
             .await
             .unwrap();
         assert!(matches!(
-            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), one).await,
+            save_off_body(&f.backend, RealtimeMode::Off, engine(), one).await,
             Err(BodySaveError::Native(_))
         ));
         assert_eq!(counts(&f).await, before);
@@ -628,6 +669,217 @@ mod sqlite_native_tests {
         f.close().await;
     }
     #[tokio::test]
+    async fn off_task_current_native_cas_receipt_history_and_room_expiry() {
+        let f = Fixture::new().await;
+        let credential = session(&f).await;
+        let task = task_target(&f).await;
+        let owner = Uuid::now_v7();
+        let lease = std::time::Duration::from_secs(60);
+        let mut tx = f.backend.begin_off_body().await.unwrap();
+        let claim = tx
+            .operation()
+            .prepare_family_task_room_writer(
+                (f.workspace, task),
+                (f.user, credential),
+                owner,
+                lease,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(claim.native.writer_generation > 0);
+        tx.commit_with_cleanup().await.unwrap();
+        let before = task_counts(&f, task).await;
+        assert_eq!(before, (0, 0, 0, 0));
+        let mut command = request(&f, credential, "actual OFF task native 😀").await;
+        command.target = RevisionTarget::Task(task);
+        assert!(matches!(
+            save_off_body(&f.backend, RealtimeMode::Off, engine(), command.clone()).await,
+            Err(BodySaveError::Native(CollabDbError::StaleWriter))
+        ));
+        assert_eq!(task_counts(&f, task).await, before);
+        let mut tx = f.backend.begin_off_body().await.unwrap();
+        let retry = tx
+            .operation()
+            .prepare_family_task_room_writer(
+                (f.workspace, task),
+                (f.user, credential),
+                owner,
+                lease,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retry.fence, claim.fence);
+        assert_eq!(
+            retry.native.writer_generation,
+            claim.native.writer_generation
+        );
+        tx.commit_with_cleanup().await.unwrap();
+        // Expiry is DB metadata controlled only in this fixture, no sleeps or
+        // fabricated successful remote acknowledgements.
+        sqlx::query(
+            "UPDATE task_collab_room_fences SET expires_at=0 WHERE workspace_id=?1 AND task_id=?2",
+        )
+        .bind(f.workspace.as_bytes().as_slice())
+        .bind(task.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        let mut tx = f.backend.begin_off_body().await.unwrap();
+        assert!(!tx
+            .operation()
+            .renew_family_task_room_fence(claim.fence, lease)
+            .await
+            .unwrap());
+        assert!(!tx
+            .operation()
+            .verify_family_task_room_fence(claim.fence)
+            .await
+            .unwrap());
+        assert!(matches!(
+            tx.operation()
+                .prepare_family_task_room_writer(
+                    (f.workspace, task),
+                    (f.user, credential),
+                    owner,
+                    lease
+                )
+                .await
+                .unwrap(),
+            Err(CollabDbError::StaleWriter)
+        ));
+        tx.rollback().await.unwrap();
+        let saved = save_off_body(&f.backend, RealtimeMode::Off, engine(), command.clone())
+            .await
+            .unwrap();
+        assert_eq!(saved.command_id, command.command);
+        assert_eq!(saved.tail_seq, "1");
+        assert_eq!(task_counts(&f, task).await, (1, 1, 1, 1));
+        let fresh = read_off_body(
+            &f.backend,
+            RealtimeMode::Off,
+            engine(),
+            f.workspace,
+            RevisionTarget::Task(task).into(),
+            f.user,
+            credential,
+        )
+        .await
+        .unwrap();
+        assert!(fresh.writable);
+        assert_eq!(
+            fresh.native.writer_generation,
+            claim.native.writer_generation
+        );
+        assert!(fresh
+            .content_json
+            .to_string()
+            .contains("actual OFF task native 😀"));
+        assert!(fresh.content_json.to_string().contains("off-stable-block"));
+        let replay = save_off_body(&f.backend, RealtimeMode::Off, engine(), command.clone())
+            .await
+            .unwrap();
+        assert_eq!(replay.revision_id, saved.revision_id);
+        assert_eq!(task_counts(&f, task).await, (1, 1, 1, 1));
+        let mut conflicting = command.clone();
+        conflicting.command = Uuid::now_v7();
+        assert!(matches!(
+            save_off_body(&f.backend, RealtimeMode::Off, engine(), conflicting).await,
+            Err(BodySaveError::Conflict)
+        ));
+        assert_eq!(task_counts(&f, task).await, (1, 1, 1, 1));
+        let mut tx = f.backend.begin_off_body().await.unwrap();
+        let successor = tx
+            .operation()
+            .prepare_family_task_room_writer(
+                (f.workspace, task),
+                (f.user, credential),
+                Uuid::now_v7(),
+                lease,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(successor.fence, claim.fence);
+        assert!(successor.native.writer_generation > claim.native.writer_generation);
+        assert!(!tx
+            .operation()
+            .release_family_task_room_fence(claim.fence)
+            .await
+            .unwrap());
+        assert!(tx
+            .operation()
+            .verify_family_task_room_fence(successor.fence)
+            .await
+            .unwrap());
+        tx.commit_with_cleanup().await.unwrap();
+        assert!(matches!(
+            save_off_body(&f.backend, RealtimeMode::Off, engine(), command).await,
+            Err(BodySaveError::Native(CollabDbError::StaleWriter))
+        ));
+        assert_eq!(task_counts(&f, task).await, (1, 1, 1, 1));
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn older_native_operation_receipt_cannot_ack_a_new_body_command_version() {
+        let f = Fixture::new().await;
+        let credential = session(&f).await;
+        let mut command = request(&f, credential, "actual older native operation").await;
+        let mut tx = f.backend.begin_off_body().await.unwrap();
+        let mut op = tx.operation();
+        let (proof, load) = op
+            .load_off_body_writer(
+                RealtimeMode::Off,
+                CollabKind::Document,
+                f.workspace,
+                f.user,
+                credential,
+                f.document,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let seq = op
+            .append_off_body(
+                proof,
+                AppendCollabInput {
+                    workspace_id: f.workspace,
+                    actor_user_id: f.user,
+                    session_id: credential,
+                    document_id: f.document,
+                    writer_generation: load.writer_generation,
+                    expected_tail_seq: 0,
+                    op_id: command.command,
+                    payload: &command.update,
+                    client_ip: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .seq();
+        assert_eq!(seq, 1);
+        tx.commit_with_cleanup().await.unwrap();
+        command.expected_tail = 1;
+        let before = counts(&f).await;
+        assert_eq!(before, (1, 0, 0, 1));
+        assert!(matches!(
+            save_off_body(&f.backend, RealtimeMode::Off, engine(), command.clone()).await,
+            Err(BodySaveError::RequestMismatch)
+        ));
+        assert_eq!(counts(&f).await, before);
+        command.command = Uuid::now_v7();
+        let saved = save_off_body(&f.backend, RealtimeMode::Off, engine(), command)
+            .await
+            .unwrap();
+        assert_eq!(saved.tail_seq, "2");
+        assert_eq!(counts(&f).await, (2, 1, 1, 2));
+        f.close().await;
+    }
+
+    #[tokio::test]
     async fn two_actual_sqlite_writers_at_one_version_commit_exactly_one_result() {
         let f = Fixture::new().await;
         let credential = session(&f).await;
@@ -638,8 +890,8 @@ mod sqlite_native_tests {
             .unwrap();
         let backend = Backend::Sqlite(pool.clone());
         let (first, second) = tokio::join!(
-            save_off_document_body(&backend, RealtimeMode::Off, engine(), one.clone()),
-            save_off_document_body(&backend, RealtimeMode::Off, engine(), two.clone()),
+            save_off_body(&backend, RealtimeMode::Off, engine(), one.clone()),
+            save_off_body(&backend, RealtimeMode::Off, engine(), two.clone()),
         );
         let (saved, winner, loser, expected_text, excluded_text) = match (first, second) {
             (Ok(saved), Err(BodySaveError::Conflict)) => (
@@ -662,7 +914,7 @@ mod sqlite_native_tests {
         assert_eq!(saved.tail_seq, "1");
         let before = counts(&f).await;
         assert_eq!(before, (1, 1, 1, 1));
-        let reader = read_off_document_body(
+        let reader = read_off_body(
             &backend,
             RealtimeMode::Off,
             engine(),
@@ -691,7 +943,7 @@ mod sqlite_native_tests {
         .await
         .unwrap();
         assert_eq!(excluded, 0);
-        let replay = save_off_document_body(&backend, RealtimeMode::Off, engine(), winner)
+        let replay = save_off_body(&backend, RealtimeMode::Off, engine(), winner)
             .await
             .unwrap();
         assert_eq!(replay.revision_id, saved.revision_id);
@@ -705,7 +957,7 @@ mod sqlite_native_tests {
         let f = Fixture::new().await;
         let credential = session(&f).await;
         let command = request(&f, credential, "retained archived wiki history").await;
-        save_off_document_body(&f.backend, RealtimeMode::Off, engine(), command.clone())
+        save_off_body(&f.backend, RealtimeMode::Off, engine(), command.clone())
             .await
             .unwrap();
         let before = counts(&f).await;
@@ -715,7 +967,7 @@ mod sqlite_native_tests {
             .execute(&f.pool)
             .await
             .unwrap();
-        let source = read_off_document_body(
+        let source = read_off_body(
             &f.backend,
             RealtimeMode::Off,
             engine(),
@@ -732,7 +984,7 @@ mod sqlite_native_tests {
             .to_string()
             .contains("retained archived wiki history"));
         assert!(matches!(
-            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), command).await,
+            save_off_body(&f.backend, RealtimeMode::Off, engine(), command).await,
             Err(BodySaveError::Native(CollabDbError::Forbidden))
         ));
         assert_eq!(counts(&f).await, before);
@@ -790,13 +1042,12 @@ mod sqlite_native_tests {
         command.command = Uuid::now_v7();
         command.expected_tail = 64;
         command.update = incoming;
-        let saved =
-            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), command.clone())
-                .await
-                .unwrap();
+        let saved = save_off_body(&f.backend, RealtimeMode::Off, engine(), command.clone())
+            .await
+            .unwrap();
         assert_eq!(saved.tail_seq, "65");
         assert_eq!(counts(&f).await, (65, 1, 1, 65));
-        let fresh = read_off_document_body(
+        let fresh = read_off_body(
             &f.backend,
             RealtimeMode::Off,
             engine(),
@@ -820,7 +1071,7 @@ mod sqlite_native_tests {
             assert!(projected.contains(kept), "missing {kept}");
         }
         let before = counts(&f).await;
-        let replay = save_off_document_body(&f.backend, RealtimeMode::Off, engine(), command)
+        let replay = save_off_body(&f.backend, RealtimeMode::Off, engine(), command)
             .await
             .unwrap();
         assert_eq!(replay.revision_id, saved.revision_id);
@@ -848,18 +1099,17 @@ mod sqlite_native_tests {
         let mut wrong = command.clone();
         wrong.project = Some(Uuid::now_v7());
         assert!(matches!(
-            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), wrong).await,
+            save_off_body(&f.backend, RealtimeMode::Off, engine(), wrong).await,
             Err(BodySaveError::Revision(RevisionDbError::NotFound))
         ));
         assert_eq!(counts(&f).await, (0, 0, 0, 0));
-        let saved =
-            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), command.clone())
-                .await
-                .unwrap();
+        let saved = save_off_body(&f.backend, RealtimeMode::Off, engine(), command.clone())
+            .await
+            .unwrap();
         assert_eq!(saved.tail_seq, "1");
         let before = counts(&f).await;
         let scope = RevisionScope::project_document(project, f.document);
-        let fresh = read_off_document_body(
+        let fresh = read_off_body(
             &f.backend,
             RealtimeMode::Off,
             engine(),
@@ -876,10 +1126,9 @@ mod sqlite_native_tests {
             .content_json
             .to_string()
             .contains("project native history"));
-        let replay =
-            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), command.clone())
-                .await
-                .unwrap();
+        let replay = save_off_body(&f.backend, RealtimeMode::Off, engine(), command.clone())
+            .await
+            .unwrap();
         assert_eq!(replay.revision_id, saved.revision_id);
         assert_eq!(counts(&f).await, before);
         sqlx::query("UPDATE projects SET archived_at=1 WHERE workspace_id=?1 AND id=?2")
@@ -889,11 +1138,11 @@ mod sqlite_native_tests {
             .await
             .unwrap();
         assert!(matches!(
-            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), command).await,
+            save_off_body(&f.backend, RealtimeMode::Off, engine(), command).await,
             Err(BodySaveError::Native(CollabDbError::Forbidden))
         ));
         assert_eq!(counts(&f).await, before);
-        let fresh = read_off_document_body(
+        let fresh = read_off_body(
             &f.backend,
             RealtimeMode::Off,
             engine(),
@@ -971,7 +1220,7 @@ mod sqlite_native_tests {
         assert_eq!(audits, 0);
         // The same bytes must make normal progress after the rejected writer.
         assert_eq!(
-            save_off_document_body(&f.backend, RealtimeMode::Off, engine(), input)
+            save_off_body(&f.backend, RealtimeMode::Off, engine(), input)
                 .await
                 .unwrap()
                 .tail_seq,

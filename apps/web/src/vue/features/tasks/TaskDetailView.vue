@@ -14,8 +14,9 @@ import { collabUserOf } from "@/features/documents/collab-model";
 import type { MemberOutput } from "@/lib/contracts";
 import { ProblemError } from "@/lib/api";
 import { projectTasksPath } from "@/lib/href";
-import { meQuery, workspacesQuery } from "@/lib/queries";
+import { meQuery, workspacesQuery, setupStatusQuery } from "@/lib/queries";
 import { useCollabRoom, collabRoomName } from "../../collab/useCollabRoom";
+import { useOffWikiBody } from "../../composables/useOffWikiBody";
 import AppLink from "../../components/AppLink.vue";
 import ConfirmActionButton from "../../components/ConfirmActionButton.vue";
 import PersonalTransferDialog from "../capture/PersonalTransferDialog.vue";
@@ -85,6 +86,29 @@ const props = defineProps<{
 // One Y.Doc and one provider for this task body; the parent keys this
 // component by the room name so a move to another item tears it down.
 const me = useQuery(meQuery);
+const setup = useQuery(setupStatusQuery);
+const realtimeOn = computed(() => setup.data.value?.realtimeMode === "on");
+const realtimeOff = computed(() => setup.data.value?.realtimeMode === "off");
+const offBody = useOffWikiBody(
+  () => {
+    const actor = me.data.value;
+    if (
+      !actor?.userId ||
+      !actor.sessionId ||
+      (me.error.value instanceof ProblemError && [401, 403].includes(me.error.value.status))
+    )
+      return null;
+    return {
+      actorId: actor.userId,
+      credentialId: actor.sessionId,
+      workspaceId: props.workspaceId,
+      targetId: props.task.id,
+      projectId: props.projectId,
+      kind: "task" as const,
+    };
+  },
+  () => realtimeOff.value,
+);
 const collabUser = computed(() => {
   const data = me.data.value;
   return data ? collabUserOf(data.userId, formatPersonName(data, data.locale)) : null;
@@ -108,6 +132,7 @@ const room = useCollabRoom(
         : props.canEdit && !props.readOnly && props.task.archivedAt == null,
     };
   },
+  () => realtimeOn.value,
 );
 const session = room.session;
 
@@ -152,6 +177,7 @@ watch(
   [
     () => props.workspaceId,
     () => props.task.id,
+    () => props.projectId,
     () => props.formEpoch,
     () => me.data.value?.userId,
     () => me.data.value?.sessionId,
@@ -177,11 +203,30 @@ function readTaskHost(): TaskHostSnapshot {
       props.clonePending ||
       props.deletePending,
     draft: form.value?.getMetadataDraftState() ?? null,
-    bodyGeneration: session.value?.generation ?? null,
-    bodyPending: session.value?.pending ?? false,
+    bodyGeneration: realtimeOff.value
+      ? offBody.generation.value
+      : (session.value?.generation ?? null),
+    bodyPending: realtimeOff.value
+      ? !offBody.durable.value || offBody.saving.value
+      : (session.value?.pending ?? false),
   };
 }
+async function persistOffBody(): Promise<boolean> {
+  const current = offBody.draft.value;
+  const epoch = hostGeneration;
+  if (!current || authRetired.value || !realtimeOff.value) return false;
+  if (!(await offBody.save())) return false;
+  const verified = await offBody.verifyCommitted();
+  return (
+    verified &&
+    epoch === hostGeneration &&
+    current === offBody.draft.value &&
+    current.active &&
+    !authRetired.value
+  );
+}
 async function persistTransferBody(): Promise<boolean> {
+  if (realtimeOff.value) return persistOffBody();
   try {
     await persistTaskBodyBeforeArchive({
       pageEditable: pageEditable.value,
@@ -215,6 +260,15 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
   archiveInFlight = true;
   archivePersisting.value = true;
   try {
+    if (realtimeOff.value) {
+      const epoch = hostGeneration;
+      if (pageEditable.value && !(await persistOffBody()))
+        throw new Error("Task body save unconfirmed");
+      if (epoch !== hostGeneration || authRetired.value)
+        throw new Error("Task archive scope retired");
+      await props.onArchiveToggle(true);
+      return;
+    }
     await runArchiveWithBodyPersist({
       pageEditable: pageEditable.value,
       session: session.value,
@@ -320,6 +374,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :task-id="task.id"
       :read-only="bodyReadOnly"
       :session="session"
+      :off-body="realtimeOff ? offBody : null"
       :collab-user="collabUser"
     />
     <TaskAttachmentsPanel

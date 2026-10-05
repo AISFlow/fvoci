@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { FvociEditor, type TiptapEditor } from "@fvoci/editor/vue";
 import { onBeforeRouteLeave, onBeforeRouteUpdate } from "vue-router";
+import { UNIQUE_ID_NODE_TYPES } from "@fvoci/editor/extract";
 import "@fvoci/editor/styles.css";
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
@@ -16,7 +17,9 @@ import {
 } from "vue";
 import { useQuery } from "@tanstack/vue-query";
 import { meQuery } from "@/lib/queries";
-import { ProblemError } from "@/lib/api";
+import { compareRevisionProjections } from "@/features/documents/revision-diff";
+import type { useOffWikiBody } from "../../composables/useOffWikiBody";
+import { loadErrorMessage, ProblemError } from "@/lib/api";
 import { collabBadge, collabRefusalNote } from "@/features/documents/collab-badge";
 import type { CollabUser } from "@/features/documents/collab-model";
 import type { CollabRoomSession } from "../../collab/useCollabRoom";
@@ -40,8 +43,38 @@ const props = defineProps<{
   taskId: string;
   readOnly: boolean;
   session: CollabRoomSession | null;
+  offBody: ReturnType<typeof useOffWikiBody> | null;
   collabUser: CollabUser | null;
 }>();
+
+const realtimeOff = computed(() => !!props.offBody);
+const offBody = computed(() => props.offBody);
+const bodyDoc = computed(() => (props.offBody ? props.offBody.doc.value : props.session?.doc));
+const bodyGeneration = computed(() =>
+  props.offBody ? `off:${props.offBody.generation.value}` : props.session?.generation,
+);
+const offComparisons = computed(() => {
+  const bodies = props.offBody?.comparison.value;
+  if (!bodies) return [];
+  const projection = (id: string, contentJson: unknown) => ({
+    id,
+    targetKind: "task",
+    targetId: props.taskId,
+    contentJson,
+  });
+  return [
+    compareRevisionProjections(
+      projection("start", bodies.start),
+      projection("mine", bodies.mine),
+      UNIQUE_ID_NODE_TYPES,
+    ),
+    compareRevisionProjections(
+      projection("start", bodies.start),
+      projection("current", bodies.current),
+      UNIQUE_ID_NODE_TYPES,
+    ),
+  ];
+});
 
 const { mentionItems, entityResolver } = useEditorEntities(
   () => props.workspaceId,
@@ -52,9 +85,19 @@ const { mentionItems, entityResolver } = useEditorEntities(
 const persisting = ref(false);
 const persistError = ref<string | null>(null);
 
-const readOnly = computed(() => props.readOnly || (props.session?.readOnly ?? false));
-const ready = computed(() => Boolean(props.session?.synced && props.collabUser));
-const refusalNote = computed(() => collabRefusalNote(props.session?.status, ready.value));
+const readOnly = computed(
+  () =>
+    props.readOnly ||
+    (props.offBody
+      ? !props.offBody.doc.value || !props.offBody.draft.value?.start.writable
+      : (props.session?.readOnly ?? false)),
+);
+const ready = computed(() =>
+  Boolean(props.collabUser && (props.offBody ? props.offBody.doc.value : props.session?.synced)),
+);
+const refusalNote = computed(() =>
+  props.offBody ? null : collabRefusalNote(props.session?.status, ready.value),
+);
 const badge = computed(() =>
   props.session
     ? collabBadge(
@@ -68,8 +111,9 @@ const canPersist = computed(
   () =>
     ready.value &&
     !readOnly.value &&
-    props.session !== null &&
-    props.session.status === "connected" &&
+    (props.offBody
+      ? !props.offBody.saving.value && !props.offBody.conflict.value
+      : props.session !== null && props.session.status === "connected") &&
     !persisting.value,
 );
 
@@ -87,9 +131,9 @@ watch(
     () => props.collabUser?.id,
     () => me.data.value?.sessionId,
     () => me.error.value instanceof ProblemError && me.error.value.status === 401,
-    () => props.session?.doc,
+    () => bodyDoc.value,
     () => props.session?.provider,
-    () => props.session?.generation,
+    () => bodyGeneration.value,
     () => props.session?.status,
     readOnly,
   ],
@@ -166,6 +210,17 @@ const readonlyCommittedBody = useReadonlyCommittedBody(() => {
   };
 });
 async function waitForEditorSave(): Promise<boolean> {
+  if (props.offBody) {
+    const current = props.offBody.draft.value;
+    if (!current || sourceAuthRetired.value) return false;
+    if (!readOnly.value) await persistBody();
+    return (
+      (await props.offBody.verifyCommitted()) &&
+      current === props.offBody.draft.value &&
+      current.active &&
+      !sourceAuthRetired.value
+    );
+  }
   const before = readSaveSession();
   const lifetime = persistLifecycle.value;
   const target = `${props.workspaceId}:${props.taskId}`;
@@ -208,6 +263,11 @@ async function waitForEditorSave(): Promise<boolean> {
 }
 
 async function persistBody(): Promise<void> {
+  if (props.offBody) {
+    if (!canPersist.value || sourceAuthRetired.value) throw new Error("Body save unavailable");
+    if (!(await props.offBody.save())) throw new Error("Body save unconfirmed");
+    return;
+  }
   const current = props.session;
   if (!current || !canPersist.value) throw new Error("collab persist unavailable");
   const lifetime = persistLifecycle.value;
@@ -232,7 +292,23 @@ async function persistBody(): Promise<void> {
   <section class="task-detail__body" :aria-label="t('doc.body.a11y')" data-testid="task-body">
     <div class="document-page__collab">
       <span
-        v-if="badge"
+        v-if="offBody"
+        class="document-page__collab-status"
+        data-body-mode="off"
+        :data-body-persisted="offBody.durable.value ? 'true' : 'false'"
+      >
+        {{
+          !offBody.doc.value
+            ? t("load.loading")
+            : offBody.saving.value
+              ? t("version.saving")
+              : offBody.dirty.value || offBody.sourceBuffer.value
+                ? t("doc.off.draft")
+                : t("doc.off.saved")
+        }}
+      </span>
+      <span
+        v-else-if="badge"
         :class="`document-page__collab-status document-page__collab-status--${badge.tone}`"
         :data-collab-status="session?.status"
         :data-collab-pending="session?.pending ? 'true' : 'false'"
@@ -256,7 +332,7 @@ async function persistBody(): Promise<void> {
         :document-id="taskId"
         :project-id="null"
         target-kind="task"
-        :read-only="readOnly"
+        :read-only="readOnly || realtimeOff"
         :persist-now="canPersist ? persistBody : undefined"
         :source-dirty="!!sourceDraft?.dirty || !!sourceDraft?.composing"
       />
@@ -266,18 +342,67 @@ async function persistBody(): Promise<void> {
       {{ t("task.collab.unauthorized") }}
     </p>
     <p v-if="refusalNote" class="document-page__body-note" role="status">{{ t(refusalNote) }}</p>
+    <p v-if="offBody && offBody.error.value" role="alert">{{
+      loadErrorMessage(offBody.error.value)
+    }}</p>
+    <p v-if="offBody && offBody.storageError.value" role="alert">{{
+      t("doc.off.storageFailed")
+    }}</p>
+    <UButton
+      v-if="realtimeOff && !offBody.doc.value && !offBody.loading.value"
+      @click="offBody.load"
+      >{{ t("load.retry") }}</UButton
+    >
+    <section
+      v-if="offBody && offBody.comparison.value"
+      :aria-label="t('version.compare')"
+      data-testid="off-body-conflict"
+    >
+      <p role="alert">{{ t("doc.off.conflict") }}</p>
+      <div v-for="(difference, index) in offComparisons" :key="difference.afterId">
+        <h3>{{ index === 0 ? t("doc.off.mine") : t("doc.off.current") }}</h3>
+        <p v-for="limit in difference.limits" :key="limit">{{ t(`version.diff.${limit}`) }}</p>
+        <div v-for="change in difference.changes" :key="change.key">
+          <p
+            >{{ t(`version.diff.${change.kind}`) }} ·
+            {{ (change.after ?? change.before)?.blockId }}</p
+          >
+          <del>{{ change.before?.text }}</del> → <ins>{{ change.after?.text }}</ins>
+          <pre v-if="change.values">{{ JSON.stringify(change.values, null, 2) }}</pre>
+        </div>
+      </div>
+      <details
+        ><summary>{{ t("doc.off.start") }}</summary
+        ><pre>{{ JSON.stringify(offBody.comparison.value.start, null, 2) }}</pre>
+      </details>
+      <details
+        ><summary>{{ t("doc.off.mine") }}</summary
+        ><pre>{{ JSON.stringify(offBody.comparison.value.mine, null, 2) }}</pre>
+      </details>
+      <details
+        ><summary>{{ t("doc.off.current") }}</summary
+        ><pre>{{ JSON.stringify(offBody.comparison.value.current, null, 2) }}</pre>
+      </details>
+      <UButton
+        v-if="offBody.conflict.value"
+        :disabled="offBody.saving.value"
+        @click="offBody.editCurrent"
+        >{{ t("doc.off.editCurrent") }}</UButton
+      >
+    </section>
     <QueryLoading v-if="!ready && session?.status !== 'unauthorized' && !refusalNote" />
     <div
-      v-if="ready && session && collabUser"
+      v-if="ready && bodyDoc && collabUser"
       class="document-page__body document-page__body--editor"
     >
       <FvociEditor
         ref="sourceEditor"
-        :key="session.generation"
+        :key="bodyGeneration"
         :mode-scope="persistLifecycle"
         :wait-for-save="waitForEditorSave"
-        :ydoc="session.doc"
-        :provider="session.provider"
+        :ydoc="bodyDoc"
+        :provider="session?.provider"
+        :source-buffer="offBody?.sourceBuffer.value ?? null"
         :user="collabUser"
         :editable="!readOnly"
         :aria-label="t('doc.body.a11y')"
@@ -286,6 +411,7 @@ async function persistBody(): Promise<void> {
         :entity-resolver="entityResolver"
         :url-embed="UrlEmbed"
         @source-dirty="onSourceDraft"
+        @source-buffer="offBody?.receiveSourceBuffer($event)"
         @ready="richEditor = $event"
       >
         <template #toolbar="{ editor: live }">

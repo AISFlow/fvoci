@@ -209,6 +209,24 @@ pub struct FamilyRoomFence {
     pub(crate) fence: i64,
 }
 
+/// Distinct task lineage. A document lease cannot authorize a task mutation.
+/// Fields remain private; the current ON task hub still refuses family rooms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FamilyTaskRoomFence {
+    workspace_id: Uuid,
+    task_id: Uuid,
+    owner_token: Uuid,
+    fence: i64,
+}
+
+/// Prepared on a borrowed writer; the caller must confirm that same commit
+/// before acknowledging room ownership or exposing native state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedFamilyTaskRoomClaim {
+    pub fence: FamilyTaskRoomFence,
+    pub native: ClaimWriterResult,
+}
+
 /// Actor-native capture capability. Fields stay private to named product
 /// operations; HTTP clients never choose or serialize this room/head proof.
 #[derive(Debug, Clone, Copy)]
@@ -4349,12 +4367,21 @@ impl OperationTx<'_, '_> {
             Self::SqliteFamily(tx) => {
                 tx.require_writer()?;
                 tx.require_tenant(workspace)?;
-                if kind != CollabKind::Document {
-                    return Ok(false);
-                }
                 let now = family_room_now(tx).await?;
-                let rows = tx.query("SELECT NOT EXISTS(SELECT 1 FROM collab_room_fences WHERE workspace_id=?1 AND document_id=?2 AND expires_at>?3)",
-                    &[Cell::uuid(workspace),Cell::uuid(resource),Cell::Integer(now)]).await?;
+                let sql = match kind {
+                    CollabKind::Document => "SELECT NOT EXISTS(SELECT 1 FROM collab_room_fences WHERE workspace_id=?1 AND document_id=?2 AND expires_at>?3)",
+                    CollabKind::Task => "SELECT NOT EXISTS(SELECT 1 FROM task_collab_room_fences WHERE workspace_id=?1 AND task_id=?2 AND expires_at>?3)",
+                };
+                let rows = tx
+                    .query(
+                        sql,
+                        &[
+                            Cell::uuid(workspace),
+                            Cell::uuid(resource),
+                            Cell::Integer(now),
+                        ],
+                    )
+                    .await?;
                 rows.first()
                     .ok_or(sqlx::Error::RowNotFound)?
                     .cell(0)?
@@ -4529,5 +4556,206 @@ impl OperationTx<'_, '_> {
             return Ok(Err(CollabDbError::StaleWriter));
         }
         Ok(Ok(()))
+    }
+}
+
+impl OperationTx<'_, '_> {
+    /// The stable owner is prepared by the actual caller once, across failures.
+    /// No commit or fresh observation occurs inside this borrowed operation.
+    pub async fn prepare_family_task_room_writer(
+        &mut self,
+        target: (Uuid, Uuid),
+        identity: (Uuid, Uuid),
+        owner: Uuid,
+        lease: std::time::Duration,
+    ) -> Result<Result<PreparedFamilyTaskRoomClaim, CollabDbError>, sqlx::Error> {
+        let (workspace, task) = target;
+        let (actor, credential) = identity;
+        if owner.is_nil() {
+            return Err(sqlx::Error::Protocol(
+                "task room owner must be prepared once".into(),
+            ));
+        }
+        if !matches!(self, Self::SqliteFamily(_)) {
+            return Err(sqlx::Error::Protocol(
+                "PG task rooms retain their session advisory guard".into(),
+            ));
+        }
+        let mut native = match self
+            .load_collab_native(
+                CollabKind::Task,
+                workspace,
+                actor,
+                credential,
+                task,
+                NativeLoadMode::Writer,
+            )
+            .await?
+        {
+            Ok(native) => native,
+            Err(error) => return Ok(Err(error)),
+        };
+        let (fence, new_owner) = match self
+            .claim_family_task_room_fence(workspace, task, owner, lease)
+            .await?
+        {
+            Ok(claim) => claim,
+            Err(error) => return Ok(Err(error)),
+        };
+        if new_owner {
+            let Some(generation) = self
+                .bump_native_writer_generation(
+                    CollabTables::for_kind(CollabKind::Task),
+                    workspace,
+                    task,
+                )
+                .await?
+            else {
+                return Ok(Err(CollabDbError::NotFound));
+            };
+            native.writer_generation = generation;
+            native.load.writer_generation = generation;
+        }
+        if !self.verify_family_task_room_fence(fence).await? {
+            return Ok(Err(CollabDbError::StaleWriter));
+        }
+        Ok(Ok(PreparedFamilyTaskRoomClaim { fence, native }))
+    }
+
+    async fn claim_family_task_room_fence(
+        &mut self,
+        workspace: Uuid,
+        task: Uuid,
+        owner: Uuid,
+        lease: std::time::Duration,
+    ) -> Result<Result<(FamilyTaskRoomFence, bool), CollabDbError>, sqlx::Error> {
+        let Self::SqliteFamily(tx) = self else {
+            return Err(sqlx::Error::Protocol(
+                "family room lease requires SQLite family".into(),
+            ));
+        };
+        tx.require_writer()?;
+        tx.require_tenant(workspace)?;
+        let now = family_room_now(tx).await?;
+        let expires = now.checked_add(room_lease_micros(lease)?).ok_or_else(|| {
+            sqlx::Error::Protocol("room lease expiry exceeds signed microseconds".into())
+        })?;
+        let rows = tx.query(
+            "SELECT owner_token,fence,expires_at FROM task_collab_room_fences WHERE workspace_id=?1 AND task_id=?2",
+            &[Cell::uuid(workspace),Cell::uuid(task)],
+        ).await?;
+        if let Some(row) = rows.first() {
+            let old_owner = row.cell(0)?.id()?;
+            let fence = row.cell(1)?.integer()?;
+            let old_expiry = row.cell(2)?.integer()?;
+            if fence <= 0 {
+                return Err(sqlx::Error::Protocol("room fence must be positive".into()));
+            }
+            if old_owner == owner {
+                if old_expiry <= now {
+                    return Ok(Err(CollabDbError::StaleWriter));
+                }
+                return Ok(Ok((
+                    FamilyTaskRoomFence {
+                        workspace_id: workspace,
+                        task_id: task,
+                        owner_token: owner,
+                        fence,
+                    },
+                    false,
+                )));
+            }
+            if old_expiry > now {
+                return Ok(Err(CollabDbError::StaleWriter));
+            }
+        }
+        // Allocation is in the same writer transaction as lease, native
+        // generation and state. Purging a target cannot reset this counter.
+        let rows = tx.query(
+            "UPDATE collab_fence_counter SET next_fence=next_fence+1 WHERE id=1 AND next_fence<9223372036854775807 RETURNING next_fence-1",
+            &[],
+        ).await?;
+        let fence = rows
+            .first()
+            .ok_or_else(|| sqlx::Error::Protocol("room fence counter absent or exhausted".into()))?
+            .cell(0)?
+            .integer()?;
+        let changed = tx.execute(
+            "INSERT INTO task_collab_room_fences(workspace_id,task_id,owner_token,fence,expires_at) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(workspace_id,task_id) DO UPDATE SET owner_token=excluded.owner_token,fence=excluded.fence,expires_at=excluded.expires_at WHERE task_collab_room_fences.expires_at<=?6",
+            &[Cell::uuid(workspace),Cell::uuid(task),Cell::uuid(owner),Cell::Integer(fence),Cell::Integer(expires),Cell::Integer(now)],
+        ).await?;
+        if changed != 1 {
+            return Ok(Err(CollabDbError::StaleWriter));
+        }
+        Ok(Ok((
+            FamilyTaskRoomFence {
+                workspace_id: workspace,
+                task_id: task,
+                owner_token: owner,
+                fence,
+            },
+            true,
+        )))
+    }
+
+    pub async fn verify_family_task_room_fence(
+        &mut self,
+        fence: FamilyTaskRoomFence,
+    ) -> Result<bool, sqlx::Error> {
+        let Self::SqliteFamily(tx) = self else {
+            return Err(sqlx::Error::Protocol(
+                "family room lease requires SQLite family".into(),
+            ));
+        };
+        tx.require_writer()?;
+        tx.require_tenant(fence.workspace_id)?;
+        let now = family_room_now(tx).await?;
+        let rows = tx.query(
+            "SELECT EXISTS(SELECT 1 FROM task_collab_room_fences WHERE workspace_id=?1 AND task_id=?2 AND owner_token=?3 AND fence=?4 AND expires_at>?5)",
+            &[Cell::uuid(fence.workspace_id),Cell::uuid(fence.task_id),Cell::uuid(fence.owner_token),Cell::Integer(fence.fence),Cell::Integer(now)],
+        ).await?;
+        rows.first()
+            .ok_or(sqlx::Error::RowNotFound)?
+            .cell(0)?
+            .boolean()
+    }
+
+    /// Renewal cannot revive an expired owner; all fields and DB time match.
+    pub async fn renew_family_task_room_fence(
+        &mut self,
+        fence: FamilyTaskRoomFence,
+        lease: std::time::Duration,
+    ) -> Result<bool, sqlx::Error> {
+        let Self::SqliteFamily(tx) = self else {
+            return Err(sqlx::Error::Protocol(
+                "task room lease requires SQLite family".into(),
+            ));
+        };
+        tx.require_writer()?;
+        tx.require_tenant(fence.workspace_id)?;
+        let now = family_room_now(tx).await?;
+        let expires = now.checked_add(room_lease_micros(lease)?).ok_or_else(|| {
+            sqlx::Error::Protocol("task room lease expiry exceeds signed microseconds".into())
+        })?;
+        let changed=tx.execute("UPDATE task_collab_room_fences SET expires_at=?5 WHERE workspace_id=?1 AND task_id=?2 AND owner_token=?3 AND fence=?4 AND expires_at>?6",
+            &[Cell::uuid(fence.workspace_id),Cell::uuid(fence.task_id),Cell::uuid(fence.owner_token),Cell::Integer(fence.fence),Cell::Integer(expires),Cell::Integer(now)]).await?;
+        Ok(changed == 1)
+    }
+    /// Expiring this exact lineage never releases a successor or resets a fence.
+    pub async fn release_family_task_room_fence(
+        &mut self,
+        fence: FamilyTaskRoomFence,
+    ) -> Result<bool, sqlx::Error> {
+        let Self::SqliteFamily(tx) = self else {
+            return Err(sqlx::Error::Protocol(
+                "task room lease requires SQLite family".into(),
+            ));
+        };
+        tx.require_writer()?;
+        tx.require_tenant(fence.workspace_id)?;
+        let now = family_room_now(tx).await?;
+        let changed=tx.execute("UPDATE task_collab_room_fences SET expires_at=?5 WHERE workspace_id=?1 AND task_id=?2 AND owner_token=?3 AND fence=?4",
+            &[Cell::uuid(fence.workspace_id),Cell::uuid(fence.task_id),Cell::uuid(fence.owner_token),Cell::Integer(fence.fence),Cell::Integer(now)]).await?;
+        Ok(changed == 1)
     }
 }

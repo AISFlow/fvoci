@@ -1393,7 +1393,15 @@ async fn get_versioned_body(
     jar: CookieJar,
     Path((workspace, document)): WikiPath,
 ) -> Result<Json<VersionedBodyResponse>, DocumentApiError> {
-    read_versioned_body_inner(state, headers, jar, workspace, document, None).await
+    read_versioned_body_inner(
+        state,
+        headers,
+        jar,
+        workspace,
+        crate::db::revisions::RevisionTarget::Document(document),
+        None,
+    )
+    .await
 }
 async fn get_project_versioned_body(
     State(state): State<AppState>,
@@ -1401,14 +1409,22 @@ async fn get_project_versioned_body(
     jar: CookieJar,
     Path((workspace, project, document)): ProjectPath,
 ) -> Result<Json<VersionedBodyResponse>, DocumentApiError> {
-    read_versioned_body_inner(state, headers, jar, workspace, document, Some(project)).await
+    read_versioned_body_inner(
+        state,
+        headers,
+        jar,
+        workspace,
+        crate::db::revisions::RevisionTarget::Document(document),
+        Some(project),
+    )
+    .await
 }
-async fn read_versioned_body_inner(
+pub(crate) async fn read_versioned_body_inner(
     state: AppState,
     headers: HeaderMap,
     jar: CookieJar,
     workspace: Uuid,
-    document: Uuid,
+    target: crate::db::revisions::RevisionTarget,
     project: Option<Uuid>,
 ) -> Result<Json<VersionedBodyResponse>, DocumentApiError> {
     let engine = require_off_writer(&state)?;
@@ -1416,20 +1432,23 @@ async fn read_versioned_body_inner(
         &state,
         &headers,
         &jar,
-        ApiTokenScope::DocumentsRead,
+        match target {
+            crate::db::revisions::RevisionTarget::Document(_) => ApiTokenScope::DocumentsRead,
+            crate::db::revisions::RevisionTarget::Task(_) => ApiTokenScope::TasksRead,
+        },
         workspace,
     )
     .await?;
-    let source = crate::db::body_save::read_off_document_body(
+    let source = crate::db::body_save::read_off_body(
         &state.auth.db.pool,
         state.realtime_mode,
         engine,
         workspace,
-        match project {
-            Some(project) => {
+        match (target, project) {
+            (crate::db::revisions::RevisionTarget::Document(document), Some(project)) => {
                 crate::db::revisions::RevisionScope::project_document(project, document)
             }
-            None => crate::db::revisions::RevisionTarget::Document(document).into(),
+            _ => target.into(),
         },
         actor.user_id,
         actor.credential_id,
@@ -1437,7 +1456,7 @@ async fn read_versioned_body_inner(
     .await
     .map_err(map_versioned_body_error)?;
     Ok(Json(VersionedBodyResponse {
-        target_id: document,
+        target_id: target.id(),
         tail_seq: source.native.tail_seq.to_string(),
         snapshot_v1: collab_engine::b64::encode(&source.native.snapshot),
         tail_v1: source
@@ -1458,7 +1477,17 @@ async fn save_versioned_body(
     Path((workspace, document)): WikiPath,
     body: Bytes,
 ) -> Result<Json<SaveVersionedBodyResponse>, DocumentApiError> {
-    save_versioned_body_inner(state, headers, jar, peer, workspace, document, None, body).await
+    save_versioned_body_inner(
+        state,
+        headers,
+        jar,
+        peer,
+        workspace,
+        crate::db::revisions::RevisionTarget::Document(document),
+        None,
+        body,
+    )
+    .await
 }
 async fn save_project_versioned_body(
     State(state): State<AppState>,
@@ -1474,19 +1503,19 @@ async fn save_project_versioned_body(
         jar,
         peer,
         workspace,
-        document,
+        crate::db::revisions::RevisionTarget::Document(document),
         Some(project),
         body,
     )
     .await
 }
-async fn save_versioned_body_inner(
+pub(crate) async fn save_versioned_body_inner(
     state: AppState,
     headers: HeaderMap,
     jar: CookieJar,
     peer: SocketAddr,
     workspace: Uuid,
-    document: Uuid,
+    target: crate::db::revisions::RevisionTarget,
     project: Option<Uuid>,
     body: Bytes,
 ) -> Result<Json<SaveVersionedBodyResponse>, DocumentApiError> {
@@ -1503,18 +1532,21 @@ async fn save_versioned_body_inner(
         &state,
         &headers,
         &jar,
-        ApiTokenScope::DocumentsWrite,
+        match target {
+            crate::db::revisions::RevisionTarget::Document(_) => ApiTokenScope::DocumentsWrite,
+            crate::db::revisions::RevisionTarget::Task(_) => ApiTokenScope::TasksWrite,
+        },
         workspace,
     )
     .await?;
     revision_write_limit(&state, actor.user_id).await?;
-    let saved = crate::db::body_save::save_off_document_body(
+    let saved = crate::db::body_save::save_off_body(
         &state.auth.db.pool,
         state.realtime_mode,
         engine,
         crate::db::body_save::OffBodyRequest {
             workspace,
-            document,
+            target,
             project,
             actor: actor.user_id,
             credential: actor.credential_id,

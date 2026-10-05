@@ -75,6 +75,7 @@ function harness() {
   const writes: {
     command: BodySaveCommand;
     projectId?: string | null;
+    kind?: "document" | "task";
     pending: ReturnType<typeof deferred<BodySaveResult>>;
   }[] = [];
   const slots = new Map<string, string>();
@@ -105,9 +106,10 @@ function harness() {
       targetId: string,
       _signal?: AbortSignal,
       projectId?: string | null,
+      kind?: "document" | "task",
     ) => {
       const pending = deferred<VersionedBody>();
-      reads.push({ scope: { ...scope.value!, workspaceId, targetId, projectId }, pending });
+      reads.push({ scope: { ...scope.value!, workspaceId, targetId, projectId, kind }, pending });
       return pending.promise;
     },
     saveVersionedBody: (
@@ -115,9 +117,10 @@ function harness() {
       _target: string,
       command: BodySaveCommand,
       projectId?: string | null,
+      kind?: "document" | "task",
     ) => {
       const pending = deferred<BodySaveResult>();
-      writes.push({ command, projectId, pending });
+      writes.push({ command, projectId, kind, pending });
       return pending.promise;
     },
   }) as typeof import("./useOffWikiBody").useOffWikiBody;
@@ -272,5 +275,36 @@ test("project affiliation changes retire reads and preserve separate drafts and 
   expect(await retry).toBe(true);
   expect(h.slots.has(ownerKey(a.scope))).toBe(false);
   expect(ownerKey(a.scope)).not.toBe(ownerKey(b.scope));
+  h.effects.stop();
+});
+
+test("task native reads, saves and conflict refresh bind task kind without borrowing a document draft", async () => {
+  const h = harness();
+  h.scope.value = { ...original, kind: "task", projectId: "owning-project" };
+  const read = h.reads.at(-1)!;
+  expect(read.scope.kind).toBe("task");
+  read.pending.resolve(source(read.scope, "task private"));
+  await settle();
+  const draft = h.body.draft.value!;
+  const paragraph = draft.doc.getXmlFragment("prosemirror").get(0) as Y.XmlElement;
+  (paragraph.get(0) as Y.XmlText).insert(1, " task owned edit");
+  const saving = h.body.save();
+  expect(h.writes[0]!.kind).toBe("task");
+  h.writes[0]!.pending.reject(new ProblemError(409));
+  await settle();
+  const conflict = h.reads.at(-1)!;
+  expect(conflict.scope.kind).toBe("task");
+  conflict.pending.resolve(source(read.scope, "task latest", "1"));
+  expect(await saving).toBe(false);
+  expect(h.body.comparison.value).not.toBeNull();
+  expect(JSON.stringify(h.body.comparison.value!.mine)).toContain("task owned edit");
+  expect(JSON.stringify(h.body.comparison.value!.current)).toContain("task latest");
+  h.scope.value = { ...original };
+  const docRead = h.reads.at(-1)!;
+  docRead.pending.resolve(source(original, "document history"));
+  await settle();
+  expect(JSON.stringify(h.body.draft.value!.mine)).toContain("document history");
+  expect(JSON.stringify(h.body.draft.value!.mine)).not.toContain("task owned edit");
+  expect(ownerKey(read.scope)).not.toBe(ownerKey(original));
   h.effects.stop();
 });

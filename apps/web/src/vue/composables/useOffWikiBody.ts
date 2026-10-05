@@ -54,6 +54,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
         scope.targetId,
         abort.signal,
         scope.projectId,
+        scope.kind,
       );
       if (
         started !== lifetime ||
@@ -114,6 +115,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
           current.owner.targetId,
           command,
           current.owner.projectId,
+          current.owner.kind,
         ),
       );
     } catch (failure) {
@@ -133,6 +135,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
             current.owner.targetId,
             undefined,
             current.owner.projectId,
+            current.owner.kind,
           );
           if (started === lifetime && draft.value === current && current.active)
             current.conflict(latest);
@@ -168,6 +171,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
         current.owner.targetId,
         undefined,
         current.owner.projectId,
+        current.owner.kind,
       );
       if (started !== lifetime || draft.value !== current || !current.active || authRetired.value)
         return false;
