@@ -23,7 +23,7 @@ NarrowFamily = Literal["docs", "frontend_web_install", "web_tests"]
 PLAN_VERSION = 3
 
 WORKFLOW_JOBS: dict[str, tuple[str, ...]] = {
-    "web": ("web-static", "web-checks", "workspace-browser-shard", "collaboration-build", "collaboration-flow"),
+    "web": ("web-static", "web-checks", "web-native-checks", "workspace-browser-shard", "collaboration-build", "collaboration-flow"),
     "rust": ("fast", "native-arm64", "postgres", "collaboration"),
     "documents": ("native-extraction",),
     "collab-engine": ("native-collab-engine",),
@@ -201,6 +201,9 @@ def sanitize_reason_code(code: str) -> str:
 
 
 def select_output_key(job: str) -> str:
+    # Both mandatory web budget lanes use the same existing selection output.
+    if job == "web-native-checks":
+        job = "web-checks"
     return f"select_{job.replace('-', '_')}"
 
 

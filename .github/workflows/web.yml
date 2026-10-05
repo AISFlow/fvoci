@@ -76,8 +76,8 @@ jobs:
           (cd apps/web && bun --bun run typecheck)
           (cd packages/editor && bun --bun run typecheck)
 
-  # API contract, schema/static transport and unit regressions run once per SHA
-  # here instead of in every browser job (same target, features and options).
+  # API contract/schema and unit regressions run once per SHA. Native checks
+  # have a separate mandatory 15-minute budget with the same selection condition.
   web-checks:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_web_checks == 'true'
@@ -126,7 +126,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target
-          key: v2-web-checks-ubuntu-26.04-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
+          key: v3-web-checks-ubuntu-26.04-${{ runner.arch }}-1.98.1-default-api-schema-devdebug0-testdebug0-${{ github.sha }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', 'packages/**', 'apps/**', 'third-party/**', 'patches/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - name: Prepare locked dependencies
         run: |
           cargo fetch --locked
@@ -135,10 +135,8 @@ jobs:
         run: |
           bash scripts/generate-api.sh
           git diff --exit-code -- apps/web/openapi.json apps/web/src/generated/api.ts
-      - name: Check schema and static transport
+      - name: Check API schema
         run: |
-          cargo clippy --locked --offline --all-targets --features db-tests,api-schema -- -D warnings
-          cargo test --locked --offline --test static_api
           cargo test --locked --offline --lib --features api-schema api::openapi::tests
       - name: Web and editor unit regressions
         run: |
@@ -148,6 +146,64 @@ jobs:
         run: |
           bash scripts/test-web-e2e-groups.sh
           python3 scripts/fixtures/web-e2e/test-build-handoff.py
+
+  web-native-checks:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_web_checks == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
+      - name: Restore Cargo downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - name: Prepare pinned SQLite root build inputs
+        id: sqlite
+        env:
+          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+        run: |
+          set -euo pipefail
+          # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
+          . /etc/os-release
+          [[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
+          case "$(dpkg --print-architecture)" in
+            amd64)
+              test -f /etc/apt/apt-mirrors.txt
+              grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
+              grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
+              test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
+              printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+              ;;
+            arm64) ;;
+            *) exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          mkdir "$RUNNER_TEMP/fvoci-sqlite"
+          dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
+          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+            --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - name: Restore native web gate Rust outputs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: target
+          key: v1-web-native-checks-ubuntu-26.04-${{ runner.arch }}-1.98.1-clippy-db-tests-api-schema-static-default-devdebug0-testdebug0-${{ github.sha }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', 'packages/**', 'apps/**', 'third-party/**', 'patches/**') }}-${{ steps.sqlite.outputs.cache_identity }}
+      - name: Prepare locked dependencies
+        run: |
+          cargo fetch --locked
+          bun ci
+      - name: Check strict Clippy and default static transport
+        run: |
+          cargo clippy --locked --offline --all-targets --features db-tests,api-schema -- -D warnings
+          cargo test --locked --offline --test static_api
 
   workspace-browser-shard:
     needs: ci-plan
@@ -468,6 +524,7 @@ jobs:
         ci-plan,
         web-static,
         web-checks,
+        web-native-checks,
         workspace-browser-shard,
         collaboration-build,
         collaboration-flow,

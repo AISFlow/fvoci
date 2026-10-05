@@ -295,7 +295,7 @@ exit "${PREREQ_EXIT:-0}"
 
     def test_workflow_root_cache_preparation_order_and_independent_crates(self):
         consumers = {'rust': {'fast', 'native-arm64', 'postgres', 'collaboration'},
-                     'web': {'web-checks', 'workspace-browser-shard', 'collaboration-build', 'collaboration-flow'},
+                     'web': {'web-checks', 'web-native-checks', 'workspace-browser-shard', 'collaboration-build', 'collaboration-flow'},
                      'documents': {'native-extraction'}}
         for workflow, expected in consumers.items():
             # Bounded textual contract; the CI planner separately parses/validates YAML.

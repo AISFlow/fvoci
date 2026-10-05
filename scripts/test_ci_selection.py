@@ -122,7 +122,7 @@ class UbuntuPrimaryMirrorTest(unittest.TestCase):
 
     def test_every_x64_root_preparation_selects_signed_primary_before_apt(self):
         steps = self.preparation_steps()
-        self.assertEqual(set(steps), {('web', 'web-checks'), ('web', 'workspace-browser-shard'),
+        self.assertEqual(set(steps), {('web', 'web-checks'), ('web', 'web-native-checks'), ('web', 'workspace-browser-shard'),
             ('web', 'collaboration-build'), ('web', 'collaboration-flow'), ('rust', 'fast'),
             ('rust', 'postgres'), ('rust', 'collaboration'), ('documents', 'native-extraction')})
         for name, step in steps.items():
@@ -706,6 +706,19 @@ class GateSchemaTest(unittest.TestCase):
             self._gate(plan, "rust", results, omit_jobs=frozenset({"native-arm64"})), 1
         )
 
+    def test_web_budget_lanes_require_both_selected_success(self) -> None:
+        selected = {"web-checks": True, "web-native-checks": True}
+        plan = self._plan("web", selected)
+        results = {job: "success" for job in selected}
+        self.assertEqual(self._gate(plan, "web", results), 0)
+        for job in selected:
+            for result in ("failure", "cancelled", "skipped"):
+                with self.subTest(job=job, result=result):
+                    self.assertEqual(self._gate(plan, "web", {**results, job: result}), 1)
+        self.assertEqual(self._gate(plan, "web", results,
+                                   omit_jobs=frozenset({"web-native-checks"})), 1)
+        self.assertEqual(self._gate(self._plan("web", {}), "web"), 0)
+
     def test_unselected_must_be_skipped(self) -> None:
         plan = self._plan("web", {"web-checks": False})
         rc = self._gate(
@@ -1006,6 +1019,57 @@ class WorkflowRegistryTest(unittest.TestCase):
         for i, bad in enumerate(mutations):
             with self.subTest(mutation=i): self.assertTrue(SEL._verify_web_build_handoff(bad))
 
+
+    def test_web_budget_split_preserves_commands_and_selection(self) -> None:
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/web.yml")
+        self.assertIsNone(error)
+        jobs = data["jobs"]
+        commands = {
+            "web-checks": [
+                "bash scripts/generate-api.sh",
+                "git diff --exit-code -- apps/web/openapi.json apps/web/src/generated/api.ts",
+                "cargo test --locked --offline --lib --features api-schema api::openapi::tests",
+                "(cd apps/web && bun run test)",
+                "(cd packages/editor && bun run test)",
+                "bash scripts/test-web-e2e-groups.sh",
+                "python3 scripts/fixtures/web-e2e/test-build-handoff.py",
+            ],
+            "web-native-checks": [
+                "cargo clippy --locked --offline --all-targets --features db-tests,api-schema -- -D warnings",
+                "cargo test --locked --offline --test static_api",
+            ],
+        }
+        target_keys = []
+        for job, required in commands.items():
+            with self.subTest(job=job):
+                spec = jobs[job]
+                self.assertEqual(spec["needs"], "ci-plan")
+                self.assertEqual(spec["if"], "needs.ci-plan.outputs.select_web_checks == 'true'")
+                self.assertEqual(spec["runs-on"], "ubuntu-26.04")
+                self.assertEqual(spec["timeout-minutes"], 15)
+                self.assertIn(job, jobs["web-ci-gate"]["needs"])
+                lines = [line for step in SEL._run_steps(spec) for line in step["run"].splitlines()]
+                actual = [line for line in lines if line in sum(commands.values(), [])]
+                self.assertEqual(actual, required)
+                for step in spec["steps"]:
+                    self.assertNotIn("continue-on-error", step)
+                    self.assertNotIn("if", step)
+                cache = next(step["with"] for step in spec["steps"]
+                             if step.get("with", {}).get("path") == "target")
+                key = cache["key"]
+                self.assertIn(job + "-ubuntu-26.04-${{ runner.arch }}-1.98.1-", key)
+                self.assertIn("devdebug0-testdebug0", key)
+                self.assertIn("${{ github.sha }}", key)
+                self.assertIn("'crates/**'", key)
+                self.assertIn("${{ steps.sqlite.outputs.cache_identity }}", key)
+                self.assertNotIn("restore-keys", cache)
+                target_keys.append(key)
+        self.assertNotEqual(*target_keys)
+        for mode, families in (("full", set()), ("narrow", {"web_tests"}),
+                               ("narrow", {"frontend_web_install"}), ("narrow", set())):
+            decision = SEL.SelectionDecision(mode, "TEST", frozenset(families))
+            self.assertEqual(SEL.workflow_job_selected("web", "web-checks", decision),
+                             SEL.workflow_job_selected("web", "web-native-checks", decision))
 
     def test_eslint_prettier_run_once_in_lightweight_locked_web_static(self) -> None:
         data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/web.yml")
@@ -1896,6 +1960,31 @@ class RegistryMutationCliTest(unittest.TestCase):
         proc, output = self._plan_against(root)
         self._assert_no_green_outputs(proc, output, "missing selector output select_web_checks")
 
+    def test_native_budget_registry_mutations_rejected_before_outputs(self) -> None:
+        for mutation in ("missing-job", "missing-gate-need", "wrong-condition"):
+            with self.subTest(mutation=mutation):
+                root = self._mutated_root()
+                web = root / ".github/workflows/web.yml"
+                text = web.read_text(encoding="utf-8")
+                if mutation == "missing-job":
+                    start = text.index("  web-native-checks:")
+                    end = text.index("  workspace-browser-shard:", start)
+                    changed = text[:start] + text[end:]
+                    needle = "web-native-checks"
+                elif mutation == "missing-gate-need":
+                    changed = text.replace("        web-native-checks,\n", "", 1)
+                    needle = "needs must be ci-plan and every registered job"
+                else:
+                    start = text.index("  web-native-checks:")
+                    changed = text[:start] + text[start:].replace(
+                        "needs.ci-plan.outputs.select_web_checks == 'true'",
+                        "needs.ci-plan.outputs.select_web_static == 'true'", 1)
+                    needle = "web-native-checks if must be"
+                self.assertNotEqual(text, changed, "negative control must mutate the workflow")
+                web.write_text(changed, encoding="utf-8")
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, needle)
+
     def test_gate_needs_mismatch_rejected_before_outputs(self) -> None:
         root = self._mutated_root()
         web = root / ".github" / "workflows" / "web.yml"
@@ -1907,6 +1996,7 @@ class RegistryMutationCliTest(unittest.TestCase):
         ci-plan,
         web-static,
         web-checks,
+        web-native-checks,
         workspace-browser-shard,
         collaboration-build,
         collaboration-flow,
