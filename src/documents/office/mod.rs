@@ -532,9 +532,10 @@ mod returned_allocation_tests {
             .unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("returned_allocation_null=true; allocation_failed=true; no panic"));
-        assert_eq!(
-            output.status.signal(),
-            Some(libc::SIGABRT),
+        // std's `Display` names the signal ("signal: 6 (SIGABRT)"); this crate
+        // has no direct libc dependency, and the process test matches the same.
+        assert!(
+            output.status.signal().is_some() && output.status.to_string().contains("SIGABRT"),
             "status={} stdout={} stderr={stderr}",
             output.status,
             String::from_utf8_lossy(&output.stdout)
