@@ -5,8 +5,12 @@ tests/schema_baseline_integration.rs::postgres_catalog_dump.
     python3 scripts/schema-baseline/compare-catalogs.py OLD.json NEW.json [--report REPORT.md]
 
 OLD is the database installed by the retired development lineage (001..056),
-NEW is the database installed by the fvoci-postgres-060 baseline. The ledger
-is expected to differ (new lineage) and is reported, not compared. Everything
+NEW is the database installed by the fvoci-postgres-060 baseline. The ONLY
+declared exception is the ledger table fvoci.schema_migrations itself: its
+columns, constraints and own indexes differ by design ((version, applied_at)
+versus (version, lineage, sql_sha256, applied_at) with CHECKs), and its rows are
+the lineage receipts. Both sides' ledger definitions and rows are printed in the
+report, never compared. No other object is excluded or normalized. Everything
 else must match: tables/columns (type, typmod, default, null, identity,
 collation, column ACL), constraints (pg_get_constraintdef), indexes
 (pg_get_indexdef), triggers, policies, RLS flags, table ACLs, sequences,
@@ -18,6 +22,8 @@ no semantic difference remains. Raw DDL text is never compared.
 import argparse
 import json
 import sys
+
+LEDGER_TABLE = "schema_migrations"
 
 
 def load(path):
@@ -63,18 +69,24 @@ def main():
     if old.get("server_version") != new.get("server_version"):
         report.append(f"NOTE server_version old={old.get('server_version')} new={new.get('server_version')} (same-version comparison expected)")
     diff_lists("schema", old["schemas"], new["schemas"], "name", report)
+    old_ledger = [t for t in old["tables"] if t["name"] == LEDGER_TABLE]
+    new_ledger = [t for t in new["tables"] if t["name"] == LEDGER_TABLE]
+    if len(old_ledger) != 1 or len(new_ledger) != 1:
+        report.append(f"MISSING ledger table {LEDGER_TABLE} on one side (old={len(old_ledger)} new={len(new_ledger)})")
+    product_old = [t for t in old["tables"] if t["name"] != LEDGER_TABLE]
+    product_new = [t for t in new["tables"] if t["name"] != LEDGER_TABLE]
     diff_lists(
         "table",
-        old["tables"],
-        new["tables"],
+        product_old,
+        product_new,
         "name",
         report,
         nested={"columns": "name", "constraints": "name", "indexes": "name", "triggers": "name", "policies": "name"},
     )
     # Column order is semantic for this comparison (SELECT * / INSERT without a
     # column list); report it separately from per-column facts.
-    old_tables = index_by(old["tables"], "name")
-    new_tables = index_by(new["tables"], "name")
+    old_tables = index_by(product_old, "name")
+    new_tables = index_by(product_new, "name")
     for name in sorted(set(old_tables) & set(new_tables)):
         old_order = [c["name"] for c in old_tables[name]["columns"]]
         new_order = [c["name"] for c in new_tables[name]["columns"]]
@@ -102,7 +114,11 @@ def main():
         for field in ("sequence_usage", "schema_usage"):
             if a.get(field) != b.get(field):
                 report.append(f"DIFF app_role.{field}: old={a.get(field)!r} new={b.get(field)!r}")
-    ledger_note = f"LEDGER (not compared) old={old.get('ledger')} new={new.get('ledger')}"
+    ledger_note = "\n".join([
+        f"LEDGER TABLE (declared exception, printed not compared) old={json.dumps(old_ledger, sort_keys=True)}",
+        f"LEDGER TABLE (declared exception, printed not compared) new={json.dumps(new_ledger, sort_keys=True)}",
+        f"LEDGER ROWS (declared exception, printed not compared) old={old.get('ledger')} new={new.get('ledger')}",
+    ])
     semantic = [line for line in report if not line.startswith("NOTE")]
     lines = [
         "# Catalog comparison",

@@ -179,9 +179,9 @@ fn steps_of(registry: &'static [(&'static str, &'static str, &'static str)]) -> 
         .enumerate()
         .map(|(index, (name, sql, sha256))| CompiledStep {
             version: (index + 1) as i32,
-            name: *name,
-            sql: *sql,
-            sha256: *sha256,
+            name,
+            sql,
+            sha256,
         })
         .collect()
 }
@@ -1933,7 +1933,7 @@ mod baseline_prefix_resume_tests {
                 .await
                 .unwrap()
                 .applied_steps,
-            4
+            12
         );
         let name: String = sqlx::query_scalar("SELECT name FROM workspaces WHERE id=?1")
             .bind(workspace.as_bytes().as_slice())

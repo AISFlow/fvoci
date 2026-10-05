@@ -240,7 +240,13 @@ try:
         applied = observer.execute('SELECT version,lineage,sql_sha256 FROM schema_migrations ORDER BY version').fetchall()
     definitions = sorted((W / 'migrations/sqlite/060').glob('[0-9][0-9]_*.sql'))
     expected = [(i + 1, 'fvoci-sqlite-060', sha(file)) for i, file in enumerate(definitions)]
-    assert applied == expected and len(applied) == 4
+    # The compiled registry (name, text, digest) is the authority: files, registry and receipts agree.
+    registry = (W / 'src/db/migrate.rs').read_text().split('const SQLITE_STEPS:', 1)[1].split('];', 1)[0]
+    registry_steps = re.findall(r'"([0-9]{2}_[a-z_]+)",\s*include_str!\("\.\./\.\./migrations/sqlite/060/([0-9]{2}_[a-z_]+)\.sql"\),\s*"([0-9a-f]{64})"', registry)
+    assert [name for name, _, _ in registry_steps] == [file.stem for file in definitions]
+    assert all(name == file for name, file, _ in registry_steps)
+    assert [digest for _, _, digest in registry_steps] == [digest for _, _, digest in expected]
+    assert applied == expected and len(applied) == len(registry_steps) == 12
     receipt.update(baseURL=base, actual_server=server_row, actual_process_rows_at_ready=rows,
                    database_inode=[meta.st_dev, meta.st_ino], actual_setup_needed=True,
                    actual_migration_rows=applied,
