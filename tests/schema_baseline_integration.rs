@@ -14,8 +14,9 @@
 //! The SQLite controls run without any database: the remote libSQL SDK renders
 //! every statement through libsql-sqlite3-parser before the remote engine
 //! stores it, and the runner feeds its reference engine the same rendering.
-//! The archived actual SDK schema response of the retired lineage (236 rows,
-//! loopback sqld, exchange 10) is the oracle for that rendering.
+//! The archived actual SDK schema response of the retired lineage's step 001
+//! (236 rows, loopback sqld, exchange 10, before 002..004 were applied) is the
+//! oracle for that rendering.
 #![cfg(feature = "db-tests")]
 
 use fvoci_server::db::migrate;
@@ -28,19 +29,18 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// The archived loopback-SDK sqlite_schema rows of legacy 001..004 must be
-/// reproduced byte-for-byte by rendering the same texts with the runner's
-/// SDK rendering and executing them in the pinned local engine. This proves
-/// the rendering replica and the engine's text storage, and is the positive
-/// control for the remote schema admission mode.
+/// The archived loopback-SDK sqlite_schema rows of legacy step 001 must be
+/// reproduced byte-for-byte by rendering the same text with the runner's SDK
+/// rendering and executing it in the pinned local engine. This proves the
+/// rendering replica and the engine's text storage (1,507 lines, 236 objects:
+/// tables, indexes and triggers), and is the positive control for the remote
+/// schema admission mode.
 #[tokio::test]
 async fn sdk_rendering_reproduces_archived_remote_sqlite_schema_rows() {
     use sqlx::Connection;
     let archived: Value = serde_json::from_str(
-        &std::fs::read_to_string(fixture(
-            "legacy-sqlite-001-004-actual-sdk-schema-response.json",
-        ))
-        .unwrap(),
+        &std::fs::read_to_string(fixture("legacy-sqlite-001-actual-sdk-schema-response.json"))
+            .unwrap(),
     )
     .unwrap();
     let expected: Vec<(String, String, String, String)> = archived["objects"]
@@ -70,12 +70,7 @@ async fn sdk_rendering_reproduces_archived_remote_sqlite_schema_rows() {
         .await
         .unwrap();
     assert_eq!(pin.0, fvoci_server::db::pool::SQLITE_VERSION);
-    for name in [
-        "legacy-sqlite-001_current_schema.sql",
-        "legacy-sqlite-002_wiki_create_commands.sql",
-        "legacy-sqlite-003_collab_room_fences.sql",
-        "legacy-sqlite-004_maintenance_claims.sql",
-    ] {
+    for name in ["legacy-sqlite-001_current_schema.sql"] {
         let sql = std::fs::read_to_string(fixture(name)).unwrap();
         for statement in migrate::sdk_rendered_statements(&sql).unwrap() {
             sqlx::raw_sql(&statement)
@@ -104,12 +99,7 @@ async fn sdk_rendering_reproduces_archived_remote_sqlite_schema_rows() {
     )
     .await
     .unwrap();
-    for name in [
-        "legacy-sqlite-001_current_schema.sql",
-        "legacy-sqlite-002_wiki_create_commands.sql",
-        "legacy-sqlite-003_collab_room_fences.sql",
-        "legacy-sqlite-004_maintenance_claims.sql",
-    ] {
+    for name in ["legacy-sqlite-001_current_schema.sql"] {
         sqlx::raw_sql(&std::fs::read_to_string(fixture(name)).unwrap())
             .execute(&mut raw)
             .await

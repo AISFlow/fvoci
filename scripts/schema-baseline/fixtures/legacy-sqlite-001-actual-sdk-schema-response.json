@@ -1,13 +1,11 @@
 {
- "description": "sqlite_schema rows (type,name,tbl_name,sql) of a loopback libsql remote (sqld) database installed by the retired SQLite development lineage steps 001..004 through the pinned libsql SDK execute_batch path. Oracle for migrate::sdk_rendered_statements; G0-era evidence, not a Turso proof.",
+ "description": "sqlite_schema rows (type,name,tbl_name,sql) of a loopback libsql remote (sqld) database right after the retired SQLite development lineage step 001 (001_current_schema.sql) was applied through the pinned libsql SDK execute_batch path (exchange 10; steps 002..004 were applied later and are not in this capture). Oracle for migrate::sdk_rendered_statements; G0-era evidence, not a Turso proof.",
  "source_steps": {
   "lineage": "fvoci-sqlite-current-v1",
   "tree": "b743975da (fvoci/v060-native-case07-fixture-ctx3796)",
+  "step": "001_current_schema.sql",
   "files_sha256": {
-   "001_current_schema.sql": "0d49ad2c13bcc7942e95441f9965ff3a60f8982b10b3baa55d4b46e00420965f",
-   "002_wiki_create_commands.sql": "8460c39b4f0815fabf9e13e958ab6a99f2415ad10b59e04bd6de397724abe45c",
-   "003_collab_room_fences.sql": "fd9b35411378d7485c40f9fcac2821121eb260c1a09dc7bdeb08a72608ba6d70",
-   "004_maintenance_claims.sql": "6e034f6aa3f69b6c7a4ac4ff13035e5276ec7e840eb73d97a78a1456105dbade"
+   "001_current_schema.sql": "0d49ad2c13bcc7942e95441f9965ff3a60f8982b10b3baa55d4b46e00420965f"
   }
  },
  "sdk": {

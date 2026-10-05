@@ -32,11 +32,13 @@ and data moves between installs with a current-format native archive.
 `cargo test --features db-tests --test schema_baseline_integration` also runs:
 
 - `sdk_rendering_reproduces_archived_remote_sqlite_schema_rows`: the archived
-  actual loopback-SDK `sqlite_schema` rows of the retired SQLite lineage
-  (`fixtures/legacy-sqlite-001-004-actual-sdk-schema-response.json`, exchange 10,
-  236 rows) are reproduced byte-for-byte by `migrate::sdk_rendered_statements`
-  applied to the frozen legacy texts (`fixtures/legacy-sqlite-00[1-4]_*.sql`).
-  This is the positive control for the remote schema admission mode.
+  actual loopback-SDK `sqlite_schema` rows captured right after the retired
+  SQLite lineage's step 001 (`fixtures/legacy-sqlite-001-actual-sdk-schema-response.json`,
+  exchange 10, 236 rows) are reproduced byte-for-byte by
+  `migrate::sdk_rendered_statements` applied to the frozen legacy text
+  (`fixtures/legacy-sqlite-001_current_schema.sql`). This is the positive control
+  for the remote schema admission mode. `fixtures/legacy-sqlite-00[2-4]_*.sql` are
+  kept as frozen inputs of the same G0 lineage (no archived rendering exists for them).
 - `baseline_sqlite_steps_render_to_the_same_structural_catalog`: the baseline
   steps build the same tables/columns/FKs/indexes whether the engine receives
   the raw text (local SQLite) or the SDK rendering (remote libSQL).
