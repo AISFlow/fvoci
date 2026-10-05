@@ -41,7 +41,16 @@ def call(args):
     return subprocess.check_output(args,cwd=ROOT,text=True).strip()
 
 
-def identity():
+def identity(mode, output):
+    execution = os.environ.get('FVOCI_SELECTED_EXECUTION_MODE', 'github-ci')
+    assert execution in ('github-ci', 'orca-local')
+    if execution == 'orca-local':
+        sys.path.insert(0, str(TEMPLATES))
+        from current_binding import load_local_allocation
+        grant = load_local_allocation(mode)
+        assert str(output) == grant['outputRoot']
+        assert subprocess.run(['git','-c','safe.directory='+str(ROOT),'diff','--quiet','HEAD'],cwd=ROOT).returncode == 0
+        return grant['owner']
     assert os.environ['CI']=='true' and os.environ['GITHUB_ACTIONS']=='true', 'allocated GitHub CI job only'
     assert call(['git','rev-parse','HEAD'])==os.environ['GITHUB_SHA']
     assert subprocess.run(['git','-c','safe.directory='+str(ROOT),'diff','--quiet','HEAD'],cwd=ROOT).returncode==0, 'current tracked source must equal the tested SHA'
@@ -114,7 +123,7 @@ def reference(path):return {'path':str(Path(path).resolve()),'sha256':sha(path)}
 
 
 def record_before(output):
-    identity();assert not (output/'before.json').exists()
+    identity('record-before', output);assert not (output/'before.json').exists()
     os_release=dict(line.split('=',1) for line in Path('/etc/os-release').read_text().splitlines() if '=' in line)
     assert os_release['ID'].strip(chr(34))=='ubuntu' and os_release['VERSION_ID'].strip(chr(34))=='26.04'
     assert 'release: 1.98.1' in call(['rustc','-Vv']) and 'host: x86_64-unknown-linux-gnu' in call(['rustc','-Vv'])
@@ -133,7 +142,7 @@ def record_before(output):
 
 
 def record_after(output):
-    identity();before=read(output/'before.json');assert read(output/'build-env-inputs.json')==build_env(), 'compiler environment changed'
+    identity('record-after', output);before=read(output/'before.json');assert read(output/'build-env-inputs.json')==build_env(), 'compiler environment changed'
     after=inputs();write(output/'after.json',after)
     assert before==after, 'source/native/dependency/toolchain changed during current compile'
     stages=[];artifacts=[]
@@ -176,7 +185,10 @@ def record_after(output):
 
 
 def stage(output,name,command):
-    identity();assert name in ('main','lib','install','engine') and command
+    identity('stage', output);assert name in ('main','lib','install','engine') and command
+    if os.environ.get('FVOCI_SELECTED_EXECUTION_MODE') == 'orca-local':
+        from current_binding import load_local_allocation
+        assert command == load_local_allocation('stage')['stageCommands'][name]
     before=read(output/'before.json');assert call(['git','rev-parse','HEAD'])==before['head']
     start=time.monotonic()
     with (output/(name+'-compiler.jsonl')).open('x') as out,(output/(name+'-stderr.log')).open('x') as err:
@@ -185,9 +197,14 @@ def stage(output,name,command):
     return r.returncode
 
 
+def selected_runs():
+    # Mandatory serial companion, not an opt-in replacing the retained ON flows.
+    return (('install','on'),('postgres','on'),('sqlite','on'),('postgres','off'),('sqlite','off'))
+
+
 def run(output):
     assert os.getuid()==os.getgid()==1000, 'normal SQLite browser/fixture/app file ownership must be1000:1000'
-    owner=identity();before=read(output/'before.json');assert read(output/'after.json')==before
+    owner=identity('run', output);before=read(output/'before.json');assert read(output/'after.json')==before
     runtime=output/'runtime';runtime.mkdir(mode=0o700)
     bun=str(Path(shutil.which('bun')).resolve());chromium=call([bun,'--eval',"console.log(require('@playwright/test').chromium.executablePath())"])
     browser={'bun':{'path':bun,'sha256':sha(bun)},'chromium':{'path':chromium,'sha256':sha(chromium)},
@@ -199,44 +216,54 @@ def run(output):
     source_written={k:before[k] for k in ('head','tree','status','tracked','external','untracked')}
     env=dict(os.environ);env.update(BUN_RUNTIME_TRANSPILER_CACHE_PATH=str(output/'bun-transpiler-cache'),FVOCI_CI_OWNER=owner,FVOCI_CI_BUN=bun,FVOCI_CI_SELECTED_RUNS=str(runtime),FVOCI_ROOT_RUN_OWNER=owner,PYTHONDONTWRITEBYTECODE='1')
     closed=None;results=[];code=0
-    for lane in ('install','postgres','sqlite'):
+    local = os.environ.get('FVOCI_SELECTED_EXECUTION_MODE') == 'orca-local'
+    authority = ({'executionMode':'orca-local','localAuthorizationSha256':os.environ['FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256'],
+                  'runId':os.environ['FVOCI_LOCAL_RUN_ID'],'runAttempt':os.environ['FVOCI_LOCAL_DISPATCH_ID']} if local else
+                 {'exclusiveCIJob':True,'currentCIJobConfirmed':True,'runId':env['GITHUB_RUN_ID'],'runAttempt':env['GITHUB_RUN_ATTEMPT']})
+    for lane, flow in selected_runs():
         runroot=runtime/('root-current-'+lane+'-'+secrets.token_hex(6));driver=TEMPLATES/('current-'+lane+'-driver.py')
-        m={'schema':1,'ready':True,'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],
+        m={'schema':1,'ready':True,'flow':flow,'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],
            'sourceInputsBefore':reference(output/'before.json'),'sourceInputsAfter':reference(output/'after.json'),
            'bundle':reference(output/'bundle.json'),'compileReceipt':reference(output/'compile-receipt.json'),
            'webReceipt':reference(output/'web-receipt.json'),'abiReceipt':reference(output/'abi-receipt.json'),
            'nativeQualification':None,'browserInputs':browser,'closedInstallReceipt':closed}
         if lane!='install':
             assert closed, 'mandatory actual current installation4 failed; cannot qualify normal main'
-            binding={'runId':env['GITHUB_RUN_ID'],'runAttempt':env['GITHUB_RUN_ATTEMPT'],'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],'backend':lane,'runRoot':str(runroot),
+        if lane!='install' and flow=='on':
+            binding={'runId':authority['runId'],'runAttempt':authority['runAttempt'],'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],'backend':lane,'runRoot':str(runroot),
                      'parentDriverSha256':sha(driver),'restartHelperSha256':sha(TEMPLATES/'restart_checkpoint.py'),
                      'sourceInputsSha256':hashlib.sha256((json.dumps(source_written,indent=2)+'\n').encode()).hexdigest(),
                      'artifactHashes':{p:r['sha256'] for p,r in bundle['binaries'].items()},'assetHashes':web['dist_files'],'browserInputs':browser,'abiHashes':abi['host_runtime_files']}
-            restart=output/(lane+'-restart-allocation.json');write(restart,{'schema':1,'status':'GRANTED','owner':owner,'exclusiveCIJob':True,'currentCIJobConfirmed':True,
-                       'runId':env['GITHUB_RUN_ID'],'runAttempt':env['GITHUB_RUN_ATTEMPT'],'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],'backend':lane,'binding':binding})
+            restart=output/(lane+'-'+flow+'-restart-allocation.json');write(restart,{'schema':1,'status':'GRANTED','owner':owner,**authority,
+                       'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],'backend':lane,'binding':binding})
             m['restartAllocation']=reference(restart);env['FVOCI_ROOT_RESTART_GRANT']=str(restart)
-        manifest=output/(lane+'-binding.json');write(manifest,m)
-        allocation=output/(lane+'-allocation.json');write(allocation,{'schema':1,'status':'GRANTED','owner':owner,'exclusiveCIJob':True,'currentCIJobConfirmed':True,
-                   'runId':env['GITHUB_RUN_ID'],'runAttempt':env['GITHUB_RUN_ATTEMPT'],'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],'lane':lane,'backend':None if lane=='install' else lane,
+        else:
+            env.pop('FVOCI_ROOT_RESTART_GRANT', None)
+        manifest=output/(lane+'-'+flow+'-binding.json');write(manifest,m)
+        allocation=output/(lane+'-'+flow+'-allocation.json');write(allocation,{'schema':1,'status':'GRANTED','owner':owner,**authority,'flow':flow,
+                   'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],'lane':lane,'backend':None if lane=='install' else lane,
                    'runRoot':str(runroot),'driverSha256':sha(driver),'bindingSha256':sha(manifest),'bindingModuleSha256':sha(TEMPLATES/'current_binding.py')})
         env.update(FVOCI_ROOT_CURRENT_BINDING=str(manifest),FVOCI_ROOT_CURRENT_ALLOCATION=str(allocation))
-        if lane=='postgres':env['FVOCI_E2E_SELECTED_AUXILIARY']='normal-api'
+        env['FVOCI_E2E_SELECTED_FLOW']=flow
+        if lane=='postgres' and flow=='on':env['FVOCI_E2E_SELECTED_AUXILIARY']='normal-api'
         else:env.pop('FVOCI_E2E_SELECTED_AUXILIARY',None)
-        with (output/(lane+'-driver.log')).open('x') as log:r=subprocess.run([sys.executable,str(driver)],env=env,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)
-        results.append({'lane':lane,'exit':r.returncode,'actualSource':before['head'],'runRoot':str(runroot)})
+        with (output/(lane+'-'+flow+'-driver.log')).open('x') as log:r=subprocess.run([sys.executable,str(driver)],env=env,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)
+        results.append({'lane':lane,'flow':flow,'exit':r.returncode,'actualSource':before['head'],'runRoot':str(runroot)})
         code=code or r.returncode
         if lane=='postgres':
             parent=read(runroot/'parent-receipt.json')
             assert parent['all_owned_fixtures_closed'], 'PG/Meili closure failed: preserve failure, no overlapping SQLite start'
+        if lane!='install':
             app=read(runroot/'receipt.json')
             assert app['owned_container_absent'] and app['owned_loopback_port_closed'] and app['recorded_process_identities_retired']
         if lane=='install':
             assert r.returncode==0,'current installation4 failed; preserve original log/15process receipts'
             closed=reference(runroot/'receipt.json')
         elif r.returncode==0:
-            record=read(runroot/'receipt.json');assert record['current_schema_server_restart']['restartBrowserExit']==0
-            assert record['actual_browser_tests']==1 and record['retries']==0
-    write(output/'selected-ci-receipt.json',{'source':before['head'],'tree':before['tree'],'owner':owner,'runs':results,'exit':code,'normalBothAndRestartRequired':True,'sqliteAuxiliary':'BLOCKED: normal writers unported','whole060Complete':False})
+            record=read(runroot/'receipt.json')
+            if flow=='on': assert record['current_schema_server_restart']['restartBrowserExit']==0
+            assert record['actual_browser_tests']==(7 if flow=='off' else 1) and record['retries']==0
+    write(output/'selected-ci-receipt.json',{'source':before['head'],'tree':before['tree'],'owner':owner,'runs':results,'exit':code,'normalBothAndRestartRequired':True,'offBothRequired':True,'offTestsPerBackend':7,'sqliteAuxiliary':'BLOCKED: normal writers unported','whole060Complete':False})
     return code
 
 

@@ -21,14 +21,16 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 E = Path(os.environ['FVOCI_CI_SELECTED_RUNS'])
 W = Path(__file__).resolve().parents[2]
-from current_binding import load_current
+from current_binding import load_current, validate_off_report
 current = load_current('sqlite', __file__)
 HEAD = COMPILED_HEAD = current['manifest']['source']
 TREE = COMPILED_TREE = current['manifest']['tree']
 IMAGE = 'ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7'
 # Native origin/hash are recorded separately in the current bundle qualification.
 OWNER = os.environ['FVOCI_CI_OWNER']
-SPEC = 'workspace-wiki-selected-backend.spec.ts'
+FLOW = current['manifest'].get('flow', 'on')
+assert FLOW in ('on', 'off')
+SPEC = 'workspace-off-selected-backend.spec.ts' if FLOW == 'off' else 'workspace-wiki-selected-backend.spec.ts'
 BUN = Path(os.environ['FVOCI_CI_BUN'])
 
 # Rebind the WHOLE existing preparation/artifact proof first, not just labels.
@@ -152,6 +154,7 @@ server_env = {
     'FVOCI_COLLAB_ENGINE': '/fvoci/bin/collab-engine', 'FVOCI_STATIC_DIR': '/srv/fvoci-web',
     'FVOCI_COLLAB_FAMILY_LEASE_MS': '30000', 'FVOCI_COLLAB_FAMILY_RENEW_MS': '5000',
     'FVOCI_COLLAB_MAX_ROOMS': '2', 'RUST_LOG': 'info',
+    'FVOCI_REALTIME_MODE': FLOW,
 }
 for file, body in [(run / 'environment.private.json', json.dumps(server_env)),
                    (run / 'environment.private.sh', ''.join(f'export {key}={shlex.quote(value)}\n' for key, value in server_env.items()))]:
@@ -159,7 +162,7 @@ for file, body in [(run / 'environment.private.json', json.dumps(server_env)),
         os.fchmod(output.fileno(), 0o600)
         output.write(body)
 receipt = {'source': HEAD, 'tree': TREE, 'compiled_source': COMPILED_HEAD, 'current_binding': str(current['manifest_path']), 'current_binding_sha256': sha(current['manifest_path']), 'root_owner': OWNER, 'started_utc': now(),
-           'driver_sha256': sha(__file__), 'container': name, 'image': IMAGE,
+           'driver_sha256': sha(__file__), 'selected_flow': FLOW, 'container': name, 'image': IMAGE,
            'scope': 'one real SQLite normal migrate--start/current Vue/native ON tracer; PG/Turso/search/OFF/restore/fullCI/shipping image pending',
            'network': 'host network, app bind127.0.0.1:0 only; no network namespace isolation',
            'runtime_abi': abi, 'binary_inputs': {path: binaries[path] for path in (server, migrate, fixture, engine)},
@@ -252,8 +255,9 @@ try:
                    actual_migration_rows=applied,
                    runtime_pin_oracle='actual SQLx server/fixture connect path refuses version/source/FK mismatch; successful real fixture later executes its own exact3.53.4/source/FK1/current-schema reads; observer does not qualify its own runtime')
     write(run / 'normal-main-ready.json', receipt)
-    browser_env = {'TMPDIR':os.environ['TMPDIR'], 'CI':'true', 'BUN_RUNTIME_TRANSPILER_CACHE_PATH':os.environ['BUN_RUNTIME_TRANSPILER_CACHE_PATH'], 'PATH': os.environ['PATH'], 'LANG': os.environ.get('LANG', 'C.UTF-8'),
+    browser_env = {'TMPDIR':os.environ['TMPDIR'], **({'CI':'true'} if current['grant'].get('executionMode') != 'orca-local' else {}), 'BUN_RUNTIME_TRANSPILER_CACHE_PATH':os.environ['BUN_RUNTIME_TRANSPILER_CACHE_PATH'], 'PATH': os.environ['PATH'], 'LANG': os.environ.get('LANG', 'C.UTF-8'),
                    'PLAYWRIGHT_BASE_URL': base, 'FVOCI_E2E_SELECTED_BACKEND': 'sqlite',
+                   'FVOCI_E2E_SELECTED_FLOW': FLOW,
                    'FVOCI_E2E_RESULT_DIR': str(run),
                    'PLAYWRIGHT_JSON_OUTPUT_FILE': str(run / 'playwright-result.private.json'),
                    'FVOCI_E2E_SELECTED_FIXTURE_BIN': fixture,
@@ -275,6 +279,9 @@ try:
     started = time.monotonic()
     result = command(args, run / 'browser.log', required=False, env=browser_env, cwd=W / 'apps/web')
     code = result.returncode
+    if (run / 'playwright-result.private.json').exists():
+        os.chmod(run / 'playwright-result.private.json', 0o600)
+        receipt['actual_json_report_sha256'] = sha(run / 'playwright-result.private.json')
     receipt.update(browser_exit=code, browser_seconds=time.monotonic()-started,
                    browser_end_utc=now(), browser_log_sha256=sha(run / 'browser.log'))
     actors = sorted(dbroot.glob('actor-*.json'))
@@ -284,12 +291,15 @@ try:
         actor = json.loads(actors[0].read_text())
         assert actor['backend'] == 'sqlite' and actor['commit'] == 'confirmed'
         assert actor['poolClosed'] and actor['connectionClose'] == 'confirmed' and actor['operationSucceeded']
-        assert re.search(r'\b1 passed\b', (run / 'browser.log').read_text()), 'exact one selected browser test'
+        if FLOW == 'on':
+            assert re.search(r'\b1 passed\b', (run / 'browser.log').read_text()), 'exact one selected browser test'
+        else:
+            receipt['actual_off_titles'] = validate_off_report(json.loads((run / 'playwright-result.private.json').read_text()), 'sqlite')
         assert (db.stat().st_dev, db.stat().st_ino) == (meta.st_dev, meta.st_ino), 'no replacement/reset DB'
-        receipt.update(actual_browser_tests=1, retries=0, ignored=0,
+        receipt.update(actual_browser_tests=7 if FLOW == 'off' else 1, retries=0, ignored=0,
                        actual_fixture_pin_checks_completed=True,
-                       tested_product_flow='actual currentVue setup/login/stable wiki create/nonempty nativeON/matching durableACK/manualrevision/fresh cookie actor body-native-ID-permission-history readback')
-    if code == 0:
+                       tested_product_flow=('immutable OFF7 actual Vue CAS/replay/native history/task/note/owner-transition/current revoke' if FLOW == 'off' else 'actual currentVue setup/login/stable wiki create/nonempty nativeON/matching durableACK/manualrevision/fresh cookie actor body-native-ID-permission-history readback'))
+    if code == 0 and FLOW == 'on':
         receipt['current_schema_server_restart'] = restart_same_app(globals())
 except BaseException as error:
     receipt['original_driver_failure'] = {'type': type(error).__name__, 'message': str(error)}
