@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   ci-plan:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
@@ -54,7 +54,7 @@ jobs:
   web-static:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_web_static == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -80,7 +80,7 @@ jobs:
   web-checks:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_web_checks == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -94,7 +94,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-${{ runner.os }}-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - name: Prepare pinned SQLite root build inputs
         id: sqlite
         env:
@@ -102,7 +102,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.3-1ubuntu1
+          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
@@ -111,7 +111,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target
-          key: v2-web-checks-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
+          key: v2-web-checks-ubuntu-26.04-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - name: Prepare locked dependencies
         run: |
           cargo fetch --locked
@@ -140,7 +140,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -154,7 +154,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-${{ runner.os }}-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - name: Prepare pinned SQLite root build inputs
         id: sqlite
         env:
@@ -162,7 +162,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.3-1ubuntu1
+          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
@@ -171,13 +171,13 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target
-          key: v2-web-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
+          key: v2-web-ubuntu-26.04-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - name: Restore production collaboration helper outputs
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: crates/collab-engine/target
-          key: v1-web-collab-helper-${{ runner.os }}-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-${{ hashFiles('crates/collab-engine/src/**') }}
-          restore-keys: v1-web-collab-helper-${{ runner.os }}-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-
+          key: v1-web-collab-helper-ubuntu-26.04-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-${{ hashFiles('crates/collab-engine/src/**') }}
+          restore-keys: v1-web-collab-helper-ubuntu-26.04-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-
       - name: Prepare locked dependencies
         run: |
           cargo fetch --locked
@@ -209,7 +209,7 @@ jobs:
   collaboration-flow:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_collaboration_flow == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -223,7 +223,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-${{ runner.os }}-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - name: Prepare pinned SQLite root build inputs
         id: sqlite
         env:
@@ -231,7 +231,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.3-1ubuntu1
+          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
@@ -240,13 +240,13 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target
-          key: v2-web-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
+          key: v2-web-ubuntu-26.04-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - name: Restore production collaboration helper outputs
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: crates/collab-engine/target
-          key: v1-web-collab-helper-${{ runner.os }}-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-${{ hashFiles('crates/collab-engine/src/**') }}
-          restore-keys: v1-web-collab-helper-${{ runner.os }}-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-
+          key: v1-web-collab-helper-ubuntu-26.04-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-${{ hashFiles('crates/collab-engine/src/**') }}
+          restore-keys: v1-web-collab-helper-ubuntu-26.04-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-
       - name: Prepare locked dependencies
         run: |
           cargo fetch --locked
@@ -304,7 +304,7 @@ jobs:
     name: web-ci-gate
     needs: [ci-plan, web-static, web-checks, workspace-browser-shard, collaboration-flow]
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

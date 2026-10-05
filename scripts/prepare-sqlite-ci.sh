@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build-only entry: bash scripts/prepare-sqlite-ci.sh [--parent OWNED_DIR] -- cargo build --locked
-# Requires native GCC/ar, Python 3, curl and LIBCLANG_PATH (Ubuntu 24: llvm-18;
-# Debian bookworm builder: llvm-14). Never installs host packages or changes Cargo.
+# Requires native GCC/ar, Python 3, curl and LIBCLANG_PATH (Ubuntu 26.04: llvm-18).
+# Never installs host packages or changes Cargo.
 # The reviewed helper owns all source hashes, C flags and SQLite export policy.
 set -euo pipefail
 exec python3 - "$0" "$@" <<'PY'
@@ -119,6 +119,8 @@ def main():
     identity = {'manifest': json.loads((prefix / 'manifest.json').read_text()),
                 'exports': env, 'wrapper_sha256': hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest(),
                 'python': sys.version,
+                'os_release': Path('/etc/os-release').read_text(),
+                'architecture': platform.machine(),
                 'packages': (parent / 'build-packages.txt').read_text() if (parent / 'build-packages.txt').is_file() else None,
                 'libclang_path': str(clang), 'libclang_sha256': hashlib.sha256(clang.read_bytes()).hexdigest(),
                 # Fingerprint build overrides without publishing their values.

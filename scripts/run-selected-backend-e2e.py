@@ -75,6 +75,7 @@ def inputs():
         tool=shutil.which(name);assert tool, name;add(Path(tool).resolve())
         result=subprocess.run(['ldd',str(Path(tool).resolve())],capture_output=True,text=True)
         for library in elf_dependencies(result.returncode,result.stdout,result.stderr):add(Path(library).resolve())
+    add(Path('/etc/os-release'))
     for path in abi_files():add(path)
     return {'head':call(['git','rev-parse','HEAD']),'tree':call(['git','rev-parse','HEAD^{tree}']),
             'status':subprocess.check_output(['git','-c','safe.directory='+str(ROOT),'status','--short'],cwd=ROOT,text=True),
@@ -114,6 +115,8 @@ def reference(path):return {'path':str(Path(path).resolve()),'sha256':sha(path)}
 
 def record_before(output):
     identity();assert not (output/'before.json').exists()
+    os_release=dict(line.split('=',1) for line in Path('/etc/os-release').read_text().splitlines() if '=' in line)
+    assert os_release['ID'].strip(chr(34))=='ubuntu' and os_release['VERSION_ID'].strip(chr(34))=='26.04'
     assert 'release: 1.98.1' in call(['rustc','-Vv']) and 'host: x86_64-unknown-linux-gnu' in call(['rustc','-Vv'])
     assert os.environ.get('CARGO_BUILD_TARGET','x86_64-unknown-linux-gnu')=='x86_64-unknown-linux-gnu'
     assert call(['bun','-v'])=='1.4.2'
@@ -123,6 +126,7 @@ def record_before(output):
     write(output/'before.json',inputs())
     write(output/'build-environment.json',{'sqlite':{k:os.environ[k] for k in ('SQLITE3_LIB_DIR','SQLITE3_INCLUDE_DIR','SQLITE3_STATIC','SQLITE3_NO_PKG_CONFIG')},
           'rustc':call(['rustc','-Vv']),'cargo':call(['cargo','-V']),'bun':call(['bun','-v']),
+          'os_release':Path('/etc/os-release').read_text(),
           'target':str(Path(os.environ['CARGO_TARGET_DIR']).resolve()),'features':['api-schema','db-tests'],
           'nativeFeatures':['worker'],'profile':'debug','devDebug':os.environ.get('CARGO_PROFILE_DEV_DEBUG'),
           'testDebug':os.environ.get('CARGO_PROFILE_TEST_DEBUG'),'compilerBeforeRecorded':True})
@@ -164,8 +168,9 @@ def record_after(output):
         assert actual and set(actual)<=set(libs), ('unqualified current ELF dependencies',p,text)
     server=next(p for p in bins if p.endswith('/fvoci-server'))
     write(output/'abi-receipt.json',{'currentSource':before['head'],'currentServerSha256':bins[server]['sha256'],
-          'currentELFDependenciesVerified':True,'actualCurrentELFldd':ldd,'exact_copied_runtime_files':libs,
-          'scope':'exact actual GitHub host ABI copied into only owned runtime containers; no dev/old image ABI claim'})
+          'currentELFDependenciesVerified':True,'actualCurrentELFldd':ldd,'host_runtime_files':libs,
+          'os_release':Path('/etc/os-release').read_text(),
+          'scope':'current Ubuntu 26.04 build-host ABI evidence only; runtime uses its own image libraries'})
 
 
 def stage(output,name,command):
@@ -204,7 +209,7 @@ def run(output):
             binding={'runId':env['GITHUB_RUN_ID'],'runAttempt':env['GITHUB_RUN_ATTEMPT'],'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],'backend':lane,'runRoot':str(runroot),
                      'parentDriverSha256':sha(driver),'restartHelperSha256':sha(TEMPLATES/'restart_checkpoint.py'),
                      'sourceInputsSha256':hashlib.sha256((json.dumps(source_written,indent=2)+'\n').encode()).hexdigest(),
-                     'artifactHashes':{p:r['sha256'] for p,r in bundle['binaries'].items()},'assetHashes':web['dist_files'],'browserInputs':browser,'abiHashes':abi['exact_copied_runtime_files']}
+                     'artifactHashes':{p:r['sha256'] for p,r in bundle['binaries'].items()},'assetHashes':web['dist_files'],'browserInputs':browser,'abiHashes':abi['host_runtime_files']}
             restart=output/(lane+'-restart-allocation.json');write(restart,{'schema':1,'status':'GRANTED','owner':owner,'exclusiveCIJob':True,'currentCIJobConfirmed':True,
                        'runId':env['GITHUB_RUN_ID'],'runAttempt':env['GITHUB_RUN_ATTEMPT'],'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],'backend':lane,'binding':binding})
             m['restartAllocation']=reference(restart);env['FVOCI_ROOT_RESTART_GRANT']=str(restart)

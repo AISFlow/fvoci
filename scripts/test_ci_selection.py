@@ -903,7 +903,7 @@ class WorkflowRegistryTest(unittest.TestCase):
         self.assertIsNone(error)
         jobs = data["jobs"]
         native = jobs["native-arm64"]
-        self.assertEqual(native["runs-on"], "ubuntu-24.04-arm")
+        self.assertEqual(native["runs-on"], "ubuntu-26.04-arm")
         self.assertEqual(native["timeout-minutes"], 15)
         self.assertEqual(native["needs"], "ci-plan")
         self.assertEqual(native["if"], "needs.ci-plan.outputs.select_native_arm64 == 'true'")
@@ -1031,7 +1031,7 @@ class RustSuiteRegistryTest(unittest.TestCase):
                 job["steps"][-1][field] = value
 
         for field, value, expected in (
-            ("runs-on", "ubuntu-24.04", "run once on ubuntu-24.04-arm"),
+            ("runs-on", "ubuntu-26.04", "run once on ubuntu-26.04-arm"),
             ("strategy", {"matrix": {"shard": ["a", "b"]}}, "run once"),
             ("timeout-minutes", 20, "15 minute budget"),
             ("continue-on-error", True, "fail on build/policy errors"),
@@ -1128,7 +1128,7 @@ class RustSuiteRegistryTest(unittest.TestCase):
             rows = jobs["postgres"]["strategy"]["matrix"]["include"]
             self.assertEqual(
                 sorted(row["runner"] for row in rows if row["shard"] == "b" and row["pg_major"] == "18"),
-                ["ubuntu-24.04", "ubuntu-24.04-arm"],
+                ["ubuntu-26.04", "ubuntu-26.04-arm"],
             )
 
     def test_selected_install_missing_or_masked_execution_fails(self) -> None:
@@ -1157,7 +1157,7 @@ class RustSuiteRegistryTest(unittest.TestCase):
                         helper = next(item for item in steps if item.get("name") == "Build production helper for PostgreSQL B native fixtures")
                         helper["run"] = helper["run"].replace('--features worker ', '')
                     else:
-                        row = next(row for row in job["strategy"]["matrix"]["include"] if row["runner"] == "ubuntu-24.04-arm" and row["shard"] == "b")
+                        row = next(row for row in job["strategy"]["matrix"]["include"] if row["runner"] == "ubuntu-26.04-arm" and row["shard"] == "b")
                         row["pg_major"] = "17"
                 fx.mutate_rust_workflow(weaken)
                 errors = SEL.verify_rust_suite_registry(fx.root)
@@ -1188,7 +1188,7 @@ class RustSuiteRegistryTest(unittest.TestCase):
         def drop_search_meili_on_arm(data: dict) -> None:
             rows = data["jobs"]["postgres"]["strategy"]["matrix"]["include"]
             for row in rows:
-                if row.get("runner") == "ubuntu-24.04-arm":
+                if row.get("runner") == "ubuntu-26.04-arm":
                     row["tests"] = row["tests"].replace(" --test search_meili", "")
 
         with RustSuiteRegistryFixture() as fx:
@@ -1538,7 +1538,7 @@ class RegistryMutationCliTest(unittest.TestCase):
   new-suite:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_new_suite == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - run: echo new
 """
@@ -1562,9 +1562,9 @@ class RegistryMutationCliTest(unittest.TestCase):
                 "workflow_dispatch inputs must be exactly",
             ),
             (
-                "  upgrade-smoke-arm64:\n    needs: ci-plan\n    if: needs.ci-plan.outputs.select_upgrade_smoke_arm64 == 'true'\n    runs-on: ubuntu-24.04-arm\n",
-                "  upgrade-smoke-arm64:\n    needs: ci-plan\n    if: needs.ci-plan.outputs.select_upgrade_smoke_arm64 == 'true'\n    runs-on: ubuntu-24.04\n",
-                "upgrade-smoke-arm64 runs-on must be ubuntu-24.04-arm",
+                "  upgrade-smoke-arm64:\n    needs: ci-plan\n    if: needs.ci-plan.outputs.select_upgrade_smoke_arm64 == 'true'\n    runs-on: ubuntu-26.04-arm\n",
+                "  upgrade-smoke-arm64:\n    needs: ci-plan\n    if: needs.ci-plan.outputs.select_upgrade_smoke_arm64 == 'true'\n    runs-on: ubuntu-26.04\n",
+                "upgrade-smoke-arm64 runs-on must be ubuntu-26.04-arm",
             ),
             (
                 "    if: needs.ci-plan.outputs.select_upgrade_smoke_arm64 == 'true'\n",
@@ -1611,7 +1611,7 @@ class RegistryMutationCliTest(unittest.TestCase):
   sneaky-ci-gate:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_sneaky_ci_gate == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - run: echo sneaky
 """
@@ -1664,7 +1664,7 @@ class RegistryMutationCliTest(unittest.TestCase):
     def test_new_workflow_rejected_before_outputs(self) -> None:
         root = self._mutated_root()
         extra = root / ".github" / "workflows" / "extra.yml"
-        extra.write_text("name: Extra\non: push\njobs:\n  extra-job:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo x\n", encoding="utf-8")
+        extra.write_text("name: Extra\non: push\njobs:\n  extra-job:\n    runs-on: ubuntu-26.04\n    steps:\n      - run: echo x\n", encoding="utf-8")
         proc, output = self._plan_against(root)
         self._assert_no_green_outputs(proc, output, "unknown workflow file extra.yml")
 
@@ -1695,6 +1695,28 @@ class RegistryMutationCliTest(unittest.TestCase):
                 path.write_text(text.replace(old, new, 1), encoding="utf-8")
                 proc, output = self._plan_against(root)
                 self._assert_no_green_outputs(proc, output, needle)
+
+    def test_old_runner_labels_rejected_before_outputs(self) -> None:
+        for filename in (*SEL.WORKFLOW_YAML.values(), SEL.RELEASE_WORKFLOW_FILE, SEL.TURSO_MANUAL_WORKFLOW_FILE):
+            for old_label in ("ubuntu-24.04", "ubuntu-22.04", "ubuntu-latest"):
+                with self.subTest(workflow=filename, runner=old_label):
+                    root = self._mutated_root()
+                    path = root / ".github" / "workflows" / filename
+                    text = path.read_text(encoding="utf-8")
+                    self.assertIn("runs-on: ubuntu-26.04", text)
+                    path.write_text(text.replace("runs-on: ubuntu-26.04", "runs-on: " + old_label, 1), encoding="utf-8")
+                    proc, output = self._plan_against(root)
+                    self._assert_no_green_outputs(proc, output, "requires explicit Ubuntu 26.04 runners")
+
+    def test_old_os_cache_prefix_rejected_before_outputs(self) -> None:
+        root = self._mutated_root()
+        path = root / ".github" / "workflows" / "collab-engine.yml"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("restore-keys: v1-collab-engine-ubuntu-26.04-", text)
+        path.write_text(text.replace("restore-keys: v1-collab-engine-ubuntu-26.04-",
+                                     "restore-keys: v1-collab-engine-ubuntu-24.04-"), encoding="utf-8")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "cache restore-keys must bind Ubuntu 26.04")
 
     def test_missing_selector_output_rejected_before_outputs(self) -> None:
         root = self._mutated_root()

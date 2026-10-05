@@ -143,6 +143,8 @@ sys.exit(int(os.environ.get('CONSUMER_EXIT','0')))
         self.assertIn('outputs', identity['manifest'])
         self.assertIn('flags', identity['manifest']['inputs'])
         self.assertEqual(identity['exports'], exports)
+        self.assertEqual(identity['os_release'], Path('/etc/os-release').read_text())
+        self.assertEqual(identity['architecture'], platform.machine())
         self.assertEqual(len(self.github_output.read_text().strip().split('=')[1]), 64)
 
     def test_download_failure_never_runs_helper_or_consumer(self):
@@ -309,7 +311,7 @@ exit "${PREREQ_EXIT:-0}"
                 self.assertIn('${{ steps.sqlite.outputs.cache_identity }}', root_cache)
                 self.assertNotIn('restore-keys:', root_cache)
                 self.assertIn('--github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"', body)
-                self.assertIn('libclang-18-dev=1:18.1.3-1ubuntu1', body)
+                self.assertIn('libclang-18-dev=1:18.1.8-20ubuntu8', body)
             if workflow == 'documents':
                 body = jobs['native-extraction']
                 self.assertLess(body.index('Production helper rejects test controls'), body.index('id: sqlite'))
@@ -318,7 +320,10 @@ exit "${PREREQ_EXIT:-0}"
             self.assertNotIn('prepare-sqlite-ci', (ROOT / '.github/workflows' / (workflow+'.yml')).read_text())
         docker = (ROOT / 'infra/rust/Dockerfile').read_text()
         builder, runtime = docker.split(' AS runtime', 1)
-        self.assertIn('libclang-14-dev=1:14.0.6-12', builder)
+        self.assertIn('libclang-18-dev=1:18.1.8-20ubuntu8', builder)
+        self.assertIn('FROM ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 AS ubuntu', builder)
+        self.assertIn('FROM ubuntu AS rust-sources', builder)
+        self.assertIn('FROM ubuntu AS web-build', builder)
         self.assertIn('prepare-sqlite-ci.sh --parent /sqlite-build -- cargo build', builder)
         for tool in ('libclang', 'python3', 'gcc', '/sqlite-build'):
             self.assertNotIn(tool, runtime)

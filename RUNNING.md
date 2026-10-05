@@ -10,6 +10,13 @@ failure and old-image rollback; ordinary PR and main CI does not run it, only an
 ## Toolchain
 
 Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_HOME`, and `PATH` at your toolchain.
+Development and native CI use Ubuntu 26.04 (x64 and ARM64), Rust 1.98.1, and
+Bun 1.4.2. The Docker Rust/web builders and final runtime use the same pinned
+Ubuntu 26.04 base. Native SQLite builds require `libclang-18-dev=1:18.1.8-20ubuntu8`
+with `LIBCLANG_PATH=/usr/lib/llvm-18/lib`, GCC, binutils, Python 3, and curl.
+Rebuild native outputs on this OS; caches are scoped to Ubuntu 26.04, architecture,
+toolchain, and build features.
+
 
 ## Environment
 
@@ -1175,7 +1182,7 @@ secure cookies. Proxy body-size and timeout limits for uploads are under
 wiki collab body projection, HWPX upload + extraction, `/collab` availability,
 a graceful `docker compose stop server` (stopped container must report exit code 0),
 a recreated server container on the same volumes, and post-recreate reads.
-CI runs the same script on `ubuntu-24.04` and `ubuntu-24.04-arm` via
+CI runs the same script on `ubuntu-26.04` and `ubuntu-26.04-arm` via
 `.github/workflows/install.yml` (no secrets, no image publish). This is the
 developer stack. The user install is exercised by
 `scripts/standalone-install-smoke.sh` (a local, manual run: fresh `.env`,
@@ -1332,7 +1339,7 @@ lifecycle rules, or the presigned transfer mode.
 not detected before start. Ordinary PR and main CI does not run this smoke. A manual dispatch of the
 Container install workflow with `run_upgrade_smoke_arm=true`
 (`gh workflow run install.yml --ref <branch> -f run_upgrade_smoke_arm=true`) runs it once on native
-`ubuntu-24.04-arm` with local storage, for the fixed pair in the `upgrade-smoke-arm64` job and the
+`ubuntu-26.04-arm` with local storage, for the fixed pair in the `upgrade-smoke-arm64` job and the
 tested commit as `--main-ref`. The job being registered is not a result. Record the pair, image IDs,
 architecture and logs of a run with the change it supports; this guide does not.
 
@@ -1590,7 +1597,7 @@ exists, restores into a second project with a rotated superset keyring (the
 secret opens), and checks those artifacts
 plus uid `1000` and that the restored server receives only `DATABASE_APP_URL`.
 Trap cleanup removes only those two projects. CI runs it as a separate job on
-`ubuntu-24.04` and `ubuntu-24.04-arm` in `.github/workflows/install.yml` (no
+`ubuntu-26.04` and `ubuntu-26.04-arm` in `.github/workflows/install.yml` (no
 secrets, no image publish).
 
 ### S3 storage backup

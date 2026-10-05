@@ -131,7 +131,7 @@ def load_current(lane, driver):
     abi = referenced(m['abiReceipt'])
     assert abi['currentSource'] == m['source'] and abi['currentServerSha256'] == binaries[next(p for p in binaries if p.endswith('/fvoci-server'))]['sha256']
     assert abi['currentELFDependenciesVerified'] is True
-    for p,h in abi['exact_copied_runtime_files'].items(): assert sha(p) == h
+    for p,h in abi['host_runtime_files'].items(): assert sha(p) == h
     if lane != 'install':
         closed = referenced(m['closedInstallReceipt'])
         assert closed['source'] == m['source'] and closed['tree'] == m['tree'] and closed['final_exit_code'] == 0
@@ -148,7 +148,7 @@ def load_current(lane, driver):
                     'sourceInputsSha256':hashlib.sha256((json.dumps(source_written,indent=2)+'\n').encode()).hexdigest(),
                     'artifactHashes':{p:r['sha256'] for p,r in binaries.items()},
                     'assetHashes':assets['dist_files'], 'browserInputs':m['browserInputs'],
-                    'abiHashes':abi['exact_copied_runtime_files']}
+                    'abiHashes':abi['host_runtime_files']}
         validate_allocation(restart, expected)
         browser = m['browserInputs']
         for key in ('bun','chromium'): assert sha(browser[key]['path']) == browser[key]['sha256']
@@ -158,7 +158,7 @@ def load_current(lane, driver):
         assert restart['binding']['restartHelperSha256'] == sha(Path(driver).parent/'restart_checkpoint.py')
         assert restart['binding']['artifactHashes'] == {p:r['sha256'] for p,r in binaries.items()}
         assert restart['binding']['assetHashes'] == assets['dist_files']
-        assert restart['binding']['abiHashes'] == abi['exact_copied_runtime_files']
+        assert restart['binding']['abiHashes'] == abi['host_runtime_files']
         assert os.environ['FVOCI_ROOT_RESTART_GRANT'] == m['restartAllocation']['path']
     return dict(manifest=m, manifest_path=manifest_path, grant=grant, run=run,
                 before=before, build=build, compile_receipt=compile_receipt, assets=assets, abi=abi)

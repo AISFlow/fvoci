@@ -36,7 +36,7 @@ WORKFLOW_JOBS: dict[str, tuple[str, ...]] = {
 OPT_IN_JOBS: dict[str, dict[str, str]] = {
     "install": {"upgrade-smoke-arm64": "run_upgrade_smoke_arm"},
 }
-OPT_IN_RUNNER: dict[str, str] = {"upgrade-smoke-arm64": "ubuntu-24.04-arm"}
+OPT_IN_RUNNER: dict[str, str] = {"upgrade-smoke-arm64": "ubuntu-26.04-arm"}
 
 WORKFLOW_YAML: dict[str, str] = {
     "web": "web.yml",
@@ -741,8 +741,8 @@ RUST_WORKFLOW_FILE = "rust.yml"
 RUST_COLLAB_CI_SCRIPT = Path("scripts/run-rust-collaboration-ci-tests.sh")
 RUST_CAPACITY_PROBE_SCRIPT = Path("scripts/collab-capacity-probe.sh")
 RUST_POSTGRES_RUNNER_ARCH: dict[str, str] = {
-    "ubuntu-24.04": "x64",
-    "ubuntu-24.04-arm": "arm64",
+    "ubuntu-26.04": "x64",
+    "ubuntu-26.04-arm": "arm64",
 }
 RUST_INTEGRATION_MANUAL_TARGETS: frozenset[str] = frozenset({"collab_capacity_probe"})
 RUST_NATIVE_ARM64_STEP = "Native server build and policy tests (ARM64)"
@@ -757,7 +757,7 @@ RUST_POSTGRES_INTEGRATION_STEP = "PostgreSQL integration tests"
 RUST_S3_INTEGRATION_STEP = "S3-compatible storage integration tests (pinned test server)"
 RUST_COLLAB_INTEGRATION_STEP = "WebSocket, PostgreSQL and native helper integration tests"
 RUST_COLLAB_INTEGRATION_RUN = "bash scripts/run-rust-collaboration-ci-tests.sh"
-RUST_COLLAB_MATRIX_RUNNERS = frozenset({"ubuntu-24.04", "ubuntu-24.04-arm"})
+RUST_COLLAB_MATRIX_RUNNERS = frozenset({"ubuntu-26.04", "ubuntu-26.04-arm"})
 RUST_S3_INTEGRATION_STEP_IF = "matrix.shard == 'b'"
 RUST_AUTOTEST_FAST_NATIVE_EXCLUSIONS: frozenset[str] = frozenset(
     {
@@ -1250,8 +1250,8 @@ def verify_native_arm64_execution(jobs: dict) -> list[str]:
     if not isinstance(job, dict):
         return ["rust: native-arm64 job missing"]
     errors: list[str] = []
-    if job.get("runs-on") != "ubuntu-24.04-arm" or "strategy" in job:
-        errors.append("rust: native-arm64 must run once on ubuntu-24.04-arm")
+    if job.get("runs-on") != "ubuntu-26.04-arm" or "strategy" in job:
+        errors.append("rust: native-arm64 must run once on ubuntu-26.04-arm")
     if job.get("timeout-minutes") != 15:
         errors.append("rust: native-arm64 must keep the 15 minute budget")
     if "continue-on-error" in job:
@@ -1429,6 +1429,35 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
     for path in discovered_files:
         if path.name not in allowed_files:
             errors.append(f"unknown workflow file {path.name}")
+        if path.name in allowed_files:
+            data, parse_err = _load_yaml_mapping(path)
+            if parse_err:
+                continue  # The workflow-specific validator reports parse errors.
+            jobs = data.get("jobs")
+            if not isinstance(jobs, dict):
+                continue
+            for job_id, job in jobs.items():
+                if not isinstance(job, dict):
+                    continue
+                runner = job.get("runs-on")
+                runners = [runner]
+                if runner == "${{ matrix.runner }}":
+                    strategy = job.get("strategy")
+                    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+                    rows = matrix.get("include", []) if isinstance(matrix, dict) else []
+                    runners = [row.get("runner") for row in rows if isinstance(row, dict)]
+                if not runners or any(not isinstance(label, str) or label not in RUST_POSTGRES_RUNNER_ARCH for label in runners):
+                    errors.append(f"{path.name}: {job_id} requires explicit Ubuntu 26.04 runners")
+                for step in job.get("steps", []):
+                    if not isinstance(step, dict) or not str(step.get("uses", "")).startswith("actions/cache@"):
+                        continue
+                    cache = step.get("with", {})
+                    # This source-only cache is revalidated by fetch-rhwp.sh.
+                    if cache.get("path") == "crates/document-extract/.vendor-src/rhwp":
+                        continue
+                    for field in ("key", "restore-keys"):
+                        if field in cache and any("ubuntu-26.04-${{ runner.arch }}-1.98.1-" not in line for line in str(cache[field]).splitlines()):
+                            errors.append(f"{path.name}: {job_id} cache {field} must bind Ubuntu 26.04, architecture and toolchain")
 
     for workflow, filename in WORKFLOW_YAML.items():
         path = workflows_dir / filename
@@ -1644,13 +1673,13 @@ def verify_turso_workflow(path: Path) -> list[str]:
     require(runtime.get("needs") == "admission" and runtime.get("if") == trusted + " && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''", "runtime needs successful trusted admission")
     require(runtime.get("environment") == "fvoci-turso-test", "fixed Environment")
     require(runtime.get("env") == {"LIBCLANG_PATH": "/usr/lib/llvm-18/lib", "CARGO_BUILD_JOBS": 4, "CARGO_INCREMENTAL": 0, "CARGO_PROFILE_DEV_DEBUG": 0, "CARGO_PROFILE_TEST_DEBUG": 0, "CARGO_TARGET_DIR": "${{ runner.temp }}/turso-target"}, "credential-free compiler environment")
-    require(admission.get("runs-on") == runtime.get("runs-on") == "ubuntu-24.04" and admission.get("timeout-minutes") == 5 and runtime.get("timeout-minutes") == 15, "fixed runner and budgets")
+    require(admission.get("runs-on") == runtime.get("runs-on") == "ubuntu-26.04" and admission.get("timeout-minutes") == 5 and runtime.get("timeout-minutes") == 15, "fixed runner and budgets")
     steps = runtime.get("steps")
     if not isinstance(steps, list) or len(steps) != 4 or not all(isinstance(step, dict) for step in steps):
         return [*errors, f"{path.name}: fixed credential-free build then single consuming step"]
     require(steps[0] == checkout, "exact SHA checkout with stripped credentials")
     require(set(steps[1]) == set(steps[2]) == {"name", "run"}, "no compilation credentials")
-    require(steps[1].get("run") == "set -euo pipefail\nrustup toolchain install 1.98.1 --profile minimal\nsudo apt-get update\nsudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.3-1ubuntu1\nmkdir \"$RUNNER_TEMP/fvoci-sqlite\"\ndpkg-query -W > \"$RUNNER_TEMP/fvoci-sqlite/build-packages.txt\"\nbash scripts/prepare-sqlite-ci.sh --parent \"$RUNNER_TEMP/fvoci-sqlite\" \\\n  --github-env \"$GITHUB_ENV\" --github-output \"$GITHUB_OUTPUT\"\ncargo fetch --locked\n", "maintained pinned compiler/native preparation")
+    require(steps[1].get("run") == "set -euo pipefail\nrustup toolchain install 1.98.1 --profile minimal\nsudo apt-get update\nsudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8\nmkdir \"$RUNNER_TEMP/fvoci-sqlite\"\ndpkg-query -W > \"$RUNNER_TEMP/fvoci-sqlite/build-packages.txt\"\nbash scripts/prepare-sqlite-ci.sh --parent \"$RUNNER_TEMP/fvoci-sqlite\" \\\n  --github-env \"$GITHUB_ENV\" --github-output \"$GITHUB_OUTPUT\"\ncargo fetch --locked\n", "maintained pinned compiler/native preparation")
     require(steps[2].get("run") == "set -euo pipefail\ncargo test --locked --offline --lib --features db-tests --jobs 4 --no-run --message-format=json > \"$RUNNER_TEMP/turso-compile.json\"\npython3 scripts/selected-backend-ci/turso-test-guard.py --freeze\n", "fixed fresh compilation and ELF binding")
     require(steps[3] == {"name": "Read-only real primary connection (exactly one test)", "env": {
         "FVOCI_DATABASE_BACKEND": "libsql-remote",

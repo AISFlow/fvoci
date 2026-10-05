@@ -2,10 +2,23 @@
 # Binaries and static assets are root-owned and read-only to the service user;
 # only /data/storage is writable by it.
 # Multi-stage install image for the Rust FVOCI slice: server, migrate, collab-engine,
-# document-extract and built React static assets. Bun is used only by web-build;
+# document-extract and built Vue static assets. Bun is used only by web-build;
 # the runtime contains Rust helpers and no JavaScript runtime.
 
-FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS rust-sources
+# These pinned images supply toolchain executables only. Every build and the
+# final runtime execute on the same Ubuntu 26.04 multiarchitecture base.
+FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS rust-toolchain
+FROM oven/bun:1.4.2@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS bun-toolchain
+FROM ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 AS ubuntu
+
+FROM ubuntu AS rust-sources
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential pkg-config curl ca-certificates \
+ && rustc -vV | grep -Fx 'release: 1.98.1' \
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY migrations ./migrations
@@ -31,19 +44,24 @@ RUN cargo fetch --locked \
 FROM rust-deps AS rust-build
 # Native bindgen/C prerequisites exist only in the builder (both GNU arches).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 gcc binutils curl ca-certificates libclang-14-dev=1:14.0.6-12 \
+ && apt-get install -y --no-install-recommends python3 gcc binutils curl ca-certificates libclang-18-dev=1:18.1.8-20ubuntu8 \
  && mkdir /sqlite-build \
  && dpkg-query -W > /sqlite-build/build-packages.txt \
  && rm -rf /var/lib/apt/lists/*
-ENV LIBCLANG_PATH=/usr/lib/llvm-14/lib
+ENV LIBCLANG_PATH=/usr/lib/llvm-18/lib
 # Release builds pass the tagged commit so `fvoci-server --version` can report it.
 ARG FVOCI_BUILD_SHA=
-ENV CARGO_TARGET_DIR=/src/target FVOCI_BUILD_SHA=${FVOCI_BUILD_SHA}
+ENV CARGO_TARGET_DIR=/src/target FVOCI_BUILD_SHA=${FVOCI_BUILD_SHA} CARGO_BUILD_JOBS=2
 RUN bash scripts/prepare-sqlite-ci.sh --parent /sqlite-build -- cargo build --locked --release --bin fvoci-server --bin fvoci-migrate \
  && cargo build --locked --release --manifest-path crates/collab-engine/Cargo.toml --features worker --bin collab-engine \
  && cargo build --locked --release --manifest-path crates/document-extract/Cargo.toml --bin document-extract
 
-FROM oven/bun:1.4.2@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS web-build
+FROM ubuntu AS web-build
+COPY --from=bun-toolchain /usr/local/bin/bun /usr/local/bin/bun
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && ln -s bun /usr/local/bin/bunx \
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 # The Bun workspace (package.json workspaces, bun.lock, bunfig.toml's linker)
 # spans apps/web, packages/* and scripts/document-convert; `bun ci` needs every
@@ -68,12 +86,14 @@ COPY apps/web ./apps/web/
 WORKDIR /src/apps/web
 RUN bun --bun run build
 
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
+FROM ubuntu AS runtime
 # No setuid/setgid files (su, passwd, mount, ...): nothing in the image
 # changes user through one, and the server's uid must not reach root by one.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl postgresql-client \
  && rm -rf /var/lib/apt/lists/* \
+ && userdel --remove ubuntu \
+ && if getent group ubuntu >/dev/null; then groupdel ubuntu; fi \
  && groupadd --gid 1000 fvoci \
  && useradd --uid 1000 --gid fvoci --no-create-home --home-dir /nonexistent fvoci \
  && find / -xdev -perm /6000 -type f -exec chmod ug-s {} + \
