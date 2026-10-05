@@ -321,6 +321,7 @@ pub fn maybe_run_helper() -> Option<i32> {
 }
 
 fn child_outcome(outcome: &OfficeOutcome) -> i32 {
+    abort_if_allocation_failed();
     let json = match serde_json::to_vec(outcome) {
         Ok(json) => json,
         Err(err) => return child_fail(&format!("serialize: {err}")),
@@ -333,8 +334,24 @@ fn child_outcome(outcome: &OfficeOutcome) -> i32 {
 }
 
 fn child_fail(msg: &str) -> i32 {
+    abort_if_allocation_failed();
     let _ = writeln!(std::io::stderr(), "{msg}");
     2
+}
+
+/// A null allocation that a library or `read_to_end` returned as an ordinary
+/// error (an inflate buffer that could not grow reads as "zip: invalid zip")
+/// is the address-space ceiling, not the document's or the worker's answer:
+/// abort like Rust's own out-of-memory path so the parent reports a resource
+/// limit. The panic hook covers libraries that panic instead (`alloc_guard`).
+fn abort_if_allocation_failed() {
+    if crate::alloc_guard::allocation_failed() {
+        let _ = writeln!(
+            std::io::stderr(),
+            "allocation failed under the address-space limit before the reply"
+        );
+        std::process::abort();
+    }
 }
 
 /// The run was cancelled (shutdown); the child was killed and reaped.
