@@ -1376,6 +1376,37 @@ async fn s3_complete_with_too_small_part_is_a_client_error() {
     .await;
     assert_eq!(status, StatusCode::OK, "still resumable: {resume:?}");
     assert_eq!(resume["uploadedParts"].as_array().unwrap().len(), 2);
+    // Preserve the refused upload/session and its valid final part; replace
+    // only the undersized first part through the original upload URL.
+    let first = patterned(part_size, 3);
+    let (status, replacement_etag) =
+        put_part(&app, &cookie, parts[0]["url"].as_str().unwrap(), &first).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, completed, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+        Some(json!({ "parts": [
+            { "partNumber": 1, "etag": replacement_etag },
+            { "partNumber": 2, "etag": etag2 }
+        ] })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "valid replacement: {completed:?}");
+    let (status, downloaded, _) = request(
+        app,
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/download"),
+        None,
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut expected = first;
+    expected.extend_from_slice(&patterned(1000, 2));
+    assert_eq!(downloaded, expected, "literal replacement/final part bytes");
     harness.cleanup().await;
 }
 
