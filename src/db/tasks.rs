@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
-use crate::db::backend::{Backend, OperationTx};
-use crate::db::codec::Cell;
+use crate::db::backend::{Backend, DbTx, FamilyTx, OperationTx};
+use crate::db::codec::{Cell, FamilyRow};
 use crate::db::import_jobs::ImportClaim;
 use tokio_util::sync::CancellationToken;
 
@@ -541,6 +541,651 @@ fn violates_task_hierarchy(child_type: &str, parent_type: &str) -> bool {
         true
     } else {
         parent_type != "epic"
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+pub(crate) mod selected_task_detail_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+    use crate::db::lookup::selected_lookup_tests::{origin_task, project, session};
+    use crate::db::task_origins::{
+        create_document_task_backend, origin_request_hash, DocumentTaskRequest,
+    };
+
+    pub(crate) async fn setup() -> (Fixture, Uuid, String, Uuid, Uuid) {
+        let f = Fixture::new().await;
+        let (credential, cookie) = session(&f, f.user).await;
+        let project = project(&f, credential).await;
+        let task = origin_task(&f, credential, project, Uuid::now_v7())
+            .await
+            .task_id();
+        (f, credential, cookie, project, task)
+    }
+
+    async fn create(
+        f: &Fixture,
+        credential: Uuid,
+        project: Uuid,
+        input: CreateTaskInput<'_>,
+    ) -> Uuid {
+        let dto = crate::api::dto::CreateTaskBody {
+            title: input.title.into(),
+            task_type: input.task_type.into(),
+            priority: input.priority.into(),
+            status_id: input.status_id,
+            start_date: input.start_date,
+            due_date: input.due_date,
+            parent_id: input.parent_id,
+            milestone_id: input.milestone_id,
+            recurrence: input.recurrence.clone(),
+        };
+        let hash = origin_request_hash(
+            f.user,
+            project,
+            None,
+            &crate::http::routes::task_body::normalized_task_input(&dto),
+        );
+        create_document_task_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            DocumentTaskRequest {
+                document_id: f.document,
+                project_id: project,
+                request_id: Uuid::now_v7(),
+                anchor: None,
+                request_hash: &hash,
+                task: input,
+                self_assign: false,
+            },
+            None,
+            "api",
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .task_id()
+    }
+
+    fn input<'a>(title: &'a str, task_type: &'a str, parent: Option<Uuid>) -> CreateTaskInput<'a> {
+        CreateTaskInput {
+            title,
+            task_type,
+            priority: "none",
+            status_id: None,
+            start_date: None,
+            due_date: None,
+            parent_id: parent,
+            milestone_id: None,
+            recurrence: None,
+        }
+    }
+
+    async fn read(f: &Fixture, credential: Uuid, task: Uuid) -> TaskDetailRow {
+        get_task_backend(&f.backend, f.workspace, task, f.user, credential)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_task_detail_origin_lookup_new_client_literal_body_and_personal_read() {
+        let (f, credential, _, project, task) = setup().await;
+        let lookup = crate::db::lookup::lookup_display_id_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            "ORIGIN-2",
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(lookup.len(), 1);
+        assert_eq!(lookup[0].id, task);
+        let client = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        let detail = get_task_backend(
+            &Backend::Sqlite(client.clone()),
+            f.workspace,
+            task,
+            f.user,
+            credential,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(detail.meta.id, task);
+        assert_eq!(detail.meta.workspace_id, f.workspace);
+        assert_eq!(detail.meta.project_id, project);
+        assert_eq!(detail.meta.number, 2);
+        assert_eq!(detail.meta.title, "실제 원본 작업 中 😀");
+        assert_eq!(detail.meta.created_by, f.user);
+        assert_eq!(detail.meta.schema_version, DOCUMENT_SCHEMA_VERSION);
+        assert_eq!(detail.meta.version, 1);
+        assert_eq!(detail.content_json, empty_document_json());
+        assert!(detail.can_edit);
+        assert!(detail.parent.is_none() && detail.children.is_empty());
+        let progress = detail.child_progress.unwrap();
+        assert_eq!((progress.done, progress.total), (0, 0));
+        assert!(
+            detail.assignee_ids.is_empty()
+                && detail.label_ids.is_empty()
+                && detail.dependencies.is_empty()
+        );
+        // Projection fixture, not a native engine/body-save substitute. The
+        // normal/current Rust native writer and browser mount run separately.
+        let body = json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"현재 본문 中 😀"}]}]});
+        sqlx::query("UPDATE tasks SET content_json=?1,version=2 WHERE id=?2")
+            .bind(body.to_string())
+            .bind(task.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE workspaces SET kind='personal' WHERE id=?1")
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET personal_workspace_id=?1 WHERE id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let personal = get_task_backend(
+            &Backend::Sqlite(client.clone()),
+            f.workspace,
+            task,
+            f.user,
+            credential,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(personal.meta.id, task);
+        assert_eq!(personal.meta.project_id, project);
+        assert_eq!(personal.meta.version, 2);
+        assert_eq!(personal.content_json, body);
+        assert!(personal.can_edit);
+        let origins = crate::db::task_origins::list_document_task_origins_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            f.document,
+            None,
+            50,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(origins.count, 1);
+        assert_eq!(origins.items[0].document_id, f.document);
+        assert_eq!(origins.items[0].task_id, task);
+        client.close().await;
+        f.pool.close().await;
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_task_detail_all_fields_refs_hierarchy_order_and_lifecycle() {
+        let f = Fixture::new().await;
+        let credential = session(&f, f.user).await.0;
+        let project = project(&f, credential).await;
+        let epic = create(&f, credential, project, input("상위 中 😀", "epic", None)).await;
+        let mut target = input("현재 전체 필드", "task", Some(epic));
+        target.priority = "high";
+        target.start_date = Some(NaiveDate::from_ymd_opt(2026, 10, 5).unwrap());
+        target.due_date = Some(NaiveDate::from_ymd_opt(2026, 10, 6).unwrap());
+        target.recurrence = Some(json!({"kind":"daily"}));
+        let task = create(&f, credential, project, target).await;
+        let open = create(
+            &f,
+            credential,
+            project,
+            input("Open", "subtask", Some(task)),
+        )
+        .await;
+        let done = create(
+            &f,
+            credential,
+            project,
+            input("Done", "subtask", Some(task)),
+        )
+        .await;
+        let canceled = create(
+            &f,
+            credential,
+            project,
+            input("Canceled", "subtask", Some(task)),
+        )
+        .await;
+        let archived = create(
+            &f,
+            credential,
+            project,
+            input("Archived", "subtask", Some(task)),
+        )
+        .await;
+        let deleted = create(
+            &f,
+            credential,
+            project,
+            input("Deleted", "subtask", Some(task)),
+        )
+        .await;
+        let before = create(&f, credential, project, input("Incoming", "task", None)).await;
+        let after = create(&f, credential, project, input("Outgoing", "task", None)).await;
+        for (child, category) in [(done, "done"), (canceled, "canceled")] {
+            sqlx::query("UPDATE tasks SET status_id=(SELECT id FROM statuses WHERE project_id=?1 AND category=?2 LIMIT 1) WHERE id=?3")
+                .bind(project.as_bytes().as_slice()).bind(category).bind(child.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        }
+        sqlx::query("UPDATE tasks SET archived_at=1000000 WHERE id=?1")
+            .bind(archived.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE tasks SET deleted_at=1000000 WHERE id=?1")
+            .bind(deleted.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        // Tie timestamps deliberately; UUID DESC must be the second key.
+        sqlx::query("UPDATE tasks SET created_at=2000000 WHERE parent_id=?1")
+            .bind(task.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let milestone = Uuid::now_v7();
+        sqlx::query("INSERT INTO milestones(id,workspace_id,project_id,name,sort_key) VALUES(?1,?2,?3,'Milestone','M')")
+            .bind(milestone.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let body = json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"확인할 본문 😀"}]}]});
+        sqlx::query("UPDATE tasks SET estimate='1.2500',milestone_id=?1,sort_key='M',version=17,created_at=3000001,updated_at=4000002,content_json=?2 WHERE id=?3")
+            .bind(milestone.as_bytes().as_slice()).bind(body.to_string()).bind(task.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let mut users = vec![f.user];
+        for number in [20u128, 10] {
+            let user = Uuid::from_u128(number);
+            sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,?2,'Assignee')")
+                .bind(user.as_bytes().as_slice())
+                .bind(format!("{user}@example.test"))
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'member')",
+            )
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+            users.push(user);
+        }
+        for user in &users {
+            sqlx::query(
+                "INSERT INTO task_assignees(workspace_id,task_id,user_id) VALUES(?1,?2,?3)",
+            )
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(task.as_bytes().as_slice())
+            .bind(user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        }
+        let mut labels = vec![Uuid::from_u128(40), Uuid::from_u128(30)];
+        for label in &labels {
+            sqlx::query("INSERT INTO labels(id,workspace_id,project_id,name,color) VALUES(?1,?2,?3,?4,'red')")
+                .bind(label.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(label.to_string()).execute(&f.pool).await.unwrap();
+            sqlx::query("INSERT INTO task_labels(workspace_id,task_id,label_id) VALUES(?1,?2,?3)")
+                .bind(f.workspace.as_bytes().as_slice())
+                .bind(task.as_bytes().as_slice())
+                .bind(label.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+        }
+        for (blocker, blocked, kind, lag) in [(before, task, "FS", 2i32), (task, after, "SS", 1)] {
+            sqlx::query("INSERT INTO task_dependencies(workspace_id,blocker_id,blocked_id,type,lag_days) VALUES(?1,?2,?3,?4,?5)")
+                .bind(f.workspace.as_bytes().as_slice()).bind(blocker.as_bytes().as_slice()).bind(blocked.as_bytes().as_slice()).bind(kind).bind(lag).execute(&f.pool).await.unwrap();
+        }
+        let detail = read(&f, credential, task).await;
+        let meta = &detail.meta;
+        assert_eq!(
+            (meta.id, meta.workspace_id, meta.project_id, meta.number),
+            (task, f.workspace, project, 3)
+        );
+        assert_eq!(
+            (
+                meta.title.as_str(),
+                meta.task_type.as_str(),
+                meta.priority.as_str()
+            ),
+            ("현재 전체 필드", "task", "high")
+        );
+        let status: Vec<u8> = sqlx::query_scalar("SELECT status_id FROM tasks WHERE id=?1")
+            .bind(task.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(meta.status_id, Uuid::from_slice(&status).unwrap());
+        assert_eq!(meta.start_date, NaiveDate::from_ymd_opt(2026, 10, 5));
+        assert_eq!(meta.due_date, NaiveDate::from_ymd_opt(2026, 10, 6));
+        assert!(meta.due_at.is_none());
+        assert_eq!(meta.estimate.as_deref(), Some("1.2500"));
+        assert_eq!(meta.parent_id, Some(epic));
+        assert_eq!(meta.milestone_id, Some(milestone));
+        assert_eq!(meta.recurrence, Some(json!({"kind":"daily"})));
+        assert_eq!(meta.sort_key, "M");
+        assert_eq!(
+            (meta.schema_version, meta.version),
+            (DOCUMENT_SCHEMA_VERSION, 17)
+        );
+        assert!(meta.archived_at.is_none());
+        assert_eq!(meta.created_by, f.user);
+        assert_eq!(meta.created_at.timestamp_micros(), 3000001);
+        assert_eq!(meta.updated_at.timestamp_micros(), 4000002);
+        assert_eq!(detail.content_json, body);
+        assert!(detail.can_edit);
+        let parent = detail.parent.unwrap();
+        assert_eq!(
+            (
+                parent.id,
+                parent.title.as_str(),
+                parent.task_type.as_str(),
+                parent.number
+            ),
+            (epic, "상위 中 😀", "epic", 2)
+        );
+        let mut expected_children = vec![open, done, canceled];
+        expected_children.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(
+            detail
+                .children
+                .iter()
+                .map(|child| child.id)
+                .collect::<Vec<_>>(),
+            expected_children
+        );
+        assert!(detail
+            .children
+            .iter()
+            .all(|child| child.task_type == "subtask"));
+        let progress = detail.child_progress.unwrap();
+        assert_eq!((progress.done, progress.total), (1, 2));
+        users.sort_unstable();
+        labels.sort_unstable();
+        assert_eq!(detail.assignee_ids, users);
+        assert_eq!(detail.label_ids, labels);
+        let mut edges = vec![
+            (before, task, "FS".to_owned(), 2),
+            (task, after, "SS".to_owned(), 1),
+        ];
+        edges.sort_unstable_by_key(|edge| (edge.0, edge.1));
+        assert_eq!(
+            detail
+                .dependencies
+                .iter()
+                .map(|edge| (
+                    edge.blocker_id,
+                    edge.blocked_id,
+                    edge.dependency_type.clone(),
+                    edge.lag_days
+                ))
+                .collect::<Vec<_>>(),
+            edges
+        );
+        let child = read(&f, credential, open).await;
+        assert_eq!(child.parent.unwrap().id, task);
+        assert!(child.child_progress.is_none());
+        sqlx::query("UPDATE tasks SET archived_at=5000003 WHERE id=?1")
+            .bind(task.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET status='archived' WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let archived_detail = read(&f, credential, task).await;
+        assert_eq!(
+            archived_detail.meta.archived_at.unwrap().timestamp_micros(),
+            5000003
+        );
+        assert!(
+            archived_detail.can_edit,
+            "metadata permission stays independent from archive UI policy"
+        );
+        sqlx::query("UPDATE tasks SET deleted_at=1 WHERE id=?1")
+            .bind(epic.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(read(&f, credential, task).await.parent.is_none());
+        f.pool.close().await;
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_task_detail_current_credentials_grants_affiliation_and_tenant_denials() {
+        let (f, credential, _, project, task) = setup().await;
+        let other = Uuid::now_v7();
+        sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,?2,'Other')")
+            .bind(other.as_bytes().as_slice())
+            .bind(format!("{other}@example.test"))
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(other.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let other_credential = session(&f, other).await.0;
+        let read_other =
+            || get_task_backend(&f.backend, f.workspace, task, other, other_credential);
+        assert!(matches!(
+            read_other().await.unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        let group = Uuid::now_v7();
+        sqlx::query("INSERT INTO groups(id,workspace_id,name) VALUES(?1,?2,'Detail grant')")
+            .bind(group.as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO group_members(workspace_id,group_id,user_id) VALUES(?1,?2,?3)")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(group.as_bytes().as_slice())
+            .bind(other.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,group_id,role) VALUES(?1,?2,?3,?4,'viewer')")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(group.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let viewer = read_other().await.unwrap().unwrap();
+        assert_eq!(viewer.meta.id, task);
+        assert!(!viewer.can_edit);
+        let mut revoke = f.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query(
+            "DELETE FROM group_members WHERE workspace_id=?1 AND group_id=?2 AND user_id=?3",
+        )
+        .bind(f.workspace.as_bytes().as_slice())
+        .bind(group.as_bytes().as_slice())
+        .bind(other.as_bytes().as_slice())
+        .execute(&mut *revoke)
+        .await
+        .unwrap();
+        revoke.commit().await.unwrap();
+        assert!(matches!(
+            read_other().await.unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'member')")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(other.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert!(read_other().await.unwrap().unwrap().can_edit);
+        assert!(matches!(
+            get_task_backend(&f.backend, f.workspace, task, other, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::Forbidden)
+        ));
+        assert!(matches!(
+            get_task_backend(&f.backend, Uuid::now_v7(), task, f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        for (table, column) in [
+            ("sessions", "revoked_at"),
+            ("users", "suspended_at"),
+            ("users", "deleted_at"),
+            ("workspaces", "deleted_at"),
+            ("projects", "deleted_at"),
+            ("tasks", "deleted_at"),
+        ] {
+            let id = match table {
+                "sessions" => credential,
+                "users" => f.user,
+                "workspaces" => f.workspace,
+                "projects" => project,
+                _ => task,
+            };
+            let sql = format!("UPDATE {table} SET {column}=1 WHERE id=?1");
+            sqlx::query(&sql)
+                .bind(id.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let denied = get_task_backend(&f.backend, f.workspace, task, f.user, credential)
+                .await
+                .unwrap();
+            if table == "sessions" || table == "users" {
+                assert!(matches!(denied, Err(ProjectDbError::Forbidden)));
+            } else {
+                assert!(matches!(denied, Err(ProjectDbError::NotFound)));
+            }
+            let sql = format!("UPDATE {table} SET {column}=NULL WHERE id=?1");
+            sqlx::query(&sql)
+                .bind(id.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            assert_eq!(read(&f, credential, task).await.meta.id, task);
+        }
+        let target = crate::db::projects::create_project_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            crate::db::projects::CreateProjectInput {
+                key: "MOVED",
+                name: "Moved",
+                visibility: "private",
+                description: None,
+                icon: None,
+                lead_user_id: None,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+        let status: Vec<u8> = sqlx::query_scalar(
+            "SELECT id FROM statuses WHERE project_id=?1 AND category='backlog' LIMIT 1",
+        )
+        .bind(target.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE tasks SET project_id=?1,status_id=?2 WHERE id=?3")
+            .bind(target.as_bytes().as_slice())
+            .bind(&status)
+            .bind(task.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(
+            matches!(read_other().await.unwrap(), Err(ProjectDbError::NotFound)),
+            "old project grant cannot authorize current affiliation"
+        );
+        let current = read(&f, credential, task).await;
+        assert_eq!(current.meta.project_id, target);
+        assert_eq!(current.meta.id, task);
+        sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(other.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            read_other().await.unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        f.pool.close().await;
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_task_detail_strict_decode_original_error_rollback_then_healthy_read() {
+        let (f, credential, _, _, task) = setup().await;
+        sqlx::query("UPDATE tasks SET due_at=?1 WHERE id=?2")
+            .bind(i64::MAX)
+            .bind(task.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let error = get_task_backend(&f.backend, f.workspace, task, f.user, credential)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error,sqlx::Error::Protocol(ref message) if message=="SQLite instant out of range")
+        );
+        // Actual returned local rollback, followed by a local writer; this is
+        // never proof of original remote-stream settlement or native replay.
+        let mut repair = f.backend.begin_write().await.unwrap();
+        let OperationTx::SqliteFamily(tx) = repair.operation() else {
+            panic!("actual local fixture")
+        };
+        tx.set_tenant(f.workspace).unwrap();
+        tx.execute(
+            "UPDATE tasks SET due_at=NULL WHERE workspace_id=?1 AND id=?2",
+            &[Cell::uuid(f.workspace), Cell::uuid(task)],
+        )
+        .await
+        .unwrap();
+        repair.commit().await.unwrap();
+        let healthy = read(&f, credential, task).await;
+        assert_eq!(healthy.meta.id, task);
+        assert!(healthy.meta.due_at.is_none());
+        assert_eq!(healthy.content_json, empty_document_json());
+        let foreign = Uuid::now_v7();
+        let result = sqlx::query(
+            "INSERT INTO task_assignees(workspace_id,task_id,user_id) VALUES(?1,?2,?3)",
+        )
+        .bind(foreign.as_bytes().as_slice())
+        .bind(task.as_bytes().as_slice())
+        .bind(f.user.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await;
+        let constraint = result.unwrap_err();
+        assert!(
+            constraint
+                .as_database_error()
+                .is_some_and(|error| error.is_foreign_key_violation()),
+            "real FK1 rejects wrong tenant ref; never disable constraint"
+        );
+        assert!(read(&f, credential, task).await.assignee_ids.is_empty());
+        f.pool.close().await;
+        std::fs::remove_dir_all(&f.root).unwrap();
     }
 }
 
@@ -1260,6 +1905,186 @@ pub async fn get_task(
     let dependencies = list_task_dependency_edges(&mut tx, workspace_id, task_id).await?;
 
     tx.commit().await?;
+    Ok(Ok(TaskDetailRow {
+        meta,
+        content_json,
+        can_edit: permission.at_least(ProjectPermission::Edit),
+        parent,
+        children,
+        child_progress,
+        assignee_ids,
+        label_ids,
+        dependencies,
+    }))
+}
+
+/// Selected reader for the existing detail DTO. PostgreSQL retains its exact
+/// repeatable-read consumer; family credentials, affiliation, grants and every
+/// returned field share one read transaction.
+pub async fn get_task_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    task_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<TaskDetailRow, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return get_task(pool, workspace_id, task_id, actor_user_id, session_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = match &mut tx {
+        DbTx::SqliteFamily(family) => {
+            get_task_family(family, workspace_id, task_id, actor_user_id, session_id).await
+        }
+        DbTx::Postgres(_) => Err(sqlx::Error::Protocol(
+            "family task detail requires selected family transaction".into(),
+        )),
+    };
+    match result {
+        Ok(Ok(detail)) => {
+            tx.commit_with_cleanup()
+                .await
+                .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+            Ok(Ok(detail))
+        }
+        Ok(Err(refusal)) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(TaskDetailReadRefusal(refusal))),
+                    cleanup,
+                ));
+            }
+            Ok(Err(refusal))
+        }
+        Err(original) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(original)),
+                    cleanup,
+                ));
+            }
+            Err(original)
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("task detail read refused: {0:?}")]
+struct TaskDetailReadRefusal(ProjectDbError);
+
+fn map_task_detail_family_row(row: &FamilyRow) -> Result<TaskRowRecord, sqlx::Error> {
+    Ok(TaskRowRecord {
+        id: row.cell(0)?.id()?,
+        project_id: row.cell(1)?.id()?,
+        number: row.cell(2)?.int32()?,
+        title: row.cell(3)?.string()?,
+        task_type: row.cell(4)?.string()?,
+        priority: row.cell(5)?.string()?,
+        status_id: row.cell(6)?.id()?,
+        start_date: row.cell(7)?.optional(Cell::date)?,
+        due_date: row.cell(8)?.optional(Cell::date)?,
+        due_at: row.cell(9)?.optional(Cell::datetime)?,
+        estimate: row.cell(10)?.optional(Cell::string)?,
+        parent_id: row.cell(11)?.optional(Cell::id)?,
+        milestone_id: row.cell(12)?.optional(Cell::id)?,
+        sort_key: row.cell(13)?.string()?,
+        schema_version: row.cell(14)?.int32()?,
+        version: row.cell(15)?.int32()?,
+        archived_at: row.cell(16)?.optional(Cell::datetime)?,
+        created_by: row.cell(17)?.id()?,
+        created_at: row.cell(18)?.datetime()?,
+        updated_at: row.cell(19)?.datetime()?,
+    })
+}
+
+async fn get_task_family(
+    tx: &mut FamilyTx,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<TaskDetailRow, ProjectDbError>, sqlx::Error> {
+    let mut op = OperationTx::SqliteFamily(&mut *tx);
+    op.set_tenant(workspace).await?;
+    if !op.session_is_live(actor, credential).await? {
+        return Ok(Err(ProjectDbError::Forbidden));
+    }
+    if !op.workspace_is_live(workspace).await? {
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    let args = [Cell::uuid(workspace), Cell::uuid(task)];
+    let rows = tx.query(
+        "SELECT id,project_id,number,title,type,priority,status_id,start_date,due_date,due_at,estimate,parent_id,milestone_id,sort_key,schema_version,version,archived_at,created_by,created_at,updated_at,content_json,recurrence FROM tasks WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",
+        &args,
+    ).await?;
+    let Some(row) = rows.first() else {
+        return Ok(Err(ProjectDbError::NotFound));
+    };
+    let record = map_task_detail_family_row(row)?;
+    let project = record.project_id;
+    let Some(permission) = OperationTx::SqliteFamily(&mut *tx)
+        .project_permission_by_id(workspace, actor, project)
+        .await?
+        .filter(|permission| permission.at_least(ProjectPermission::View))
+    else {
+        return Ok(Err(ProjectDbError::NotFound));
+    };
+    let meta = row_to_meta(workspace, record, row.cell(21)?.optional(Cell::value)?);
+    let content_json = row.cell(20)?.value()?;
+    let parent = if let Some(parent) = meta.parent_id {
+        tx.query(
+            "SELECT id,title,type,number FROM tasks WHERE workspace_id=?1 AND id=?2 AND project_id=?3 AND deleted_at IS NULL",
+            &[Cell::uuid(workspace), Cell::uuid(parent), Cell::uuid(project)],
+        ).await?.first().map(|row| -> Result<TaskParentRow, sqlx::Error> {
+            Ok(TaskParentRow {
+                id: row.cell(0)?.id()?,
+                title: row.cell(1)?.string()?,
+                task_type: row.cell(2)?.string()?,
+                number: row.cell(3)?.int32()?,
+            })
+        }).transpose()?
+    } else {
+        None
+    };
+    let children = tx.query(
+        "SELECT id,number,title,type,status_id FROM tasks WHERE workspace_id=?1 AND parent_id=?2 AND deleted_at IS NULL AND archived_at IS NULL ORDER BY created_at DESC,id DESC",
+        &args,
+    ).await?.iter().map(|row| {
+        Ok(TaskChildRow {
+            id: row.cell(0)?.id()?,
+            number: row.cell(1)?.int32()?,
+            title: row.cell(2)?.string()?,
+            task_type: row.cell(3)?.string()?,
+            status_id: row.cell(4)?.id()?,
+        })
+    }).collect::<Result<Vec<_>,sqlx::Error>>()?;
+    let child_progress = if meta.task_type == "subtask" {
+        None
+    } else {
+        let rows = tx.query(
+            "SELECT count(*) FILTER (WHERE s.category='done'),count(*) FROM tasks t INNER JOIN statuses s ON s.workspace_id=t.workspace_id AND s.id=t.status_id WHERE t.workspace_id=?1 AND t.parent_id=?2 AND t.deleted_at IS NULL AND t.archived_at IS NULL AND s.category<>'canceled'",
+            &args,
+        ).await?;
+        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        Some(TaskChildProgress {
+            done: row.cell(0)?.integer()?,
+            total: row.cell(1)?.integer()?,
+        })
+    };
+    let assignee_ids = tx.query(
+        "SELECT user_id FROM task_assignees WHERE workspace_id=?1 AND task_id=?2 ORDER BY user_id",
+        &args,
+    ).await?.iter().map(|row| row.cell(0)?.id()).collect::<Result<Vec<_>,sqlx::Error>>()?;
+    let label_ids = tx.query(
+        "SELECT label_id FROM task_labels WHERE workspace_id=?1 AND task_id=?2 ORDER BY label_id",
+        &args,
+    ).await?.iter().map(|row| row.cell(0)?.id()).collect::<Result<Vec<_>,sqlx::Error>>()?;
+    let dependencies = tx.query(
+        "SELECT blocker_id,blocked_id,type,lag_days FROM task_dependencies WHERE workspace_id=?1 AND (blocker_id=?2 OR blocked_id=?2) ORDER BY blocker_id,blocked_id",
+        &args,
+    ).await?.iter().map(|row| {
+        Ok(map_dependency_row(row.cell(0)?.id()?,row.cell(1)?.id()?,row.cell(2)?.string()?,row.cell(3)?.int32()?))
+    }).collect::<Result<Vec<_>,sqlx::Error>>()?;
     Ok(Ok(TaskDetailRow {
         meta,
         content_json,
