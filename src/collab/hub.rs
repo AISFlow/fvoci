@@ -654,6 +654,13 @@ impl CollabHub {
         self.memory_ledger.try_reserve(0).is_some()
     }
 
+    /// Owned reservations only; global helper RSS is an admission input,
+    /// not evidence that this hub retained or released its startup memory.
+    #[cfg(feature = "db-tests")]
+    pub fn outstanding_room_memory_bytes(&self) -> u64 {
+        self.memory_ledger.outstanding()
+    }
+
     #[cfg(feature = "db-tests")]
     pub async fn probe_actor(&self, key: impl Into<RoomKey>) -> crate::collab::room::ActorProbe {
         let key: RoomKey = key.into();

@@ -1952,7 +1952,7 @@ mod enumeration_finish_tests {
             let mut keys = Vec::new();
             for workspace in [f.workspace, second] {
                 let document = f.document(workspace).await;
-                let key = format!("enumeration-{document}");
+                let key = Uuid::now_v7().to_string();
                 f.stored_attachment(workspace, document, &key, None).await;
                 storage
                     .put_bytes(&key, b"enumeration-literal-untouched".to_vec())

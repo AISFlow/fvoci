@@ -4147,6 +4147,14 @@ mod selected_import_task_tests {
         let workflow = Uuid::now_v7();
         let status = Uuid::now_v7();
         sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'IMP','Import','private',?3)").bind(project.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        // Normal private-project creation installs the creator's lead grant;
+        // workspace admin status alone does not grant private-project access.
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')")
+            .bind(Uuid::now_v7().as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(project.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool).await.unwrap();
         sqlx::query("INSERT INTO workflows(id,workspace_id,project_id) VALUES(?1,?2,?3)")
             .bind(workflow.as_bytes().as_slice())
             .bind(f.workspace.as_bytes().as_slice())
@@ -4203,6 +4211,60 @@ mod selected_import_task_tests {
         let counts:(i64,i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM tasks),(SELECT next_number FROM projects),(SELECT count(*) FROM import_deferred_events),(SELECT count(*) FROM task_activity)").fetch_one(&f.pool).await.unwrap();
         assert_eq!(counts, (0, 1, 0, 0));
     }
+    #[tokio::test]
+    async fn import_selected_task_private_project_current_grant_required_then_healthy() {
+        let (f, c, project, status) = setup().await;
+        sqlx::query(
+            "DELETE FROM project_members WHERE workspace_id=?1 AND project_id=?2 AND user_id=?3",
+        )
+        .bind(f.workspace.as_bytes().as_slice())
+        .bind(project.as_bytes().as_slice())
+        .bind(f.user.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        assert!(matches!(
+            create_import_task_backend(
+                &f.backend,
+                request(&c, project, Some(status), None),
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        no_effects(&f).await;
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice())
+            .bind(project.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool).await.unwrap();
+        let id = create_import_task_backend(
+            &f.backend,
+            request(&c, project, Some(status), None),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let refs: String = sqlx::query_scalar("SELECT created_refs FROM import_jobs WHERE id=?1")
+            .bind(c.job_id.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<crate::db::import_jobs::ImportJobRefs>(&refs)
+                .unwrap()
+                .task_ids,
+            vec![id]
+        );
+        let row: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM tasks),(SELECT next_number FROM projects),(SELECT count(*) FROM import_deferred_events)")
+            .fetch_one(&f.pool).await.unwrap();
+        assert_eq!(row, (1, 2, 1));
+        f.close().await;
+    }
+
     #[tokio::test]
     async fn import_selected_task_rollback_control_retains_domain_and_healthy_retry() {
         let (f, c, project, status) = setup().await;

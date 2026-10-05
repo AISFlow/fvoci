@@ -66,8 +66,8 @@ impl MemoryLedger {
         })
     }
 
-    #[cfg(test)]
-    fn outstanding(&self) -> u64 {
+    #[cfg(any(test, feature = "db-tests"))]
+    pub(crate) fn outstanding(&self) -> u64 {
         *self
             .outstanding_bytes
             .lock()

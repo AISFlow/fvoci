@@ -1631,6 +1631,15 @@ async fn cleanup_refs(
     family: &mut FamilyTx,
     owner: &ImportCleanupOwner<'_>,
 ) -> Result<Option<ImportJobRefs>, sqlx::Error> {
+    Ok(cleanup_ref_snapshot(family, owner)
+        .await?
+        .map(|(refs, _)| refs))
+}
+
+async fn cleanup_ref_snapshot(
+    family: &mut FamilyTx,
+    owner: &ImportCleanupOwner<'_>,
+) -> Result<Option<(ImportJobRefs, String)>, sqlx::Error> {
     let (workspace, job) = owner.identity();
     family.require_tenant(workspace)?;
     let now = import_now(family).await?;
@@ -1639,7 +1648,7 @@ async fn cleanup_refs(
         ImportCleanupOwner::Expired(_) => family.query("SELECT created_refs FROM import_jobs WHERE workspace_id=?1 AND id=?2 AND source<>'markdown-zip' AND status='failed' AND lease_token IS NULL", &[Cell::uuid(workspace),Cell::uuid(job)]).await?,
     };
     rows.first()
-        .map(|r| checked_refs(r.cell(0)?.value()?))
+        .map(|r| Ok((checked_refs(r.cell(0)?.value()?)?, r.cell(0)?.string()?)))
         .transpose()
 }
 
@@ -1748,7 +1757,7 @@ async fn compensate_family_import_tx(
     if let Some(context) = maintenance {
         renew_import_maintenance(family, context, cancel).await?;
     }
-    let durable = cleanup_refs(family, &owner)
+    let (durable, durable_json) = cleanup_ref_snapshot(family, &owner)
         .await?
         .ok_or_else(|| import_protocol("cleanup owner fenced"))?;
     if !refs
@@ -1891,8 +1900,12 @@ async fn compensate_family_import_tx(
     if let Some(context) = maintenance {
         renew_import_maintenance(family, context, cancel).await?;
         let (workspace, job) = owner.identity();
-        let changed=family.execute("UPDATE import_jobs SET created_refs=?3 WHERE workspace_id=?1 AND id=?2 AND source<>'markdown-zip' AND status='failed' AND lease_token IS NULL AND json(created_refs)=json(?4)", &[
-                Cell::uuid(workspace),Cell::uuid(job),Cell::json(&json!(ImportJobRefs::default()))?,Cell::json(&json!(durable))?
+        // Compare the exact current stored snapshot, captured under this same
+        // writer. SQLite json() preserves object key order, while converting
+        // the typed refs through Value can reorder it. Reserializing the
+        // expected row would roll back otherwise healthy physical cleanup.
+        let changed=family.execute("UPDATE import_jobs SET created_refs=?3 WHERE workspace_id=?1 AND id=?2 AND source<>'markdown-zip' AND status='failed' AND lease_token IS NULL AND created_refs=?4", &[
+                Cell::uuid(workspace),Cell::uuid(job),Cell::json(&json!(ImportJobRefs::default()))?,Cell::text(durable_json)
             ]).await?;
         if changed != 1 {
             return Err(import_protocol("failed cleanup refs changed before clear"));
@@ -2747,7 +2760,15 @@ mod selected_import_tests {
         storage.put_bytes(&key, literal.clone()).await.unwrap();
         refs(&f, &c, f.document, Some(&key)).await;
         let child = Uuid::now_v7();
-        sqlx::query("INSERT INTO documents(id,workspace_id,title,path,parent_id,sort_key,number,created_by) VALUES(?1,?2,'foreign child',?3,?4,'W',2,?5)").bind(child.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(child.simple().to_string()).bind(f.document.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO documents(id,workspace_id,title,path,parent_id,sort_key,number,created_by,status,schema_version,content_json) VALUES(?1,?2,'foreign child',?3,?4,'W',2,?5,'published',?6,?7)")
+            .bind(child.as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(format!("{}.{}", f.document.simple(), child.simple()))
+            .bind(f.document.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .bind(crate::db::documents::DOCUMENT_SCHEMA_VERSION)
+            .bind(crate::db::documents::empty_document_json().to_string())
+            .execute(&f.pool).await.unwrap();
         let durable = get_import_job_backend(&f.backend, f.workspace, f.user, credential, c.job_id)
             .await
             .unwrap()
@@ -3413,6 +3434,67 @@ mod selected_import_tests {
         daily.release().await.unwrap();
         f.close().await;
     }
+    #[tokio::test]
+    async fn import_selected_cleanup_current_json_snapshot_orders_commit_physical_drain() {
+        for typed_order in [true, false] {
+            let f = Fixture::new().await;
+            let literal = b"current JSON order must not strand a purged import";
+            let (_, key) = f.attachment(literal.len() as i64, "text/plain").await;
+            let root = f.root.join("json-order-cleanup");
+            let storage = crate::attachments::ObjectStorage::local(root.clone());
+            storage.put_bytes(&key, literal.to_vec()).await.unwrap();
+            let c = failed_with_refs(&f, &key).await;
+            let refs = ImportJobRefs {
+                document_ids: vec![f.document],
+                stored_keys: vec![key.clone()],
+                ..Default::default()
+            };
+            // Struct serialization follows declared field order; Value uses
+            // its map order. Both are real supported stored JSON inputs.
+            let raw = if typed_order {
+                serde_json::to_string(&refs).unwrap()
+            } else {
+                serde_json::to_value(&refs).unwrap().to_string()
+            };
+            assert_eq!(serde_json::from_str::<ImportJobRefs>(&raw).unwrap(), refs);
+            sqlx::query("UPDATE import_jobs SET created_refs=?2 WHERE id=?1")
+                .bind(c.job_id.as_bytes().as_slice())
+                .bind(&raw)
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                std::fs::read(root.join("objects").join(&key).join("payload")).unwrap(),
+                literal
+            );
+            let daily = daily(&f).await;
+            let cancel = CancellationToken::new();
+            let sweep = || {
+                crate::import_job::sweep_orphan_imports_with_maintenance_claim_backend(
+                    &f.backend,
+                    &storage,
+                    &cancel,
+                    daily.proof(),
+                    daily.policy(),
+                )
+            };
+            assert_eq!(sweep().await.unwrap(), 1);
+            assert!(storage.head(&key).await.unwrap().is_none());
+            let state: (String, String, i64, i64, i64) = sqlx::query_as(
+                "SELECT status,created_refs,(SELECT count(*) FROM documents WHERE id=?2),(SELECT count(*) FROM attachments WHERE storage_key=?3),(SELECT count(*) FROM events WHERE target_id=?2 AND verb='document.purged') FROM import_jobs WHERE id=?1")
+                .bind(c.job_id.as_bytes().as_slice()).bind(f.document.as_bytes().as_slice()).bind(&key)
+                .fetch_one(&f.pool).await.unwrap();
+            assert_eq!(state.0, "failed");
+            assert!(serde_json::from_str::<ImportJobRefs>(&state.1)
+                .unwrap()
+                .is_empty());
+            assert_eq!((state.2, state.3, state.4), (0, 0, 1));
+            assert_eq!(sweep().await.unwrap(), 0);
+            daily.release().await.unwrap();
+            f.close().await;
+        }
+    }
+
     #[tokio::test]
     async fn import_selected_failed_cleanup_actual_io_failure_then_automatic_healthy_sweep() {
         let f = Fixture::new().await;

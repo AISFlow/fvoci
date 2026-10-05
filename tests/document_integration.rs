@@ -3705,7 +3705,9 @@ async fn selected_family_startup_uncertainty_bounds_admission() {
     use fvoci_server::collab::room::RoomKey;
     let mut config = selected_room_support::test_collab_config(2, 30_000);
     config.rpc_timeout_ms = 500;
-    config.memory_budget_bytes = collab_engine::limits::room_memory_reservation_bytes(2);
+    // Keep the maintained fixture's global RSS headroom. A one-reservation
+    // budget mixes other live helper RSS with this hub's release receipt;
+    // observe its exact owned reservations separately below.
     let fixture = SelectedFamilyRoomFixture::new(config.clone()).await;
     let mut retained = Vec::new();
     for committed in [true, false] {
@@ -3717,16 +3719,24 @@ async fn selected_family_startup_uncertainty_bounds_admission() {
         );
         let (reached, proceed) =
             fvoci_server::db::collab::arm_family_room_start_reply_fault(document, committed).await;
-        let pending = tokio::spawn({
+        let mut pending = tokio::spawn({
             let hub = fixture.hub.clone();
             let actor = fixture.live.user_id;
             let credential = fixture.live.session_id;
             async move { hub.project_live(key, actor, credential).await }
         });
-        tokio::time::timeout(Duration::from_secs(5), reached)
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::select! {
+            result = tokio::time::timeout(Duration::from_secs(5), reached) => {
+                result.expect("startup must reach its actual DB reply boundary").unwrap();
+            }
+            result = &mut pending => {
+                panic!("project_live returned before the actual DB reply boundary: {result:?}");
+            }
+        }
+        assert!(
+            fixture.hub.outstanding_room_memory_bytes() > 0,
+            "startup holds an actual owned reservation at the reply boundary"
+        );
         let actual: Option<Vec<u8>> = sqlx::query_scalar(
             "SELECT owner_token FROM collab_room_fences WHERE workspace_id=?1 AND document_id=?2",
         )
@@ -3773,6 +3783,11 @@ async fn selected_family_startup_uncertainty_bounds_admission() {
         );
         assert!(!fixture.hub.room_occupies_slot(key).await);
         assert_eq!(fixture.hub.available_room_slots(), 2);
+        assert_eq!(
+            fixture.hub.outstanding_room_memory_bytes(),
+            0,
+            "failed startup released every actual owned reservation"
+        );
         assert!(
             fixture.hub.can_reserve_room_memory(),
             "failed startup released actual memory reservation"

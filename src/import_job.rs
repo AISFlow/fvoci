@@ -2347,10 +2347,26 @@ mod native_failure_propagation_tests {
             std::fs::read(root.join("objects").join(&key).join("payload")).unwrap(),
             literal
         );
-        // Known acknowledged rollback retains the ordinary failed-job policy,
-        // and the actual next queued job can subsequently be claimed.
+        // A known acknowledged refusal still follows the bounded retry policy
+        // while another attempt remains. It cannot discard these current refs
+        // or the referenced literal object merely to manufacture progress.
         sqlx::query("UPDATE import_jobs SET lease_until=1,attempts=0 WHERE id=?1")
             .bind(jobs[0].id.as_bytes().as_slice())
+            .execute(&f.pool).await.unwrap();
+        assert!(run_next_import_backend(&f.backend, &settings, &storage, &cancel).await.unwrap());
+        let retry: (String, i64, String, Option<Vec<u8>>) = sqlx::query_as(
+            "SELECT status,attempts,created_refs,lease_token FROM import_jobs WHERE id=?1")
+            .bind(jobs[0].id.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+        assert_eq!((&retry.0, retry.1), (&"running".to_owned(), 1));
+        assert!(retry.3.is_none());
+        assert_eq!(serde_json::from_str::<ImportJobRefs>(&retry.2).unwrap(), prior);
+        assert_eq!(std::fs::read(root.join("objects").join(&key).join("payload")).unwrap(), literal);
+        // Exercise the final allowed attempt: an acknowledged incomplete
+        // compensation retries below that bound, and fails at the bound.
+        // Keep the same refs/object and let the actual next job follow it.
+        sqlx::query("UPDATE import_jobs SET lease_until=1,attempts=?2 WHERE id=?1")
+            .bind(jobs[0].id.as_bytes().as_slice())
+            .bind(IMPORT_MAX_ATTEMPTS - 1)
             .execute(&f.pool)
             .await
             .unwrap();
@@ -2365,6 +2381,9 @@ mod native_failure_propagation_tests {
             .await
             .unwrap();
         assert_eq!(failed, "failed");
+        let final_attempt: i64 = sqlx::query_scalar("SELECT attempts FROM import_jobs WHERE id=?1")
+            .bind(jobs[0].id.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+        assert_eq!(final_attempt, i64::from(IMPORT_MAX_ATTEMPTS));
         assert!(
             run_next_import_backend(&f.backend, &settings, &storage, &cancel)
                 .await
