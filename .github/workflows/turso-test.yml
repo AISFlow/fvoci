@@ -54,7 +54,6 @@ jobs:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
-      CARGO_TARGET_DIR: ${{ runner.temp }}/turso-target
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -63,6 +62,7 @@ jobs:
       - name: Credential-free compiler and maintained SQLite inputs
         run: |
           set -euo pipefail
+          printf 'CARGO_TARGET_DIR=%s/turso-target\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           rustup toolchain install 1.98.1 --profile minimal
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8

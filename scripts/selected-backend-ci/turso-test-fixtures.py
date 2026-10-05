@@ -19,6 +19,26 @@ guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
 
 
+class WorkflowTargetTests(unittest.TestCase):
+    def test_target_published_before_preparation_for_later_steps(self):
+        # Only inspect and execute the literal shell prefix. Admission fixtures
+        # must not depend on PyYAML or launch the compiler/native preparation.
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / ".github/workflows/turso-test.yml").read_text()
+        initialization = 'printf \'CARGO_TARGET_DIR=%s/turso-target\\n\' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n'
+        prefix = "set -euo pipefail\n" + initialization
+        marker = "      - name: Credential-free compiler and maintained SQLite inputs\n        run: |\n"
+        self.assertIn(marker, workflow)
+        preparation = workflow.split(marker, 1)[1].split("      - name:", 1)[0]
+        self.assertTrue(preparation.startswith("".join("          " + line for line in prefix.splitlines(keepends=True))))
+        self.assertNotIn("      CARGO_TARGET_DIR:", workflow)
+        with tempfile.TemporaryDirectory(prefix="fvoci-turso-env-pure-") as directory:
+            envfile = Path(directory) / "github-env"
+            result = subprocess.run(["bash", "-c", prefix], env={"PATH": os.environ["PATH"], "RUNNER_TEMP": directory, "GITHUB_ENV": str(envfile)}, capture_output=True, text=True, check=False)
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+            self.assertEqual(envfile.read_text(), "CARGO_TARGET_DIR=" + directory + "/turso-target\n")
+
+
 class AdmissionTests(unittest.TestCase):
     def setUp(self):
         self.context = {

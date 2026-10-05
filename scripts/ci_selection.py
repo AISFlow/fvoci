@@ -1672,14 +1672,14 @@ def verify_turso_workflow(path: Path) -> list[str]:
     require(set(runtime) == {"needs", "if", "environment", "runs-on", "timeout-minutes", "env", "steps"}, "runtime job cannot add unchecked execution or permissions")
     require(runtime.get("needs") == "admission" and runtime.get("if") == trusted + " && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''", "runtime needs successful trusted admission")
     require(runtime.get("environment") == "fvoci-turso-test", "fixed Environment")
-    require(runtime.get("env") == {"LIBCLANG_PATH": "/usr/lib/llvm-18/lib", "CARGO_BUILD_JOBS": 4, "CARGO_INCREMENTAL": 0, "CARGO_PROFILE_DEV_DEBUG": 0, "CARGO_PROFILE_TEST_DEBUG": 0, "CARGO_TARGET_DIR": "${{ runner.temp }}/turso-target"}, "credential-free compiler environment")
+    require(runtime.get("env") == {"LIBCLANG_PATH": "/usr/lib/llvm-18/lib", "CARGO_BUILD_JOBS": 4, "CARGO_INCREMENTAL": 0, "CARGO_PROFILE_DEV_DEBUG": 0, "CARGO_PROFILE_TEST_DEBUG": 0}, "credential-free compiler environment")
     require(admission.get("runs-on") == runtime.get("runs-on") == "ubuntu-26.04" and admission.get("timeout-minutes") == 5 and runtime.get("timeout-minutes") == 15, "fixed runner and budgets")
     steps = runtime.get("steps")
     if not isinstance(steps, list) or len(steps) != 4 or not all(isinstance(step, dict) for step in steps):
         return [*errors, f"{path.name}: fixed credential-free build then single consuming step"]
     require(steps[0] == checkout, "exact SHA checkout with stripped credentials")
     require(set(steps[1]) == set(steps[2]) == {"name", "run"}, "no compilation credentials")
-    require(steps[1].get("run") == "set -euo pipefail\nrustup toolchain install 1.98.1 --profile minimal\nsudo apt-get update\nsudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8\nmkdir \"$RUNNER_TEMP/fvoci-sqlite\"\ndpkg-query -W > \"$RUNNER_TEMP/fvoci-sqlite/build-packages.txt\"\nbash scripts/prepare-sqlite-ci.sh --parent \"$RUNNER_TEMP/fvoci-sqlite\" \\\n  --github-env \"$GITHUB_ENV\" --github-output \"$GITHUB_OUTPUT\"\ncargo fetch --locked\n", "maintained pinned compiler/native preparation")
+    require(steps[1].get("run") == "set -euo pipefail\nprintf 'CARGO_TARGET_DIR=%s/turso-target\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"\nrustup toolchain install 1.98.1 --profile minimal\nsudo apt-get update\nsudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8\nmkdir \"$RUNNER_TEMP/fvoci-sqlite\"\ndpkg-query -W > \"$RUNNER_TEMP/fvoci-sqlite/build-packages.txt\"\nbash scripts/prepare-sqlite-ci.sh --parent \"$RUNNER_TEMP/fvoci-sqlite\" \\\n  --github-env \"$GITHUB_ENV\" --github-output \"$GITHUB_OUTPUT\"\ncargo fetch --locked\n", "maintained pinned compiler/native preparation")
     require(steps[2].get("run") == "set -euo pipefail\ncargo test --locked --offline --lib --features db-tests --jobs 4 --no-run --message-format=json > \"$RUNNER_TEMP/turso-compile.json\"\npython3 scripts/selected-backend-ci/turso-test-guard.py --freeze\n", "fixed fresh compilation and ELF binding")
     require(steps[3] == {"name": "Read-only real primary connection (exactly one test)", "env": {
         "FVOCI_DATABASE_BACKEND": "libsql-remote",

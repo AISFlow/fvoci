@@ -1669,6 +1669,7 @@ class RegistryMutationCliTest(unittest.TestCase):
         self._assert_no_green_outputs(proc, output, "unknown workflow file extra.yml")
 
     def test_turso_manual_workflow_security_boundaries_before_outputs(self) -> None:
+        target_init = "          printf 'CARGO_TARGET_DIR=%s/turso-target\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"\n"
         cases = [
             ("  workflow_dispatch:\n", "  pull_request_target:\n", "manual dispatch only"),
             ("      destructive:\n", "      checkout_sha:\n", "fixed phase inputs"),
@@ -1685,6 +1686,10 @@ class RegistryMutationCliTest(unittest.TestCase):
             (" --consume\n", " --consume || true\n", "only one sanitized runtime step"),
             ("branches: [fvoci/v060-turso-verified-connection]", "branches: ['*']", "fixed credential-free bootstrap"),
             ("    if: github.event_name == 'workflow_dispatch'", "    if: github.event_name == 'push'", "runtime needs successful trusted admission"),
+            ("      CARGO_INCREMENTAL: 0\n", "      CARGO_INCREMENTAL: 0\n      CARGO_TARGET_DIR: ${{ runner.temp }}/turso-target\n", "credential-free compiler environment"),
+            (target_init, "", "maintained pinned compiler/native preparation"),
+            (target_init, target_init.replace("$RUNNER_TEMP", "/foreign"), "maintained pinned compiler/native preparation"),
+            (target_init + "          rustup toolchain install 1.98.1 --profile minimal\n", "          rustup toolchain install 1.98.1 --profile minimal\n" + target_init, "maintained pinned compiler/native preparation"),
         ]
         for old, new, needle in cases:
             with self.subTest(boundary=needle):
@@ -1695,6 +1700,19 @@ class RegistryMutationCliTest(unittest.TestCase):
                 path.write_text(text.replace(old, new, 1), encoding="utf-8")
                 proc, output = self._plan_against(root)
                 self._assert_no_green_outputs(proc, output, needle)
+
+    def test_turso_target_initialization_moved_to_compile_rejected_before_outputs(self) -> None:
+        root = self._mutated_root()
+        path = root / ".github" / "workflows" / "turso-test.yml"
+        text = path.read_text(encoding="utf-8")
+        target_init = "          printf 'CARGO_TARGET_DIR=%s/turso-target\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"\n"
+        self.assertIn(target_init, text)
+        self.assertIn("          cargo test --locked", text)
+        text = text.replace(target_init, "", 1).replace("          cargo test --locked", target_init + "          cargo test --locked", 1)
+        path.write_text(text, encoding="utf-8")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "maintained pinned compiler/native preparation")
+        self.assertIn("fixed fresh compilation", proc.stderr)
 
     def test_old_runner_labels_rejected_before_outputs(self) -> None:
         for filename in (*SEL.WORKFLOW_YAML.values(), SEL.RELEASE_WORKFLOW_FILE, SEL.TURSO_MANUAL_WORKFLOW_FILE):
