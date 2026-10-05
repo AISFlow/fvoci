@@ -4,7 +4,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::collab::derived_body::PreparedDerivedBody;
-use crate::db::backend::{Backend, OperationTx};
+use crate::db::backend::{Backend, DbTx, OperationTx};
 use crate::db::codec::{Cell, FamilyRow};
 use crate::db::collab::{CollabKind, FamilyNativeConsumerProof, FamilyRoomFence};
 use crate::db::context::{set_system, set_tenant};
@@ -566,17 +566,50 @@ pub async fn authorize_revision_target_backend(
     } else {
         backend.begin_read().await?
     };
-    tx.operation().set_tenant(workspace).await?;
-    let result = tx
-        .operation()
-        .authorize_revision_scope(workspace, actor, credential, scope.into(), write)
-        .await?;
-    if result.is_ok() {
-        tx.commit().await.map_err(|unknown| unknown.source)?;
-    } else {
-        tx.rollback().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        op.authorize_revision_scope(workspace, actor, credential, scope.into(), write)
+            .await
     }
-    Ok(result)
+    .await;
+    finish_revision_authorization(tx, result).await
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("revision authorization refused: {0:?}")]
+struct RevisionAuthorizationRefusal(RevisionDbError);
+
+async fn finish_revision_authorization(
+    tx: DbTx,
+    result: Result<Result<(), RevisionDbError>, sqlx::Error>,
+) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
+    match result {
+        Ok(Ok(())) => {
+            tx.commit_with_cleanup()
+                .await
+                .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+            Ok(Ok(()))
+        }
+        Ok(Err(refusal)) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(RevisionAuthorizationRefusal(refusal))),
+                    cleanup,
+                ));
+            }
+            Ok(Err(refusal))
+        }
+        Err(original) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(original)),
+                    cleanup,
+                ));
+            }
+            Err(original)
+        }
+    }
 }
 
 async fn collab_state_exists(
@@ -2359,6 +2392,320 @@ pub async fn gc_automatic_revisions_batch(
     .rows_affected();
     tx.commit().await?;
     Ok(deleted as u32)
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod selected_revision_preflight_finish_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+    use crate::db::backend::{CommitCleanupUnknown, CommitSettlement, RollbackCleanupUnknown};
+    use crate::db::tasks::selected_task_detail_tests::setup;
+
+    async fn authorize(
+        f: &Fixture,
+        credential: Uuid,
+        task: Uuid,
+        write: bool,
+    ) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
+        authorize_revision_target_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            RevisionTarget::Task(task),
+            write,
+        )
+        .await
+    }
+
+    // Observe actual persisted body/version and publication tables, rather than
+    // treating the authorization return value as proof of no publication.
+    async fn publication(f: &Fixture, task: Uuid) -> (String, i64, i64, i64, i64, i64) {
+        sqlx::query_as("SELECT content_json,version,(SELECT count(*) FROM task_collab_updates WHERE task_id=?1),(SELECT count(*) FROM revisions WHERE target_kind='task' AND target_id=?1),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log) FROM tasks WHERE id=?1")
+            .bind(task.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_revision_preflight_current_refusals_decode_rollback_then_healthy() {
+        let (f, credential, _, project, task) = setup().await;
+        let before = publication(&f, task).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&before.0).unwrap(),
+            crate::db::documents::empty_document_json()
+        );
+        assert_eq!(before.1, 1);
+        assert_eq!(authorize(&f, credential, task, true).await.unwrap(), Ok(()));
+        sqlx::query("UPDATE project_members SET role='viewer' WHERE project_id=?1 AND user_id=?2")
+            .bind(project.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            authorize(&f, credential, task, false).await.unwrap(),
+            Ok(())
+        );
+        assert_eq!(
+            authorize(&f, credential, task, true).await.unwrap(),
+            Err(RevisionDbError::NotFound)
+        );
+        sqlx::query("UPDATE project_members SET role='lead' WHERE project_id=?1 AND user_id=?2")
+            .bind(project.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            authorize(&f, Uuid::now_v7(), task, true).await.unwrap(),
+            Err(RevisionDbError::Forbidden)
+        );
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            authorize(&f, credential, task, true).await.unwrap(),
+            Err(RevisionDbError::Forbidden)
+        );
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            authorize_revision_target_backend(
+                &f.backend,
+                Uuid::now_v7(),
+                f.user,
+                credential,
+                RevisionTarget::Task(task),
+                true
+            )
+            .await
+            .unwrap(),
+            Err(RevisionDbError::NotFound)
+        );
+        sqlx::query("UPDATE tasks SET archived_at=1 WHERE id=?1")
+            .bind(task.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            authorize(&f, credential, task, true).await.unwrap(),
+            Err(RevisionDbError::TaskArchived)
+        );
+        assert_eq!(
+            authorize(&f, credential, task, false).await.unwrap(),
+            Ok(())
+        );
+        sqlx::query("UPDATE tasks SET archived_at=NULL WHERE id=?1")
+            .bind(task.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET status='archived' WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            authorize(&f, credential, task, true).await.unwrap(),
+            Err(RevisionDbError::ProjectArchived)
+        );
+        sqlx::query("UPDATE projects SET status='active' WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        // A legal SQLite INTEGER outside Chrono's range causes the real public
+        // authorizer to fail after BEGIN/set_tenant, before any native capture.
+        sqlx::query("UPDATE tasks SET archived_at=?1 WHERE id=?2")
+            .bind(i64::MAX)
+            .bind(task.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let error = authorize(&f, credential, task, true).await.unwrap_err();
+        assert!(
+            matches!(error, sqlx::Error::Protocol(ref message) if message == "SQLite instant out of range")
+        );
+        // The actual repair writer must become usable after the returned rollback.
+        let mut repair = f.backend.begin_write().await.unwrap();
+        repair.operation().set_tenant(f.workspace).await.unwrap();
+        let OperationTx::SqliteFamily(writer) = repair.operation() else {
+            panic!("actual SQLite writer")
+        };
+        assert_eq!(
+            writer
+                .execute(
+                    "UPDATE tasks SET archived_at=NULL WHERE id=?1",
+                    &[Cell::uuid(task)]
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        repair.commit_with_cleanup().await.unwrap();
+        assert_eq!(authorize(&f, credential, task, true).await.unwrap(), Ok(()));
+        assert_eq!(publication(&f, task).await, before);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_revision_preflight_actual_deferred_fk_commit_metadata_no_publish() {
+        let (f, credential, _, _, task) = setup().await;
+        let before = publication(&f, task).await;
+        // Fixture-local fault table; the maintained product schema/FK policy is
+        // unchanged. This fails the actual COMMIT, not an injected return value.
+        sqlx::query("CREATE TABLE revision_finish_probe (workspace_id BLOB REFERENCES workspaces(id) DEFERRABLE INITIALLY DEFERRED) STRICT")
+            .execute(&f.pool).await.unwrap();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        let result = {
+            let mut op = tx.operation();
+            op.set_tenant(f.workspace).await.unwrap();
+            op.authorize_revision_scope(
+                f.workspace,
+                f.user,
+                credential,
+                RevisionTarget::Task(task).into(),
+                true,
+            )
+            .await
+            .unwrap()
+        };
+        assert_eq!(result, Ok(()));
+        let OperationTx::SqliteFamily(writer) = tx.operation() else {
+            panic!("actual SQLite writer")
+        };
+        writer
+            .execute(
+                "INSERT INTO revision_finish_probe(workspace_id) VALUES(?1)",
+                &[Cell::uuid(Uuid::now_v7())],
+            )
+            .await
+            .unwrap();
+        writer.execute("UPDATE tasks SET content_json='{\"type\":\"doc\",\"content\":[]}',version=99 WHERE id=?1", &[Cell::uuid(task)]).await.unwrap();
+        let error = finish_revision_authorization(tx, Ok(result))
+            .await
+            .unwrap_err();
+        let sqlx::Error::AnyDriverError(source) = error else {
+            panic!("typed original commit uncertainty")
+        };
+        let unknown = source.downcast_ref::<CommitCleanupUnknown>().unwrap();
+        assert!(unknown
+            .source
+            .source
+            .as_database_error()
+            .unwrap()
+            .is_foreign_key_violation());
+        assert_eq!(unknown.settlement, CommitSettlement::LocalWriterReconcile);
+        assert!(unknown.cleanup_error.is_none());
+        assert!(unknown.permits_reconciliation());
+        // Local SQLx FIFO/Drop behavior is observed here. It is not proof of
+        // original-stream cleanup on the pinned remote SDK or Turso.
+        assert_eq!(publication(&f, task).await, before);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM revision_finish_probe")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(authorize(&f, credential, task, true).await.unwrap(), Ok(()));
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_revision_preflight_actual_failed_rollback_retains_refusal_and_driver() {
+        let (f, credential, _, _, task) = setup().await;
+        let before = publication(&f, task).await;
+        for driver_failure in [false, true] {
+            // A separate real app connection confines the deliberately disturbed
+            // SQLx transaction bookkeeping to this fault control.
+            let pool = crate::db::pool::connect_sqlite_app(&f.path, 1)
+                .await
+                .unwrap();
+            let backend = Backend::Sqlite(pool);
+            let mut tx = backend.begin_write().await.unwrap();
+            tx.operation().set_tenant(f.workspace).await.unwrap();
+            let result = if driver_failure {
+                let OperationTx::SqliteFamily(writer) = tx.operation() else {
+                    panic!("actual SQLite writer")
+                };
+                Err(writer
+                    .query("SELECT * FROM revision_finish_missing_table", &[])
+                    .await
+                    .unwrap_err())
+            } else {
+                let result = tx
+                    .operation()
+                    .authorize_revision_scope(
+                        f.workspace,
+                        f.user,
+                        credential,
+                        RevisionTarget::Task(Uuid::now_v7()).into(),
+                        true,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(result, Err(RevisionDbError::NotFound));
+                Ok(result)
+            };
+            let OperationTx::SqliteFamily(writer) = tx.operation() else {
+                panic!("actual SQLite writer")
+            };
+            // The driver still owns a Transaction. Ending its underlying SQL
+            // transaction makes its awaited rollback fail with real SQLite data.
+            writer.execute("ROLLBACK", &[]).await.unwrap();
+            let error = finish_revision_authorization(tx, result).await.unwrap_err();
+            let sqlx::Error::AnyDriverError(source) = error else {
+                panic!("typed rollback uncertainty")
+            };
+            let unknown = source.downcast_ref::<RollbackCleanupUnknown>().unwrap();
+            assert!(unknown
+                .cleanup
+                .as_database_error()
+                .unwrap()
+                .message()
+                .contains("no transaction is active"));
+            let original = unknown.original.as_ref().unwrap();
+            if driver_failure {
+                assert!(original
+                    .downcast_ref::<sqlx::Error>()
+                    .unwrap()
+                    .as_database_error()
+                    .unwrap()
+                    .message()
+                    .contains("revision_finish_missing_table"));
+            } else {
+                assert_eq!(
+                    original
+                        .downcast_ref::<RevisionAuthorizationRefusal>()
+                        .unwrap()
+                        .0,
+                    RevisionDbError::NotFound
+                );
+            }
+            // Do not reuse bookkeeping deliberately invalidated by this oracle.
+            // Closing it and observing another local connection is not a remote
+            // settlement receipt, and the returned result remains unknown.
+            backend.close().await.unwrap();
+            assert_eq!(authorize(&f, credential, task, true).await.unwrap(), Ok(()));
+            assert_eq!(publication(&f, task).await, before);
+        }
+        f.close().await;
+    }
 }
 
 #[cfg(test)]
