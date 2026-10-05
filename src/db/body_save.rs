@@ -632,14 +632,14 @@ pub async fn preview_off_restore(
     )
     .await?
     {
-        OffRevisionCapture::Preview(preview) => Ok(preview),
+        OffRevisionCapture::Preview(preview) => Ok(*preview),
         OffRevisionCapture::Created(_) => Err(BodySaveError::Invalid),
     }
 }
 
 enum OffRevisionCapture {
     Created(Uuid),
-    Preview(OffRestorePreview),
+    Preview(Box<OffRestorePreview>),
 }
 
 #[expect(
@@ -709,11 +709,11 @@ async fn capture_off_revision(
         .await
         .map_err(|_| BodySaveError::Unavailable)??;
         let result = if let Some(source) = detail {
-            OffRevisionCapture::Preview(OffRestorePreview {
+            OffRevisionCapture::Preview(Box::new(OffRestorePreview {
                 source,
                 current_content_json: captured.content_json,
                 current_tail: native.tail_seq,
-            })
+            }))
         } else {
             let text = crate::collab::revision::prepare_revision_text(&captured.content_json)
                 .map_err(|_| BodySaveError::Invalid)?;
@@ -1704,7 +1704,8 @@ mod sqlite_native_tests {
             .await
             .unwrap();
         healthy.rollback().await.unwrap();
-        let original_file: (Option<Vec<u8>>, Option<Vec<u8>>, Vec<u8>, String) = sqlx::query_as(
+        type OriginalAttachmentRow = (Option<Vec<u8>>, Option<Vec<u8>>, Vec<u8>, String);
+        let original_file: OriginalAttachmentRow = sqlx::query_as(
             "SELECT document_id,task_id,uploader_id,status FROM attachments WHERE id=?1",
         )
         .bind(attachment.as_bytes().as_slice())
