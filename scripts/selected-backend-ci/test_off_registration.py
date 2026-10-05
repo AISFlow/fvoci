@@ -180,26 +180,57 @@ class LocalAllocation(unittest.TestCase):
                      'selected-backend-ci/current-install-driver.py','selected-backend-ci/current-postgres-driver.py','selected-backend-ci/current-sqlite-driver.py'):
             self.grant['registrationHashes'][name] = hashlib.sha256((ROOT/'scripts'/name).read_bytes()).hexdigest()
 
-    def check(self, grant=None, env=None, mode='run'):
-        self.path.write_text(json.dumps(self.grant if grant is None else grant));self.path.chmod(0o600)
+    ACTOR = 1000  # the only runtime actor the product accepts; the real host uid running this file may differ
+
+    def check(self, grant=None, env=None, mode='run', file_mode=0o600, file_owner=None):
+        """Model the lease file's owner as the simulated actor for the exact allocation path only.
+        The real host uid is irrelevant to the product contract (owner == actor), so stat of that one
+        path reports file_owner (default: the actor); mode, hash, symlink and every other check stay real.
+        """
+        self.path.write_text(json.dumps(self.grant if grant is None else grant));self.path.chmod(file_mode)
         current = dict(self.env if env is None else env)
         current['FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256'] = hashlib.sha256(self.path.read_bytes()).hexdigest()
-        with patch.dict(os.environ,current,clear=True), patch.object(os,'getuid',return_value=1000), patch.object(os,'getgid',return_value=1000):
+        lease, owner = self.path.resolve(), self.ACTOR if file_owner is None else file_owner
+        class LeasePath(type(Path())):
+            def stat(self, *args, **kwargs):
+                facts = super().stat(*args, **kwargs)
+                if Path(self).resolve() != lease: return facts
+                return os.stat_result((facts.st_mode, facts.st_ino, facts.st_dev, facts.st_nlink, owner, facts.st_gid,
+                                       facts.st_size, facts.st_atime, facts.st_mtime, facts.st_ctime))
+        with patch.dict(os.environ,current,clear=True), patch.object(os,'getuid',return_value=self.ACTOR), patch.object(os,'getgid',return_value=self.ACTOR):
             binding = module(HERE/'current_binding.py', 'binding_control')
-            with patch.object(binding.subprocess,'check_output',side_effect=['a'*40+'\n','b'*40+'\n']), patch.object(binding.subprocess,'run',return_value=subprocess.CompletedProcess([],0)):
+            with patch.object(binding,'Path',LeasePath), patch.object(binding.subprocess,'check_output',side_effect=['a'*40+'\n','b'*40+'\n']), patch.object(binding.subprocess,'run',return_value=subprocess.CompletedProcess([],0)):
                 return binding.load_local_allocation(mode)
+
+    def refused_at(self, **kwargs):
+        """The source line of the actual failing assertion, so a refusal is attributed to its own precondition."""
+        try: self.check(**kwargs)
+        except AssertionError as error:
+            frame = error.__traceback__
+            while frame.tb_next: frame = frame.tb_next
+            return open(frame.tb_frame.f_code.co_filename).read().splitlines()[frame.tb_lineno-1].strip()
+        self.fail('accepted')
+
+    def test_valid_baseline_then_mismatched_owner_and_private_mode_are_refused_at_the_lease_guard(self):
+        self.assertEqual(self.check(), self.grant)
+        self.assertEqual(self.check(file_owner=self.ACTOR), self.grant)
+        for kwargs in ({'file_owner':1001}, {'file_owner':0}, {'file_mode':0o640}, {'file_mode':0o644}, {'file_mode':0o700}):
+            with self.subTest(**kwargs):
+                self.assertIn('st_uid', self.refused_at(**kwargs))
 
     def test_explicit_local_root_grant_only(self):
         self.assertEqual(self.check(), self.grant)
 
     def test_stale_foreign_absent_and_unallocated_mode_fail_closed(self):
+        self.assertEqual(self.check(), self.grant)  # valid baseline first: a negative must fail on its own field
         for field,value in [('source','c'*40),('tree','c'*40),('worktree','/foreign'),('dispatchId','ctx_other'),
                             ('owner','foreign'),('status','NOTRUN'),('exclusiveLocalBatch',False),('currentDispatchConfirmed',False),
                             ('expiresUtc','2000-01-01T00:00:00+00:00'),('uid',0),('workerTerminal','foreign')]:
             with self.subTest(field=field):
                 grant=copy.deepcopy(self.grant);grant[field]=value
                 with self.assertRaises((AssertionError,KeyError)):self.check(grant)
-        with self.assertRaises(AssertionError):self.check(mode='stage')
+                self.assertNotIn('st_uid', self.refused_at(grant=grant), 'refused by the lease owner/mode guard instead of the mutated field')
+        self.assertNotIn('st_uid', self.refused_at(mode='stage'))
         env=dict(self.env);del env['FVOCI_SELECTED_LOCAL_ALLOCATION']
         with self.assertRaises(KeyError):self.check(env=env)
         grant=copy.deepcopy(self.grant);grant['registrationHashes']['selected-backend-ci/current_binding.py']='0'*64
