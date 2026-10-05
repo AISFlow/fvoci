@@ -556,6 +556,7 @@ print(json.dumps({'output':facts(o),'sqlite':facts(s),'header':facts(root/'repo/
                 subprocess.run(['sudo','-n','chown','-R',str(os.getuid())+':'+str(os.getgid()),str(root)],check=True)
 
 
+
 class BrowserAssetsTest(unittest.TestCase):
     """Owned POSIX data/subprocess only: no Chromium, Bun or native execution."""
     def setUp(self):
@@ -685,4 +686,3 @@ m.prepare_browser(pathlib.Path(sys.argv[2]),sys.argv[3])
 
 
 if __name__=='__main__':unittest.main()
-
