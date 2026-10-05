@@ -2643,11 +2643,13 @@ mod selected_revision_preflight_finish_tests {
                 let OperationTx::SqliteFamily(writer) = tx.operation() else {
                     panic!("actual SQLite writer")
                 };
-                Err(writer
+                match writer
                     .query("SELECT * FROM revision_finish_missing_table", &[])
                     .await
-                    .err()
-                    .expect("actual missing-table query must fail"))
+                {
+                    Err(error) => Err(error),
+                    Ok(_) => panic!("actual missing-table query must fail"),
+                }
             } else {
                 let result = tx
                     .operation()
