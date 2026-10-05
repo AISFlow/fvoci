@@ -7534,6 +7534,10 @@ mod upload_owned_adapter_tests {
         FamilyMaintenanceLeasePolicy::new(Duration::from_secs(300), Duration::from_secs(60))
             .unwrap()
     }
+    fn current_cutoff() -> DateTime<Utc> {
+        DateTime::from_timestamp_micros(Utc::now().timestamp_micros())
+            .expect("current cutoff has actual microsecond precision")
+    }
     fn storage(f: &Fixture) -> ObjectStorage {
         ObjectStorage::local(f.root.join("s18-owned-storage"))
     }
@@ -7669,7 +7673,7 @@ mod upload_owned_adapter_tests {
         let stats = crate::jobs::run_stale_upload_gc_claimed_backend(
             &other,
             &s,
-            Utc::now(),
+            current_cutoff(),
             None,
             1,
             &CancellationToken::new(),
@@ -7772,15 +7776,31 @@ mod upload_owned_adapter_tests {
         let row = journal(&f, Uuid::now_v7(), &key).await;
         let before = journal_row(&f, row.id).await;
         let root = f.root.join("s18-owned-storage");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("objects"), b"real ENOTDIR blocker").unwrap();
+        let blocked_path = root.join("objects").join(&key);
+        std::fs::create_dir_all(root.join("objects")).unwrap();
+        std::fs::write(&blocked_path, b"real ENOTDIR blocker").unwrap();
+        // Actual I/O prerequisite: metadata sees this key, but removal of
+        // its regular-file object directory must fail before the actor hook.
+        let prerequisite = s.purge_key(&key).await.unwrap_err();
+        match prerequisite {
+            crate::attachments::StorageError::Io(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
+                println!("S18 owned actual purge prerequisite: {error}");
+            }
+            other => panic!("actual purge ENOTDIR prerequisite required: {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(&blocked_path).unwrap(),
+            b"real ENOTDIR blocker"
+        );
+        assert_eq!(journal_row(&f, row.id).await, before);
         let cancel = CancellationToken::new();
         let worker_cancel = cancel.clone();
         let proof = claim.proof().clone();
         let backend = other.clone();
         let object = s.clone();
-        let (entered, release) = cleanup_test_hooks::arm(row.id, 2);
-        let actor = tokio::spawn(async move {
+        let (mut entered, release) = cleanup_test_hooks::arm(row.id, 2);
+        let mut actor = tokio::spawn(async move {
             reclaim_attachment_objects_claimed_backend(
                 &backend,
                 &object,
@@ -7792,13 +7812,22 @@ mod upload_owned_adapter_tests {
             )
             .await
         });
-        entered.await.unwrap();
+        tokio::select! {
+            reached = &mut entered => reached.expect("actual failed purge reached phase 2"),
+            result = &mut actor => {
+                panic!("claimed cleanup actor ended before actual failed purge phase 2: {result:?}");
+            }
+        }
         cancel.cancel();
         release.send(()).unwrap();
         let error = actor.await.unwrap().unwrap_err();
         stopped(&error, UploadMaintenanceStop::Cancelled);
         assert_eq!(journal_row(&f, row.id).await, before);
-        std::fs::remove_file(root.join("objects")).unwrap();
+        assert_eq!(
+            std::fs::read(&blocked_path).unwrap(),
+            b"real ENOTDIR blocker"
+        );
+        std::fs::remove_file(&blocked_path).unwrap();
         s.put_bytes(&key, BYTES.to_vec()).await.unwrap();
         literal(&s, &key).await;
         let result = reclaim_attachment_objects_claimed_backend(
@@ -8270,14 +8299,14 @@ mod upload_owned_adapter_tests {
         let path = f.root.join("s18-owned-storage/objects").join(&badkey);
         std::fs::remove_dir_all(&path).unwrap();
         std::fs::write(&path, b"real failed-prefix ENOTDIR sentinel").unwrap();
-        let listed = list_stale_uploading_backend(&other, Utc::now(), None, 2)
+        let listed = list_stale_uploading_backend(&other, current_cutoff(), None, 2)
             .await
             .unwrap();
         assert_eq!(listed.len(), 2);
         let stats = crate::jobs::run_stale_upload_gc_claimed_backend(
             &other,
             &s,
-            Utc::now(),
+            current_cutoff(),
             None,
             2,
             &CancellationToken::new(),
@@ -8371,7 +8400,7 @@ mod upload_owned_adapter_tests {
         let credential = Uuid::now_v7();
         sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES(?1,?2,'S18 real second tenant')")
             .bind(workspace.as_bytes().as_slice())
-            .bind(workspace.to_string())
+            .bind(workspace.simple().to_string())
             .execute(&f.pool)
             .await
             .unwrap();
@@ -8403,7 +8432,7 @@ mod upload_owned_adapter_tests {
         let stats = crate::jobs::run_stale_upload_gc_claimed_backend(
             &other,
             &s,
-            Utc::now(),
+            current_cutoff(),
             None,
             10,
             &CancellationToken::new(),
