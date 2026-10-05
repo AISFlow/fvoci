@@ -17,7 +17,10 @@ import {
 } from "vue";
 import { useQuery } from "@tanstack/vue-query";
 import { meQuery } from "@/lib/queries";
+import { projectDocumentsQuery } from "@/features/projects/queries";
 import { compareRevisionProjections } from "@/features/documents/revision-diff";
+import { documentPath, wikiDisplayId } from "@/lib/href";
+import type { OffDraftCreateResponse } from "@/features/documents/document-api";
 import type { useOffWikiBody } from "../../composables/useOffWikiBody";
 import { loadErrorMessage, ProblemError } from "@/lib/api";
 import { collabBadge, collabRefusalNote } from "@/features/documents/collab-badge";
@@ -124,6 +127,67 @@ UrlEmbed.props = ["url"];
 
 const me = useQuery(meQuery);
 const persistLifecycle = ref(0);
+const copyTitle = ref("");
+const copiedDraft = shallowRef<OffDraftCreateResponse | null>(null);
+const copyDestination = ref<"wiki" | "project">("project");
+const copyParentId = ref("");
+const copyProjectId = computed(() => props.offBody?.draft.value?.owner.projectId ?? "");
+const copyTree = useQuery(() => ({
+  ...projectDocumentsQuery(props.workspaceId, copyProjectId.value),
+  enabled:
+    !!props.offBody?.comparison.value &&
+    copyDestination.value === "project" &&
+    !!copyProjectId.value &&
+    !props.offBody.pendingDistinct.value,
+}));
+const copyTargets = computed(() =>
+  (copyTree.data.value?.items ?? []).filter((node) => node.projectId === copyProjectId.value),
+);
+watch(
+  persistLifecycle,
+  () => {
+    copyTitle.value = "";
+    copyDestination.value = "project";
+    copyParentId.value = "";
+    copiedDraft.value = null;
+  },
+  { flush: "sync" },
+);
+watch(copyTargets, (nodes) => {
+  if (!copyParentId.value && !props.offBody?.pendingDistinct.value)
+    copyParentId.value = nodes.find((node) => node.parentId === null)?.id ?? "";
+});
+watch(
+  () => props.offBody?.pendingDistinct.value,
+  (pending) => {
+    if (!pending) return;
+    copyDestination.value = pending.projectId ? "project" : "wiki";
+    copyParentId.value = pending.body.parentId ?? "";
+    copyTitle.value = pending.body.title;
+  },
+  { immediate: true },
+);
+async function copyOffDraft(): Promise<void> {
+  const lifetime = persistLifecycle.value;
+  const current = props.offBody;
+  if (
+    !current ||
+    (!current.pendingDistinct.value &&
+      (sourceDraft.value?.dirty || sourceDraft.value?.composing)) ||
+    (copyDestination.value === "project" &&
+      (!copyProjectId.value || !copyParentId.value) &&
+      !current.pendingDistinct.value)
+  )
+    return;
+  const copied = await current.createDistinct({
+    projectId: copyDestination.value === "project" ? copyProjectId.value : null,
+    parentId: copyDestination.value === "project" ? copyParentId.value || null : null,
+    title: copyTitle.value.trim() || t("doc.duplicate.title"),
+  });
+  if (lifetime !== persistLifecycle.value || props.offBody !== current || !copied) return;
+  copiedDraft.value = copied;
+}
+
 watch(
   [
     () => props.workspaceId,
@@ -350,11 +414,7 @@ async function persistBody(): Promise<void> {
       t("doc.off.storageFailed")
     }}</p>
     <UButton
-      v-if="
-        offBody &&
-        (!offBody.doc.value || !offBody.writable.value) &&
-        !offBody.loading.value
-      "
+      v-if="offBody && (!offBody.doc.value || !offBody.writable.value) && !offBody.loading.value"
       @click="offBody.load"
       >{{ t("load.retry") }}</UButton
     >
@@ -390,10 +450,95 @@ async function persistBody(): Promise<void> {
       </details>
       <UButton
         v-if="offBody.conflict.value"
-        :disabled="offBody.saving.value"
+        :disabled="offBody.saving.value || offBody.creating.value"
         @click="offBody.editCurrent"
         >{{ t("doc.off.editCurrent") }}</UButton
       >
+      <label>
+        {{ t("doc.duplicate.title") }}
+        <input
+          v-model="copyTitle"
+          maxlength="300"
+          :disabled="offBody.creating.value || !!offBody.pendingDistinct.value"
+          :placeholder="t('doc.duplicate.title')"
+        />
+      </label>
+      <label>
+        {{ t("doc.move.parentLabel") }}
+        <select
+          v-model="copyDestination"
+          :disabled="offBody.creating.value || !!offBody.pendingDistinct.value"
+          :aria-label="t('doc.move.parentLabel')"
+        >
+          <option value="project">{{ t("wiki.projectWikis") }}</option>
+          <option value="wiki">{{ t("nav.wiki") }}</option>
+        </select>
+        <select
+          v-if="copyDestination === 'project'"
+          v-model="copyParentId"
+          :disabled="offBody.creating.value || !!offBody.pendingDistinct.value"
+          :aria-label="t('doc.move.parentLabel')"
+        >
+          <option value="">{{ t("doc.move.parentLabel") }}</option>
+          <option v-for="node in copyTargets" :key="node.id" :value="node.id">{{
+            node.title
+          }}</option>
+        </select>
+      </label>
+      <p v-if="copyDestination === 'project' && copyTree.error.value" role="alert">{{
+        loadErrorMessage(copyTree.error.value)
+      }}</p>
+      <UButton
+        :disabled="
+          offBody.creating.value ||
+          offBody.saving.value ||
+          (copyDestination === 'project' &&
+            (!copyProjectId || !copyParentId) &&
+            !offBody.pendingDistinct.value) ||
+          !!sourceDraft?.dirty ||
+          !!sourceDraft?.composing
+        "
+        @click="copyOffDraft"
+      >
+        {{ offBody.creating.value ? t("doc.duplicate.pending") : t("doc.duplicate.submit") }}
+      </UButton>
+      <p>{{ t("doc.off.referenceAccess") }}</p>
+      <p v-if="copiedDraft" role="status">
+        {{ t("doc.duplicate.done") }}
+        <a
+          :href="
+            documentPath(
+              slug,
+              copiedDraft.document.displayId || wikiDisplayId(copiedDraft.document.number),
+            )
+          "
+          >{{ copiedDraft.document.title }}</a
+        >
+      </p>
+    </section>
+    <section
+      v-if="offBody && !offBody.comparison.value && (offBody.pendingDistinct.value || copiedDraft)"
+      class="document-off-compare"
+      role="status"
+    >
+      <template v-if="offBody.pendingDistinct.value">
+        <p>{{ t("doc.duplicate.pending") }}: {{ offBody.pendingDistinct.value.body.title }}</p>
+        <UButton :disabled="offBody.creating.value || offBody.saving.value" @click="copyOffDraft">{{
+          t("load.retry")
+        }}</UButton>
+      </template>
+      <p v-if="copiedDraft">
+        {{ t("doc.duplicate.done") }}
+        <a
+          :href="
+            documentPath(
+              slug,
+              copiedDraft.document.displayId || wikiDisplayId(copiedDraft.document.number),
+            )
+          "
+          >{{ copiedDraft.document.title }}</a
+        >
+      </p>
     </section>
     <QueryLoading v-if="!ready && session?.status !== 'unauthorized' && !refusalNote" />
     <div

@@ -93,6 +93,481 @@ pub struct SavedBody {
     pub revision_id: Uuid,
 }
 
+/// One frozen logical draft publication. Source view and destination creation
+/// are independent authorities; this never changes the source native history.
+#[derive(Clone)]
+pub struct OffDraftCreateRequest {
+    pub workspace: Uuid,
+    pub source: RevisionScope,
+    pub destination_project: Option<Uuid>,
+    pub parent: Option<Uuid>,
+    pub actor: Uuid,
+    pub credential: Uuid,
+    pub command: Uuid,
+    pub title: String,
+    pub icon: Option<String>,
+    pub content_json: Value,
+    pub client_ip: Option<String>,
+}
+
+impl OffDraftCreateRequest {
+    fn validate(&self) -> Result<(), OffDraftCreateError> {
+        if self.command.is_nil()
+            || self.workspace.is_nil()
+            || self.source.target().id().is_nil()
+            || (matches!(self.source.target(), RevisionTarget::Task(_))
+                && self.source.project_id().is_some())
+            || self.destination_project.is_some_and(|id| id.is_nil())
+            || self.parent.is_some_and(|id| id.is_nil())
+            || !super::documents::title_is_valid(&self.title)
+            || self
+                .icon
+                .as_ref()
+                .is_some_and(|icon| !super::documents::icon_is_valid(icon))
+        {
+            return Err(BodySaveError::Invalid.into());
+        }
+        crate::collab::derived_body::extract_stored_attachment_refs(&self.content_json)
+            .map_err(|_| BodySaveError::Invalid)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OffDraftCreated {
+    pub document: super::documents::DocumentMeta,
+    pub command_id: Uuid,
+    pub tail_seq: String,
+    pub revision_id: Uuid,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OffDraftCreateError {
+    #[error(transparent)]
+    Body(#[from] BodySaveError),
+    #[error("draft destination access refused: {0:?}")]
+    Document(super::documents::DocumentDbError),
+    #[error("draft source attachment access refused: {0:?}")]
+    Attachment(super::attachments::AttachmentDbError),
+    #[error("draft rollback is unconfirmed; original={original}")]
+    RollbackUnconfirmed {
+        original: Box<OffDraftCreateError>,
+        #[source]
+        cleanup: sqlx::Error,
+    },
+}
+impl From<sqlx::Error> for OffDraftCreateError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Body(BodySaveError::Database(error))
+    }
+}
+
+fn draft_create_hash(request: &OffDraftCreateRequest) -> Result<String, sqlx::Error> {
+    let bytes = serde_json::to_vec(&(
+        "fvoci:off-independent-draft:v1",
+        request.workspace,
+        request.actor,
+        request.credential,
+        request.source.target().kind_str(),
+        request.source.target().id(),
+        request.source.project_id(),
+        request.destination_project,
+        request.parent,
+        &request.title,
+        &request.icon,
+        &request.content_json,
+    ))
+    .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+/// Dedicated OFF publication: receipt lookup precedes the randomized seed,
+/// creation/native body/history/outbox/result share the caller-owned writer.
+pub async fn create_off_draft(
+    backend: &Backend,
+    mode: RealtimeMode,
+    engine: CollabConfig,
+    request: OffDraftCreateRequest,
+) -> Result<OffDraftCreated, OffDraftCreateError> {
+    if mode != RealtimeMode::Off {
+        return Err(BodySaveError::Invalid.into());
+    }
+    request.validate()?;
+    let mut tx = backend.begin_off_body().await?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let _cancel_on_drop = NativeCancel(cancelled.clone());
+    let result =
+        create_draft_in_writer(&mut tx.operation(), mode, engine, &request, cancelled).await;
+    match result {
+        Ok(created) => {
+            tx.commit_with_cleanup()
+                .await
+                .map_err(|error| BodySaveError::CommitUnconfirmed(Box::new(error)))?;
+            Ok(created)
+        }
+        Err(original) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(OffDraftCreateError::RollbackUnconfirmed {
+                    original: Box::new(original),
+                    cleanup,
+                });
+            }
+            Err(original)
+        }
+    }
+}
+
+async fn create_draft_in_writer(
+    op: &mut OperationTx<'_, '_>,
+    mode: RealtimeMode,
+    engine: CollabConfig,
+    request: &OffDraftCreateRequest,
+    cancelled: Arc<AtomicBool>,
+) -> Result<OffDraftCreated, OffDraftCreateError> {
+    if mode != RealtimeMode::Off {
+        return Err(BodySaveError::Invalid.into());
+    }
+    request.validate()?;
+    authorize_draft_source(op, request).await?;
+    authorize_draft_destination(op, request).await?;
+    authorize_draft_references(op, request).await?;
+    let hash = draft_create_hash(request)?;
+    if let Some((actor, stored_hash, target, result)) = op
+        .wiki_create_receipt(request.workspace, request.command)
+        .await?
+    {
+        if actor != request.actor || stored_hash != hash {
+            return Err(BodySaveError::RequestMismatch.into());
+        }
+        let target = target.ok_or(BodySaveError::Native(CollabDbError::NotFound))?;
+        let created: OffDraftCreated =
+            serde_json::from_value(result).map_err(|_| BodySaveError::Invalid)?;
+        if created.command_id != request.command
+            || created.document.id != target
+            || target == request.source.target().id()
+            || created.document.workspace_id != request.workspace
+            || created.document.project_id != request.destination_project
+            || created.document.parent_id != request.parent
+            || created.tail_seq != "1"
+            || created.revision_id.is_nil()
+        {
+            return Err(BodySaveError::Invalid.into());
+        }
+        let (_, body_result) = op
+            .body_save_receipt(request.workspace, request.command)
+            .await?
+            .ok_or(BodySaveError::Invalid)?;
+        let body: SavedBody =
+            serde_json::from_value(body_result).map_err(|_| BodySaveError::Invalid)?;
+        if body.command_id != request.command
+            || body.target_id != target
+            || body.tail_seq != created.tail_seq
+            || body.revision_id != created.revision_id
+        {
+            return Err(BodySaveError::Invalid.into());
+        }
+        let scope = match request.destination_project {
+            Some(project) => RevisionScope::project_document(project, target),
+            None => RevisionTarget::Document(target).into(),
+        };
+        op.authorize_collab_read(
+            CollabKind::Document,
+            request.workspace,
+            request.actor,
+            request.credential,
+            target,
+            &mut super::collab::CollabDbStageTimings::default(),
+        )
+        .await?
+        .map_err(BodySaveError::Native)?;
+        op.authorize_revision_scope(
+            request.workspace,
+            request.actor,
+            request.credential,
+            scope,
+            false,
+        )
+        .await?
+        .map_err(BodySaveError::Revision)?;
+        if cancelled.load(Ordering::Acquire) {
+            return Err(BodySaveError::Cancelled.into());
+        }
+        if !op
+            .recheck_session(request.actor, request.credential)
+            .await?
+        {
+            return Err(BodySaveError::Native(CollabDbError::Forbidden).into());
+        }
+        return Ok(created);
+    }
+    if cancelled.load(Ordering::Acquire) {
+        return Err(BodySaveError::Cancelled.into());
+    }
+    // This exact maintained producer is owned/reviewed separately. It seeds a
+    // new document with server-assigned block IDs; it never reseeds the source.
+    let seed = crate::collab::seed::SeedEngine::new(engine.engine_bin.clone(), engine.limits)
+        .tiptap_to_independent_yjs_update(&request.content_json)
+        .await
+        .map_err(|error| match error {
+            crate::collab::seed::SeedError::InvalidInput(_) => BodySaveError::Invalid,
+            crate::collab::seed::SeedError::TooLarge(_) => {
+                BodySaveError::Native(CollabDbError::PayloadTooLarge)
+            }
+            crate::collab::seed::SeedError::Unavailable
+            | crate::collab::seed::SeedError::Failed(_) => BodySaveError::Unavailable,
+        })?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err(BodySaveError::Cancelled.into());
+    }
+    // Current source/destination/reference checks are repeated after the seed
+    // await before the first creation effect; authority is never lease metadata.
+    authorize_draft_source(op, request).await?;
+    authorize_draft_destination(op, request).await?;
+    authorize_draft_references(op, request).await?;
+    let input = super::documents::CreateDocumentInput {
+        parent_id: request.parent,
+        title: &request.title,
+        icon: Some(request.icon.as_deref()),
+    };
+    let created = match request.destination_project {
+        Some(project) => super::project_documents::create_project_document_operation(
+            op,
+            request.workspace,
+            project,
+            request.actor,
+            request.credential,
+            input,
+            request.client_ip.as_deref(),
+        )
+        .await?
+        .map_err(OffDraftCreateError::Document)?,
+        None => super::documents::create_wiki_document_operation(
+            op,
+            request.workspace,
+            request.actor,
+            request.credential,
+            input,
+            request.client_ip.as_deref(),
+            None,
+        )
+        .await?
+        .map_err(OffDraftCreateError::Document)?
+        .ok_or(BodySaveError::Invalid)?,
+    };
+    if created.id == request.source.target().id() {
+        return Err(BodySaveError::Invalid.into());
+    }
+    let (saved, proof) = save_in_writer_with_proof(
+        op,
+        mode,
+        engine,
+        &OffBodyRequest {
+            workspace: request.workspace,
+            target: RevisionTarget::Document(created.id),
+            project: request.destination_project,
+            actor: request.actor,
+            credential: request.credential,
+            command: request.command,
+            expected_tail: 0,
+            update: seed,
+            client_ip: request.client_ip.clone(),
+        },
+        cancelled.clone(),
+        None,
+    )
+    .await?;
+    let row = op
+        .document_row(request.workspace, created.id)
+        .await?
+        .ok_or(BodySaveError::Invalid)?;
+    let mut document = super::documents::row_to_meta(row, true);
+    document.display_id = created.display_id;
+    let result = OffDraftCreated {
+        document,
+        command_id: saved.command_id,
+        tail_seq: saved.tail_seq,
+        revision_id: saved.revision_id,
+    };
+    let json =
+        serde_json::to_value(&result).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+    op.insert_wiki_create_receipt(
+        request.workspace,
+        request.command,
+        request.actor,
+        &hash,
+        result.document.id,
+        &json,
+    )
+    .await?;
+    authorize_draft_source(op, request).await?;
+    authorize_draft_destination(op, request).await?;
+    authorize_draft_references(op, request).await?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err(BodySaveError::Cancelled.into());
+    }
+    if !op
+        .recheck_session(request.actor, request.credential)
+        .await?
+        || !op.verify_off_body_writer(proof).await?
+    {
+        return Err(BodySaveError::Native(CollabDbError::Forbidden).into());
+    }
+    Ok(result)
+}
+
+/// Same current actor/session and maintained source View locks, including an
+/// archived readable source. This capability does not grant destination rights.
+async fn authorize_draft_source(
+    op: &mut OperationTx<'_, '_>,
+    request: &OffDraftCreateRequest,
+) -> Result<(), OffDraftCreateError> {
+    op.set_tenant(request.workspace).await?;
+    op.lock_membership_users(&[request.actor]).await?;
+    op.lock_tree(request.workspace).await?;
+    let kind = match request.source.target() {
+        RevisionTarget::Document(_) => CollabKind::Document,
+        RevisionTarget::Task(_) => CollabKind::Task,
+    };
+    op.authorize_collab_read(
+        kind,
+        request.workspace,
+        request.actor,
+        request.credential,
+        request.source.target().id(),
+        &mut super::collab::CollabDbStageTimings::default(),
+    )
+    .await?
+    .map_err(BodySaveError::Native)?;
+    op.authorize_revision_scope(
+        request.workspace,
+        request.actor,
+        request.credential,
+        request.source,
+        false,
+    )
+    .await?
+    .map_err(BodySaveError::Revision)?;
+    Ok(())
+}
+
+/// Native document/task reference access is the maintained View policy on the
+/// same outer writer, with project/resource locks and current credential.
+async fn authorize_internal_draft_refs(
+    op: &mut OperationTx<'_, '_>,
+    request: &OffDraftCreateRequest,
+) -> Result<(), OffDraftCreateError> {
+    for reference in crate::collab::derived_body::extract_internal_refs(&request.content_json) {
+        let id = Uuid::parse_str(&reference.id).map_err(|_| BodySaveError::Invalid)?;
+        let kind = match reference.kind {
+            crate::collab::derived_body::InternalRefKind::Document => CollabKind::Document,
+            crate::collab::derived_body::InternalRefKind::Task => CollabKind::Task,
+        };
+        op.authorize_collab_read(
+            kind,
+            request.workspace,
+            request.actor,
+            request.credential,
+            id,
+            &mut super::collab::CollabDbStageTimings::default(),
+        )
+        .await?
+        .map_err(BodySaveError::Native)?;
+    }
+    Ok(())
+}
+
+/// Stored file references retain original IDs/parent/ownership. Admission is
+/// current source View on the borrowed writer, never a recipient access grant.
+async fn authorize_draft_references(
+    op: &mut OperationTx<'_, '_>,
+    request: &OffDraftCreateRequest,
+) -> Result<(), OffDraftCreateError> {
+    let attachments =
+        crate::collab::derived_body::extract_stored_attachment_refs(&request.content_json)
+            .map_err(|_| BodySaveError::Invalid)?;
+    authorize_internal_draft_refs(op, request).await?;
+    for id in attachments {
+        op.authorize_stored_attachment_reference(
+            request.workspace,
+            id,
+            request.actor,
+            request.credential,
+        )
+        .await?
+        .map_err(OffDraftCreateError::Attachment)?;
+    }
+    Ok(())
+}
+
+/// Repeat the current ordinary create policy before even a stored result is
+/// returned. Receipt replay is not a right to a retired destination or parent.
+async fn authorize_draft_destination(
+    op: &mut OperationTx<'_, '_>,
+    request: &OffDraftCreateRequest,
+) -> Result<(), OffDraftCreateError> {
+    op.set_tenant(request.workspace).await?;
+    if let Some(project) = request.destination_project {
+        super::project_documents::authorize_project_draft_parent(
+            op,
+            request.workspace,
+            project,
+            request.actor,
+            request.credential,
+            request.parent,
+        )
+        .await?
+        .map_err(OffDraftCreateError::Document)?;
+        return Ok(());
+    }
+    op.lock_membership_users(&[request.actor]).await?;
+    if !op
+        .recheck_session(request.actor, request.credential)
+        .await?
+    {
+        return Err(OffDraftCreateError::Document(
+            super::documents::DocumentDbError::Forbidden,
+        ));
+    }
+    op.lock_tree(request.workspace).await?;
+    if !op.workspace_is_live(request.workspace).await? {
+        return Err(OffDraftCreateError::Document(
+            super::documents::DocumentDbError::NotFound,
+        ));
+    }
+    if !super::documents::wiki_can_edit(
+        op.membership_role(request.workspace, request.actor, true)
+            .await?,
+    ) {
+        return Err(OffDraftCreateError::Document(
+            super::documents::DocumentDbError::Forbidden,
+        ));
+    }
+    if let Some(parent) = request.parent {
+        let Some((project, path, deleted)) = op.wiki_parent(request.workspace, parent).await?
+        else {
+            return Err(OffDraftCreateError::Document(
+                super::documents::DocumentDbError::NotFound,
+            ));
+        };
+        if deleted.is_some() {
+            return Err(OffDraftCreateError::Document(
+                super::documents::DocumentDbError::NotFound,
+            ));
+        }
+        if project.is_some() {
+            return Err(OffDraftCreateError::Document(
+                super::documents::DocumentDbError::AffiliationMismatch,
+            ));
+        }
+        if super::documents::depth_of(&path) >= super::documents::MAX_TREE_DEPTH {
+            return Err(OffDraftCreateError::Document(
+                super::documents::DocumentDbError::DepthLimit,
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub struct OffBodySource {
     pub native: CollabLoadState,
     pub content_json: Value,
@@ -481,6 +956,19 @@ async fn save_in_writer(
     cancelled: Arc<AtomicBool>,
     source_revision: Option<Uuid>,
 ) -> Result<SavedBody, BodySaveError> {
+    save_in_writer_with_proof(op, mode, engine, request, cancelled, source_revision)
+        .await
+        .map(|(saved, _)| saved)
+}
+
+async fn save_in_writer_with_proof(
+    op: &mut OperationTx<'_, '_>,
+    mode: RealtimeMode,
+    engine: CollabConfig,
+    request: &OffBodyRequest,
+    cancelled: Arc<AtomicBool>,
+    source_revision: Option<Uuid>,
+) -> Result<(SavedBody, super::collab::OffBodyWriter), BodySaveError> {
     let OffBodyRequest {
         workspace,
         target,
@@ -544,7 +1032,7 @@ async fn save_in_writer(
         {
             return Err(BodySaveError::Native(CollabDbError::Forbidden));
         }
-        return Ok(saved);
+        return Ok((saved, proof));
     }
     if load.tail_seq != *expected_tail {
         return Err(BodySaveError::Conflict);
@@ -703,7 +1191,7 @@ async fn save_in_writer(
     if !op.recheck_session(*actor, *credential).await? || !op.verify_off_body_writer(proof).await? {
         return Err(BodySaveError::Native(CollabDbError::Forbidden));
     }
-    Ok(saved)
+    Ok((saved, proof))
 }
 
 impl OperationTx<'_, '_> {
@@ -763,6 +1251,55 @@ impl OperationTx<'_, '_> {
 mod policy_tests {
     use super::*;
     #[test]
+    fn draft_command_hash_binds_source_destination_current_identity_and_exact_private_body() {
+        let request = OffDraftCreateRequest {
+            workspace: Uuid::now_v7(),
+            source: RevisionTarget::Document(Uuid::now_v7()).into(),
+            destination_project: None,
+            parent: None,
+            actor: Uuid::now_v7(),
+            credential: Uuid::now_v7(),
+            command: Uuid::now_v7(),
+            title: "private 😀".into(),
+            icon: None,
+            content_json: serde_json::json!({"type":"doc","content":[]}),
+            client_ip: None,
+        };
+        request.validate().unwrap();
+        let hash = draft_create_hash(&request).unwrap();
+        let mutations: [fn(&mut OffDraftCreateRequest); 9] = [
+            |r| r.workspace = Uuid::now_v7(),
+            |r| r.actor = Uuid::now_v7(),
+            |r| r.credential = Uuid::now_v7(),
+            |r| r.source = RevisionTarget::Task(r.source.target().id()).into(),
+            |r| r.source = RevisionScope::project_document(Uuid::now_v7(), r.source.target().id()),
+            |r| r.destination_project = Some(Uuid::now_v7()),
+            |r| r.parent = Some(Uuid::now_v7()),
+            |r| r.title.push('!'),
+            |r| {
+                r.content_json =
+                    serde_json::json!({"type":"doc","content":[{"type":"paragraph","content":[]}]})
+            },
+        ];
+        for mutate in mutations {
+            let mut next = request.clone();
+            mutate(&mut next);
+            assert_ne!(draft_create_hash(&next).unwrap(), hash);
+        }
+        let mut retry = request.clone();
+        retry.client_ip = Some("127.0.0.1".into());
+        assert_eq!(draft_create_hash(&retry).unwrap(), hash);
+        retry.command = Uuid::nil();
+        assert!(retry.validate().is_err());
+        retry.command = request.command;
+        retry.content_json = serde_json::json!({"type":"doc","content":[{"type":"attachment","attrs":{"id":"bad-ref"}}]});
+        assert!(
+            retry.validate().is_err(),
+            "malformed supported references must fail before effects"
+        );
+    }
+
+    #[test]
     fn command_binding_covers_content_version_target_and_current_identity() {
         let request = OffBodyRequest {
             workspace: Uuid::now_v7(),
@@ -820,6 +1357,363 @@ mod sqlite_native_tests {
     use crate::collab::seed::SeedEngine;
     use crate::db::attachment_preview::tests::Fixture;
     use serde_json::json;
+
+    async fn draft_observable(f: &Fixture) -> (i64, i64, i64, i64, i64, i64, i64) {
+        sqlx::query_as("SELECT (SELECT count(*) FROM documents WHERE workspace_id=?1),(SELECT count(*) FROM wiki_create_commands WHERE workspace_id=?1),(SELECT count(*) FROM body_save_commands WHERE workspace_id=?1),(SELECT count(*) FROM revisions WHERE workspace_id=?1),(SELECT count(*) FROM events WHERE workspace_id=?1),(SELECT count(*) FROM audit_log WHERE workspace_id=?1),(SELECT next_document_number FROM workspaces WHERE id=?1)")
+            .bind(f.workspace.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap()
+    }
+    async fn original_history(f: &Fixture) -> (i64, Vec<u8>, String, i64, i64) {
+        sqlx::query_as("SELECT ds.tail_seq,ds.state,d.content_json,(SELECT count(*) FROM revisions WHERE workspace_id=?1 AND target_kind='document' AND target_id=?2),(SELECT count(*) FROM document_collab_op_receipts WHERE workspace_id=?1 AND document_id=?2) FROM document_states ds JOIN documents d ON d.workspace_id=ds.workspace_id AND d.id=ds.document_id WHERE ds.workspace_id=?1 AND ds.document_id=?2")
+            .bind(f.workspace.as_bytes().as_slice()).bind(f.document.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap()
+    }
+    #[tokio::test]
+    async fn off_draft_copy_has_independent_ids_same_fk_rollback_exact_receipt_and_authorized_replay(
+    ) {
+        let f = Fixture::new().await;
+        let credential = session(&f).await;
+        sqlx::query("UPDATE workspaces SET next_document_number=1 WHERE id=?1")
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let original = request(&f, credential, "server original 😀").await;
+        save_off_body(&f.backend, RealtimeMode::Off, engine(), original)
+            .await
+            .unwrap();
+        let (attachment, _) = f.attachment(10, "text/plain").await;
+        let source = original_history(&f).await;
+        let request = OffDraftCreateRequest {
+            workspace: f.workspace,
+            source: RevisionTarget::Document(f.document).into(),
+            destination_project: None,
+            parent: None,
+            actor: f.user,
+            credential,
+            command: Uuid::now_v7(),
+            title: "private independent copy".into(),
+            icon: Some("📄".into()),
+            content_json: json!({"type":"doc","content":[
+                {"type":"paragraph","attrs":{"id":"off-stable-block"},"content":[{"type":"text","text":"unsaved private 😀","marks":[{"type":"bold"}]}]},
+                {"type":"attachment","attrs":{"id":attachment,"name":"literal.txt","image":false,"width":64,"align":null,"caption":"private caption","previewWidth":128,"previewHeight":256}},
+                {"type":"embed","attrs":{"id":"client-embed-block","entity":"document","ref":f.document}},
+            ]}),
+            client_ip: Some("127.0.0.1".into()),
+        };
+        let input = request.content_json.clone();
+        let before = draft_observable(&f).await;
+        let mut cancelled_writer = f.backend.begin_off_body().await.unwrap();
+        assert!(matches!(
+            create_draft_in_writer(
+                &mut cancelled_writer.operation(),
+                RealtimeMode::Off,
+                engine(),
+                &request,
+                Arc::new(AtomicBool::new(true)),
+            )
+            .await,
+            Err(OffDraftCreateError::Body(BodySaveError::Cancelled))
+        ));
+        cancelled_writer.rollback().await.unwrap();
+        assert_eq!(draft_observable(&f).await, before);
+        assert_eq!(original_history(&f).await, source);
+        // Cancellation did not consume the stable logical command. The exact
+        // same binding below must still reach a real writer and make progress.
+        let mut outer = f.backend.begin_off_body().await.unwrap();
+        let staged = create_draft_in_writer(
+            &mut outer.operation(),
+            RealtimeMode::Off,
+            engine(),
+            &request,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        let OperationTx::SqliteFamily(writer) = outer.operation() else {
+            panic!("actual family writer")
+        };
+        let fk=writer.execute("UPDATE wiki_create_commands SET document_id=?1 WHERE workspace_id=?2 AND command_id=?3",&[Cell::uuid(Uuid::now_v7()),Cell::uuid(f.workspace),Cell::uuid(request.command)]).await.unwrap_err();
+        assert!(
+            fk.to_string().contains("FOREIGN KEY"),
+            "real same-writer FK failure after ALL copy effects: {fk}"
+        );
+        outer.rollback().await.unwrap();
+        assert_eq!(draft_observable(&f).await, before);
+        assert_eq!(original_history(&f).await, source);
+        let absent: i64 = sqlx::query_scalar("SELECT count(*) FROM documents WHERE id=?1")
+            .bind(staged.document.id.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(absent, 0);
+        let created = create_off_draft(&f.backend, RealtimeMode::Off, engine(), request.clone())
+            .await
+            .unwrap();
+        assert_ne!(created.document.id, f.document);
+        assert_ne!(created.document.id, staged.document.id);
+        assert_eq!(created.tail_seq, "1");
+        assert_eq!(created.document.number, 2);
+        assert!(!created.revision_id.is_nil());
+        assert_eq!(
+            request.content_json, input,
+            "producer/copy must not mutate private input"
+        );
+        let fresh = read_off_body(
+            &f.backend,
+            RealtimeMode::Off,
+            engine(),
+            f.workspace,
+            RevisionTarget::Document(created.document.id).into(),
+            f.user,
+            credential,
+        )
+        .await
+        .unwrap();
+        assert_eq!(fresh.native.tail_seq, 1);
+        assert_eq!(fresh.content_json, created.document.content_json);
+        let blocks = &fresh.content_json["content"];
+        let paragraph = blocks[0]["attrs"]["id"].as_str().unwrap();
+        let embed = blocks[2]["attrs"]["id"].as_str().unwrap();
+        assert!(Uuid::parse_str(paragraph).is_ok() && Uuid::parse_str(embed).is_ok());
+        assert_ne!(paragraph, embed);
+        assert_ne!(paragraph, "off-stable-block");
+        assert_ne!(embed, "client-embed-block");
+        assert_eq!(blocks[1]["attrs"]["id"], json!(attachment));
+        assert_eq!(blocks[1]["attrs"]["caption"], json!("private caption"));
+        assert_eq!(blocks[1]["attrs"]["width"], json!(64));
+        assert_eq!(blocks[1]["attrs"]["previewWidth"], json!(128));
+        assert_eq!(blocks[2]["attrs"]["ref"], json!(f.document));
+        assert!(
+            fresh
+                .content_json
+                .to_string()
+                .contains("unsaved private 😀")
+                && fresh.content_json.to_string().contains("bold")
+        );
+        assert_eq!(
+            original_history(&f).await,
+            source,
+            "source native snapshot/body/revision/receipts remain immutable"
+        );
+        let after = draft_observable(&f).await;
+        let replay = create_off_draft(&f.backend, RealtimeMode::Off, engine(), request.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&replay).unwrap(),
+            serde_json::to_value(&created).unwrap()
+        );
+        assert_eq!(draft_observable(&f).await, after);
+        let mut mismatch = request.clone();
+        mismatch.title.push('!');
+        assert!(matches!(
+            create_off_draft(&f.backend, RealtimeMode::Off, engine(), mismatch).await,
+            Err(OffDraftCreateError::Body(BodySaveError::RequestMismatch))
+        ));
+        assert_eq!(draft_observable(&f).await, after);
+        // A fabricated/mismatched command result cannot become a copy ACK.
+        let original_result: String = sqlx::query_scalar(
+            "SELECT result_json FROM wiki_create_commands WHERE workspace_id=?1 AND command_id=?2",
+        )
+        .bind(f.workspace.as_bytes().as_slice())
+        .bind(request.command.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        let mut wrong: Value = serde_json::from_str(&original_result).unwrap();
+        wrong["revision_id"] = json!(Uuid::now_v7());
+        sqlx::query("UPDATE wiki_create_commands SET result_json=?1 WHERE workspace_id=?2 AND command_id=?3").bind(wrong.to_string()).bind(f.workspace.as_bytes().as_slice()).bind(request.command.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert!(matches!(
+            create_off_draft(&f.backend, RealtimeMode::Off, engine(), request.clone()).await,
+            Err(OffDraftCreateError::Body(BodySaveError::Invalid))
+        ));
+        sqlx::query("UPDATE wiki_create_commands SET result_json=?1 WHERE workspace_id=?2 AND command_id=?3").bind(&original_result).bind(f.workspace.as_bytes().as_slice()).bind(request.command.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            create_off_draft(&f.backend, RealtimeMode::Off, engine(), request.clone()).await,
+            Err(OffDraftCreateError::Body(BodySaveError::Native(
+                CollabDbError::Forbidden
+            )))
+        ));
+        assert_eq!(draft_observable(&f).await, after);
+        assert_eq!(original_history(&f).await, source);
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let healthy = create_off_draft(&f.backend, RealtimeMode::Off, engine(), request)
+            .await
+            .unwrap();
+        assert_eq!(healthy.document.id, created.document.id);
+        let file: (Vec<u8>, Vec<u8>) =
+            sqlx::query_as("SELECT document_id,uploader_id FROM attachments WHERE id=?1")
+                .bind(attachment.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            file,
+            (f.document.as_bytes().to_vec(), f.user.as_bytes().to_vec())
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn off_draft_source_view_is_not_destination_create_or_foreign_reference_authority() {
+        let f = Fixture::new().await;
+        let credential = session(&f).await;
+        let task = task_target(&f).await;
+        let project: Vec<u8> = sqlx::query_scalar("SELECT project_id FROM tasks WHERE id=?1")
+            .bind(task.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        let project = Uuid::from_slice(&project).unwrap();
+        let attachment: Vec<u8> = sqlx::query_scalar("SELECT id FROM attachments WHERE task_id=?1")
+            .bind(task.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        let attachment = Uuid::from_slice(&attachment).unwrap();
+        sqlx::query("UPDATE projects SET status='archived' WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE tasks SET archived_at=1 WHERE id=?1")
+            .bind(task.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let request = OffDraftCreateRequest {
+            workspace: f.workspace,
+            source: RevisionTarget::Task(task).into(),
+            destination_project: None,
+            parent: None,
+            actor: f.user,
+            credential,
+            command: Uuid::now_v7(),
+            title: "preserved private draft".into(),
+            icon: None,
+            content_json: json!({"type":"doc","content":[{"type":"embed","attrs":{"entity":"document","ref":f.document,"id":"draft-block"}},{"type":"attachment","attrs":{"id":attachment,"name":"original file"}}]}),
+            client_ip: None,
+        };
+        request.validate().unwrap();
+        let before:(i64,i64,i64,i64) = sqlx::query_as("SELECT (SELECT count(*) FROM documents),(SELECT count(*) FROM wiki_create_commands),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log)").fetch_one(&f.pool).await.unwrap();
+        let mut outer = f.backend.begin_off_body().await.unwrap();
+        authorize_draft_source(&mut outer.operation(), &request)
+            .await
+            .unwrap();
+        authorize_draft_destination(&mut outer.operation(), &request)
+            .await
+            .unwrap();
+        authorize_draft_references(&mut outer.operation(), &request)
+            .await
+            .unwrap();
+        outer.rollback().await.unwrap();
+        let mut archived_destination = request.clone();
+        archived_destination.destination_project = Some(project);
+        archived_destination.parent = Some(f.document);
+        let mut outer = f.backend.begin_off_body().await.unwrap();
+        authorize_draft_source(&mut outer.operation(), &archived_destination)
+            .await
+            .unwrap();
+        assert!(matches!(
+            authorize_draft_destination(&mut outer.operation(), &archived_destination).await,
+            Err(OffDraftCreateError::Document(
+                super::super::documents::DocumentDbError::NotFound
+            ))
+        ));
+        outer.rollback().await.unwrap();
+        let foreign_workspace = Uuid::now_v7();
+        let foreign_document = Uuid::now_v7();
+        sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES(?1,'draft-foreign','Foreign')")
+            .bind(foreign_workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,content_json,created_by) VALUES(?1,?2,'Foreign',?3,'V',1,'draft',2,?4,?5)")
+            .bind(foreign_document.as_bytes().as_slice()).bind(foreign_workspace.as_bytes().as_slice()).bind(foreign_document.simple().to_string()).bind(super::super::documents::empty_document_json().to_string()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let mut wrong_reference = request.clone();
+        wrong_reference.content_json["content"][0]["attrs"]["ref"] = json!(foreign_document);
+        let mut outer = f.backend.begin_off_body().await.unwrap();
+        authorize_draft_source(&mut outer.operation(), &wrong_reference)
+            .await
+            .unwrap();
+        assert!(matches!(
+            authorize_draft_references(&mut outer.operation(), &wrong_reference).await,
+            Err(OffDraftCreateError::Body(BodySaveError::Native(
+                CollabDbError::NotFound
+            )))
+        ));
+        outer.rollback().await.unwrap();
+        sqlx::query("UPDATE attachments SET scan_status='infected' WHERE id=?1")
+            .bind(attachment.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let mut outer = f.backend.begin_off_body().await.unwrap();
+        authorize_draft_source(&mut outer.operation(), &request)
+            .await
+            .unwrap();
+        assert!(matches!(
+            authorize_draft_references(&mut outer.operation(), &request).await,
+            Err(OffDraftCreateError::Attachment(
+                super::super::attachments::AttachmentDbError::Infected
+            ))
+        ));
+        outer.rollback().await.unwrap();
+        sqlx::query("UPDATE attachments SET scan_status='clean' WHERE id=?1")
+            .bind(attachment.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let mut outer = f.backend.begin_off_body().await.unwrap();
+        assert!(matches!(
+            authorize_draft_source(&mut outer.operation(), &request).await,
+            Err(OffDraftCreateError::Body(BodySaveError::Native(
+                CollabDbError::Forbidden
+            )))
+        ));
+        outer.rollback().await.unwrap();
+        let after:(i64,i64,i64,i64) = sqlx::query_as("SELECT (SELECT count(*) FROM documents WHERE workspace_id=?1),(SELECT count(*) FROM wiki_create_commands),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log)")
+            .bind(f.workspace.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+        assert_eq!(after,before,"current source/destination/reference refusals have no command/document/outbox/audit effects");
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let mut healthy = f.backend.begin_off_body().await.unwrap();
+        authorize_draft_source(&mut healthy.operation(), &request)
+            .await
+            .unwrap();
+        authorize_draft_destination(&mut healthy.operation(), &request)
+            .await
+            .unwrap();
+        authorize_draft_references(&mut healthy.operation(), &request)
+            .await
+            .unwrap();
+        healthy.rollback().await.unwrap();
+        let original_file: (Option<Vec<u8>>, Option<Vec<u8>>, Vec<u8>, String) = sqlx::query_as(
+            "SELECT document_id,task_id,uploader_id,status FROM attachments WHERE id=?1",
+        )
+        .bind(attachment.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(original_file,(None,Some(task.as_bytes().to_vec()),f.user.as_bytes().to_vec(),"stored".into()), "source reference admission never rebinds ownership/parent or grants destination file access");
+        f.close().await;
+    }
 
     async fn session(f: &Fixture) -> Uuid {
         // This fixture was built for attachment previews. A normal newly
@@ -1700,5 +2594,261 @@ mod sqlite_native_tests {
             "1"
         );
         f.close().await;
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod pg_draft_native_tests {
+    use super::*;
+    use serde_json::json;
+    use sqlx::postgres::PgPoolOptions;
+
+    async fn observable(pool: &sqlx::PgPool, workspace: Uuid) -> Vec<i64> {
+        let row: (i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM fvoci.documents WHERE workspace_id=$1),(SELECT count(*) FROM fvoci.wiki_create_commands WHERE workspace_id=$1),(SELECT count(*) FROM fvoci.body_save_commands WHERE workspace_id=$1),(SELECT count(*) FROM fvoci.revisions WHERE workspace_id=$1),(SELECT count(*) FROM fvoci.events WHERE workspace_id=$1),(SELECT count(*) FROM fvoci.audit_log WHERE workspace_id=$1),(SELECT count(*) FROM fvoci.document_collab_op_receipts WHERE workspace_id=$1),(SELECT next_document_number::bigint FROM fvoci.workspaces WHERE id=$1)")
+            .bind(workspace).fetch_one(pool).await.unwrap();
+        vec![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7]
+    }
+
+    #[tokio::test]
+    async fn off_draft_pg_restricted_writer_same_fk_rollback_replay_and_current_auth() {
+        // Provisioning follows the maintained attachment/reference PG fixture:
+        // current migrations/grants, isolated LOGIN role, no missing-URL skip.
+        let provisioner = std::env::var("TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))
+            .expect("root allocation must provide isolated PG provisioner URL");
+        let engine = CollabConfig::from_env()
+            .expect("root allocation must provide current FVOCI_COLLAB_ENGINE");
+        let mut server = url::Url::parse(&provisioner).unwrap();
+        server.set_path("/postgres");
+        let admin_server = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(server.as_str())
+            .await
+            .unwrap();
+        let database = format!("fvoci_off_copy_{}", Uuid::now_v7().simple());
+        let role = format!("fvoci_off_app_{}", Uuid::now_v7().simple());
+        let password = crate::auth::token::new_token().hash;
+        sqlx::query(&format!("CREATE DATABASE \"{database}\""))
+            .execute(&admin_server)
+            .await
+            .unwrap();
+        let mut database_url = server.clone();
+        database_url.set_path(&format!("/{database}"));
+        crate::db::migrate::run_migrations(database_url.as_str())
+            .await
+            .unwrap();
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(database_url.as_str())
+            .await
+            .unwrap();
+        sqlx::query(&format!(
+            "CREATE ROLE \"{role}\" LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS"
+        ))
+        .execute(&admin)
+        .await
+        .unwrap();
+        crate::db::migrate::apply_app_role_grants(&admin, &role)
+            .await
+            .unwrap();
+        let mut app_url = database_url;
+        app_url.set_username(&role).unwrap();
+        app_url.set_password(Some(&password)).unwrap();
+        let app = crate::db::pool::connect_app_with_max(app_url.as_str(), 2)
+            .await
+            .unwrap();
+        let flags: (bool, bool, bool) = sqlx::query_as(
+            "SELECT rolcanlogin,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user",
+        )
+        .fetch_one(&app)
+        .await
+        .unwrap();
+        assert_eq!(flags, (true, false, false));
+        for table in [
+            "documents",
+            "document_states",
+            "wiki_create_commands",
+            "body_save_commands",
+            "revisions",
+        ] {
+            let secured: bool =
+                sqlx::query_scalar("SELECT relrowsecurity FROM pg_class WHERE oid=to_regclass($1)")
+                    .bind(format!("fvoci.{table}"))
+                    .fetch_one(&app)
+                    .await
+                    .unwrap();
+            assert!(secured, "actual app operation must use RLS on {table}");
+        }
+        let workspace = Uuid::now_v7();
+        let actor = Uuid::now_v7();
+        let source = Uuid::now_v7();
+        let credential = Uuid::now_v7();
+        let session = crate::auth::token::new_token();
+        sqlx::query(
+            "INSERT INTO fvoci.users(id,email,given_name) VALUES($1,'off-copy@example.test','OFF')",
+        )
+        .bind(actor)
+        .execute(&admin)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO fvoci.workspaces(id,slug,name,next_document_number) VALUES($1,'off-copy','OFF',1)")
+            .bind(workspace).execute(&admin).await.unwrap();
+        sqlx::query(
+            "INSERT INTO fvoci.memberships(workspace_id,user_id,role) VALUES($1,$2,'owner')",
+        )
+        .bind(workspace)
+        .bind(actor)
+        .execute(&admin)
+        .await
+        .unwrap();
+        let original = super::super::documents::empty_document_json();
+        sqlx::query("INSERT INTO fvoci.documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES($1,$2,'Original',$3,'V',1,'published',2,$4,$5)")
+            .bind(source).bind(workspace).bind(source.simple().to_string()).bind(actor).bind(&original).execute(&admin).await.unwrap();
+        sqlx::query("INSERT INTO fvoci.sessions(id,user_id,token_hash,expires_at) VALUES($1,$2,$3,now()+interval '30 days')")
+            .bind(credential).bind(actor).bind(&session.hash).execute(&admin).await.unwrap();
+        let backend = Backend::Postgres(app.clone());
+        let request = OffDraftCreateRequest {
+            workspace,
+            source: RevisionTarget::Document(source).into(),
+            destination_project: None,
+            parent: None,
+            actor,
+            credential,
+            command: Uuid::now_v7(),
+            title: "private native copy 😀".into(),
+            icon: None,
+            content_json: json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":"client-source-block"},"content":[{"type":"text","text":"unsaved private PG 😀","marks":[{"type":"bold"}]}]}]}),
+            client_ip: None,
+        };
+        let before = observable(&admin, workspace).await;
+        let mut outer = backend.begin_off_body().await.unwrap();
+        let staged = create_draft_in_writer(
+            &mut outer.operation(),
+            RealtimeMode::Off,
+            engine.clone(),
+            &request,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        let OperationTx::Postgres(writer) = outer.operation() else {
+            panic!("real PG writer")
+        };
+        let fk = sqlx::query("UPDATE fvoci.wiki_create_commands SET document_id=$1 WHERE workspace_id=$2 AND command_id=$3")
+            .bind(Uuid::now_v7()).bind(workspace).bind(request.command).execute(&mut **writer).await.unwrap_err();
+        assert_eq!(
+            fk.as_database_error().unwrap().code().as_deref(),
+            Some("23503"),
+            "same real restricted writer after all copy effects"
+        );
+        outer.rollback().await.unwrap();
+        assert_eq!(observable(&admin, workspace).await, before);
+        let staged_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fvoci.documents WHERE id=$1)")
+                .bind(staged.document.id)
+                .fetch_one(&admin)
+                .await
+                .unwrap();
+        assert!(!staged_exists);
+        let created =
+            create_off_draft(&backend, RealtimeMode::Off, engine.clone(), request.clone())
+                .await
+                .unwrap();
+        assert_ne!(created.document.id, source);
+        assert_ne!(created.document.id, staged.document.id);
+        assert_eq!(created.document.number, 2);
+        assert_eq!(created.tail_seq, "1");
+        let fresh = read_off_body(
+            &backend,
+            RealtimeMode::Off,
+            engine.clone(),
+            workspace,
+            RevisionTarget::Document(created.document.id).into(),
+            actor,
+            credential,
+        )
+        .await
+        .unwrap();
+        assert_eq!(fresh.native.tail_seq, 1);
+        assert_eq!(fresh.content_json, created.document.content_json);
+        assert!(fresh
+            .content_json
+            .to_string()
+            .contains("unsaved private PG 😀"));
+        let block = fresh.content_json["content"][0]["attrs"]["id"]
+            .as_str()
+            .unwrap();
+        assert!(Uuid::parse_str(block).is_ok());
+        assert_ne!(block, "client-source-block");
+        assert!(fresh.content_json.to_string().contains("bold"));
+        let after = observable(&admin, workspace).await;
+        assert_eq!(
+            (after[0], after[1], after[2], after[3], after[6], after[7]),
+            (
+                before[0] + 1,
+                before[1] + 1,
+                before[2] + 1,
+                before[3] + 1,
+                before[6] + 1,
+                before[7] + 1
+            )
+        );
+        let replay = create_off_draft(&backend, RealtimeMode::Off, engine.clone(), request.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(replay).unwrap(),
+            serde_json::to_value(&created).unwrap()
+        );
+        assert_eq!(observable(&admin, workspace).await, after);
+        let mut mismatch = request.clone();
+        mismatch.content_json["content"][0]["content"][0]["text"] = json!("different private body");
+        assert!(matches!(
+            create_off_draft(&backend, RealtimeMode::Off, engine.clone(), mismatch).await,
+            Err(OffDraftCreateError::Body(BodySaveError::RequestMismatch))
+        ));
+        sqlx::query("UPDATE fvoci.sessions SET revoked_at=now() WHERE id=$1")
+            .bind(credential)
+            .execute(&admin)
+            .await
+            .unwrap();
+        assert!(matches!(
+            create_off_draft(&backend, RealtimeMode::Off, engine.clone(), request.clone()).await,
+            Err(OffDraftCreateError::Body(BodySaveError::Native(
+                CollabDbError::Forbidden
+            )))
+        ));
+        assert_eq!(observable(&admin, workspace).await, after);
+        sqlx::query("UPDATE fvoci.sessions SET revoked_at=NULL WHERE id=$1")
+            .bind(credential)
+            .execute(&admin)
+            .await
+            .unwrap();
+        assert_eq!(
+            create_off_draft(&backend, RealtimeMode::Off, engine, request)
+                .await
+                .unwrap()
+                .document
+                .id,
+            created.document.id
+        );
+        let source_state:(Value,i64,i64) = sqlx::query_as("SELECT content_json,(SELECT count(*) FROM fvoci.document_states WHERE workspace_id=$1 AND document_id=$2),(SELECT count(*) FROM fvoci.revisions WHERE workspace_id=$1 AND target_kind='document' AND target_id=$2) FROM fvoci.documents WHERE workspace_id=$1 AND id=$2")
+            .bind(workspace).bind(source).fetch_one(&admin).await.unwrap();
+        assert_eq!(
+            source_state,
+            (original, 0, 0),
+            "copy must not initialize, reseed or write original history"
+        );
+        app.close().await;
+        admin.close().await;
+        sqlx::query(&format!("DROP DATABASE \"{database}\""))
+            .execute(&admin_server)
+            .await
+            .unwrap();
+        sqlx::query(&format!("DROP ROLE \"{role}\""))
+            .execute(&admin_server)
+            .await
+            .unwrap();
+        admin_server.close().await;
     }
 }

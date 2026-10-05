@@ -63,6 +63,18 @@ const PROJECT_DOC: &str =
 pub fn router() -> Router<AppState> {
     Router::new()
         .route(
+            "/api/v1/workspaces/{workspace_id}/documents/from-draft",
+            post(create_wiki_from_draft).layer(axum::extract::DefaultBodyLimit::max(
+                DOCUMENT_MAX_BODY_BYTES + 4096,
+            )),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/from-draft",
+            post(create_project_from_draft).layer(axum::extract::DefaultBodyLimit::max(
+                DOCUMENT_MAX_BODY_BYTES + 4096,
+            )),
+        )
+        .route(
             &format!("{WS_DOC}/body/versioned"),
             get(get_versioned_body).put(save_versioned_body).layer(
                 axum::extract::DefaultBodyLimit::max(
@@ -1275,6 +1287,78 @@ async fn duplicate_by_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dedicated_draft_route_keeps_source_destination_parent_and_current_create_limits() {
+        let workspace = Uuid::now_v7();
+        let actor = Uuid::now_v7();
+        let credential = Uuid::now_v7();
+        let source = Uuid::now_v7();
+        let source_project = Uuid::now_v7();
+        let destination_project = Uuid::now_v7();
+        let parent = Uuid::now_v7();
+        let raw = serde_json::json!({"commandId":Uuid::now_v7(),"sourceKind":"document","sourceId":source,
+            "sourceProjectId":source_project,"parentId":parent,"title":" private 😀 ","contentJson":{"type":"doc","content":[]}});
+        let request = parse_off_draft_request(
+            workspace,
+            Some(destination_project),
+            actor,
+            credential,
+            serde_json::from_value(raw.clone()).unwrap(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(request.source.project_id(), Some(source_project));
+        assert_eq!(
+            request.source.target(),
+            crate::db::revisions::RevisionTarget::Document(source)
+        );
+        assert_eq!(request.destination_project, Some(destination_project));
+        assert_eq!(request.parent, Some(parent));
+        assert_eq!(request.title, "private 😀");
+        for change in ["parent", "kind", "task_project", "nil", "title", "ref"] {
+            let mut refused = raw.clone();
+            match change {
+                "parent" => {
+                    refused.as_object_mut().unwrap().remove("parentId");
+                }
+                "kind" => refused["sourceKind"] = serde_json::json!("unregistered"),
+                "task_project" => refused["sourceKind"] = serde_json::json!("task"),
+                "nil" => refused["commandId"] = serde_json::json!(Uuid::nil()),
+                "title" => refused["title"] = serde_json::json!("x".repeat(301)),
+                _ => {
+                    refused["contentJson"] = serde_json::json!({"type":"doc","content":[{"type":"attachment","attrs":{"id":"bad-ref"}}]})
+                }
+            }
+            assert!(
+                parse_off_draft_request(
+                    workspace,
+                    Some(destination_project),
+                    actor,
+                    credential,
+                    serde_json::from_value(refused).unwrap(),
+                    None
+                )
+                .is_err(),
+                "{change} cannot become implicit create rights or content"
+            );
+        }
+        let task = serde_json::json!({"commandId":Uuid::now_v7(),"sourceKind":"task","sourceId":source,"parentId":null,"title":"Task private copy","contentJson":{"type":"doc","content":[]}});
+        let parsed = parse_off_draft_request(
+            workspace,
+            None,
+            actor,
+            credential,
+            serde_json::from_value(task).unwrap(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.source.target(),
+            crate::db::revisions::RevisionTarget::Task(source)
+        );
+        assert_eq!(parsed.source.project_id(), None);
+        assert_eq!(parsed.destination_project, None);
+    }
 
     #[test]
     fn body_input_requires_exactly_one_field() {
@@ -1326,6 +1410,174 @@ fn require_off_writer(state: &AppState) -> Result<crate::collab::CollabConfig, D
     }
     state.native_engine.clone().ok_or_else(collab_unavailable)
 }
+async fn create_wiki_from_draft(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(workspace): Path<Uuid>,
+    body: Bytes,
+) -> Result<Response, DocumentApiError> {
+    create_from_draft_inner(&state, peer, &headers, &jar, workspace, None, &body).await
+}
+async fn create_project_from_draft(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace, project)): Path<(Uuid, Uuid)>,
+    body: Bytes,
+) -> Result<Response, DocumentApiError> {
+    create_from_draft_inner(
+        &state,
+        peer,
+        &headers,
+        &jar,
+        workspace,
+        Some(project),
+        &body,
+    )
+    .await
+}
+async fn create_from_draft_inner(
+    state: &AppState,
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+    workspace: Uuid,
+    destination_project: Option<Uuid>,
+    body: &[u8],
+) -> Result<Response, DocumentApiError> {
+    let engine = require_off_writer(state)?;
+    check_origin(headers, &state.public_origin)?;
+    let input: crate::api::dto::OffDraftCreateBody =
+        serde_json::from_slice(body).map_err(|_| invalid_body())?;
+    let actor = auth(
+        state,
+        headers,
+        jar,
+        ApiTokenScope::DocumentsWrite,
+        workspace,
+    )
+    .await?;
+    if input.source_kind == "task" {
+        let reader = auth(state, headers, jar, ApiTokenScope::TasksRead, workspace).await?;
+        if reader.user_id != actor.user_id || reader.credential_id != actor.credential_id {
+            return Err(AppError::from_code(ProblemCode::AuthenticationRequired).into());
+        }
+    }
+    let request = parse_off_draft_request(
+        workspace,
+        destination_project,
+        actor.user_id,
+        actor.credential_id,
+        input,
+        Some(peer_ip(peer.ip())),
+    )?;
+    revision_write_limit(state, actor.user_id).await?;
+    let created = crate::db::body_save::create_off_draft(
+        &state.auth.db.pool,
+        state.realtime_mode,
+        engine,
+        request,
+    )
+    .await
+    .map_err(map_off_draft_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(crate::api::dto::OffDraftCreateResponse {
+            document: meta_response(&created.document, true),
+            command_id: created.command_id,
+            tail_seq: created.tail_seq,
+            revision_id: created.revision_id,
+        }),
+    )
+        .into_response())
+}
+fn map_off_draft_error(error: crate::db::body_save::OffDraftCreateError) -> DocumentApiError {
+    use crate::db::body_save::{BodySaveError, OffDraftCreateError};
+    match error {
+        OffDraftCreateError::Body(BodySaveError::RequestMismatch) => coded(
+            StatusCode::CONFLICT,
+            "request_mismatch",
+            "creation command does not match the original request",
+        ),
+        OffDraftCreateError::Body(error) => map_versioned_body_error(error),
+        OffDraftCreateError::Document(error) => map_document_error(error),
+        OffDraftCreateError::Attachment(_) => AppError::from_code(ProblemCode::NotFound).into(),
+        OffDraftCreateError::RollbackUnconfirmed { original, cleanup } => {
+            tracing::warn!(%original,%cleanup,"OFF draft rollback unconfirmed");
+            coded(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "body_save_unconfirmed",
+                "body save is unconfirmed",
+            )
+        }
+    }
+}
+
+/// Dedicated creation contract; ordinary strict wiki/project create DTOs and
+/// their command/hash domains are unchanged. Destination project is the route,
+/// while source project belongs only to the currently authorized source scope.
+fn parse_off_draft_request(
+    workspace: Uuid,
+    destination_project: Option<Uuid>,
+    actor: Uuid,
+    credential: Uuid,
+    body: crate::api::dto::OffDraftCreateBody,
+    client_ip: Option<String>,
+) -> Result<crate::db::body_save::OffDraftCreateRequest, DocumentApiError> {
+    use crate::api::dto::RequiredNullable;
+    use crate::db::revisions::{RevisionScope, RevisionTarget};
+    let parent = match body.parent_id {
+        RequiredNullable::Missing => {
+            return Err(AppError::from_code(ProblemCode::InvalidInput).into())
+        }
+        RequiredNullable::Null => None,
+        RequiredNullable::Value(id) => Some(id),
+    };
+    let source = match (body.source_kind.as_str(), body.source_project_id) {
+        ("document", Some(project)) if !project.is_nil() => {
+            RevisionScope::project_document(project, body.source_id)
+        }
+        ("document", None) => RevisionTarget::Document(body.source_id).into(),
+        ("task", None) => RevisionTarget::Task(body.source_id).into(),
+        _ => return Err(invalid_body()),
+    };
+    let title = body.title.trim();
+    let icon = body.icon.flatten();
+    if body.command_id.is_nil()
+        || body.source_id.is_nil()
+        || parent.is_some_and(|id| id.is_nil())
+        || destination_project.is_some_and(|id| id.is_nil())
+        || !crate::db::documents::title_is_valid(title)
+        || icon
+            .as_ref()
+            .is_some_and(|icon| !crate::db::documents::icon_is_valid(icon))
+    {
+        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+    }
+    crate::collab::derived_body::extract_stored_attachment_refs(&body.content_json).map_err(
+        |error| match error {
+            DerivedBodyError::TooLarge => too_large(),
+            DerivedBodyError::InvalidDocumentBody(_) => invalid_body(),
+        },
+    )?;
+    Ok(crate::db::body_save::OffDraftCreateRequest {
+        workspace,
+        source,
+        destination_project,
+        parent,
+        actor,
+        credential,
+        command: body.command_id,
+        title: title.to_string(),
+        icon,
+        content_json: body.content_json,
+        client_ip,
+    })
+}
+
 fn parse_body_tail(value: &str) -> Option<i64> {
     if value.is_empty()
         || (value.len() > 1 && value.starts_with('0'))

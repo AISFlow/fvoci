@@ -1,6 +1,11 @@
 import * as Y from "yjs";
 import { yDocToTiptapJson } from "@fvoci/editor/collab-tiptap";
+import { independentDraftBody } from "@fvoci/editor/extract";
+import { createFvociExtensions } from "@fvoci/editor/tiptap-schema";
+import { isTiptapDoc } from "@fvoci/editor/json";
+import { z } from "zod";
 import type { BodySaveCommand, BodySaveResult, VersionedBody } from "./versioned-body-api";
+import type { OffDraftCreateBody, OffDraftCreateResponse } from "./document-api";
 
 export type OffWikiOwner = {
   actorId: string;
@@ -11,6 +16,15 @@ export type OffWikiOwner = {
   kind?: "document" | "task";
 };
 type FrozenSave = { command: BodySaveCommand; snapshot: string };
+export type DraftDestination = {
+  projectId: string | null;
+  parentId: string | null;
+  title: string;
+  icon?: string | null;
+};
+type FrozenDistinct = { projectId: string | null; body: OffDraftCreateBody };
+const liveUuid = (value: unknown) =>
+  z.string().uuid().safeParse(value).success && value !== "00000000-0000-0000-0000-000000000000";
 type StoredDraft = {
   format: 1;
   owner: OffWikiOwner;
@@ -18,6 +32,7 @@ type StoredDraft = {
   mine: string;
   acknowledged: string;
   frozen: FrozenSave | null;
+  distinct?: FrozenDistinct | null;
   conflictBackup?: StoredDraft | null;
   comparison?: { start: unknown; mine: unknown; current: unknown } | null;
   sourceBuffer?: { text: string; baseV1: string } | null;
@@ -74,9 +89,11 @@ export class OffWikiDraft {
   private conflictBackup: StoredDraft | null = null;
   sourceBuffer: { text: string; baseV1: string } | null = null;
   frozen: FrozenSave | null = null;
+  distinct: FrozenDistinct | null = null;
   private acknowledged: string;
   private retired = false;
   saving = false;
+  creating = false;
   storageError: unknown = null;
   constructor(
     readonly owner: OffWikiOwner,
@@ -139,12 +156,31 @@ export class OffWikiDraft {
           }
           if (saved.conflictBackup && ownerKey(saved.conflictBackup.owner) !== ownerKey(owner))
             throw new Error("Conflict draft owner mismatch");
+          if (saved.distinct) {
+            const request = saved.distinct.body;
+            if (
+              !liveUuid(request?.commandId) ||
+              request.sourceId !== owner.targetId ||
+              request.sourceKind !== (owner.kind ?? "document") ||
+              (request.sourceProjectId ?? null) !==
+                (owner.kind === "task" ? null : (owner.projectId ?? null)) ||
+              !isTiptapDoc(request.contentJson) ||
+              new TextEncoder().encode(JSON.stringify(request.contentJson)).length > 1024 * 1024 ||
+              typeof request.title !== "string" ||
+              (request.parentId !== null &&
+                !z.string().uuid().safeParse(request.parentId).success) ||
+              (saved.distinct.projectId !== null &&
+                !z.string().uuid().safeParse(saved.distinct.projectId).success)
+            )
+              throw new Error("Distinct draft command owner/input mismatch");
+          }
           // Replace the just-created reader, never an already edited document.
           this.doc.destroy();
           this.doc = old;
           this.start = { ...saved.start, writable: current.writable };
           this.acknowledged = saved.acknowledged;
           this.frozen = saved.frozen;
+          this.distinct = saved.distinct ?? null;
           this.conflictBackup = saved.conflictBackup ?? null;
           this.comparison = saved.comparison ?? null;
           this.sourceBuffer = saved.sourceBuffer ?? null;
@@ -177,14 +213,20 @@ export class OffWikiDraft {
     return yDocToTiptapJson(this.doc);
   }
   get durable(): boolean {
-    return !this.dirty && !this.frozen && !this.latest && !this.sourceBuffer;
+    return !this.dirty && !this.frozen && !this.distinct && !this.latest && !this.sourceBuffer;
   }
   get active(): boolean {
     return !this.retired;
   }
   get hasPrivateState(): boolean {
-    return this.dirty || !!this.frozen || !!this.latest ||
-      !!this.conflictBackup || !!this.sourceBuffer;
+    return (
+      this.dirty ||
+      !!this.frozen ||
+      !!this.distinct ||
+      !!this.latest ||
+      !!this.conflictBackup ||
+      !!this.sourceBuffer
+    );
   }
   /** A confirmed operation may be followed by a fresh authorized read while
    * typing continues. Keep the live native draft even when storage refused it.
@@ -193,12 +235,19 @@ export class OffWikiDraft {
     if (this.retired || current.targetId !== this.owner.targetId) return;
     const reader = loadBody(current, this.owner.targetId);
     let snapshot: string;
-    try { snapshot = encodeUpdate(Y.encodeStateAsUpdate(reader)); }
-    finally { reader.destroy(); }
+    try {
+      snapshot = encodeUpdate(Y.encodeStateAsUpdate(reader));
+    } finally {
+      reader.destroy();
+    }
     this.start = { ...this.start, writable: current.writable };
     if (current.tailSeq !== this.start.tailSeq || snapshot !== this.acknowledged) {
       this.latest = current;
-      this.comparison = { start:this.start.contentJson, mine:this.mine, current:current.contentJson };
+      this.comparison = {
+        start: this.start.contentJson,
+        mine: this.mine,
+        current: current.contentJson,
+      };
     }
     this.persist();
     this.changed();
@@ -206,7 +255,14 @@ export class OffWikiDraft {
   persist(): void {
     if (this.retired || !this.storage) return;
     try {
-      if (!this.dirty && !this.frozen && !this.latest && !this.conflictBackup && !this.sourceBuffer)
+      if (
+        !this.dirty &&
+        !this.frozen &&
+        !this.distinct &&
+        !this.latest &&
+        !this.conflictBackup &&
+        !this.sourceBuffer
+      )
         this.storage.removeItem(ownerKey(this.owner));
       else
         this.storage.setItem(
@@ -218,6 +274,7 @@ export class OffWikiDraft {
             mine: encodeUpdate(Y.encodeStateAsUpdate(this.doc)),
             acknowledged: this.acknowledged,
             frozen: this.frozen,
+            distinct: this.distinct,
             conflictBackup: this.conflictBackup,
             comparison: this.comparison,
             sourceBuffer: this.sourceBuffer,
@@ -229,7 +286,7 @@ export class OffWikiDraft {
     }
   }
   async save(send: (command: BodySaveCommand) => Promise<BodySaveResult>): Promise<boolean> {
-    if (this.retired || this.saving || (this.latest && !this.frozen)) return false;
+    if (this.retired || this.saving || this.creating || (this.latest && !this.frozen)) return false;
     if (!this.start.writable) return false;
     if (!this.dirty && !this.frozen) return this.durable;
     if (!this.frozen) {
@@ -289,6 +346,69 @@ export class OffWikiDraft {
       if (!this.retired) this.changed();
     }
   }
+  async createDistinct(
+    destination: DraftDestination,
+    send: (body: OffDraftCreateBody, projectId: string | null) => Promise<OffDraftCreateResponse>,
+  ): Promise<OffDraftCreateResponse | null> {
+    if (this.retired || this.saving || this.creating || (this.sourceBuffer && !this.distinct))
+      return null;
+    if (!this.distinct) {
+      const title = destination.title.trim();
+      if (
+        !title ||
+        title.length > 300 ||
+        (destination.icon != null && destination.icon.length > 50)
+      )
+        throw new Error("Invalid document title or icon");
+      this.distinct = {
+        projectId: destination.projectId,
+        body: {
+          commandId: this.commandId(),
+          sourceKind: this.owner.kind ?? "document",
+          sourceId: this.owner.targetId,
+          sourceProjectId: this.owner.kind === "task" ? null : (this.owner.projectId ?? null),
+          parentId: destination.parentId,
+          title,
+          icon: destination.icon,
+          contentJson: independentDraftBody(this.mine, createFvociExtensions()),
+        },
+      };
+      this.persist();
+    }
+    const pending = this.distinct;
+    this.creating = true;
+    this.changed();
+    try {
+      const result = await send(pending.body, pending.projectId);
+      if (this.retired) return null;
+      if (
+        result.commandId !== pending.body.commandId ||
+        result.tailSeq !== "1" ||
+        !liveUuid(result.document?.id) ||
+        result.document.id === this.owner.targetId ||
+        result.document.workspaceId !== this.owner.workspaceId ||
+        (result.document.projectId ?? null) !== pending.projectId ||
+        result.document.parentId !== pending.body.parentId ||
+        !liveUuid(result.revisionId)
+      )
+        throw new Error("Unmatched distinct document acknowledgment");
+      // Copying mine never replaces, advances or clears the original draft.
+      this.distinct = null;
+      this.persist();
+      return result;
+    } finally {
+      this.creating = false;
+      if (!this.retired) this.changed();
+    }
+  }
+  distinctRefused(commandId: string): void {
+    if (this.retired || this.distinct?.body.commandId !== commandId) return;
+    // Only a definite validated-input refusal supplied by the controller.
+    // Mine/history remain private; the next deliberate submit is a new intent.
+    this.distinct = null;
+    this.persist();
+    this.changed();
+  }
   private snapshotDoc(snapshot: string): Y.Doc {
     const doc = new Y.Doc({ gc: false });
     Y.applyUpdate(doc, decodeUpdate(snapshot));
@@ -310,7 +430,7 @@ export class OffWikiDraft {
     this.changed();
   }
   editCurrent(): void {
-    if (this.retired || !this.latest || this.saving) return;
+    if (this.retired || !this.latest || this.saving || this.creating) return;
     const fresh = loadBody(this.latest, this.owner.targetId);
     this.conflictBackup = {
       format: 1,

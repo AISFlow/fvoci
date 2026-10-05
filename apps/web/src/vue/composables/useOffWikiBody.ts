@@ -7,7 +7,9 @@ import {
   loadBody,
   ownerKey,
   type OffWikiOwner,
+  type DraftDestination,
 } from "@/features/documents/off-wiki-draft";
+import { createDocumentFromDraft } from "@/features/documents/document-api";
 import { readVersionedBody, saveVersionedBody } from "@/features/documents/versioned-body-api";
 import { ProblemError } from "@/lib/api";
 import { sourceDraftAuthRetiredKey } from "./useSourceDraftGuard";
@@ -71,7 +73,11 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
         /* The editor still retains its in-memory draft. */
       }
       const mounted = draft.value;
-      if (mounted?.active && ownerKey(mounted.owner) === ownerKey(scope) && mounted.hasPrivateState) {
+      if (
+        mounted?.active &&
+        ownerKey(mounted.owner) === ownerKey(scope) &&
+        mounted.hasPrivateState
+      ) {
         // Preserve the actual owned in-memory draft, including edits made after
         // the read started. Reconstructing from storage can lose a quota-denied
         // edit or an unavailable-storage source buffer/unknown command.
@@ -101,7 +107,8 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
   onScopeDispose(retire);
   function beforeUnload(event: Event) {
     const current = draft.value;
-    if (current?.storageError && (current.dirty || current.sourceBuffer)) event.preventDefault();
+    if (current?.storageError && (current.dirty || current.sourceBuffer || current.distinct))
+      event.preventDefault();
   }
   if (typeof window !== "undefined") window.addEventListener("beforeunload", beforeUnload);
   onScopeDispose(() => {
@@ -164,6 +171,45 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
       return false;
     }
   }
+  async function createDistinct(destination: DraftDestination) {
+    const current = draft.value;
+    const started = lifetime;
+    if (!current || authRetired.value || !enabled()) return null;
+    error.value = null;
+    try {
+      const result = await current.createDistinct(destination, (body, projectId) =>
+        createDocumentFromDraft(current.owner.workspaceId, projectId, body, abort?.signal),
+      );
+      if (started !== lifetime || draft.value !== current || !current.active || authRetired.value)
+        return null;
+      return result;
+    } catch (failure) {
+      if (started !== lifetime || draft.value !== current || !current.active) return null;
+      error.value = failure;
+      if (
+        failure instanceof ProblemError &&
+        ((failure.status === 400 &&
+          [
+            "invalid_input",
+            "invalid_document_body",
+            "tree_depth_limit",
+            "document_affiliation_mismatch",
+          ].includes(failure.code ?? "")) ||
+          (failure.status === 413 &&
+            failure.code === "document_body_exceeds_document_max_body_bytes"))
+      ) {
+        const commandId = current.distinct?.body.commandId;
+        if (commandId) current.distinctRefused(commandId);
+      }
+      if (failure instanceof ProblemError && [401, 403, 404].includes(failure.status)) {
+        current.retire();
+        draft.value = null;
+        generation.value++;
+      }
+      // Unknown finish has no fresh-observer recovery: retry the frozen command.
+      return null;
+    }
+  }
   function editCurrent() {
     draft.value?.editCurrent();
     generation.value++;
@@ -213,6 +259,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     loading,
     load,
     save,
+    createDistinct,
     editCurrent,
     verifyCommitted,
     doc: value((current) => current.doc, null),
@@ -220,6 +267,8 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     dirty: value((current) => current.dirty, false),
     durable: value((current) => current.durable, false),
     saving: value((current) => current.saving, false),
+    creating: value((current) => current.creating, false),
+    pendingDistinct: value((current) => current.distinct, null),
     conflict: value((current) => current.latest, null),
     comparison: value((current) => current.comparison, null),
     storageError: value((current) => current.storageError, null),

@@ -9,13 +9,15 @@ use crate::api::documents_dto::{
     SaveVersionedBodyInput, SaveVersionedBodyResponse, VersionedBodyResponse,
 };
 use crate::api::dto::{
-    AncestorsResponse, DocumentMetaResponse, OkResponse, PatchDocumentBody, ProblemResponse,
-    TreeResponse,
+    AncestorsResponse, DocumentMetaResponse, OffDraftCreateBody, OffDraftCreateResponse,
+    OkResponse, PatchDocumentBody, ProblemResponse, TreeResponse,
 };
 
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        create_from_draft,
+        create_project_from_draft,
         read_versioned_body,
         save_versioned_body,
         read_project_versioned_body,
@@ -37,6 +39,8 @@ use crate::api::dto::{
         duplicate_by_id,
     ),
     components(schemas(
+        OffDraftCreateBody,
+        OffDraftCreateResponse,
         SaveVersionedBodyInput,
         SaveVersionedBodyResponse,
         VersionedBodyResponse,
@@ -51,6 +55,34 @@ use crate::api::dto::{
     ))
 )]
 pub struct DocumentsApiDoc;
+
+#[utoipa::path(
+    post,path="/api/v1/workspaces/{workspace_id}/documents/from-draft",tag="documents",
+    security(("fvoci_session"=[]),("bearer_api_token"=["documents.write"])),
+    params(("workspace_id"=String,description="Workspace id")),request_body=OffDraftCreateBody,
+    responses((status=201,description="Confirmed independent OFF draft document or exact command replay",body=OffDraftCreateResponse),
+        (status=400,description="Invalid draft or OFF mode required",body=ProblemResponse),
+        (status=401,description="Authentication required",body=ProblemResponse),
+        (status=404,description="Current source/destination/reference access refused",body=ProblemResponse),
+        (status=409,description="Creation command binding mismatch",body=ProblemResponse),
+        (status=413,description="Body limit exceeded",body=ProblemResponse),
+        (status=503,description="Native unavailable or finish unconfirmed; retry exact command",body=ProblemResponse))
+)]
+fn create_from_draft() {}
+
+#[utoipa::path(
+    post,path="/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/from-draft",tag="documents",
+    security(("fvoci_session"=[]),("bearer_api_token"=["documents.write"])),
+    params(("workspace_id"=String,description="Workspace id"),("project_id"=String,description="Destination project id")),request_body=OffDraftCreateBody,
+    responses((status=201,description="Confirmed independent OFF draft document or exact command replay",body=OffDraftCreateResponse),
+        (status=400,description="Invalid draft or OFF mode required",body=ProblemResponse),
+        (status=401,description="Authentication required",body=ProblemResponse),
+        (status=404,description="Current source/destination/reference access refused",body=ProblemResponse),
+        (status=409,description="Creation command binding mismatch",body=ProblemResponse),
+        (status=413,description="Body limit exceeded",body=ProblemResponse),
+        (status=503,description="Native unavailable or finish unconfirmed; retry exact command",body=ProblemResponse))
+)]
+fn create_project_from_draft() {}
 
 #[utoipa::path(
     put,

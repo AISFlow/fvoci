@@ -18,9 +18,16 @@ import type {
   BodySaveResult,
   VersionedBody,
 } from "../../features/documents/versioned-body-api";
+import type {
+  OffDraftCreateBody,
+  OffDraftCreateResponse,
+} from "../../features/documents/document-api";
 
 class ProblemError extends Error {
-  constructor(readonly status: number) {
+  constructor(
+    readonly status: number,
+    readonly code?: string,
+  ) {
     super(String(status));
   }
 }
@@ -79,6 +86,11 @@ function harness() {
     pending: ReturnType<typeof deferred<BodySaveResult>>;
   }[] = [];
   const slots = new Map<string, string>();
+  const creates: {
+    body: OffDraftCreateBody;
+    projectId: string | null;
+    pending: ReturnType<typeof deferred<OffDraftCreateResponse>>;
+  }[] = [];
   const effects = Vue.effectScope();
   const factory = runInNewContext(`${script}\nuseOffWikiBody`, {
     ...Vue,
@@ -123,6 +135,15 @@ function harness() {
       writes.push({ command, projectId, kind, pending });
       return pending.promise;
     },
+    createDocumentFromDraft: (
+      _workspace: string,
+      projectId: string | null,
+      body: OffDraftCreateBody,
+    ) => {
+      const pending = deferred<OffDraftCreateResponse>();
+      creates.push({ body, projectId, pending });
+      return pending.promise;
+    },
   }) as typeof import("./useOffWikiBody").useOffWikiBody;
   const body = effects.run(() =>
     factory(
@@ -130,9 +151,163 @@ function harness() {
       () => enabled.value,
     ),
   )!;
-  return { body, reads, writes, scope, enabled, authRetired, effects, slots };
+  return { body, reads, writes, creates, scope, enabled, authRetired, effects, slots };
 }
 describe("OFF wiki HTTP lifetime", () => {
+  test("distinct creation unknown finish has no observer and retries exact body while keeping mine", async () => {
+    const h = harness();
+    h.reads[0]!.pending.resolve(source(original));
+    await settle();
+    const first = h.body.createDistinct({ projectId: null, parentId: null, title: "copy" });
+    h.creates[0]!.pending.reject(new ProblemError(503));
+    expect(await first).toBeNull();
+    expect(h.reads).toHaveLength(1);
+    const retry = h.body.createDistinct({ projectId: null, parentId: null, title: "form changed" });
+    expect(h.creates[1]!.body).toBe(h.creates[0]!.body);
+    const captured = h.creates[1]!.body;
+    h.creates[1]!.pending.resolve({
+      commandId: captured.commandId,
+      tailSeq: "1",
+      revisionId: "33333333-3333-4333-8333-333333333333",
+      document: {
+        id: "22222222-2222-4222-8222-222222222222",
+        workspaceId: original.workspaceId,
+        parentId: null,
+        projectId: null,
+      },
+    } as OffDraftCreateResponse);
+    expect((await retry)?.document.id).toBe("22222222-2222-4222-8222-222222222222");
+    expect(h.reads).toHaveLength(1);
+    expect(h.body.draft.value?.start.tailSeq).toBe("0");
+    h.effects.stop();
+  });
+  test("definite copy input refusal permits a corrected new logical request without erasing mine or observing commit", async () => {
+    for (const status of [400, 413]) {
+      const h = harness();
+      h.reads[0]!.pending.resolve(source(original));
+      await settle();
+      const draft = h.body.draft.value!;
+      const paragraph = draft.doc.getXmlFragment("prosemirror").get(0) as Y.XmlElement;
+      (paragraph.get(0) as Y.XmlText).insert(0, "private mine ");
+      const refused = h.body.createDistinct({
+        projectId: null,
+        parentId: null,
+        title: "refused copy",
+      });
+      const oldCommand = h.creates[0]!.body.commandId;
+      h.creates[0]!.pending.reject(
+        new ProblemError(
+          status,
+          status === 400 ? "invalid_input" : "document_body_exceeds_document_max_body_bytes",
+        ),
+      );
+      expect(await refused).toBeNull();
+      expect(h.body.draft.value).toBe(draft);
+      expect(h.body.pendingDistinct.value).toBeNull();
+      expect(JSON.stringify(draft.mine)).toContain("private mine");
+      expect(h.reads).toHaveLength(1);
+      const next = h.body.createDistinct({
+        projectId: null,
+        parentId: null,
+        title: "corrected copy",
+      });
+      expect(h.creates[1]!.body.commandId).not.toBe(oldCommand);
+      expect(h.creates[1]!.body.title).toBe("corrected copy");
+      h.creates[1]!.pending.reject(new ProblemError(503));
+      await next;
+      expect(h.body.pendingDistinct.value?.body.commandId).toBe(h.creates[1]!.body.commandId);
+      h.effects.stop();
+    }
+  });
+  test("untyped HTTP input status cannot discard an unknown copy binding", async () => {
+    const h = harness();
+    h.reads[0]!.pending.resolve(source(original));
+    await settle();
+    const first = h.body.createDistinct({ projectId: null, parentId: null, title: "captured" });
+    const captured = h.creates[0]!.body;
+    h.creates[0]!.pending.reject(new ProblemError(400));
+    await first;
+    expect(h.body.pendingDistinct.value?.body.commandId).toBe(captured.commandId);
+    const retry = h.body.createDistinct({
+      projectId: null,
+      parentId: null,
+      title: "different form",
+    });
+    expect(h.creates[1]!.body).toBe(captured);
+    h.creates[1]!.pending.reject(new ProblemError(503));
+    await retry;
+    expect(h.reads).toHaveLength(1);
+    h.effects.stop();
+  });
+  test("current copy denial hides private mine and frozen command until fresh same-owner authorization", async () => {
+    for (const status of [401, 403, 404]) {
+      const h = harness();
+      h.reads[0]!.pending.resolve(source(original));
+      await settle();
+      const draft = h.body.draft.value!;
+      const paragraph = draft.doc.getXmlFragment("prosemirror").get(0) as Y.XmlElement;
+      (paragraph.get(0) as Y.XmlText).insert(0, "owned secret ");
+      const pending = h.body.createDistinct({
+        projectId: null,
+        parentId: null,
+        title: "private copy",
+      });
+      const command = h.creates[0]!.body;
+      h.creates[0]!.pending.reject(new ProblemError(status));
+      expect(await pending).toBeNull();
+      expect(h.body.doc.value).toBeNull();
+      expect(h.body.pendingDistinct.value).toBeNull();
+      expect(h.reads).toHaveLength(1);
+      expect(h.slots.has(ownerKey(original))).toBe(true);
+      h.scope.value = null;
+      h.scope.value = { ...original };
+      const fresh = h.reads.at(-1)!;
+      expect(h.body.doc.value).toBeNull();
+      fresh.pending.resolve(source(original));
+      await settle();
+      expect(JSON.stringify(h.body.draft.value!.mine)).toContain("owned secret");
+      const retry = h.body.createDistinct({
+        projectId: null,
+        parentId: null,
+        title: "changed title",
+      });
+      expect(h.creates[1]!.body).toEqual(command);
+      h.creates[1]!.pending.reject(new ProblemError(503));
+      await retry;
+      h.effects.stop();
+    }
+  });
+  test("late distinct creation callback cannot expose a result to a new actor and normal requests still progress", async () => {
+    const h = harness();
+    h.reads[0]!.pending.resolve(source(original));
+    await settle();
+    const first = h.body.createDistinct({ projectId: null, parentId: null, title: "private A" });
+    const captured = h.creates[0]!.body;
+    h.scope.value = { ...original, actorId: "B", credentialId: "session-B" };
+    const fresh = h.reads.at(-1)!;
+    fresh.pending.resolve(source(fresh.scope, "B body"));
+    await settle();
+    h.creates[0]!.pending.resolve({
+      commandId: captured.commandId,
+      tailSeq: "1",
+      revisionId: "33333333-3333-4333-8333-333333333333",
+      document: {
+        id: "22222222-2222-4222-8222-222222222222",
+        workspaceId: original.workspaceId,
+        parentId: null,
+        projectId: null,
+      },
+    } as OffDraftCreateResponse);
+    expect(await first).toBeNull();
+    expect(JSON.stringify(h.body.draft.value?.mine)).toContain("B body");
+    expect(h.body.pendingDistinct.value).toBeNull();
+    const next = h.body.createDistinct({ projectId: null, parentId: null, title: "B copy" });
+    expect(h.creates[1]!.body.commandId).not.toBe(captured.commandId);
+    h.creates[1]!.pending.reject(new ProblemError(503));
+    await next;
+    expect(h.body.doc.value).not.toBeNull();
+    h.effects.stop();
+  });
   test("unknown/ON mode starts no read and mode enable loads the actual target", async () => {
     const h = harness();
     h.enabled.value = false;

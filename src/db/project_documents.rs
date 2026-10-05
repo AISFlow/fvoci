@@ -460,6 +460,153 @@ pub async fn create_project_document(
     }
 }
 
+/// The exact existing project-create authority/parent policy, borrowed for both
+/// first creation and a stable draft receipt replay; never starts or finishes a tx.
+pub(crate) async fn authorize_project_draft_parent(
+    op: &mut OperationTx<'_, '_>,
+    workspace: Uuid,
+    project: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    parent: Option<Uuid>,
+) -> Result<Result<String, DocumentDbError>, sqlx::Error> {
+    op.set_tenant(workspace).await?;
+    op.lock_membership_users(&[actor]).await?;
+    if !op.recheck_session(actor, credential).await? {
+        return Ok(Err(DocumentDbError::Forbidden));
+    }
+    op.lock_tree(workspace).await?;
+    if !op.workspace_is_live(workspace).await? {
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+    match op {
+        OperationTx::Postgres(tx) => {
+            if let Err(error) = require_project_document_access(
+                tx,
+                workspace,
+                actor,
+                credential,
+                project,
+                ProjectPermission::Edit,
+                true,
+            )
+            .await?
+            {
+                return Ok(Err(error));
+            }
+        }
+        OperationTx::SqliteFamily(_) => {
+            let Some((permission, archived)) = op
+                .share_lock_project_permission(workspace, actor, project)
+                .await?
+            else {
+                return Ok(Err(DocumentDbError::NotFound));
+            };
+            if archived || !permission.at_least(ProjectPermission::Edit) {
+                return Ok(Err(DocumentDbError::NotFound));
+            }
+            if !op.recheck_session(actor, credential).await? {
+                return Ok(Err(DocumentDbError::Forbidden));
+            }
+        }
+    }
+    let Some(parent) = parent else {
+        return Ok(Err(DocumentDbError::NotFound));
+    };
+    let Some((affiliation, parent_path, deleted)) = op.wiki_parent(workspace, parent).await? else {
+        return Ok(Err(DocumentDbError::NotFound));
+    };
+    if affiliation != Some(project) {
+        return Ok(Err(DocumentDbError::AffiliationMismatch));
+    }
+    if deleted.is_some() {
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+    if depth_of(&parent_path) >= MAX_TREE_DEPTH {
+        return Ok(Err(DocumentDbError::DepthLimit));
+    }
+    Ok(Ok(parent_path))
+}
+
+/// Dedicated borrowed creator for the stable OFF draft command. The caller
+/// owns the command ledger, native body/revision effects and single finish.
+/// Ordinary project create keeps its original public body and PG wrapper.
+pub(crate) async fn create_project_document_operation(
+    op: &mut OperationTx<'_, '_>,
+    workspace: Uuid,
+    project: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    input: CreateDocumentInput<'_>,
+    ip: Option<&str>,
+) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+    let parent_path = match authorize_project_draft_parent(
+        op,
+        workspace,
+        project,
+        actor,
+        credential,
+        input.parent_id,
+    )
+    .await?
+    {
+        Ok(path) => path,
+        Err(error) => return Ok(Err(error)),
+    };
+    let parent = input.parent_id.ok_or(sqlx::Error::Protocol(
+        "authorized project parent is absent".into(),
+    ))?;
+    let last = op.last_wiki_sort_key(workspace, Some(parent)).await?;
+    let sort = match between(last.as_deref(), None) {
+        Ok(value) => value,
+        Err(_) => return Ok(Err(DocumentDbError::InvalidSortKey)),
+    };
+    let document = Uuid::now_v7();
+    let path = format!(
+        "{}.{}",
+        parent_path,
+        crate::db::documents::to_path_label(document)
+    );
+    let icon = input.icon.flatten();
+    let body = empty_document_json();
+    let key = match op {
+        OperationTx::Postgres(tx) => {
+            let number:i32 = sqlx::query_scalar("UPDATE fvoci.projects SET next_number=next_number+1,updated_at=now() WHERE workspace_id=$1 AND id=$2 RETURNING next_number-1")
+                .bind(workspace).bind(project).fetch_one(&mut ***tx).await?;
+            sqlx::query("INSERT INTO fvoci.documents(id,workspace_id,title,icon,path,parent_id,sort_key,project_id,number,status,schema_version,content_json,created_by,kind) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'draft',$10,$11,$12,'doc')")
+                .bind(document).bind(workspace).bind(input.title).bind(icon).bind(&path).bind(parent).bind(&sort).bind(project).bind(number).bind(DOCUMENT_SCHEMA_VERSION).bind(&body).bind(actor).execute(&mut ***tx).await?;
+            project_key(tx, workspace, project)
+                .await?
+                .ok_or(sqlx::Error::RowNotFound)?
+        }
+        OperationTx::SqliteFamily(tx) => {
+            tx.require_writer()?;
+            tx.require_tenant(workspace)?;
+            let rows = tx.query("UPDATE projects SET next_number=next_number+1,updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE workspace_id=?1 AND id=?2 AND next_number<2147483647 RETURNING next_number-1,key", &[Cell::uuid(workspace),Cell::uuid(project)]).await?;
+            let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+            let number = row.cell(0)?.int32()?;
+            let key = row.cell(1)?.string()?;
+            tx.execute("INSERT INTO documents(id,workspace_id,title,icon,path,parent_id,sort_key,project_id,number,status,schema_version,content_json,created_by,kind) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'draft',?10,?11,?12,'doc')",
+                &[Cell::uuid(document),Cell::uuid(workspace),Cell::text(input.title),Cell::optional_text(icon),Cell::text(path),Cell::uuid(parent),Cell::text(sort),Cell::uuid(project),Cell::Integer(i64::from(number)),Cell::Integer(i64::from(DOCUMENT_SCHEMA_VERSION)),Cell::json(&body)?,Cell::uuid(actor)]).await?;
+            key
+        }
+    };
+    op.record_document_event_and_audit(
+        workspace,
+        actor,
+        "document.created",
+        document,
+        json!({"documentId":document,"parentId":parent,"title":input.title,"projectId":project}),
+        ip,
+    )
+    .await?;
+    let row = op
+        .document_row(workspace, document)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)?;
+    Ok(Ok(with_project_display_id(row_to_meta(row, true), &key)))
+}
+
 pub async fn get_project_document(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1177,6 +1324,342 @@ pub async fn reorder_project_document(
             &project_key,
         ))),
         None => Ok(Err(DocumentDbError::NotFound)),
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod off_draft_borrowed_create_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+
+    #[tokio::test]
+    async fn project_draft_creator_keeps_current_parent_policy_and_rolls_back_same_fk_failure() {
+        let f = Fixture::new().await;
+        let credential = Uuid::now_v7();
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,9223372036854775807)")
+            .bind(credential.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(credential.to_string()).execute(&f.pool).await.unwrap();
+        let (_, task) = f.task_attachment().await;
+        let project: Vec<u8> = sqlx::query_scalar("SELECT project_id FROM tasks WHERE id=?1")
+            .bind(task.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        let project = Uuid::from_slice(&project).unwrap();
+        // A populated project parent; keep its existing number namespace.
+        sqlx::query("UPDATE documents SET project_id=?1 WHERE id=?2")
+            .bind(project.as_bytes().as_slice())
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET next_number=2 WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let before: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM events), (SELECT count(*) FROM audit_log)",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        let input = CreateDocumentInput {
+            parent_id: Some(f.document),
+            title: "independent 😀",
+            icon: Some(Some("📄")),
+        };
+        let mut tx = f.backend.begin_off_body().await.unwrap();
+        let staged = create_project_document_operation(
+            &mut tx.operation(),
+            f.workspace,
+            project,
+            f.user,
+            credential,
+            input,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(staged.project_id, Some(project));
+        assert_eq!(staged.parent_id, Some(f.document));
+        assert_eq!(staged.number, 2);
+        let OperationTx::SqliteFamily(writer) = tx.operation() else {
+            panic!("actual family writer")
+        };
+        let error = writer
+            .execute(
+                "UPDATE documents SET parent_id=?1 WHERE workspace_id=?2 AND id=?3",
+                &[
+                    Cell::uuid(Uuid::now_v7()),
+                    Cell::uuid(f.workspace),
+                    Cell::uuid(staged.id),
+                ],
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("FOREIGN KEY"),
+            "actual same-writer FK refusal: {error}"
+        );
+        tx.rollback().await.unwrap();
+        let absent: i64 = sqlx::query_scalar("SELECT count(*) FROM documents WHERE id=?1")
+            .bind(staged.id.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(absent, 0);
+        let number: i64 = sqlx::query_scalar("SELECT next_number FROM projects WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(number, 2);
+        let after_rollback: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM events), (SELECT count(*) FROM audit_log)",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            after_rollback, before,
+            "same FK refusal rolls back the creator outbox and audit too"
+        );
+        let mut tx = f.backend.begin_off_body().await.unwrap();
+        let healthy = create_project_document_operation(
+            &mut tx.operation(),
+            f.workspace,
+            project,
+            f.user,
+            credential,
+            CreateDocumentInput {
+                parent_id: Some(f.document),
+                title: "independent 😀",
+                icon: Some(Some("📄")),
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(healthy.number, 2);
+        assert!(healthy
+            .display_id
+            .as_ref()
+            .is_some_and(|id| id.ends_with("-2")));
+        assert_eq!(healthy.title, "independent 😀");
+        assert_eq!(healthy.icon.as_deref(), Some("📄"));
+        tx.commit_with_cleanup().await.unwrap();
+        let after_healthy: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM events), (SELECT count(*) FROM audit_log)",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(after_healthy, (before.0 + 1, before.1 + 1));
+        let mut denied = f.backend.begin_off_body().await.unwrap();
+        assert!(matches!(
+            create_project_document_operation(
+                &mut denied.operation(),
+                f.workspace,
+                project,
+                f.user,
+                credential,
+                CreateDocumentInput {
+                    parent_id: None,
+                    title: "must not create",
+                    icon: None
+                },
+                None
+            )
+            .await
+            .unwrap(),
+            Err(DocumentDbError::NotFound)
+        ));
+        denied.rollback().await.unwrap();
+        sqlx::query("UPDATE projects SET status='archived' WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let mut denied = f.backend.begin_off_body().await.unwrap();
+        assert!(matches!(
+            create_project_document_operation(
+                &mut denied.operation(),
+                f.workspace,
+                project,
+                f.user,
+                credential,
+                CreateDocumentInput {
+                    parent_id: Some(f.document),
+                    title: "must not create",
+                    icon: None
+                },
+                None
+            )
+            .await
+            .unwrap(),
+            Err(DocumentDbError::NotFound)
+        ));
+        denied.rollback().await.unwrap();
+        let after_denials: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM events), (SELECT count(*) FROM audit_log)",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(after_denials, after_healthy);
+        let nodes = list_project_document_tree_backend(
+            &f.backend,
+            f.workspace,
+            project,
+            f.user,
+            credential,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(nodes.len(), 2, "archived project remains readable");
+        assert!(nodes
+            .windows(2)
+            .all(|pair| pair[0].sort_key <= pair[1].sort_key));
+        let child = nodes.iter().find(|node| node.id == healthy.id).unwrap();
+        assert_eq!(child.workspace_id, f.workspace);
+        assert_eq!(child.project_id, Some(project));
+        assert_eq!(child.parent_id, Some(f.document));
+        assert_eq!(child.title, healthy.title);
+        assert_eq!(child.number, healthy.number);
+        sqlx::query("UPDATE projects SET visibility='private' WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE memberships SET role='guest' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_project_document_tree_backend(
+                &f.backend,
+                f.workspace,
+                project,
+                f.user,
+                credential,
+                None
+            )
+            .await
+            .unwrap(),
+            Err(DocumentDbError::NotFound)
+        ));
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'viewer')")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert_eq!(
+            list_project_document_tree_backend(
+                &f.backend,
+                f.workspace,
+                project,
+                f.user,
+                credential,
+                None
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .len(),
+            2,
+            "explicit current guest View is sufficient for the archived tree"
+        );
+        sqlx::query("UPDATE projects SET status='active' WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let mut view_only = f.backend.begin_off_body().await.unwrap();
+        assert!(matches!(
+            create_project_document_operation(
+                &mut view_only.operation(),
+                f.workspace,
+                project,
+                f.user,
+                credential,
+                CreateDocumentInput {
+                    parent_id: Some(f.document),
+                    title: "view must not grant creation",
+                    icon: None
+                },
+                None,
+            )
+            .await
+            .unwrap(),
+            Err(DocumentDbError::NotFound)
+        ));
+        view_only.rollback().await.unwrap();
+        assert!(matches!(
+            list_project_document_tree_backend(
+                &f.backend,
+                Uuid::now_v7(),
+                project,
+                f.user,
+                credential,
+                None
+            )
+            .await
+            .unwrap(),
+            Err(DocumentDbError::NotFound)
+        ));
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_project_document_tree_backend(
+                &f.backend,
+                f.workspace,
+                project,
+                f.user,
+                credential,
+                None
+            )
+            .await
+            .unwrap(),
+            Err(DocumentDbError::Forbidden)
+        ));
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            list_project_document_tree_backend(
+                &f.backend,
+                f.workspace,
+                project,
+                f.user,
+                credential,
+                None
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .len(),
+            2,
+            "denied read releases its own transaction; healthy reads still work"
+        );
+        let after_reads: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM events), (SELECT count(*) FROM audit_log)",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            after_reads, after_healthy,
+            "tree visibility never grants or writes events/audit"
+        );
+        f.close().await;
     }
 }
 
