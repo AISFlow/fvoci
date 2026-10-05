@@ -736,7 +736,7 @@ async fn restored_epoch_fails_closed_until_recovery_rebases_within_its_window() 
     }
     assert_eq!(seeded_cursors(&admin).await, cursors_at("0", 0));
     let (outside, _, _) = commit_event(&admin, workspace_id, 60).await;
-    let (inside, _, inside_seq) = commit_event(&admin, workspace_id, 1).await;
+    let (inside, _, _) = commit_event(&admin, workspace_id, 1).await;
     // Old-cluster xids, past this cluster's xmax (as after a logical restore).
     sqlx::query(
         "UPDATE fvoci.events SET xact = CASE WHEN id = $1 THEN '100000000000'::xid8 \
@@ -746,7 +746,6 @@ async fn restored_epoch_fails_closed_until_recovery_rebases_within_its_window() 
     .execute(&admin)
     .await
     .expect("restored xids");
-    let _ = inside_seq;
     for consumer in SEEDED_CONSUMERS {
         let err = read_events(&admin, consumer, 100)
             .await
