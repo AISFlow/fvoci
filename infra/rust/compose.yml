@@ -4,7 +4,7 @@ name: fvoci-rust-install
 
 services:
   postgres:
-    image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
+    image: postgres:18.6@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722
     # Compose sets FVOCI_COLLAB_MAX_ROOMS=64 (the verified configuration): 64 room fences
     # (detached, outside the app pool) + app pool 64 + reserve 10 = 138; 150 leaves headroom.
     command: ["postgres", "-c", "max_connections=150"]
@@ -22,7 +22,7 @@ services:
       start_period: 5s
 
   meilisearch:
-    image: getmeili/meilisearch:v1.53.2@sha256:c94e58ca09662dd6e65e8f1b0fd145767be3da7d5422a863a27b8d2b68e090c9
+    image: getmeili/meilisearch:v1.54.3@sha256:e68913ab7d6f5b159529e472cfd362ce3c741fafd3c127961b2142abbe41b3c9
     environment:
       MEILI_ENV: production
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?MEILI_MASTER_KEY is required}
