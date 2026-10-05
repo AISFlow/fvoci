@@ -18,9 +18,9 @@ use crate::api::dto::{
 };
 use crate::auth::session::SessionUser;
 use crate::db::projects::{
-    add_project_member, clone_project, create_project, get_project, get_project_workflow,
-    list_deleted_projects, list_project_members, list_projects, remove_project_member,
-    restore_project, set_project_archived, trash_project, update_project,
+    add_project_member, clone_project, create_project_backend as create_project, get_project,
+    get_project_workflow, list_deleted_projects, list_project_members, list_projects,
+    remove_project_member, restore_project, set_project_archived, trash_project, update_project,
     update_project_member_role, CloneProjectInput, CreateProjectInput, ProjectDbError,
     UpdateProjectInput,
 };
@@ -106,12 +106,7 @@ async fn create_project_route(
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = create_project(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/projects.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         actor_user_id,
         session_id,
@@ -921,4 +916,317 @@ fn parse_user_id(value: &str) -> Result<Uuid, AppError> {
 fn internal(err: sqlx::Error) -> AppError {
     tracing::error!("database error: {}", err);
     AppError::internal()
+}
+
+#[cfg(test)]
+mod selected_project_create_http_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+    use serde_json::Value;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+    fn state(f: &Fixture) -> AppState {
+        AppState {
+            auth:Arc::new(crate::auth::AuthService{db:crate::db::Db::from_backend(f.backend.clone()),password_keys:crate::auth::password::Keyring::parse(r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,"test").unwrap()}),
+            branding_name:"FVOCI".into(),public_origin:"http://localhost".into(),cookie_secure:false,rate_limiter:crate::http::rate_limit::RateLimiter::new(),storage:crate::attachments::ObjectStorage::local(f.root.join("project-create-http-storage")),
+            upload:crate::attachments::UploadLimits{part_size_bytes:24,max_file_size_bytes:1024,create_rate_per_5min:20,part_put_slots:crate::attachments::PartPutSlots::new(2)},
+            collab:None,meili:None,search_embedder:None,markdown:None,import_wake:None,import_extractor_available:false,preview_extract:None,quota:Default::default(),mailer:Arc::new(crate::mail::Mailer::disabled()),streams:AppState::fresh_streams(),
+        }
+    }
+
+    async fn request(
+        app: Router,
+        method: &str,
+        path: &str,
+        cookie: Option<&str>,
+        bearer: Option<&str>,
+        origin: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let mut builder = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header("origin", origin)
+            .header("content-type", "application/json");
+        if let Some(token) = cookie {
+            builder = builder.header("cookie", format!("fvoci_session={token}"));
+        }
+        if let Some(token) = bearer {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        let mut request = builder
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        request.extensions_mut().insert(ConnectInfo(
+            "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
+        ));
+        let response = app.oneshot(request).await.unwrap();
+        let code = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 16384)
+            .await
+            .unwrap();
+        (code, serde_json::from_slice(&bytes).unwrap())
+    }
+    async fn session(f: &Fixture, user: Uuid) -> (Uuid, String) {
+        let token = crate::auth::token::new_token();
+        let id = Uuid::now_v7();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        tx.operation()
+            .create_session(
+                id,
+                user,
+                &token.hash,
+                chrono::DateTime::from_timestamp_micros(
+                    chrono::Utc::now().timestamp_micros() + 86_400_000_000,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        (id, token.token)
+    }
+    #[tokio::test]
+    async fn wiki_aux_project_create_http_normal_submit_picker_strict_scopes_auth_and_tenant() {
+        let f = Fixture::new().await;
+        let (credential, cookie) = session(&f, f.user).await;
+        let app = router()
+            .merge(crate::http::routes::task_body::router())
+            .with_state(state(&f));
+        let path = format!("/api/v1/workspaces/{}/projects", f.workspace);
+        let picker = format!(
+            "/api/v1/workspaces/{}/documents/{}/task-projects",
+            f.workspace, f.document
+        );
+        let body = json!({"key":"NＯRMAL","name":"  실제 프로젝트 中 😀  ","visibility":"private"});
+        let call = |app: Router, body: Value| {
+            let path = path.clone();
+            let cookie = cookie.clone();
+            async move {
+                request(
+                    app,
+                    "POST",
+                    &path,
+                    Some(&cookie),
+                    None,
+                    "http://localhost",
+                    body,
+                )
+                .await
+            }
+        };
+        assert_eq!(
+            request(
+                app.clone(),
+                "POST",
+                &path,
+                None,
+                None,
+                "http://localhost",
+                body.clone()
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            request(
+                app.clone(),
+                "POST",
+                &path,
+                Some(&cookie),
+                None,
+                "http://elsewhere",
+                body.clone()
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        for invalid in [
+            json!({"key":"WIKI","name":"Test","visibility":"private"}),
+            json!({"key":" normal ","name":"Test","visibility":"private"}),
+            json!({"key":"VALID","name":"Test","visibility":"bad"}),
+            json!({"key":"VALID","name":"Test","visibility":"private","unknown":true}),
+            json!({"key":"VALID","name":"Test","visibility":"private","leadUserId":null}),
+        ] {
+            assert_eq!(call(app.clone(), invalid).await.0, StatusCode::BAD_REQUEST);
+        }
+        let pat = crate::auth::token::new_token();
+        let pat_id = Uuid::now_v7();
+        sqlx::query("INSERT INTO api_tokens(id,workspace_id,user_id,token_hash,name,scopes) VALUES(?1,?2,?3,?4,'Project auth','[\"documents.read\"]')")
+            .bind(pat_id.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(&pat.hash).execute(&f.pool).await.unwrap();
+        assert_eq!(
+            request(
+                app.clone(),
+                "POST",
+                &path,
+                None,
+                Some(&pat.token),
+                "http://localhost",
+                body.clone()
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        // First-party credentials take precedence over the insufficient bearer.
+        let (code, created) = request(
+            app.clone(),
+            "POST",
+            &path,
+            Some(&cookie),
+            Some(&pat.token),
+            "http://localhost",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(code, StatusCode::CREATED, "{created}");
+        let project = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+        let root = Uuid::parse_str(created["rootDocumentId"].as_str().unwrap()).unwrap();
+        assert_eq!(created["key"], "NORMAL");
+        assert_eq!(created["name"], "실제 프로젝트 中 😀");
+        assert_eq!(created["visibility"], "private");
+        assert_eq!(created["createdBy"], f.user.to_string());
+        let roles: Vec<(Vec<u8>, String)> =
+            sqlx::query_as("SELECT user_id,role FROM project_members WHERE project_id=?1")
+                .bind(project.as_bytes().as_slice())
+                .fetch_all(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(roles, vec![(f.user.as_bytes().to_vec(), "lead".into())]);
+        let (code, items) = request(
+            app.clone(),
+            "GET",
+            &picker,
+            Some(&cookie),
+            None,
+            "http://localhost",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{items}");
+        assert_eq!(items["items"].as_array().unwrap().len(), 1);
+        assert_eq!(items["items"][0]["id"], project.to_string());
+        assert_eq!(items["items"][0]["name"], created["name"]);
+        assert_eq!(items["items"][0]["key"], "NORMAL");
+        assert_eq!(items["canCreateProject"], true);
+        let root_row: (Vec<u8>, i64, String) =
+            sqlx::query_as("SELECT project_id,number,content_json FROM documents WHERE id=?1")
+                .bind(root.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(root_row.0, project.as_bytes());
+        assert_eq!(root_row.1, 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&root_row.2).unwrap(),
+            crate::db::documents::empty_document_json()
+        );
+        assert_eq!(
+            call(app.clone(), body.clone()).await.0,
+            StatusCode::CONFLICT
+        );
+        let other = Uuid::now_v7();
+        sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,?2,'Other')")
+            .bind(other.as_bytes().as_slice())
+            .bind(format!("{other}@example.test"))
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'member')")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(other.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let (_, other_cookie) = session(&f, other).await;
+        let (code, other_items) = request(
+            app.clone(),
+            "GET",
+            &picker,
+            Some(&other_cookie),
+            None,
+            "http://localhost",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{other_items}");
+        assert_eq!(other_items["items"], json!([]));
+        sqlx::query("UPDATE api_tokens SET scopes='[\"projects.manage\"]' WHERE id=?1")
+            .bind(pat_id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let (_, before): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM projects),(SELECT count(*) FROM audit_log)",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        let (code, pat_created) = request(
+            app.clone(),
+            "POST",
+            &path,
+            None,
+            Some(&pat.token),
+            "http://localhost",
+            json!({"key":"TOKEN","name":"Token","visibility":"workspace"}),
+        )
+        .await;
+        assert_eq!(code, StatusCode::CREATED, "{pat_created}");
+        let foreign = format!("/api/v1/workspaces/{}/projects", Uuid::now_v7());
+        assert_eq!(
+            request(
+                app.clone(),
+                "POST",
+                &foreign,
+                None,
+                Some(&pat.token),
+                "http://localhost",
+                body.clone()
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            call(
+                app.clone(),
+                json!({"key":"REVOKED","name":"No","visibility":"private"})
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        // Cookie revocation cannot fall through to the still valid bearer.
+        assert_eq!(
+            request(
+                app,
+                "POST",
+                &path,
+                Some(&cookie),
+                Some(&pat.token),
+                "http://localhost",
+                json!({"key":"FALLTHROUGH","name":"No","visibility":"private"})
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (count, audits): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM projects),(SELECT count(*) FROM audit_log)",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(audits, before + 1);
+        f.close().await;
+    }
 }
