@@ -1786,13 +1786,21 @@ class RegistryMutationCliTest(unittest.TestCase):
         root = self._mutated_root()
         web = root / ".github" / "workflows" / "web.yml"
         text = web.read_text(encoding="utf-8")
-        web.write_text(
-            text.replace(
-                "    needs: [ci-plan, web-static, web-checks, workspace-browser-shard, collaboration-build, collaboration-flow]",
-                "    needs: [ci-plan, web-checks]",
-            ),
-            encoding="utf-8",
-        )
+        gate_start = text.index("  web-ci-gate:")
+        before_gate, gate = text[:gate_start], text[gate_start:]
+        original_needs = """    needs:
+      [
+        ci-plan,
+        web-static,
+        web-checks,
+        workspace-browser-shard,
+        collaboration-build,
+        collaboration-flow,
+      ]"""
+        self.assertIn(original_needs, gate)
+        mutated = before_gate + gate.replace(original_needs, "    needs: [ci-plan, web-checks]", 1)
+        self.assertNotEqual(text, mutated, "negative control must mutate the actual gate")
+        web.write_text(mutated, encoding="utf-8")
         proc, output = self._plan_against(root)
         self._assert_no_green_outputs(proc, output, "needs must be ci-plan and every registered job")
 

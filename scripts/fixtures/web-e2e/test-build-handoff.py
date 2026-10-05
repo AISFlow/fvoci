@@ -28,6 +28,8 @@ class PacketTest(unittest.TestCase):
         self.output = Path(self.tmp.name) / 'output'; self.output.mkdir(mode=0o700)
         self.packet = Path(self.tmp.name) / 'packet'
         self.header = self.root / 'header'; self.header.write_bytes(b'official fixture header')
+        self.library = self.root / 'lib-fixture.so'; self.library.write_bytes(b'NOT ELF qualified library fixture')
+        self.ldd_result = type('FixtureLdd', (), {'returncode':0, 'stdout':self.ldd_text('0x2222'), 'stderr':''})()
         self.dist = self.root / 'apps/web/dist'; self.dist.mkdir(parents=True); (self.dist / 'index.html').write_bytes(b'fresh fixture dist')
         self.target = self.root / 'target'
         env = {'CI':'true','GITHUB_ACTIONS':'true','GITHUB_JOB':'collaboration-build','FVOCI_WEB_BUILD_PHASE':'prepare',
@@ -39,7 +41,8 @@ class PacketTest(unittest.TestCase):
         self.patches = [patch.object(H,'ROOT',self.root),patch.object(H.CI,'identity',return_value='fixture'),
                         patch.object(H.CI.shutil,'disk_usage',return_value=type('FixtureSpace', (), {'free':20_000_000_000})()),
                         patch.object(H.CI,'inputs',side_effect=self.inputs),patch.object(H.CI,'build_env',return_value={'fixture-env':'fixed'}),
-                        patch.object(H.CI,'abi_files',return_value=[str(self.header)]),patch.object(H.CI,'call',side_effect=self.call)]
+                        patch.object(H.CI,'abi_files',return_value=[str(self.library)]),patch.object(H.CI,'call',side_effect=self.call),
+                        patch.object(H.CI.subprocess,'run',side_effect=self.ldd)]
         for p in self.patches:p.start();self.addCleanup(p.stop)
         self.put('before.json',self.inputs()); self.put('after.json',self.inputs()); self.put('build-env-inputs.json',{'fixture-env':'fixed'})
         stages=[]
@@ -61,7 +64,52 @@ class PacketTest(unittest.TestCase):
             'os_release':Path('/etc/os-release').read_text(),'target':str(self.target),'features':['api-schema','db-tests'],'nativeFeatures':['worker'],
             'profile':'debug','devDebug':'0','testDebug':'0','sqlite':{k:os.environ[k] for k in ['SQLITE3_LIB_DIR','SQLITE3_INCLUDE_DIR','SQLITE3_STATIC','SQLITE3_NO_PKG_CONFIG']}})
         self.put('web-receipt.json',{'source':SHA,'tree':TREE,'exit_code':0,'full_inputs_unchanged':True,'dist_files':{'index.html':H.CI.sha(self.dist/'index.html')},'servedDist':str(self.dist)})
-        self.put('abi-receipt.json',{'currentSource':SHA,'currentELFDependenciesVerified':True,'host_runtime_files':{str(self.header):H.CI.sha(self.header)},'actualCurrentELFldd':{p:'fixture ldd' for p in bins}})
+        self.put('abi-receipt.json',{'currentSource':SHA,'currentELFDependenciesVerified':True,'host_runtime_files':{str(self.library):H.CI.sha(self.library)},'actualCurrentELFldd':{p:self.ldd_text('0x1111') for p in bins}})
+
+    def ldd_text(self, address):
+        return f"linux-vdso.so.1 ({address})\nlib-fixture.so => {self.library} ({address})\n"
+    def ldd(self, args, **kwargs):
+        self.assertEqual(args[0], 'ldd')
+        self.assertIn(args[1], self.get('bundle.json')['binaries'])
+        self.assertEqual(kwargs, {'capture_output':True, 'text':True})
+        return self.ldd_result
+    def test_ldd_address_changes_preserve_qualified_dependency_identity(self):
+        recorded = next(iter(self.get('abi-receipt.json')['actualCurrentELFldd'].values()))
+        self.assertNotEqual(recorded, self.ldd_result.stdout)
+        H.export()
+        self.assertTrue(self.packet.exists())
+        self.assertEqual(next(iter(self.get('abi-receipt.json')['actualCurrentELFldd'].values())), recorded)
+    def test_ldd_missing_dependency_refused(self):
+        self.ldd_result.stdout = 'lib-fixture.so => not found\n'
+        with self.assertRaises(AssertionError):H.export()
+        self.assertFalse(self.packet.exists())
+    def test_ldd_unexpected_dependency_refused(self):
+        extra = self.root / 'foreign.so';extra.write_bytes(b'NOT ELF foreign fixture')
+        self.ldd_result.stdout += f'foreign.so => {extra} (0x3333)\n'
+        with self.assertRaisesRegex(AssertionError, 'dependency set differs'):H.export()
+        self.assertFalse(self.packet.exists())
+    def test_ldd_matching_but_unqualified_dependency_refused(self):
+        extra = self.root / 'foreign.so';extra.write_bytes(b'NOT ELF foreign fixture')
+        self.ldd_result.stdout += f'foreign.so => {extra} (0x3333)\n'
+        abi = self.get('abi-receipt.json')
+        abi['actualCurrentELFldd'] = {p:self.ldd_result.stdout for p in abi['actualCurrentELFldd']}
+        self.put('abi-receipt.json', abi)
+        with self.assertRaisesRegex(AssertionError, 'unqualified current ELF dependency'):H.export()
+        self.assertFalse(self.packet.exists())
+    def test_ldd_changed_library_bytes_refused(self):
+        self.library.write_bytes(b'changed qualified library bytes')
+        with self.assertRaises(AssertionError):H.export()
+        self.assertFalse(self.packet.exists())
+    def test_ldd_failed_process_refused(self):
+        self.ldd_result.returncode = 1
+        with self.assertRaisesRegex(AssertionError, 'ldd failed'):H.export()
+        self.assertFalse(self.packet.exists())
+    def test_ldd_missing_recorded_dependency_refused(self):
+        abi = self.get('abi-receipt.json')
+        abi['actualCurrentELFldd'][next(iter(abi['actualCurrentELFldd']))] = 'linux-vdso.so.1 (0x1111)\n'
+        self.put('abi-receipt.json', abi)
+        with self.assertRaisesRegex(AssertionError, 'dependency set differs'):H.export()
+        self.assertFalse(self.packet.exists())
 
     def call(self,args):
         if args[:2]==['git','rev-parse']:return SHA if args[2]=='HEAD' else TREE

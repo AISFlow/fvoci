@@ -105,8 +105,19 @@ def qualify(output):
     abi = read(output, "abi-receipt.json")
     assert abi["currentSource"] == before["head"] and abi["currentELFDependenciesVerified"] is True
     assert abi["host_runtime_files"] == {p: CI.sha(p) for p in CI.abi_files()}
+    assert set(abi["actualCurrentELFldd"]) == set(bundle["binaries"])
     for executable in bundle["binaries"]:
-        assert CI.call(["ldd", executable]) == abi["actualCurrentELFldd"][executable]
+        # Retain the producer's raw ldd receipt, but compare resolved dependency
+        # identities: ASLR mapping addresses are not library inputs.
+        recorded = abi["actualCurrentELFldd"][executable]
+        actual = CI.subprocess.run(["ldd", executable], capture_output=True, text=True)
+        assert actual.returncode == 0, "current ELF ldd failed"
+        assert "not found" not in recorded and "not found" not in actual.stdout + actual.stderr
+        recorded_paths = set(CI.elf_dependencies(0, recorded, ""))
+        actual_paths = set(CI.elf_dependencies(actual.returncode, actual.stdout, actual.stderr))
+        assert recorded_paths and recorded_paths == actual_paths, "current ELF dependency set differs"
+        assert actual_paths <= set(abi["host_runtime_files"]), "unqualified current ELF dependency"
+        assert all(CI.sha(path) == abi["host_runtime_files"][path] for path in actual_paths), "current ELF library bytes differ"
     return bundle
 
 
