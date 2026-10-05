@@ -706,6 +706,15 @@ class GateSchemaTest(unittest.TestCase):
             self._gate(plan, "rust", results, omit_jobs=frozenset({"native-arm64"})), 1
         )
 
+    def test_postgres_budget_matrix_aggregate_is_required_by_gate(self) -> None:
+        plan = self._plan("rust", {job: True for job in SEL.WORKFLOW_JOBS["rust"]})
+        results = {job: "success" for job in SEL.WORKFLOW_JOBS["rust"]}
+        self.assertEqual(self._gate(plan, "rust", results), 0)
+        for result in ("failure", "cancelled", "skipped"):
+            with self.subTest(result=result):
+                self.assertEqual(self._gate(plan, "rust", {**results, "postgres": result}), 1)
+        self.assertEqual(self._gate(plan, "rust", results, omit_jobs=frozenset({"postgres"})), 1)
+
     def test_web_budget_lanes_require_both_selected_success(self) -> None:
         selected = {"web-checks": True, "web-native-checks": True}
         plan = self._plan("web", selected)
@@ -1238,6 +1247,85 @@ class RustSuiteRegistryFixture:
 
 
 class RustSuiteRegistryTest(unittest.TestCase):
+    def test_postgres_budget_exact_measured_split_and_isolation(self) -> None:
+        original_a = {
+            "db_integration", "task_integration", "collab_integration", "invitation_integration",
+            "search_index", "comment_integration", "api_token_integration", "mail_integration",
+            "task_labels_integration", "workspace_lifecycle", "search_query", "notification_integration",
+            "push_integration", "schedule_ics_integration", "search_meili", "secret_maintenance_integration",
+            "outbox_reset_integration", "pool_release_integration",
+        }
+        moved = {"task_integration", "comment_integration"}
+        jobs, err = SEL._rust_workflow_jobs(ROOT)
+        self.assertIsNone(err)
+        self.assertEqual(SEL.verify_postgres_budget_matrix(jobs), [])
+        job = jobs["postgres"]
+        rows = job["strategy"]["matrix"]["include"]
+        self.assertEqual(len(rows), 12)
+        for runner, major in (("ubuntu-26.04", "16"), ("ubuntu-26.04", "17"),
+                              ("ubuntu-26.04", "18"), ("ubuntu-26.04-arm", "18")):
+            selected = {row["shard"]: row for row in rows if (row["runner"], row["pg_major"]) == (runner, major)}
+            with self.subTest(runner=runner, major=major):
+                self.assertEqual(set(selected), {"a", "b", "c"})
+                a = SEL.cargo_test_flags_in_text(selected["a"]["tests"])
+                b = SEL.cargo_test_flags_in_text(selected["b"]["tests"])
+                c = SEL.cargo_test_flags_in_text(selected["c"]["tests"])
+                self.assertEqual(a, original_a - moved)
+                self.assertEqual(c, moved)
+                self.assertEqual(len(b), 26)
+                self.assertEqual(len(a | b | c), 44)
+                self.assertFalse(a & b or a & c or b & c)
+                self.assertEqual(selected["a"]["postgres_image"], selected["c"]["postgres_image"])
+        self.assertEqual(job["services"]["postgres"]["image"], "${{ matrix.postgres_image }}")
+        self.assertEqual(job["services"]["postgres"]["ports"], ["5432/tcp"])
+        step = next(step for step in job["steps"] if step.get("name") == SEL.RUST_POSTGRES_INTEGRATION_STEP)
+        self.assertEqual(step["run"], SEL.RUST_POSTGRES_INTEGRATION_RUN_CANONICAL)
+        self.assertEqual(step["env"]["FVOCI_COLLAB_ENGINE"], "${{ matrix.shard == 'b' && format('{0}/crates/collab-engine/target/debug/collab-engine', github.workspace) || '' }}")
+
+    def test_postgres_budget_row_and_coverage_mutations_fail(self) -> None:
+        mutations = ("missing-c", "duplicate-row", "unknown-shard", "wrong-major", "wrong-pin", "duplicate-check",
+                     "extra-dimension", "duplicate-target", "duplicate-across-shards", "missing-pg16-target", "c-filter", "extra-row-field")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), RustSuiteRegistryFixture() as fx:
+                fx.write_cargo()
+                def change(data: dict) -> None:
+                    matrix = data["jobs"]["postgres"]["strategy"]["matrix"]
+                    rows = matrix["include"]
+                    c = next(row for row in rows if row["shard"] == "c" and row["pg_major"] == "16")
+                    a = next(row for row in rows if row["shard"] == "a" and row["pg_major"] == "16")
+                    if mutation == "missing-c": rows.remove(c)
+                    elif mutation == "duplicate-row": rows.append(dict(c))
+                    elif mutation == "unknown-shard": c["shard"] = "d"
+                    elif mutation == "wrong-major": c["pg_major"] = "17"
+                    elif mutation == "wrong-pin": c["postgres_image"] = "postgres:16"
+                    elif mutation == "duplicate-check": c["check"] = a["check"]
+                    elif mutation == "extra-dimension": matrix["exclude"] = [dict(c)]
+                    elif mutation == "duplicate-target": c["tests"] += " --test task_integration"
+                    elif mutation == "duplicate-across-shards": a["tests"] += " --test task_integration"
+                    elif mutation == "missing-pg16-target": a["tests"] = a["tests"].replace("--test db_integration ", "")
+                    elif mutation == "c-filter": c["tests"] += " -- --skip failing"
+                    else: c["continue-on-error"] = True
+                fx.mutate_rust_workflow(change)
+                self.assertTrue(SEL.verify_postgres_budget_matrix(SEL._rust_workflow_jobs(fx.root)[0]))
+
+    def test_postgres_budget_limits_and_strict_cache_mutations_fail(self) -> None:
+        for mutation in ("timeout", "fail-fast", "mask", "runner", "cache-fallback", "cache-key", "cache-path", "missing-cache"):
+            with self.subTest(mutation=mutation), RustSuiteRegistryFixture() as fx:
+                fx.write_cargo()
+                def change(data: dict) -> None:
+                    job = data["jobs"]["postgres"]
+                    cache = next(step for step in job["steps"] if step.get("name") == "Restore server build outputs")
+                    if mutation == "timeout": job["timeout-minutes"] = 20
+                    elif mutation == "fail-fast": job["strategy"]["fail-fast"] = True
+                    elif mutation == "mask": job["continue-on-error"] = True
+                    elif mutation == "runner": job["runs-on"] = "ubuntu-26.04"
+                    elif mutation == "cache-fallback": cache["with"]["restore-keys"] = "v2-server-"
+                    elif mutation == "cache-key": cache["with"]["key"] = "v2-server-ubuntu-26.04-incomplete"
+                    elif mutation == "cache-path": cache["with"]["path"] = "/foreign/target"
+                    else: job["steps"].remove(cache)
+                fx.mutate_rust_workflow(change)
+                self.assertTrue(SEL.verify_postgres_budget_matrix(SEL._rust_workflow_jobs(fx.root)[0]))
+
     def test_native_arm64_wrong_scheduler_and_check_weakening_fail(self) -> None:
         def mutate_native(data: dict, field: str, value: object) -> None:
             job = data["jobs"]["native-arm64"]
@@ -1959,6 +2047,36 @@ class RegistryMutationCliTest(unittest.TestCase):
         web.write_text(text.replace("      select_web_checks: ${{ steps.plan.outputs.select_web_checks }}\n", ""), encoding="utf-8")
         proc, output = self._plan_against(root)
         self._assert_no_green_outputs(proc, output, "missing selector output select_web_checks")
+
+    def test_postgres_budget_mutations_rejected_before_plan_outputs(self) -> None:
+        for mutation in ("missing-c", "missing-gate", "wrong-selection", "longer-budget", "cache-fallback"):
+            with self.subTest(mutation=mutation):
+                root = self._mutated_root()
+                path = root / ".github/workflows/rust.yml"
+                data, err = SEL._load_yaml_mapping(path)
+                self.assertIsNone(err)
+                job = data["jobs"]["postgres"]
+                if mutation == "missing-c":
+                    rows = job["strategy"]["matrix"]["include"]
+                    rows.remove(next(row for row in rows if row["shard"] == "c"))
+                    needle = "all twelve"
+                elif mutation == "missing-gate":
+                    data["jobs"]["rust-ci-gate"]["needs"].remove("postgres")
+                    needle = "every registered job"
+                elif mutation == "wrong-selection":
+                    job["if"] = "false"
+                    needle = "postgres if must be"
+                elif mutation == "longer-budget":
+                    job["timeout-minutes"] = 30
+                    needle = "A/C15m and B20m"
+                else:
+                    cache = next(step for step in job["steps"] if step.get("name") == "Restore server build outputs")
+                    cache["with"]["restore-keys"] = "v2-server-"
+                    needle = "strict complete-input server cache"
+                import yaml
+                path.write_text(yaml.safe_dump(data, sort_keys=False))
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, needle)
 
     def test_native_budget_registry_mutations_rejected_before_outputs(self) -> None:
         for mutation in ("missing-job", "missing-gate-need", "wrong-condition"):
