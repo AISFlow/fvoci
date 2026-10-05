@@ -580,7 +580,7 @@ impl Archive {
                     .is_some_and(|d| crate::tasks::parse_iso_date(d).is_none())
                 || t.estimate.as_ref().is_some_and(|v| {
                     v.as_str()
-                        .is_none_or(|s| !crate::tasks::patch::estimate_is_valid(s))
+                        .is_none_or(|s| !archived_estimate_is_valid(s))
                 })
                 || !estimate_unit_is_valid(t.estimate.as_ref(), t.estimate_unit.as_deref())
             {
@@ -948,6 +948,15 @@ impl Archive {
     }
 }
 
+// Archive stored finite decimal text without the task form's digit cap.
+// The graph byte budget already bounds this field; never round through f64.
+fn archived_estimate_is_valid(value: &str) -> bool {
+    static DECIMAL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\A[+-]?[0-9]+(?:\.[0-9]+)?\z").expect("stored estimate decimal grammar")
+    });
+    DECIMAL.is_match(value)
+}
+
 /// Migration 049: an explicit unit is only 'minutes' over a stored integral
 /// estimate in 0..=i32::MAX (exact decimal text, never a guessed unit).
 fn estimate_unit_is_valid(estimate: Option<&Value>, unit: Option<&str>) -> bool {
@@ -961,9 +970,16 @@ fn estimate_unit_is_valid(estimate: Option<&Value>, unit: Option<&str>) -> bool 
                     ""
                 }
             });
-            !integral.is_empty()
-                && integral.bytes().all(|b| b.is_ascii_digit())
-                && integral.parse::<u64>().is_ok_and(|n| n <= i32::MAX as u64)
+            let negative = integral.starts_with('-');
+            let unsigned = integral
+                .strip_prefix('+')
+                .or_else(|| integral.strip_prefix('-'))
+                .unwrap_or(integral);
+            !unsigned.is_empty()
+                && unsigned.bytes().all(|b| b.is_ascii_digit())
+                && unsigned
+                    .parse::<u64>()
+                    .is_ok_and(|n| n <= i32::MAX as u64 && (!negative || n == 0))
         }),
         Some(_) => false,
     }
@@ -2434,7 +2450,7 @@ fn activity_changes_supported(
             "priority" => string(v, &crate::tasks::priority_is_valid),
             "startDate" | "dueDate" => optional(v, &|s| crate::tasks::parse_iso_date(s).is_some()),
             "dueAt" => optional(v, &|s| chrono::DateTime::parse_from_rfc3339(s).is_ok()),
-            "estimate" => optional(v, &crate::tasks::patch::estimate_is_valid),
+            "estimate" => optional(v, &archived_estimate_is_valid),
             "archived" => v.is_boolean(),
             "statusId" => reference(v).is_some_and(|(id, label)| {
                 statuses.contains(&id)

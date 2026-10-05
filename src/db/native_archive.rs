@@ -3898,6 +3898,76 @@ mod selected_tests {
         let f = Fixture::new().await;
         let (claim, request, hash) = f.claim().await;
         let mut archive = crate::native_archive::tests::policy_fixture();
+        // Stored estimates are not restricted by the task form's digit cap.
+        // Exercise both the task and historical from/to archive admissions.
+        let beyond_f64 = format!("1{}", "0".repeat(309));
+        for (value, unit) in [
+            ("9007199254740993.000000", None),
+            ("-9007199254740993.000000", None),
+            ("+9007199254740993.000000", None),
+            ("1.1234567", None),
+            (beyond_f64.as_str(), None),
+            ("+90.000", Some("minutes")),
+            ("-0.000", Some("minutes")),
+            ("0000000000000000000090.000", Some("minutes")),
+            ("2147483647", Some("minutes")),
+        ] {
+            let mut candidate = archive.clone();
+            candidate.graph.tasks[0].estimate = Some(json!(value));
+            candidate.graph.tasks[0].estimate_unit = unit.map(str::to_owned);
+            candidate.validate().unwrap();
+            candidate.graph.activity[1].changes = json!([{"field":"estimate","from":value,"to":value}]);
+            candidate.validate().unwrap();
+        }
+        for value in [
+            json!("NaN"),
+            json!("Infinity"),
+            json!("-Infinity"),
+            json!("1e3"),
+            json!(".5"),
+            json!("1."),
+            json!("1..2"),
+            json!("+-1"),
+            json!(" 1"),
+            json!("1\n"),
+            json!("１"),
+            json!(""),
+            json!(9007199254740993_u64),
+            json!(true),
+            json!(["1"]),
+            json!({"value":"1"}),
+        ] {
+            let mut candidate = archive.clone();
+            candidate.graph.tasks[0].estimate = Some(value.clone());
+            assert!(matches!(
+                candidate.validate(),
+                Err(crate::native_archive::ArchiveError::Invalid(_))
+            ));
+            candidate.graph.tasks[0].estimate = None;
+            candidate.graph.activity[1].changes = json!([{"field":"estimate","from":value,"to":null}]);
+            assert!(matches!(
+                candidate.validate(),
+                Err(crate::native_archive::ArchiveError::Invalid(_))
+            ));
+        }
+        for (value, unit) in [
+            ("2147483648", "minutes"),
+            ("-1", "minutes"),
+            ("1.5", "minutes"),
+            ("-0.001", "minutes"),
+            ("90", "hours"),
+        ] {
+            let mut candidate = archive.clone();
+            candidate.graph.tasks[0].estimate = Some(json!(value));
+            candidate.graph.tasks[0].estimate_unit = Some(unit.to_owned());
+            assert!(matches!(
+                candidate.validate(),
+                Err(crate::native_archive::ArchiveError::Invalid(_))
+            ));
+        }
+        assert!(!crate::tasks::patch::estimate_is_valid(
+            "9007199254740993.000000"
+        ));
         archive.graph.statuses[0].wip_limit = Some(3);
         archive.graph.tasks[0].estimate = Some(json!("9007199254740993.000000"));
         archive.validate().unwrap();
