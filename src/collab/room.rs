@@ -4811,10 +4811,54 @@ mod remote_task_finish_tests {
     };
     use crate::db::tasks::selected_task_detail_tests::setup;
 
-    const RELEASE: &str = "UPDATE task_collab_room_fences SET expires_at=?5 WHERE workspace_id=?1 AND task_id=?2 AND owner_token=?3 AND fence=?4";
-    const RECEIPT: &str =
-        "SELECT seq,payload_len,payload_sha256,actor_user_id FROM task_collab_op_receipts";
-    const LOAD: &str = "SELECT state,encoding,writer_generation,snapshot_cutoff_seq,tail_seq,updated_at FROM task_states";
+    // The pinned SDK describes the original SQL, then executes its maintained
+    // parser's canonical SQL. Match only that actual execution representation,
+    // with the complete projection, target and predicates; never Describe.
+    const RELEASE: &str = "UPDATE task_collab_room_fences SET expires_at = ?5 WHERE workspace_id = ?1 AND task_id = ?2 AND owner_token = ?3 AND fence = ?4;";
+    const RECEIPT: &str = "SELECT seq, payload_len, payload_sha256, actor_user_id FROM task_collab_op_receipts WHERE workspace_id = ?1 AND task_id = ?2 AND op_id = ?3;";
+    const LOAD: &str = "SELECT state, encoding, writer_generation, snapshot_cutoff_seq, tail_seq, updated_at FROM task_states WHERE workspace_id = ?1 AND task_id = ?2;";
+
+    #[test]
+    fn task_finish_selectors_match_exact_sdk_execution_and_refuse_other_statements() {
+        // Immutable 46da diagnostic cursor272, with original-stream COMMIT+Close283.
+        let observed_receipt = "SELECT seq, payload_len, payload_sha256, actor_user_id FROM task_collab_op_receipts WHERE workspace_id = ?1 AND task_id = ?2 AND op_id = ?3;";
+        assert!(observed_receipt.contains(RECEIPT));
+        assert!(!"SELECT seq,payload_len,payload_sha256,actor_user_id FROM task_collab_op_receipts WHERE workspace_id=?1 AND task_id=?2 AND op_id=?3".contains(RECEIPT), "Describe is not executed receipt SQL");
+        for other in [
+            observed_receipt.replace("task_collab_op_receipts", "document_collab_op_receipts"),
+            observed_receipt.replace("task_collab_op_receipts", "task_collab_op_receipts_extra"),
+            observed_receipt.replace("seq, payload_len", "payload_len, seq"),
+            observed_receipt.replace("op_id = ?3", "op_id = ?4"),
+            observed_receipt.replace("AND op_id = ?3", "AND op_id != ?3"),
+        ] {
+            assert!(
+                !other.contains(RECEIPT),
+                "different receipt operation cannot arm this fault"
+            );
+        }
+        // Same pinned parser rendering of the existing full Task load and release
+        // SQL; their actual runtime paths still require separate allocation.
+        let canonical_load = "SELECT state, encoding, writer_generation, snapshot_cutoff_seq, tail_seq, updated_at FROM task_states WHERE workspace_id = ?1 AND task_id = ?2;";
+        assert!(canonical_load.contains(LOAD));
+        assert!(!canonical_load
+            .replace("task_states", "document_states")
+            .contains(LOAD));
+        assert!(!canonical_load
+            .replace("task_id = ?2", "task_id = ?3")
+            .contains(LOAD));
+        assert!(!canonical_load
+            .replace("AND task_id = ?2", "AND task_id != ?2")
+            .contains(LOAD));
+        let canonical_release = "UPDATE task_collab_room_fences SET expires_at = ?5 WHERE workspace_id = ?1 AND task_id = ?2 AND owner_token = ?3 AND fence = ?4;";
+        assert_eq!(canonical_release, RELEASE);
+        assert_ne!(
+            canonical_release.replace("owner_token = ?3", "owner_token = ?6"),
+            RELEASE
+        );
+        // Observed 46da renewal has an extra DB-clock live-owner predicate and is
+        // not a release. Exact equality keeps the no-fresh-release oracle specific.
+        assert_ne!("UPDATE task_collab_room_fences SET expires_at = ?5 WHERE workspace_id = ?1 AND task_id = ?2 AND owner_token = ?3 AND fence = ?4 AND expires_at > ?6;", RELEASE);
+    }
 
     // Concrete normal Task consumer fixture. SQL is executed by the maintained
     // SQLite engine through the pinned SDK, native bytes by the actual child.
