@@ -203,6 +203,20 @@ class MetadataControls(unittest.TestCase):
     def test_public_set_drift_refuses_admission(self):
         with patch.object(metadata, 'installed', side_effect=[list(metadata.ROWS), ['unknown']]): self.refuses()
 
+    def test_public_inspection_metadata_drift_refuses_final_receipt(self):
+        drift = ('\n'.join(reversed(metadata.ROWS)) + '\n').encode()
+        calls = [0]
+        def installed(rustup):
+            calls[0] += 1
+            if calls[0] == 2:
+                self.component.write_bytes(drift)
+            return sorted(metadata.ROWS)
+        with patch.object(metadata, 'installed', installed), self.assertRaisesRegex(ValueError, 'components-final-byte-drift'):
+            self.prepare()
+        self.assertEqual(self.component.read_bytes(), drift)
+        self.assertTrue((self.output/'before.json').exists())
+        self.assertFalse((self.output/'after.json').exists())
+
     def test_rustup_identity_drift_before_write(self):
         self.rustup.write_bytes(b'owned changed manager bytes'); self.refuses()
 

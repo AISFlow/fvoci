@@ -208,6 +208,10 @@ def prepare(root, output, rustup, context):
     require(after_closure == before_closure, 'compiled-toolchain-input-drift')
     require(installed(rustup) == before_set, 'public-installed-set-drift')
     require((sha(rustup.read_bytes()), file_identity(rustup.lstat())) == before_rustup, 'rustup-identity-drift')
+    with open(component, 'rb', opener=lambda path, flags: os.open(path, flags | os.O_NOFOLLOW)) as final:
+        require(file_identity(os.fstat(final.fileno())) == file_identity(original_info)
+                and file_identity(component.lstat()) == file_identity(original_info), 'components-final-identity-drift')
+        require(final.read(4096) == CANONICAL, 'components-final-byte-drift')
     after = {**context, 'changed': raw != CANONICAL, 'canonical_order': list(ROWS),
              'canonical_sha256': sha(CANONICAL), 'component_identity': file_identity(component.lstat()),
              'other_toolchain_inputs_sha256': after_closure['sha256'],
