@@ -1,87 +1,82 @@
-# Isolated Turso test preparation
+# Isolated Turso connection test
 
-This manual path is **source preparation only**. Every runtime phase currently
-fails with `NOT_IMPLEMENTED` before build, Turso network access, or credential
-consumption. No connection, CRUD, migration, persistence, restore, or UI test has
-passed. The shared CI workflow registry and actual primary driver remain
-root-owned integration work. There is no secret-consuming job yet.
+The source consumer is prepared; Rust compilation and actual Turso execution are
+**NOT RUN**. Independent review, trusted-main adoption, and a separately
+allocated execution are still required. The workflow must exist on the default
+branch before `workflow_dispatch` is available. Never dispatch unreviewed
+PR/fork/alternate-ref code with credentials. [GitHub manual dispatch](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch).
 
-Use only a designated isolated test database. In **AISFlow/fvoci → Settings →
-Environments → New environment**, manually create `fvoci-turso-test`; select
-deployment branches/tags with the single **Branch `main`** rule. Configure any
-required reviewer yourself. Do not use a wildcard or tag rule. Environment
-secrets become available only to jobs referencing that Environment after its
-protection rules pass. A workflow referencing an absent Environment can create
-an unprotected one, so the eventual driver must check existence and the exact
-main-only policy before that job starts. See [GitHub's Environment guide](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments).
+Use the user-designated isolated test database. The dedicated Environment is
+**AISFlow/fvoci → Settings → Environments → `fvoci-turso-test`**. Register only:
 
-Register these two **Environment secrets** yourself, without posting values to
-chat, an issue, a log, or an artifact:
-
-- `FVOCI_TEST_TURSO_DATABASE_URL`: the isolated database's primary `libsql://`
-  or `https://` URL; no userinfo, query, fragment, custom port, replica, sync,
-  local fallback, or production endpoint. The preparation guard restricts hosts
-  to `*.turso.io`; another host requires explicit reviewed admission.
-- `FVOCI_TEST_TURSO_AUTH_TOKEN`: one short-expiry **read/write token scoped to
-  that database alone**, supporting the authorized isolated schema/data CRUD
-  and DDL. Do not select `--read-only`, which would require replacement for
-  those later tests. The initial connection phase still performs no destructive
-  data/schema operation. Never use an organization/account/admin/platform API
-  or billing token; do not delete or recreate the service database. See
+- Environment secret `FVOCI_TEST_TURSO_DATABASE_URL`: that database's primary
+  `libsql://` or `https://` URL on `*.turso.io`; no userinfo, query, fragment,
+  custom port, replica, sync, local fallback or production target.
+- Environment secret `FVOCI_TEST_TURSO_AUTH_TOKEN`: one short-expiry **read/write
+  token scoped to that database alone**, supporting the authorized isolated
+  schema/data CRUD and DDL. Do not select `--read-only`, which would require
+  replacement for later tests. Never use an organization/account/admin/platform
+  API or billing credential; do not delete or recreate the service database.
   [Turso database tokens](https://docs.turso.tech/cli/db/tokens/create).
 
-Set these nonsecret **Environment variables** and confirm the same host/ID in
-the dispatch inputs:
+The current registration metadata reports that the Environment and these two
+secret names exist, with only `FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE=false` as an
+Environment variable. No values were inspected or verified by this author.
+**Expected-host and database-name/ID variables or dispatch inputs are not
+required.** The secret URL is the designated target; URL shape validation is
+neither server identity proof nor permission to initialize/reset anything.
 
-- `FVOCI_TEST_TURSO_EXPECTED_HOST`: exact lowercase isolated DB hostname.
-- `FVOCI_TEST_TURSO_DATABASE_ID`: exact isolated DB identifier.
-- `FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE`: keep `false` initially. A later fixed
-  mutating phase needs this value `true` **and** the dispatch boolean
-  `destructive=true`; connection requires `destructive=false`.
+Current Environment `deployment_branch_policy` is null and is allowed. Both
+jobs enforce AISFlow/fvoci + `workflow_dispatch` + `refs/heads/main` and checkout
+exact `github.sha` with credentials persistence disabled. The admission job
+first verifies the preexisting named Environment through an anonymous public
+GitHub metadata GET. It does not create or modify an Environment or policy;
+404, denied/rate-limited access, malformed metadata or redirects fail before the
+Environment job. Public metadata reads need no organization/admin token;
+private authenticated equivalents need Actions read access. [GitHub Environment API](https://docs.github.com/en/rest/deployments/environments#get-an-environment).
 
-Registration may proceed while the driver and registry work remain pending.
-Secret-name presence can be confirmed through Settings without displaying
-values; registration does not make the missing consumer ready. The current
-empty Environment inventory proves no registration or readiness. Prepared
-source is not a dispatchable default-branch workflow:
-`workflow_dispatch` requires the workflow on the default branch. Only reviewed
-trusted-main adoption can enable this path; never run an unreviewed PR/fork or
-arbitrary ref with secrets. See [GitHub manual dispatch](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch).
+The dedicated `turso-connection` job prepares the maintained pinned SQLite/Rust
+inputs and compiles the current library tests **without credentials**. It
+freezes the actual Cargo-emitted test ELF and binds source SHA/digest, emitted
+profile/features, binary hash and native preparation receipt. Only its final
+runtime step binds the two secrets. No raw SDK/test error body, URL, header,
+token, environment dump or credential-bearing trace is printed or uploaded.
 
-## Required real driver before credentials are consumed
+Default phase `connection` requires `destructive=false` and makes no schema/data
+mutation even if ALLOW_DESTRUCTIVE is missing or true. It explicitly executes
+`db::turso_test::turso_primary_connection` with `--ignored --exact
+--test-threads=1`; the wrapper requires **1 passed, 0 failed, 0 ignored**, never
+zero-test success. The new test is ignored in ordinary automatic suites so they
+never contact Turso; explicit selection with missing credentials fails.
 
-Use the product's pinned `libsql = 0.9.30` remote/TLS SDK and actual
-`RemoteDatabase::connect` / `Backend::LibsqlRemote` transaction path. First prove
-connectivity, literal readback, and `PRAGMA foreign_keys=1` on the **same stream**
-with awaited rollback/closure. `Backend::ping` alone is insufficient for that
-oracle. There is no existing real Turso primary harness; the local transport
-fixture is not Turso. The remote migrator also currently refuses admission.
+The fixture uses the pinned libsql0.9.30 remote/TLS product SDK through
+`RemoteDatabase::connect` and `Backend::LibsqlRemote::begin_read`. It reads
+`PRAGMA foreign_keys=1` and literal integer/text values on the same borrowed
+stream, then awaits the original transaction rollback even after read failure
+and awaits `Backend::close`. Fixed receipts distinguish primary, rollback,
+owner-close and lease-accounting outcomes. Owner drain is not proof of a server
+Close ACK: the SDK's Drop Close receipt is not exposed. No abort/timeout/drop is
+claimed to perform cooperative cleanup.
 
-Initial URL/host validation is configuration admission, not proof of a remote
-database's identity or every later SDK endpoint. The maintained SDK accepts a
-server-provided Hrana `base_url` for subsequent requests; the product connection
-does not expose a connector override. This is an execution boundary needing a
-specific maintained-SDK/trusted-server assessment before consuming credentials,
-not a confirmed vulnerability or an adopted transport redesign.
+The maintained SDK accepts a trusted server's Hrana `base_url` for subsequent
+requests. Initial URL validation does not prove follow-up endpoint behavior.
+This remains a specific maintained-SDK/trusted-primary assessment boundary, not
+a confirmed vulnerability or an adopted transport redesign. No SDK, dependency,
+product connection or transport framework was changed.
 
-Before any mutations, verify real target metadata and an isolated ownership
-marker; reject foreign/mixed data without initializing it. Use a namespace
-bound to repository/run ID/run attempt and clean only the current run's objects,
-even after primary failure. Keep primary and cleanup failures separate; unknown
-COMMIT or mutation outcome must not trigger a blind retry/reset. The fixed
-Environment-wide concurrency group uses `cancel-in-progress: false` to
-serialize all runs against the same database. No other execution's cleanup or
-service resource deletion is authorized.
+All later phases remain **NOT IMPLEMENTED** and fail before credential
+consumption. They must cover current tenant authority/CRUD, receipt/version
+retry, concurrent/cancel/original-stream rollback and COMMIT reply loss with
+fresh-connection reconciliation, current migrations, persistence/restart,
+restore, UI persist ACK/revisions and fresh-client readback. ALLOW_DESTRUCTIVE
+must become explicitly true only for a future approved in-DB mutating phase,
+with its dispatch confirmation; it can never reset the connection phase.
+Before mutations, verify real target metadata and an isolated owned marker,
+reject foreign/mixed data, namespace by run ID/attempt, and clean only that run's
+objects. Keep primary and cleanup failures separate; unknown mutation outcome
+cannot cause blind retry/reset. Constant per-database concurrency uses
+`cancel-in-progress:false`; no service database resource deletion/recreation.
 
-Mandatory later phases remain explicit: CRUD/current tenant authority;
-version/command receipt retry; concurrency/cancellation and original-stream
-rollback/COMMIT reply loss with fresh connection reconciliation; current
-migrations; persistence/restart; current restore; UI persist ACK/revisions and
-fresh-client readback. Missing phases fail closed rather than passing no-ops.
-Only a reviewed dedicated Environment job may bind the two secrets to its
-single consuming step after credential-free compilation. Never emit raw SDK
-errors, URLs, headers, tokens, environment dumps, or credential-bearing traces.
-
-Pure checks now: `python3 scripts/selected-backend-ci/turso-test-fixtures.py`.
-Rust compilation, real SDK/DB operations, remote Actions, and browser/runtime
-qualification are **NOT RUN** and require separate allocation and review.
+Pure local checks: `python3 scripts/selected-backend-ci/turso-test-fixtures.py`
+and `bash scripts/test-ci-selection.sh`. These do not prove Rust compilation,
+SDK/network execution or actual Turso PASS.

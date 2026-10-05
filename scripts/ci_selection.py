@@ -50,6 +50,7 @@ WORKFLOW_YAML: dict[str, str] = {
 # selection workflow, so it has no ci-plan/gate; it is allowed only while it
 # cannot run for untrusted refs and write scopes stay in the listed jobs.
 RELEASE_WORKFLOW_FILE = "release.yml"
+TURSO_MANUAL_WORKFLOW_FILE = "turso-test.yml"
 RELEASE_WRITE_SCOPES: dict[str, frozenset[str]] = {
     "build": frozenset({"packages"}),
     "index": frozenset({"packages"}),
@@ -1419,7 +1420,7 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
 def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     workflows_dir = repo_root / ".github" / "workflows"
-    allowed_files = {*WORKFLOW_YAML.values(), RELEASE_WORKFLOW_FILE}
+    allowed_files = {*WORKFLOW_YAML.values(), RELEASE_WORKFLOW_FILE, TURSO_MANUAL_WORKFLOW_FILE}
     discovered_files = list_workflow_files(repo_root)
     if not workflows_dir.is_dir():
         errors.append("missing .github/workflows directory")
@@ -1595,7 +1596,66 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
     if release_path.is_file():
         errors.extend(verify_release_workflow(release_path))
 
+    turso_path = workflows_dir / TURSO_MANUAL_WORKFLOW_FILE
+    if turso_path.is_file():
+        errors.extend(verify_turso_workflow(turso_path))
+
     errors.extend(verify_rust_suite_registry(repo_root))
+    return errors
+
+
+def verify_turso_workflow(path: Path) -> list[str]:
+    """Named manual-only exception; never changes PR selection or stable gates."""
+    data, parse_err = _load_yaml_mapping(path)
+    if parse_err:
+        return [f"{path.name}: {parse_err}"]
+    errors: list[str] = []
+
+    def require(condition: bool, boundary: str) -> None:
+        if not condition:
+            errors.append(f"{path.name}: {boundary}")
+
+    triggers = data.get("on", data.get(True))
+    require(isinstance(triggers, dict) and set(triggers) == {"workflow_dispatch"}, "manual dispatch only")
+    dispatch = triggers.get("workflow_dispatch", {}) if isinstance(triggers, dict) else {}
+    require(dispatch.get("inputs") == {
+        "phase": {"description": "Connection is read-only; later phases are NOT IMPLEMENTED", "type": "choice", "default": "connection", "options": ["connection", "crud", "transactions", "migration", "persistence", "restore", "ui-ack"]},
+        "destructive": {"description": "Explicit isolated test DB mutation confirmation (connection must be false)", "type": "boolean", "default": False},
+    } if isinstance(dispatch, dict) else False, "fixed phase inputs and non-destructive default")
+    require(data.get("permissions") == {"contents": "read"}, "contents read only")
+    require("env" not in data, "no global credential environment")
+    require(data.get("concurrency") == {"group": "fvoci-turso-test-database", "cancel-in-progress": False}, "fixed database concurrency without cancellation")
+    jobs = data.get("jobs")
+    if not isinstance(jobs, dict) or set(jobs) != {"admission", "turso-connection"}:
+        return [*errors, f"{path.name}: exactly admission and turso-connection jobs required"]
+    trusted = "github.event_name == 'workflow_dispatch' && github.repository == 'AISFlow/fvoci' && github.ref == 'refs/heads/main'"
+    checkout = {"uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262", "with": {"ref": "${{ github.sha }}", "persist-credentials": False}}
+    admission = jobs["admission"]
+    runtime = jobs["turso-connection"]
+    if not isinstance(admission, dict) or not isinstance(runtime, dict):
+        return [*errors, f"{path.name}: job mappings required"]
+    require(set(admission) == {"if", "runs-on", "timeout-minutes", "outputs", "steps"}, "admission has no Environment or credentials")
+    require(admission.get("if") == trusted and admission.get("outputs") == {"environment_id": "${{ steps.admit.outputs.environment_id }}"}, "trusted admission and existence output")
+    require(admission.get("steps") == [checkout,
+        {"name": "Pure admission fixtures (no credentials or network)", "run": "python3 scripts/selected-backend-ci/turso-test-fixtures.py"},
+        {"name": "Verify preexisting Environment (no configuration writes)", "id": "admit", "run": "python3 scripts/selected-backend-ci/turso-test-guard.py --admit"}], "pre-Environment admission steps")
+    require(set(runtime) == {"needs", "if", "environment", "runs-on", "timeout-minutes", "env", "steps"}, "runtime job cannot add unchecked execution or permissions")
+    require(runtime.get("needs") == "admission" and runtime.get("if") == trusted + " && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''", "runtime needs successful trusted admission")
+    require(runtime.get("environment") == "fvoci-turso-test", "fixed Environment")
+    require(runtime.get("env") == {"LIBCLANG_PATH": "/usr/lib/llvm-18/lib", "CARGO_BUILD_JOBS": 4, "CARGO_INCREMENTAL": 0, "CARGO_PROFILE_DEV_DEBUG": 0, "CARGO_PROFILE_TEST_DEBUG": 0, "CARGO_TARGET_DIR": "${{ runner.temp }}/turso-target"}, "credential-free compiler environment")
+    require(admission.get("runs-on") == runtime.get("runs-on") == "ubuntu-24.04" and admission.get("timeout-minutes") == 5 and runtime.get("timeout-minutes") == 15, "fixed runner and budgets")
+    steps = runtime.get("steps")
+    if not isinstance(steps, list) or len(steps) != 4 or not all(isinstance(step, dict) for step in steps):
+        return [*errors, f"{path.name}: fixed credential-free build then single consuming step"]
+    require(steps[0] == checkout, "exact SHA checkout with stripped credentials")
+    require(set(steps[1]) == set(steps[2]) == {"name", "run"}, "no compilation credentials")
+    require(steps[1].get("run") == "set -euo pipefail\nrustup toolchain install 1.98.1 --profile minimal\nsudo apt-get update\nsudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.3-1ubuntu1\nmkdir \"$RUNNER_TEMP/fvoci-sqlite\"\ndpkg-query -W > \"$RUNNER_TEMP/fvoci-sqlite/build-packages.txt\"\nbash scripts/prepare-sqlite-ci.sh --parent \"$RUNNER_TEMP/fvoci-sqlite\" \\\n  --github-env \"$GITHUB_ENV\" --github-output \"$GITHUB_OUTPUT\"\ncargo fetch --locked\n", "maintained pinned compiler/native preparation")
+    require(steps[2].get("run") == "set -euo pipefail\ncargo test --locked --offline --lib --features db-tests --jobs 4 --no-run --message-format=json > \"$RUNNER_TEMP/turso-compile.json\"\npython3 scripts/selected-backend-ci/turso-test-guard.py --freeze\n", "fixed fresh compilation and ELF binding")
+    require(steps[3] == {"name": "Read-only real primary connection (exactly one test)", "env": {
+        "FVOCI_TEST_TURSO_DATABASE_URL": "${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}",
+        "FVOCI_TEST_TURSO_AUTH_TOKEN": "${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}",
+        "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}",
+    }, "run": "python3 scripts/selected-backend-ci/turso-test-guard.py --consume"}, "only one sanitized runtime step consumes two secrets")
     return errors
 
 

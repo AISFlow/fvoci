@@ -1668,6 +1668,32 @@ class RegistryMutationCliTest(unittest.TestCase):
         proc, output = self._plan_against(root)
         self._assert_no_green_outputs(proc, output, "unknown workflow file extra.yml")
 
+    def test_turso_manual_workflow_security_boundaries_before_outputs(self) -> None:
+        cases = [
+            ("  workflow_dispatch:\n", "  pull_request_target:\n", "manual dispatch only"),
+            ("      destructive:\n", "      checkout_sha:\n", "fixed phase inputs"),
+            ("  contents: read\n", "  contents: write\n", "contents read only"),
+            ("  cancel-in-progress: false\n", "  cancel-in-progress: true\n", "fixed database concurrency"),
+            ("github.repository == 'AISFlow/fvoci'", "github.repository == 'attacker/fvoci'", "trusted admission"),
+            ("ref: ${{ github.sha }}", "ref: ${{ inputs.checkout_sha }}", "pre-Environment admission steps"),
+            ("persist-credentials: false", "persist-credentials: true", "pre-Environment admission steps"),
+            ("    needs: admission\n", "    needs: []\n", "runtime needs successful trusted admission"),
+            ("    environment: fvoci-turso-test\n", "    environment: production\n", "fixed Environment"),
+            (" --admit\n", " --consume\n", "pre-Environment admission steps"),
+            ("--no-run --message-format=json", "--message-format=json", "fixed fresh compilation"),
+            ("      CARGO_INCREMENTAL: 0\n", "      TOKEN: ${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}\n", "credential-free compiler environment"),
+            (" --consume\n", " --consume || true\n", "only one sanitized runtime step"),
+        ]
+        for old, new, needle in cases:
+            with self.subTest(boundary=needle):
+                root = self._mutated_root()
+                path = root / ".github" / "workflows" / "turso-test.yml"
+                text = path.read_text(encoding="utf-8")
+                self.assertIn(old, text)
+                path.write_text(text.replace(old, new, 1), encoding="utf-8")
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, needle)
+
     def test_missing_selector_output_rejected_before_outputs(self) -> None:
         root = self._mutated_root()
         web = root / ".github" / "workflows" / "web.yml"

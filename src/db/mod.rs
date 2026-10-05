@@ -64,6 +64,8 @@ pub mod task_origins;
 pub mod task_timer;
 pub mod tasks;
 pub mod templates;
+#[cfg(all(test, feature = "db-tests"))]
+mod turso_test;
 pub mod user_export;
 pub(crate) mod vapid;
 pub mod view_query;
