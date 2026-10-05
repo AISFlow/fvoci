@@ -41,7 +41,7 @@ def call(args):
     return subprocess.check_output(args,cwd=ROOT,text=True).strip()
 
 
-def identity(mode, output):
+def identity(mode="handoff", output=None):
     execution = os.environ.get('FVOCI_SELECTED_EXECUTION_MODE', 'github-ci')
     assert execution in ('github-ci', 'orca-local')
     if execution == 'orca-local':
@@ -56,7 +56,12 @@ def identity(mode, output):
     assert subprocess.run(['git','-c','safe.directory='+str(ROOT),'diff','--quiet','HEAD'],cwd=ROOT).returncode==0, 'current tracked source must equal the tested SHA'
     assert re.fullmatch('[0-9]+',os.environ['GITHUB_RUN_ID'])
     assert re.fullmatch('[0-9]+',os.environ['GITHUB_RUN_ATTEMPT'])
-    assert os.environ['GITHUB_JOB']=='collaboration-flow'
+    if os.environ['GITHUB_JOB'] == 'collaboration-build':
+        assert mode in ('handoff', 'record-before', 'stage', 'record-after')
+        assert os.environ.get('FVOCI_WEB_BUILD_PHASE') == 'prepare', 'wrong producer phase'
+    else:
+        assert os.environ['GITHUB_JOB']=='collaboration-flow'
+        assert os.environ.get('FVOCI_WEB_BUILD_PHASE') in (None, 'consume'), 'wrong runtime phase'
     return 'github:'+':'.join(os.environ[k] for k in ('GITHUB_REPOSITORY','GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','GITHUB_JOB'))
 
 
@@ -203,6 +208,7 @@ def selected_runs():
 
 
 def run(output):
+    assert os.environ.get("GITHUB_JOB") != "collaboration-build", "build producer cannot start runtime"
     assert os.getuid()==os.getgid()==1000, 'normal SQLite browser/fixture/app file ownership must be1000:1000'
     owner=identity('run', output);before=read(output/'before.json');assert read(output/'after.json')==before
     runtime=output/'runtime';runtime.mkdir(mode=0o700)

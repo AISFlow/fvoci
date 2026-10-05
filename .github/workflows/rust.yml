@@ -284,6 +284,87 @@ jobs:
           FVOCI_MEILI_KEY: ci-ephemeral-meili-master
         run: cargo test --locked --offline --no-fail-fast --features db-tests ${{ matrix.tests }}
 
+      - name: Schema baseline SQLite controls and prepared PostgreSQL catalog
+        if: matrix.shard == 'a'
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+          PREPARATION_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
+        run: |
+          set -euo pipefail
+          cargo build --locked --offline --bin fvoci-migrate
+          python3 - <<'PYSCHEMA'
+          import hashlib, json, os, pathlib, re, secrets, stat, subprocess, tempfile, urllib.parse
+          assert os.environ['CI'] == os.environ['GITHUB_ACTIONS'] == 'true'
+          assert subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip() == os.environ['GITHUB_SHA']
+          container = os.environ['PG_CONTAINER']
+          assert re.fullmatch('[0-9a-f]{64}', container)
+          url = urllib.parse.urlsplit(os.environ['PREPARATION_DATABASE_URL'])
+          assert url.scheme == 'postgres' and url.hostname == '127.0.0.1' and url.port and url.path == '/postgres'
+          assert url.username == 'postgres' and not url.query and not url.fragment
+          root = pathlib.Path(tempfile.mkdtemp(prefix='fvoci-schema-ci-', dir=os.environ['RUNNER_TEMP']))
+          assert stat.S_IMODE(root.stat().st_mode) == 0o700 and root.stat().st_uid == os.getuid()
+          identity = secrets.token_hex(8)
+          database, role = 'fvoci_schema_ci_' + identity, 'fvoci_schema_app_' + identity
+          password = secrets.token_hex(32)
+          created_db = created_role = False
+          failed = False
+          # Owner URL is confined to preparation and this documented read-only catalog
+          # extractor, never exported to normal product servers or other test targets.
+          def private(name, data):
+              with (root / name).open('xb') as handle:
+                  os.fchmod(handle.fileno(), 0o600); handle.write(data)
+          def command(name, args, *, env=None, sql=None):
+              result = subprocess.run(args, env=env, input=sql, capture_output=True)
+              private(name + '.stdout.log', result.stdout); private(name + '.stderr.log', result.stderr)
+              if result.returncode:
+                  raise RuntimeError(name + ' exit=' + str(result.returncode))
+              return result.stdout.decode()
+          def sql(name, text, db='postgres'):
+              return command(name, ['docker','exec','-i',container,'psql','-X','-U','postgres','-d',db,'-v','ON_ERROR_STOP=1'], sql=text.encode())
+          owner_url = urllib.parse.urlunsplit(url._replace(path='/' + database))
+          migrate = str(pathlib.Path('target/debug/fvoci-migrate').resolve())
+          assert stat.S_ISREG(pathlib.Path(migrate).lstat().st_mode)
+          try:
+              # CREATE has no IF NOT EXISTS: collision is a refusal, not adoption.
+              sql('create-role', f"CREATE ROLE \"{role}\" LOGIN PASSWORD '{password}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;")
+              created_role = True
+              sql('create-database', f'CREATE DATABASE "{database}";')
+              created_db = True
+              preparation = {**os.environ, 'FVOCI_DATABASE_BACKEND':'postgres', 'DATABASE_URL':owner_url}
+              command('normal-install', [migrate], env=preparation)
+              command('normal-app-grants', [migrate,'--grant-app-role',role], env=preparation)
+              catalog = root / 'catalog.private.json'; private(catalog.name, b'')
+              observer = {**os.environ, 'FVOCI_SCHEMA_CATALOG_DATABASE_URL':owner_url,
+                          'FVOCI_SCHEMA_CATALOG_APP_ROLE':role, 'FVOCI_SCHEMA_CATALOG_OUT':str(catalog)}
+              observer.pop('PREPARATION_DATABASE_URL', None)
+              stdout = command('schema-target', ['cargo','test','--locked','--offline','--features','db-tests',
+                                '--test','schema_baseline_integration','--','--nocapture'], env=observer)
+              assert re.search(r'test result: ok\. 3 passed; 0 failed; 0 ignored;', stdout), 'exact three actual controls required'
+              assert 'SKIP postgres_catalog_dump' not in (root/'schema-target.stderr.log').read_text()
+              facts = json.loads(catalog.read_bytes())
+              assert facts['tables'] and len(facts['ledger']) == 12
+              authority = facts['app_role']; attrs = authority['attributes']
+              assert authority['role'] == role and attrs['exists'] and attrs['login']
+              assert all(attrs[k] is False for k in ('superuser','createdb','createrole','replication','bypassrls'))
+              assert attrs['member_of'] == []
+              private('scope.json', json.dumps({'source':os.environ['GITHUB_SHA'],'catalog_sha256':hashlib.sha256(catalog.read_bytes()).hexdigest(),
+                  'actual_controls':3,'sqlite_controls':2,'postgres_catalog_reads':1,
+                  'normal_product_role_tests':'separate existing PostgreSQL integration suites'}).encode())
+          except BaseException:
+              failed = True
+              # Keep all raw tool output private; do not expose URLs or seed fields.
+              print('schema baseline controls failed; private evidence retained', flush=True)
+              raise RuntimeError('schema baseline CI preparation/execution failed') from None
+          finally:
+              # Only identities positively created by this invocation can be retired.
+              if created_db:
+                  sql('drop-database', f'DROP DATABASE "{database}" WITH (FORCE);')
+              if created_role:
+                  sql('drop-role', f'DROP ROLE "{role}";')
+              if not failed:
+                  print('schema baseline: 2 SQLite controls + 1 prepared-owner catalog read passed; owned DB/role retired', flush=True)
+          PYSCHEMA
+
       - name: Selected SQLite install lifetime controls
         if: matrix.shard == 'b' && matrix.pg_major == '18'
         env:

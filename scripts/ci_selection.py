@@ -23,7 +23,7 @@ NarrowFamily = Literal["docs", "frontend_web_install", "web_tests"]
 PLAN_VERSION = 3
 
 WORKFLOW_JOBS: dict[str, tuple[str, ...]] = {
-    "web": ("web-static", "web-checks", "workspace-browser-shard", "collaboration-flow"),
+    "web": ("web-static", "web-checks", "web-native-checks", "workspace-browser-shard", "collaboration-build", "collaboration-flow"),
     "rust": ("fast", "native-arm64", "postgres", "collaboration"),
     "documents": ("native-extraction",),
     "collab-engine": ("native-collab-engine",),
@@ -201,6 +201,9 @@ def sanitize_reason_code(code: str) -> str:
 
 
 def select_output_key(job: str) -> str:
+    # Both mandatory web budget lanes use the same existing selection output.
+    if job == "web-native-checks":
+        job = "web-checks"
     return f"select_{job.replace('-', '_')}"
 
 
@@ -1328,6 +1331,39 @@ def selected_install_inventory(jobs: dict) -> tuple[set[str], str | None]:
     return {RUST_SELECTED_INSTALL_TARGET}, None
 
 
+RUST_SCHEMA_BASELINE_STEP = "Schema baseline SQLite controls and prepared PostgreSQL catalog"
+RUST_SCHEMA_BASELINE_RUN_SHA256 = "ee031ee20abc5405b838fe9f2b4073f0a392ca5649ebff3eb9ced9d866850c91"
+
+
+def schema_baseline_inventory(jobs: dict) -> tuple[set[str], str | None]:
+    """Two actual local SDK controls and the configured catalog inspection tool.
+    The catalog uses an owned prepared DB/owner, not a normal-server credential.
+    """
+    steps, err = _postgres_job_steps(jobs)
+    if err:
+        return set(), err
+    step, err = _unique_named_step(steps, RUST_SCHEMA_BASELINE_STEP, job="postgres")
+    if err:
+        return set(), err
+    expected_env = {
+        "PG_CONTAINER": "${{ job.services.postgres.id }}",
+        "PREPARATION_DATABASE_URL": "postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres",
+    }
+    if (step.get("if") != "matrix.shard == 'a'" or "continue-on-error" in step
+            or step.get("env") != expected_env
+            or hashlib.sha256(str(step.get("run", "")).strip().encode()).hexdigest() != RUST_SCHEMA_BASELINE_RUN_SHA256):
+        return set(), "rust: schema baseline requires exact configured extraction, 2+1 actual controls and owned cleanup"
+    rows, err = _postgres_matrix_rows(jobs["postgres"])
+    if err:
+        return set(), err
+    actual = [(row.get("runner"), row.get("pg_major")) for row in rows if row.get("shard") == "a"]
+    expected = [("ubuntu-26.04", "16"), ("ubuntu-26.04", "17"),
+                ("ubuntu-26.04", "18"), ("ubuntu-26.04-arm", "18")]
+    if sorted(actual) != sorted(expected):
+        return set(), "rust: schema baseline requires PG16/17/18 x64 and PG18 arm64 A execution"
+    return {"schema_baseline_integration"}, None
+
+
 def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
     """Ensure explicit root [[test]] db-tests targets map to rust.yml execution rows."""
     errors: list[str] = []
@@ -1388,11 +1424,17 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
         errors.append(install_err)
         return errors
 
+    schema_tests, schema_err = schema_baseline_inventory(jobs)
+    if schema_err:
+        errors.append(schema_err)
+        return errors
+
     postgres_union = per_arch["x64"]
     overlap = (
         (postgres_union & collab_tests) | (postgres_union & s3_tests)
         | (collab_tests & s3_tests)
         | (install_tests & (postgres_union | collab_tests | s3_tests))
+        | (schema_tests & (postgres_union | collab_tests | s3_tests | install_tests))
     )
     if overlap:
         errors.append(
@@ -1405,7 +1447,7 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
         if not probe_script.is_file():
             errors.append(f"rust: missing manual probe script {RUST_CAPACITY_PROBE_SCRIPT}")
 
-    assigned = postgres_union | collab_tests | s3_tests | install_tests | RUST_INTEGRATION_MANUAL_TARGETS
+    assigned = postgres_union | collab_tests | s3_tests | install_tests | schema_tests | RUST_INTEGRATION_MANUAL_TARGETS
     required = cargo_targets - RUST_INTEGRATION_MANUAL_TARGETS
     missing = sorted(required - assigned)
     if missing:
@@ -1414,6 +1456,60 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
             + ", ".join(missing)
         )
 
+    return errors
+
+
+def _verify_web_build_handoff(jobs: dict) -> list[str]:
+    """The only admitted cross-job native consumer, bound to this run's producer."""
+    errors = []
+    def require(ok, message):
+        if not ok: errors.append("web: current build handoff " + message)
+    producer = jobs.get("collaboration-build", {})
+    consumer = jobs.get("collaboration-flow", {})
+    require(producer.get("needs") == "ci-plan", "producer needs ci-plan")
+    require(consumer.get("needs") == ["ci-plan", "collaboration-build"], "consumer needs successful registered producer")
+    for name, job in (("collaboration-build", producer), ("collaboration-flow", consumer)):
+        require(job.get("runs-on") == "ubuntu-26.04" and job.get("timeout-minutes") == 15, "fixed runner/budget")
+        require(not any(k in job for k in ("continue-on-error", "strategy", "env", "permissions")), "no masked/alternate authority")
+        checkout = [step for step in job.get("steps", []) if str(step.get("uses", "")).startswith("actions/checkout@")]
+        require(len(checkout) == 1 and checkout[0].get("with") == {"persist-credentials": False}, "default exact checkout without stored credentials")
+        require(job.get("if") == "needs.ci-plan.outputs.select_" + name.replace("-", "_") + " == 'true'", "selection only by registered plan")
+    # Pending registration controls are DB-free, but not part of apps/web's
+    # default src-only unit discovery. Require their explicit mandatory consumer.
+    unit = [step for step in jobs.get("web-checks", {}).get("steps", [])
+            if step.get("name") == "Web and editor unit regressions"]
+    required = ("(cd apps/web && bun run test)", "(cd packages/editor && bun run test)",
+                "(cd apps/web && bun test e2e-pending/collab-playwright.config.test.ts --timeout 60000)",
+                "python3 scripts/selected-backend-ci/test_off_registration.py")
+    require(len(unit) == 1 and unit[0].get("run", "").splitlines() == list(required)
+            and not any(k in unit[0] for k in ("if", "continue-on-error")),
+            "mandatory complete web/editor and selected registration fixtures")
+    steps = producer.get("steps", [])
+    prepare = [step for step in steps if step.get("id") == "prepare"]
+    require(len(prepare) == 1 and prepare[0].get("env") == {"FVOCI_E2E_PENDING": "1"}
+            and "bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-prepare-selected" in prepare[0].get("run", "")
+            and not any(k in prepare[0] for k in ("if", "continue-on-error")), "unconditional qualified producer")
+    publish = [step for step in steps if step.get("id") == "publish"]
+    require(len(publish) == 1 and publish[0].get("uses") == "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+            and publish[0].get("with") == {"name": "web-current-build-${{ github.run_attempt }}",
+                "path": "${{ runner.temp }}/fvoci-web-build-handoff/handoff.json\n${{ runner.temp }}/fvoci-web-build-handoff/payload.tar\n",
+                "if-no-files-found": "error", "retention-days": 1}
+            and not any(k in publish[0] for k in ("if", "continue-on-error")), "publish only successful complete packet")
+    require(producer.get("outputs") == {"artifact_id": "${{ steps.publish.outputs.artifact-id }}",
+            "handoff_sha256": "${{ steps.prepare.outputs.handoff_sha256 }}"}, "producer artifact identity and digest outputs")
+    steps = consumer.get("steps", [])
+    download = [step for step in steps if str(step.get("uses", "")).startswith("actions/download-artifact@")]
+    require(len(download) == 1 and download[0].get("uses") == "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
+            and download[0].get("with") == {"artifact-ids": "${{ needs.collaboration-build.outputs.artifact_id }}", "merge-multiple": True,
+                "path": "${{ runner.temp }}/fvoci-web-build-handoff"}
+            and not any(k in download[0] for k in ("if", "continue-on-error")), "current-run exact artifact ID without foreign token/ref/run")
+    runtime = [step for step in steps if step.get("id") == "browser"]
+    require(len(runtime) == 1 and runtime[0].get("env") == {"FVOCI_E2E_PENDING": "1",
+                "FVOCI_WEB_BUILD_HANDOFF_SHA256": "${{ needs.collaboration-build.outputs.handoff_sha256 }}"}
+            and "bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected" in runtime[0].get("run", "")
+            and not any(k in runtime[0] for k in ("if", "continue-on-error")), "mandatory full original runtime after qualification")
+    require(not any(step.get("with", {}).get("path") in ("target", "crates/collab-engine/target")
+            for step in steps if str(step.get("uses", "")).startswith("actions/cache@")), "consumer cannot borrow target cache")
     return errors
 
 
@@ -1620,6 +1716,8 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
             errors.append(f"{workflow}: {reserved_gate} must be a mapping")
 
         errors.extend(_verify_opt_in_wiring(workflow, data, jobs))
+        if workflow == "web":
+            errors.extend(_verify_web_build_handoff(jobs))
 
     release_path = workflows_dir / RELEASE_WORKFLOW_FILE
     if release_path.is_file():

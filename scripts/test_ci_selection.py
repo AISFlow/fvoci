@@ -91,6 +91,195 @@ def configure_git(repo: Path) -> None:
     git(repo, "config", "commit.gpgsign", "false")
 
 
+X64_APT_MIRROR_SETUP = r"""# Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
+. /etc/os-release
+[[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
+case "$(dpkg --print-architecture)" in
+  amd64)
+    test -f /etc/apt/apt-mirrors.txt
+    grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
+    grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
+    test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
+    printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+    ;;
+  arm64) ;;
+  *) exit 1 ;;
+esac
+"""
+
+
+class UbuntuPrimaryMirrorTest(unittest.TestCase):
+    def preparation_steps(self):
+        result = {}
+        for workflow in ('web',):
+            data, error = SEL._load_yaml_mapping(ROOT / '.github/workflows' / (workflow + '.yml'))
+            self.assertIsNone(error)
+            for name, job in data['jobs'].items():
+                for step in job.get('steps', []):
+                    if step.get('id') == 'sqlite' and name != 'native-arm64':
+                        result[(workflow, name)] = step
+        return result
+
+    def test_every_x64_root_preparation_selects_signed_primary_before_apt(self):
+        steps = self.preparation_steps()
+        self.assertEqual(set(steps), {('web', 'web-checks'), ('web', 'web-native-checks'), ('web', 'workspace-browser-shard'),
+            ('web', 'collaboration-build'), ('web', 'collaboration-flow')})
+        for name, step in steps.items():
+            with self.subTest(consumer=name):
+                run = step['run']
+                self.assertEqual(run.count(X64_APT_MIRROR_SETUP), 1)
+                self.assertLess(run.index(X64_APT_MIRROR_SETUP), run.index('sudo apt-get update'))
+                self.assertLess(run.index('sudo apt-get update'), run.index('sudo apt-get install'))
+                self.assertIn('sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8', run)
+                self.assertEqual(step['env'], {'LIBCLANG_PATH': '/usr/lib/llvm-18/lib'})
+
+    def probe(self, arch='amd64', *, os_id='ubuntu', version='26.04', missing=None, source=None, apt_exit=0):
+        # Execute the actual workflow shell prefix against owned files and
+        # explicit dpkg/sudo stubs; never alter host APT or make network calls.
+        with tempfile.TemporaryDirectory(prefix='fvoci-apt-mirror-control-') as directory:
+            root = Path(directory); fake_bin = root / 'bin'; fake_bin.mkdir()
+            release = root / 'os-release'; release.write_text(f'ID={os_id}\nVERSION_ID={version}\n')
+            mirrors = root / 'apt-mirrors.txt'; mirrors.write_text('original ARM/Azure mirror\n')
+            sources = root / 'ubuntu.sources'
+            sources.write_text(source if source is not None else 'URIs: mirror+file:/etc/apt/apt-mirrors.txt\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n')
+            keyring = root / 'ubuntu-archive-keyring.gpg'; keyring.write_bytes(b'fixture keyring, not cryptographic verification')
+            foreign = root / 'foreign.sources'; foreign.write_text('foreign repository preserved\n')
+            before = (sources.read_bytes(), foreign.read_bytes())
+            if missing: {'mirrors':mirrors, 'sources':sources, 'keyring':keyring}[missing].unlink()
+            (fake_bin / 'dpkg').write_text('#!/bin/bash\n[[ "$*" == --print-architecture ]] || exit 90\nprintf "%s\n" "$FIXTURE_ARCH"\n')
+            (fake_bin / 'sudo').write_text('''#!/bin/bash
+set -euo pipefail
+if [[ "$1" == tee && "$2" == "$FIXTURE_MIRRORS" && $# == 2 ]]; then
+  exec /usr/bin/tee "$2"
+elif [[ "$1" == apt-get ]]; then
+  printf '%s\n' "$*" >> "$FIXTURE_TRACE"
+  exit "$FIXTURE_APT_EXIT"
+else
+  exit 91
+fi
+''')
+            for path in fake_bin.iterdir(): path.chmod(0o755)
+            trace = root / 'trace'
+            step = self.preparation_steps()[('web', 'collaboration-build')]['run']
+            prefix = step[:step.index('mkdir "$RUNNER_TEMP/fvoci-sqlite"')]
+            for old, new in [('/etc/os-release', release),
+                ('/etc/apt/sources.list.d/ubuntu.sources', sources),
+                ('/usr/share/keyrings/ubuntu-archive-keyring.gpg', keyring),
+                ('/etc/apt/apt-mirrors.txt', mirrors)]:
+                # Replace only known literal filesystem paths in this harness.
+                prefix = prefix.replace(old, str(new))
+                if sources.exists(): sources.write_text(sources.read_text().replace(old, str(new)))
+            if sources.exists(): before = (sources.read_bytes(), foreign.read_bytes())
+            result = subprocess.run(['bash', '-c', prefix], env={'PATH':str(fake_bin)+':/usr/bin:/bin',
+                'FIXTURE_ARCH':arch, 'FIXTURE_MIRRORS':str(mirrors), 'FIXTURE_TRACE':str(trace),
+                'FIXTURE_APT_EXIT':str(apt_exit)}, capture_output=True, text=True, timeout=10)
+            calls = trace.read_text().splitlines() if trace.exists() else []
+            self.assertEqual(foreign.read_bytes(), before[1])
+            if sources.exists(): self.assertEqual(sources.read_bytes(), before[0])
+            return result.returncode, calls, mirrors.read_text() if mirrors.exists() else None
+
+    def test_x64_primary_and_arm_mirror_preservation(self):
+        calls = ['apt-get update', 'apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8']
+        self.assertEqual(self.probe(), (0, calls, 'https://archive.ubuntu.com/ubuntu/\n'))
+        self.assertEqual(self.probe('arm64'), (0, calls, 'original ARM/Azure mirror\n'))
+
+    def test_wrong_platform_or_unsigned_missing_sources_stop_before_apt(self):
+        cases = [dict(arch='riscv64'), dict(os_id='debian'), dict(version='24.04'),
+            dict(missing='mirrors'), dict(missing='sources'), dict(missing='keyring'),
+            dict(source='URIs: https://foreign.example/ubuntu\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n'),
+            dict(source='URIs: mirror+file:/etc/apt/apt-mirrors.txt\nSigned-By: /foreign/keyring.gpg\n')]
+        for case in cases:
+            with self.subTest(case=case):
+                code, calls, mirror = self.probe(**case)
+                self.assertNotEqual(code, 0)
+                self.assertEqual(calls, [])
+                self.assertIn(mirror, (None, 'original ARM/Azure mirror\n'))
+
+    def test_apt_failure_propagates_without_retry(self):
+        code, calls, mirror = self.probe(apt_exit=7)
+        self.assertEqual(code, 7)
+        self.assertEqual(calls, ['apt-get update'])
+        self.assertEqual(mirror, 'https://archive.ubuntu.com/ubuntu/\n')
+
+
+
+class SchemaCatalogLifecycleTest(unittest.TestCase):
+    """Actual inline control flow, private data-only subprocess boundaries.
+    These controls do not qualify PostgreSQL/SQLite/catalog execution.
+    """
+    def execute(self, defect=None):
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/rust.yml")
+        self.assertIsNone(error)
+        run = next(s["run"] for s in data["jobs"]["postgres"]["steps"] if s.get("name") == SEL.RUST_SCHEMA_BASELINE_STEP)
+        source = run.split("<<'PYSCHEMA'\n", 1)[1].rsplit("\nPYSCHEMA", 1)[0]
+        code = compile(source, "schema-baseline-inline-ci", "exec")
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "target/debug/fvoci-migrate"; binary.parent.mkdir(parents=True); binary.write_bytes(b"fixture, not ELF")
+            env = {"CI":"true", "GITHUB_ACTIONS":"true", "GITHUB_SHA":"a"*40,
+                   "PG_CONTAINER":"b"*64, "RUNNER_TEMP":str(root),
+                   "PREPARATION_DATABASE_URL":"postgres://postgres:fixture-only@127.0.0.1:5432/postgres"}
+            if defect == "foreign": env["PREPARATION_DATABASE_URL"] = "postgres://postgres:fixture-only@foreign.invalid:5432/postgres"
+            def child(args, *, env=None, input=None, capture_output):
+                self.assertTrue(capture_output)
+                calls.append((args, input))
+                if args[0] == "docker":
+                    self.assertEqual(args[:4], ["docker", "exec", "-i", "b"*64])
+                    sql = input.decode()
+                    self.assertRegex(sql, r'^(CREATE ROLE|CREATE DATABASE|DROP DATABASE|DROP ROLE) "fvoci_schema_(app|ci)_[a-f0-9]{16}"')
+                    if defect == "collision" and sql.startswith("CREATE ROLE"):
+                        return subprocess.CompletedProcess(args, 7, b"", b"owned fixture collision")
+                    return subprocess.CompletedProcess(args, 0, b"", b"")
+                if args[0] == str(binary):
+                    self.assertEqual(env["FVOCI_DATABASE_BACKEND"], "postgres")
+                    self.assertRegex(env["DATABASE_URL"], r'/fvoci_schema_ci_[a-f0-9]{16}$')
+                    self.assertNotIn("FVOCI_SCHEMA_CATALOG_DATABASE_URL", env)
+                    return subprocess.CompletedProcess(args, 0, b"", b"")
+                self.assertEqual(args, ["cargo","test","--locked","--offline","--features","db-tests",
+                                       "--test","schema_baseline_integration","--","--nocapture"])
+                self.assertNotIn("DATABASE_URL", env)
+                self.assertNotIn("TEST_DATABASE_URL", env)
+                self.assertNotIn("PREPARATION_DATABASE_URL", env)
+                attrs = {"exists":True,"login":True,"member_of":[], **{k:False for k in ("superuser","createdb","createrole","replication","bypassrls")}}
+                if defect == "elevated": attrs["bypassrls"] = True
+                facts = {"tables":[{"name":"fixture"}],"ledger":[{}]*12,
+                         "app_role":{"role":env["FVOCI_SCHEMA_CATALOG_APP_ROLE"],"attributes":attrs}}
+                Path(env["FVOCI_SCHEMA_CATALOG_OUT"]).write_text(json.dumps(facts))
+                count = 2 if defect == "count" else 3
+                return subprocess.CompletedProcess(args, 0,
+                    f"test result: ok. {count} passed; 0 failed; 0 ignored;".encode(),
+                    b"SKIP postgres_catalog_dump" if defect == "skip" else b"")
+            old = Path.cwd()
+            try:
+                os.chdir(root)
+                with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(subprocess, "check_output", return_value="a"*40), mock.patch.object(subprocess, "run", side_effect=child):
+                    if defect:
+                        with self.assertRaises((AssertionError, RuntimeError)): exec(code, {})
+                    else: exec(code, {})
+            finally: os.chdir(old)
+            outputs = list(root.glob("fvoci-schema-ci-*/*"))
+            for file in outputs: self.assertEqual(file.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(bool(list(root.glob("fvoci-schema-ci-*/scope.json"))), defect is None)
+        return [sql.decode() for _, sql in calls if sql is not None]
+
+    def test_success_retires_only_owned_database_and_role(self):
+        sql = self.execute()
+        self.assertEqual(len(sql), 4)
+        self.assertEqual(sql[0].split('"')[1], sql[3].split('"')[1])
+        self.assertEqual(sql[1].split('"')[1], sql[2].split('"')[1])
+
+    def test_count_skip_or_elevated_role_failure_keeps_private_evidence_and_retires_owned(self):
+        for defect in ("count", "skip", "elevated"):
+            with self.subTest(defect=defect):
+                self.assertEqual(len(self.execute(defect)), 4)
+
+    def test_foreign_connection_and_collision_never_adopt_or_delete_resources(self):
+        self.assertEqual(self.execute("foreign"), [])
+        sql = self.execute("collision")
+        self.assertEqual(len(sql), 1); self.assertTrue(sql[0].startswith("CREATE ROLE"))
+
+
 class GitRepoFixture:
     def __init__(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -496,6 +685,20 @@ class PrCheckoutBindingTest(unittest.TestCase):
 
 
 class GateSchemaTest(unittest.TestCase):
+    def test_web_budget_lanes_require_both_selected_success(self) -> None:
+        selected = {"web-checks": True, "web-native-checks": True}
+        plan = self._plan("web", selected)
+        results = {job: "success" for job in selected}
+        self.assertEqual(self._gate(plan, "web", results), 0)
+        for job in selected:
+            for result in ("failure", "cancelled", "skipped"):
+                with self.subTest(job=job, result=result):
+                    self.assertEqual(self._gate(plan, "web", {**results, job: result}), 1)
+        self.assertEqual(self._gate(plan, "web", results,
+                                   omit_jobs=frozenset({"web-native-checks"})), 1)
+        self.assertEqual(self._gate(self._plan("web", {}), "web"), 0)
+
+
     def _plan(self, workflow: str, selected: dict[str, bool], plan_ok: bool = True) -> dict:
         jobs = {job: {"selected": selected.get(job, False)} for job in SEL.WORKFLOW_JOBS[workflow]}
         return {
@@ -872,6 +1075,105 @@ class OptInSelectionTest(unittest.TestCase):
 
 
 class WorkflowRegistryTest(unittest.TestCase):
+    def test_web_current_build_handoff_positive_and_fail_closed(self) -> None:
+        import copy
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/web.yml")
+        self.assertIsNone(error)
+        jobs = data["jobs"]
+        self.assertEqual(SEL._verify_web_build_handoff(jobs), [])
+        mutations = []
+        bad = copy.deepcopy(jobs); bad["collaboration-flow"]["needs"] = "ci-plan"; mutations.append(bad)
+        bad = copy.deepcopy(jobs); bad["collaboration-build"]["timeout-minutes"] = 16; mutations.append(bad)
+        for job, key in (("collaboration-build", "prepare"), ("collaboration-build", "publish"), ("collaboration-flow", "browser")):
+            bad = copy.deepcopy(jobs); step = next(s for s in bad[job]["steps"] if s.get("id") == key)
+            step["continue-on-error"] = True; mutations.append(bad)
+        bad = copy.deepcopy(jobs)
+        step = next(s for s in bad["collaboration-flow"]["steps"] if str(s.get("uses", "")).startswith("actions/download-artifact@"))
+        step["with"]["run-id"] = "foreign"; mutations.append(bad)
+        bad = copy.deepcopy(jobs); bad["collaboration-build"]["outputs"]["handoff_sha256"] = ""; mutations.append(bad)
+        bad = copy.deepcopy(jobs)
+        next(s for s in bad["collaboration-flow"]["steps"] if s.get("id") == "browser")["run"] = "bash scripts/run-web-e2e.sh --ci-use-committed-api --with-selected-backends"; mutations.append(bad)
+        bad = copy.deepcopy(jobs); bad["collaboration-flow"]["steps"].append({"uses": "actions/cache@anything", "with": {"path": "target"}}); mutations.append(bad)
+        for i, bad in enumerate(mutations):
+            with self.subTest(mutation=i): self.assertTrue(SEL._verify_web_build_handoff(bad))
+
+
+    def test_selected_registration_commands_cannot_be_missing_or_masked(self) -> None:
+        import copy
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/web.yml")
+        self.assertIsNone(error)
+        jobs = data["jobs"]
+        for command in ("(cd apps/web && bun test e2e-pending/collab-playwright.config.test.ts --timeout 60000)",
+                        "python3 scripts/selected-backend-ci/test_off_registration.py"):
+            with self.subTest(command=command):
+                bad = copy.deepcopy(jobs)
+                step = next(s for s in bad["web-checks"]["steps"]
+                            if s.get("name") == "Web and editor unit regressions")
+                self.assertIn(command + "\n", step["run"])
+                step["run"] = step["run"].replace(command + "\n", "", 1)
+                self.assertNotEqual(step["run"], next(s for s in jobs["web-checks"]["steps"]
+                    if s.get("name") == "Web and editor unit regressions")["run"])
+                self.assertTrue(SEL._verify_web_build_handoff(bad))
+        for key, value in (("if", "false"), ("continue-on-error", True)):
+            bad = copy.deepcopy(jobs)
+            next(s for s in bad["web-checks"]["steps"]
+                 if s.get("name") == "Web and editor unit regressions")[key] = value
+            self.assertTrue(SEL._verify_web_build_handoff(bad))
+
+    def test_web_budget_split_preserves_commands_and_selection(self) -> None:
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/web.yml")
+        self.assertIsNone(error)
+        jobs = data["jobs"]
+        commands = {
+            "web-checks": [
+                "bash scripts/generate-api.sh",
+                "git diff --exit-code -- apps/web/openapi.json apps/web/src/generated/api.ts",
+                "cargo test --locked --offline --lib --features api-schema api::openapi::tests",
+                "(cd apps/web && bun run test)",
+                "(cd packages/editor && bun run test)",
+                "(cd apps/web && bun test e2e-pending/collab-playwright.config.test.ts --timeout 60000)",
+                "python3 scripts/selected-backend-ci/test_off_registration.py",
+                "bash scripts/test-web-e2e-groups.sh",
+                "python3 scripts/fixtures/web-e2e/test-build-handoff.py",
+            ],
+            "web-native-checks": [
+                "cargo clippy --locked --offline --all-targets --features db-tests,api-schema -- -D warnings",
+                "cargo test --locked --offline --test static_api",
+            ],
+        }
+        target_keys = []
+        for job, required in commands.items():
+            with self.subTest(job=job):
+                spec = jobs[job]
+                self.assertEqual(spec["needs"], "ci-plan")
+                self.assertEqual(spec["if"], "needs.ci-plan.outputs.select_web_checks == 'true'")
+                self.assertEqual(spec["runs-on"], "ubuntu-26.04")
+                self.assertEqual(spec["timeout-minutes"], 15)
+                self.assertIn(job, jobs["web-ci-gate"]["needs"])
+                lines = [line for step in SEL._run_steps(spec) for line in step["run"].splitlines()]
+                actual = [line for line in lines if line in sum(commands.values(), [])]
+                self.assertEqual(actual, required)
+                for step in spec["steps"]:
+                    self.assertNotIn("continue-on-error", step)
+                    self.assertNotIn("if", step)
+                cache = next(step["with"] for step in spec["steps"]
+                             if step.get("with", {}).get("path") == "target")
+                key = cache["key"]
+                self.assertIn(job + "-ubuntu-26.04-${{ runner.arch }}-1.98.1-", key)
+                self.assertIn("devdebug0-testdebug0", key)
+                self.assertIn("${{ github.sha }}", key)
+                self.assertIn("'crates/**'", key)
+                self.assertIn("${{ steps.sqlite.outputs.cache_identity }}", key)
+                self.assertNotIn("restore-keys", cache)
+                target_keys.append(key)
+        self.assertNotEqual(*target_keys)
+        for mode, families in (("full", set()), ("narrow", {"web_tests"}),
+                               ("narrow", {"frontend_web_install"}), ("narrow", set())):
+            decision = SEL.SelectionDecision(mode, "TEST", frozenset(families))
+            self.assertEqual(SEL.workflow_job_selected("web", "web-checks", decision),
+                             SEL.workflow_job_selected("web", "web-native-checks", decision))
+
+
     def test_eslint_prettier_run_once_in_lightweight_locked_web_static(self) -> None:
         data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/web.yml")
         self.assertIsNone(error)
@@ -1022,6 +1324,48 @@ class RustSuiteRegistryFixture:
 
 
 class RustSuiteRegistryTest(unittest.TestCase):
+    def test_schema_baseline_configured_target_mapping_refuses_omissions_and_masking(self) -> None:
+        import copy
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/rust.yml")
+        self.assertIsNone(error)
+        jobs = data["jobs"]
+        self.assertEqual(SEL.schema_baseline_inventory(jobs), ({"schema_baseline_integration"}, None))
+        original = next(s for s in jobs["postgres"]["steps"] if s.get("name") == SEL.RUST_SCHEMA_BASELINE_STEP)
+        # Independent target contract: both real SQLite tests and the configured
+        # PostgreSQL extractor execute, never the extractor's unconfigured return.
+        self.assertIn("'FVOCI_SCHEMA_CATALOG_DATABASE_URL':owner_url", original["run"])
+        self.assertIn("'FVOCI_SCHEMA_CATALOG_APP_ROLE':role", original["run"])
+        self.assertIn("'FVOCI_SCHEMA_CATALOG_OUT':str(catalog)", original["run"])
+        self.assertIn("3 passed; 0 failed; 0 ignored;", original["run"])
+        self.assertIn("'SKIP postgres_catalog_dump' not in", original["run"])
+        for mutation in ("missing", "masked", "wrong-row", "missing-url", "skip", "count", "owner-in-tests"):
+            with self.subTest(mutation=mutation):
+                bad = copy.deepcopy(jobs)
+                step = next(s for s in bad["postgres"]["steps"] if s.get("name") == SEL.RUST_SCHEMA_BASELINE_STEP)
+                if mutation == "missing": bad["postgres"]["steps"].remove(step)
+                elif mutation == "masked": step["continue-on-error"] = True
+                elif mutation == "wrong-row": step["if"] = "matrix.shard == 'b'"
+                elif mutation == "missing-url": step["env"].pop("PREPARATION_DATABASE_URL")
+                elif mutation == "skip": step["run"] = step["run"].replace("'--','--nocapture'", "'--','--skip','postgres_catalog_dump'")
+                elif mutation == "count": step["run"] = step["run"].replace("3 passed; 0 failed; 0 ignored;", "2 passed; 0 failed; 0 ignored;")
+                else: step["run"] = step["run"].replace("'DATABASE_URL':owner_url", "'TEST_DATABASE_URL':owner_url")
+                self.assertNotEqual(bad, jobs)
+                names, err = SEL.schema_baseline_inventory(bad)
+                self.assertEqual(names, set()); self.assertIsNotNone(err)
+        for runner, major in (("ubuntu-26.04", "16"), ("ubuntu-26.04-arm", "18")):
+            bad = copy.deepcopy(jobs)
+            bad["postgres"]["strategy"]["matrix"]["include"] = [row for row in bad["postgres"]["strategy"]["matrix"]["include"]
+                if not (row.get("runner") == runner and row.get("pg_major") == major and row.get("shard") == "a")]
+            self.assertIsNotNone(SEL.schema_baseline_inventory(bad)[1])
+
+    def test_schema_target_omission_is_a_registry_failure(self) -> None:
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo(extra_targets=["schema_baseline_integration"])
+            fx.mutate_rust_workflow(lambda data: data["jobs"]["postgres"].update(
+                steps=[step for step in data["jobs"]["postgres"]["steps"] if step.get("name") != SEL.RUST_SCHEMA_BASELINE_STEP]))
+            self.assertIn(SEL.RUST_SCHEMA_BASELINE_STEP, "\n".join(SEL.verify_rust_suite_registry(fx.root)))
+
+
     def test_native_arm64_wrong_scheduler_and_check_weakening_fail(self) -> None:
         def mutate_native(data: dict, field: str, value: object) -> None:
             job = data["jobs"]["native-arm64"]
@@ -1470,6 +1814,32 @@ class RustSuiteRegistryTest(unittest.TestCase):
 
 
 class RegistryMutationCliTest(unittest.TestCase):
+    def test_native_budget_registry_mutations_rejected_before_outputs(self) -> None:
+        for mutation in ("missing-job", "missing-gate-need", "wrong-condition"):
+            with self.subTest(mutation=mutation):
+                root = self._mutated_root()
+                web = root / ".github/workflows/web.yml"
+                text = web.read_text(encoding="utf-8")
+                if mutation == "missing-job":
+                    start = text.index("  web-native-checks:")
+                    end = text.index("  workspace-browser-shard:", start)
+                    changed = text[:start] + text[end:]
+                    needle = "web-native-checks"
+                elif mutation == "missing-gate-need":
+                    changed = text.replace("        web-native-checks,\n", "", 1)
+                    needle = "needs must be ci-plan and every registered job"
+                else:
+                    start = text.index("  web-native-checks:")
+                    changed = text[:start] + text[start:].replace(
+                        "needs.ci-plan.outputs.select_web_checks == 'true'",
+                        "needs.ci-plan.outputs.select_web_static == 'true'", 1)
+                    needle = "web-native-checks if must be"
+                self.assertNotEqual(text, changed, "negative control must mutate the workflow")
+                web.write_text(changed, encoding="utf-8")
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, needle)
+
+
     def _mutated_root(self) -> Path:
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -1748,15 +2118,25 @@ class RegistryMutationCliTest(unittest.TestCase):
         root = self._mutated_root()
         web = root / ".github" / "workflows" / "web.yml"
         text = web.read_text(encoding="utf-8")
-        web.write_text(
-            text.replace(
-                "    needs: [ci-plan, web-static, web-checks, workspace-browser-shard, collaboration-flow]",
-                "    needs: [ci-plan, web-checks]",
-            ),
-            encoding="utf-8",
-        )
+        gate_start = text.index("  web-ci-gate:")
+        before_gate, gate = text[:gate_start], text[gate_start:]
+        original_needs = """    needs:
+      [
+        ci-plan,
+        web-static,
+        web-checks,
+        web-native-checks,
+        workspace-browser-shard,
+        collaboration-build,
+        collaboration-flow,
+      ]"""
+        self.assertIn(original_needs, gate)
+        mutated = before_gate + gate.replace(original_needs, "    needs: [ci-plan, web-checks]", 1)
+        self.assertNotEqual(text, mutated, "negative control must mutate the actual gate")
+        web.write_text(mutated, encoding="utf-8")
         proc, output = self._plan_against(root)
         self._assert_no_green_outputs(proc, output, "needs must be ci-plan and every registered job")
+
 
     def test_swapped_needs_json_expr_rejected_before_outputs(self) -> None:
         root = self._mutated_root()
