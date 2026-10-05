@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Pure packet/physical-byte controls; fake ELF/tool metadata, no native execution."""
+import ast
 import copy
 import hashlib
 import importlib.util
@@ -363,6 +364,191 @@ print(json.dumps({'outcome':outcome, 'added':sorted(set(after['untracked'])-set(
                 self.assertEqual(record['outcome'], 'current physical inputs differ')
                 self.assertEqual(record['changed'], fields)
                 self.assertEqual(count, 4)
+
+
+
+class RuntimePermissionsTest(unittest.TestCase):
+    """Real kernel UID1000 access, owned temp only; no product/native execution.
+
+    A root preparation process with ordinary primary GID1001 models a distinct
+    CI preparation owner without creating a local account or granting sudo.
+    The runtime actor is the unmodified real UID/GID1000; its backend body is
+    replaced only in the fixture by the maintained runtime_access guard.
+    """
+    DOCKER_GID = 986
+
+    def case(self, *, original=False, fault='', exit_code=0):
+        self.assertEqual(subprocess.run(['sudo','-n','true'],capture_output=True).returncode,0,
+                         'this real permission fixture needs its explicit owned-temp sudo boundary')
+        with tempfile.TemporaryDirectory(prefix='fvoci-permission-fixture-') as tmp:
+            temp=Path(tmp);repo=temp/'repo';scripts=repo/'scripts';scripts.mkdir(parents=True)
+            output=temp/'fvoci-selected-current';output.mkdir(mode=0o700)
+            sqlite=temp/'fvoci-sqlite';lib=sqlite/'lib';lib.mkdir(parents=True)
+            header=repo/'header';header.write_bytes(b'qualified read-only fixture')
+            native=lib/'libsqlite3.a';native.write_bytes(b'NOT native; owned fixture')
+            chrome=repo/'chromium';chrome.write_text('#!/bin/sh\nexit 0\n');chrome.chmod(0o755)
+            fake=repo/'bin';fake.mkdir()
+            bun=fake/'bun';bun.write_text('#!/bin/sh\nprintf "%s\\n" "'+str(chrome)+'"\n');bun.chmod(0o755)
+            sockstat=fake/'stat';sockstat.write_text('#!/bin/sh\nif [ "$1" = -c ] && [ "$2" = %g ] && [ "$3" = /var/run/docker.sock ]; then echo 986; else exec /usr/bin/stat "$@"; fi\n');sockstat.chmod(0o755)
+            program=scripts/'run-selected-backend-e2e.py'
+            tree=ast.parse((ROOT/'scripts/run-selected-backend-e2e.py').read_text())
+            # Preserve CLI, permissions/write/read/runtime_access bodies. Replace
+            # only Git allocation lookup and the downstream product boundary.
+            replacements=ast.parse("""
+def identity():return 'owned-permission-fixture'
+def run(output):
+    assert os.getuid()==os.getgid()==1000
+    assert output.stat().st_uid==1000 and output.stat().st_mode & 0o777 == 0o700
+    before=read(output/'before.json')
+    runtime_access(before['external'], {'bun':{'path':before['fixture_bun']},'chromium':{'path':before['fixture_chrome']}})
+    write(output/'fixture-marker.json', {'uid':os.getuid(),'gid':os.getgid(),'groups':os.getgroups()})
+    if before['fixture_incomplete']:
+        (output/'runtime').mkdir()
+        write(output/'install-allocation.json', {})
+    if before['fixture_fault'] in ('closed','wrong-source','missing-process','live'):
+        runtime=output/'runtime';runtime.mkdir()
+        runs=[]
+        for lane in ('install','postgres','sqlite'):
+            root=runtime/('root-current-'+lane+'-fixture');root.mkdir()
+            write(output/(lane+'-allocation.json'),{})
+            facts={'source':before['head'],'final_exit_code':0,'owned_container_absent':True,
+                   'owned_loopback_port_closed':True,'recorded_process_identities_retired':True,'cleanup_errors':[]}
+            if lane=='install':
+                facts['actual_owned_process_receipts']=15
+                retained=root/'retained-run';retained.mkdir()
+                for i in range(15):write(retained/(str(i)+'-process.json'),{'status':None if before['fixture_fault']=='missing-process' and i==0 else 0})
+            if lane=='postgres':write(root/'parent-receipt.json',{'all_owned_fixtures_closed':True})
+            if before['fixture_fault']=='wrong-source':facts['source']='foreign-source'
+            if before['fixture_fault']=='live':facts['recorded_process_identities_retired']=False
+            write(root/'receipt.json',facts)
+            runs.append({'lane':lane,'runRoot':str(root),'exit':0})
+        write(output/'selected-ci-receipt.json',{'owner':identity(),'source':before['head'],'tree':before['tree'],'runs':runs})
+    return before['fixture_exit']
+""").body
+            for replacement in replacements:
+                tree.body=[replacement if isinstance(n,ast.FunctionDef) and n.name==replacement.name else n for n in tree.body]
+            program.write_text(ast.unparse(tree)+'\n')
+            before={'head':SHA,'tree':TREE,'tracked':{'scripts/run-selected-backend-e2e.py':H.CI.sha(program)},
+                    'external':{str(header):H.CI.sha(header),str(native):H.CI.sha(native)},
+                    'fixture_bun':str(bun),'fixture_chrome':str(chrome),'fixture_exit':exit_code,'fixture_incomplete':fault=='incomplete','fixture_fault':fault}
+            for name in ('before.json','after.json'):(output/name).write_text(json.dumps(before));(output/name).chmod(0o600)
+            (output/'bundle.json').write_text(json.dumps({'binaries':{str(chrome):{}}}));(output/'bundle.json').chmod(0o600)
+            source=(ROOT/'scripts/run-web-e2e.sh').read_text()
+            if original:
+                source=subprocess.check_output(['git','show','c7ad4a2a9165a0dfb64ebc7f17150140b54ed1fe:scripts/run-web-e2e.sh'],cwd=ROOT,text=True)
+            footer=source[source.index('selected_status=0\n'):]
+            environment={'PATH':str(fake)+':'+os.defpath,'ROOT':str(repo),'RUNNER_TEMP':str(temp),
+                'SELECTED_BACKENDS':'true','FVOCI_SELECTED_CI_OUTPUT':str(output),
+                'FVOCI_SELECTED_CI_SQLITE_PARENT':str(sqlite),'SQLITE3_LIB_DIR':str(lib),
+                'CI':'true','GITHUB_ACTIONS':'true','GITHUB_JOB':'collaboration-flow',
+                'GITHUB_SHA':SHA,'GITHUB_REPOSITORY':'fixture/owned','GITHUB_RUN_ID':'1','GITHUB_RUN_ATTEMPT':'1'}
+            script=temp/'footer.sh';script.write_text('set -euo pipefail\npending_status=0\n'+footer)
+            subprocess.run(['sudo','-n','chown','-R','0:1001',str(temp)],check=True)
+            subprocess.run(['sudo','-n','chmod','750',str(temp),str(repo)],check=True)
+            if fault=='unreadable':subprocess.run(['sudo','-n','chmod','600',str(header)],check=True)
+            if fault=='foreign':subprocess.run(['sudo','-n','chown','1001:1001',str(native)],check=True)
+            if fault=='symlink':
+                subprocess.run(['sudo','-n','ln','-s',str(header),str(sqlite/'foreign-link')],check=True)
+            try:
+                result=subprocess.run(['sudo','-n','setpriv','--reuid=0','--regid=1001','--clear-groups',
+                    'env','-i',*[k+'='+v for k,v in environment.items()],'/bin/bash',str(script)],
+                    capture_output=True,text=True)
+                collector="""import json,pathlib,sys
+root=pathlib.Path(sys.argv[1]);o=root/'fvoci-selected-current';s=root/'fvoci-sqlite'
+def facts(p):
+ x=p.stat();return {'uid':x.st_uid,'gid':x.st_gid,'mode':x.st_mode & 0o777}
+def optional(name):
+ p=o/name;return json.loads(p.read_text()) if p.exists() else None
+print(json.dumps({'output':facts(o),'sqlite':facts(s),'header':facts(root/'repo/header'),
+ 'marker':optional('fixture-marker.json'),'stage':optional('runtime-access-stage.json'),'close':optional('runtime-close-stage.json')}))
+"""
+                inspected=subprocess.run(['sudo','-n',sys.executable,'-c',collector,str(temp)],capture_output=True,text=True,check=True)
+                facts=json.loads(inspected.stdout)
+                self.assertNotIn(str(temp),json.dumps(facts['stage']))
+                print(json.dumps({'control':'original' if original else (fault or 'fixed'),'selected_exit':exit_code,
+                    'footer_exit':result.returncode,'err13': '[Errno 13] Permission denied' in result.stderr,
+                    'stderr_sha256':hashlib.sha256(result.stderr.encode()).hexdigest(),**facts}),flush=True)
+                return result,facts
+            finally:
+                # Retire only this positively created owned temporary fixture.
+                subprocess.run(['sudo','-n','chown','-R',str(os.getuid())+':'+str(os.getgid()),str(temp)],check=True)
+
+    def test_original_group_drop_cannot_open_runner_before_body(self):
+        result,facts=self.case(original=True)
+        self.assertEqual(result.returncode,2,result.stderr)
+        self.assertIn('[Errno 13] Permission denied',result.stderr)
+        self.assertIsNone(facts['marker']);self.assertIsNone(facts['stage'])
+        self.assertEqual(facts['output'],{'uid':1000,'gid':1000,'mode':0o700})
+
+    def test_fixed_exact_footer_real_access_then_private_owner_roundtrip(self):
+        result,facts=self.case()
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(facts['marker'],{'uid':1000,'gid':1000,'groups':[986,1001]})
+        self.assertEqual(facts['stage']['groups'],[986,1001])
+        self.assertEqual(facts['stage']['preflight']['missing'],0)
+        self.assertGreater(facts['stage']['required_group_path_count'],0)
+        self.assertEqual(facts['output'],{'uid':0,'gid':1001,'mode':0o700})
+        self.assertEqual((facts['sqlite']['uid'],facts['sqlite']['gid']),(0,1001))
+
+    def test_failed_child_first_status_kept_after_settlement_and_roundtrip(self):
+        result,facts=self.case(exit_code=7)
+        self.assertEqual(result.returncode,7,result.stderr)
+        self.assertIsNotNone(facts['marker'])
+        self.assertEqual(facts['output'],{'uid':0,'gid':1001,'mode':0o700})
+
+    def test_waited_launcher_without_resource_proof_keeps_private_ownership_and_first_status(self):
+        result,facts=self.case(fault='incomplete',exit_code=7)
+        self.assertEqual(result.returncode,7,result.stderr)
+        self.assertIn('resource retirement proof incomplete',result.stderr)
+        self.assertIsNotNone(facts['marker'])
+        self.assertEqual(facts['output'],{'uid':1000,'gid':1000,'mode':0o700})
+
+    def test_exact_closed_receipts_admit_but_foreign_source_unsettled_pid_or_live_resources_refuse(self):
+        result,facts=self.case(fault='closed')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(facts['close']['closed_current_lanes'],['install','postgres','sqlite'])
+        self.assertEqual(facts['output'],{'uid':0,'gid':1001,'mode':0o700})
+        for fault in ('wrong-source','missing-process','live'):
+            with self.subTest(fault=fault):
+                result,facts=self.case(fault=fault)
+                self.assertNotEqual(result.returncode,0)
+                self.assertIsNone(facts['close'])
+                self.assertEqual(facts['output'],{'uid':1000,'gid':1000,'mode':0o700})
+
+    def test_declared_group_cannot_override_private_unreadable_input(self):
+        result,facts=self.case(fault='unreadable')
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('runtime input access preflight failed',result.stderr)
+        self.assertEqual(facts['stage']['preflight']['missing'],1)
+        self.assertIsNone(facts['marker'])
+        self.assertEqual(facts['header']['mode'],0o600)
+        self.assertEqual(facts['output'],{'uid':0,'gid':1001,'mode':0o700})
+
+    def test_foreign_owner_and_symlink_refused_before_any_transfer(self):
+        for fault in ('foreign','symlink'):
+            with self.subTest(fault=fault):
+                result,facts=self.case(fault=fault)
+                self.assertNotEqual(result.returncode,0)
+                self.assertIsNone(facts['marker']);self.assertIsNone(facts['stage'])
+                self.assertEqual(facts['output'],{'uid':0,'gid':1001,'mode':0o700})
+
+    def test_private_diagnostics_owner_is_what_controls_nonroot_upload_access(self):
+        with tempfile.TemporaryDirectory(prefix='fvoci-upload-permission-') as tmp:
+            root=Path(tmp);output=root/'output';output.mkdir(mode=0o700)
+            (output/'safe-stage.json').write_text('{}')
+            try:
+                subprocess.run(['sudo','-n','chmod','755',str(root)],check=True)
+                subprocess.run(['sudo','-n','chown','-R','1000:1000',str(output)],check=True)
+                argv=['sudo','-n','setpriv','--reuid=1001','--regid=1001','--clear-groups',sys.executable,'-c',
+                      'import os,sys;print(os.listdir(sys.argv[1]))',str(output)]
+                original=subprocess.run(argv,capture_output=True,text=True)
+                self.assertNotEqual(original.returncode,0);self.assertIn('PermissionError',original.stderr)
+                subprocess.run(['sudo','-n','chown','-R','1001:1001',str(output)],check=True)
+                fixed=subprocess.run(argv,capture_output=True,text=True)
+                self.assertEqual(fixed.returncode,0,fixed.stderr);self.assertIn('safe-stage.json',fixed.stdout)
+                self.assertEqual(output.stat().st_mode & 0o777,0o700)
+            finally:
+                subprocess.run(['sudo','-n','chown','-R',str(os.getuid())+':'+str(os.getgid()),str(root)],check=True)
 
 
 if __name__=='__main__':unittest.main()
