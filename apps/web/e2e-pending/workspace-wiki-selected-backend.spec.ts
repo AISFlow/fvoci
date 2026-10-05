@@ -11,6 +11,9 @@ import { lstatSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import * as Y from "yjs";
+import { yDocToTiptapJson } from "../../../packages/editor/src/collab-tiptap";
+import { emojiGlyph } from "../../../packages/editor/src/emoji-glyph";
+import { extractText, walkTiptap, type TiptapWalkNode } from "../../../packages/editor/src/extract";
 import type { components } from "../src/generated/api";
 import { watchCspViolations } from "../e2e/helpers";
 import {
@@ -110,6 +113,108 @@ function documentNodeIds(value: unknown): string[] {
   return [...own, ...(node.content ?? []).flatMap(documentNodeIds)];
 }
 
+function expectCanonicalContent(
+  content: unknown,
+  retained: string,
+  removed: string,
+  expectedIds: string[],
+): void {
+  const text = extractText(content);
+  expect(text).toBe(`${retained} 새 편집`);
+  expect(text).not.toContain(removed);
+  const emojis: TiptapWalkNode[] = [];
+  walkTiptap(content, (node) => {
+    if (node.type === "emoji") emojis.push(node);
+  });
+  expect(emojis).toHaveLength(1);
+  expect(emojis[0].attrs?.name).toBe("grinning");
+  expect(emojiGlyph(emojis[0])).toBe("😀");
+  const ids = documentNodeIds(content);
+  expect(ids.length).toBeGreaterThan(0);
+  for (const id of ids) expect(id).toMatch(UUID_RE);
+  expect(ids).toEqual(expectedIds);
+}
+
+function expectCanonicalOracleControls(
+  content: unknown,
+  retained: string,
+  removed: string,
+  ids: string[],
+): string[] {
+  // Mutate read-only JSON copies using the maintained walker. These controls
+  // never touch a live editor/Y.Doc, native bytes, or server state.
+  const controls: [string, (copy: unknown) => void][] = [
+    [
+      "emoji absent",
+      (copy) => {
+        walkTiptap(copy, (node) => {
+          if (node.type === "emoji") {
+            node.type = "text";
+            node.text = "";
+            delete node.attrs;
+          }
+        });
+      },
+    ],
+    [
+      "wrong emoji name despite matching explicit glyph",
+      (copy) => {
+        walkTiptap(copy, (node) => {
+          if (node.type === "emoji")
+            node.attrs = { ...node.attrs, name: "wrong-name", emoji: "😀" };
+        });
+      },
+    ],
+    [
+      "emoji misplaced",
+      (copy) => {
+        let emoji: TiptapWalkNode | undefined;
+        walkTiptap(copy, (node) => {
+          if (node.type === "emoji") emoji = node;
+        });
+        walkTiptap(copy, (node) => {
+          if (emoji && node.content?.includes(emoji))
+            node.content = [emoji, ...node.content.filter((child) => child !== emoji)];
+        });
+      },
+    ],
+    [
+      "retained text missing",
+      (copy) => {
+        walkTiptap(copy, (node) => {
+          if (typeof node.text === "string") node.text = node.text.replace("동일한", "");
+        });
+      },
+    ],
+    [
+      "deleted text survives",
+      (copy) => {
+        walkTiptap(copy, (node) => {
+          if (typeof node.text === "string" && node.text.includes("새 편집")) node.text += removed;
+        });
+      },
+    ],
+    [
+      "block identity changed",
+      (copy) => {
+        walkTiptap(copy, (node) => {
+          if (node.type === "paragraph")
+            node.attrs = { ...node.attrs, id: "00000000-0000-4000-8000-000000000340" };
+        });
+      },
+    ],
+  ];
+  expectCanonicalContent(content, retained, removed, ids);
+  for (const [label, mutate] of controls) {
+    const copy = structuredClone(content);
+    mutate(copy);
+    expect(() => {
+      expectCanonicalContent(copy, retained, removed, ids);
+    }, label).toThrow();
+  }
+  return controls.map(([label]) => label);
+}
+
 function expectRetainedNative(detail: RevisionDetail, retained: string, removed: string): void {
   // This is a read-only oracle using maintained Yjs, never an editor reset,
   // JSON reseed, native parser, or server-side JavaScript fallback.
@@ -132,9 +237,11 @@ function expectRetainedNative(detail: RevisionDetail, retained: string, removed:
     Y.applyUpdate(native, update);
     const xml: unknown = native.getXmlFragment("prosemirror").toJSON();
     if (typeof xml !== "string") throw new Error("native XML serialization must be a string");
-    expect(xml).toContain(retained);
-    expect(xml).not.toContain(removed);
+    // Named emoji atoms are intentional schema nodes. Read the native update
+    // through the same maintained converter and glyph mapping as the editor.
     const ids = documentNodeIds(detail.contentJson);
+    expectCanonicalContent(yDocToTiptapJson(native), retained, removed, ids);
+    expect(xml).not.toContain(removed);
     expect(ids.length).toBeGreaterThan(0);
     for (const id of ids) expect(xml).toContain(id);
   } finally {
@@ -232,11 +339,14 @@ test("selected normal main: Vue setup, stable wiki create, native persist, manua
     const finalAck = await expectMatchingPersistAck(pageA, wireA);
     expect(finalAck).not.toBe(firstAck);
     const persisted = await body(pageA, documentPath);
-    expect(JSON.stringify(persisted.contentJson)).toContain(retained);
-    expect(JSON.stringify(persisted.contentJson)).toContain("새 편집");
-    expect(JSON.stringify(persisted.contentJson)).not.toContain(removed);
     expect(persisted.version).toBeGreaterThan(0);
     const beforeRevision = await editorShape(pageA);
+    const oracleControls = expectCanonicalOracleControls(
+      persisted.contentJson,
+      retained,
+      removed,
+      documentNodeIds(beforeRevision.document),
+    );
     const savedRevision = pageA.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
@@ -314,6 +424,7 @@ test("selected normal main: Vue setup, stable wiki create, native persist, manua
             finalAck,
             persisted,
             revision: saved,
+            canonicalEmojiOracleControls: oracleControls,
             creatorId: creator.userId,
             freshActorId: reader.userId,
           },
