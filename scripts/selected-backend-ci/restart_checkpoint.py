@@ -205,6 +205,7 @@ def restart_same_app(g):
               'owns_schema',EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='fvoci' AND pg_get_userbyid(nspowner)=current_user),
               'owns_tables',EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='fvoci' AND pg_get_userbyid(c.relowner)=current_user),
               'versions',(SELECT jsonb_agg(version ORDER BY version) FROM fvoci.schema_migrations),
+              'ledger',(SELECT jsonb_agg(jsonb_build_array(version,lineage,sql_sha256) ORDER BY version) FROM fvoci.schema_migrations),
               'rls',(SELECT jsonb_object_agg(c.relname,jsonb_build_object('enabled',c.relrowsecurity,'forced',c.relforcerowsecurity))
                      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='fvoci'
                      AND c.relname IN('documents','document_states','document_collab_updates','wiki_create_commands','revisions')))

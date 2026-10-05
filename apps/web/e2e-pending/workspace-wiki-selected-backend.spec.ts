@@ -682,6 +682,8 @@ if (process.env.FVOCI_E2E_SELECTED_RESTART_CHECKPOINT !== undefined) {
       ).items.find((item) => item.id === seed.workspaceId);
       expect(workspace).toMatchObject({ slug: admin.workspaceSlug, role: "member" });
       const documentPath = `/api/v1/workspaces/${seed.workspaceId}/documents/${seed.document.id}`;
+      expect(Number.isSafeInteger(seed.document.number)).toBe(true);
+      expect(seed.document.number).toBeGreaterThan(0);
       const displayId = `WIKI-${String(seed.document.number)}`;
       await openEditor(page, `/w/${admin.workspaceSlug}/${displayId}`);
       await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
@@ -699,13 +701,33 @@ if (process.env.FVOCI_E2E_SELECTED_RESTART_CHECKPOINT !== undefined) {
         removed,
         documentNodeIds(seed.persisted.contentJson),
       );
+      // Wiki URLs resolve the persisted number in the visible workspace tree,
+      // as useWikiDocumentRef does; generic document metadata has no displayId.
+      const treeResponse = await page.request.get(`/api/v1/workspaces/${seed.workspaceId}/tree`);
+      expect(treeResponse.status()).toBe(200);
+      const tree = (await treeResponse.json()) as components["schemas"]["TreeResponse"];
+      const resolved = tree.items.filter(
+        (item) => item.projectId === null && item.number === seed.document.number,
+      );
+      expect(resolved).toHaveLength(1);
+      expect(resolved[0]).toMatchObject({
+        id: seed.document.id,
+        workspaceId: seed.workspaceId,
+        number: seed.document.number,
+        title: seed.document.title,
+        path: seed.document.path,
+        parentId: null,
+        projectId: null,
+      });
+      expect(displayId).toBe(seed.document.displayId);
+      await expect(page).toHaveURL(new URL(`/w/${admin.workspaceSlug}/${displayId}`, baseURL).href);
       const currentMeta = await page.request.get(documentPath);
       expect(currentMeta.status()).toBe(200);
       expect(await currentMeta.json()).toMatchObject({
         id: seed.document.id,
         workspaceId: seed.workspaceId,
         number: seed.document.number,
-        displayId: seed.document.displayId,
+        title: seed.document.title,
         path: seed.document.path,
         parentId: null,
         projectId: null,
