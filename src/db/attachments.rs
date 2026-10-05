@@ -1188,7 +1188,18 @@ async fn complete_owned_inner(
             // EntityTooSmall: a non-final part below the S3 minimum is a
             // client-side part list problem, not a server failure.
             Err(StorageError::EtagMismatch | StorageError::PartTooSmall) => {
-                revert_assembling_on_conn(lock, workspace_id, attachment_id).await?;
+                if let Err(err) = clear_refused_completion_on_conn(
+                    lock,
+                    workspace_id,
+                    attachment_id,
+                    actor_user_id,
+                    session_id,
+                    &completion,
+                )
+                .await?
+                {
+                    return Ok(CompleteAttempt::Denied(err));
+                }
                 return Ok(CompleteAttempt::Denied(AttachmentDbError::EtagMismatch));
             }
             Err(StorageError::UploadGone) => {
@@ -1409,6 +1420,52 @@ async fn revert_assembling_on_conn(
     .await?;
     tx.commit().await?;
     Ok(())
+}
+
+// Only an acknowledged parts refusal permits a different completion attempt.
+// Transport/commit uncertainty keeps the prepared identity to fence rewrites.
+async fn clear_refused_completion_on_conn(
+    lock: &mut AttachmentSessionLock,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    completion: &UploadCompletion,
+) -> Result<Result<(), AttachmentDbError>, sqlx::Error> {
+    let mut tx = lock.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    with_upload_xact_lock(&mut tx, attachment_id).await?;
+    let att = match check_upload_write_access(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        attachment_id,
+    )
+    .await?
+    {
+        Ok(att) => att,
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(Err(err));
+        }
+    };
+    if att.status != "assembling"
+        || !prepared_upload_matches(&att, completion)
+        || prepared_upload(&att)?.as_ref() != Some(completion)
+    {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::UploadState));
+    }
+    let changed = sqlx::query("UPDATE fvoci.attachments SET status='uploading',upload_meta=upload_meta-'_completion' WHERE workspace_id=$1 AND id=$2 AND status='assembling' AND storage_key=$3 AND upload_meta->'_completion'=$4::jsonb")
+        .bind(workspace_id).bind(attachment_id).bind(&completion.storage_key).bind(json!(completion))
+        .execute(&mut *tx).await?.rows_affected();
+    if changed != 1 {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::UploadState));
+    }
+    tx.commit().await?;
+    Ok(Ok(()))
 }
 
 pub async fn get_attachment_meta(
@@ -5659,6 +5716,286 @@ mod upload_session_tests {
         })
     }
     #[tokio::test]
+    #[cfg(feature = "db-tests")]
+    async fn upload_session_selected_s3_too_small_resumes_replaces_and_completes() {
+        let f = Fixture::new().await;
+        let s3 = crate::attachments::S3Storage::new(crate::config::S3Settings {
+            endpoint: std::env::var("S3_ENDPOINT").expect("S3_ENDPOINT required"),
+            public_endpoint: None,
+            region: std::env::var("S3_REGION").expect("S3_REGION required"),
+            bucket: std::env::var("S3_BUCKET").expect("S3_BUCKET required"),
+            access_key_id: std::env::var("S3_ACCESS_KEY_ID").expect("S3_ACCESS_KEY_ID required"),
+            secret_access_key: std::env::var("S3_SECRET_ACCESS_KEY")
+                .expect("S3_SECRET_ACCESS_KEY required"),
+            force_path_style: true,
+        })
+        .unwrap();
+        s3.ensure_bucket().await.unwrap();
+        let s = ObjectStorage::from(s3);
+        let credential = new_credential(&f).await;
+        let part_size = 5 * 1024 * 1024;
+        let mut upload_limits = limits();
+        upload_limits.part_size_bytes = part_size;
+        upload_limits.max_file_size_bytes = part_size + 1000;
+        let (att, meta) = create_upload_backend(
+            &f.backend,
+            &s,
+            &upload_limits,
+            &StorageQuota::Unlimited,
+            f.workspace,
+            UploadReservation::Target(UploadTarget::WikiDocument(f.document)),
+            f.user,
+            credential,
+            CreateUploadInput {
+                name: "refused-s3.bin".into(),
+                size_bytes: part_size + 1000,
+                declared_mime: None,
+            },
+            TransferMode::Proxy,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        async fn put(
+            f: &Fixture,
+            s: &ObjectStorage,
+            credential: Uuid,
+            att: &AttachmentRow,
+            n: i32,
+            body: Vec<u8>,
+        ) -> String {
+            let (key, max, upload_ref) = authorize_upload_part_backend(
+                &f.backend,
+                f.workspace,
+                att.id,
+                f.user,
+                credential,
+                n,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let length = body.len() as u64;
+            let stream =
+                futures_util::stream::iter(vec![Ok::<_, std::io::Error>(bytes::Bytes::from(body))]);
+            let mut staged = s
+                .stage_part_stream(&key, upload_ref.as_deref(), n, stream, Some(length), max)
+                .await
+                .unwrap();
+            commit_upload_part_backend(
+                &f.backend,
+                s,
+                f.workspace,
+                att.id,
+                f.user,
+                credential,
+                n,
+                &key,
+                upload_ref.as_deref(),
+                &mut staged,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .etag
+        }
+        let first = put(&f, &s, credential, &att, 1, vec![b'a'; 1000]).await;
+        let last = put(&f, &s, credential, &att, 2, vec![b'b'; 1000]).await;
+        let supplied = vec![(1, first), (2, last.clone())];
+        assert_eq!(
+            finish(&f, &s, credential, att.id, supplied)
+                .await
+                .unwrap()
+                .unwrap_err(),
+            AttachmentDbError::EtagMismatch
+        );
+        let (resumed, current_meta, done, remaining) =
+            resume_upload_backend(&f.backend, &s, f.workspace, att.id, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(resumed.status, "uploading");
+        assert_eq!(resumed.storage_key, att.storage_key);
+        assert!(prepared_upload(&resumed).unwrap().is_none());
+        assert_eq!(current_meta.upload_ref, meta.upload_ref);
+        assert_eq!(done.len(), 2);
+        assert!(remaining.is_empty());
+        assert_eq!(counts(&f, att.id).await, (0, 0));
+        let replaced = put(&f, &s, credential, &att, 1, vec![b'c'; part_size as usize]).await;
+        let completed = finish(&f, &s, credential, att.id, vec![(1, replaced), (2, last)])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.status, "stored");
+        let mut expected = vec![b'c'; part_size as usize];
+        expected.extend_from_slice(&vec![b'b'; 1000]);
+        assert_eq!(
+            s.read_range(&att.storage_key, 0, expected.len() as u64 - 1)
+                .await
+                .unwrap(),
+            expected
+        );
+        assert_eq!(counts(&f, att.id).await, (1, 1));
+        s.purge_key(&att.storage_key).await.unwrap();
+        f.close().await;
+    }
+    #[tokio::test]
+    async fn upload_session_selected_definite_refusal_resumes_replaces_and_completes() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let credential = new_credential(&f).await;
+        let (att, meta) = create(&f, &s, credential).await;
+        let submitted = parts(&f, &s, credential, &att, &meta).await;
+        let (paused, go) = cleanup_test_hooks::arm(att.id, 15);
+        let complete = launch(
+            &f,
+            &s,
+            credential,
+            att.id,
+            submitted,
+            CancellationToken::new(),
+        );
+        entered(paused).await;
+        // External part replacement after verified preparation makes the actual
+        // storage assembly definitively refuse that exact completion identity.
+        let body = vec![b'R'; meta.part_size_bytes as usize];
+        let stream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(bytes::Bytes::from(
+            body.clone(),
+        ))]);
+        let mut staged = s
+            .stage_part_stream(
+                &att.storage_key,
+                meta.upload_ref.as_deref(),
+                1,
+                stream,
+                Some(body.len() as u64),
+                body.len() as u64,
+            )
+            .await
+            .unwrap();
+        s.publish_staged_part(&att.storage_key, 1, &mut staged)
+            .await
+            .unwrap();
+        let listing = listed_parts(&s, &att.storage_key).await;
+        go.send(()).unwrap();
+        assert_eq!(
+            complete.await.unwrap().unwrap().unwrap_err(),
+            AttachmentDbError::EtagMismatch
+        );
+        let (resumed, resumed_meta, done, remaining) =
+            resume_upload_backend(&f.backend, &s, f.workspace, att.id, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(resumed.status, "uploading");
+        assert_eq!(resumed.storage_key, att.storage_key);
+        assert!(prepared_upload(&resumed).unwrap().is_none());
+        assert_eq!(resumed_meta.upload_ref, meta.upload_ref);
+        assert_eq!(done.len(), meta.part_count as usize);
+        assert!(remaining.is_empty());
+        assert_eq!(listed_parts(&s, &att.storage_key).await, listing);
+        assert_eq!(counts(&f, att.id).await, (0, 0));
+        // Use the normal authorization/part commit path to replace bad parts.
+        let valid = parts(&f, &s, credential, &att, &meta).await;
+        let completed = finish(&f, &s, credential, att.id, valid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.status, "stored");
+        assert_eq!(completed.storage_key, att.storage_key);
+        literal(&s, &att.storage_key).await;
+        assert_eq!(counts(&f, att.id).await, (1, 1));
+        f.close().await;
+    }
+    #[tokio::test]
+    async fn upload_session_selected_storage_error_keeps_completion_and_fences_rewrite() {
+        let f = Fixture::new().await;
+        let s = storage(&f);
+        let credential = new_credential(&f).await;
+        let (att, meta) = create(&f, &s, credential).await;
+        let submitted = parts(&f, &s, credential, &att, &meta).await;
+        let (paused, go) = cleanup_test_hooks::arm(att.id, 15);
+        let complete = launch(
+            &f,
+            &s,
+            credential,
+            att.id,
+            submitted.clone(),
+            CancellationToken::new(),
+        );
+        entered(paused).await;
+        // An actual filesystem assembly error is not an acknowledged parts
+        // refusal. No marker may be cleared merely because assembly errored.
+        let object_dir = f.root.join("s18-storage/objects").join(&att.storage_key);
+        std::fs::create_dir_all(&object_dir).unwrap();
+        let obstruction = object_dir.join("payload.assembly");
+        std::fs::create_dir(&obstruction).unwrap();
+        go.send(()).unwrap();
+        assert!(matches!(
+            complete.await.unwrap().unwrap_err(),
+            sqlx::Error::Io(_)
+        ));
+        let before = pointer(&f, att.id).await;
+        assert_eq!(before.0, "uploading");
+        assert!(serde_json::from_str::<Value>(&before.2)
+            .unwrap()
+            .get("_completion")
+            .is_some());
+        assert_eq!(
+            resume_upload_backend(&f.backend, &s, f.workspace, att.id, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap_err(),
+            AttachmentDbError::UploadState
+        );
+        let listing = listed_parts(&s, &att.storage_key).await;
+        let body = vec![b'Z'; meta.part_size_bytes as usize];
+        let stream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(bytes::Bytes::from(
+            body.clone(),
+        ))]);
+        let mut staged = s
+            .stage_part_stream(
+                &att.storage_key,
+                meta.upload_ref.as_deref(),
+                1,
+                stream,
+                Some(body.len() as u64),
+                body.len() as u64,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            commit_upload_part_backend(
+                &f.backend,
+                &s,
+                f.workspace,
+                att.id,
+                f.user,
+                credential,
+                1,
+                &att.storage_key,
+                meta.upload_ref.as_deref(),
+                &mut staged
+            )
+            .await
+            .unwrap()
+            .unwrap_err(),
+            AttachmentDbError::UploadState
+        );
+        assert_eq!(pointer(&f, att.id).await, before);
+        assert_eq!(listed_parts(&s, &att.storage_key).await, listing);
+        assert_eq!(counts(&f, att.id).await, (0, 0));
+        std::fs::remove_dir(&obstruction).unwrap();
+        finish(&f, &s, credential, att.id, submitted)
+            .await
+            .unwrap()
+            .unwrap();
+        literal(&s, &att.storage_key).await;
+        assert_eq!(counts(&f, att.id).await, (1, 1));
+        f.close().await;
+    }
+    #[tokio::test]
     async fn upload_session_selected_complete_literal_fresh_client_replay_and_conflict() {
         let f = Fixture::new().await;
         let s = storage(&f);
@@ -6425,6 +6762,7 @@ pub(crate) async fn complete_upload_backend_with_cancel(
     #[cfg(test)]
     cleanup_test_hooks::wait(id, 9).await;
     let mut owned = backend.begin_write().await?;
+    let mut definite_refusal = false;
     let outcome=async {
         if let Err(e)=upload_cancelled(cancel) {return Ok(Err(e));}
         let mut op=owned.operation();op.set_tenant(workspace).await?;
@@ -6446,7 +6784,19 @@ pub(crate) async fn complete_upload_backend_with_cancel(
         let assembled=storage.assemble_multipart(&completion.storage_key,meta.upload_ref.as_deref(),&completion.parts).await;
         #[cfg(test)] cleanup_test_hooks::wait(id,14).await;
         if let Err(e)=upload_cancelled(cancel) {return Ok(Err(e));}
-        let size=match assembled {Ok(n)=>n,Err(StorageError::EtagMismatch|StorageError::PartTooSmall)=>return Ok(Err(AttachmentDbError::EtagMismatch)),Err(StorageError::UploadGone)=>return Ok(Err(AttachmentDbError::UploadState)),Err(e)=>return Err(upload_storage_error(e))};
+        let size=match assembled {
+            Ok(n)=>n,
+            Err(StorageError::EtagMismatch|StorageError::PartTooSmall)=>{
+                let current=match op.upload_actor_row(workspace,id,actor,credential,true).await? {Ok(v)=>v,Err(e)=>return Ok(Err(e))};
+                if current.status!="assembling" || !prepared_upload_matches(&current,&completion) || prepared_upload(&current)?.as_ref()!=Some(&completion) || !op.upload_key_owned(workspace,id,&completion.storage_key).await? {return Ok(Err(AttachmentDbError::UploadState));}
+                let family=op.attachment_cleanup_tenant_family(workspace)?;
+                if family.execute("UPDATE attachments SET status='uploading',upload_meta=json_remove(upload_meta,'$._completion') WHERE workspace_id=?1 AND id=?2 AND status='assembling' AND storage_key=?3 AND json_extract(upload_meta,'$._completion')=json(?4)", &[Cell::uuid(workspace),Cell::uuid(id),Cell::text(&completion.storage_key),Cell::json(&json!(completion))?]).await?!=1 {return Ok(Err(AttachmentDbError::UploadState));}
+                definite_refusal=true;
+                return Ok(Err(AttachmentDbError::EtagMismatch));
+            },
+            Err(StorageError::UploadGone)=>return Ok(Err(AttachmentDbError::UploadState)),
+            Err(e)=>return Err(upload_storage_error(e))
+        };
         #[cfg(test)] cleanup_test_hooks::wait(id,11).await;
         let head=storage.head(&completion.storage_key).await.map_err(upload_storage_error)?;
         if let Err(e)=upload_cancelled(cancel) {return Ok(Err(e));}
@@ -6509,6 +6859,14 @@ pub(crate) async fn complete_upload_backend_with_cancel(
         Ok(Ok(_)) => {
             owned.rollback().await?;
             Ok(Err(AttachmentDbError::UploadState))
+        }
+        Ok(Err(e)) if definite_refusal && !cancel.is_cancelled() => {
+            // Commit the scoped refusal cleanup, never the unknown/error path.
+            owned
+                .commit()
+                .await
+                .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+            Ok(Err(e))
         }
         Ok(Err(e)) => {
             owned.rollback().await?;
