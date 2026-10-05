@@ -606,18 +606,36 @@ mod backend_tests {
             run_embed_pass_backend(&backend, &embedder, &mut EmbedBackoff::default(), &c).await
         });
         provider.seen().await;
-        assert_eq!(f.pool.num_idle(), 1); // Provider wait owns no app connection.
-        provider.state.release.notify_one();
-        tokio::time::timeout(Duration::from_secs(5), async {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let provider_boundary = tokio::time::timeout_at(deadline, async {
+            // SQLx returns a committed connection in a spawned task. Prove
+            // availability through the same public pool while the provider
+            // remains blocked, rather than racing that task's idle snapshot.
+            let probe = f.pool.acquire().await?;
+            let pool_limits = (f.pool.options().get_max_connections(), f.pool.size());
+            // Negative control: a held connection in this sole-connection
+            // pool really prevents another public acquisition.
+            let held_probe_denied = f.pool.try_acquire().is_none();
+            drop(probe);
+            while f.pool.num_idle() != 1 {
+                tokio::task::yield_now().await;
+            }
+            let released_idle = f.pool.num_idle();
+            provider.state.release.notify_one();
             while f.pool.num_idle() != 0 {
                 tokio::task::yield_now().await;
             }
+            Ok::<_, sqlx::Error>((pool_limits, held_probe_denied, released_idle))
         })
-        .await
-        .unwrap(); // The sole embedding task now awaits its writer.
+        .await; // One unchanged budget includes the actual writer wait.
         cancel.cancel();
-        reservation.rollback().await.unwrap();
-        let outcome = call.await.unwrap().unwrap();
+        // A failed barrier must also release the provider and retire the
+        // original writer/call before its failure is reported.
+        if !matches!(&provider_boundary, Ok(Ok(_))) {
+            provider.state.release.notify_one();
+        }
+        let reservation_finish = reservation.rollback().await;
+        let outcome = call.await;
         let vectors = vector_count(&f).await;
         let events = f.event_count("attachment.embedded").await;
         provider.finish().await;
@@ -626,6 +644,17 @@ mod backend_tests {
         f.pool.close().await;
         // Resources and the original failure database are closed before the
         // oracle; on failure its directory is deliberately retained.
+        let (pool_limits, held_probe_denied, released_idle) = provider_boundary
+            .expect("provider availability/release/writer wait exceeded the original budget")
+            .expect("provider wait must leave the app connection available");
+        assert_eq!(pool_limits, (1, 1));
+        assert!(
+            held_probe_denied,
+            "a held app connection must block acquisition"
+        );
+        assert_eq!(released_idle, 1, "the probe must return before writer wait");
+        reservation_finish.unwrap();
+        let outcome = outcome.unwrap().unwrap();
         assert_eq!(outcome, EmbedPassOutcome::Cancelled);
         assert_eq!(
             vectors, 0,
