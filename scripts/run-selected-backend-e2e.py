@@ -148,7 +148,9 @@ def record_after(output):
         unique={a['executable'] for a in matches};assert len(unique)==1,(name,unique)
         a=matches[-1]
         assert all(m['target']==a['target'] and m['features']==a['features'] and m['profile']==a['profile'] for m in matches);path=a['executable'];metadata=Path(path).stat()
-        assert sorted(a['features'])==(['worker'] if name=='collab-engine' else ['api-schema','db-tests'])
+        # Cargo lists every activated feature, including a declared `default` (collab-engine declares `default = []`).
+        expected=['default','worker'] if name=='collab-engine' else ['api-schema','db-tests']
+        assert sorted(a['features'])==expected,(name,'actual emitted features',sorted(a['features']),'expected',expected)
         bins[path]={'sha256':sha(path),'bytes':metadata.st_size,'mode':oct(metadata.st_mode),'inode':metadata.st_ino,
                     'compiledSource':before['head'],'targetTriple':'x86_64-unknown-linux-gnu',
                     'target':a['target'],'features':a['features'],'profile':a['profile'],'cargo_fresh':a['fresh']}
