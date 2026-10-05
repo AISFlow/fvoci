@@ -244,37 +244,74 @@ sys.exit(bool(missing))
 
 def runtime_ownership_return(output):
     """A waited launcher alone does not prove its product resources retired."""
-    owner = identity()
-    assert os.getuid() == os.getgid() == 1000 and os.environ['GITHUB_JOB'] == 'collaboration-flow'
-    before = read(output/'before.json')
-    assert before['head'] == os.environ['GITHUB_SHA']
-    runtime = output/'runtime'
-    allocated = list(output.glob('*-allocation.json')) + list(output.glob('*-binding.json'))
-    no_start = not allocated and (not runtime.exists() or not any(runtime.iterdir()))
-    if no_start:
-        proof = {'no_runtime_started':True}
-    else:
-        result = read(output/'selected-ci-receipt.json')
-        assert result['owner'] == owner and result['source'] == before['head'] and result['tree'] == before['tree']
-        assert [r['lane'] for r in result['runs']] == ['install','postgres','sqlite']
-        for run in result['runs']:
-            root = Path(run['runRoot'])
-            assert root.parent == runtime and root.name.startswith('root-current-'+run['lane']+'-')
-            facts = read(root/'receipt.json')
-            assert facts['source'] == before['head'] and facts['final_exit_code'] == run['exit']
-            assert facts['owned_container_absent'] is True
-            if run['lane'] == 'install':
-                assert facts['actual_owned_process_receipts'] == 15
-                processes = list((root/'retained-run').rglob('*process.json'))
-                assert len(processes) == 15 and all(read(p)['status'] is not None for p in processes)
-            else:
-                assert facts['owned_loopback_port_closed'] is True and facts['recorded_process_identities_retired'] is True
-                assert facts['cleanup_errors'] == []
-                if run['lane'] == 'postgres':
-                    assert read(root/'parent-receipt.json')['all_owned_fixtures_closed'] is True
-        proof = {'closed_current_lanes':['install','postgres','sqlite'],'installation_process_receipts':15}
-    write(output/'runtime-close-stage.json', {'source':before['head'],'tree':before['tree'],
-          'owner':owner,'ownership_return_qualified':True,**proof})
+    diagnostic = {'schema':1, 'phase':'identity', 'source':None, 'tree':None,
+                  'ownership_return_qualified':False, 'lanes':[]}
+    try:
+        owner = identity()
+        diagnostic['phase'] = 'current-source'
+        assert os.getuid() == os.getgid() == 1000 and os.environ['GITHUB_JOB'] == 'collaboration-flow'
+        before = read(output/'before.json')
+        assert before['head'] == os.environ['GITHUB_SHA']
+        diagnostic.update(source=before['head'],
+            tree=before['tree'] if re.fullmatch('[0-9a-f]{40}', str(before['tree'])) else None)
+        runtime = output/'runtime'
+        allocated = list(output.glob('*-allocation.json')) + list(output.glob('*-binding.json'))
+        no_start = not allocated and (not runtime.exists() or not any(runtime.iterdir()))
+        if no_start:
+            proof = {'no_runtime_started':True}
+        else:
+            diagnostic['phase'] = 'selected-receipt'
+            result = read(output/'selected-ci-receipt.json')
+            assert result['owner'] == owner and result['source'] == before['head'] and result['tree'] == before['tree']
+            assert [r['lane'] for r in result['runs']] == ['install','postgres','sqlite']
+            for run in result['runs']:
+                diagnostic['phase'] = run['lane']
+                root = Path(run['runRoot'])
+                assert root.parent == runtime and root.name.startswith('root-current-'+run['lane']+'-')
+                facts = read(root/'receipt.json')
+                required = ['source', 'final_exit_code', 'owned_container_absent'] + (
+                    ['actual_owned_process_receipts'] if run['lane'] == 'install' else
+                    ['owned_loopback_port_closed', 'recorded_process_identities_retired', 'cleanup_errors'])
+                expected = {'source':str, 'final_exit_code':int, 'owned_container_absent':bool,
+                            'actual_owned_process_receipts':int, 'owned_loopback_port_closed':bool,
+                            'recorded_process_identities_retired':bool, 'cleanup_errors':list}
+                # A whitelist only: no paths, URLs, failure messages or raw logs.
+                # Missing evidence remains missing and still refuses ownership return.
+                diagnostic['lanes'].append({'lane':run['lane'],
+                    'launcher_observed_driver_exit':run['exit'] if type(run['exit']) is int else None,
+                    'receipt_final_exit':facts.get('final_exit_code') if type(facts.get('final_exit_code')) is int else None,
+                    'receipt_sha256':sha(root/'receipt.json'),
+                    'missing_required_fields':[key for key in required if key not in facts],
+                    'invalid_required_fields':[key for key in required if key in facts and type(facts[key]) is not expected[key]],
+                    'source_matches_current':facts.get('source') == before['head'],
+                    'closure_facts':{key:facts[key] if type(facts.get(key)) is bool else None
+                        for key in ('owned_container_absent','owned_loopback_port_closed','recorded_process_identities_retired')},
+                    'cleanup_error_count':len(facts['cleanup_errors']) if type(facts.get('cleanup_errors')) is list else None,
+                    'original_driver_failure_sha256':hashlib.sha256(json.dumps(facts['original_driver_failure'],sort_keys=True).encode()).hexdigest()
+                        if 'original_driver_failure' in facts else None})
+                assert facts['source'] == before['head'] and facts['final_exit_code'] == run['exit']
+                assert facts['owned_container_absent'] is True
+                if run['lane'] == 'install':
+                    assert facts['actual_owned_process_receipts'] == 15
+                    processes = list((root/'retained-run').rglob('*process.json'))
+                    assert len(processes) == 15 and all(read(p)['status'] is not None for p in processes)
+                else:
+                    assert facts['owned_loopback_port_closed'] is True and facts['recorded_process_identities_retired'] is True
+                    assert facts['cleanup_errors'] == []
+                    if run['lane'] == 'postgres':
+                        assert read(root/'parent-receipt.json')['all_owned_fixtures_closed'] is True
+            proof = {'closed_current_lanes':['install','postgres','sqlite'],'installation_process_receipts':15}
+        write(output/'runtime-close-stage.json', {'source':before['head'],'tree':before['tree'],
+              'owner':owner,'ownership_return_qualified':True,**proof})
+
+        diagnostic['ownership_return_qualified'] = True
+    except Exception as error:
+        diagnostic['proof_error_type'] = type(error).__name__
+        raise
+    finally:
+        # The launcher captures this bounded summary into its own private prefix.
+        # Product data stay owned by1000 when any closure assertion refuses.
+        print(json.dumps(diagnostic), flush=True)
 
 
 def abi_files():

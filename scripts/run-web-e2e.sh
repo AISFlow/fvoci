@@ -295,6 +295,19 @@ from pathlib import Path
 import sys
 assert Path(sys.argv[1]).resolve().is_relative_to(Path(sys.argv[2]).resolve())
 PY_PARENT
+  # Exclusive runner-owned safe output stays outside the transferred prefixes.
+  safe_diagnostics="$RUNNER_TEMP/fvoci-selected-diagnostics"
+  python3 - "$safe_diagnostics" <<'PY_DIAGNOSTICS'
+from pathlib import Path
+import os,sys
+prefix=Path(sys.argv[1])
+assert prefix == Path(os.environ['RUNNER_TEMP']).resolve()/'fvoci-selected-diagnostics'
+prefix.mkdir(mode=0o700)  # occupied/symlink/foreign destinations are refused
+assert prefix.stat().st_uid == os.getuid() and prefix.stat().st_mode & 0o777 == 0o700
+if os.environ.get('GITHUB_OUTPUT'):
+    with open(os.environ['GITHUB_OUTPUT'],'a') as output:
+        output.write('selected-safe-diagnostics='+str(prefix)+'\n')
+PY_DIAGNOSTICS
   runner_uid="$(id -u)"
   runner_gid="$(id -g)"
   docker_gid="$(stat -c %g /var/run/docker.sock)"
@@ -311,19 +324,49 @@ PY_PARENT
       python3 "$ROOT/scripts/run-selected-backend-e2e.py" run --output "$FVOCI_SELECTED_CI_OUTPUT" || selected_status=$?
   # The launcher has returned, but require existing exact resource-retirement
   # witnesses (or proof no runtime began) before changing private data ownership.
+  launcher_status="$selected_status"
   ownership_status=0
-  sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB \
-    setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
-    python3 "$ROOT/scripts/run-selected-backend-e2e.py" owner-return --output "$FVOCI_SELECTED_CI_OUTPUT" || ownership_status=$?
+  (umask 077
+    sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB \
+      setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
+      python3 "$ROOT/scripts/run-selected-backend-e2e.py" owner-return --output "$FVOCI_SELECTED_CI_OUTPUT" \
+      >"$safe_diagnostics/ownership-stage.json") || ownership_status=$?
   if [[ "$ownership_status" -eq 0 ]]; then
     if ! sudo chown -h -R "$runner_uid:$runner_gid" "$FVOCI_SELECTED_CI_OUTPUT" "$FVOCI_SELECTED_CI_SQLITE_PARENT"; then
       echo "selected runtime ownership restoration failed" >&2
       if [[ "$selected_status" -eq 0 ]]; then selected_status=1; fi
+    else
+      # Publish the old allowlist only after the strict closure and owner return.
+      if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+        if ! {
+          echo 'selected-private-diagnostics<<FVOCI_CLOSED_DIAGNOSTICS'
+          for item in '*-stderr.log' '*-stage.json' '*-driver.log' selected-ci-receipt.json \
+            handoff-input-before-safe.json handoff-input-after-safe.json handoff-input-current-safe.json handoff-input-delta-safe.json; do
+            printf '%s/%s\n' "$FVOCI_SELECTED_CI_OUTPUT" "$item"
+          done
+          echo FVOCI_CLOSED_DIAGNOSTICS
+        } >>"$GITHUB_OUTPUT"; then
+          echo "selected diagnostic publication failed" >&2
+          if [[ "$selected_status" -eq 0 ]]; then selected_status=1; fi
+        fi
+      fi
     fi
   else
     echo "selected runtime ownership retained: resource retirement proof incomplete" >&2
     if [[ "$selected_status" -eq 0 ]]; then selected_status=1; fi
   fi
+  diagnostic_status=0
+  python3 - "$safe_diagnostics" "$launcher_status" "$ownership_status" "$selected_status" "$pending_status" <<'PY_STATUS' || diagnostic_status=$?
+from pathlib import Path
+import json,os,sys
+prefix=Path(sys.argv[1])
+assert not prefix.is_symlink() and prefix.stat().st_uid == os.getuid() and prefix.stat().st_mode & 0o777 == 0o700
+with (prefix/'launcher-stage.json').open('x') as receipt:
+    os.fchmod(receipt.fileno(),0o600)
+    json.dump(dict(zip(('actual_launcher_exit','ownership_return_exit','selected_final_exit','pending_exit'),map(int,sys.argv[2:]))),receipt)
+    receipt.write('\n')
+PY_STATUS
+  if [[ "$diagnostic_status" -ne 0 && "$selected_status" -eq 0 ]]; then selected_status=1; fi
 fi
 if [[ "$pending_status" -ne 0 ]]; then exit "$pending_status"; fi
 exit "$selected_status"
