@@ -406,12 +406,14 @@ echo "failed preparation: not healthy, /ready refused; after the fix the restart
 
 step "pending migrations while the server is live: preparation refuses"
 LATEST="$(psql_owner 'SELECT max(version) FROM fvoci.schema_migrations' fvoci)"
+# The receipt carries lineage and digest; hold the exact row aside instead of re-inserting a bare version.
+psql_owner "CREATE TABLE public.smoke_held_receipt AS SELECT * FROM fvoci.schema_migrations WHERE version = ${LATEST}" fvoci
 psql_owner "DELETE FROM fvoci.schema_migrations WHERE version = ${LATEST}" fvoci
 set +e
 OUT="$(docker compose run --rm --no-deps -T --entrypoint /opt/fvoci/bin/fvoci-migrate fvoci --prepare 2>&1)"
 STATUS=$?
 set -e
-psql_owner "INSERT INTO fvoci.schema_migrations (version) VALUES (${LATEST})" fvoci
+psql_owner "INSERT INTO fvoci.schema_migrations SELECT * FROM public.smoke_held_receipt; DROP TABLE public.smoke_held_receipt" fvoci
 grep 'migration(s) are pending' <<<"$OUT" | cut -c1-220
 if (( STATUS == 0 )) || ! grep -q 'another FVOCI server is still running' <<<"$OUT"; then
   fail "live-writer upgrade not refused"

@@ -3749,8 +3749,8 @@ async fn microsoft_template_links_fail_closed_until_authenticated_reconnect() {
 }
 
 #[tokio::test]
-async fn issuer_rewrite_functions_disappear_without_changing_legacy_links() {
-    let db = TestDb::bootstrap_through(36).await;
+async fn issuer_rewrite_functions_are_absent_and_reruns_preserve_legacy_links() {
+    let db = TestDb::bootstrap().await;
     let admin = admin_pool(&db).await;
     let user = Uuid::now_v7();
     sqlx::query("INSERT INTO fvoci.users (id, email, given_name) VALUES ($1, 'upgrade@example.com', 'Upgrade')")
@@ -3782,9 +3782,11 @@ async fn issuer_rewrite_functions_disappear_without_changing_legacy_links() {
     .fetch_all(&admin)
     .await
     .unwrap();
-    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_proc WHERE oid IN ('fvoci.app_identity_link_backfill_issuer(uuid,text)'::regprocedure, 'fvoci.app_identity_link_repin_template(uuid,text,text)'::regprocedure)")
+    // The retired development lineage once shipped issuer rewrite definers; the
+    // baseline never has them, and nothing guesses an issuer for a NULL link.
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_proc WHERE proname IN ('app_identity_link_backfill_issuer', 'app_identity_link_repin_template')")
         .fetch_one(&admin).await.unwrap();
-    assert_eq!(before, 2);
+    assert_eq!(before, 0);
 
     fvoci_server::db::migrate::run_migrations(&db.admin_url)
         .await

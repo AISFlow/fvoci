@@ -581,57 +581,9 @@ async fn group_mention_on_project_document_respects_access_at_delivery() {
     harness.cleanup().await;
 }
 
-/// Upgrading an existing install must not notify users about past events: the
-/// notifications consumer starts after the events recorded before migration 018.
-#[tokio::test]
-async fn upgrade_starts_notifications_after_existing_events() {
-    let harness = TestDb::bootstrap_through(17).await;
-    let admin = admin_pool(&harness).await;
-    let mut tx = admin.begin().await.expect("tx");
-    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
-        .execute(&mut *tx)
-        .await
-        .expect("system ctx");
-    let workspace_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO fvoci.workspaces (id, slug, name) VALUES (gen_random_uuid(), 'upg', 'Upgrade') RETURNING id",
-    )
-    .fetch_one(&mut *tx)
-    .await
-    .expect("workspace");
-    let last: (String, i64) = sqlx::query_as(
-        "INSERT INTO fvoci.events (id, workspace_id, verb, target_type, target_id, payload) \
-         VALUES (gen_random_uuid(), $1, 'task.created', 'task', gen_random_uuid(), '{}'::jsonb) \
-         RETURNING xact::text, seq",
-    )
-    .bind(workspace_id)
-    .fetch_one(&mut *tx)
-    .await
-    .expect("historical event");
-    tx.commit().await.expect("commit");
-    // Precondition: 018 records the newest settled event (xact < xmin). xmin is
-    // cluster-wide, so another test's open transaction can keep this event
-    // unsettled; wait until it is settled before upgrading.
-    wait_xmin_past(&admin, &last.0).await;
-    admin.close().await;
-
-    fvoci_server::db::migrate::run_migrations(&harness.admin_url)
-        .await
-        .expect("migrate to latest");
-    let admin = admin_pool(&harness).await;
-    let cursor: (String, i64) = sqlx::query_as(
-        "SELECT last_xact::text, last_seq FROM fvoci.outbox_consumers WHERE consumer = 'notifications'",
-    )
-    .fetch_one(&admin)
-    .await
-    .expect("notifications cursor");
-    assert_eq!(cursor, last, "cursor starts after the pre-upgrade events");
-    admin.close().await;
-    harness.cleanup().await;
-}
-
 const SEEDED_CONSUMERS: [&str; 5] = ["github", "mail", "notifications", "push", "webhooks"];
 
-/// Cursors of the consumers that 018/020/027/040 seed, by name.
+/// Cursors of the relay consumers, by name.
 async fn seeded_cursors(admin: &PgPool) -> Vec<(String, String, i64)> {
     sqlx::query_as(
         "SELECT consumer, last_xact::text, last_seq FROM fvoci.outbox_consumers \
@@ -731,147 +683,19 @@ async fn read_ids(admin: &PgPool, consumer: &str) -> Vec<Uuid> {
         .collect()
 }
 
-/// 018/020/027/040 seed nothing while another database's transaction holds the
-/// cluster xmin below the pre-upgrade events. 041 refuses to guess while that
-/// holder may be same-database work, then seeds every missing cursor at the
-/// newest event once it has settled: no history is replayed, new events flow.
-#[tokio::test]
-async fn upgrade_repairs_cursors_missed_while_cluster_xmin_lagged() {
-    let harness = TestDb::bootstrap_through(17).await;
-    let admin = admin_pool(&harness).await;
-    let workspace_id = insert_upgrade_workspace(&admin).await;
-    let (holder, holder_xid) = hold_xid_in_other_database(&harness).await;
-    let (_, last_xact, last_seq) = commit_event(&admin, workspace_id, 0).await;
-    let lagging: bool = sqlx::query_scalar(
-        "SELECT $1::xid8 < $2::xid8 AND pg_snapshot_xmin(pg_current_snapshot()) <= $1::xid8",
-    )
-    .bind(&holder_xid)
-    .bind(&last_xact)
-    .fetch_one(&admin)
-    .await
-    .expect("xmin precondition");
-    assert!(
-        lagging,
-        "holder {holder_xid} must keep xmin below event {last_xact}"
-    );
-
-    fvoci_server::db::migrate::run_migrations_through(&harness.admin_url, 40)
-        .await
-        .expect("migrate through 040");
-    assert_eq!(
-        seeded_cursors(&admin).await,
-        no_cursors(),
-        "018/020/027/040 seed nothing while xmin lags"
-    );
-
-    let err = fvoci_server::db::migrate::run_migrations(&harness.admin_url)
-        .await
-        .expect_err("041 must refuse an unsettled tail");
-    let db_err = err.as_database_error().expect("database error");
-    assert_eq!(db_err.code().as_deref(), Some("55000"), "{db_err}");
-    assert!(db_err.message().contains("is not settled"), "{db_err}");
-    assert!(
-        fvoci_server::db::migrate::assert_schema_current(&admin)
-            .await
-            .is_err(),
-        "the schema gate keeps the server off"
-    );
-    assert_eq!(
-        seeded_cursors(&admin).await,
-        no_cursors(),
-        "nothing seeded on failure"
-    );
-
-    release_xid(holder).await;
-    wait_xmin_past(&admin, &last_xact).await;
-    fvoci_server::db::migrate::run_migrations(&harness.admin_url)
-        .await
-        .expect("rerun migrate after the holder ended");
-    fvoci_server::db::migrate::assert_schema_current(&admin)
-        .await
-        .expect("schema current");
-    assert_eq!(
-        seeded_cursors(&admin).await,
-        cursors_at(&last_xact, last_seq)
-    );
-
-    for consumer in SEEDED_CONSUMERS {
-        assert!(
-            read_ids(&admin, consumer).await.is_empty(),
-            "{consumer} replays history"
-        );
-    }
-    let (fresh, fresh_xact, _) = commit_event(&admin, workspace_id, 0).await;
-    wait_xmin_past(&admin, &fresh_xact).await;
-    for consumer in SEEDED_CONSUMERS {
-        assert_eq!(read_ids(&admin, consumer).await, [fresh], "{consumer}");
-    }
-    admin.close().await;
-    harness.cleanup().await;
-}
-
-/// Existing cursors are never moved, and an unsettled tail does not block an
-/// upgrade that has nothing to repair.
-#[tokio::test]
-async fn upgrade_keeps_existing_cursors_and_repairs_only_missing_ones() {
-    let harness = TestDb::bootstrap_through(40).await;
-    let admin = admin_pool(&harness).await;
-    let workspace_id = insert_upgrade_workspace(&admin).await;
-    for consumer in SEEDED_CONSUMERS {
-        sqlx::query("INSERT INTO fvoci.outbox_consumers (consumer) VALUES ($1)")
-            .bind(consumer)
-            .execute(&admin)
-            .await
-            .expect("existing cursor");
-    }
-    let (holder, _) = hold_xid_in_other_database(&harness).await;
-    commit_event(&admin, workspace_id, 0).await;
-    fvoci_server::db::migrate::run_migrations(&harness.admin_url)
-        .await
-        .expect("nothing missing: no guard");
-    assert_eq!(seeded_cursors(&admin).await, cursors_at("0", 0));
-    release_xid(holder).await;
-
-    // Partial: one cursor already exists, the others were missed.
-    let harness2 = TestDb::bootstrap_through(40).await;
-    let admin2 = admin_pool(&harness2).await;
-    let workspace_id = insert_upgrade_workspace(&admin2).await;
-    sqlx::query("INSERT INTO fvoci.outbox_consumers (consumer) VALUES ('notifications')")
-        .execute(&admin2)
-        .await
-        .expect("existing notifications cursor");
-    let (_, last_xact, last_seq) = commit_event(&admin2, workspace_id, 0).await;
-    wait_xmin_past(&admin2, &last_xact).await;
-    fvoci_server::db::migrate::run_migrations(&harness2.admin_url)
-        .await
-        .expect("repair missing cursors");
-    let expected: Vec<_> = cursors_at(&last_xact, last_seq)
-        .into_iter()
-        .map(|(name, xact, seq)| {
-            if name == "notifications" {
-                (name, "0".to_string(), 0)
-            } else {
-                (name, xact, seq)
-            }
-        })
-        .collect();
-    assert_eq!(seeded_cursors(&admin2).await, expected);
-    admin.close().await;
-    admin2.close().await;
-    harness.cleanup().await;
-    harness2.cleanup().await;
-}
-
-/// A fresh install has no events: 041 seeds nothing even while xmin lags, and
-/// the first `ensure_consumer` starts at the beginning as before.
+/// A fresh install creates no cursor rows, also when the installer reruns
+/// while another database's transaction holds the cluster xmin; the first
+/// `ensure_consumer` starts at the beginning, and a later rerun of the installer
+/// never moves that cursor.
 #[tokio::test]
 async fn fresh_install_seeds_no_cursors() {
-    let harness = TestDb::bootstrap_through(40).await;
+    let harness = TestDb::bootstrap().await;
     let admin = admin_pool(&harness).await;
+    assert_eq!(seeded_cursors(&admin).await, no_cursors());
     let (holder, _) = hold_xid_in_other_database(&harness).await;
     fvoci_server::db::migrate::run_migrations(&harness.admin_url)
         .await
-        .expect("fresh migrate");
+        .expect("rerun while xmin lags");
     release_xid(holder).await;
     assert_eq!(seeded_cursors(&admin).await, no_cursors());
     ensure_consumer(&admin, NOTIFICATIONS_CONSUMER)
@@ -884,22 +708,33 @@ async fn fresh_install_seeds_no_cursors() {
     .await
     .expect("cursor");
     assert_eq!(cursor, ("0".to_string(), 0));
+    fvoci_server::db::migrate::run_migrations(&harness.admin_url)
+        .await
+        .expect("rerun after the first lease");
+    assert_eq!(
+        seeded_cursors(&admin).await,
+        vec![("notifications".to_string(), "0".to_string(), 0)],
+        "a rerun never moves or adds cursors"
+    );
     admin.close().await;
     harness.cleanup().await;
 }
 
-/// A pre-041 dump restored into another cluster carries xids past this
-/// cluster's xmax, so 018/020/027/040 seeded nothing. 041 seeds at the restored
-/// tail; the relay stays fail-closed until --recover-outbox rebases these rows
-/// like any other, which replays only its window and then new events.
+/// Events restored from another cluster carry xids past this cluster's xmax.
+/// Every consumer's relay stays fail-closed until --recover-outbox rebases the
+/// cursors, which replays only its window and then new events.
 #[tokio::test]
-async fn restored_epoch_seeds_cursors_that_recovery_rebases_within_its_window() {
+async fn restored_epoch_fails_closed_until_recovery_rebases_within_its_window() {
     use fvoci_server::db::outbox::is_outbox_xid_epoch_mismatch;
     use fvoci_server::db::outbox_recover::{recover_outbox, RecoverOutboxOptions};
 
-    let harness = TestDb::bootstrap_through(40).await;
+    let harness = TestDb::bootstrap().await;
     let admin = admin_pool(&harness).await;
     let workspace_id = insert_upgrade_workspace(&admin).await;
+    for consumer in SEEDED_CONSUMERS {
+        ensure_consumer(&admin, consumer).await.expect("ensure");
+    }
+    assert_eq!(seeded_cursors(&admin).await, cursors_at("0", 0));
     let (outside, _, _) = commit_event(&admin, workspace_id, 60).await;
     let (inside, _, inside_seq) = commit_event(&admin, workspace_id, 1).await;
     // Old-cluster xids, past this cluster's xmax (as after a logical restore).
@@ -911,15 +746,7 @@ async fn restored_epoch_seeds_cursors_that_recovery_rebases_within_its_window() 
     .execute(&admin)
     .await
     .expect("restored xids");
-    assert_eq!(seeded_cursors(&admin).await, no_cursors());
-
-    fvoci_server::db::migrate::run_migrations(&harness.admin_url)
-        .await
-        .expect("041 seeds a restored tail");
-    assert_eq!(
-        seeded_cursors(&admin).await,
-        cursors_at("100000000001", inside_seq)
-    );
+    let _ = inside_seq;
     for consumer in SEEDED_CONSUMERS {
         let err = read_events(&admin, consumer, 100)
             .await
@@ -948,7 +775,7 @@ async fn restored_epoch_seeds_cursors_that_recovery_rebases_within_its_window() 
                 .1
                 .to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
             apply: true,
-            reason: Some("test restore of a pre-041 dump".into()),
+            reason: Some("test restore from another cluster".into()),
             acknowledge_external_replay: true,
         },
     )
@@ -1033,7 +860,7 @@ async fn wait_for_no_client_backends(harness: &TestDb, db_name: &str) {
 /// precondition holds without depending on when the pool is dropped.
 #[tokio::test]
 async fn close_pool_closes_a_connection_returned_during_close() {
-    let harness = TestDb::bootstrap_through(1).await;
+    let harness = TestDb::bootstrap().await;
     let admin = admin_pool(&harness).await;
     let db_name: String = sqlx::query_scalar("SELECT current_database()::text")
         .fetch_one(&admin)

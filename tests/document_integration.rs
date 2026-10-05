@@ -1664,7 +1664,7 @@ async fn app_role_rls_and_secret_grants_hold_for_new_tables() {
             .expect("app role may SELECT schema_migrations");
     assert!(readable_version >= 1);
     for sql in [
-        "INSERT INTO fvoci.schema_migrations (version) VALUES (999)",
+        "INSERT INTO fvoci.schema_migrations (version, lineage, sql_sha256) VALUES (999, 'fvoci-postgres-060', repeat('0', 64))",
         "UPDATE fvoci.schema_migrations SET version = version",
         "DELETE FROM fvoci.schema_migrations",
     ] {
@@ -1740,186 +1740,6 @@ async fn app_role_rls_and_secret_grants_hold_for_new_tables() {
     app_pool.close().await;
     admin.close().await;
     harness.cleanup().await;
-}
-
-#[tokio::test]
-async fn migration_001_003_upgrades_to_004_documents() {
-    let admin_base = std::env::var("TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))
-        .expect("TEST_DATABASE_URL missing");
-    let db_name = format!("fvoci_test_{}", Uuid::now_v7().simple());
-    let role_name = format!("fvoci_app_{}", db_name.replace('-', "_"));
-    let mut password_bytes = [0u8; 24];
-    rand::rng().fill_bytes(&mut password_bytes);
-    let role_password = hex::encode(password_bytes);
-    let server_url = server_db_url(&admin_base);
-    let admin_pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&server_url)
-        .await
-        .unwrap();
-    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
-        .execute(&admin_pool)
-        .await
-        .unwrap();
-    admin_pool.close().await;
-
-    let admin_url = join_db_url(&server_url, &db_name);
-    let migration_pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&admin_url)
-        .await
-        .unwrap();
-    for sql in [
-        include_str!("../migrations/001_schema.sql"),
-        include_str!("../migrations/002_functions.sql"),
-        include_str!("../migrations/003_workspace.sql"),
-    ] {
-        sqlx::raw_sql(sql).execute(&migration_pool).await.unwrap();
-    }
-    sqlx::query("INSERT INTO fvoci.schema_migrations (version) VALUES (1), (2), (3)")
-        .execute(&migration_pool)
-        .await
-        .unwrap();
-    let has_documents: (bool,) = sqlx::query_as(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'fvoci' AND table_name = 'documents')",
-    )
-    .fetch_one(&migration_pool)
-    .await
-    .unwrap();
-    assert!(!has_documents.0);
-    let has_number: (bool,) = sqlx::query_as(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'fvoci' AND table_name = 'workspaces' AND column_name = 'next_document_number')",
-    )
-    .fetch_one(&migration_pool)
-    .await
-    .unwrap();
-    assert!(!has_number.0);
-    migration_pool.close().await;
-
-    migrate::run_migrations(&admin_url).await.unwrap();
-    let migration_pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&admin_url)
-        .await
-        .unwrap();
-    let versions: (i64,) = sqlx::query_as("SELECT count(*) FROM fvoci.schema_migrations")
-        .fetch_one(&migration_pool)
-        .await
-        .unwrap();
-    assert_eq!(
-        versions.0,
-        fvoci_server::db::migrate::compiled_migration_count() as i64
-    );
-    let has_documents: (bool,) = sqlx::query_as(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'fvoci' AND table_name = 'documents')",
-    )
-    .fetch_one(&migration_pool)
-    .await
-    .unwrap();
-    assert!(has_documents.0);
-    let has_states: (bool,) = sqlx::query_as(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'fvoci' AND table_name = 'document_states')",
-    )
-    .fetch_one(&migration_pool)
-    .await
-    .unwrap();
-    assert!(has_states.0);
-    let has_number: (bool,) = sqlx::query_as(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'fvoci' AND table_name = 'workspaces' AND column_name = 'next_document_number')",
-    )
-    .fetch_one(&migration_pool)
-    .await
-    .unwrap();
-    assert!(has_number.0);
-    sqlx::query(&format!(
-        "CREATE ROLE \"{role_name}\" LOGIN PASSWORD '{role_password}' NOSUPERUSER NOBYPASSRLS"
-    ))
-    .execute(&migration_pool)
-    .await
-    .unwrap();
-    apply_grants(&migration_pool, &role_name).await;
-    let still_has_self: (bool,) =
-        sqlx::query_as("SELECT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'app_self_user_id')")
-            .fetch_one(&migration_pool)
-            .await
-            .unwrap();
-    assert!(still_has_self.0);
-    let user_id = Uuid::now_v7();
-    let workspace_id = Uuid::now_v7();
-    sqlx::query("INSERT INTO fvoci.users (id, email, given_name) VALUES ($1, $2, $3)")
-        .bind(user_id)
-        .bind("upgrade@example.com")
-        .bind("Upgrade")
-        .execute(&migration_pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO fvoci.workspaces (id, slug, name) VALUES ($1, 'upgrade', 'Upgrade')")
-        .bind(workspace_id)
-        .execute(&migration_pool)
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'owner')",
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .execute(&migration_pool)
-    .await
-    .unwrap();
-    migration_pool.close().await;
-
-    let mut app = url::Url::parse(&admin_url).unwrap();
-    app.set_username(&role_name).ok();
-    app.set_password(Some(&role_password)).ok();
-    let app_pool = pool::connect_app(app.as_str()).await.unwrap();
-    let mut tx = app_pool.begin().await.unwrap();
-    sqlx::query("SELECT set_config('app.tenant_id', $1, true)")
-        .bind(workspace_id.to_string())
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    let doc_id = Uuid::now_v7();
-    sqlx::query(
-        r#"
-        INSERT INTO fvoci.documents (
-            id, workspace_id, title, path, sort_key, number, status, schema_version,
-            content_json, created_by
-        ) VALUES (
-            $1, $2, 'Upgraded', $3, 'V', 1, 'draft', 2, '{"type":"doc"}'::jsonb, $4
-        )
-        "#,
-    )
-    .bind(doc_id)
-    .bind(workspace_id)
-    .bind(doc_id.simple().to_string())
-    .bind(user_id)
-    .execute(&mut *tx)
-    .await
-    .unwrap();
-    let visible: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM fvoci.documents WHERE id = $1")
-        .bind(doc_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .unwrap();
-    assert_eq!(visible.map(|(id,)| id), Some(doc_id));
-    let hidden_foreign: Option<(Uuid,)> =
-        sqlx::query_as("SELECT id FROM fvoci.documents WHERE workspace_id <> $1")
-            .bind(workspace_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .unwrap();
-    assert!(hidden_foreign.is_none());
-    tx.commit().await.unwrap();
-    app_pool.close().await;
-
-    let cleanup = TestDb {
-        admin_url,
-        app_url: String::new(),
-        db_name,
-        role_name,
-    };
-    cleanup.cleanup().await;
 }
 
 async fn create_doc(
@@ -4976,7 +4796,10 @@ async fn selected_backend_wiki_fixture(
         .await
         .unwrap();
     assert_eq!(capability.lineage, migrate::SQLITE_LINEAGE);
-    assert_eq!(capability.applied_steps, 4);
+    assert_eq!(
+        capability.applied_steps,
+        migrate::compiled_sqlite_steps().len()
+    );
     let command = Uuid::now_v7();
     let room_owner = Uuid::now_v7();
     let mut membership_failures = Vec::new();
@@ -6656,7 +6479,7 @@ async fn sqlite_migration_cancelled_commit_retains_admission_until_drain() {
                         .await
                         .unwrap()
                         .applied_steps,
-                    4
+                    migrate::compiled_sqlite_steps().len()
                 );
                 backend.close().await.unwrap();
             }
