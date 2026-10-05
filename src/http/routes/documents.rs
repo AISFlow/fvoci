@@ -119,6 +119,7 @@ pub(crate) struct TrashQuery {
     pub(crate) children: Option<String>,
 }
 
+#[derive(Debug)]
 pub(crate) enum DocumentApiError {
     App(AppError),
     Coded {
