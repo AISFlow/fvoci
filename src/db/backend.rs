@@ -1547,7 +1547,7 @@ pub(crate) mod maintenance_claim_driver_tests {
             .await
             .unwrap();
         let tx = f.writer().await;
-        let sql = "SELECT id AS original_id,label,:named AS bound FROM describe_probe WHERE id=?1 AND label=?";
+        let sql = "SELECT id AS original_id,label,?1 AS bound FROM describe_probe WHERE id=:named AND label=?";
         // Actual unmodified SDK prepare must decode the pipeline describe reply.
         let prepared = tx.connection().prepare(sql).await.unwrap();
         assert_eq!(prepared.column_count(), 3);
