@@ -1642,6 +1642,7 @@ impl RoomActor {
                         Some(RoomCommand::ReconcileForTest {
                             actor, credential, op_id, expected_tail, payload, reply,
                         }) => {
+                            eprintln!("P102 diagnostic handler before kind={:?} proof_present={} guard_present={} fence_lost={} connections={} writer_generation={:?} committed_generation={} committed_tail={} expected_tail={}", self.kind, self.native_consumer_proof().is_some(), self.room_guard.is_some(), self.fence_lost, self.connections.len(), self.writer_generation, self.committed_writer_generation, self.committed.tail_seq, expected_tail);
                             let digest = payload_digest(&payload);
                             let result = self.reconcile_ambiguous_append(
                                 actor, credential, op_id, expected_tail, &payload, &digest,
@@ -1649,6 +1650,7 @@ impl RoomActor {
                             let reload = if result.is_none() {
                                 self.reload_primary_or_close_room().await
                             } else { true };
+                            eprintln!("P102 diagnostic handler after ack_present={} reloaded={} proof_present={} guard_present={} fence_lost={} connections={}", result.is_some(), reload, self.native_consumer_proof().is_some(), self.room_guard.is_some(), self.fence_lost, self.connections.len());
                             let _ = reply.send((result, reload));
                         }
                         Some(RoomCommand::Shutdown) => {
@@ -4809,10 +4811,54 @@ mod remote_task_finish_tests {
     };
     use crate::db::tasks::selected_task_detail_tests::setup;
 
-    const RELEASE: &str = "UPDATE task_collab_room_fences SET expires_at=?5 WHERE workspace_id=?1 AND task_id=?2 AND owner_token=?3 AND fence=?4";
-    const RECEIPT: &str =
-        "SELECT seq,payload_len,payload_sha256,actor_user_id FROM task_collab_op_receipts";
-    const LOAD: &str = "SELECT state,encoding,writer_generation,snapshot_cutoff_seq,tail_seq,updated_at FROM task_states";
+    // The pinned SDK describes the original SQL, then executes its maintained
+    // parser's canonical SQL. Match only that actual execution representation,
+    // with the complete projection, target and predicates; never Describe.
+    const RELEASE: &str = "UPDATE task_collab_room_fences SET expires_at = ?5 WHERE workspace_id = ?1 AND task_id = ?2 AND owner_token = ?3 AND fence = ?4;";
+    const RECEIPT: &str = "SELECT seq, payload_len, payload_sha256, actor_user_id FROM task_collab_op_receipts WHERE workspace_id = ?1 AND task_id = ?2 AND op_id = ?3;";
+    const LOAD: &str = "SELECT state, encoding, writer_generation, snapshot_cutoff_seq, tail_seq, updated_at FROM task_states WHERE workspace_id = ?1 AND task_id = ?2;";
+
+    #[test]
+    fn task_finish_selectors_match_exact_sdk_execution_and_refuse_other_statements() {
+        // Immutable 46da diagnostic cursor272, with original-stream COMMIT+Close283.
+        let observed_receipt = "SELECT seq, payload_len, payload_sha256, actor_user_id FROM task_collab_op_receipts WHERE workspace_id = ?1 AND task_id = ?2 AND op_id = ?3;";
+        assert!(observed_receipt.contains(RECEIPT));
+        assert!(!"SELECT seq,payload_len,payload_sha256,actor_user_id FROM task_collab_op_receipts WHERE workspace_id=?1 AND task_id=?2 AND op_id=?3".contains(RECEIPT), "Describe is not executed receipt SQL");
+        for other in [
+            observed_receipt.replace("task_collab_op_receipts", "document_collab_op_receipts"),
+            observed_receipt.replace("task_collab_op_receipts", "task_collab_op_receipts_extra"),
+            observed_receipt.replace("seq, payload_len", "payload_len, seq"),
+            observed_receipt.replace("op_id = ?3", "op_id = ?4"),
+            observed_receipt.replace("AND op_id = ?3", "AND op_id != ?3"),
+        ] {
+            assert!(
+                !other.contains(RECEIPT),
+                "different receipt operation cannot arm this fault"
+            );
+        }
+        // Same pinned parser rendering of the existing full Task load and release
+        // SQL; their actual runtime paths still require separate allocation.
+        let canonical_load = "SELECT state, encoding, writer_generation, snapshot_cutoff_seq, tail_seq, updated_at FROM task_states WHERE workspace_id = ?1 AND task_id = ?2;";
+        assert!(canonical_load.contains(LOAD));
+        assert!(!canonical_load
+            .replace("task_states", "document_states")
+            .contains(LOAD));
+        assert!(!canonical_load
+            .replace("task_id = ?2", "task_id = ?3")
+            .contains(LOAD));
+        assert!(!canonical_load
+            .replace("AND task_id = ?2", "AND task_id != ?2")
+            .contains(LOAD));
+        let canonical_release = "UPDATE task_collab_room_fences SET expires_at = ?5 WHERE workspace_id = ?1 AND task_id = ?2 AND owner_token = ?3 AND fence = ?4;";
+        assert_eq!(canonical_release, RELEASE);
+        assert_ne!(
+            canonical_release.replace("owner_token = ?3", "owner_token = ?6"),
+            RELEASE
+        );
+        // Observed 46da renewal has an extra DB-clock live-owner predicate and is
+        // not a release. Exact equality keeps the no-fresh-release oracle specific.
+        assert_ne!("UPDATE task_collab_room_fences SET expires_at = ?5 WHERE workspace_id = ?1 AND task_id = ?2 AND owner_token = ?3 AND fence = ?4 AND expires_at > ?6;", RELEASE);
+    }
 
     // Concrete normal Task consumer fixture. SQL is executed by the maintained
     // SQLite engine through the pinned SDK, native bytes by the actual child.
@@ -5062,6 +5108,40 @@ mod remote_task_finish_tests {
     async fn remote_task_ambiguous_receipt_and_readback_finish_retain_original_owner() {
         for (receipt, mode) in [(true, 1), (true, 3), (false, 1), (false, 3)] {
             let mut room = TaskRoom::new().await;
+            // Writable join confirms activation before any Sync or receipt.
+            // Witness that exact owner before arming an uncertain finish;
+            // no fresh observer may settle or replace it after the failure.
+            let delivery = room.lease.family_room_delivery.expect("actual typed lease");
+            let (workspace, task, owner, fence, generation): (
+                Vec<u8>, Vec<u8>, Vec<u8>, i64, i64,
+            ) = sqlx::query_as(
+                "SELECT f.workspace_id, f.task_id, f.owner_token, f.fence, s.writer_generation FROM task_collab_room_fences AS f JOIN task_states AS s ON s.workspace_id = f.workspace_id AND s.task_id = f.task_id WHERE f.workspace_id = ?1 AND f.task_id = ?2",
+            )
+            .bind(room.key.0.as_bytes().as_slice())
+            .bind(room.key.1.as_bytes().as_slice())
+            .fetch_one(&room.f.pool)
+            .await
+            .unwrap();
+            let workspace = Uuid::from_slice(&workspace).unwrap();
+            let task = Uuid::from_slice(&task).unwrap();
+            let owner = Uuid::from_slice(&owner).unwrap();
+            assert_eq!(delivery.original.kind(), CollabKind::Task);
+            assert!(workspace == room.key.0 && workspace == delivery.original.workspace());
+            assert!(task == room.key.1 && task == delivery.original.resource());
+            assert!(
+                owner == delivery.writer_owner,
+                "confirmed join activation owner"
+            );
+            assert_eq!(fence, delivery.original.sequence());
+            assert_eq!(generation, 1, "one confirmed writable join activation");
+            let witnessed = delivery.original.with_owner(owner);
+            assert!(witnessed == delivery.original.with_owner(delivery.writer_owner));
+            assert_eq!(witnessed.sequence(), delivery.original.sequence());
+            assert!(
+                witnessed != delivery.original,
+                "original owner is wrong even with the same Task scope and fence sequence"
+            );
+            eprintln!("P102 diagnostic subcase receipt={receipt} mode={mode}");
             let op_id = if receipt {
                 room.sync().await;
                 assert_eq!(
@@ -5083,6 +5163,7 @@ mod remote_task_finish_tests {
                 .handle
                 .reconcile_for_test(room.f.user, room.credential, op_id, 0, room.payload.clone())
                 .await;
+            eprintln!("P102 diagnostic returned receipt={receipt} mode={mode} ack_present={} reloaded={reloaded}", ack.is_some());
             room.driver
                 .assert_original_finish_for(if receipt { RECEIPT } else { LOAD })
                 .await;
@@ -5098,7 +5179,7 @@ mod remote_task_finish_tests {
                 room.durable().await,
                 if receipt { (1, 1, 1) } else { (0, 0, 0) }
             );
-            room.assert_blocked(receipt, false).await;
+            room.assert_blocked(true, false).await;
             room.close(true, false).await;
         }
     }
