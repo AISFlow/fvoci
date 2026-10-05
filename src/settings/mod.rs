@@ -301,6 +301,35 @@ pub async fn attachment_transfer(
     Ok(effective_transfer(&snapshot, unavailable))
 }
 
+/// Startup reads the same current stored policy on the selected connection,
+/// including the blocked/unavailable reason; it does not populate boot state.
+pub async fn attachment_transfer_backend(
+    backend: &Backend,
+    unavailable: Option<TransferUnavailable>,
+) -> Result<EffectiveTransfer, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return attachment_transfer(pool, unavailable).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let rows = tx.operation().settings_rows().await;
+    let rollback = tx.rollback().await;
+    let rows = match (rows, rollback) {
+        (Ok(rows), Ok(())) => rows,
+        (Err(error), Ok(())) => return Err(error),
+        (Err(error), Err(cleanup)) => {
+            return Err(crate::db::backend::rollback_cleanup_unknown(
+                Some(Box::new(error)),
+                cleanup,
+            ))
+        }
+        (Ok(_), Err(cleanup)) => {
+            return Err(crate::db::backend::rollback_cleanup_unknown(None, cleanup))
+        }
+    };
+    let snapshot = resolve(rows, 0, "FVOCI", &crate::license::absent());
+    Ok(effective_transfer(&snapshot, unavailable))
+}
+
 /// Read API for upload creation and original downloads: the mode in effect
 /// now, read per request so an admin change reaches every process on its next
 /// request. Storage that cannot presign is always `proxy`, without a read.

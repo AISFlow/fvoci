@@ -125,10 +125,31 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             println!("{snapshot} {since}");
         }
-        [] => {
-            let url = migration_url()?;
-            migrate::run_migrations(&url).await?;
-        }
+        [] => match std::env::var("FVOCI_DATABASE_BACKEND").as_deref() {
+            Err(std::env::VarError::NotPresent) | Ok("postgres") => {
+                let url = migration_url()?;
+                migrate::run_migrations(&url).await?;
+            }
+            Ok("sqlite") => {
+                let fvoci_server::config::DatabaseSettings::Sqlite { path } =
+                    fvoci_server::config::DatabaseSettings::from_env()?
+                else {
+                    unreachable!()
+                };
+                migrate::run_sqlite_migrations(&path).await?;
+            }
+            Ok("libsql-remote") => {
+                return Err(
+                    "remote migration requires the pending primary server/migrator admission"
+                        .into(),
+                );
+            }
+            _ => {
+                return Err(
+                    "FVOCI_DATABASE_BACKEND must be postgres, sqlite, or libsql-remote".into(),
+                )
+            }
+        },
         [flag, role] if flag == "--grant-app-role" => {
             let url = migration_url()?;
             migrate::grant_app_role(&url, role).await?;

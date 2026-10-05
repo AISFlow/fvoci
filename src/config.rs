@@ -94,9 +94,127 @@ pub enum StorageSettings {
     S3(S3Settings),
 }
 
+/// Explicit connection configuration. PostgreSQL remains the default when
+/// the selector is absent; a selected family never reads a PostgreSQL URL.
+#[derive(Clone)]
+pub enum DatabaseSettings {
+    Postgres {
+        app_url: String,
+    },
+    Sqlite {
+        path: PathBuf,
+    },
+    LibsqlRemote {
+        primary_url: String,
+        auth_token: String,
+    },
+}
+
+impl fmt::Debug for DatabaseSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // URLs may contain credentials, routing identifiers, or query tokens.
+        f.write_str(match self {
+            Self::Postgres { .. } => "Postgres(<configured>)",
+            Self::Sqlite { .. } => "Sqlite(<configured>)",
+            Self::LibsqlRemote { .. } => "LibsqlRemote(<configured>)",
+        })
+    }
+}
+
+impl DatabaseSettings {
+    pub fn from_env() -> Result<Self, String> {
+        let values = [
+            "FVOCI_DATABASE_BACKEND",
+            "DATABASE_APP_URL",
+            "FVOCI_APP_DATABASE_URL",
+            "FVOCI_SQLITE_PATH",
+            "FVOCI_LIBSQL_URL",
+            "FVOCI_LIBSQL_AUTH_TOKEN",
+        ]
+        .into_iter()
+        .map(|name| Ok((name, env_unicode(name)?)))
+        .collect::<Result<Vec<_>, String>>()?;
+        Self::from_lookup(|name| {
+            values
+                .iter()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value.clone())
+        })
+    }
+
+    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let selected = get("FVOCI_DATABASE_BACKEND").unwrap_or_else(|| "postgres".into());
+        let required = |name| {
+            get(name)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| format!("{name} is required"))
+        };
+        let refuse = |names: &[&str]| -> Result<(), String> {
+            for name in names {
+                if get(name).is_some() {
+                    return Err(format!("{name} conflicts with FVOCI_DATABASE_BACKEND"));
+                }
+            }
+            Ok(())
+        };
+        match selected.as_str() {
+            "postgres" => {
+                refuse(&[
+                    "FVOCI_SQLITE_PATH",
+                    "FVOCI_LIBSQL_URL",
+                    "FVOCI_LIBSQL_AUTH_TOKEN",
+                ])?;
+                let app_url = get("DATABASE_APP_URL")
+                    .or_else(|| get("FVOCI_APP_DATABASE_URL"))
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or("DATABASE_APP_URL is required")?;
+                Ok(Self::Postgres { app_url })
+            }
+            "sqlite" => {
+                refuse(&[
+                    "DATABASE_APP_URL",
+                    "FVOCI_APP_DATABASE_URL",
+                    "FVOCI_LIBSQL_URL",
+                    "FVOCI_LIBSQL_AUTH_TOKEN",
+                ])?;
+                let path = PathBuf::from(required("FVOCI_SQLITE_PATH")?);
+                if !path.is_absolute() || path.file_name().is_none() {
+                    return Err(
+                        "FVOCI_SQLITE_PATH must be an absolute persistent database file".into(),
+                    );
+                }
+                Ok(Self::Sqlite { path })
+            }
+            "libsql-remote" => {
+                refuse(&[
+                    "DATABASE_APP_URL",
+                    "FVOCI_APP_DATABASE_URL",
+                    "FVOCI_SQLITE_PATH",
+                ])?;
+                let primary_url = required("FVOCI_LIBSQL_URL")?;
+                let parsed = url::Url::parse(&primary_url)
+                    .map_err(|_| "FVOCI_LIBSQL_URL must be a TLS primary endpoint")?;
+                if !matches!(parsed.scheme(), "https" | "libsql")
+                    || parsed.host_str().is_none()
+                    || !parsed.username().is_empty()
+                    || parsed.password().is_some()
+                    || parsed.fragment().is_some()
+                {
+                    return Err("FVOCI_LIBSQL_URL must be a TLS primary endpoint without user credentials or fragment".into());
+                }
+                Ok(Self::LibsqlRemote {
+                    primary_url,
+                    auth_token: required("FVOCI_LIBSQL_AUTH_TOKEN")?,
+                })
+            }
+            _ => Err("FVOCI_DATABASE_BACKEND must be postgres, sqlite, or libsql-remote".into()),
+        }
+    }
+}
+
 pub struct Config {
     pub bind: SocketAddr,
-    pub app_database_url: String,
+    pub database: DatabaseSettings,
     pub password_keys: Keyring,
     pub branding_name: String,
     pub public_origin: String,
@@ -119,7 +237,7 @@ impl Clone for Config {
     fn clone(&self) -> Self {
         Self {
             bind: self.bind,
-            app_database_url: self.app_database_url.clone(),
+            database: self.database.clone(),
             password_keys: self.password_keys.clone(),
             branding_name: self.branding_name.clone(),
             public_origin: self.public_origin.clone(),
@@ -141,7 +259,7 @@ impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
             .field("bind", &self.bind)
-            .field("app_database_url", &"<redacted>")
+            .field("database", &self.database)
             .field("branding_name", &self.branding_name)
             .field("public_origin", &self.public_origin)
             .field("cookie_secure", &self.cookie_secure)
@@ -171,9 +289,7 @@ impl Config {
             );
         }
 
-        let app_database_url = env::var("DATABASE_APP_URL")
-            .or_else(|_| env::var("FVOCI_APP_DATABASE_URL"))
-            .map_err(|_| "DATABASE_APP_URL is required".to_string())?;
+        let database = DatabaseSettings::from_env()?;
 
         let pepper_keys = env::var("PASSWORD_PEPPER_KEYS").map_err(|_| {
             "PASSWORD_PEPPER_KEYS is required (JSON map of key id to 64-char hex)".to_string()
@@ -224,7 +340,7 @@ impl Config {
 
         Ok(Self {
             bind,
-            app_database_url,
+            database,
             password_keys,
             branding_name,
             public_origin,
@@ -629,6 +745,92 @@ fn parse_shutdown_deadline_ms(raw: Option<&str>) -> Result<Duration, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn database_settings(pairs: &[(&str, &str)]) -> Result<DatabaseSettings, String> {
+        DatabaseSettings::from_lookup(|name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        })
+    }
+
+    #[test]
+    fn selected_database_never_uses_another_backends_credentials() {
+        assert!(
+            matches!(database_settings(&[("DATABASE_APP_URL", "postgres://fixture")]).unwrap(),
+            DatabaseSettings::Postgres { app_url } if app_url == "postgres://fixture")
+        );
+        let sqlite = [
+            ("FVOCI_DATABASE_BACKEND", "sqlite"),
+            ("FVOCI_SQLITE_PATH", "/owned/wiki.sqlite"),
+        ];
+        assert!(
+            matches!(database_settings(&sqlite).unwrap(), DatabaseSettings::Sqlite { path }
+            if path == PathBuf::from("/owned/wiki.sqlite"))
+        );
+        for foreign in [
+            "DATABASE_APP_URL",
+            "FVOCI_APP_DATABASE_URL",
+            "FVOCI_LIBSQL_URL",
+            "FVOCI_LIBSQL_AUTH_TOKEN",
+        ] {
+            let mut mixed = sqlite.to_vec();
+            mixed.push((foreign, "synthetic-secret"));
+            let error = database_settings(&mixed).unwrap_err();
+            assert!(error.contains(foreign));
+            assert!(!error.contains("synthetic-secret"));
+        }
+        for path in ["", "relative.sqlite", ":memory:", "/"] {
+            assert!(database_settings(&[
+                ("FVOCI_DATABASE_BACKEND", "sqlite"),
+                ("FVOCI_SQLITE_PATH", path)
+            ])
+            .is_err());
+        }
+        for selector in ["", "sqlite ", "replica", "turso", "unknown-secret"] {
+            let error = database_settings(&[("FVOCI_DATABASE_BACKEND", selector)]).unwrap_err();
+            assert!(!error.contains("unknown-secret"));
+        }
+    }
+
+    #[test]
+    fn selected_remote_requires_tls_primary_and_redacts_all_connection_inputs() {
+        for endpoint in [
+            "https://primary.example.test",
+            "libsql://primary.example.test",
+        ] {
+            let remote = database_settings(&[
+                ("FVOCI_DATABASE_BACKEND", "libsql-remote"),
+                ("FVOCI_LIBSQL_URL", endpoint),
+                ("FVOCI_LIBSQL_AUTH_TOKEN", "synthetic-secret"),
+            ])
+            .unwrap();
+            let debug = format!("{remote:?}");
+            assert!(!debug.contains(endpoint));
+            assert!(!debug.contains("synthetic-secret"));
+        }
+        for endpoint in [
+            "http://localhost",
+            "file:/owned/db",
+            "https://user:synthetic-secret@primary.example.test",
+            "https://primary.example.test/#synthetic-secret",
+            "invalid-synthetic-secret",
+        ] {
+            let error = database_settings(&[
+                ("FVOCI_DATABASE_BACKEND", "libsql-remote"),
+                ("FVOCI_LIBSQL_URL", endpoint),
+                ("FVOCI_LIBSQL_AUTH_TOKEN", "synthetic-secret"),
+            ])
+            .unwrap_err();
+            assert!(!error.contains("synthetic-secret"));
+        }
+        assert!(database_settings(&[
+            ("FVOCI_DATABASE_BACKEND", "libsql-remote"),
+            ("FVOCI_LIBSQL_URL", "https://primary.example.test")
+        ])
+        .is_err());
+    }
 
     #[test]
     fn storage_root_requires_explicit_nonempty_path() {

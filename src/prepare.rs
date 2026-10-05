@@ -163,6 +163,20 @@ pub fn install_env(
 ) -> Result<Vec<(&'static str, String)>, String> {
     let set = |name: &str| get(name).is_some();
     let mut out = Vec::new();
+    let selected = get("FVOCI_DATABASE_BACKEND").unwrap_or_else(|| "postgres".into());
+    if selected != "postgres" {
+        crate::config::DatabaseSettings::from_lookup(&get)?;
+        for name in [
+            "POSTGRES_PASSWORD",
+            "FVOCI_APP_PASSWORD",
+            "DATABASE_URL",
+            "FVOCI_MIGRATION_URL",
+        ] {
+            if set(name) {
+                return Err(format!("{name} conflicts with FVOCI_DATABASE_BACKEND"));
+            }
+        }
+    }
     if let Some(password) = get("POSTGRES_PASSWORD") {
         if let Some(var) = ["DATABASE_URL", "FVOCI_MIGRATION_URL"]
             .into_iter()
@@ -204,7 +218,19 @@ pub fn load_install_env() -> Result<(), String> {
 /// Every problem with the required settings, naming variables only.
 pub fn validate(get: impl Fn(&str) -> Option<String>) -> Vec<String> {
     let mut problems = Vec::new();
+    let postgres = get("FVOCI_DATABASE_BACKEND").is_none_or(|kind| kind == "postgres");
+    if !postgres {
+        if let Err(error) = crate::config::DatabaseSettings::from_lookup(&get) {
+            problems.push(error);
+        }
+    }
     for name in REQUIRED {
+        if !postgres
+            && (matches!(*name, "POSTGRES_PASSWORD" | "FVOCI_APP_PASSWORD")
+                || (*name == "MEILI_MASTER_KEY" && get("FVOCI_MEILI_URL").is_none()))
+        {
+            continue;
+        }
         let Some(value) = get(name) else {
             problems.push(format!("{name} is not set (see the env example)"));
             continue;
@@ -239,13 +265,19 @@ pub fn validate(get: impl Fn(&str) -> Option<String>) -> Vec<String> {
         "FVOCI_APP_PASSWORD",
         "MEILI_MASTER_KEY",
     ] {
+        if !postgres
+            && (matches!(name, "POSTGRES_PASSWORD" | "FVOCI_APP_PASSWORD")
+                || (name == "MEILI_MASTER_KEY" && get("FVOCI_MEILI_URL").is_none()))
+        {
+            continue;
+        }
         if value(name).trim().chars().count() < MIN_SECRET_LEN {
             problems.push(format!(
                 "{name} must be at least {MIN_SECRET_LEN} characters (e.g. openssl rand -hex 32)"
             ));
         }
     }
-    if value("POSTGRES_PASSWORD") == value("FVOCI_APP_PASSWORD") {
+    if postgres && value("POSTGRES_PASSWORD") == value("FVOCI_APP_PASSWORD") {
         problems.push("FVOCI_APP_PASSWORD must differ from POSTGRES_PASSWORD".into());
     }
     if let Err(e) = crate::auth::password::Keyring::parse(
@@ -300,22 +332,67 @@ pub fn retired_secret_files(get: impl Fn(&str) -> Option<String>) -> Vec<String>
 /// Whether this start prepares the install (the owner password is given).
 pub fn wants_prepare() -> bool {
     std::env::var_os("POSTGRES_PASSWORD").is_some()
+        || std::env::var_os("FVOCI_DATABASE_BACKEND").is_some_and(|kind| kind != "postgres")
 }
 
 /// Steps 2-3. Runs inside a runtime; the caller races it against signals.
 pub async fn prepare() -> Result<(), String> {
-    let owner_url = std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is not derived")?;
-    let names = DbNames::from_lookup(|k| std::env::var(k).ok())?;
-    let deadline = tokio::time::Instant::now()
+    // Preserve the owner-only PostgreSQL preparation entry: it does not need
+    // to parse a normal app connection before deriving/checking that role.
+    match std::env::var("FVOCI_DATABASE_BACKEND").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("postgres") => return prepare_postgres().await,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("FVOCI_DATABASE_BACKEND must be Unicode".into())
+        }
+        _ => {}
+    }
+    match crate::config::DatabaseSettings::from_env()? {
+        crate::config::DatabaseSettings::Postgres { .. } => unreachable!(),
+        crate::config::DatabaseSettings::Sqlite { path } => {
+            // Preparation owns creation and the controlled migration actor;
+            // normal server startup opens only this prepared existing file.
+            // The caller's SIGTERM/SIGINT cancellation drops the actor handle,
+            // whose existing owner finishes/quarantines the actual connection.
+            let deadline = prepare_deadline()?;
+            let meili = std::env::var("FVOCI_MEILI_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty());
+            if let Some(url) = &meili {
+                wait_for_meili(url.trim(), deadline).await?;
+            }
+            migrate::run_sqlite_migrations(&path)
+                .await
+                .map_err(|error| format!("SQLite preparation: {error}"))?;
+            if meili.is_some() {
+                let key_file = std::env::var("FVOCI_MEILI_KEY_FILE")
+                    .unwrap_or_else(|_| DEFAULT_MEILI_KEY_FILE.to_string());
+                ensure_meili_key_file(Path::new(&key_file)).await?;
+            }
+            Ok(())
+        }
+        crate::config::DatabaseSettings::LibsqlRemote { .. } => {
+            Err("remote preparation requires the pending primary server/migrator admission".into())
+        }
+    }
+}
+
+fn prepare_deadline() -> Result<tokio::time::Instant, String> {
+    Ok(tokio::time::Instant::now()
         + Duration::from_secs(match std::env::var("FVOCI_PREPARE_TIMEOUT_SECS") {
             Ok(raw) => raw
                 .trim()
                 .parse::<u64>()
                 .ok()
-                .filter(|s| *s > 0)
+                .filter(|value| *value > 0)
                 .ok_or("FVOCI_PREPARE_TIMEOUT_SECS must be a positive number of seconds")?,
             Err(_) => DEFAULT_PREPARE_TIMEOUT_SECS,
-        });
+        }))
+}
+
+async fn prepare_postgres() -> Result<(), String> {
+    let owner_url = std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is not derived")?;
+    let names = DbNames::from_lookup(|k| std::env::var(k).ok())?;
+    let deadline = prepare_deadline()?;
 
     let mut conn = wait_for_postgres(&owner_url, &names, deadline).await?;
     let meili_url = std::env::var("FVOCI_MEILI_URL")
@@ -587,6 +664,43 @@ mod tests {
             ("ENCRYPTION_ACTIVE_KEY_ID", "install".into()),
             ("FVOCI_PUBLIC_ORIGIN", "http://localhost:8080".into()),
         ]
+    }
+
+    #[test]
+    fn sqlite_preparation_validates_keys_without_deriving_postgres_credentials() {
+        let mut selected = valid();
+        selected.retain(|(name, _)| {
+            !matches!(
+                *name,
+                "POSTGRES_PASSWORD" | "FVOCI_APP_PASSWORD" | "MEILI_MASTER_KEY"
+            )
+        });
+        selected.extend([
+            ("FVOCI_DATABASE_BACKEND", "sqlite".into()),
+            ("FVOCI_SQLITE_PATH", "/owned/wiki.sqlite".into()),
+        ]);
+        assert!(validate(get(&selected)).is_empty());
+        assert!(install_env(get(&selected)).unwrap().is_empty());
+        for name in [
+            "POSTGRES_PASSWORD",
+            "FVOCI_APP_PASSWORD",
+            "DATABASE_URL",
+            "FVOCI_MIGRATION_URL",
+        ] {
+            let mut mixed = selected.clone();
+            mixed.push((name, "synthetic-owner-secret".into()));
+            let error = install_env(get(&mixed)).unwrap_err();
+            assert!(error.contains(name));
+            assert!(!error.contains("synthetic-owner-secret"));
+        }
+        selected.retain(|(name, _)| *name != "ENCRYPTION_KEYS");
+        assert!(validate(get(&selected))
+            .iter()
+            .any(|error| error.contains("ENCRYPTION_KEYS")));
+        selected.push(("FVOCI_MEILI_URL", "http://127.0.0.1:1".into()));
+        assert!(validate(get(&selected))
+            .iter()
+            .any(|error| error.contains("MEILI_MASTER_KEY")));
     }
 
     fn get<'a>(env: &'a [(&'static str, String)]) -> impl Fn(&str) -> Option<String> + 'a {
