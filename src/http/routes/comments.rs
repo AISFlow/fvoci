@@ -17,11 +17,12 @@ use crate::api::dto::{
 };
 use crate::auth::scopes::{grants_api_token_scope, ApiTokenScope};
 use crate::db::comments::{
-    comment_output, comment_write_kind, create_document_comment, create_project_document_comment,
-    create_task_comment, list_document_comments_backend as list_document_comments,
-    list_project_document_comments, list_task_comments, purge_comment, resolve_comment,
-    set_comment_reaction, unresolve_comment, update_comment, CommentDbError, CommentListQuery,
-    CommentWriteKind, CreateCommentInput, PatchCommentInput, ReactionInput,
+    comment_output, comment_write_kind, create_document_comment_backend as create_document_comment,
+    create_project_document_comment, create_task_comment,
+    list_document_comments_backend as list_document_comments, list_project_document_comments,
+    list_task_comments, purge_comment, resolve_comment, set_comment_reaction, unresolve_comment,
+    update_comment, CommentDbError, CommentListQuery, CommentWriteKind, CreateCommentInput,
+    PatchCommentInput, ReactionInput,
 };
 use crate::error::{AppError, ProblemCode};
 use crate::http::authz::{self, Access, RequestAuth};
@@ -288,12 +289,7 @@ async fn create_document_comment_route(
         return Err(AppError::rate_limited(retry_after).into());
     }
     let created = create_document_comment(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/comments.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -1111,5 +1107,230 @@ mod selected_wiki_auxiliary_http_tests {
         fresh.close().await;
         f.pool.close().await;
         std::fs::remove_dir_all(&f.root).unwrap();
+    }
+
+    mod selected_mutation_http_tests {
+        use super::*;
+
+        async fn post(
+            app: Router,
+            path: &str,
+            cookie: Option<&str>,
+            bearer: Option<&str>,
+            body: Value,
+        ) -> (StatusCode, Value) {
+            let mut request = axum::http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("origin", "http://localhost")
+                .header("content-type", "application/json");
+            if let Some(token) = cookie {
+                request = request.header("cookie", format!("fvoci_session={token}"));
+            }
+            if let Some(token) = bearer {
+                request = request.header("authorization", format!("Bearer {token}"));
+            }
+            let mut request = request
+                .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap();
+            request.extensions_mut().insert(ConnectInfo(
+                "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
+            ));
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 16384)
+                .await
+                .unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        }
+
+        #[tokio::test]
+        async fn wiki_aux_mutation_http_normal_tag_assign_comment_nonempty_gets_and_current_auth() {
+            let f = Fixture::new().await;
+            let token = crate::auth::token::new_token();
+            let credential = Uuid::now_v7();
+            let mut tx = f.backend.begin_write().await.unwrap();
+            tx.operation()
+                .create_session(
+                    credential,
+                    f.user,
+                    &token.hash,
+                    chrono::Utc::now() + chrono::Duration::days(1),
+                )
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            let app = router()
+                .merge(crate::http::routes::document_tags::router())
+                .with_state(state(&f));
+            let pool_path = format!("/api/v1/workspaces/{}/document-tags", f.workspace);
+            let base = format!(
+                "/api/v1/workspaces/{}/documents/{}",
+                f.workspace, f.document
+            );
+            let tags_path = format!("{base}/tags");
+            let comments_path = format!("{base}/comments");
+            let (code, tag) = post(
+                app.clone(),
+                &pool_path,
+                Some(&token.token),
+                None,
+                json!({"name":"  태그 中 😀  ","color":"violet"}),
+            )
+            .await;
+            assert_eq!(code, StatusCode::CREATED, "{tag}");
+            let tag_id = Uuid::parse_str(tag["id"].as_str().unwrap()).unwrap();
+            assert_eq!(tag["workspaceId"], f.workspace.to_string());
+            assert_eq!(tag["name"], "태그 中 😀");
+            assert_eq!(tag["color"], "violet");
+            let (code, assigned) = post(
+                app.clone(),
+                &tags_path,
+                Some(&token.token),
+                None,
+                json!({"tagId":tag_id}),
+            )
+            .await;
+            assert_eq!(code, StatusCode::OK, "{assigned}");
+            assert_eq!(assigned, tag);
+            let (code, repeat) = post(
+                app.clone(),
+                &tags_path,
+                Some(&token.token),
+                None,
+                json!({"tagId":tag_id}),
+            )
+            .await;
+            assert_eq!(code, StatusCode::OK, "{repeat}");
+            assert_eq!(repeat, tag);
+            let (code, tags) = get(app.clone(), &tags_path, Some(&token.token), None).await;
+            assert_eq!(code, StatusCode::OK, "{tags}");
+            assert_eq!(tags["items"], json!([tag.clone()]));
+            let (code, parent) = post(
+                app.clone(),
+                &comments_path,
+                Some(&token.token),
+                None,
+                json!({"body":" 부모 😀 "}),
+            )
+            .await;
+            assert_eq!(code, StatusCode::CREATED, "{parent}");
+            let parent_id = Uuid::parse_str(parent["id"].as_str().unwrap()).unwrap();
+            assert_eq!(parent["body"], "부모 😀");
+            assert_eq!(parent["createdBy"], f.user.to_string());
+            let (code,reply) = post(app.clone(),&comments_path,Some(&token.token),None,json!({"body":" 실제 댓글 中 😀 ","parentId":parent_id,"mentionedUserIds":[f.user]})).await;
+            assert_eq!(code, StatusCode::CREATED, "{reply}");
+            let reply_id = Uuid::parse_str(reply["id"].as_str().unwrap()).unwrap();
+            assert_ne!(reply_id, parent_id);
+            assert_eq!(reply["parentId"], parent_id.to_string());
+            assert_eq!(reply["body"], "실제 댓글 中 😀");
+            assert_eq!(reply["createdBy"], f.user.to_string());
+            let (code, comments) = get(app.clone(), &comments_path, Some(&token.token), None).await;
+            assert_eq!(code, StatusCode::OK, "{comments}");
+            assert_eq!(comments["items"], json!([parent, reply]));
+            assert!(comments["nextCursor"].is_null());
+            let before: (i64,i64,i64,i64) = sqlx::query_as("SELECT (SELECT count(*) FROM document_tags),(SELECT count(*) FROM comments),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log)").fetch_one(&f.pool).await.unwrap();
+            assert_eq!(
+                post(
+                    app.clone(),
+                    &pool_path,
+                    Some(&token.token),
+                    None,
+                    json!({"name":"태그 中 😀","color":"red"})
+                )
+                .await
+                .0,
+                StatusCode::CONFLICT
+            );
+            assert_eq!(
+                post(
+                    app.clone(),
+                    &comments_path,
+                    Some(&token.token),
+                    None,
+                    json!({"body":"bad extra","unknown":true})
+                )
+                .await
+                .0,
+                StatusCode::BAD_REQUEST
+            );
+            let pat = crate::auth::token::new_token();
+            let pat_id = Uuid::now_v7();
+            sqlx::query("INSERT INTO api_tokens(id,workspace_id,user_id,token_hash,name,scopes) VALUES(?1,?2,?3,?4,'Read only','[\"documents.read\"]')")
+                .bind(pat_id.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(&pat.hash).execute(&f.pool).await.unwrap();
+            assert_eq!(
+                post(
+                    app.clone(),
+                    &pool_path,
+                    None,
+                    Some(&pat.token),
+                    json!({"name":"denied"})
+                )
+                .await
+                .0,
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                post(
+                    app.clone(),
+                    &comments_path,
+                    None,
+                    Some(&pat.token),
+                    json!({"body":"denied"})
+                )
+                .await
+                .0,
+                StatusCode::NOT_FOUND
+            );
+            sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+                .bind(credential.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                post(
+                    app.clone(),
+                    &pool_path,
+                    Some(&token.token),
+                    None,
+                    json!({"name":"revoked"})
+                )
+                .await
+                .0,
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                post(
+                    app.clone(),
+                    &comments_path,
+                    Some(&token.token),
+                    None,
+                    json!({"body":"revoked"})
+                )
+                .await
+                .0,
+                StatusCode::UNAUTHORIZED
+            );
+            let after: (i64,i64,i64,i64) = sqlx::query_as("SELECT (SELECT count(*) FROM document_tags),(SELECT count(*) FROM comments),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log)").fetch_one(&f.pool).await.unwrap();
+            assert_eq!(after, before);
+            sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+                .bind(credential.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let (code, healthy) = post(
+                app.clone(),
+                &comments_path,
+                Some(&token.token),
+                None,
+                json!({"body":"Healthy current auth","parentId":parent_id}),
+            )
+            .await;
+            assert_eq!(code, StatusCode::CREATED, "{healthy}");
+            assert_eq!(healthy["parentId"], parent_id.to_string());
+            drop(app);
+            f.pool.close().await;
+            std::fs::remove_dir_all(&f.root).unwrap();
+        }
     }
 }
