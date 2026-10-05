@@ -4562,10 +4562,6 @@ impl OperationTx<'_, '_> {
         }
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "OFF native load binds current mode, actor, credential and target on one existing writer"
-    )]
     pub(crate) async fn load_off_body_read(
         &mut self,
         mode: crate::config::RealtimeMode,
@@ -4585,10 +4581,6 @@ impl OperationTx<'_, '_> {
             .await
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "OFF native capability binds current mode, actor, credential and target on one existing writer"
-    )]
     pub(crate) async fn load_off_body_writer(
         &mut self,
         mode: crate::config::RealtimeMode,
@@ -4734,6 +4726,7 @@ impl OperationTx<'_, '_> {
 impl OperationTx<'_, '_> {
     /// The stable owner is prepared by the actual caller once, across failures.
     /// No commit or fresh observation occurs inside this borrowed operation.
+    #[cfg(all(test, feature = "db-tests"))]
     pub async fn prepare_family_task_room_writer(
         &mut self,
         target: (Uuid, Uuid),
