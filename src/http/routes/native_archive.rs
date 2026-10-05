@@ -193,20 +193,10 @@ async fn export_native(
         project,
         zotero_connectors: &connectors,
     };
-    let mut capture = db::capture(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/native_archive.rs")
-            .map_err(crate::http::routes::tasks::internal)?,
-        workspace,
-        actor,
-        session,
-        &selection,
-    )
-    .await
-    .map_err(db_error)?;
+    let mut capture =
+        db::capture_backend(&state.auth.db.pool, workspace, actor, session, &selection)
+            .await
+            .map_err(db_error)?;
     let mut total = capture
         .archive
         .entries
@@ -227,13 +217,8 @@ async fn export_native(
         let bytes = native::read_file(&state.storage, key, file.size_bytes)
             .await
             .map_err(archive_error)?;
-        db::recheck_file(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/native_archive.rs")
-                .map_err(crate::http::routes::tasks::internal)?,
+        db::recheck_file_backend(
+            &state.auth.db.pool,
             workspace,
             actor,
             session,
@@ -262,13 +247,8 @@ async fn export_native(
             .map_err(archive_error)?,
     )
     .map_err(archive_error)?;
-    db::recheck_delivery(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/native_archive.rs")
-            .map_err(crate::http::routes::tasks::internal)?,
+    db::recheck_delivery_backend(
+        &state.auth.db.pool,
         workspace,
         actor,
         session,
@@ -279,13 +259,7 @@ async fn export_native(
     .map_err(db_error)?;
     // Current credential and private-resource authorization on every bounded
     // delivery chunk. Bytes already in flight cannot be recalled.
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/native_archive.rs")
-        .map_err(crate::http::routes::tasks::internal)?
-        .clone();
+    let pool = state.auth.db.pool.clone();
     let stream = futures_util::stream::try_unfold(
         (bytes, 0usize, permit),
         move |(bytes, offset, permit)| {
@@ -296,7 +270,7 @@ async fn export_native(
                 if offset == bytes.len() {
                     return Ok::<_, std::io::Error>(None);
                 }
-                db::recheck_delivery(&pool, workspace, actor, session, &graph, &keys)
+                db::recheck_delivery_backend(&pool, workspace, actor, session, &graph, &keys)
                     .await
                     .map_err(|_| std::io::Error::other("archive delivery authorization"))?;
                 let end = (offset + 64 * 1024).min(bytes.len());
@@ -329,19 +303,9 @@ async fn preflight(
     check_origin(&headers, &state.public_origin)?;
     let (actor, session) = authenticate(&state, &headers, &jar, workspace).await?;
     let _permit = admission(&state, actor).await?;
-    db::preflight_destination(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/native_archive.rs")
-            .map_err(crate::http::routes::tasks::internal)?,
-        workspace,
-        actor,
-        session,
-    )
-    .await
-    .map_err(db_error)?;
+    db::preflight_destination_backend(&state.auth.db.pool, workspace, actor, session)
+        .await
+        .map_err(db_error)?;
     let body: NativePreflightBody = read_body(request).await?;
     let bytes = native::decode(&body.archive_base64).map_err(archive_error)?;
     let hash = native::digest(&bytes);
@@ -354,19 +318,9 @@ async fn preflight(
     let archive = native::validate_native(archive, config(&state)?, &cancel)
         .await
         .map_err(archive_error)?;
-    db::preflight_destination(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/native_archive.rs")
-            .map_err(crate::http::routes::tasks::internal)?,
-        workspace,
-        actor,
-        session,
-    )
-    .await
-    .map_err(db_error)?;
+    db::preflight_destination_backend(&state.auth.db.pool, workspace, actor, session)
+        .await
+        .map_err(db_error)?;
     let graph = &archive.graph;
     Ok(Json(NativePreflightOutput {
         archive_hash: hash,
@@ -396,19 +350,9 @@ async fn restore(
     check_origin(&headers, &state.public_origin)?;
     let (actor, session) = authenticate(&state, &headers, &jar, workspace).await?;
     let _permit = admission(&state, actor).await?;
-    db::authorize_destination(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/native_archive.rs")
-            .map_err(crate::http::routes::tasks::internal)?,
-        workspace,
-        actor,
-        session,
-    )
-    .await
-    .map_err(db_error)?;
+    db::authorize_destination_backend(&state.auth.db.pool, workspace, actor, session)
+        .await
+        .map_err(db_error)?;
     let body: NativeRestoreBody = read_body(request).await?;
     if !body.confirm || body.destination_actor_id != actor {
         return Err(AppError::from_code(ProblemCode::ConfirmInvalid));
@@ -433,13 +377,8 @@ async fn restore(
         .map_err(archive_error)?;
     // A replay may target a nonempty workspace after the original job committed;
     // queue_restore reauthorizes the actor and checks the durable command first.
-    let id = db::queue_restore(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/native_archive.rs")
-            .map_err(crate::http::routes::tasks::internal)?,
+    let id = db::queue_restore_backend(
+        &state.auth.db.pool,
         workspace,
         actor,
         session,
@@ -450,20 +389,9 @@ async fn restore(
     .await
     .map_err(db_error)?;
     state.import_wake.as_ref().expect("checked").notify_one();
-    let output = db::status(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/native_archive.rs")
-            .map_err(crate::http::routes::tasks::internal)?,
-        workspace,
-        actor,
-        session,
-        id,
-    )
-    .await
-    .map_err(db_error)?;
+    let output = db::status_backend(&state.auth.db.pool, workspace, actor, session, id)
+        .await
+        .map_err(db_error)?;
     if output.status == "failed" && output.diagnostic.as_deref() == Some("conflict") {
         return Err(AppError::from_code(ProblemCode::Conflict));
     }
@@ -476,20 +404,9 @@ async fn status(
     jar: CookieJar,
 ) -> Result<Json<NativeJobOutput>, AppError> {
     let (actor, session) = authenticate(&state, &headers, &jar, workspace).await?;
-    let output = db::status(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/native_archive.rs")
-            .map_err(crate::http::routes::tasks::internal)?,
-        workspace,
-        actor,
-        session,
-        id,
-    )
-    .await
-    .map_err(db_error)?;
+    let output = db::status_backend(&state.auth.db.pool, workspace, actor, session, id)
+        .await
+        .map_err(db_error)?;
     if output.status == "failed" && output.diagnostic.as_deref() == Some("conflict") {
         return Err(AppError::from_code(ProblemCode::Conflict));
     }

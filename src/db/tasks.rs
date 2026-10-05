@@ -5,6 +5,11 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
+use crate::db::backend::{Backend, OperationTx};
+use crate::db::codec::Cell;
+use crate::db::import_jobs::ImportClaim;
+use tokio_util::sync::CancellationToken;
+
 use crate::db::context::{
     begin_read, lock_key_from_uuid, lock_membership_users, recheck_session, session_is_live,
     set_tenant,
@@ -3765,4 +3770,667 @@ pub async fn project_status_names(
     .await?;
     tx.commit().await?;
     Ok(rows)
+}
+
+/// One logical CSV-row creation; the existing input and leased job are the
+/// authority/identity. No task, ref or event commits independently.
+pub(crate) struct ImportTaskRequest<'a> {
+    pub claim: &'a ImportClaim,
+    pub project_id: Uuid,
+    pub input: CreateTaskInput<'a>,
+    pub assignee: Option<Uuid>,
+}
+
+impl OperationTx<'_, '_> {
+    async fn import_task_authority(
+        &mut self,
+        claim: &ImportClaim,
+        project: Uuid,
+    ) -> Result<Result<bool, ProjectDbError>, sqlx::Error> {
+        if self
+            .require_import_admin(claim.workspace_id, claim.created_by, claim.session_id)
+            .await?
+            .is_err()
+        {
+            return Ok(Err(ProjectDbError::Forbidden));
+        }
+        if claim.source != crate::db::import_jobs::ImportSource::NotionZip
+            || claim.project_id != Some(project)
+            || !self.hold_import_claim(claim).await?
+        {
+            return Ok(Ok(false));
+        }
+        let Some((permission, archived)) = self
+            .share_lock_project_permission(claim.workspace_id, claim.created_by, project)
+            .await?
+        else {
+            return Ok(Err(ProjectDbError::NotFound));
+        };
+        if archived {
+            return Ok(Err(ProjectDbError::Archived));
+        }
+        if !permission.at_least(ProjectPermission::Edit) {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        Ok(Ok(true))
+    }
+
+    /// Family leaf of the existing task creation program: reuse current
+    /// authorization, hierarchy, sort allocation, schema and event/audit APIs.
+    async fn create_import_task_family(
+        &mut self,
+        request: &ImportTaskRequest<'_>,
+        task_id: Uuid,
+        cancel: &CancellationToken,
+    ) -> Result<Result<Option<Uuid>, ProjectDbError>, sqlx::Error> {
+        let c = request.claim;
+        let workspace = c.workspace_id;
+        let project = request.project_id;
+        let input = &request.input;
+        match self.import_task_authority(c, project).await? {
+            Err(error) => return Ok(Err(error)),
+            Ok(false) => return Ok(Ok(None)),
+            Ok(true) => {}
+        }
+        if cancel.is_cancelled() {
+            return Ok(Ok(None));
+        }
+        let Self::SqliteFamily(tx) = self else {
+            unreachable!("family leaf")
+        };
+        if input.task_type == "subtask" && input.parent_id.is_none() {
+            return Ok(Err(ProjectDbError::Conflict));
+        }
+        if let Some(parent) = input.parent_id {
+            let rows = tx
+                .query(
+                    "SELECT project_id,deleted_at,type FROM tasks WHERE workspace_id=?1 AND id=?2",
+                    &[Cell::uuid(workspace), Cell::uuid(parent)],
+                )
+                .await?;
+            let Some(row) = rows.first() else {
+                return Ok(Err(ProjectDbError::NotFound));
+            };
+            if row.cell(0)?.id()? != project || row.cell(1)?.optional(Cell::integer)?.is_some() {
+                return Ok(Err(ProjectDbError::NotFound));
+            }
+            if violates_task_hierarchy(input.task_type, &row.cell(2)?.string()?) {
+                return Ok(Err(ProjectDbError::Conflict));
+            }
+        }
+        if let Some(milestone) = input.milestone_id {
+            if tx
+                .query(
+                    "SELECT id FROM milestones WHERE workspace_id=?1 AND project_id=?2 AND id=?3",
+                    &[
+                        Cell::uuid(workspace),
+                        Cell::uuid(project),
+                        Cell::uuid(milestone),
+                    ],
+                )
+                .await?
+                .is_empty()
+            {
+                return Ok(Err(ProjectDbError::MilestoneNotFound));
+            }
+        }
+        let statuses=tx.query("SELECT id,category FROM statuses WHERE workspace_id=?1 AND project_id=?2 ORDER BY sort_key COLLATE BINARY", &[Cell::uuid(workspace),Cell::uuid(project)]).await?;
+        let status = if let Some(status) = input.status_id {
+            let mut valid = false;
+            for row in &statuses {
+                if row.cell(0)?.id()? == status {
+                    valid = true;
+                }
+            }
+            if !valid {
+                return Ok(Err(ProjectDbError::StatusNotInWorkflow));
+            }
+            status
+        } else {
+            let mut fallback = None;
+            for row in &statuses {
+                let id = row.cell(0)?.id()?;
+                fallback.get_or_insert(id);
+                if row.cell(1)?.string()? == "backlog" {
+                    fallback = Some(id);
+                    break;
+                }
+            }
+            let Some(status) = fallback else {
+                return Ok(Err(ProjectDbError::NotFound));
+            };
+            status
+        };
+        let numbers=tx.query("UPDATE projects SET next_number=next_number+1,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2 RETURNING next_number-1", &[Cell::uuid(workspace),Cell::uuid(project)]).await?;
+        let number = numbers
+            .first()
+            .ok_or(sqlx::Error::RowNotFound)?
+            .cell(0)?
+            .int32()?;
+        let last=tx.query("SELECT sort_key FROM tasks WHERE workspace_id=?1 AND project_id=?2 AND status_id=?3 AND deleted_at IS NULL ORDER BY sort_key COLLATE BINARY DESC LIMIT 1", &[Cell::uuid(workspace),Cell::uuid(project),Cell::uuid(status)]).await?;
+        let last = last.first().map(|r| r.cell(0)?.string()).transpose()?;
+        let sort = match between(last.as_deref(), None) {
+            Ok(sort) => sort,
+            Err(_) => return Ok(Err(ProjectDbError::Conflict)),
+        };
+        let start = input.start_date.map(|d| d.to_string());
+        let due = input.due_date.map(|d| d.to_string());
+        tx.execute("INSERT INTO tasks(id,workspace_id,project_id,number,title,type,priority,status_id,start_date,due_date,parent_id,milestone_id,recurrence,sort_key,schema_version,content_json,created_by) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)", &[
+            Cell::uuid(task_id),Cell::uuid(workspace),Cell::uuid(project),Cell::Integer(i64::from(number)),Cell::text(input.title.trim()),Cell::text(input.task_type),Cell::text(input.priority),Cell::uuid(status),Cell::optional_text(start.as_deref()),Cell::optional_text(due.as_deref()),Cell::optional_uuid(input.parent_id),Cell::optional_uuid(input.milestone_id),input.recurrence.as_ref().map(Cell::json).transpose()?.unwrap_or(Cell::Null),Cell::text(sort),Cell::Integer(i64::from(DOCUMENT_SCHEMA_VERSION)),Cell::json(&empty_document_json())?,Cell::uuid(c.created_by)
+        ]).await?;
+        if let Some(assignee) = request.assignee {
+            tx.execute("INSERT INTO task_assignees(workspace_id,task_id,user_id) SELECT ?1,?2,?3 WHERE EXISTS(SELECT 1 FROM memberships WHERE workspace_id=?1 AND user_id=?3) ON CONFLICT DO NOTHING", &[Cell::uuid(workspace),Cell::uuid(task_id),Cell::uuid(assignee)]).await?;
+        }
+        // The existing create activity uses an empty snapshot: diff_activity
+        // produces this canonical empty created change, independently of CSV data.
+        let changes = crate::tasks::activity::diff_activity(None, &ActivitySnapshot::new())
+            .map(Value::Array)
+            .unwrap_or_else(|| json!([]));
+        tx.execute("INSERT INTO task_activity(id,workspace_id,task_id,actor_user_id,channel,kind,changes) VALUES(?1,?2,?3,?4,'web','created',?5)", &[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace),Cell::uuid(task_id),Cell::uuid(c.created_by),Cell::json(&changes)?]).await?;
+        let fence = crate::db::documents::ImportFence {
+            job_id: c.job_id,
+            lease_token: c.lease_token,
+        };
+        let payload = json!({"taskId":task_id.to_string(),"projectId":project.to_string(),"title":input.title.trim()});
+        if !self
+            .park_import_event(
+                workspace,
+                fence,
+                EventAppend {
+                    id: Uuid::now_v7(),
+                    workspace_id: Some(workspace),
+                    actor_user_id: Some(c.created_by),
+                    verb: "task.created".into(),
+                    target_type: Some("task".into()),
+                    target_id: Some(task_id),
+                    payload: payload.clone(),
+                },
+                "web",
+            )
+            .await?
+        {
+            return Ok(Ok(None));
+        }
+        self.append_audit(AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace),
+            actor_user_id: Some(c.created_by),
+            verb: "task.created".into(),
+            target_type: Some("task".into()),
+            target_id: Some(task_id),
+            payload,
+            ip: None,
+        })
+        .await?;
+        if !self
+            .append_import_ref(
+                workspace,
+                fence,
+                crate::db::import_jobs::ImportRefKind::Task,
+                &task_id.to_string(),
+            )
+            .await?
+        {
+            return Ok(Ok(None));
+        }
+        match self.import_task_authority(c, project).await? {
+            Ok(true) if !cancel.is_cancelled() => Ok(Ok(Some(task_id))),
+            Ok(_) => Ok(Ok(None)),
+            Err(error) => Ok(Err(error)),
+        }
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static IMPORT_TASK_ROLLBACK_AFTER_ACK_CONTROL: bool;
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ImportTaskRollbackReason {
+    #[error("import task refused: {0:?}")]
+    Domain(ProjectDbError),
+    #[error("import task publication fenced or cancelled")]
+    FencedOrCancelled,
+}
+
+pub(crate) async fn create_import_task_backend(
+    backend: &Backend,
+    request: ImportTaskRequest<'_>,
+    cancel: &CancellationToken,
+) -> Result<Result<Option<Uuid>, ProjectDbError>, sqlx::Error> {
+    if cancel.is_cancelled() {
+        return Ok(Ok(None));
+    }
+    if let Backend::Postgres(pool) = backend {
+        let c = request.claim;
+        return create_import_task(
+            pool,
+            c.workspace_id,
+            request.project_id,
+            c.created_by,
+            c.session_id,
+            request.input,
+            request.assignee,
+            crate::db::documents::ImportFence {
+                job_id: c.job_id,
+                lease_token: c.lease_token,
+            },
+        )
+        .await;
+    }
+    // Choose once per logical row, before writer acquisition. Unknown remote
+    // commit retains the original error and never retries with a fresh UUID.
+    let task_id = Uuid::now_v7();
+    let mut tx = backend.begin_write().await?;
+    tx.operation()
+        .set_tenant(request.claim.workspace_id)
+        .await?;
+    let result = tx
+        .operation()
+        .create_import_task_family(&request, task_id, cancel)
+        .await;
+    match result {
+        Ok(Ok(Some(id))) if !cancel.is_cancelled() => {
+            tx.commit()
+                .await
+                .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
+            Ok(Ok(Some(id)))
+        }
+        Ok(Ok(_)) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(ImportTaskRollbackReason::FencedOrCancelled)),
+                    cleanup,
+                ));
+            }
+            Ok(Ok(None))
+        }
+        Ok(Err(error)) => {
+            let cleanup = tx.rollback().await;
+            // Test propagation only, after an actual acknowledged local
+            // rollback; this is not provider settlement evidence.
+            #[cfg(test)]
+            let cleanup = cleanup.and_then(|()| {
+                if IMPORT_TASK_ROLLBACK_AFTER_ACK_CONTROL
+                    .try_with(|enabled| *enabled)
+                    .unwrap_or(false)
+                {
+                    Err(sqlx::Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        "after-real-task-rollback propagation control",
+                    )))
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(cleanup) = cleanup {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(ImportTaskRollbackReason::Domain(error))),
+                    cleanup,
+                ));
+            }
+            Ok(Err(error))
+        }
+        Err(error) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(error)),
+                    cleanup,
+                ));
+            }
+            Err(error)
+        }
+    }
+}
+
+pub(crate) async fn project_status_names_backend(
+    backend: &Backend,
+    claim: &ImportClaim,
+    project: Uuid,
+) -> Result<Result<Vec<(Uuid, String)>, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return project_status_names(pool, claim.workspace_id, project)
+            .await
+            .map(Ok);
+    }
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(claim.workspace_id).await?;
+    let result=async {
+        match tx.operation().import_task_authority(claim,project).await? {
+            Ok(true)=>{}, Ok(false)=>return Ok(Err(ProjectDbError::NotFound)),Err(e)=>return Ok(Err(e))
+        }
+        let mut op=tx.operation();
+        let OperationTx::SqliteFamily(family)=&mut op else{unreachable!("family read")};
+        family.query("SELECT id,name FROM statuses WHERE workspace_id=?1 AND project_id=?2 ORDER BY sort_key COLLATE BINARY,id", &[Cell::uuid(claim.workspace_id),Cell::uuid(project)]).await?.iter().map(|r|Ok((r.cell(0)?.id()?,r.cell(1)?.string()?))).collect::<Result<Vec<_>,sqlx::Error>>().map(Ok)
+    }.await;
+    // Status matching is observational; the borrowed authority check's lease
+    // refresh is deliberately rolled back, and no writer result is fabricated.
+    if let Err(cleanup) = tx.rollback().await {
+        let original: Option<Box<dyn std::error::Error + Send + Sync>> = match result {
+            Err(error) => Some(Box::new(error)),
+            Ok(Err(error)) => Some(Box::new(ImportTaskRollbackReason::Domain(error))),
+            Ok(Ok(_)) => None,
+        };
+        return Err(crate::db::backend::rollback_cleanup_unknown(
+            original, cleanup,
+        ));
+    }
+    result
+}
+
+#[cfg(test)]
+mod selected_import_task_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+    use crate::db::import_jobs::{
+        claim_next_import_job_backend, create_async_import_job_backend, ImportSource,
+        NewAsyncImport,
+    };
+
+    async fn setup() -> (Fixture, ImportClaim, Uuid, Uuid) {
+        let f = Fixture::new().await;
+        let credential = Uuid::now_v7();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        tx.operation()
+            .create_session(
+                credential,
+                f.user,
+                &crate::auth::token::new_token().hash,
+                DateTime::from_timestamp_micros(Utc::now().timestamp_micros() + 86_400_000_000)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let project = Uuid::now_v7();
+        let workflow = Uuid::now_v7();
+        let status = Uuid::now_v7();
+        sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'IMP','Import','private',?3)").bind(project.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO workflows(id,workspace_id,project_id) VALUES(?1,?2,?3)")
+            .bind(workflow.as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO statuses(id,workspace_id,project_id,workflow_id,name,category,sort_key) VALUES(?1,?2,?3,?4,'할 일','backlog','V')").bind(status.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(workflow.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        create_async_import_job_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            ImportSource::NotionZip,
+            NewAsyncImport {
+                file_name: Some("actual-notion.zip"),
+                project_id: Some(project),
+                payload: b"source preserved",
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let claim = claim_next_import_job_backend(&f.backend)
+            .await
+            .unwrap()
+            .unwrap();
+        (f, claim, project, status)
+    }
+    fn request(
+        claim: &ImportClaim,
+        project: Uuid,
+        status: Option<Uuid>,
+        assignee: Option<Uuid>,
+    ) -> ImportTaskRequest<'_> {
+        ImportTaskRequest {
+            claim,
+            project_id: project,
+            input: CreateTaskInput {
+                title: "  실제 CSV 작업 😀  ",
+                task_type: "task",
+                priority: "none",
+                status_id: status,
+                start_date: None,
+                due_date: NaiveDate::from_ymd_opt(2026, 10, 5),
+                parent_id: None,
+                milestone_id: None,
+                recurrence: None,
+            },
+            assignee,
+        }
+    }
+    async fn no_effects(f: &Fixture) {
+        let counts:(i64,i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM tasks),(SELECT next_number FROM projects),(SELECT count(*) FROM import_deferred_events),(SELECT count(*) FROM task_activity)").fetch_one(&f.pool).await.unwrap();
+        assert_eq!(counts, (0, 1, 0, 0));
+    }
+    #[tokio::test]
+    async fn import_selected_task_rollback_control_retains_domain_and_healthy_retry() {
+        let (f, c, project, status) = setup().await;
+        let missing_status = Uuid::now_v7();
+        let error = IMPORT_TASK_ROLLBACK_AFTER_ACK_CONTROL
+            .scope(
+                true,
+                create_import_task_backend(
+                    &f.backend,
+                    request(&c, project, Some(missing_status), None),
+                    &CancellationToken::new(),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert!(crate::import_job::import_database_error_stops_scheduler(
+            &f.backend, &error
+        ));
+        let sqlx::Error::AnyDriverError(source) = &error else {
+            panic!("typed rollback error required");
+        };
+        let stopped = source
+            .downcast_ref::<crate::db::backend::RollbackCleanupUnknown>()
+            .unwrap();
+        let original = stopped
+            .original
+            .as_ref()
+            .unwrap()
+            .downcast_ref::<ImportTaskRollbackReason>()
+            .unwrap();
+        assert!(matches!(
+            original,
+            ImportTaskRollbackReason::Domain(ProjectDbError::StatusNotInWorkflow)
+        ));
+        assert!(
+            matches!(&stopped.cleanup, sqlx::Error::Io(error) if error.kind()==std::io::ErrorKind::ConnectionAborted)
+        );
+        no_effects(&f).await;
+        let refs: String = sqlx::query_scalar("SELECT created_refs FROM import_jobs WHERE id=?1")
+            .bind(c.job_id.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert!(
+            serde_json::from_str::<crate::db::import_jobs::ImportJobRefs>(&refs)
+                .unwrap()
+                .is_empty()
+        );
+        // A confirmed rollback still returns the exact existing domain refusal.
+        assert!(matches!(
+            create_import_task_backend(
+                &f.backend,
+                request(&c, project, Some(missing_status), None),
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap(),
+            Err(ProjectDbError::StatusNotInWorkflow)
+        ));
+        no_effects(&f).await;
+        let id = create_import_task_backend(
+            &f.backend,
+            request(&c, project, Some(status), None),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let row: (String, Vec<u8>) =
+            sqlx::query_as("SELECT title,status_id FROM tasks WHERE id=?1")
+                .bind(id.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(row, ("실제 CSV 작업 😀".into(), status.as_bytes().to_vec()));
+        let refs: String = sqlx::query_scalar("SELECT created_refs FROM import_jobs WHERE id=?1")
+            .bind(c.job_id.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<crate::db::import_jobs::ImportJobRefs>(&refs)
+                .unwrap()
+                .task_ids,
+            vec![id]
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn import_selected_task_literal_dates_refs_activity_deferred_event_and_current_member() {
+        let (f, c, project, status) = setup().await;
+        assert_eq!(
+            project_status_names_backend(&f.backend, &c, project)
+                .await
+                .unwrap()
+                .unwrap(),
+            vec![(status, "할 일".into())]
+        );
+        let id = create_import_task_backend(
+            &f.backend,
+            request(&c, project, None, Some(f.user)),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert_eq!(id.get_version_num(), 7);
+        let row:(String,String,i64,Vec<u8>,String,i64,i64)=sqlx::query_as("SELECT title,due_date,number,status_id,content_json,schema_version,version FROM tasks WHERE id=?1").bind(id.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+        assert_eq!(
+            row,
+            (
+                "실제 CSV 작업 😀".into(),
+                "2026-10-05".into(),
+                1,
+                status.as_bytes().to_vec(),
+                serde_json::to_string(&empty_document_json()).unwrap(),
+                i64::from(DOCUMENT_SCHEMA_VERSION),
+                1
+            )
+        );
+        let refs: String = sqlx::query_scalar("SELECT created_refs FROM import_jobs WHERE id=?1")
+            .bind(c.job_id.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        let refs: crate::db::import_jobs::ImportJobRefs = serde_json::from_str(&refs).unwrap();
+        assert_eq!(refs.task_ids, vec![id]);
+        let counts:(i64,i64,i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM task_assignees),(SELECT count(*) FROM task_activity WHERE kind='created' AND channel='web' AND changes='[]'),(SELECT count(*) FROM import_deferred_events WHERE verb='task.created'),(SELECT count(*) FROM events),(SELECT next_number FROM projects)").fetch_one(&f.pool).await.unwrap();
+        assert_eq!(counts, (1, 1, 1, 0, 2));
+        let second = create_import_task_backend(
+            &f.backend,
+            request(&c, project, Some(status), Some(Uuid::now_v7())),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let row: (i64, String) = sqlx::query_as("SELECT number,sort_key FROM tasks WHERE id=?1")
+            .bind(second.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(row.0, 2);
+        let first_sort: String = sqlx::query_scalar("SELECT sort_key FROM tasks WHERE id=?1")
+            .bind(id.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert!(row.1 > first_sort);
+        let assigned: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM task_assignees WHERE task_id=?1")
+                .bind(second.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(assigned, 0);
+        f.backend.close().await.unwrap();
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
+    #[tokio::test]
+    async fn import_selected_task_wrong_status_owner_tenant_cancel_and_revoked_session_no_effects()
+    {
+        let (f, c, project, _) = setup().await;
+        assert!(matches!(
+            create_import_task_backend(
+                &f.backend,
+                request(&c, project, Some(Uuid::now_v7()), None),
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap(),
+            Err(ProjectDbError::StatusNotInWorkflow)
+        ));
+        no_effects(&f).await;
+        let mut forged = c.clone();
+        forged.lease_token = Uuid::now_v7();
+        assert!(create_import_task_backend(
+            &f.backend,
+            request(&forged, project, None, None),
+            &CancellationToken::new()
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .is_none());
+        no_effects(&f).await;
+        forged = c.clone();
+        forged.workspace_id = Uuid::now_v7();
+        assert!(create_import_task_backend(
+            &f.backend,
+            request(&forged, project, None, None),
+            &CancellationToken::new()
+        )
+        .await
+        .unwrap()
+        .is_err());
+        no_effects(&f).await;
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert!(
+            create_import_task_backend(&f.backend, request(&c, project, None, None), &cancel)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+        no_effects(&f).await;
+        sqlx::query("DELETE FROM sessions WHERE id=?1")
+            .bind(c.session_id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            create_import_task_backend(
+                &f.backend,
+                request(&c, project, None, None),
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap(),
+            Err(ProjectDbError::Forbidden)
+        ));
+        no_effects(&f).await;
+        f.backend.close().await.unwrap();
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
 }
