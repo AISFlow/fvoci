@@ -156,7 +156,7 @@ def load_current(lane, driver):
     after = referenced(m['sourceInputsAfter'])
     assert before == after and before['head'] == m['source'] and before['tree'] == m['tree']
     assert before['tracked'] and before['external']
-    assert before['tracked']['apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'] == '871ec11473d6ba4d0019475fcef48d41fff96991b364a85ca51635f262f0943d'
+    assert before['tracked']['apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'] == 'c3ce787e280d3f4051371cda3734bc4902588b29922c51f065cc9c9bfd32e2e3'
     flow = m.get('flow', 'on')
     assert flow in ('on', 'off') and grant.get('flow', 'on') == flow
     assert os.environ.get('FVOCI_E2E_SELECTED_FLOW', 'on') == flow
