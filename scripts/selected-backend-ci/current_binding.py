@@ -15,6 +15,17 @@ OWNER = os.environ['FVOCI_CI_OWNER']
 E = Path(os.environ['FVOCI_CI_SELECTED_RUNS'])
 W = Path(__file__).resolve().parents[2]
 
+# The feature list cargo actually emits for the engine stage: crates/collab-engine
+# declares `default = []`, and a compiler-artifact lists every activated feature
+# including a declared default. Must equal the record-after guard in
+# scripts/run-selected-backend-e2e.py. Exact: a missing default or an extra
+# feature (test-hang) is a different, non-current engine.
+ENGINE_FEATURES = ['default', 'worker']
+
+
+def engine_features_match(features):
+    return sorted(features) == ENGINE_FEATURES
+
 
 def sha(path):
     h = hashlib.sha256()
@@ -121,8 +132,8 @@ def load_current(lane, driver):
         assert q['originalAbiInputs'] == q['currentAbiInputs'] and q['currentAbiInputs']
         assert all(sha(n) == h for n,h in q['currentAbiInputs'].items())
     else:
-        assert binaries[engine]['features'] == ['worker']
-        assert any(a['executable'] == engine and a['features'] == ['worker'] for a in artifacts)
+        assert engine_features_match(binaries[engine]['features']), ('engine features', binaries[engine]['features'], ENGINE_FEATURES)
+        assert any(a['executable'] == engine and engine_features_match(a['features']) for a in artifacts)
     assets = referenced(m['webReceipt'])
     assert assets['source'] == m['source'] and assets['tree'] == m['tree']
     assert assets['exit_code'] == 0 and assets['full_inputs_unchanged'] and assets['dist_files']
