@@ -552,19 +552,127 @@ pub async fn list_members_backend(
         return list_members(pool, workspace_id, actor_user_id, session_id).await;
     }
     let mut tx = backend.begin_read().await?;
-    tx.operation().set_tenant(workspace_id).await?;
-    let result = tx
-        .operation()
-        .authorized_workspace_members(workspace_id, actor_user_id, session_id)
-        .await?;
-    tx.rollback().await?;
-    Ok(result)
+    let result = async {
+        tx.operation().set_tenant(workspace_id).await?;
+        tx.operation()
+            .authorized_workspace_members(workspace_id, actor_user_id, session_id)
+            .await
+    }
+    .await;
+    let cleanup = tx.rollback().await;
+    member_read_after_rollback(result, cleanup)
+}
+
+// WorkspaceDbError is the existing public domain result, not an Error. This
+// private envelope retains that exact refusal only when actual cleanup fails.
+#[derive(Debug, thiserror::Error)]
+#[error("workspace member read refused: {0:?}")]
+struct MemberReadRefusal(WorkspaceDbError);
+
+fn member_read_after_rollback(
+    result: Result<Result<Vec<MemberRow>, WorkspaceDbError>, sqlx::Error>,
+    cleanup: Result<(), sqlx::Error>,
+) -> Result<Result<Vec<MemberRow>, WorkspaceDbError>, sqlx::Error> {
+    match cleanup {
+        Ok(()) => result,
+        Err(cleanup) => {
+            let original: Option<Box<dyn std::error::Error + Send + Sync>> = match result {
+                Err(driver) => Some(Box::new(driver)),
+                Ok(Err(refusal)) => Some(Box::new(MemberReadRefusal(refusal))),
+                Ok(Ok(_)) => None,
+            };
+            Err(super::backend::rollback_cleanup_unknown(original, cleanup))
+        }
+    }
 }
 
 #[cfg(test)]
 mod selected_member_read_regressions {
     use super::*;
     use crate::db::notifications::family_runtime_fixture::Fixture;
+
+    #[tokio::test]
+    async fn selected_member_read_synthetic_cleanup_error_after_real_rollback_retains_causes() {
+        let f = Fixture::new().await;
+        for domain in [true, false] {
+            let mut tx = f.backend.begin_read().await.unwrap();
+            tx.operation()
+                .set_tenant(if domain {
+                    f.workspace
+                } else {
+                    f.other_workspace
+                })
+                .await
+                .unwrap();
+            let result = tx
+                .operation()
+                .authorized_workspace_members(f.workspace, f.user, f.credential)
+                .await;
+            if domain {
+                assert!(matches!(&result, Ok(Err(WorkspaceDbError::Forbidden))));
+            } else {
+                assert!(matches!(&result, Err(sqlx::Error::Protocol(_))));
+            }
+            // Actual local rollback is acknowledged first. The following
+            // synthetic returned error tests propagation only; it is not a
+            // provider cleanup failure or evidence of remote settlement.
+            tx.rollback().await.unwrap();
+            let error = member_read_after_rollback(
+                result,
+                Err(sqlx::Error::Protocol(
+                    "synthetic cleanup error after acknowledged real rollback".into(),
+                )),
+            )
+            .err()
+            .expect("uncertain cleanup must be an outer typed error");
+            assert!(crate::db::backend::is_rollback_cleanup_unknown(&error));
+            let sqlx::Error::AnyDriverError(source) = &error else {
+                panic!("canonical cleanup receipt required")
+            };
+            let receipt = source
+                .downcast_ref::<crate::db::backend::RollbackCleanupUnknown>()
+                .expect("shared receipt must survive the public SQLx result");
+            assert!(matches!(&receipt.cleanup, sqlx::Error::Protocol(message)
+                if message == "synthetic cleanup error after acknowledged real rollback"));
+            let original = receipt
+                .original
+                .as_ref()
+                .expect("original refusal retained");
+            if domain {
+                let original = original.downcast_ref::<MemberReadRefusal>().unwrap();
+                assert!(matches!(&original.0, WorkspaceDbError::Forbidden));
+            } else {
+                assert!(matches!(
+                    original.downcast_ref::<sqlx::Error>(),
+                    Some(sqlx::Error::Protocol(_))
+                ));
+            }
+        }
+        assert!(matches!(
+            list_members_backend(&f.backend, f.workspace, f.user, f.credential)
+                .await
+                .unwrap(),
+            Err(WorkspaceDbError::Forbidden)
+        ));
+        sqlx::query("UPDATE memberships SET role='member' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let rows = list_members_backend(&f.backend, f.workspace, f.user, f.credential)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "known healthy rollback preserves the public read result"
+        );
+        assert!(rows.iter().any(|row| row.user_id == f.actor));
+        f.backend.close().await.unwrap();
+        std::fs::remove_dir_all(f.dir).unwrap();
+    }
 
     #[tokio::test]
     async fn selected_member_read_current_credential_role_live_users_and_order() {
