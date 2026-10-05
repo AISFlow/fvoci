@@ -2975,7 +2975,7 @@ mod selected_project_create_tests {
         let other = Uuid::now_v7();
         sqlx::query("INSERT INTO workspaces(id,name,slug) VALUES(?1,'Other',?2)")
             .bind(other.as_bytes().as_slice())
-            .bind(format!("other-{other}"))
+            .bind(other.simple().to_string())
             .execute(&f.pool)
             .await
             .unwrap();
