@@ -87,6 +87,53 @@ impl Inputs {
             );
         }
         assert!(env.contains_key("FVOCI_PUBLIC_ORIGIN"));
+        // The candidate executables are built under the builder's home, which a
+        // hosted runner keeps at 0750 for its own UID; the real entrypoint execs
+        // its sibling server (and the server its collab engine) as service UID
+        // 1000, which cannot traverse that home ("Permission denied (os error
+        // 13)"). Stage byte-identical root-owned 0755 copies in a root-owned
+        // directory that only the service group may traverse, verify them
+        // against the same root receipts, and run those. Nothing outside the
+        // run root is chmodded.
+        let bin = root.join(format!("bin-{}", Uuid::now_v7()));
+        std::fs::create_dir(&bin).unwrap();
+        let directory = std::fs::File::open(&bin).unwrap();
+        std::os::unix::fs::fchown(&directory, Some(0), Some(1000)).unwrap();
+        directory
+            .set_permissions(std::fs::Permissions::from_mode(0o750))
+            .unwrap();
+        let stage = |source: &Path, receipt: Option<&str>| -> PathBuf {
+            let target = bin.join(source.file_name().unwrap());
+            std::fs::copy(source, &target).unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let meta = std::fs::symlink_metadata(&target).unwrap();
+            assert!(meta.is_file() && meta.uid() == 0 && meta.mode() & 0o022 == 0);
+            let digest = format!("{:x}", Sha256::digest(std::fs::read(&target).unwrap()));
+            assert_eq!(
+                digest,
+                format!("{:x}", Sha256::digest(std::fs::read(source).unwrap())),
+                "staged copy differs from the candidate executable"
+            );
+            if let Some(name) = receipt {
+                assert_eq!(
+                    digest,
+                    required(name),
+                    "staged copy differs from root receipt"
+                );
+            }
+            target
+        };
+        let migrate = stage(&migrate, Some("FVOCI_SELECTED_INSTALL_MIGRATE_SHA256"));
+        let server = stage(&server, Some("FVOCI_SELECTED_INSTALL_SERVER_SHA256"));
+        assert_eq!(migrate.parent(), server.parent());
+        let mut env = env;
+        if let Some(engine) = env.get("FVOCI_COLLAB_ENGINE").cloned() {
+            let staged = stage(Path::new(&engine), None);
+            env.insert(
+                "FVOCI_COLLAB_ENGINE".to_string(),
+                staged.to_str().unwrap().to_string(),
+            );
+        }
         Self { root, migrate, env }
     }
     fn run_directory(&self, label: &str) -> OwnedRun {
