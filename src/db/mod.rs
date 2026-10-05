@@ -5,7 +5,7 @@ pub mod attachment_extract;
 pub mod attachment_preview;
 pub mod attachments;
 pub mod backend;
-mod codec;
+pub(crate) mod codec;
 pub mod collab;
 pub mod collab_delivery;
 pub mod collection_query;

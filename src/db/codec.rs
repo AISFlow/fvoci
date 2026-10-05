@@ -1,8 +1,6 @@
 //! Checked SQLite-family values. Business operations decode their named rows;
 //! there is no JSON row bag, SQL conversion or lossy numeric coercion.
-#[cfg(test)]
-use chrono::NaiveDate;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::Value;
 use sqlx::{Row, TypeInfo, ValueRef};
 use uuid::Uuid;
@@ -76,8 +74,7 @@ impl Cell {
         DateTime::from_timestamp_micros(self.integer()?)
             .ok_or_else(|| invalid("SQLite instant out of range"))
     }
-    // Only the codec regression currently consumes canonical date decoding.
-    #[cfg(test)]
+    // Decode canonical date-only values for storage and archive consumers.
     pub(crate) fn date(&self) -> Result<NaiveDate, sqlx::Error> {
         let raw = self.string()?;
         let date = NaiveDate::parse_from_str(&raw, "%Y-%m-%d")
