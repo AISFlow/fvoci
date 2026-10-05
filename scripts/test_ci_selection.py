@@ -32,6 +32,23 @@ def load_ci_selection():
 SEL = load_ci_selection()
 
 
+X64_APT_MIRROR_SETUP = r"""# Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
+. /etc/os-release
+[[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
+case "$(dpkg --print-architecture)" in
+  amd64)
+    test -f /etc/apt/apt-mirrors.txt
+    grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
+    grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
+    test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
+    printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+    ;;
+  arm64) ;;
+  *) exit 1 ;;
+esac
+"""
+
+
 def git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args],
@@ -89,6 +106,101 @@ def configure_git(repo: Path) -> None:
     git(repo, "config", "user.email", "ci@test")
     git(repo, "config", "user.name", "ci")
     git(repo, "config", "commit.gpgsign", "false")
+
+
+class UbuntuPrimaryMirrorTest(unittest.TestCase):
+    def preparation_steps(self):
+        result = {}
+        for workflow in ('web', 'rust', 'documents'):
+            data, error = SEL._load_yaml_mapping(ROOT / '.github/workflows' / (workflow + '.yml'))
+            self.assertIsNone(error)
+            for name, job in data['jobs'].items():
+                for step in job.get('steps', []):
+                    if step.get('id') == 'sqlite' and name != 'native-arm64':
+                        result[(workflow, name)] = step
+        return result
+
+    def test_every_x64_root_preparation_selects_signed_primary_before_apt(self):
+        steps = self.preparation_steps()
+        self.assertEqual(set(steps), {('web', 'web-checks'), ('web', 'workspace-browser-shard'),
+            ('web', 'collaboration-build'), ('web', 'collaboration-flow'), ('rust', 'fast'),
+            ('rust', 'postgres'), ('rust', 'collaboration'), ('documents', 'native-extraction')})
+        for name, step in steps.items():
+            with self.subTest(consumer=name):
+                run = step['run']
+                self.assertEqual(run.count(X64_APT_MIRROR_SETUP), 1)
+                self.assertLess(run.index(X64_APT_MIRROR_SETUP), run.index('sudo apt-get update'))
+                self.assertLess(run.index('sudo apt-get update'), run.index('sudo apt-get install'))
+                self.assertIn('sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8', run)
+                self.assertEqual(step['env'], {'LIBCLANG_PATH': '/usr/lib/llvm-18/lib'})
+
+    def probe(self, arch='amd64', *, os_id='ubuntu', version='26.04', missing=None, source=None, apt_exit=0):
+        # Execute the actual workflow shell prefix against owned files and
+        # explicit dpkg/sudo stubs; never alter host APT or make network calls.
+        with tempfile.TemporaryDirectory(prefix='fvoci-apt-mirror-control-') as directory:
+            root = Path(directory); fake_bin = root / 'bin'; fake_bin.mkdir()
+            release = root / 'os-release'; release.write_text(f'ID={os_id}\nVERSION_ID={version}\n')
+            mirrors = root / 'apt-mirrors.txt'; mirrors.write_text('original ARM/Azure mirror\n')
+            sources = root / 'ubuntu.sources'
+            sources.write_text(source if source is not None else 'URIs: mirror+file:/etc/apt/apt-mirrors.txt\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n')
+            keyring = root / 'ubuntu-archive-keyring.gpg'; keyring.write_bytes(b'fixture keyring, not cryptographic verification')
+            foreign = root / 'foreign.sources'; foreign.write_text('foreign repository preserved\n')
+            before = (sources.read_bytes(), foreign.read_bytes())
+            if missing: {'mirrors':mirrors, 'sources':sources, 'keyring':keyring}[missing].unlink()
+            (fake_bin / 'dpkg').write_text('#!/bin/bash\n[[ "$*" == --print-architecture ]] || exit 90\nprintf "%s\n" "$FIXTURE_ARCH"\n')
+            (fake_bin / 'sudo').write_text('''#!/bin/bash
+set -euo pipefail
+if [[ "$1" == tee && "$2" == "$FIXTURE_MIRRORS" && $# == 2 ]]; then
+  exec /usr/bin/tee "$2"
+elif [[ "$1" == apt-get ]]; then
+  printf '%s\n' "$*" >> "$FIXTURE_TRACE"
+  exit "$FIXTURE_APT_EXIT"
+else
+  exit 91
+fi
+''')
+            for path in fake_bin.iterdir(): path.chmod(0o755)
+            trace = root / 'trace'
+            step = self.preparation_steps()[('web', 'collaboration-build')]['run']
+            prefix = step[:step.index('mkdir "$RUNNER_TEMP/fvoci-sqlite"')]
+            for old, new in [('/etc/os-release', release),
+                ('/etc/apt/sources.list.d/ubuntu.sources', sources),
+                ('/usr/share/keyrings/ubuntu-archive-keyring.gpg', keyring),
+                ('/etc/apt/apt-mirrors.txt', mirrors)]:
+                # Replace only known literal filesystem paths in this harness.
+                prefix = prefix.replace(old, str(new))
+                if sources.exists(): sources.write_text(sources.read_text().replace(old, str(new)))
+            if sources.exists(): before = (sources.read_bytes(), foreign.read_bytes())
+            result = subprocess.run(['bash', '-c', prefix], env={'PATH':str(fake_bin)+':/usr/bin:/bin',
+                'FIXTURE_ARCH':arch, 'FIXTURE_MIRRORS':str(mirrors), 'FIXTURE_TRACE':str(trace),
+                'FIXTURE_APT_EXIT':str(apt_exit)}, capture_output=True, text=True, timeout=10)
+            calls = trace.read_text().splitlines() if trace.exists() else []
+            self.assertEqual(foreign.read_bytes(), before[1])
+            if sources.exists(): self.assertEqual(sources.read_bytes(), before[0])
+            return result.returncode, calls, mirrors.read_text() if mirrors.exists() else None
+
+    def test_x64_primary_and_arm_mirror_preservation(self):
+        calls = ['apt-get update', 'apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8']
+        self.assertEqual(self.probe(), (0, calls, 'https://archive.ubuntu.com/ubuntu/\n'))
+        self.assertEqual(self.probe('arm64'), (0, calls, 'original ARM/Azure mirror\n'))
+
+    def test_wrong_platform_or_unsigned_missing_sources_stop_before_apt(self):
+        cases = [dict(arch='riscv64'), dict(os_id='debian'), dict(version='24.04'),
+            dict(missing='mirrors'), dict(missing='sources'), dict(missing='keyring'),
+            dict(source='URIs: https://foreign.example/ubuntu\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n'),
+            dict(source='URIs: mirror+file:/etc/apt/apt-mirrors.txt\nSigned-By: /foreign/keyring.gpg\n')]
+        for case in cases:
+            with self.subTest(case=case):
+                code, calls, mirror = self.probe(**case)
+                self.assertNotEqual(code, 0)
+                self.assertEqual(calls, [])
+                self.assertIn(mirror, (None, 'original ARM/Azure mirror\n'))
+
+    def test_apt_failure_propagates_without_retry(self):
+        code, calls, mirror = self.probe(apt_exit=7)
+        self.assertEqual(code, 7)
+        self.assertEqual(calls, ['apt-get update'])
+        self.assertEqual(mirror, 'https://archive.ubuntu.com/ubuntu/\n')
 
 
 class GitRepoFixture:
@@ -958,6 +1070,8 @@ class WorkflowRegistryTest(unittest.TestCase):
             "printf '%s\\n' 'https://ports.ubuntu.com/ubuntu-ports/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null\n"
         )
         prepare = next(step for step in expected_setup if step.get("id") == "sqlite")
+        self.assertIn(X64_APT_MIRROR_SETUP, prepare["run"])
+        prepare["run"] = prepare["run"].replace(X64_APT_MIRROR_SETUP, "", 1)
         prepare["run"] = prepare["run"].replace("set -euo pipefail\n", "set -euo pipefail\n" + mirror_setup, 1)
         self.assertEqual(steps[:-1], expected_setup)
         cache = next(step for step in steps if step.get("name") == "Restore server build outputs")
