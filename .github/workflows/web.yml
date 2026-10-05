@@ -33,6 +33,7 @@ jobs:
       select_web_checks: ${{ steps.plan.outputs.select_web_checks }}
       select_web_static: ${{ steps.plan.outputs.select_web_static }}
       select_workspace_browser_shard: ${{ steps.plan.outputs.select_workspace_browser_shard }}
+      select_collaboration_build: ${{ steps.plan.outputs.select_collaboration_build }}
       select_collaboration_flow: ${{ steps.plan.outputs.select_collaboration_flow }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -130,7 +131,9 @@ jobs:
           (cd apps/web && bun run test)
           (cd packages/editor && bun run test)
       - name: Verify normal web e2e shard plan
-        run: bash scripts/test-web-e2e-groups.sh
+        run: |
+          bash scripts/test-web-e2e-groups.sh
+          python3 scripts/fixtures/web-e2e/test-build-handoff.py
 
   workspace-browser-shard:
     needs: ci-plan
@@ -207,13 +210,18 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  collaboration-flow:
+  collaboration-build:
     needs: ci-plan
-    if: needs.ci-plan.outputs.select_collaboration_flow == 'true'
+    if: needs.ci-plan.outputs.select_collaboration_build == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 15
+    outputs:
+      artifact_id: ${{ steps.publish.outputs.artifact-id }}
+      handoff_sha256: ${{ steps.prepare.outputs.handoff_sha256 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
@@ -256,6 +264,92 @@ jobs:
       - name: Prepare Chromium and system libraries
         working-directory: apps/web
         run: bun --bun x --no-install playwright install --with-deps chromium
+      - name: Qualify current selected native outputs (no browser or DB)
+        id: prepare
+        env:
+          FVOCI_E2E_PENDING: "1"
+        run: |
+          set -euo pipefail
+          export FVOCI_SELECTED_CI_OUTPUT="$RUNNER_TEMP/fvoci-selected-current"
+          export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"
+          export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
+          mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
+          bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-prepare-selected
+      - name: Publish only the successful current-source build packet
+        id: publish
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web-current-build-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/fvoci-web-build-handoff/handoff.json
+            ${{ runner.temp }}/fvoci-web-build-handoff/payload.tar
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain failed current compilation diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: selected-current-compile-diagnostics-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/fvoci-selected-current/*-stderr.log
+            ${{ runner.temp }}/fvoci-selected-current/*-stage.json
+
+  collaboration-flow:
+    needs: [ci-plan, collaboration-build]
+    if: needs.ci-plan.outputs.select_collaboration_flow == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
+      - name: Restore Cargo downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - name: Prepare pinned SQLite root build inputs
+        id: sqlite
+        env:
+          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          mkdir "$RUNNER_TEMP/fvoci-sqlite"
+          dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
+          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+            --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - name: Prepare locked dependencies
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
+          bun ci
+      - name: Prepare Chromium and system libraries
+        working-directory: apps/web
+        run: bun --bun x --no-install playwright install --with-deps chromium
+      - name: Require a successful exact producer artifact
+        env:
+          PRODUCER_RESULT: ${{ needs.collaboration-build.result }}
+          PRODUCER_ARTIFACT: ${{ needs.collaboration-build.outputs.artifact_id }}
+          PRODUCER_DIGEST: ${{ needs.collaboration-build.outputs.handoff_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$PRODUCER_RESULT" == success ]]
+          [[ "$PRODUCER_ARTIFACT" =~ ^[0-9]+$ ]]
+          [[ "$PRODUCER_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+      - name: Download this run's immutable producer artifact by ID
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.collaboration-build.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/fvoci-web-build-handoff
       - name: Check collaborative browser fixtures
         # Same per-test bound as the web and editor test scripts (node --test had none).
         run: |
@@ -266,15 +360,17 @@ jobs:
         id: browser
         env:
           FVOCI_E2E_PENDING: "1"
+          FVOCI_WEB_BUILD_HANDOFF_SHA256: ${{ needs.collaboration-build.outputs.handoff_sha256 }}
         run: |
           set -euo pipefail
           # Only this ephemeral CI job's checkout/SQLite input/target/report ownership.
           # No account creation/global Git setting or operating resource changes.
           export FVOCI_SELECTED_CI_OUTPUT="$RUNNER_TEMP/fvoci-selected-current"
           export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"
+          export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
           export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
-          bash scripts/run-web-e2e.sh --ci-use-committed-api --with-selected-backends
+          bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected
       - name: Retain failed browser DOM diagnostics
         if: (failure() || cancelled()) && steps.browser.outputs.failure-artifacts != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -303,7 +399,15 @@ jobs:
 
   web-ci-gate:
     name: web-ci-gate
-    needs: [ci-plan, web-static, web-checks, workspace-browser-shard, collaboration-flow]
+    needs:
+      [
+        ci-plan,
+        web-static,
+        web-checks,
+        workspace-browser-shard,
+        collaboration-build,
+        collaboration-flow,
+      ]
     if: always()
     runs-on: ubuntu-26.04
     timeout-minutes: 5

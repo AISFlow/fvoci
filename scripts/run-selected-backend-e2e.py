@@ -47,7 +47,8 @@ def identity():
     assert subprocess.run(['git','-c','safe.directory='+str(ROOT),'diff','--quiet','HEAD'],cwd=ROOT).returncode==0, 'current tracked source must equal the tested SHA'
     assert re.fullmatch('[0-9]+',os.environ['GITHUB_RUN_ID'])
     assert re.fullmatch('[0-9]+',os.environ['GITHUB_RUN_ATTEMPT'])
-    assert os.environ['GITHUB_JOB']=='collaboration-flow'
+    assert ((os.environ['GITHUB_JOB']=='collaboration-flow' and os.environ.get('FVOCI_WEB_BUILD_PHASE') in (None,'consume')) or
+            (os.environ['GITHUB_JOB']=='collaboration-build' and os.environ.get('FVOCI_WEB_BUILD_PHASE')=='prepare')), 'wrong current build/runtime phase'
     return 'github:'+':'.join(os.environ[k] for k in ('GITHUB_REPOSITORY','GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','GITHUB_JOB'))
 
 
@@ -186,6 +187,7 @@ def stage(output,name,command):
 
 
 def run(output):
+    assert os.environ['GITHUB_JOB']=='collaboration-flow', 'build producer cannot start runtime'
     assert os.getuid()==os.getgid()==1000, 'normal SQLite browser/fixture/app file ownership must be1000:1000'
     owner=identity();before=read(output/'before.json');assert read(output/'after.json')==before
     runtime=output/'runtime';runtime.mkdir(mode=0o700)

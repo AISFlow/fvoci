@@ -23,7 +23,7 @@ NarrowFamily = Literal["docs", "frontend_web_install", "web_tests"]
 PLAN_VERSION = 3
 
 WORKFLOW_JOBS: dict[str, tuple[str, ...]] = {
-    "web": ("web-static", "web-checks", "workspace-browser-shard", "collaboration-flow"),
+    "web": ("web-static", "web-checks", "workspace-browser-shard", "collaboration-build", "collaboration-flow"),
     "rust": ("fast", "native-arm64", "postgres", "collaboration"),
     "documents": ("native-extraction",),
     "collab-engine": ("native-collab-engine",),
@@ -1417,6 +1417,50 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
     return errors
 
 
+def _verify_web_build_handoff(jobs: dict) -> list[str]:
+    """The only admitted cross-job native consumer, bound to this run's producer."""
+    errors = []
+    def require(ok, message):
+        if not ok: errors.append("web: current build handoff " + message)
+    producer = jobs.get("collaboration-build", {})
+    consumer = jobs.get("collaboration-flow", {})
+    require(producer.get("needs") == "ci-plan", "producer needs ci-plan")
+    require(consumer.get("needs") == ["ci-plan", "collaboration-build"], "consumer needs successful registered producer")
+    for name, job in (("collaboration-build", producer), ("collaboration-flow", consumer)):
+        require(job.get("runs-on") == "ubuntu-26.04" and job.get("timeout-minutes") == 15, "fixed runner/budget")
+        require(not any(k in job for k in ("continue-on-error", "strategy", "env", "permissions")), "no masked/alternate authority")
+        checkout = [step for step in job.get("steps", []) if str(step.get("uses", "")).startswith("actions/checkout@")]
+        require(len(checkout) == 1 and checkout[0].get("with") == {"persist-credentials": False}, "default exact checkout without stored credentials")
+        require(job.get("if") == "needs.ci-plan.outputs.select_" + name.replace("-", "_") + " == 'true'", "selection only by registered plan")
+    steps = producer.get("steps", [])
+    prepare = [step for step in steps if step.get("id") == "prepare"]
+    require(len(prepare) == 1 and prepare[0].get("env") == {"FVOCI_E2E_PENDING": "1"}
+            and "bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-prepare-selected" in prepare[0].get("run", "")
+            and not any(k in prepare[0] for k in ("if", "continue-on-error")), "unconditional qualified producer")
+    publish = [step for step in steps if step.get("id") == "publish"]
+    require(len(publish) == 1 and publish[0].get("uses") == "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+            and publish[0].get("with") == {"name": "web-current-build-${{ github.run_attempt }}",
+                "path": "${{ runner.temp }}/fvoci-web-build-handoff/handoff.json\n${{ runner.temp }}/fvoci-web-build-handoff/payload.tar\n",
+                "if-no-files-found": "error", "retention-days": 1}
+            and not any(k in publish[0] for k in ("if", "continue-on-error")), "publish only successful complete packet")
+    require(producer.get("outputs") == {"artifact_id": "${{ steps.publish.outputs.artifact-id }}",
+            "handoff_sha256": "${{ steps.prepare.outputs.handoff_sha256 }}"}, "producer artifact identity and digest outputs")
+    steps = consumer.get("steps", [])
+    download = [step for step in steps if str(step.get("uses", "")).startswith("actions/download-artifact@")]
+    require(len(download) == 1 and download[0].get("uses") == "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
+            and download[0].get("with") == {"artifact-ids": "${{ needs.collaboration-build.outputs.artifact_id }}", "merge-multiple": True,
+                "path": "${{ runner.temp }}/fvoci-web-build-handoff"}
+            and not any(k in download[0] for k in ("if", "continue-on-error")), "current-run exact artifact ID without foreign token/ref/run")
+    runtime = [step for step in steps if step.get("id") == "browser"]
+    require(len(runtime) == 1 and runtime[0].get("env") == {"FVOCI_E2E_PENDING": "1",
+                "FVOCI_WEB_BUILD_HANDOFF_SHA256": "${{ needs.collaboration-build.outputs.handoff_sha256 }}"}
+            and "bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected" in runtime[0].get("run", "")
+            and not any(k in runtime[0] for k in ("if", "continue-on-error")), "mandatory full original runtime after qualification")
+    require(not any(step.get("with", {}).get("path") in ("target", "crates/collab-engine/target")
+            for step in steps if str(step.get("uses", "")).startswith("actions/cache@")), "consumer cannot borrow target cache")
+    return errors
+
+
 def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     workflows_dir = repo_root / ".github" / "workflows"
@@ -1620,6 +1664,8 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
             errors.append(f"{workflow}: {reserved_gate} must be a mapping")
 
         errors.extend(_verify_opt_in_wiring(workflow, data, jobs))
+        if workflow == "web":
+            errors.extend(_verify_web_build_handoff(jobs))
 
     release_path = workflows_dir / RELEASE_WORKFLOW_FILE
     if release_path.is_file():

@@ -21,6 +21,7 @@ CI_SHARD=""
 SPEC_ARGS=()
 SELECTED_BACKENDS=false
 CI_COMMITTED_API=false
+SELECTED_PHASE="whole"
 
 while (($# > 0)); do
   case "$1" in
@@ -30,6 +31,12 @@ while (($# > 0)); do
         exit 1
       fi
       CI_COMMITTED_API=true
+      shift
+      ;;
+    --ci-prepare-selected|--ci-consume-selected)
+      [[ "$SELECTED_PHASE" == whole && "$SELECTED_BACKENDS" == false ]] || { echo "duplicate/mixed selected phase" >&2; exit 1; }
+      SELECTED_BACKENDS=true
+      if [[ "$1" == --ci-prepare-selected ]]; then SELECTED_PHASE=prepare; else SELECTED_PHASE=consume; fi
       shift
       ;;
     --with-selected-backends)
@@ -80,6 +87,8 @@ def git(*args):
 if os.environ.get("CI") != "true" or os.environ.get("GITHUB_ACTIONS") != "true":
     fail("requires GitHub CI")
 job = "workspace-browser-shard" if sys.argv[2] else "collaboration-flow"
+if os.environ.get("GITHUB_JOB") == "collaboration-build" and sys.argv[3] == "true":
+    job = "collaboration-build"
 if not sys.argv[2] and sys.argv[3] != "true":
     fail("requires a browser shard or selected companion")
 if os.environ.get("GITHUB_JOB") != job:
@@ -146,7 +155,9 @@ build_current_artifacts() {
 
   cd "$ROOT"
   if [[ "$CI_COMMITTED_API" == true ]]; then verify_committed_api; fi
-  if [[ "$SELECTED_BACKENDS" == true ]]; then
+  if [[ "$SELECTED_PHASE" == consume ]]; then
+    run_stage selected-handoff-consume python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" consume
+  elif [[ "$SELECTED_BACKENDS" == true ]]; then
     run_stage selected-input-before python3 "$ROOT/scripts/run-selected-backend-e2e.py" record-before --output "$FVOCI_SELECTED_CI_OUTPUT"
     run_stage selected-main python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name main -- \
       cargo build --locked --offline --features db-tests,api-schema --bin fvoci-server --bin fvoci-migrate --bin fvoci-e2e-fixture --message-format=json-render-diagnostics
@@ -236,9 +247,25 @@ if [[ "$SELECTED_BACKENDS" == true ]]; then
   fi
   : "${FVOCI_SELECTED_CI_OUTPUT:?required private current cohort output}"
   : "${GITHUB_ACTIONS:?selected companion requires its allocated GitHub job}"
+  if [[ "$SELECTED_PHASE" == whole ]]; then
+    [[ "${GITHUB_JOB:-}" == collaboration-flow && -z "${FVOCI_WEB_BUILD_PHASE:-}" ]] || { echo "wrong same-job selected authority" >&2; exit 1; }
+  else
+    export FVOCI_WEB_BUILD_PHASE="$SELECTED_PHASE"
+    [[ "$CI_COMMITTED_API" == true && "${CI:-}" == true && "$GITHUB_ACTIONS" == true ]] || { echo "handoff requires explicit GitHub committed API mode" >&2; exit 1; }
+    if [[ "$SELECTED_PHASE" == prepare ]]; then
+      [[ "${GITHUB_JOB:-}" == collaboration-build ]] || { echo "wrong producer job" >&2; exit 1; }
+    else
+      [[ "${GITHUB_JOB:-}" == collaboration-flow ]] || { echo "wrong consumer job" >&2; exit 1; }
+      : "${FVOCI_WEB_BUILD_HANDOFF:?missing current producer artifact}"
+      : "${FVOCI_WEB_BUILD_HANDOFF_SHA256:?missing current producer digest}"
+    fi
+  fi
 fi
 
 if [[ "$CI_COMMITTED_API" == true ]]; then verify_committed_api; fi
+if [[ "$SELECTED_PHASE" == consume ]]; then
+  run_stage selected-handoff-admit python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" admit
+fi
 require_prepared
 
 if [[ -n "$CI_SHARD" ]]; then
@@ -251,6 +278,10 @@ if [[ -n "$CI_SHARD" ]]; then
 fi
 
 build_current_artifacts
+if [[ "$SELECTED_PHASE" == prepare ]]; then
+  run_stage selected-handoff-export python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" export
+  exit 0
+fi
 pending_status=0
 bash "$ROOT/scripts/web-e2e-run-group.sh" "${SPEC_ARGS[@]}" || pending_status=$?
 selected_status=0

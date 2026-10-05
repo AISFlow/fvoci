@@ -872,6 +872,29 @@ class OptInSelectionTest(unittest.TestCase):
 
 
 class WorkflowRegistryTest(unittest.TestCase):
+    def test_web_current_build_handoff_positive_and_fail_closed(self) -> None:
+        import copy
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/web.yml")
+        self.assertIsNone(error)
+        jobs = data["jobs"]
+        self.assertEqual(SEL._verify_web_build_handoff(jobs), [])
+        mutations = []
+        bad = copy.deepcopy(jobs); bad["collaboration-flow"]["needs"] = "ci-plan"; mutations.append(bad)
+        bad = copy.deepcopy(jobs); bad["collaboration-build"]["timeout-minutes"] = 16; mutations.append(bad)
+        for job, key in (("collaboration-build", "prepare"), ("collaboration-build", "publish"), ("collaboration-flow", "browser")):
+            bad = copy.deepcopy(jobs); step = next(s for s in bad[job]["steps"] if s.get("id") == key)
+            step["continue-on-error"] = True; mutations.append(bad)
+        bad = copy.deepcopy(jobs)
+        step = next(s for s in bad["collaboration-flow"]["steps"] if str(s.get("uses", "")).startswith("actions/download-artifact@"))
+        step["with"]["run-id"] = "foreign"; mutations.append(bad)
+        bad = copy.deepcopy(jobs); bad["collaboration-build"]["outputs"]["handoff_sha256"] = ""; mutations.append(bad)
+        bad = copy.deepcopy(jobs)
+        next(s for s in bad["collaboration-flow"]["steps"] if s.get("id") == "browser")["run"] = "bash scripts/run-web-e2e.sh --ci-use-committed-api --with-selected-backends"; mutations.append(bad)
+        bad = copy.deepcopy(jobs); bad["collaboration-flow"]["steps"].append({"uses": "actions/cache@anything", "with": {"path": "target"}}); mutations.append(bad)
+        for i, bad in enumerate(mutations):
+            with self.subTest(mutation=i): self.assertTrue(SEL._verify_web_build_handoff(bad))
+
+
     def test_eslint_prettier_run_once_in_lightweight_locked_web_static(self) -> None:
         data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/web.yml")
         self.assertIsNone(error)
@@ -1765,7 +1788,7 @@ class RegistryMutationCliTest(unittest.TestCase):
         text = web.read_text(encoding="utf-8")
         web.write_text(
             text.replace(
-                "    needs: [ci-plan, web-static, web-checks, workspace-browser-shard, collaboration-flow]",
+                "    needs: [ci-plan, web-static, web-checks, workspace-browser-shard, collaboration-build, collaboration-flow]",
                 "    needs: [ci-plan, web-checks]",
             ),
             encoding="utf-8",
