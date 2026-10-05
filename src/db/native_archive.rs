@@ -3471,7 +3471,7 @@ mod selected_tests {
                 let kind = archive.graph.states[index].target_kind.clone();
                 let target = archive.graph.states[index].target_id;
                 let block = format!("retained-{kind}-block");
-                let content = |text: &str| json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":block},"content":[{"type":"text","text":text,"marks":[{"type":"bold"}]}]}]});
+                let content = |text: &str| json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":block},"content":[{"type":"text","text":text,"marks":[{"type":"bold","attrs":{}}]}]}]});
                 let first_body = content("보존 원본 🧪");
                 let final_body = content("보존 후속 🧪");
                 let mut child = EngineSession::spawn(SpawnRequest {
