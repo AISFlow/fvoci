@@ -20,9 +20,25 @@ CI_SHARD_COUNT=8
 CI_SHARD=""
 SPEC_ARGS=()
 SELECTED_BACKENDS=false
+CI_COMMITTED_API=false
+SELECTED_PHASE="whole"
 
 while (($# > 0)); do
   case "$1" in
+    --ci-use-committed-api)
+      if [[ "$CI_COMMITTED_API" == true ]]; then
+        echo "--ci-use-committed-api may be supplied only once" >&2
+        exit 1
+      fi
+      CI_COMMITTED_API=true
+      shift
+      ;;
+    --ci-prepare-selected|--ci-consume-selected)
+      [[ "$SELECTED_PHASE" == whole && "$SELECTED_BACKENDS" == false ]] || { echo "duplicate/mixed selected phase" >&2; exit 1; }
+      SELECTED_BACKENDS=true
+      if [[ "$1" == --ci-prepare-selected ]]; then SELECTED_PHASE=prepare; else SELECTED_PHASE=consume; fi
+      shift
+      ;;
     --with-selected-backends)
       if [[ "$SELECTED_BACKENDS" == true ]]; then
         echo "--with-selected-backends may be supplied only once" >&2
@@ -51,6 +67,65 @@ while (($# > 0)); do
   esac
 done
 
+verify_committed_api() {
+  # web-checks generates and diffs these same-checkout files; its mandatory
+  # aggregate gate remains responsible for schema freshness. Never regenerate
+  # or fall back if this explicit browser-only consumption fails qualification.
+  python3 - "$ROOT" "$CI_SHARD" "$SELECTED_BACKENDS" <<'PY_API'
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+
+root = Path(sys.argv[1])
+def fail(message):
+    sys.exit("committed API qualification failed: " + message)
+def git(*args):
+    return subprocess.check_output(["git", "-C", str(root), *args])
+if os.environ.get("CI") != "true" or os.environ.get("GITHUB_ACTIONS") != "true":
+    fail("requires GitHub CI")
+job = "workspace-browser-shard" if sys.argv[2] else "collaboration-flow"
+if os.environ.get("GITHUB_JOB") == "collaboration-build" and sys.argv[3] == "true":
+    job = "collaboration-build"
+if not sys.argv[2] and sys.argv[3] != "true":
+    fail("requires a browser shard or selected companion")
+if os.environ.get("GITHUB_JOB") != job:
+    fail("requires the allocated browser job")
+sha = os.environ.get("GITHUB_SHA", "")
+if not re.fullmatch(r"[0-9a-f]{40}", sha) or git("rev-parse", "HEAD").decode().strip() != sha:
+    fail("checkout HEAD differs from tested SHA")
+if Path(git("rev-parse", "--show-toplevel").decode().strip()).resolve() != root:
+    fail("wrapper must belong to this checkout")
+if subprocess.run(["git", "-C", str(root), "diff", "--quiet", "HEAD", "--"]).returncode:
+    fail("tracked checkout is dirty")
+for name in ("apps/web/openapi.json", "apps/web/src/generated/api.ts"):
+    path = root / name
+    entry = git("ls-tree", "HEAD", "--", name).decode().strip()
+    if not entry.startswith("100644 blob ") or not entry.endswith("\t" + name):
+        fail(name + " must be a tracked regular output at HEAD")
+    oid = entry.split()[2]
+    if git("ls-files", "--stage", "--", name).decode().strip() != f"100644 {oid} 0\t{name}":
+        fail(name + " index differs from HEAD")
+    if not path.exists() or path.resolve() != path or not stat.S_ISREG(path.lstat().st_mode):
+        fail(name + " must be a physical regular output")
+    content = path.read_bytes()
+    if not content or content != git("cat-file", "blob", oid):
+        fail(name + " physical bytes differ from HEAD")
+print("committed API outputs match tested checkout " + sha)
+PY_API
+}
+
+run_stage() {
+  local name="$1" started="$SECONDS" status
+  shift
+  echo "web-e2e stage=${name} started" >&2
+  if "$@"; then status=0; else status=$?; fi
+  echo "web-e2e stage=${name} elapsed_seconds=$((SECONDS - started)) exit=${status}" >&2
+  return "$status"
+}
+
 require_prepared() {
   if ! (cd "$ROOT/apps/web" && bun --bun x --no-install playwright --version) >/dev/null 2>&1; then
     echo "missing web dependencies or Playwright; run scripts/prepare-web-e2e.sh" >&2
@@ -69,27 +144,34 @@ build_current_artifacts() {
   # shellcheck disable=SC1090
   source "$sqlite_env"
   rm -f "$sqlite_env"
-  bash "$ROOT/scripts/generate-api.sh"
+  if [[ "$CI_COMMITTED_API" == true ]]; then
+    verify_committed_api
+  else
+    run_stage api-generation bash "$ROOT/scripts/generate-api.sh"
+  fi
 
   cd "$ROOT/apps/web"
-  bun --bun run build
+  run_stage web-build bun --bun run build
 
   cd "$ROOT"
-  if [[ "$SELECTED_BACKENDS" == true ]]; then
-    python3 "$ROOT/scripts/run-selected-backend-e2e.py" record-before --output "$FVOCI_SELECTED_CI_OUTPUT"
-    python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name main -- \
+  if [[ "$CI_COMMITTED_API" == true ]]; then verify_committed_api; fi
+  if [[ "$SELECTED_PHASE" == consume ]]; then
+    run_stage selected-handoff-consume python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" consume
+  elif [[ "$SELECTED_BACKENDS" == true ]]; then
+    run_stage selected-input-before python3 "$ROOT/scripts/run-selected-backend-e2e.py" record-before --output "$FVOCI_SELECTED_CI_OUTPUT"
+    run_stage selected-main python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name main -- \
       cargo build --locked --offline --features db-tests,api-schema --bin fvoci-server --bin fvoci-migrate --bin fvoci-e2e-fixture --message-format=json-render-diagnostics
-    python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name lib -- \
+    run_stage selected-lib python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name lib -- \
       cargo test --locked --offline --features db-tests,api-schema --lib --no-run --message-format=json-render-diagnostics
-    python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name install -- \
+    run_stage selected-install python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name install -- \
       cargo test --locked --offline --features db-tests,api-schema --test selected_install_lifetime --no-run --message-format=json-render-diagnostics
-    CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name engine -- \
+    CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" run_stage selected-engine python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name engine -- \
       cargo build --locked --offline --manifest-path "$ROOT/crates/collab-engine/Cargo.toml" --features worker --bin collab-engine --message-format=json-render-diagnostics
-    python3 "$ROOT/scripts/run-selected-backend-e2e.py" record-after --output "$FVOCI_SELECTED_CI_OUTPUT"
+    run_stage selected-input-after python3 "$ROOT/scripts/run-selected-backend-e2e.py" record-after --output "$FVOCI_SELECTED_CI_OUTPUT"
   else
-    cargo build --locked --offline --bin fvoci-e2e-fixture --features db-tests
-    cargo build --locked --offline --bin fvoci-server --bin fvoci-migrate
-    CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" cargo build --locked --offline \
+    run_stage fixture-build cargo build --locked --offline --bin fvoci-e2e-fixture --features db-tests
+    run_stage default-server-build cargo build --locked --offline --bin fvoci-server --bin fvoci-migrate
+    CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" run_stage worker-build cargo build --locked --offline \
       --manifest-path "$ROOT/crates/collab-engine/Cargo.toml" --features worker --bin collab-engine
   fi
 }
@@ -165,8 +247,25 @@ if [[ "$SELECTED_BACKENDS" == true ]]; then
   fi
   : "${FVOCI_SELECTED_CI_OUTPUT:?required private current cohort output}"
   : "${GITHUB_ACTIONS:?selected companion requires its allocated GitHub job}"
+  if [[ "$SELECTED_PHASE" == whole ]]; then
+    [[ "${GITHUB_JOB:-}" == collaboration-flow && -z "${FVOCI_WEB_BUILD_PHASE:-}" ]] || { echo "wrong same-job selected authority" >&2; exit 1; }
+  else
+    export FVOCI_WEB_BUILD_PHASE="$SELECTED_PHASE"
+    [[ "$CI_COMMITTED_API" == true && "${CI:-}" == true && "$GITHUB_ACTIONS" == true ]] || { echo "handoff requires explicit GitHub committed API mode" >&2; exit 1; }
+    if [[ "$SELECTED_PHASE" == prepare ]]; then
+      [[ "${GITHUB_JOB:-}" == collaboration-build ]] || { echo "wrong producer job" >&2; exit 1; }
+    else
+      [[ "${GITHUB_JOB:-}" == collaboration-flow ]] || { echo "wrong consumer job" >&2; exit 1; }
+      : "${FVOCI_WEB_BUILD_HANDOFF:?missing current producer artifact}"
+      : "${FVOCI_WEB_BUILD_HANDOFF_SHA256:?missing current producer digest}"
+    fi
+  fi
 fi
 
+if [[ "$CI_COMMITTED_API" == true ]]; then verify_committed_api; fi
+if [[ "$SELECTED_PHASE" == consume ]]; then
+  run_stage selected-handoff-admit python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" admit
+fi
 require_prepared
 
 if [[ -n "$CI_SHARD" ]]; then
@@ -179,6 +278,10 @@ if [[ -n "$CI_SHARD" ]]; then
 fi
 
 build_current_artifacts
+if [[ "$SELECTED_PHASE" == prepare ]]; then
+  run_stage selected-handoff-export python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" export
+  exit 0
+fi
 pending_status=0
 bash "$ROOT/scripts/web-e2e-run-group.sh" "${SPEC_ARGS[@]}" || pending_status=$?
 selected_status=0
