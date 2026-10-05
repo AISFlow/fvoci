@@ -578,10 +578,9 @@ impl Archive {
                 || t.due_date
                     .as_deref()
                     .is_some_and(|d| crate::tasks::parse_iso_date(d).is_none())
-                || t.estimate.as_ref().is_some_and(|v| {
-                    v.as_str()
-                        .is_none_or(|s| !archived_estimate_is_valid(s))
-                })
+                || t.estimate
+                    .as_ref()
+                    .is_some_and(|v| v.as_str().is_none_or(|s| !archived_estimate_is_valid(s)))
                 || !estimate_unit_is_valid(t.estimate.as_ref(), t.estimate_unit.as_deref())
             {
                 return Err(invalid());
