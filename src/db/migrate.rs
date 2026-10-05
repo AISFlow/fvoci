@@ -1195,6 +1195,15 @@ pub async fn run_sqlite_migrations_legacy_control(
     result
 }
 
+/// Test-owned SQLite-family registry initialization for the actual loopback SDK.
+/// Product remote installation still requires its separate admission owner.
+#[cfg(all(test, feature = "db-tests"))]
+pub(crate) async fn initialize_family_backend_for_test(
+    backend: &super::backend::Backend,
+) -> Result<(), sqlx::Error> {
+    apply_sqlite_migrations(backend, None).await
+}
+
 async fn apply_sqlite_migrations(
     backend: &super::backend::Backend,
     cancel: Option<&tokio_util::sync::CancellationToken>,
