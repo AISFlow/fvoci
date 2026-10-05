@@ -56,6 +56,10 @@ sha2 = "0.10"
 tar = { version = "=0.4.46", default-features = false }
 sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "sqlite-unbundled", "json", "uuid", "chrono"] }
 libsql = { version = "=0.9.30", default-features = false, features = ["remote", "tls"] }
+# The remote SQLite-family schema gate feeds its reference engine the exact rendering the
+# pinned libsql SDK sends (its parser and iterator crates, already locked at these versions).
+libsql-sqlite3-parser = { version = "=0.13.0", default-features = false }
+fallible-iterator = "=0.3.0"
 # SQLx's public locked native handle: inspect autocommit before idle reuse.
 # Exactly the SQLx0.8.6 transitive ABI, without bundled SQLite.
 libsqlite3-sys = { version = "=0.30.1", default-features = false }

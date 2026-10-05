@@ -81,7 +81,7 @@ def restart_same_app(g):
                'sourceInputsSha256': digest(run / 'source-inputs-before.json'),
                'artifactHashes': {str(path): record['sha256'] for path, record in g['binaries'].items()},
                'assetHashes': g['assets']['dist_files'],
-               'browserInputs': g['browser_inputs'], 'abiHashes': g['abi']['exact_copied_runtime_files']}
+               'browserInputs': g['browser_inputs'], 'abiHashes': g['abi']['host_runtime_files']}
     validate_allocation(allocation, binding)
     receipt = {'scope': 'current-schema same owned DB/storage server restart only; not upgrade/archive/restore/Turso/whole0.6',
                'binding': binding, 'allocationSha256': digest(grant_path), 'stage': 'validated',
@@ -96,7 +96,7 @@ def restart_same_app(g):
         for path, record in g['binaries'].items():
             assert digest(path) == record['sha256']
         assert g['tree_hashes'](g['dist']) == g['assets']['dist_files']
-        for path, expected in g['abi']['exact_copied_runtime_files'].items():
+        for path, expected in g['abi']['host_runtime_files'].items():
             assert digest(path) == expected
         browser = g['browser_inputs']
         assert digest(browser['bun']['path']) == browser['bun']['sha256']

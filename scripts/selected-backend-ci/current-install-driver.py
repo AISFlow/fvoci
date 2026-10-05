@@ -16,7 +16,7 @@ P = current['run']
 E = P.parent
 W = pathlib.Path(__file__).resolve().parents[2]
 H = current['manifest']['source']
-IMAGE = 'ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55'
+IMAGE = 'ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7'
 NAME = 'fvoci-v060-install-current-' + secrets.token_hex(4)
 
 def now():
@@ -83,7 +83,7 @@ receipt = {
     'scope': 'actual SQLite normal migrate --start process/install/lifetime controls, not browser/PG/Turso/OFF/fullCI',
     'test_executable': test_build['test_executable'], 'actual_binary_inputs': bins,
     'environment_names': sorted(env), 'environment_private_file': str(private),
-    'original_failure': 'root-d49-install-runtime/test.log ownership4FAIL and owned-copy/test.log ABI1PASS3FAIL preserved; this execution corrects only ephemeral copiedowner+actualhost ABI prerequisites',
+    'original_failure': 'root-d49-install-runtime/test.log ownership4FAIL and owned-copy/test.log ABI1PASS3FAIL preserved; historical copiedowner/ABI failures retained; this execution uses Ubuntu26 image libraries',
     'expected_rust_tests': 4, 'expected_owned_child_processes': 15,
     'free_before': shutil.disk_usage(P).free, 'retry': 0,
 }
@@ -98,10 +98,7 @@ try:
     command(['docker', 'start', NAME])
     runtime_abi=current['abi']
     write(P/'runtime-abi-inputs.json', runtime_abi)
-    for source, expected in runtime_abi['exact_copied_runtime_files'].items():
-        assert sha(source)==expected, source
-        command(['docker','cp',source,NAME+':/lib/x86_64-linux-gnu/'+pathlib.Path(source).name])
-    receipt['runtime_abi']='runtime-abi-inputs.json: exact actualhost libc/loader/libm/libgcc copied onlyintoown ephemeraldevelopmentcontainer; original Ubuntu24 image compatibility NOTclaimed'
+    receipt['runtime_abi']='Ubuntu 26.04 image libraries; host ABI hashes are provenance only'
     command(['docker','exec',NAME,'/bin/sh','-ec','ldd --version | head -1; /bin/true'], logfile=P/'actual-runtime-abi.log')
     setup = ('mkdir -p ' + str(pathlib.Path(server).parent) + ' /fvoci/bin /fvoci/run /fvoci/inputs /fvoci/storage /srv/fvoci-web; '
              'chown 0:1000 /fvoci/run; chmod 0710 /fvoci/run; '
@@ -115,6 +112,11 @@ try:
     command(['docker','exec',NAME,'stat','-c','%n %u %g %a',*copied], logfile=P/'copied-files-before.log')
     command(['docker','exec',NAME,'chown','0:0',*copied])
     command(['docker','exec',NAME,'chmod','0755',*copied[:-1]])
+    runtime_ldd=command(['docker','exec',NAME,'/bin/sh','-ec',
+                         '. /etc/os-release; test "$ID" = ubuntu; test "$VERSION_ID" = 26.04; for binary do ldd "$binary"; done',
+                         'fvoci-runtime-abi',*copied[:-1]]).stdout
+    (P/'native-runtime-abi.log').write_text(runtime_ldd)
+    assert 'not found' not in runtime_ldd, 'Ubuntu26 runtime ELF dependencies missing'
     command(['docker','exec',NAME,'chmod','0600',copied[-1]])
     command(['docker','exec',NAME,'chown','-R','0:0','/srv/fvoci-web'])
     command(['docker','exec',NAME,'stat','-c','%n %u %g %a',*copied], logfile=P/'copied-files-after.log')

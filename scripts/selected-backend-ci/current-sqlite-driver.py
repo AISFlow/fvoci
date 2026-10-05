@@ -25,7 +25,7 @@ from current_binding import load_current
 current = load_current('sqlite', __file__)
 HEAD = COMPILED_HEAD = current['manifest']['source']
 TREE = COMPILED_TREE = current['manifest']['tree']
-IMAGE = 'ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55'
+IMAGE = 'ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7'
 # Native origin/hash are recorded separately in the current bundle qualification.
 OWNER = os.environ['FVOCI_CI_OWNER']
 SPEC = 'workspace-wiki-selected-backend.spec.ts'
@@ -187,20 +187,19 @@ try:
              '--entrypoint', '/bin/sleep', IMAGE, '1800'], run / 'container-create.log')
     created = True
     command(['docker', 'start', name], run / 'container-start.log')
-    for path in abi['exact_copied_runtime_files']:
-        command(['docker', 'cp', path, name + ':/lib/x86_64-linux-gnu/' + Path(path).name])
     command(['docker', 'exec', name, '/bin/sh', '-ec',
              'mkdir -p /fvoci/bin /fvoci/inputs /srv/fvoci-web; chmod 0700 /fvoci/inputs; ldd --version | head -1'], run / 'runtime-abi.log')
-    copied_abi = command(['docker', 'exec', name, 'sha256sum',
-                          *['/lib/x86_64-linux-gnu/' + Path(path).name for path in abi['exact_copied_runtime_files']]]).stdout
-    (run / 'copied-runtime-abi-hashes.log').write_text(copied_abi)
-    assert [line.split()[0] for line in copied_abi.splitlines()] == list(abi['exact_copied_runtime_files'].values())
     copies = [(server, '/fvoci/bin/fvoci-server'), (migrate, '/fvoci/bin/fvoci-migrate'),
               (engine, '/fvoci/bin/collab-engine'), (str(run / 'environment.private.sh'), '/fvoci/inputs/environment.sh')]
     for source, destination in copies:
         command(['docker', 'cp', source, name + ':' + destination])
     command(['docker', 'exec', name, 'chown', '0:0', *[dest for _, dest in copies]])
     command(['docker', 'exec', name, 'chmod', '0755', *[dest for _, dest in copies[:-1]]])
+    runtime_ldd = command(['docker', 'exec', name, '/bin/sh', '-ec',
+                           '. /etc/os-release; test "$ID" = ubuntu; test "$VERSION_ID" = 26.04; for binary do ldd "$binary"; done',
+                           'fvoci-runtime-abi', *[dest for _, dest in copies[:-1]]]).stdout
+    (run / 'native-runtime-abi.log').write_text(runtime_ldd)
+    assert 'not found' not in runtime_ldd, 'Ubuntu26 runtime ELF dependencies missing'
     command(['docker', 'exec', name, 'chmod', '0600', copies[-1][1]])
     command(['docker', 'cp', str(dist) + '/.', name + ':/srv/fvoci-web'])
     command(['docker', 'exec', name, 'stat', '-c', '%n %u %g %a', *[dest for _, dest in copies]], run / 'copied-owned-files.log')
@@ -239,8 +238,8 @@ try:
     # Python's SQLite version/connection PRAGMA are NOT the app runtime/FK proof.
     with sqlite3.connect('file:' + quote(str(db)) + '?mode=ro', uri=True) as observer:
         applied = observer.execute('SELECT version,lineage,sql_sha256 FROM schema_migrations ORDER BY version').fetchall()
-    definitions = sorted((W / 'migrations/sqlite').glob('[0-9][0-9][0-9]_*.sql'))
-    expected = [(i + 1, 'fvoci-sqlite-current-v1', sha(file)) for i, file in enumerate(definitions)]
+    definitions = sorted((W / 'migrations/sqlite/060').glob('[0-9][0-9]_*.sql'))
+    expected = [(i + 1, 'fvoci-sqlite-060', sha(file)) for i, file in enumerate(definitions)]
     assert applied == expected and len(applied) == 4
     receipt.update(baseURL=base, actual_server=server_row, actual_process_rows_at_ready=rows,
                    database_inode=[meta.st_dev, meta.st_ino], actual_setup_needed=True,
@@ -348,7 +347,7 @@ finally:
         assert tree_hashes(dist) == assets['dist_files']
         for path in (server, migrate, fixture, engine):
             assert sha(path) == binaries[path]['sha256']
-        for path, expected_hash in abi['exact_copied_runtime_files'].items():
+        for path, expected_hash in abi['host_runtime_files'].items():
             assert sha(path) == expected_hash
         if browser_inputs:
             assert sha(BUN) == browser_inputs['bun']['sha256']
