@@ -468,3 +468,521 @@ async fn gc_workspace_rounds(
     }
     Ok((deleted, false))
 }
+
+/// Actual selected-family batch. The named consumer retains each mutation
+/// writer across native work; borrowed producers never start another BEGIN.
+pub(crate) async fn run_revision_maintenance_batch_family(
+    backend: &crate::db::backend::Backend,
+    params: &RevisionMaintenanceParams,
+    resume: RevisionMaintenanceResume,
+    proof: &super::FamilyMaintenanceProof,
+    policy: super::FamilyMaintenanceLeasePolicy,
+    cancel: &CancellationToken,
+) -> Result<(RevisionMaintenanceStats, RevisionMaintenanceResume), super::MaintenanceConsumerError>
+{
+    let consumer = FamilyRevisionConsumer {
+        backend,
+        proof,
+        policy,
+        cancel,
+    };
+    let mut stats = RevisionMaintenanceStats::default();
+    let mut next_resume = resume;
+    if params.settings.snapshot_interval_hours > 0 && !resume.scheduled_phase_complete {
+        if let Some(engine) = params.engine.as_ref() {
+            let cutoff = snapshot_cutoff(
+                super::family_maintenance_now(),
+                params.settings.snapshot_interval_hours,
+            );
+            let sweep = consumer.scheduled(engine, cutoff, resume).await?;
+            stats = sweep.stats;
+            next_resume = sweep.resume;
+        } else {
+            next_resume.scheduled_phase_complete = true;
+        }
+    } else if params.settings.snapshot_interval_hours == 0 {
+        next_resume.scheduled_phase_complete = true;
+    }
+    if !cancel.is_cancelled() && !next_resume.gc_phase_complete {
+        let (deleted, after, complete) = consumer
+            .gc(params.settings.keep, next_resume.gc_workspace_after)
+            .await?;
+        stats.revisions_deleted = deleted;
+        next_resume.gc_workspace_after = after;
+        next_resume.gc_phase_complete = complete;
+    }
+    Ok((stats, next_resume))
+}
+
+struct FamilyRevisionConsumer<'a> {
+    backend: &'a crate::db::backend::Backend,
+    proof: &'a super::FamilyMaintenanceProof,
+    policy: super::FamilyMaintenanceLeasePolicy,
+    cancel: &'a CancellationToken,
+}
+
+impl FamilyRevisionConsumer<'_> {
+    async fn writer(
+        &self,
+        workspace: Option<Uuid>,
+    ) -> Result<crate::db::backend::DbTx, super::MaintenanceConsumerError> {
+        let mut tx = self.backend.begin_write().await?;
+        let result = async {
+            super::renew_maintenance_writer(
+                &mut tx,
+                self.proof,
+                super::MaintenanceJobKey::Revisions,
+                self.policy,
+                self.cancel,
+            )
+            .await?;
+            if let Some(workspace) = workspace {
+                tx.operation().set_tenant(workspace).await?;
+            }
+            Ok::<_, super::MaintenanceConsumerError>(())
+        }
+        .await;
+        match result {
+            Ok(()) => Ok(tx),
+            Err(error) => Err(super::rollback_maintenance_writer(tx, error).await),
+        }
+    }
+
+    async fn finish(
+        &self,
+        tx: crate::db::backend::DbTx,
+    ) -> Result<(), super::MaintenanceConsumerError> {
+        super::commit_maintenance_writer(
+            tx,
+            self.proof,
+            super::MaintenanceJobKey::Revisions,
+            self.cancel,
+        )
+        .await
+    }
+
+    async fn workspaces(
+        &self,
+        after: Option<Uuid>,
+        inclusive: bool,
+    ) -> Result<Vec<Uuid>, super::MaintenanceConsumerError> {
+        let mut tx = self.writer(None).await?;
+        let result = async {
+            let previous = tx.operation().set_system().await?;
+            let ids = tx
+                .operation()
+                .list_revision_live_workspace_ids(after, inclusive, WORKSPACE_SCAN_BATCH)
+                .await?;
+            tx.operation().restore_system(previous).await?;
+            Ok::<_, super::MaintenanceConsumerError>(ids)
+        }
+        .await;
+        let ids = match result {
+            Ok(ids) => ids,
+            Err(error) => return Err(super::rollback_maintenance_writer(tx, error).await),
+        };
+        self.finish(tx).await?;
+        Ok(ids)
+    }
+
+    async fn candidates(
+        &self,
+        workspace: Uuid,
+        after: Option<ScheduledRevisionCursor>,
+    ) -> Result<Vec<ScheduledRevisionCandidate>, super::MaintenanceConsumerError> {
+        let mut tx = self.writer(Some(workspace)).await?;
+        let result = tx
+            .operation()
+            .list_scheduled_revision_candidates(
+                workspace,
+                after,
+                SCHEDULED_REVISION_TARGET_BATCH as i64,
+            )
+            .await;
+        let rows = match result {
+            Ok(rows) => rows,
+            Err(error) => return Err(super::rollback_maintenance_writer(tx, error.into()).await),
+        };
+        self.finish(tx).await?;
+        Ok(rows)
+    }
+
+    async fn scheduled(
+        &self,
+        engine: &RevisionMaintenanceEngine,
+        cutoff: DateTime<Utc>,
+        resume: RevisionMaintenanceResume,
+    ) -> Result<ScheduledSweep, super::MaintenanceConsumerError> {
+        let mut stats = RevisionMaintenanceStats::default();
+        let gc_hold = resume.gc_workspace_after;
+        let gc_phase_complete = resume.gc_phase_complete;
+        let mut workspace_after = resume.workspace_id;
+        let mut target_cursor = resume.target;
+        let mut attempts_remaining = SCHEDULED_REVISION_TARGET_BATCH;
+        let mut examined_remaining = SCHEDULED_REVISION_EXAMINE_BATCH;
+        let mut workspaces_remaining = WORKSPACE_SCAN_BATCH as usize;
+        while examined_remaining > 0
+            && attempts_remaining > 0
+            && workspaces_remaining > 0
+            && !self.cancel.is_cancelled()
+        {
+            let workspaces = self
+                .workspaces(workspace_after, target_cursor.is_some())
+                .await?;
+            if workspaces.is_empty() {
+                return Ok(ScheduledSweep {
+                    stats,
+                    resume: snapshot_resume(None, None, gc_hold, true, gc_phase_complete),
+                });
+            }
+            let workspace_count = workspaces.len();
+            for workspace_id in workspaces {
+                if self.cancel.is_cancelled()
+                    || attempts_remaining == 0
+                    || examined_remaining == 0
+                    || workspaces_remaining == 0
+                {
+                    break;
+                }
+                workspaces_remaining -= 1;
+                let mut cursor = if workspace_after == Some(workspace_id) {
+                    target_cursor
+                } else {
+                    None
+                };
+                while examined_remaining > 0
+                    && attempts_remaining > 0
+                    && !self.cancel.is_cancelled()
+                {
+                    let candidates = self.candidates(workspace_id, cursor).await?;
+                    if candidates.is_empty() {
+                        workspace_after = Some(workspace_id);
+                        target_cursor = None;
+                        break;
+                    }
+                    let page_len = candidates.len();
+                    let mut advanced = false;
+                    for candidate in candidates {
+                        if self.cancel.is_cancelled()
+                            || attempts_remaining == 0
+                            || examined_remaining == 0
+                        {
+                            break;
+                        }
+                        examined_remaining -= 1;
+                        advanced = true;
+                        workspace_after = Some(workspace_id);
+                        let next = scheduled_revision_cursor(&candidate);
+                        target_cursor = Some(next);
+                        cursor = Some(next);
+                        if candidate.anchor_at >= cutoff
+                            || candidate.state_updated_at <= candidate.anchor_at
+                        {
+                            stats.snapshots_skipped += 1;
+                            continue;
+                        }
+                        attempts_remaining -= 1;
+                        stats.snapshots_attempted += 1;
+                        match self.snapshot(engine, candidate).await {
+                            Ok(ScheduledOutcome::Created) => stats.snapshots_created += 1,
+                            Ok(ScheduledOutcome::Deduped) => stats.snapshots_deduped += 1,
+                            Ok(ScheduledOutcome::Skipped) => stats.snapshots_skipped += 1,
+                            Ok(ScheduledOutcome::Failed) => stats.snapshots_failed += 1,
+                            Ok(ScheduledOutcome::Cancelled) => break,
+                            Err(super::MaintenanceConsumerError::RevisionRefused(_)) => {
+                                stats.snapshots_skipped += 1;
+                            }
+                            Err(error) if error.stops_on_backend(self.backend) => {
+                                return Err(error)
+                            }
+                            Err(error) => {
+                                stats.snapshots_failed += 1;
+                                tracing::warn!(%error,"maintenance.scheduled_revision_target_failed");
+                            }
+                        }
+                    }
+                    if !advanced || page_len < SCHEDULED_REVISION_TARGET_BATCH {
+                        break;
+                    }
+                }
+            }
+            if attempts_remaining == 0 || examined_remaining == 0 || workspaces_remaining == 0 {
+                break;
+            }
+            if workspace_count < WORKSPACE_SCAN_BATCH as usize {
+                let complete = !self.cancel.is_cancelled();
+                return Ok(ScheduledSweep {
+                    stats,
+                    resume: snapshot_resume(
+                        if complete { None } else { workspace_after },
+                        if complete { None } else { target_cursor },
+                        gc_hold,
+                        complete,
+                        gc_phase_complete,
+                    ),
+                });
+            }
+        }
+        Ok(ScheduledSweep {
+            stats,
+            resume: snapshot_resume(
+                workspace_after,
+                target_cursor,
+                gc_hold,
+                false,
+                gc_phase_complete,
+            ),
+        })
+    }
+
+    async fn snapshot(
+        &self,
+        engine: &RevisionMaintenanceEngine,
+        candidate: ScheduledRevisionCandidate,
+    ) -> Result<ScheduledOutcome, super::MaintenanceConsumerError> {
+        let mut tx = self.writer(Some(candidate.workspace_id)).await?;
+        let result = async {
+            let source = match tx
+                .operation()
+                .load_scheduled_revision_source(
+                    candidate.workspace_id,
+                    candidate.target,
+                    candidate.writer_generation,
+                )
+                .await?
+            {
+                Ok(source) => source,
+                Err(_) => return Ok(ScheduledOutcome::Skipped),
+            };
+            let captured = tokio::task::spawn_blocking({
+                let snapshot = source.durable.snapshot.clone();
+                let tail = source.durable.tail.clone();
+                let bin = engine.engine_bin.clone();
+                let limits = engine.limits;
+                move || capture_revision_offline(bin, limits, snapshot, tail)
+            })
+            .await;
+            // Recheck even a helper failure, and never renew an expired owner.
+            if self.cancel.is_cancelled() {
+                return Err(super::MaintenanceConsumerError::Cancelled);
+            }
+            if !tx
+                .operation()
+                .check_family_maintenance_claim(self.proof, super::MaintenanceJobKey::Revisions)
+                .await?
+            {
+                return Err(super::MaintenanceConsumerError::OwnershipLost);
+            }
+            if tx
+                .operation()
+                .check_scheduled_revision_source(&source)
+                .await?
+                .is_err()
+            {
+                return Ok(ScheduledOutcome::Skipped);
+            }
+            let captured = match captured {
+                Ok(Ok(value)) => value,
+                _ => return Ok(ScheduledOutcome::Failed),
+            };
+            let mut head_retries = 0u32;
+            loop {
+                if self.cancel.is_cancelled() {
+                    return Err(super::MaintenanceConsumerError::Cancelled);
+                }
+                let latest = tx
+                    .operation()
+                    .latest_scheduled_revision_head(candidate.workspace_id, candidate.target)
+                    .await?;
+                let head_fence = SystemRevisionHead::from_latest(latest.clone());
+                if let Some((_, previous)) = &latest {
+                    let equal = tokio::task::spawn_blocking({
+                        let left = previous.clone();
+                        let right = captured.y_snapshot.clone();
+                        let bin = engine.engine_bin.clone();
+                        let limits = engine.limits;
+                        move || revision_snapshots_equal_offline(bin, limits, &left, &right)
+                    })
+                    .await;
+                    if self.cancel.is_cancelled() {
+                        return Err(super::MaintenanceConsumerError::Cancelled);
+                    }
+                    if !tx
+                        .operation()
+                        .check_family_maintenance_claim(
+                            self.proof,
+                            super::MaintenanceJobKey::Revisions,
+                        )
+                        .await?
+                    {
+                        return Err(super::MaintenanceConsumerError::OwnershipLost);
+                    }
+                    if tx
+                        .operation()
+                        .check_scheduled_revision_source(&source)
+                        .await?
+                        .is_err()
+                    {
+                        return Ok(ScheduledOutcome::Skipped);
+                    }
+                    match equal {
+                        Ok(Ok(true)) => return Ok(ScheduledOutcome::Deduped),
+                        Ok(Ok(false)) => {}
+                        _ => return Ok(ScheduledOutcome::Failed),
+                    }
+                }
+                let text = match prepare_revision_text(&captured.content_json) {
+                    Ok(text) => text,
+                    Err(_) => return Ok(ScheduledOutcome::Failed),
+                };
+                let input = CreateRevisionInput {
+                    y_snapshot: captured.y_snapshot.clone(),
+                    content_json: captured.content_json.clone(),
+                    text,
+                    reason: SCHEDULED_REASON.into(),
+                };
+                // Original expected generation/tail/cutoff/head come from the
+                // opaque actual writer source; no cached actor proof substitute.
+                super::renew_maintenance_writer(
+                    &mut tx,
+                    self.proof,
+                    super::MaintenanceJobKey::Revisions,
+                    self.policy,
+                    self.cancel,
+                )
+                .await?;
+                match tx
+                    .operation()
+                    .create_scheduled_revision(&source, &input, &head_fence)
+                    .await?
+                {
+                    Ok(_) => {
+                        if tx
+                            .operation()
+                            .check_scheduled_revision_source(&source)
+                            .await?
+                            .is_err()
+                        {
+                            return Err(super::MaintenanceConsumerError::OwnershipLost);
+                        }
+                        return Ok(ScheduledOutcome::Created);
+                    }
+                    Err(RevisionDbError::StaleRevisionHead)
+                        if head_retries + 1 < SYSTEM_REVISION_HEAD_RETRIES =>
+                    {
+                        head_retries += 1;
+                    }
+                    Err(error) => {
+                        // The borrowed producer may have inserted before its
+                        // final source refusal. Roll back this whole unit;
+                        // never COMMIT a partial publication as a skip.
+                        if self.cancel.is_cancelled() {
+                            return Err(super::MaintenanceConsumerError::Cancelled);
+                        }
+                        if !tx
+                            .operation()
+                            .check_family_maintenance_claim(
+                                self.proof,
+                                super::MaintenanceJobKey::Revisions,
+                            )
+                            .await?
+                        {
+                            return Err(super::MaintenanceConsumerError::OwnershipLost);
+                        }
+                        return Err(super::MaintenanceConsumerError::RevisionRefused(error));
+                    }
+                }
+            }
+        }
+        .await;
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(error) => return Err(super::rollback_maintenance_writer(tx, error).await),
+        };
+        self.finish(tx).await?;
+        Ok(outcome)
+    }
+
+    async fn gc_round(
+        &self,
+        workspace: Uuid,
+        keep: u32,
+    ) -> Result<u32, super::MaintenanceConsumerError> {
+        let mut tx = self.writer(Some(workspace)).await?;
+        let result = tx
+            .operation()
+            .gc_revision_automatic_rows(workspace, keep, REVISION_GC_DELETE_BATCH)
+            .await;
+        let deleted = match result {
+            Ok(deleted) => deleted,
+            Err(error) => return Err(super::rollback_maintenance_writer(tx, error.into()).await),
+        };
+        self.finish(tx).await?;
+        Ok(deleted)
+    }
+
+    async fn gc_workspace(
+        &self,
+        workspace: Uuid,
+        keep: u32,
+        rounds: &mut u32,
+    ) -> Result<(u32, bool), super::MaintenanceConsumerError> {
+        let mut deleted = 0;
+        while *rounds > 0 && !self.cancel.is_cancelled() {
+            let n = self.gc_round(workspace, keep).await?;
+            deleted += n;
+            *rounds -= 1;
+            if n < REVISION_GC_DELETE_BATCH as u32 {
+                return Ok((deleted, true));
+            }
+        }
+        Ok((deleted, false))
+    }
+
+    async fn gc(
+        &self,
+        keep: u32,
+        resume_after: Option<Uuid>,
+    ) -> Result<(u32, Option<Uuid>, bool), super::MaintenanceConsumerError> {
+        let mut deleted = 0;
+        let mut rounds = REVISION_GC_ROUNDS;
+        let mut workspace_after = resume_after;
+        let mut resume_workspace = resume_after;
+        while rounds > 0 && !self.cancel.is_cancelled() {
+            if let Some(workspace) = resume_workspace {
+                let (n, exhausted) = self.gc_workspace(workspace, keep, &mut rounds).await?;
+                deleted += n;
+                workspace_after = Some(workspace);
+                if exhausted {
+                    resume_workspace = None;
+                    continue;
+                }
+                if rounds == 0 {
+                    return Ok((deleted, Some(workspace), false));
+                }
+                resume_workspace = None;
+                continue;
+            }
+            let workspaces = self.workspaces(workspace_after, false).await?;
+            if workspaces.is_empty() {
+                return Ok((deleted, None, true));
+            }
+            let workspace_count = workspaces.len();
+            for workspace in workspaces {
+                if self.cancel.is_cancelled() || rounds == 0 {
+                    return Ok((deleted, workspace_after, false));
+                }
+                workspace_after = Some(workspace);
+                let (n, exhausted) = self.gc_workspace(workspace, keep, &mut rounds).await?;
+                deleted += n;
+                if !exhausted {
+                    return Ok((deleted, Some(workspace), false));
+                }
+            }
+            if workspace_count < WORKSPACE_SCAN_BATCH as usize {
+                return Ok((deleted, None, true));
+            }
+        }
+        Ok((deleted, workspace_after, false))
+    }
+}

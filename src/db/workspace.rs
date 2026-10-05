@@ -540,6 +540,231 @@ pub async fn list_members(
         .collect()))
 }
 
+/// Selected member read with the original actor/session/member threshold and
+/// live-user privacy. PG keeps its original public transaction/RLS contract.
+pub async fn list_members_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<Vec<MemberRow>, WorkspaceDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_members(pool, workspace_id, actor_user_id, session_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    tx.operation().set_tenant(workspace_id).await?;
+    let result = tx
+        .operation()
+        .authorized_workspace_members(workspace_id, actor_user_id, session_id)
+        .await?;
+    tx.rollback().await?;
+    Ok(result)
+}
+
+#[cfg(test)]
+mod selected_member_read_regressions {
+    use super::*;
+    use crate::db::notifications::family_runtime_fixture::Fixture;
+
+    #[tokio::test]
+    async fn selected_member_read_current_credential_role_live_users_and_order() {
+        let f = Fixture::new().await;
+        assert!(
+            matches!(
+                list_members_backend(&f.backend, f.workspace, f.user, f.credential)
+                    .await
+                    .unwrap(),
+                Err(WorkspaceDbError::Forbidden)
+            ),
+            "guest cannot enumerate member email identities"
+        );
+        sqlx::query("UPDATE memberships SET role='member',created_at=100 WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("UPDATE memberships SET created_at=200 WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.actor.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let rows = list_members_backend(&f.backend, f.workspace, f.user, f.credential)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.user_id).collect::<Vec<_>>(),
+            vec![f.user, f.actor]
+        );
+        assert_eq!(rows[1].email, "actor@notification.invalid");
+        assert_eq!(rows[1].role, WorkspaceRole::Owner);
+        assert_eq!(rows[0].role, WorkspaceRole::Member);
+        assert_eq!(rows[0].given_name, "한글🙂");
+        assert!(matches!(
+            list_members_backend(&f.backend, f.workspace, f.user, f.other_credential)
+                .await
+                .unwrap(),
+            Err(WorkspaceDbError::Forbidden)
+        ));
+        assert!(matches!(
+            list_members_backend(&f.backend, f.other_workspace, f.user, f.credential)
+                .await
+                .unwrap(),
+            Err(WorkspaceDbError::Forbidden)
+        ));
+        sqlx::query("UPDATE users SET deleted_at=1 WHERE id=?1")
+            .bind(f.actor.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let rows = list_members_backend(&f.backend, f.workspace, f.user, f.credential)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.user_id).collect::<Vec<_>>(),
+            vec![f.user],
+            "retained memberships cannot expose withdrawn user's identity"
+        );
+        for column in ["suspended_at", "deleted_at"] {
+            let sql = match column {
+                "suspended_at" => "UPDATE users SET suspended_at=1 WHERE id=?1",
+                _ => "UPDATE users SET deleted_at=1 WHERE id=?1",
+            };
+            sqlx::query(sql)
+                .bind(f.user.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            assert!(matches!(
+                list_members_backend(&f.backend, f.workspace, f.user, f.credential)
+                    .await
+                    .unwrap(),
+                Err(WorkspaceDbError::Forbidden)
+            ));
+            sqlx::query("UPDATE users SET suspended_at=NULL,deleted_at=NULL WHERE id=?1")
+                .bind(f.user.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(f.credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_members_backend(&f.backend, f.workspace, f.user, f.credential)
+                .await
+                .unwrap(),
+            Err(WorkspaceDbError::Forbidden)
+        ));
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(f.credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sessions SET expires_at=1 WHERE id=?1")
+            .bind(f.credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_members_backend(&f.backend, f.workspace, f.user, f.credential)
+                .await
+                .unwrap(),
+            Err(WorkspaceDbError::Forbidden)
+        ));
+        sqlx::query("UPDATE sessions SET expires_at=?2 WHERE id=?1")
+            .bind(f.credential.as_bytes().as_slice())
+            .bind(chrono::Utc::now().timestamp_micros() + 3_600_000_000i64)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let mut tx = f.backend.begin_read().await.unwrap();
+        tx.operation().set_tenant(f.workspace).await.unwrap();
+        let _ = tx
+            .operation()
+            .authorized_workspace_members(f.workspace, f.user, f.credential)
+            .await
+            .unwrap()
+            .unwrap();
+        let OperationTx::SqliteFamily(family) = tx.operation() else {
+            panic!("actual SQLite transaction required")
+        };
+        assert!(
+            family.require_system_context().is_err(),
+            "member read cannot broaden system scope"
+        );
+        tx.rollback().await.unwrap();
+        let mut wrong = f.backend.begin_read().await.unwrap();
+        wrong
+            .operation()
+            .set_tenant(f.other_workspace)
+            .await
+            .unwrap();
+        assert!(wrong
+            .operation()
+            .authorized_workspace_members(f.workspace, f.user, f.credential)
+            .await
+            .is_err());
+        wrong.rollback().await.unwrap();
+        sqlx::query("UPDATE workspaces SET deleted_at=1 WHERE id=?1")
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_members_backend(&f.backend, f.workspace, f.user, f.credential)
+                .await
+                .unwrap(),
+            Err(WorkspaceDbError::NotFound)
+        ));
+        f.backend.close().await.unwrap();
+        std::fs::remove_dir_all(f.dir).unwrap();
+    }
+}
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn authorized_workspace_members(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+    ) -> Result<Result<Vec<MemberRow>, WorkspaceDbError>, sqlx::Error> {
+        if !self.session_is_live(actor, credential).await?
+            || !self
+                .membership_role(workspace, actor, false)
+                .await?
+                .is_some_and(|role| role.at_least(WorkspaceRole::Member))
+        {
+            return Ok(Err(WorkspaceDbError::Forbidden));
+        }
+        if !self.workspace_is_live(workspace).await? {
+            return Ok(Err(WorkspaceDbError::NotFound));
+        }
+        let rows: Vec<(Uuid,String,String,Option<String>,String)> = match self {
+            Self::Postgres(tx) => sqlx::query_as("SELECT u.id,u.email,u.given_name,u.family_name,m.role FROM fvoci.memberships m INNER JOIN fvoci.users u ON u.id=m.user_id WHERE m.workspace_id=$1 AND u.deleted_at IS NULL ORDER BY m.created_at ASC,u.id ASC")
+                .bind(workspace).fetch_all(&mut ***tx).await?,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                tx.query("SELECT u.id,u.email,u.given_name,u.family_name,m.role FROM memberships m INNER JOIN users u ON u.id=m.user_id WHERE m.workspace_id=?1 AND u.deleted_at IS NULL ORDER BY m.created_at,u.id", &[Cell::uuid(workspace)]).await?
+                    .iter().map(|row|Ok((row.cell(0)?.id()?,row.cell(1)?.string()?,row.cell(2)?.string()?,row.cell(3)?.optional(Cell::string)?,row.cell(4)?.string()?))).collect::<Result<_,sqlx::Error>>()?
+            }
+        };
+        Ok(Ok(rows
+            .into_iter()
+            .filter_map(|(user_id, email, given_name, family_name, role)| {
+                WorkspaceRole::parse(&role).map(|role| MemberRow {
+                    user_id,
+                    email,
+                    given_name,
+                    family_name,
+                    role,
+                })
+            })
+            .collect()))
+    }
+}
+
 pub async fn get_workspace_meta(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1327,6 +1552,165 @@ pub async fn trash_workspace(
 pub struct WorkspacePurgeResult {
     pub purged: bool,
     pub storage_keys: Vec<String>,
+}
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn maintenance_deleted_workspaces(
+        &mut self,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Uuid>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE deleted_at IS NOT NULL AND (kind = 'personal' OR deleted_at <= $1) ORDER BY deleted_at ASC, id ASC")
+                .bind(before).fetch_all(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_system_context()?;
+                tx.query("SELECT id FROM workspaces WHERE deleted_at IS NOT NULL AND (kind='personal' OR deleted_at <= ?1) ORDER BY deleted_at, id", &[Cell::instant(before)?])
+                    .await?.iter().map(|row| row.cell(0)?.id()).collect()
+            }
+        }
+    }
+
+    /// Keep this actual writer alive across storage cleanup and final deletion.
+    /// None means the current deletion/grace predicate no longer authorizes it.
+    pub(crate) async fn maintenance_workspace_purge_keys(
+        &mut self,
+        workspace: Uuid,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<Vec<String>>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                let eligible: Option<bool> = sqlx::query_scalar("SELECT deleted_at IS NOT NULL AND (kind='personal' OR deleted_at <= $2) FROM fvoci.workspaces WHERE id=$1 FOR UPDATE")
+                    .bind(workspace).bind(before).fetch_optional(&mut ***tx).await?;
+                if eligible != Some(true) {
+                    return Ok(None);
+                }
+                sqlx::query_scalar("SELECT storage_key FROM fvoci.attachments WHERE workspace_id=$1 UNION ALL SELECT variants -> 'preview' ->> 'key' FROM fvoci.attachments WHERE workspace_id=$1 AND jsonb_typeof(variants -> 'preview' -> 'key')='string'")
+                    .bind(workspace).fetch_all(&mut ***tx).await.map(Some)
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_system_context()?;
+                tx.require_tenant(workspace)?;
+                let eligible = tx.query("SELECT 1 FROM workspaces WHERE id=?1 AND deleted_at IS NOT NULL AND (kind='personal' OR deleted_at <= ?2)", &[Cell::uuid(workspace), Cell::instant(before)?]).await?;
+                if eligible.is_empty() {
+                    return Ok(None);
+                }
+                tx.query("SELECT storage_key FROM attachments WHERE workspace_id=?1 UNION ALL SELECT json_extract(variants,'$.preview.key') FROM attachments WHERE workspace_id=?1 AND json_type(variants,'$.preview.key')='text'", &[Cell::uuid(workspace)])
+                    .await?.iter().map(|row| row.cell(0)?.string()).collect::<Result<Vec<_>,_>>().map(Some)
+            }
+        }
+    }
+
+    /// The caller established this current tombstone/grace on the same writer.
+    /// Never infer a blanket workspace exclusion for global physical keys.
+    pub(crate) async fn maintenance_workspace_purge_attachment_ids(
+        &mut self,
+        workspace: Uuid,
+    ) -> Result<Vec<Uuid>, sqlx::Error> {
+        let Self::SqliteFamily(tx) = self else {
+            return Err(sqlx::Error::Protocol(
+                "family doomed-row reader requires its actual family writer".into(),
+            ));
+        };
+        tx.require_writer()?;
+        tx.require_system_context()?;
+        tx.require_tenant(workspace)?;
+        tx.query(
+            "SELECT id FROM attachments WHERE workspace_id=?1 ORDER BY id",
+            &[Cell::uuid(workspace)],
+        )
+        .await?
+        .iter()
+        .map(|row| row.cell(0)?.id())
+        .collect()
+    }
+
+    pub(crate) async fn maintenance_purge_workspace(
+        &mut self,
+        workspace: Uuid,
+    ) -> Result<WorkspacePurgeResult, sqlx::Error> {
+        let keys: Vec<String>;
+        let deleted;
+        match self {
+            Self::Postgres(tx) => {
+                let eligible: Option<bool> = sqlx::query_scalar(
+                    "SELECT deleted_at IS NOT NULL FROM fvoci.workspaces WHERE id=$1 FOR UPDATE",
+                )
+                .bind(workspace)
+                .fetch_optional(&mut ***tx)
+                .await?;
+                if eligible != Some(true) {
+                    return Ok(WorkspacePurgeResult {
+                        purged: false,
+                        storage_keys: Vec::new(),
+                    });
+                }
+                keys = sqlx::query_scalar(
+                    "DELETE FROM fvoci.attachments WHERE workspace_id=$1 RETURNING storage_key",
+                )
+                .bind(workspace)
+                .fetch_all(&mut ***tx)
+                .await?;
+                sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id=$1")
+                    .bind(workspace)
+                    .execute(&mut ***tx)
+                    .await?;
+                deleted = sqlx::query(
+                    "DELETE FROM fvoci.workspaces WHERE id=$1 AND deleted_at IS NOT NULL",
+                )
+                .bind(workspace)
+                .execute(&mut ***tx)
+                .await?
+                .rows_affected();
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_system_context()?;
+                tx.require_tenant(workspace)?;
+                let eligible = tx
+                    .query(
+                        "SELECT 1 FROM workspaces WHERE id=?1 AND deleted_at IS NOT NULL",
+                        &[Cell::uuid(workspace)],
+                    )
+                    .await?;
+                if eligible.is_empty() {
+                    return Ok(WorkspacePurgeResult {
+                        purged: false,
+                        storage_keys: Vec::new(),
+                    });
+                }
+                keys = tx
+                    .query(
+                        "DELETE FROM attachments WHERE workspace_id=?1 RETURNING storage_key",
+                        &[Cell::uuid(workspace)],
+                    )
+                    .await?
+                    .iter()
+                    .map(|row| row.cell(0)?.string())
+                    .collect::<Result<Vec<_>, _>>()?;
+                tx.execute(
+                    "DELETE FROM memberships WHERE workspace_id=?1",
+                    &[Cell::uuid(workspace)],
+                )
+                .await?;
+                deleted = tx
+                    .execute(
+                        "DELETE FROM workspaces WHERE id=?1 AND deleted_at IS NOT NULL",
+                        &[Cell::uuid(workspace)],
+                    )
+                    .await?;
+            }
+        }
+        if deleted != 1 {
+            return Err(sqlx::Error::Protocol(
+                "workspaces.purge: locked workspace was not deleted".into(),
+            ));
+        }
+        Ok(WorkspacePurgeResult {
+            purged: true,
+            storage_keys: keys,
+        })
+    }
 }
 
 pub async fn list_deleted_workspace_ids(

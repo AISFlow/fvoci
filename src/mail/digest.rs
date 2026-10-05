@@ -155,6 +155,223 @@ pub async fn send_due_digests_backend(
     Ok(sent)
 }
 
+/// The selected maintenance consumer retains its actual writer through each
+/// recipient send. Ordinary/PG entrypoints above keep their existing contract.
+pub(crate) async fn send_due_digests_maintenance_backend(
+    backend: &Backend,
+    mailer: &Mailer,
+    now: DateTime<Utc>,
+    proof: &crate::jobs::FamilyMaintenanceProof,
+    policy: crate::jobs::FamilyMaintenanceLeasePolicy,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<u32, crate::jobs::MaintenanceConsumerError> {
+    use crate::jobs::{
+        commit_maintenance_writer, renew_maintenance_writer, rollback_maintenance_writer,
+        MaintenanceConsumerError, MaintenanceJobKey,
+    };
+    let now = DateTime::from_timestamp_micros(now.timestamp_micros())
+        .ok_or_else(|| sqlx::Error::Protocol("digest scheduler instant out of range".into()))?;
+    let before =
+        now - chrono::Duration::from_std(DIGEST_INTERVAL).unwrap_or(chrono::Duration::days(1));
+    let deadline = std::time::Instant::now() + DIGEST_TIME_BUDGET;
+    let mut streaks = SendStreaks::default();
+    let stop = |streaks: &SendStreaks| {
+        streaks.ended() || cancel.is_cancelled() || std::time::Instant::now() >= deadline
+    };
+    let mut after = None;
+    let mut sent = 0;
+    while !stop(&streaks) {
+        let mut tx = backend.begin_write().await?;
+        let result = async {
+            renew_maintenance_writer(&mut tx, proof, MaintenanceJobKey::Daily, policy, cancel)
+                .await?;
+            let previous = tx.operation().set_system().await?;
+            let due = tx
+                .operation()
+                .digest_claim_due(before, now, after, DIGEST_BATCH)
+                .await?;
+            tx.operation().restore_system(previous).await?;
+            Ok::<_, MaintenanceConsumerError>(due)
+        }
+        .await;
+        let due = match result {
+            Ok(due) => due,
+            Err(err) => return Err(rollback_maintenance_writer(tx, err).await),
+        };
+        // No claim batch or send is accepted on an unknown DB COMMIT, and no
+        // remote fresh observer is used to fabricate a durable batch receipt.
+        commit_maintenance_writer(tx, proof, MaintenanceJobKey::Daily, cancel).await?;
+        let Some(last) = due.iter().map(|(w, u, _)| (*w, *u)).max() else {
+            break;
+        };
+        after = Some(last);
+        let short = (due.len() as i64) < DIGEST_BATCH;
+        let mut pending = due.into_iter();
+        while let Some(claim) = pending.next() {
+            if stop(&streaks) {
+                // Cancellation does not skip owned unsent handback. Its proof
+                // must still be current; expired/new owners cannot restore it.
+                for claim in std::iter::once(claim).chain(pending) {
+                    restore_digest_maintenance(backend, proof, policy, claim, now).await?;
+                }
+                break;
+            }
+            match send_claimed_maintenance(backend, mailer, claim, now, proof, policy, cancel)
+                .await?
+            {
+                MaintenanceDigestSend::Sent => {
+                    sent += 1;
+                    streaks = SendStreaks::default();
+                }
+                MaintenanceDigestSend::Kept => {}
+                MaintenanceDigestSend::Failed(err) => {
+                    streaks.failed(&err);
+                    tracing::warn!(message=%format!("digest: recipient deferred to the next sweep ({err})"),"mail.send_failed");
+                }
+            }
+        }
+        if short {
+            break;
+        }
+    }
+    Ok(sent)
+}
+
+enum MaintenanceDigestSend {
+    Sent,
+    Kept,
+    Failed(DigestError),
+}
+
+async fn restore_digest_maintenance(
+    backend: &Backend,
+    proof: &crate::jobs::FamilyMaintenanceProof,
+    policy: crate::jobs::FamilyMaintenanceLeasePolicy,
+    claim: DigestClaim,
+    claimed_at: DateTime<Utc>,
+) -> Result<(), crate::jobs::MaintenanceConsumerError> {
+    use crate::jobs::{
+        commit_maintenance_writer, renew_maintenance_writer, rollback_maintenance_writer,
+        MaintenanceConsumerError, MaintenanceJobKey,
+    };
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let (workspace, user, previous_window) = claim;
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        renew_maintenance_writer(&mut tx, proof, MaintenanceJobKey::Daily, policy, &cancel).await?;
+        let previous = tx.operation().set_system().await?;
+        tx.operation().set_tenant(workspace).await?;
+        // The existing exact claimed_at guard never overwrites a newer claim.
+        tx.operation()
+            .digest_restore_claim(workspace, user, previous_window, claimed_at)
+            .await?;
+        tx.operation().restore_system(previous).await?;
+        Ok::<_, MaintenanceConsumerError>(())
+    }
+    .await;
+    if let Err(err) = result {
+        return Err(rollback_maintenance_writer(tx, err).await);
+    }
+    commit_maintenance_writer(tx, proof, MaintenanceJobKey::Daily, &cancel).await
+}
+
+async fn send_claimed_maintenance(
+    backend: &Backend,
+    mailer: &Mailer,
+    claim: DigestClaim,
+    claimed_at: DateTime<Utc>,
+    proof: &crate::jobs::FamilyMaintenanceProof,
+    policy: crate::jobs::FamilyMaintenanceLeasePolicy,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<MaintenanceDigestSend, crate::jobs::MaintenanceConsumerError> {
+    use crate::jobs::{
+        commit_maintenance_writer, renew_maintenance_writer, rollback_maintenance_writer,
+        MaintenanceConsumerError, MaintenanceJobKey,
+    };
+    let (workspace, user, previous_window) = claim;
+    let mut tx = backend.begin_write().await?;
+    let mut smtp_result = None;
+    let result = async {
+        renew_maintenance_writer(&mut tx, proof, MaintenanceJobKey::Daily, policy, cancel).await?;
+        let previous = tx.operation().set_system().await?;
+        tx.operation().set_tenant(workspace).await?;
+        let recipient = tx
+            .operation()
+            .digest_recipient(workspace, user, claimed_at)
+            .await?;
+        let count = if recipient.is_some() {
+            tx.operation()
+                .digest_unread_count(workspace, user, previous_window)
+                .await?
+        } else {
+            0
+        };
+        if let Some(email) = recipient.filter(|_| count > 0) {
+            if mailer.enabled() {
+                renew_maintenance_writer(&mut tx, proof, MaintenanceJobKey::Daily, policy, cancel)
+                    .await?;
+                // Await the actual SMTP settlement. A late cancel must not drop
+                // an in-flight send and then call its claim safely unsent.
+                smtp_result = Some(
+                    mailer
+                        .send(&email, DIGEST_SUBJECT, &digest_text(count))
+                        .await,
+                );
+                #[cfg(test)]
+                crate::jobs::maintenance_test_hooks::after_digest_send(proof).await;
+                if smtp_result.as_ref().is_some_and(|result| result.is_err()) {
+                    renew_maintenance_writer(
+                        &mut tx,
+                        proof,
+                        MaintenanceJobKey::Daily,
+                        policy,
+                        cancel,
+                    )
+                    .await?;
+                    tx.operation()
+                        .digest_restore_claim(workspace, user, previous_window, claimed_at)
+                        .await?;
+                }
+            } else {
+                renew_maintenance_writer(&mut tx, proof, MaintenanceJobKey::Daily, policy, cancel)
+                    .await?;
+                tx.operation()
+                    .digest_restore_claim(workspace, user, previous_window, claimed_at)
+                    .await?;
+            }
+        }
+        tx.operation().restore_system(previous).await?;
+        Ok::<_, MaintenanceConsumerError>(())
+    }
+    .await;
+    if let Err(err) = result {
+        let source = rollback_maintenance_writer(tx, err).await;
+        return Err(match smtp_result {
+            Some(smtp) => MaintenanceConsumerError::DigestFinishUnconfirmed {
+                source: Box::new(source),
+                smtp_error: smtp.err(),
+            },
+            None => source,
+        });
+    }
+    if let Err(source) =
+        commit_maintenance_writer(tx, proof, MaintenanceJobKey::Daily, cancel).await
+    {
+        return Err(match smtp_result {
+            Some(smtp) => MaintenanceConsumerError::DigestFinishUnconfirmed {
+                source: Box::new(source),
+                smtp_error: smtp.err(),
+            },
+            None => source,
+        });
+    }
+    Ok(match smtp_result {
+        Some(Ok(())) => MaintenanceDigestSend::Sent,
+        Some(Err(err)) => MaintenanceDigestSend::Failed(DigestError::Mail(err)),
+        None => MaintenanceDigestSend::Kept,
+    })
+}
+
 /// Failed sends counted towards `DIGEST_DOWN_STREAK` and
 /// `DIGEST_REFUSAL_STREAK` since the last sent digest or final refusal.
 #[derive(Default)]
@@ -333,6 +550,203 @@ mod backend_regressions {
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio_util::sync::CancellationToken;
+
+    async fn ready_current_maintenance(f: &crate::jobs::family_maintenance_fixture::Fixture) {
+        sqlx::query(
+            "INSERT INTO notification_prefs(workspace_id,user_id,mail_digest) VALUES(?1,?2,1)",
+        )
+        .bind(f.workspace.as_bytes().as_slice())
+        .bind(f.user.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO notifications(id,workspace_id,user_id,event_id,verb,payload) VALUES(?1,?2,?3,?4,'retained-fixture','{\"body\":\"private-never-sent\"}')")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice()).bind(Uuid::now_v7().as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn maintenance_digest_wrong_expired_proof_then_actual_healthy_send() {
+        use crate::db::maintenance_claim::FamilyMaintenanceClaimRequest;
+        use crate::jobs::family_maintenance_fixture::{
+            acquired, policy, Fixture as CurrentFixture,
+        };
+        use crate::jobs::{MaintenanceConsumerError, MaintenanceJobKey};
+        let f = CurrentFixture::new().await;
+        ready_current_maintenance(&f).await;
+        let sink = Sink::new(false).await;
+        let now = clock();
+        let wrong_request = FamilyMaintenanceClaimRequest::new(MaintenanceJobKey::Uploads);
+        let wrong = acquired(&wrong_request, &f.backend).await;
+        assert!(matches!(
+            send_due_digests_maintenance_backend(
+                &f.backend,
+                &sink.mailer,
+                now,
+                wrong.proof(),
+                policy(),
+                &CancellationToken::new()
+            )
+            .await,
+            Err(MaintenanceConsumerError::OwnershipLost)
+        ));
+        wrong.release().await.unwrap();
+        let request = FamilyMaintenanceClaimRequest::new(MaintenanceJobKey::Daily);
+        let old = acquired(&request, &f.backend).await;
+        sqlx::query("UPDATE maintenance_job_claims SET expires_at=0 WHERE job_key=1")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            send_due_digests_maintenance_backend(
+                &f.backend,
+                &sink.mailer,
+                now,
+                old.proof(),
+                policy(),
+                &CancellationToken::new()
+            )
+            .await,
+            Err(MaintenanceConsumerError::OwnershipLost)
+        ));
+        assert!(sink.mails.lock().unwrap().is_empty());
+        let untouched: Option<i64> =
+            sqlx::query_scalar("SELECT last_digest_at FROM notification_prefs")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(untouched, None);
+        let current = acquired(&request, &f.backend).await;
+        assert_eq!(
+            send_due_digests_maintenance_backend(
+                &f.backend,
+                &sink.mailer,
+                now,
+                current.proof(),
+                policy(),
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(sink.mails.lock().unwrap().len(), 1);
+        assert!(!sink.mails.lock().unwrap()[0].contains("private-never-sent"));
+        let at: Option<i64> = sqlx::query_scalar("SELECT last_digest_at FROM notification_prefs")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(at, Some(now.timestamp_micros()));
+        assert_eq!(
+            old.release().await.unwrap(),
+            crate::db::maintenance_claim::FamilyLeaseAction::Lost
+        );
+        current.release().await.unwrap();
+        sink.finish().await;
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn maintenance_digest_accepted_smtp_late_cancel_or_real_fk_commit_unknown_never_resends()
+    {
+        use crate::db::maintenance_claim::FamilyMaintenanceClaimRequest;
+        use crate::jobs::family_maintenance_fixture::{
+            acquired, policy, Fixture as CurrentFixture,
+        };
+        use crate::jobs::{maintenance_test_hooks, MaintenanceConsumerError, MaintenanceJobKey};
+        for late_cancel in [true, false] {
+            let f = CurrentFixture::new().await;
+            ready_current_maintenance(&f).await;
+            let sink = Sink::new(false).await;
+            let now = clock();
+            let request = FamilyMaintenanceClaimRequest::new(MaintenanceJobKey::Daily);
+            let owner = acquired(&request, &f.backend).await;
+            let proof = owner.proof().clone();
+            let (reached, proceed) = maintenance_test_hooks::arm_after_digest_send(&proof);
+            let backend = f.backend.clone();
+            let mailer = sink.mailer.clone();
+            let cancel = CancellationToken::new();
+            let child = cancel.clone();
+            let job_proof = proof.clone();
+            let mut job = tokio::spawn(async move {
+                send_due_digests_maintenance_backend(
+                    &backend,
+                    &mailer,
+                    now,
+                    &job_proof,
+                    policy(),
+                    &child,
+                )
+                .await
+            });
+            maintenance_test_hooks::wait_reached(reached, &mut job).await;
+            assert_eq!(
+                sink.mails.lock().unwrap().len(),
+                1,
+                "actual SMTP completed before finish fault/cancel"
+            );
+            if late_cancel {
+                cancel.cancel()
+            } else {
+                maintenance_test_hooks::arm_commit_fault(&proof)
+            }
+            proceed.send(()).unwrap();
+            let error = job
+                .await
+                .unwrap()
+                .expect_err("SMTP settlement cannot fabricate confirmed DB finish");
+            let MaintenanceConsumerError::DigestFinishUnconfirmed { source, smtp_error } = error
+            else {
+                panic!("actual SMTP-settled/database-unconfirmed outcome required")
+            };
+            assert!(
+                smtp_error.is_none(),
+                "real sink acknowledged SMTP acceptance"
+            );
+            if late_cancel {
+                assert!(matches!(*source, MaintenanceConsumerError::Cancelled));
+            } else {
+                let MaintenanceConsumerError::CommitUnknown(unknown) = *source else {
+                    panic!("real FK COMMIT rejection required")
+                };
+                let sqlx::Error::Database(database) = unknown.source.source else {
+                    panic!("actual SQLite database error required")
+                };
+                assert_eq!(database.code().as_deref(), Some("787"));
+            }
+            let at: Option<i64> =
+                sqlx::query_scalar("SELECT last_digest_at FROM notification_prefs")
+                    .fetch_one(&f.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                at,
+                Some(now.timestamp_micros()),
+                "confirmed pre-send window remains; never restore possibly-sent mail"
+            );
+            assert_eq!(
+                send_due_digests_maintenance_backend(
+                    &f.backend,
+                    &sink.mailer,
+                    now,
+                    owner.proof(),
+                    policy(),
+                    &CancellationToken::new()
+                )
+                .await
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                sink.mails.lock().unwrap().len(),
+                1,
+                "no immediate fresh observe/restore/resend after uncertain finish"
+            );
+            owner.release().await.unwrap();
+            sink.finish().await;
+            f.finish().await;
+        }
+    }
 
     fn clock() -> DateTime<Utc> {
         DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap()

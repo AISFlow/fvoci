@@ -456,8 +456,18 @@ pub async fn purge_settled_deliveries(pool: &PgPool, days: i32) -> Result<u64, s
 pub async fn purge_expired_install_states(pool: &PgPool) -> Result<u64, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_system(&mut tx).await?;
-    let deleted = sqlx::query(
-        r#"
+    let deleted = OperationTx::Postgres(&mut tx)
+        .maintenance_install_state_gc()
+        .await?;
+    tx.commit().await?;
+    Ok(deleted)
+}
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn maintenance_install_state_gc(&mut self) -> Result<u64, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => Ok(sqlx::query(
+                r#"
         DELETE FROM fvoci.github_install_states
         WHERE nonce_hash IN (
             SELECT nonce_hash FROM fvoci.github_install_states
@@ -466,21 +476,42 @@ pub async fn purge_expired_install_states(pool: &PgPool) -> Result<u64, sqlx::Er
             LIMIT $1
         )
         "#,
-    )
-    .bind(INTEGRATION_GC_BATCH)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    tx.commit().await?;
-    Ok(deleted)
+            )
+            .bind(INTEGRATION_GC_BATCH)
+            .execute(&mut ***tx)
+            .await?
+            .rows_affected()),
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_system_context()?;
+                tx.execute(
+                    "DELETE FROM github_install_states WHERE nonce_hash IN (SELECT nonce_hash FROM github_install_states WHERE expires_at <= (unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) ORDER BY expires_at LIMIT ?1)",
+                    &[Cell::Integer(INTEGRATION_GC_BATCH)],
+                ).await
+            }
+        }
+    }
 }
 
 /// Plain `DELETE … IN` for the same reason as the install states.
 pub async fn purge_github_deliveries(pool: &PgPool, days: i32) -> Result<u64, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_system(&mut tx).await?;
-    let deleted = sqlx::query(
-        r#"
+    let deleted = OperationTx::Postgres(&mut tx)
+        .maintenance_github_delivery_gc(days)
+        .await?;
+    tx.commit().await?;
+    Ok(deleted)
+}
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn maintenance_github_delivery_gc(
+        &mut self,
+        days: i32,
+    ) -> Result<u64, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => Ok(sqlx::query(
+                r#"
         DELETE FROM fvoci.github_deliveries
         WHERE delivery_id IN (
             SELECT delivery_id FROM fvoci.github_deliveries
@@ -489,14 +520,22 @@ pub async fn purge_github_deliveries(pool: &PgPool, days: i32) -> Result<u64, sq
             LIMIT $2
         )
         "#,
-    )
-    .bind(days)
-    .bind(INTEGRATION_GC_BATCH)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    tx.commit().await?;
-    Ok(deleted)
+            )
+            .bind(days)
+            .bind(INTEGRATION_GC_BATCH)
+            .execute(&mut ***tx)
+            .await?
+            .rows_affected()),
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_system_context()?;
+                tx.execute(
+                    "DELETE FROM github_deliveries WHERE delivery_id IN (SELECT delivery_id FROM github_deliveries WHERE processed_at < (unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)-?1 ORDER BY processed_at LIMIT ?2)",
+                    &[Cell::Integer(i64::from(days)*86_400_000_000), Cell::Integer(INTEGRATION_GC_BATCH)],
+                ).await
+            }
+        }
+    }
 }
 
 /// Internal receipt for the actual sender, separate from the preserved PG DTO.
