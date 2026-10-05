@@ -30,6 +30,9 @@ pub mod legal;
 pub mod lookup;
 pub mod magic;
 pub mod maintenance_claim;
+#[cfg(all(test, feature = "db-tests"))]
+#[path = "../../tests/support/libsql_finish_fixture.rs"]
+pub(crate) mod libsql_finish_fixture;
 pub(crate) mod mail_digest;
 pub mod mfa;
 pub mod migrate;
