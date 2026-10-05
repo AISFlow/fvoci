@@ -347,10 +347,23 @@ async fn postgres_catalog_dump() {
         let value: Value = sqlx::query_scalar(
             "SELECT jsonb_build_object(
                 'role', $1::text,
-                'table_privileges', (SELECT coalesce(jsonb_agg(jsonb_build_object('table', table_name, 'privilege', privilege_type) ORDER BY table_name, privilege_type), '[]')
-                    FROM information_schema.role_table_grants WHERE grantee = $1 AND table_schema = 'fvoci'),
-                'column_privileges', (SELECT coalesce(jsonb_agg(jsonb_build_object('table', table_name, 'column', column_name, 'privilege', privilege_type) ORDER BY table_name, column_name, privilege_type), '[]')
-                    FROM information_schema.column_privileges WHERE grantee = $1 AND table_schema = 'fvoci'),
+                'attributes', (SELECT jsonb_build_object('exists', true, 'superuser', rolsuper, 'inherit', rolinherit,
+                        'createrole', rolcreaterole, 'createdb', rolcreatedb, 'login', rolcanlogin,
+                        'replication', rolreplication, 'bypassrls', rolbypassrls,
+                        'member_of', (SELECT coalesce(array_agg(g.rolname ORDER BY g.rolname), '{}')
+                            FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid WHERE m.member = r.oid))
+                    FROM pg_roles r WHERE r.rolname = $1),
+                'schema_privileges', (SELECT coalesce(jsonb_object_agg(nspname, jsonb_build_object(
+                        'usage', has_schema_privilege($1, oid, 'USAGE'), 'create', has_schema_privilege($1, oid, 'CREATE'))), '{}')
+                    FROM pg_namespace WHERE nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema'),
+                'table_privileges', (SELECT coalesce(jsonb_agg(jsonb_build_object('schema', table_schema, 'table', table_name,
+                        'privilege', privilege_type, 'grantor', grantor, 'grantable', is_grantable)
+                    ORDER BY table_schema, table_name, privilege_type, grantor), '[]')
+                    FROM information_schema.role_table_grants WHERE grantee = $1),
+                'column_privileges', (SELECT coalesce(jsonb_agg(jsonb_build_object('schema', table_schema, 'table', table_name,
+                        'column', column_name, 'privilege', privilege_type, 'grantor', grantor, 'grantable', is_grantable)
+                    ORDER BY table_schema, table_name, column_name, privilege_type, grantor), '[]')
+                    FROM information_schema.column_privileges WHERE grantee = $1),
                 'routine_privileges', (SELECT coalesce(jsonb_agg(jsonb_build_object('routine', p.oid::regprocedure::text, 'execute', has_function_privilege($1, p.oid, 'EXECUTE')) ORDER BY p.oid::regprocedure::text), '[]')
                     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
                     WHERE n.nspname = 'fvoci' OR (n.nspname = 'public' AND p.proname LIKE 'app\\_%')),
