@@ -179,9 +179,9 @@ fn steps_of(registry: &'static [(&'static str, &'static str, &'static str)]) -> 
         .enumerate()
         .map(|(index, (name, sql, sha256))| CompiledStep {
             version: (index + 1) as i32,
-            name,
-            sql,
-            sha256,
+            name: *name,
+            sql: *sql,
+            sha256: *sha256,
         })
         .collect()
 }
