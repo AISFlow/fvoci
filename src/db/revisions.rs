@@ -2646,7 +2646,8 @@ mod selected_revision_preflight_finish_tests {
                 Err(writer
                     .query("SELECT * FROM revision_finish_missing_table", &[])
                     .await
-                    .unwrap_err())
+                    .err()
+                    .expect("actual missing-table query must fail"))
             } else {
                 let result = tx
                     .operation()
