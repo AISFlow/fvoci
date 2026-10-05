@@ -34,6 +34,32 @@ def functions(path, names):
     return scope
 
 
+class OnSpecPin(unittest.TestCase):
+    spec = 'apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'
+
+    def guard(self, digest):
+        # Execute the actual admission assertion, without running its resource loader.
+        tree = ast.parse((HERE / 'current_binding.py').read_text())
+        loader = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'load_current')
+        guards = [node for node in loader.body if isinstance(node, ast.Assert) and self.spec in ast.unparse(node.test)]
+        self.assertEqual(len(guards), 1)
+        exec(compile(ast.Module(body=guards, type_ignores=[]), 'current_binding.py', 'exec'),
+             {'before': {'tracked': {self.spec: digest}}})
+
+    def test_declared_on_pin_accepts_actual_fixed_git_spec(self):
+        source = subprocess.check_output(['git', 'show', 'HEAD:' + self.spec], cwd=ROOT)
+        self.assertEqual(source, (ROOT / self.spec).read_bytes())
+        self.guard(hashlib.sha256(source).hexdigest())
+
+    def test_actual_on_guard_refuses_stale_and_mutated_spec(self):
+        stale = subprocess.check_output(['git', 'show', '086129e0f95a00cf93703ae117bd102fd9944a0e^:' + self.spec], cwd=ROOT)
+        current = (ROOT / self.spec).read_bytes()
+        self.assertNotEqual(stale, current)
+        for source in (stale, current + b'\n// unapproved spec mutation\n'):
+            with self.subTest(digest=hashlib.sha256(source).hexdigest()), self.assertRaises(AssertionError):
+                self.guard(hashlib.sha256(source).hexdigest())
+
+
 class OffReports(unittest.TestCase):
     def setUp(self):
         self.names = re.findall(r'  test\("([^"\n]+)"', (ROOT / 'apps/web/e2e-pending/workspace-off-selected-backend.spec.ts').read_text())
