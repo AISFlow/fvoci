@@ -16,7 +16,7 @@ COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
 COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
 ENV CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential pkg-config curl ca-certificates \
+ && apt-get install -y --no-install-recommends build-essential pkg-config git curl ca-certificates \
  && rustc -vV | grep -Fx 'release: 1.98.1' \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
