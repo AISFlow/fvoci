@@ -917,10 +917,25 @@ class WorkflowRegistryTest(unittest.TestCase):
             "name": "Native server build and policy tests (ARM64)",
             "run": "cargo build --locked --offline --bins\ncargo test --locked --offline --lib\n",
         })
-        # Preserve the existing build inputs and cache qualification verbatim.
+        # Preserve every build input/cache step, with only the exact ARM mirror
+        # override needed for the stalled Azure download. Signing stays intact.
         pg_steps = jobs["postgres"]["steps"]
-        expected_setup = [step for step in pg_steps
+        expected_setup = [dict(step) for step in pg_steps
                           if step.get("name") != "PostgreSQL service major matches matrix"][:6]
+        mirror_setup = (
+            "# This runner's Azure mirror stalled the pinned ARM libclang download.\n"
+            "# Change only its mirror list; keep the Ubuntu archive Signed-By policy.\n"
+            ". /etc/os-release\n"
+            '[[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]\n'
+            '[[ "$(dpkg --print-architecture)" == arm64 ]]\n'
+            "test -f /etc/apt/apt-mirrors.txt\n"
+            "grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources\n"
+            "grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources\n"
+            "test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
+            "printf '%s\\n' 'https://ports.ubuntu.com/ubuntu-ports/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null\n"
+        )
+        prepare = next(step for step in expected_setup if step.get("id") == "sqlite")
+        prepare["run"] = prepare["run"].replace("set -euo pipefail\n", "set -euo pipefail\n" + mirror_setup, 1)
         self.assertEqual(steps[:-1], expected_setup)
         cache = next(step for step in steps if step.get("name") == "Restore server build outputs")
         self.assertEqual(cache["with"]["path"], "target")
