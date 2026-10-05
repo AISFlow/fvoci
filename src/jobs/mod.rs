@@ -54,6 +54,8 @@ pub use revisions::{
     WORKSPACE_SCAN_BATCH,
 };
 pub use tokens::{run_ics_token_gc, run_magic_token_gc, TOKEN_GC_BATCH};
+#[cfg(test)]
+pub(crate) use uploads::run_stale_upload_gc_claimed_backend;
 pub use uploads::{
     run_stale_upload_gc, run_stale_upload_gc_backend, StaleUploadGcStats, UPLOAD_GC_BATCH,
 };
