@@ -107,7 +107,7 @@ struct DrainOutcome {
 struct StartupTransferUnknown {
     #[source]
     original: sqlx::Error,
-    close: Result<(), String>,
+    close: Result<(), sqlx::Error>,
 }
 
 async fn read_startup_attachment_transfer(

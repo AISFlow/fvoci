@@ -4084,8 +4084,8 @@ impl OperationTx<'_, '_> {
         let changed = self
             .write_native_body_projection(t, workspace_id, document_id, &prepared)
             .await?;
-        if changed {
-            if !self
+        if changed
+            && !self
                 .append_native_body_updated_owned(
                     t,
                     workspace_id,
@@ -4096,9 +4096,8 @@ impl OperationTx<'_, '_> {
                     },
                 )
                 .await?
-            {
-                return Ok(Err(CollabDbError::StaleWriter));
-            }
+        {
+            return Ok(Err(CollabDbError::StaleWriter));
         }
         if !self
             .current_native_write_scope(

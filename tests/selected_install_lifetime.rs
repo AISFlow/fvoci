@@ -10,6 +10,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use futures_util::FutureExt;
 use fvoci_server::db::{backend::Backend, migrate, pool};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -88,10 +89,24 @@ impl Inputs {
         assert!(env.contains_key("FVOCI_PUBLIC_ORIGIN"));
         Self { root, migrate, env }
     }
-    fn run_directory(&self, label: &str) -> PathBuf {
-        let run = self.root.join(format!("{label}-{}", Uuid::now_v7()));
+    fn run_directory(&self, label: &str) -> OwnedRun {
+        let id = Uuid::now_v7();
+        let receipts = self.root.join(format!("receipts-{label}-{id}"));
+        std::fs::create_dir(&receipts).unwrap();
+        std::fs::set_permissions(&receipts, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let run = self.root.join(format!("tmp-{label}-{id}"));
         std::fs::create_dir(&run).unwrap();
-        let directory = std::fs::File::open(&run).unwrap();
+        // Own the unique temporary root before the first subsequent fallible
+        // setup step. Durable receipts never live in the disposable subtree.
+        let mut run = OwnedRun {
+            path: run,
+            receipts,
+            inode: None,
+            finalized: false,
+        };
+        let meta = std::fs::symlink_metadata(&run.path).unwrap();
+        run.inode = Some((meta.dev(), meta.ino()));
+        let directory = std::fs::File::open(&run.path).unwrap();
         std::os::unix::fs::fchown(&directory, Some(0), Some(1000)).unwrap();
         directory
             .set_permissions(std::fs::Permissions::from_mode(0o710))
@@ -118,40 +133,123 @@ impl Inputs {
     }
 }
 
+struct OwnedRun {
+    path: PathBuf,
+    receipts: PathBuf,
+    inode: Option<(u64, u64)>,
+    finalized: bool,
+}
+impl OwnedRun {
+    fn join(&self, path: impl AsRef<Path>) -> PathBuf {
+        self.path.join(path)
+    }
+    fn report(&self, path: impl AsRef<Path>) -> PathBuf {
+        self.receipts.join(path)
+    }
+    fn cleanup(&mut self, original: &str) -> std::io::Result<()> {
+        if self.finalized {
+            return Ok(());
+        }
+        self.finalized = true;
+        let result = (|| {
+            let meta = std::fs::symlink_metadata(&self.path)?;
+            if !meta.is_dir() || Some((meta.dev(), meta.ino())) != self.inode {
+                return Err(std::io::Error::other(
+                    "owned temporary root inode changed; cleanup refused",
+                ));
+            }
+            // Maintained std removal does not follow child symlinks. Never
+            // recursively delete the supplied run root, inputs or receipts.
+            std::fs::remove_dir_all(&self.path)
+        })();
+        let receipt = json!({
+            "temporaryRoot":self.path,"originalFailure":original,
+            "temporaryRootRemoved":result.is_ok(),
+            "cleanupFailure":result.as_ref().err().map(ToString::to_string),
+            "retainedPath":if result.is_err() { Some(&self.path) } else { None },
+            "durableReceipts":self.receipts,
+        });
+        let written = std::fs::write(self.report("temporary-cleanup.json"), receipt.to_string());
+        if let Err(error) = &written {
+            eprintln!("owned fixture cleanup receipt failed: {error}; original={original}; temporary={}; cleanup={result:?}; durable={}", self.path.display(), self.receipts.display());
+        }
+        match (result, written) {
+            (Err(cleanup), _) => Err(cleanup),
+            (Ok(()), written) => written,
+        }
+    }
+    fn finish(mut self) -> std::io::Result<()> {
+        self.cleanup("none: healthy body completed")
+    }
+}
+impl Drop for OwnedRun {
+    fn drop(&mut self) {
+        if !self.finalized {
+            // Declared before every process/gate: lexical unwinding reaps the
+            // owned child and closes gate FDs before this finalizer runs.
+            let original = if std::thread::panicking() {
+                "original body/setup panic; retained by test runner"
+            } else {
+                "early return before healthy finalizer"
+            };
+            if let Err(error) = self.cleanup(original) {
+                eprintln!("owned fixture temporary cleanup failed: {error}; original={original}; retained={}", self.path.display());
+            }
+        }
+    }
+}
+
 struct OwnedProcess {
     child: Child,
     logs: Arc<Mutex<Vec<String>>>,
     reader: Option<std::thread::JoinHandle<()>>,
     status: Option<ExitStatus>,
     report: PathBuf,
+    reader_started: bool,
 }
 impl OwnedProcess {
     fn start(command: &mut Command, report: PathBuf) -> Self {
-        let mut child = command.spawn().unwrap();
-        let stderr = child.stderr.take().unwrap();
+        let mut process = Self::spawn_owned(command, report);
+        process.observe_stderr(None);
+        process
+    }
+    fn spawn_owned(command: &mut Command, report: PathBuf) -> Self {
+        let child = command.spawn().unwrap();
         let logs = Arc::new(Mutex::new(Vec::new()));
-        let read_logs = logs.clone();
-        let reader = std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                match line {
-                    Ok(line) => read_logs.lock().unwrap().push(line),
-                    Err(error) => {
-                        read_logs
-                            .lock()
-                            .unwrap()
-                            .push(format!("owned stderr read failed: {error}"));
-                        break;
-                    }
-                }
-            }
-        });
         Self {
             child,
             logs,
-            reader: Some(reader),
+            reader: None,
             status: None,
             report,
+            reader_started: false,
         }
+    }
+    fn observe_stderr(&mut self, forced_setup_failure: Option<&str>) {
+        if let Some(original) = forced_setup_failure {
+            panic!("{original}");
+        }
+        let stderr = self.child.stderr.take().unwrap();
+        let read_logs = self.logs.clone();
+        let reader = std::thread::Builder::new()
+            .name("selected-install-stderr".into())
+            .spawn(move || {
+                for line in BufReader::new(stderr).lines() {
+                    match line {
+                        Ok(line) => read_logs.lock().unwrap().push(line),
+                        Err(error) => {
+                            read_logs
+                                .lock()
+                                .unwrap()
+                                .push(format!("owned stderr read failed: {error}"));
+                            break;
+                        }
+                    }
+                }
+            })
+            .expect("owned stderr reader setup");
+        self.reader = Some(reader);
+        self.reader_started = true;
     }
     fn text(&self) -> String {
         self.logs.lock().unwrap().join("\n")
@@ -209,7 +307,7 @@ impl OwnedProcess {
         }
     }
     fn receipt(&self, kind: &str) {
-        std::fs::write(&self.report, json!({"pid":self.child.id(),"kind":kind,"status":self.status.map(|status| status.to_string()),"stderr":self.text(),"readerJoined":self.reader.is_none()}).to_string()).unwrap();
+        std::fs::write(&self.report, json!({"pid":self.child.id(),"kind":kind,"status":self.status.map(|status| status.to_string()),"stderr":self.text(),"readerStarted":self.reader_started,"readerJoined":self.reader_started && self.reader.is_none()}).to_string()).unwrap();
     }
 }
 impl Drop for OwnedProcess {
@@ -222,7 +320,7 @@ impl Drop for OwnedProcess {
             if let Some(reader) = self.reader.take() {
                 let _ = reader.join();
             }
-            let _ = std::fs::write(&self.report, json!({"pid":self.child.id(),"kind":"exceptional-force-reap","status":self.status.map(|status| status.to_string()),"stderr":self.text(),"readerJoined":true}).to_string());
+            let _ = std::fs::write(&self.report, json!({"pid":self.child.id(),"kind":"exceptional-force-reap","status":self.status.map(|status| status.to_string()),"stderr":self.text(),"readerStarted":self.reader_started,"readerJoined":self.reader_started && self.reader.is_none()}).to_string());
         }
     }
 }
@@ -250,7 +348,7 @@ async fn selected_install_fresh_and_existing_service_uid() {
     for (attempt, needed) in [("fresh", true), ("existing", false)] {
         let mut process = OwnedProcess::start(
             &mut inputs.command(&db),
-            run.join(format!("{attempt}-process.json")),
+            run.report(format!("{attempt}-process.json")),
         );
         let url = ready(&mut process).await;
         let status =
@@ -311,21 +409,18 @@ async fn selected_install_fresh_and_existing_service_uid() {
             process.text()
         );
         let pool = pool::connect_sqlite_app(&db, 1).await.unwrap();
-        migrate::assert_sqlite_schema_current(&Backend::Sqlite(pool.clone()))
-            .await
-            .unwrap();
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM users WHERE email='install@fixture.invalid'"
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap(),
-            1
-        );
+        let schema = migrate::assert_sqlite_schema_current(&Backend::Sqlite(pool.clone())).await;
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM users WHERE email='install@fixture.invalid'",
+        )
+        .fetch_one(&pool)
+        .await;
         pool.close().await;
-        std::fs::write(run.join(format!("{attempt}-uid-readback.json")), json!({"uid":1000,"gid":1000,"inode":actual_inode,"setupNeeded":needed,"preservedSetupUserCount":1,"databaseMode":"0600","parentMode":"0700","serviceExit":0}).to_string()).unwrap();
+        schema.unwrap();
+        assert_eq!(count.unwrap(), 1);
+        std::fs::write(run.report(format!("{attempt}-uid-readback.json")), json!({"uid":1000,"gid":1000,"inode":actual_inode,"setupNeeded":needed,"preservedSetupUserCount":1,"databaseMode":"0600","parentMode":"0700","serviceExit":0}).to_string()).unwrap();
     }
+    run.finish().unwrap();
 }
 
 #[tokio::test]
@@ -343,7 +438,7 @@ async fn selected_install_sigterm_waits_actual_commit_and_close() {
         command
             .env("FVOCI_TEST_SQLITE_GATE_SOCKET", &socket)
             .env("FVOCI_TEST_SQLITE_GATE_PHASE", phase);
-        let mut process = OwnedProcess::start(&mut command, run.join("signal-process.json"));
+        let mut process = OwnedProcess::start(&mut command, run.report("signal-process.json"));
         let (mut gate, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
             .await
             .unwrap()
@@ -390,7 +485,7 @@ async fn selected_install_sigterm_waits_actual_commit_and_close() {
         // Restart uses actual current migration receipts and schema; a first
         // COMMIT may have completed despite cancellation. No reset is allowed.
         let mut restart =
-            OwnedProcess::start(&mut inputs.command(&db), run.join("restart-process.json"));
+            OwnedProcess::start(&mut inputs.command(&db), run.report("restart-process.json"));
         let url = ready(&mut restart).await;
         let response = reqwest::Client::builder()
             .no_proxy()
@@ -407,7 +502,12 @@ async fn selected_install_sigterm_waits_actual_commit_and_close() {
         );
         restart.signal();
         assert!(restart.finish().await.success());
-        std::fs::write(run.join("signal-gate-readback.json"), json!({"phase":phase,"signalExit":143,"heldBeyondOriginalFiveSecondShutdown":true,"originalDrain":"Closed","serverExecDuringSignal":false,"restartExit":0,"restartSetupNeeded":true}).to_string()).unwrap();
+        std::fs::write(run.report("signal-gate-readback.json"), json!({"phase":phase,"signalExit":143,"heldBeyondOriginalFiveSecondShutdown":true,"originalDrain":"Closed","serverExecDuringSignal":false,"restartExit":0,"restartSetupNeeded":true}).to_string()).unwrap();
+        drop(restart);
+        drop(process);
+        drop(gate);
+        drop(listener);
+        run.finish().unwrap();
     }
 }
 
@@ -439,7 +539,7 @@ async fn selected_install_refuses_alias_foreign_and_unrelated_paths() {
         let original = std::fs::symlink_metadata(&retained).unwrap();
         let foreign_before = (kind == "foreign").then(|| std::fs::metadata(&db).unwrap());
         let mut process =
-            OwnedProcess::start(&mut inputs.command(&db), run.join("refused-process.json"));
+            OwnedProcess::start(&mut inputs.command(&db), run.report("refused-process.json"));
         assert_eq!(process.finish().await.code(), Some(1));
         assert!(!process.text().contains("fvoci-server listening"));
         let refusal = match kind {
@@ -496,6 +596,8 @@ async fn selected_install_refuses_alias_foreign_and_unrelated_paths() {
             assert!(!db.exists());
             assert_eq!(std::fs::read(run.join("data/keep.txt")).unwrap(), b"keep");
         }
+        drop(process);
+        run.finish().unwrap();
     }
     // Replace the literal parent only while the original real SQLite COMMIT
     // is paused. Its owned migration may settle; handoff must still refuse
@@ -523,7 +625,7 @@ async fn selected_install_refuses_alias_foreign_and_unrelated_paths() {
     command
         .env("FVOCI_TEST_SQLITE_GATE_SOCKET", &socket)
         .env("FVOCI_TEST_SQLITE_GATE_PHASE", "commit");
-    let mut process = OwnedProcess::start(&mut command, run.join("replacement-process.json"));
+    let mut process = OwnedProcess::start(&mut command, run.report("replacement-process.json"));
     let (mut gate, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
         .await
         .unwrap()
@@ -564,4 +666,203 @@ async fn selected_install_refuses_alias_foreign_and_unrelated_paths() {
         b"replacement must not receive root ownership changes or writes"
     );
     assert!(run.join("original-data/app.sqlite").is_file());
+    drop(process);
+    drop(gate);
+    drop(listener);
+    run.finish().unwrap();
+}
+
+#[tokio::test]
+async fn selected_install_forced_failure_cleans_owned_child_gate_and_temporary_tree() {
+    use std::os::unix::fs::symlink;
+    let inputs = Inputs::load();
+    for phase in ["setup", "body", "healthy"] {
+        let mut run = inputs.run_directory(phase);
+        let temporary = run.path.clone();
+        let receipts = run.receipts.clone();
+        let sentinel = run.report("outside-sentinel.txt");
+        std::fs::write(
+            &sentinel,
+            b"durable outside target must survive temporary cleanup",
+        )
+        .unwrap();
+        std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let sentinel_before = std::fs::metadata(&sentinel).unwrap();
+        symlink(&sentinel, run.join("outside-link")).unwrap();
+        let db = run.join("data/app.sqlite");
+        let gates = run.join("gates");
+        std::fs::create_dir(&gates).unwrap();
+        std::fs::set_permissions(&gates, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = gates.join("gate.sock");
+        let mut owned_pid = None;
+        let mut owned_listener = None;
+        let original = format!("forced {phase} failure after actual owned child and COMMIT gate");
+        // The run guard lives outside this caught future. All its child/gate
+        // locals retire before the explicit cleanup receives the original
+        // panic payload; unexpected failures cannot be mistaken for this control.
+        let body = std::panic::AssertUnwindSafe(async {
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let mut command = inputs.command(&db);
+            command
+                .env("FVOCI_TEST_SQLITE_GATE_SOCKET", &socket)
+                .env("FVOCI_TEST_SQLITE_GATE_PHASE", "commit");
+            let mut process = if phase == "setup" {
+                OwnedProcess::spawn_owned(&mut command, run.report("forced-process.json"))
+            } else {
+                OwnedProcess::start(&mut command, run.report("forced-process.json"))
+            };
+            owned_pid = Some(process.child.id());
+            let (mut gate, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut marker = [0];
+            tokio::time::timeout(Duration::from_secs(10), gate.read_exact(&mut marker))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(marker, *b"C");
+            if phase == "setup" {
+                // The actual child is already owned, even if stderr-reader
+                // setup fails before its reader thread exists.
+                process.observe_stderr(Some(&original));
+            } else if phase == "body" {
+                panic!("{original}");
+            }
+            gate.write_all(b"R").await.unwrap();
+            let url = ready(&mut process).await;
+            owned_listener = Some(
+                url.strip_prefix("http://")
+                    .unwrap()
+                    .parse::<std::net::SocketAddr>()
+                    .unwrap(),
+            );
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .get(format!("{url}/api/v1/setup"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(
+                response.json::<serde_json::Value>().await.unwrap()["needed"],
+                true
+            );
+            process.signal();
+            assert!(process.finish().await.success());
+            std::fs::write(
+                run.report("healthy-readback.json"),
+                json!({"actualSetupNeeded":true,"ownedServiceExit":0}).to_string(),
+            )
+            .unwrap();
+        })
+        .catch_unwind()
+        .await;
+        let primary = match body {
+            Ok(()) => {
+                assert_eq!(phase, "healthy", "forced failure did not happen");
+                "none: healthy body completed".to_owned()
+            }
+            Err(payload) => {
+                let caught = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| {
+                        payload
+                            .downcast_ref::<&str>()
+                            .map(|value| (*value).to_owned())
+                    })
+                    .expect("original panic payload");
+                if phase == "healthy" || caught != original {
+                    let _ = run.cleanup(&caught);
+                    std::panic::resume_unwind(payload);
+                }
+                std::fs::write(
+                    run.report("original-failure.json"),
+                    json!({"original":caught,"expectedControl":true}).to_string(),
+                )
+                .unwrap();
+                caught
+            }
+        };
+        if let Err(cleanup) = run.cleanup(&primary) {
+            panic!(
+                "{primary}; owned temporary cleanup failed: {cleanup}; retained {}",
+                temporary.display()
+            );
+        }
+        let pid = owned_pid.expect("actual child was spawned");
+        assert!(
+            !PathBuf::from(format!("/proc/{pid}")).exists(),
+            "owned child remains after reap"
+        );
+        assert!(
+            !temporary.exists(),
+            "owned temporary socket/DB/foreign-link subtree remains"
+        );
+        assert!(!socket.exists());
+        assert!(tokio::net::UnixStream::connect(&socket).await.is_err());
+        assert!(
+            !std::fs::read_to_string("/proc/net/unix")
+                .unwrap()
+                .contains(socket.to_str().unwrap()),
+            "original owned Unix gate listener/stream remains in kernel after retirement"
+        );
+        if let Some(listener) = owned_listener {
+            assert!(
+                tokio::net::TcpStream::connect(listener).await.is_err(),
+                "owned service listener remains after reap"
+            );
+        }
+        let process: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(receipts.join("forced-process.json")).unwrap())
+                .unwrap();
+        assert!(process["status"].is_string());
+        assert_eq!(
+            process["kind"],
+            if phase == "healthy" {
+                "observed-exit"
+            } else {
+                "exceptional-force-reap"
+            }
+        );
+        assert_eq!(process["readerStarted"], phase != "setup");
+        assert_eq!(process["readerJoined"], phase != "setup");
+        let cleanup: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(receipts.join("temporary-cleanup.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cleanup["originalFailure"], primary);
+        assert_eq!(cleanup["temporaryRootRemoved"], true);
+        assert!(cleanup["cleanupFailure"].is_null());
+        assert!(cleanup["retainedPath"].is_null());
+        let after = std::fs::metadata(&sentinel).unwrap();
+        assert_eq!(
+            (
+                after.dev(),
+                after.ino(),
+                after.uid(),
+                after.gid(),
+                after.mode()
+            ),
+            (
+                sentinel_before.dev(),
+                sentinel_before.ino(),
+                sentinel_before.uid(),
+                sentinel_before.gid(),
+                sentinel_before.mode()
+            )
+        );
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"durable outside target must survive temporary cleanup"
+        );
+        if phase == "healthy" {
+            assert!(receipts.join("healthy-readback.json").is_file());
+        } else {
+            assert!(receipts.join("original-failure.json").is_file());
+        }
+    }
 }
