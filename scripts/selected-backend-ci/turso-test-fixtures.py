@@ -49,6 +49,21 @@ class AdmissionTests(unittest.TestCase):
     def test_trusted_dispatch_configuration(self):
         self.assertEqual(guard.validate_dispatch(self.context, self.inputs, "a" * 40), "connection")
 
+    def test_fixed_reviewed_branch_bootstrap_and_manual_only_consumption(self):
+        self.assertEqual(guard.validate_dispatch(dict(self.context, event_name="push", ref=guard.REVIEWED_REF), {}, "a" * 40), "connection")
+        self.assertEqual(guard.validate_dispatch(dict(self.context, ref=guard.REVIEWED_REF), self.inputs, "a" * 40), "connection")
+        for event, ref in (("push", "refs/heads/main"), ("push", "refs/heads/topic"), ("workflow_dispatch", "refs/heads/topic")):
+            self.denied("UNTRUSTED_DISPATCH", guard.validate_dispatch, dict(self.context, event_name=event, ref=ref), self.inputs, "a" * 40)
+        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        with tempfile.TemporaryDirectory(prefix="fvoci-turso-bootstrap-pure-") as directory:
+            event = Path(directory) / "event.json"
+            event.write_text('{"inputs": {}}')
+            environment = {"PATH": os.environ.get("PATH", ""), "GITHUB_EVENT_PATH": str(event), "GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": "AISFlow/fvoci", "GITHUB_REF": guard.REVIEWED_REF, "GITHUB_SHA": sha}
+            result = subprocess.run(["python3", str(GUARD_PATH), "--admit"], env=environment, capture_output=True, text=True, check=False)
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "BOOTSTRAP_SOURCE_ADMISSION_OK_RUNTIME_NOT_RUN\n", ""))
+            result = subprocess.run(["python3", str(GUARD_PATH), "--consume"], env=environment, capture_output=True, text=True, check=False)
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (78, "", "SECRET_MODE_REQUIRES_MANUAL\n"))
+
     def test_denied_event_repository_and_ref(self):
         for key, value in (
             ("event_name", "pull_request"),
@@ -138,6 +153,7 @@ class AdmissionTests(unittest.TestCase):
             "GITHUB_REPOSITORY": "AISFlow/fvoci",
             "GITHUB_REF": "refs/heads/main",
             "GITHUB_SHA": sha,
+            "FVOCI_DATABASE_BACKEND": "libsql-remote",
         }
         with tempfile.TemporaryDirectory(prefix="fvoci-turso-pure-") as directory:
             event = Path(directory) / "event.json"
@@ -205,7 +221,7 @@ class AdmissionTests(unittest.TestCase):
             native.write_bytes(b"pure metadata fixture, not native proof")
             manifest = {"sha": "a" * 40, "source_digest": "fixture", "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "native_input_sha256": hashlib.sha256(native.read_bytes()).hexdigest()}
             (root / "turso-connection-build.json").write_text(json.dumps(manifest))
-            environment = {**self.secrets, **self.settings, "RUNNER_TEMP": directory, "UNRELATED_FAKE_CREDENTIAL": "never forwarded"}
+            environment = {**self.settings, "FVOCI_DATABASE_BACKEND": "libsql-remote", "FVOCI_LIBSQL_URL": self.secrets["FVOCI_TEST_TURSO_DATABASE_URL"], "FVOCI_LIBSQL_AUTH_TOKEN": self.secrets["FVOCI_TEST_TURSO_AUTH_TOKEN"], "RUNNER_TEMP": directory, "UNRELATED_FAKE_CREDENTIAL": "never forwarded"}
             valid = ("test " + guard.TEST_NAME + " ... FVOCI_TURSO_RECEIPT primary=OK rollback=OK close=OK leases=ZERO\nok\n"
                      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out;\n").encode()
             with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(guard, "source_digest", return_value="fixture"), mock.patch.object(guard.subprocess, "run") as run:
@@ -215,6 +231,9 @@ class AdmissionTests(unittest.TestCase):
                 self.assertIn("TURSO_CONNECTION_PASS tests=1 ignored=0", output.getvalue())
                 self.assertEqual(run.call_args.args[0][1:], [guard.TEST_NAME, "--ignored", "--exact", "--test-threads=1", "--nocapture"])
                 self.assertNotIn("UNRELATED_FAKE_CREDENTIAL", run.call_args.kwargs["env"])
+                self.assertEqual(run.call_args.kwargs["env"]["FVOCI_DATABASE_BACKEND"], "libsql-remote")
+                self.assertIn("FVOCI_LIBSQL_AUTH_TOKEN", run.call_args.kwargs["env"])
+                self.assertNotIn("FVOCI_TEST_TURSO_AUTH_TOKEN", run.call_args.kwargs["env"])
                 for raw, exit_code in ((valid.replace(b"1 passed", b"0 passed"), 0), (valid.replace(b"0 ignored", b"1 ignored"), 0), (valid, 1), (valid.replace(b"rollback=OK", b"rollback=FAILED"), 0)):
                     run.return_value = subprocess.CompletedProcess([], exit_code, raw + b"FAKE_PRIVATE_BODY_NEVER_PRINT")
                     with contextlib.redirect_stdout(io.StringIO()) as output:

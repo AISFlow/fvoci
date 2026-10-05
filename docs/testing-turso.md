@@ -1,10 +1,16 @@
 # Isolated Turso connection test
 
 The source consumer is prepared; Rust compilation and actual Turso execution are
-**NOT RUN**. Independent review, trusted-main adoption, and a separately
-allocated execution are still required. The workflow must exist on the default
-branch before `workflow_dispatch` is available. Never dispatch unreviewed
-PR/fork/alternate-ref code with credentials. [GitHub manual dispatch](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch).
+**NOT RUN**. Independent review and a separately allocated execution are still required.
+Root may publish the reviewed fixed source to the single hardcoded branch
+`fvoci/v060-turso-verified-connection`. Its push bootstrap runs **only pure
+fixtures/source admission**, with no Environment, credentials, build or probe.
+The secret job permits only manual dispatch on main or that exact same-repo
+reviewed branch, checking exact github.sha. No free-form checkout input, PR,
+fork, pull_request_target or other ref is allowed. GitHub documentation says
+the workflow must be on the default branch for manual dispatch; bootstrap/API
+eligibility on the reviewed branch is not yet verified. Root must record the
+actual API acceptance or rejection, without an arbitrary-ref/merge fallback. [GitHub manual dispatch](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch).
 
 Use the user-designated isolated test database. The dedicated Environment is
 **AISFlow/fvoci → Settings → Environments → `fvoci-turso-test`**. Register only:
@@ -26,9 +32,10 @@ Environment variable. No values were inspected or verified by this author.
 required.** The secret URL is the designated target; URL shape validation is
 neither server identity proof nor permission to initialize/reset anything.
 
-Current Environment `deployment_branch_policy` is null and is allowed. Both
-jobs enforce AISFlow/fvoci + `workflow_dispatch` + `refs/heads/main` and checkout
-exact `github.sha` with credentials persistence disabled. The admission job
+Current Environment `deployment_branch_policy` is null and is allowed. The
+secret job enforces AISFlow/fvoci + workflow_dispatch + main or the single
+root-reviewed branch, and exact github.sha with credentials persistence disabled.
+Bootstrap pushes cannot enter that job. The admission job
 first verifies the preexisting named Environment through an anonymous public
 GitHub metadata GET. It does not create or modify an Environment or policy;
 404, denied/rate-limited access, malformed metadata or redirects fail before the
@@ -38,8 +45,10 @@ private authenticated equivalents need Actions read access. [GitHub Environment 
 The dedicated `turso-connection` job prepares the maintained pinned SQLite/Rust
 inputs and compiles the current library tests **without credentials**. It
 freezes the actual Cargo-emitted test ELF and binds source SHA/digest, emitted
-profile/features, binary hash and native preparation receipt. Only its final
-runtime step binds the two secrets. No raw SDK/test error body, URL, header,
+profile/features, binary hash and native preparation receipt. Only its final runtime step maps the two registered secrets to product
+`FVOCI_DATABASE_BACKEND=libsql-remote`, `FVOCI_LIBSQL_URL`, and
+`FVOCI_LIBSQL_AUTH_TOKEN`; the fixture uses `DatabaseSettings::from_env` and the
+existing RemoteDatabase constructor, rather than a test-only configuration path. No raw SDK/test error body, URL, header,
 token, environment dump or credential-bearing trace is printed or uploaded.
 
 Default phase `connection` requires `destructive=false` and makes no schema/data

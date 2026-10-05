@@ -28,6 +28,7 @@ PHASES = (
 )
 REPOSITORY = "AISFlow/fvoci"
 ENVIRONMENT = "fvoci-turso-test"
+REVIEWED_REF = "refs/heads/fvoci/v060-turso-verified-connection"
 TEST_NAME = "db::turso_test::turso_primary_connection"
 API_ROOT = "https://api.github.com/repos/AISFlow/fvoci/environments/fvoci-turso-test"
 
@@ -47,11 +48,9 @@ def boolean(value):
 
 
 def validate_dispatch(context, inputs, checkout_sha):
-    if (
-        context.get("event_name") != "workflow_dispatch"
-        or context.get("repository") != REPOSITORY
-        or context.get("ref") != "refs/heads/main"
-    ):
+    manual = context.get("event_name") == "workflow_dispatch" and context.get("ref") in ("refs/heads/main", REVIEWED_REF)
+    bootstrap = context.get("event_name") == "push" and context.get("ref") == REVIEWED_REF
+    if context.get("repository") != REPOSITORY or not (manual or bootstrap):
         reject("UNTRUSTED_DISPATCH")
     sha = context.get("sha", "")
     if not re.fullmatch(r"[0-9a-f]{40}", sha) or checkout_sha != sha:
@@ -229,10 +228,10 @@ def freeze_compiled_test(checkout_sha):
 
 
 def run_connection(checkout_sha, inputs):
+    if os.environ.get("FVOCI_DATABASE_BACKEND") != "libsql-remote":
+        reject("BACKEND_SELECTOR_REQUIRED")
     settings = {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": os.environ.get("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "")}
-    credentials = {key: os.environ.get(key, "") for key in (
-        "FVOCI_TEST_TURSO_DATABASE_URL", "FVOCI_TEST_TURSO_AUTH_TOKEN"
-    )}
+    credentials = {"FVOCI_TEST_TURSO_DATABASE_URL": os.environ.get("FVOCI_LIBSQL_URL", ""), "FVOCI_TEST_TURSO_AUTH_TOKEN": os.environ.get("FVOCI_LIBSQL_AUTH_TOKEN", "")}
     validate_target(inputs, settings, credentials)
     root = Path(os.environ["RUNNER_TEMP"]).resolve()
     manifest = json.loads((root / "turso-connection-build.json").read_text())
@@ -249,7 +248,7 @@ def run_connection(checkout_sha, inputs):
     child_env = {key: os.environ[key] for key in (
         "PATH", "LD_LIBRARY_PATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "TZ"
     ) if key in os.environ}
-    child_env.update(credentials)
+    child_env.update({"FVOCI_DATABASE_BACKEND": "libsql-remote", "FVOCI_LIBSQL_URL": credentials["FVOCI_TEST_TURSO_DATABASE_URL"], "FVOCI_LIBSQL_AUTH_TOKEN": credentials["FVOCI_TEST_TURSO_AUTH_TOKEN"]})
     child_env["FVOCI_TEST_TURSO_CONNECTION_SELECTED"] = "1"
     # Raw SDK/test errors can contain endpoint/query/token values. Capture only
     # in memory; never write/upload/reflect them. Do not retry a failed probe.
@@ -300,6 +299,11 @@ def main():
             checkout_sha,
         )
         require_implemented(phase)
+        if os.environ.get("GITHUB_EVENT_NAME") == "push":
+            if sys.argv[1] != "--admit":
+                reject("SECRET_MODE_REQUIRES_MANUAL")
+            print("BOOTSTRAP_SOURCE_ADMISSION_OK_RUNTIME_NOT_RUN")
+            return 0
         if sys.argv[1] == "--admit":
             environment_id = environment_metadata()
             with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:

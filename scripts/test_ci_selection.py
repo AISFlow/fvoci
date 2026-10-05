@@ -1683,6 +1683,8 @@ class RegistryMutationCliTest(unittest.TestCase):
             ("--no-run --message-format=json", "--message-format=json", "fixed fresh compilation"),
             ("      CARGO_INCREMENTAL: 0\n", "      TOKEN: ${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}\n", "credential-free compiler environment"),
             (" --consume\n", " --consume || true\n", "only one sanitized runtime step"),
+            ("branches: [fvoci/v060-turso-verified-connection]", "branches: ['*']", "fixed credential-free bootstrap"),
+            ("    if: github.event_name == 'workflow_dispatch'", "    if: github.event_name == 'push'", "runtime needs successful trusted admission"),
         ]
         for old, new, needle in cases:
             with self.subTest(boundary=needle):

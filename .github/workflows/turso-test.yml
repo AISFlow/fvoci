@@ -1,6 +1,8 @@
 name: Turso isolated primary connection
 
 on:
+  push:
+    branches: [fvoci/v060-turso-verified-connection]
   workflow_dispatch:
     inputs:
       phase:
@@ -24,7 +26,7 @@ concurrency:
 
 jobs:
   admission:
-    if: github.event_name == 'workflow_dispatch' && github.repository == 'AISFlow/fvoci' && github.ref == 'refs/heads/main'
+    if: github.repository == 'AISFlow/fvoci' && ((github.event_name == 'push' && github.ref == 'refs/heads/fvoci/v060-turso-verified-connection') || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection')))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -42,7 +44,7 @@ jobs:
 
   turso-connection:
     needs: admission
-    if: github.event_name == 'workflow_dispatch' && github.repository == 'AISFlow/fvoci' && github.ref == 'refs/heads/main' && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'AISFlow/fvoci' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection') && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''
     environment: fvoci-turso-test
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -76,8 +78,9 @@ jobs:
           python3 scripts/selected-backend-ci/turso-test-guard.py --freeze
       - name: Read-only real primary connection (exactly one test)
         env:
-          FVOCI_TEST_TURSO_DATABASE_URL: ${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}
-          FVOCI_TEST_TURSO_AUTH_TOKEN: ${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}
+          FVOCI_DATABASE_BACKEND: libsql-remote
+          FVOCI_LIBSQL_URL: ${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}
+          FVOCI_LIBSQL_AUTH_TOKEN: ${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}
           FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: ${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}
         run: python3 scripts/selected-backend-ci/turso-test-guard.py --consume
 

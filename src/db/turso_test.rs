@@ -2,6 +2,7 @@
 //! No schema/data mutation, migration, retry, or synthetic transport is used.
 use super::backend::{Backend, DbTx, FamilyTx, RemoteDatabase};
 use super::codec::Cell;
+use crate::config::DatabaseSettings;
 
 const TEST_NAME: &str = "db::turso_test::turso_primary_connection";
 
@@ -83,10 +84,15 @@ async fn turso_primary_connection() -> Result<(), &'static str> {
     {
         return Err("EXPLICIT_SELECTION_REQUIRED");
     }
-    let (url, token) = configuration(
-        std::env::var("FVOCI_TEST_TURSO_DATABASE_URL").unwrap_or_default(),
-        std::env::var("FVOCI_TEST_TURSO_AUTH_TOKEN").unwrap_or_default(),
-    )?;
+    let settings = DatabaseSettings::from_env().map_err(|_| "PRODUCT_CONFIGURATION_FAILED")?;
+    let DatabaseSettings::LibsqlRemote {
+        primary_url,
+        auth_token,
+    } = settings
+    else {
+        return Err("WRONG_PRODUCT_BACKEND");
+    };
+    let (url, token) = configuration(primary_url, auth_token)?;
     let remote = match RemoteDatabase::connect(url, token, 1).await {
         Ok(remote) => remote,
         Err(_) => {
