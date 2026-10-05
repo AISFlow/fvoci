@@ -188,9 +188,10 @@ jobs:
         run: bun --bun x --no-install playwright install --with-deps chromium
       - name: Real React browser shard ${{ matrix.shard }} with PostgreSQL app role
         id: browser
-        run: bash scripts/run-web-e2e.sh --ci-shard ${{ matrix.shard }}
+        # web-checks generates/diffs the same committed outputs; the gate requires it.
+        run: bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-shard ${{ matrix.shard }}
       - name: Retain failed browser DOM diagnostics
-        if: failure() && steps.browser.outputs.failure-artifacts != ''
+        if: (failure() || cancelled()) && steps.browser.outputs.failure-artifacts != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: web-browser-shard-${{ matrix.shard }}-browser-failure-${{ github.run_attempt }}
@@ -273,9 +274,9 @@ jobs:
           export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
           export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
-          bash scripts/run-web-e2e.sh --with-selected-backends
+          bash scripts/run-web-e2e.sh --ci-use-committed-api --with-selected-backends
       - name: Retain failed browser DOM diagnostics
-        if: failure() && steps.browser.outputs.failure-artifacts != ''
+        if: (failure() || cancelled()) && steps.browser.outputs.failure-artifacts != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: collaboration-browser-failure-${{ github.run_attempt }}
@@ -290,7 +291,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Retain selected current build and runtime diagnostics
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: selected-normal-diagnostics-${{ github.run_attempt }}
