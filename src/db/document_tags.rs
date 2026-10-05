@@ -1034,7 +1034,10 @@ mod selected_tag_write_tests {
                 credential,
                 f.user,
                 "tag-write-session",
-                Utc::now() + chrono::Duration::days(1),
+                chrono::DateTime::from_timestamp_micros(
+                    chrono::Utc::now().timestamp_micros() + 86_400_000_000,
+                )
+                .unwrap(),
             )
             .await
             .unwrap();

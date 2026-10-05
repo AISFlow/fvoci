@@ -2006,7 +2006,10 @@ mod selected_comment_write_tests {
                 id,
                 f.user,
                 "comment-write-session",
-                Utc::now() + chrono::Duration::days(1),
+                chrono::DateTime::from_timestamp_micros(
+                    chrono::Utc::now().timestamp_micros() + 86_400_000_000,
+                )
+                .unwrap(),
             )
             .await
             .unwrap();
