@@ -1656,6 +1656,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/documents/from-draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["create_from_draft"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/documents/{document_id}": {
         parameters: {
             query?: never;
@@ -1729,6 +1745,22 @@ export interface paths {
         };
         get: operations["get_body"];
         put: operations["put_body"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/body/versioned": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["read_versioned_body"];
+        put: operations["save_versioned_body"];
         post?: never;
         delete?: never;
         options?: never;
@@ -2696,6 +2728,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/from-draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["create_project_from_draft"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}": {
         parameters: {
             query?: never;
@@ -2769,6 +2817,22 @@ export interface paths {
         };
         get: operations["get_project_document_body"];
         put: operations["put_project_body"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/body/versioned": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["read_project_versioned_body"];
+        put: operations["save_project_versioned_body"];
         post?: never;
         delete?: never;
         options?: never;
@@ -3542,6 +3606,22 @@ export interface paths {
         options?: never;
         head?: never;
         patch: operations["patch_task_block"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/body/versioned": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["read_versioned_task_body"];
+        put: operations["save_versioned_task_body"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/clone": {
@@ -5577,6 +5657,29 @@ export interface components {
             /** Format: int64 */
             count: number;
         };
+        /** @description Dedicated OFF draft publication. Ordinary create bodies remain unchanged. */
+        OffDraftCreateBody: {
+            /** Format: uuid */
+            commandId: string;
+            contentJson: unknown;
+            icon?: string | null;
+            /** Format: uuid */
+            parentId: string | null;
+            /** Format: uuid */
+            sourceId: string;
+            sourceKind: string;
+            /** Format: uuid */
+            sourceProjectId?: string | null;
+            title: string;
+        };
+        OffDraftCreateResponse: {
+            /** Format: uuid */
+            commandId: string;
+            document: components["schemas"]["DocumentMetaResponse"];
+            /** Format: uuid */
+            revisionId: string;
+            tailSeq: string;
+        };
         /**
          * @description An OIDC start answered with JSON: the page navigates the browser to
          *     `authorizationUrl` itself. A form submission that redirects to the
@@ -5974,6 +6077,11 @@ export interface components {
             contentJson?: unknown;
             contentMd?: string | null;
         };
+        /**
+         * @description Server-wide writer policy, read once before startup. A request cannot toggle it.
+         * @enum {string}
+         */
+        RealtimeMode: "on" | "off";
         RecentItemOutput: {
             id: string;
             /** Format: int32 */
@@ -6060,6 +6168,23 @@ export interface components {
         RevisionRestoreResponse: {
             restored: boolean;
             revisionId: string;
+        };
+        SaveVersionedBodyInput: {
+            /** Format: uuid */
+            commandId: string;
+            /** @description Opaque native sequence; never a JavaScript floating-point number. */
+            expectedTailSeq: string;
+            /** @description Forward updateV1 from the editor's original native history. */
+            updateV1: string;
+        };
+        SaveVersionedBodyResponse: {
+            /** Format: uuid */
+            commandId: string;
+            /** Format: uuid */
+            revisionId: string;
+            tailSeq: string;
+            /** Format: uuid */
+            targetId: string;
         };
         ScaleTickOutput: {
             date: components["schemas"]["String"];
@@ -6150,6 +6275,7 @@ export interface components {
             branding: components["schemas"]["BrandingOutput"];
             mailEnabled: boolean;
             needed: boolean;
+            realtimeMode: components["schemas"]["RealtimeMode"];
         };
         /** @description Source `shareCreateInput`: exactly one of `documentId` / `projectId`. */
         ShareCreateBody: {
@@ -6717,6 +6843,15 @@ export interface components {
             state?: string | null;
             title?: string | null;
             url: string;
+        };
+        VersionedBodyResponse: {
+            contentJson: unknown;
+            snapshotV1: string;
+            tailSeq: string;
+            tailV1: string[];
+            /** Format: uuid */
+            targetId: string;
+            writable: boolean;
         };
         WebhookCreateBody: {
             events: string[];
@@ -13411,6 +13546,87 @@ export interface operations {
             };
         };
     };
+    create_from_draft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OffDraftCreateBody"];
+            };
+        };
+        responses: {
+            /** @description Confirmed independent OFF draft document or exact command replay */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OffDraftCreateResponse"];
+                };
+            };
+            /** @description Invalid draft or OFF mode required */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Current source/destination/reference access refused */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Creation command binding mismatch */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Body limit exceeded */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Native unavailable or finish unconfirmed; retry exact command */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
     get_document: {
         parameters: {
             query?: never;
@@ -13810,6 +14026,132 @@ export interface operations {
             };
             /** @description Collaboration timeout; retry */
             504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    read_versioned_body: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Wiki document id */
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Authorized native OFF edit start and opaque version */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VersionedBodyResponse"];
+                };
+            };
+            /** @description Unavailable or unauthorized target */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Writer mode mismatch */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Native engine or finish unconfirmed */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    save_versioned_body: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Wiki document id */
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveVersionedBodyInput"];
+            };
+        };
+        responses: {
+            /** @description Confirmed atomic body/revision/receipt result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SaveVersionedBodyResponse"];
+                };
+            };
+            /** @description Invalid command, native update or opaque version */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Unavailable or unauthorized target */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Version, command or writer mode conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Body/native history limit */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Unconfirmed save; retain exact command and draft */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -17959,6 +18301,89 @@ export interface operations {
             };
         };
     };
+    create_project_from_draft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Destination project id */
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OffDraftCreateBody"];
+            };
+        };
+        responses: {
+            /** @description Confirmed independent OFF draft document or exact command replay */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OffDraftCreateResponse"];
+                };
+            };
+            /** @description Invalid draft or OFF mode required */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Current source/destination/reference access refused */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Creation command binding mismatch */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Body limit exceeded */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Native unavailable or finish unconfirmed; retry exact command */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
     get_project_document: {
         parameters: {
             query?: never;
@@ -18429,6 +18854,136 @@ export interface operations {
             };
             /** @description Collaboration timeout; retry */
             504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    read_project_versioned_body: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Project id */
+                project_id: string;
+                /** @description Project document id */
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Authorized native OFF edit start and opaque version */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VersionedBodyResponse"];
+                };
+            };
+            /** @description Unavailable or unauthorized target */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Writer mode mismatch */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Native engine or finish unconfirmed */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    save_project_versioned_body: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Project id */
+                project_id: string;
+                /** @description Project document id */
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveVersionedBodyInput"];
+            };
+        };
+        responses: {
+            /** @description Confirmed atomic body/revision/receipt result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SaveVersionedBodyResponse"];
+                };
+            };
+            /** @description Invalid command, native update or opaque version */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Unavailable or unauthorized target */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Version, command or writer mode conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Body/native history limit */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Unconfirmed save; retain exact command and draft */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -21989,6 +22544,132 @@ export interface operations {
             };
             /** @description Collab timeout */
             504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    read_versioned_task_body: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Task id */
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Authorized native OFF edit start and opaque version */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VersionedBodyResponse"];
+                };
+            };
+            /** @description Unavailable or unauthorized target */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Writer mode mismatch */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Native engine or finish unconfirmed */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    save_versioned_task_body: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Task id */
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveVersionedBodyInput"];
+            };
+        };
+        responses: {
+            /** @description Confirmed atomic body/revision/receipt result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SaveVersionedBodyResponse"];
+                };
+            };
+            /** @description Invalid command, native update or opaque version */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Unavailable or unauthorized target */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Version, command or writer mode conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Body/native history limit */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Unconfirmed save; retain exact command and draft */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

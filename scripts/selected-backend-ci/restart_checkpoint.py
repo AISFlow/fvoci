@@ -31,7 +31,14 @@ def private_write(path, value):
 
 def validate_allocation(allocation, binding):
     assert allocation['schema'] == 1 and allocation['status'] == 'GRANTED'
-    assert allocation['owner'] == OWNER and allocation['exclusiveCIJob'] is True
+    assert allocation['owner'] == OWNER
+    if allocation.get('executionMode') == 'orca-local':
+        from current_binding import load_local_allocation
+        local = load_local_allocation('run')
+        assert allocation['localAuthorizationSha256'] == os.environ['FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256']
+        assert allocation['runId'] == local['runId'] and allocation['runAttempt'] == local['dispatchId']
+    else:
+        assert allocation['owner'] == OWNER and allocation['exclusiveCIJob'] is True
     assert allocation['source'] == allocation['compiledSource'] == binding['source']
     assert allocation['tree'] == binding['tree'] and allocation['backend'] == binding['backend']
     assert re.fullmatch('[0-9a-f]{40}', allocation['source'])
@@ -39,9 +46,10 @@ def validate_allocation(allocation, binding):
     assert allocation['backend'] in ('postgres', 'sqlite')
     assert allocation['binding'] == binding
     assert allocation['runId'] == binding['runId'] and allocation['runAttempt'] == binding['runAttempt']
-    assert re.fullmatch('[0-9]+', allocation['runId'])
-    assert re.fullmatch('[0-9]+', allocation['runAttempt'])
-    assert allocation['currentCIJobConfirmed'] is True
+    if allocation.get('executionMode') != 'orca-local':
+        assert re.fullmatch('[0-9]+', allocation['runId'])
+        assert re.fullmatch('[0-9]+', allocation['runAttempt'])
+        assert allocation['currentCIJobConfirmed'] is True
 
 
 def single_attachment(path, name):
@@ -74,8 +82,9 @@ def restart_same_app(g):
     grant_path = Path(os.environ['FVOCI_ROOT_RESTART_GRANT'])
     assert grant_path.is_absolute() and not grant_path.is_symlink()
     allocation = json.loads(grant_path.read_text())
-    binding = {'runId': os.environ['GITHUB_RUN_ID'],
-               'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'], 'source': g['HEAD'], 'tree': g['TREE'], 'compiledSource': g['COMPILED_HEAD'],
+    identity = g['current']['grant']
+    binding = {'runId': identity['runId'],
+               'runAttempt': identity['runAttempt'], 'source': g['HEAD'], 'tree': g['TREE'], 'compiledSource': g['COMPILED_HEAD'],
                'backend': selected, 'runRoot': str(run.resolve()),
                'parentDriverSha256': digest(g['__file__']), 'restartHelperSha256': digest(__file__),
                'sourceInputsSha256': digest(run / 'source-inputs-before.json'),
@@ -216,7 +225,8 @@ def restart_same_app(g):
         receipt.update(stage='restarted normal main ready', restartedBaseURL=restart_base, restartedServer=restart_server)
         # Neither owner DB URL/pepper nor actor executable reaches readback phase.
         env = {key: value for key, value in g['browser_env'].items() if key in ('PATH', 'LANG', 'PLAYWRIGHT_BROWSERS_PATH','BUN_RUNTIME_TRANSPILER_CACHE_PATH','TMPDIR')}
-        env.update(CI='true', PLAYWRIGHT_BASE_URL=restart_base, FVOCI_E2E_SELECTED_BACKEND=selected,
+        if identity.get('executionMode') != 'orca-local': env['CI'] = 'true'
+        env.update(PLAYWRIGHT_BASE_URL=restart_base, FVOCI_E2E_SELECTED_BACKEND=selected,
                    FVOCI_E2E_SELECTED_RESTART_SOURCE=g['HEAD'], FVOCI_E2E_SELECTED_RESTART_CHECKPOINT=str(checkpoint_path),
                    FVOCI_E2E_RESULT_DIR=str(run / 'restart-browser'), PLAYWRIGHT_JSON_OUTPUT_FILE=str(run / 'restart-playwright-result.private.json'))
         args = [str(g['BUN']), '--bun', 'x', 'playwright', 'test', '--config', 'e2e-pending/collab-playwright.config.ts',

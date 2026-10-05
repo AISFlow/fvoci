@@ -8756,6 +8756,117 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/documents/from-draft": {
+      "post": {
+        "tags": [
+          "documents"
+        ],
+        "operationId": "create_from_draft",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OffDraftCreateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Confirmed independent OFF draft document or exact command replay",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OffDraftCreateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid draft or OFF mode required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Current source/destination/reference access refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Creation command binding mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Native unavailable or finish unconfirmed; retry exact command",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          },
+          {
+            "bearer_api_token": [
+              "documents.write"
+            ]
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/documents/{document_id}": {
       "get": {
         "tags": [
@@ -9354,6 +9465,194 @@
           },
           "504": {
             "description": "Collaboration timeout; retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          },
+          {
+            "bearer_api_token": [
+              "documents.write"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/body/versioned": {
+      "get": {
+        "tags": [
+          "documents"
+        ],
+        "operationId": "read_versioned_body",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "document_id",
+            "in": "path",
+            "description": "Wiki document id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authorized native OFF edit start and opaque version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionedBodyResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unavailable or unauthorized target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Writer mode mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Native engine or finish unconfirmed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          },
+          {
+            "bearer_api_token": [
+              "documents.read"
+            ]
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "documents"
+        ],
+        "operationId": "save_versioned_body",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "document_id",
+            "in": "path",
+            "description": "Wiki document id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveVersionedBodyInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Confirmed atomic body/revision/receipt result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaveVersionedBodyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid command, native update or opaque version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unavailable or unauthorized target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Version, command or writer mode conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body/native history limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Unconfirmed save; retain exact command and draft",
             "content": {
               "application/json": {
                 "schema": {
@@ -15511,6 +15810,126 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/from-draft": {
+      "post": {
+        "tags": [
+          "documents"
+        ],
+        "operationId": "create_project_from_draft",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "Destination project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OffDraftCreateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Confirmed independent OFF draft document or exact command replay",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OffDraftCreateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid draft or OFF mode required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Current source/destination/reference access refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Creation command binding mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Native unavailable or finish unconfirmed; retry exact command",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          },
+          {
+            "bearer_api_token": [
+              "documents.write"
+            ]
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}": {
       "get": {
         "tags": [
@@ -16268,6 +16687,212 @@
           },
           "504": {
             "description": "Collaboration timeout; retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          },
+          {
+            "bearer_api_token": [
+              "documents.write"
+            ]
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/body/versioned": {
+      "get": {
+        "tags": [
+          "documents"
+        ],
+        "operationId": "read_project_versioned_body",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "document_id",
+            "in": "path",
+            "description": "Project document id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authorized native OFF edit start and opaque version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionedBodyResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unavailable or unauthorized target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Writer mode mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Native engine or finish unconfirmed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          },
+          {
+            "bearer_api_token": [
+              "documents.read"
+            ]
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "documents"
+        ],
+        "operationId": "save_project_versioned_body",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "document_id",
+            "in": "path",
+            "description": "Project document id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveVersionedBodyInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Confirmed atomic body/revision/receipt result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaveVersionedBodyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid command, native update or opaque version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unavailable or unauthorized target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Version, command or writer mode conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body/native history limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Unconfirmed save; retain exact command and draft",
             "content": {
               "application/json": {
                 "schema": {
@@ -21989,6 +22614,194 @@
           },
           {
             "bearer_api_token": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/body/versioned": {
+      "get": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "read_versioned_task_body",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "Task id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authorized native OFF edit start and opaque version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionedBodyResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unavailable or unauthorized target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Writer mode mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Native engine or finish unconfirmed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          },
+          {
+            "bearer_api_token": [
+              "tasks.read"
+            ]
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "save_versioned_task_body",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "Task id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveVersionedBodyInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Confirmed atomic body/revision/receipt result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaveVersionedBodyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid command, native update or opaque version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unavailable or unauthorized target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Version, command or writer mode conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body/native history limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Unconfirmed save; retain exact command and draft",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          },
+          {
+            "bearer_api_token": [
+              "tasks.write"
+            ]
           }
         ]
       }
@@ -31407,6 +32220,81 @@
           }
         }
       },
+      "OffDraftCreateBody": {
+        "type": "object",
+        "description": "Dedicated OFF draft publication. Ordinary create bodies remain unchanged.",
+        "required": [
+          "commandId",
+          "sourceKind",
+          "sourceId",
+          "parentId",
+          "title",
+          "contentJson"
+        ],
+        "properties": {
+          "commandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "contentJson": {},
+          "icon": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parentId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "sourceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourceKind": {
+            "type": "string"
+          },
+          "sourceProjectId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "OffDraftCreateResponse": {
+        "type": "object",
+        "required": [
+          "document",
+          "commandId",
+          "tailSeq",
+          "revisionId"
+        ],
+        "properties": {
+          "commandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "document": {
+            "$ref": "#/components/schemas/DocumentMetaResponse"
+          },
+          "revisionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "tailSeq": {
+            "type": "string"
+          }
+        }
+      },
       "OidcAuthorizationOutput": {
         "type": "object",
         "description": "An OIDC start answered with JSON: the page navigates the browser to\n`authorizationUrl` itself. A form submission that redirects to the\nprovider would be blocked by the app's `form-action 'self'`.",
@@ -32843,6 +33731,14 @@
         },
         "additionalProperties": false
       },
+      "RealtimeMode": {
+        "type": "string",
+        "description": "Server-wide writer policy, read once before startup. A request cannot toggle it.",
+        "enum": [
+          "on",
+          "off"
+        ]
+      },
       "RecentItemOutput": {
         "type": "object",
         "required": [
@@ -33166,6 +34062,55 @@
           },
           "revisionId": {
             "type": "string"
+          }
+        }
+      },
+      "SaveVersionedBodyInput": {
+        "type": "object",
+        "required": [
+          "commandId",
+          "expectedTailSeq",
+          "updateV1"
+        ],
+        "properties": {
+          "commandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expectedTailSeq": {
+            "type": "string",
+            "description": "Opaque native sequence; never a JavaScript floating-point number."
+          },
+          "updateV1": {
+            "type": "string",
+            "description": "Forward updateV1 from the editor's original native history."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SaveVersionedBodyResponse": {
+        "type": "object",
+        "required": [
+          "commandId",
+          "targetId",
+          "tailSeq",
+          "revisionId"
+        ],
+        "properties": {
+          "commandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revisionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "tailSeq": {
+            "type": "string"
+          },
+          "targetId": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
@@ -33519,6 +34464,7 @@
       "SetupStatusResponse": {
         "type": "object",
         "required": [
+          "realtimeMode",
           "needed",
           "branding",
           "mailEnabled"
@@ -33532,6 +34478,9 @@
           },
           "needed": {
             "type": "boolean"
+          },
+          "realtimeMode": {
+            "$ref": "#/components/schemas/RealtimeMode"
           }
         }
       },
@@ -35525,6 +36474,39 @@
           },
           "url": {
             "type": "string"
+          }
+        }
+      },
+      "VersionedBodyResponse": {
+        "type": "object",
+        "required": [
+          "targetId",
+          "tailSeq",
+          "snapshotV1",
+          "tailV1",
+          "contentJson",
+          "writable"
+        ],
+        "properties": {
+          "contentJson": {},
+          "snapshotV1": {
+            "type": "string"
+          },
+          "tailSeq": {
+            "type": "string"
+          },
+          "tailV1": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "targetId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "writable": {
+            "type": "boolean"
           }
         }
       },

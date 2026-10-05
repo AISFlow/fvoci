@@ -23,19 +23,21 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 E = Path(os.environ['FVOCI_CI_SELECTED_RUNS'])
 W = Path(__file__).resolve().parents[2]
-from current_binding import load_current
+from current_binding import load_current, validate_off_report
 current = load_current('postgres', __file__)
 HEAD = COMPILED_HEAD = current['manifest']['source']
 TREE = COMPILED_TREE = current['manifest']['tree']
 IMAGE = 'ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7'
 # Native origin/hash are recorded separately in the current bundle qualification.
 OWNER = os.environ['FVOCI_CI_OWNER']
-SPEC = 'workspace-wiki-selected-backend.spec.ts'
+FLOW = current['manifest'].get('flow', 'on')
+assert FLOW in ('on', 'off')
+SPEC = 'workspace-off-selected-backend.spec.ts' if FLOW == 'off' else 'workspace-wiki-selected-backend.spec.ts'
 BUN = Path(os.environ['FVOCI_CI_BUN'])
 
 # Root must rebind the WHOLE maintained artifact/preparation proof first.
 assert HEAD == COMPILED_HEAD, 'auxiliary flow requires exact fresh current compiled source'
-assert os.environ.get('FVOCI_E2E_SELECTED_AUXILIARY') == 'normal-api'
+assert os.environ.get('FVOCI_E2E_SELECTED_AUXILIARY') == ('normal-api' if FLOW == 'on' else None)
 from restart_checkpoint import restart_same_app
 
 
@@ -199,8 +201,8 @@ if len(sys.argv) == 1:
     write(run / 'source-inputs-before.json', source_before)
     environment = {'PATH': os.environ['PATH'], 'LANG': os.environ.get('LANG', 'C.UTF-8'),
                    'FVOCI_ROOT_RUN_OWNER': OWNER, 'FVOCI_TEST_PG_MAJOR': '18',
-                   'FVOCI_E2E_SELECTED_AUXILIARY': 'normal-api',
-                   **{k: os.environ[k] for k in ('FVOCI_ROOT_CURRENT_BINDING','FVOCI_ROOT_CURRENT_ALLOCATION','FVOCI_ROOT_RESTART_GRANT','GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','CI','GITHUB_ACTIONS','GITHUB_SHA','GITHUB_REPOSITORY','GITHUB_JOB','FVOCI_CI_OWNER','FVOCI_CI_SELECTED_RUNS','FVOCI_CI_BUN','BUN_RUNTIME_TRANSPILER_CACHE_PATH','TMPDIR')}}
+                   **({'FVOCI_E2E_SELECTED_AUXILIARY': 'normal-api'} if FLOW == 'on' else {}),
+                   **{k: os.environ[k] for k in ('FVOCI_ROOT_CURRENT_BINDING','FVOCI_ROOT_CURRENT_ALLOCATION','FVOCI_ROOT_RESTART_GRANT','GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','CI','GITHUB_ACTIONS','GITHUB_SHA','GITHUB_REPOSITORY','GITHUB_JOB','FVOCI_CI_OWNER','FVOCI_CI_SELECTED_RUNS','FVOCI_CI_BUN','BUN_RUNTIME_TRANSPILER_CACHE_PATH','TMPDIR','FVOCI_E2E_SELECTED_FLOW','FVOCI_SELECTED_EXECUTION_MODE','FVOCI_SELECTED_LOCAL_ALLOCATION','FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256','FVOCI_LOCAL_RUN_ID','FVOCI_LOCAL_DISPATCH_ID','FVOCI_LOCAL_TASK_ID','ORCA_TERMINAL_HANDLE','FVOCI_LOCAL_ROOT_TERMINAL') if k in os.environ}}
     if os.environ.get('PLAYWRIGHT_BROWSERS_PATH'):
         environment['PLAYWRIGHT_BROWSERS_PATH'] = os.environ['PLAYWRIGHT_BROWSERS_PATH']
     started = now()
@@ -222,7 +224,7 @@ if len(sys.argv) == 1:
         write(run / 'parent-input-failure.json', {'type': type(error).__name__, 'message': str(error)})
         code = code or 1
     summary = {'source': HEAD, 'tree': TREE, 'compiled_source': COMPILED_HEAD,
-               'root_owner': OWNER, 'driver_sha256': sha(__file__), 'started_utc': started,
+               'root_owner': OWNER, 'driver_sha256': sha(__file__), 'selected_flow': FLOW, 'started_utc': started,
                'wrapper_exit': result.returncode, 'actual_child_receipt_present': child is not None,
                'fixture_closure': checks, 'all_owned_fixtures_closed': complete,
                'exact_source_artifact_inputs_unchanged': inputs_equal, 'final_exit_code': code,
@@ -295,6 +297,7 @@ server_env = {
     'FVOCI_COLLAB_ENGINE': '/fvoci/bin/collab-engine', 'FVOCI_STATIC_DIR': '/srv/fvoci-web',
     'FVOCI_COLLAB_FAMILY_LEASE_MS': '30000', 'FVOCI_COLLAB_FAMILY_RENEW_MS': '5000',
     'FVOCI_COLLAB_MAX_ROOMS': '2', 'RUST_LOG': 'info',
+    'FVOCI_REALTIME_MODE': FLOW,
 }
 for file, body in [(run / 'environment.private.json', json.dumps(server_env)),
                    (run / 'environment.private.sh', ''.join(f'export {key}={shlex.quote(value)}\n' for key, value in server_env.items()))]:
@@ -302,7 +305,7 @@ for file, body in [(run / 'environment.private.json', json.dumps(server_env)),
         os.fchmod(output.fileno(), 0o600)
         output.write(body)
 receipt = {'source': HEAD, 'tree': TREE, 'compiled_source': COMPILED_HEAD,
-           'root_owner': OWNER, 'started_utc': now(), 'driver_sha256': sha(__file__),
+           'root_owner': OWNER, 'started_utc': now(), 'driver_sha256': sha(__file__), 'selected_flow': FLOW,
            'current_binding': str(current['manifest_path']),
            'current_binding_sha256': sha(current['manifest_path']),
            'container': name, 'image': IMAGE, 'postgres_image': PG_IMAGE, 'meili_image': MEILI_IMAGE,
@@ -403,9 +406,10 @@ try:
                    actual_scoped_search_key_metadata=key_metadata,
                    actual_scoped_search_key_distinct_from_master=True, actual_search_and_outbox_started=True)
     write(run / 'normal-main-ready.json', receipt)
-    browser_env = {'TMPDIR':os.environ['TMPDIR'], 'CI':'true', 'BUN_RUNTIME_TRANSPILER_CACHE_PATH':os.environ['BUN_RUNTIME_TRANSPILER_CACHE_PATH'], 'PATH': os.environ['PATH'], 'LANG': os.environ.get('LANG', 'C.UTF-8'),
+    browser_env = {'TMPDIR':os.environ['TMPDIR'], **({'CI':'true'} if current['grant'].get('executionMode') != 'orca-local' else {}), 'BUN_RUNTIME_TRANSPILER_CACHE_PATH':os.environ['BUN_RUNTIME_TRANSPILER_CACHE_PATH'], 'PATH': os.environ['PATH'], 'LANG': os.environ.get('LANG', 'C.UTF-8'),
                    'PLAYWRIGHT_BASE_URL': base, 'FVOCI_E2E_SELECTED_BACKEND': 'postgres',
-                   'FVOCI_E2E_SELECTED_AUXILIARY': 'normal-api',
+                   'FVOCI_E2E_SELECTED_FLOW': FLOW,
+                   **({'FVOCI_E2E_SELECTED_AUXILIARY': 'normal-api'} if FLOW == 'on' else {}),
                    'FVOCI_E2E_SELECTED_SOURCE': HEAD, 'FVOCI_E2E_SELECTED_COMPILED_SOURCE': COMPILED_HEAD,
                    'FVOCI_E2E_RESULT_DIR': str(run), 'FVOCI_E2E_ADMIN_DATABASE_URL': owner_url,
                    'PLAYWRIGHT_JSON_OUTPUT_FILE': str(run / 'playwright-result.private.json'),
@@ -433,7 +437,7 @@ try:
     if (run / 'playwright-result.private.json').exists():
         os.chmod(run / 'playwright-result.private.json', 0o600)
         receipt['actual_json_report_sha256'] = sha(run / 'playwright-result.private.json')
-    if code == 0:
+    if code == 0 and FLOW == 'on':
         assert re.search(r'\b1 passed\b', (run / 'browser.log').read_text())
         report = json.loads((run / 'playwright-result.private.json').read_text())
         assert report['config']['workers'] == 1 and report['errors'] == []
@@ -504,8 +508,13 @@ try:
         receipt.update(actual_browser_tests=1, retries=0, ignored=0, actual_actor_and_closed_provisioning=facts,
                        actual_wrong_tenant_hidden=hidden, actual_restricted_role_durable_commit=durable,
                        tested_product_flow='identical actual currentVue setup/login/stable wiki create/nonempty nativeON/matching durableACK/manual DSSV reconstruction/fresh cookie actor and new connection native-body-ID-permission-history readback')
-    if code == 0:
+    if code == 0 and FLOW == 'on':
         receipt['current_schema_server_restart'] = restart_same_app(globals())
+    if code == 0 and FLOW == 'off':
+        titles = validate_off_report(json.loads((run / 'playwright-result.private.json').read_text()), 'postgres')
+        receipt.update(actual_browser_tests=7, retries=0, ignored=0, actual_off_titles=titles,
+                       tested_product_flow='immutable OFF7 actual Vue CAS/replay/native history/task/note/owner-transition/current revoke')
+
 except BaseException as error:
     receipt['original_driver_failure'] = {'type': type(error).__name__, 'message': str(error)}
     code = code or 1
