@@ -2658,6 +2658,9 @@ mod selected_project_create_tests {
     use super::*;
     use crate::db::attachment_preview::tests::Fixture;
 
+    /// Exact columns read back for the created root document (unchanged query).
+    type RootDocumentRow = (String, String, Option<Vec<u8>>, String, Vec<u8>, i64, String, i64, String, Vec<u8>);
+
     async fn credential(f: &Fixture) -> Uuid {
         let id = Uuid::now_v7();
         let mut tx = f.backend.begin_write().await.unwrap();
@@ -2746,7 +2749,7 @@ mod selected_project_create_tests {
         assert_eq!(project.icon, None);
         assert_eq!(project.status, "active");
         let root = project.root_document_id.unwrap();
-        let row:(String,String,Option<Vec<u8>>,String,Vec<u8>,i64,String,i64,String,Vec<u8>) = sqlx::query_as("SELECT title,path,parent_id,sort_key,project_id,number,status,schema_version,content_json,created_by FROM documents WHERE workspace_id=?1 AND id=?2")
+        let row: RootDocumentRow = sqlx::query_as("SELECT title,path,parent_id,sort_key,project_id,number,status,schema_version,content_json,created_by FROM documents WHERE workspace_id=?1 AND id=?2")
             .bind(f.workspace.as_bytes().as_slice()).bind(root.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
         assert_eq!(row.0, project.name);
         assert_eq!(row.1, to_path_label(root));
