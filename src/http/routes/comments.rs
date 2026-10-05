@@ -1155,7 +1155,10 @@ mod selected_wiki_auxiliary_http_tests {
                     credential,
                     f.user,
                     &token.hash,
-                    chrono::Utc::now() + chrono::Duration::days(1),
+                    chrono::DateTime::from_timestamp_micros(
+                        chrono::Utc::now().timestamp_micros() + 86_400_000_000,
+                    )
+                    .unwrap(),
                 )
                 .await
                 .unwrap();
