@@ -2812,6 +2812,319 @@ mod selected_tests {
         }
     }
 
+    struct SdkFixture {
+        driver: crate::db::libsql_finish_fixture::LibsqlFinishFixture,
+        backend: Backend,
+        recovery: Option<Backend>,
+        root: PathBuf,
+        workspace: Uuid,
+        actor: Uuid,
+        session: Uuid,
+    }
+    impl SdkFixture {
+        async fn new() -> Self {
+            use futures_util::FutureExt;
+            let sqld = PathBuf::from(
+                std::env::var_os("FVOCI_TEST_SQLD")
+                    .expect("allocated pinned official sqld required; no SDK skip"),
+            );
+            let root = std::env::temp_dir().join(format!("fvoci-native-sdk-{}", Uuid::now_v7()));
+            let driver = crate::db::libsql_finish_fixture::LibsqlFinishFixture::start(&sqld, &root)
+                .await
+                .unwrap();
+            let database = driver.database().await.unwrap();
+            let backend = Backend::LibsqlRemote(std::sync::Arc::new(
+                crate::db::backend::RemoteDatabase::from_test_driver(
+                    database,
+                    std::num::NonZeroU32::new(1).unwrap(),
+                ),
+            ));
+            let workspace = Uuid::now_v7();
+            let actor = Uuid::now_v7();
+            let session = Uuid::now_v7();
+            let setup = std::panic::AssertUnwindSafe(async {
+                crate::db::migrate::initialize_family_backend_for_test(&backend).await.unwrap();
+                crate::db::migrate::assert_sqlite_schema_current(&backend).await.unwrap();
+                let mut tx = backend.begin_write().await.unwrap();
+                let crate::db::backend::DbTransaction::SqliteFamily(family) = &mut tx else { unreachable!() };
+                assert_eq!(family.query("PRAGMA foreign_keys", &[]).await.unwrap()[0].cell(0).unwrap().integer().unwrap(), 1);
+                // Trusted isolated fixture setup, not product login or PG RLS.
+                family.execute("INSERT INTO workspaces(id,slug,name,kind) VALUES(?1,'native-sdk','current SDK fixture','personal')", &[Cell::uuid(workspace)]).await.unwrap();
+                family.execute("INSERT INTO users(id,email,given_name,personal_workspace_id) VALUES(?1,'sdk-native@example.invalid','SDK fixture',?2)", &[Cell::uuid(actor),Cell::uuid(workspace)]).await.unwrap();
+                family.execute("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')", &[Cell::uuid(workspace),Cell::uuid(actor)]).await.unwrap();
+                family.execute("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,'sdk-native-control-token',unixepoch()*1000000+3600000000)", &[Cell::uuid(session),Cell::uuid(actor)]).await.unwrap();
+                tx.commit().await.unwrap();
+            }).catch_unwind().await;
+            if let Err(panic) = setup {
+                let close = backend.close().await;
+                let receipt = driver.finish().await.unwrap();
+                eprintln!(
+                    "failed SDK setup closed={close:?} receipt={}",
+                    receipt.root.display()
+                );
+                std::panic::resume_unwind(panic);
+            }
+            Self {
+                driver,
+                backend,
+                recovery: None,
+                root,
+                workspace,
+                actor,
+                session,
+            }
+        }
+        async fn claim(&self) -> (ImportClaim, Uuid, String, Archive, BTreeMap<Uuid, String>) {
+            let payload = b"native SDK finish policy control";
+            let hash = digest(payload);
+            let request = Uuid::now_v7();
+            let job = queue_restore_backend(
+                &self.backend,
+                self.workspace,
+                self.actor,
+                self.session,
+                request,
+                &hash,
+                payload,
+            )
+            .await
+            .unwrap();
+            let claim = crate::db::import_jobs::claim_next_import_job_backend(&self.backend)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(claim.job_id, job);
+            let archive = archive_with_file();
+            let file = &archive.graph.attachments[0];
+            let key = Uuid::now_v7().to_string();
+            stage_key_backend(
+                &self.backend,
+                &claim,
+                file.id,
+                &key,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            std::fs::write(
+                self.root.join(&key),
+                archive.bytes(&file.payload_entry).unwrap(),
+            )
+            .unwrap();
+            (
+                claim,
+                request,
+                hash,
+                archive,
+                BTreeMap::from([(file.id, key)]),
+            )
+        }
+        async fn finish(self) -> Result<(), sqlx::Error> {
+            let close = self.backend.close().await;
+            if let Some(recovery) = &self.recovery {
+                recovery.close().await.unwrap();
+            }
+            let receipt = self.driver.finish().await.unwrap();
+            assert!(
+                receipt.sqld_reaped
+                    && receipt.proxy_joined
+                    && receipt.upstream_closed
+                    && receipt.proxy_closed
+            );
+            // Retain exact upstream/proxy logs and file/database input evidence;
+            // no process/listener remains and no unrelated /tmp cleanup occurs.
+            println!(
+                "native SDK owned finish receipt {}",
+                receipt.root.join("finish-receipt.json").display()
+            );
+            close
+        }
+    }
+
+    fn sdk_closed_finish_response(
+        exchange: &crate::db::libsql_finish_fixture::Exchange,
+        commit: bool,
+        accepted: bool,
+    ) {
+        assert_eq!(exchange.has_commit, commit);
+        assert!(exchange.has_close);
+        assert_eq!(exchange.upstream_status, Some(200));
+        assert!(exchange.upstream_error.is_none());
+        // Inspect recorded real upstream JSON using the pinned SDK's existing
+        // response shape. No protocol server/parser or response is synthesized.
+        let response: Value = serde_json::from_slice(&exchange.upstream_body).unwrap();
+        let results = response["results"].as_array().unwrap();
+        let batch = results
+            .iter()
+            .find(|result| result["response"]["type"] == "batch")
+            .unwrap();
+        assert_eq!(batch["type"], "ok");
+        let result = &batch["response"]["result"];
+        assert_eq!(result["step_results"].as_array().unwrap().len(), 1);
+        assert_eq!(result["step_errors"].as_array().unwrap().len(), 1);
+        assert_eq!(result["step_errors"][0].is_null(), accepted);
+        assert_eq!(result["step_results"][0].is_object(), accepted);
+        assert!(results
+            .iter()
+            .any(|result| result["type"] == "ok" && result["response"]["type"] == "close"));
+    }
+
+    fn sdk_no_post_failure_sql(
+        exchanges: &[crate::db::libsql_finish_fixture::Exchange],
+        boundary: usize,
+    ) {
+        for exchange in exchanges
+            .iter()
+            .filter(|exchange| exchange.ordinal > boundary)
+        {
+            // Close requests are observable disposal, not a new SQL observer,
+            // rollback, compensating write or second publication stream.
+            assert!(exchange.request["requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|request| request["type"] == "close"));
+        }
+    }
+
+    #[tokio::test]
+    async fn native_archive_sdk_actual_commit_reply_loss_stops_and_explicit_retry_reads_once() {
+        use futures_util::FutureExt;
+        let mut f = SdkFixture::new().await;
+        let body = std::panic::AssertUnwindSafe(async {
+            let (claim, request, hash, archive, keys) = f.claim().await;
+            let key = keys.values().next().unwrap();
+            let physical = std::fs::read(f.root.join(key)).unwrap();
+            let gate = f.driver.arm_commit_response_loss();
+            let (backend, current, graph, staged, expected) = (f.backend.clone(), claim.clone(), archive.clone(), keys.clone(), hash.clone());
+            let publication = tokio::spawn(async move {
+                publish_backend(&backend, &current, &graph, &staged, &crate::db::quota::StorageQuota::Unlimited, &expected, &CancellationToken::new()).await
+            });
+            gate.wait_upstream_response().await.unwrap();
+            assert!(!publication.is_finished());
+            let lost = f.driver.exchanges().into_iter().find(|exchange| exchange.reply_lost).unwrap();
+            sdk_closed_finish_response(&lost, true, true); // Original COMMIT+Close accepted upstream before cut.
+            gate.release_lost_reply();
+            let failure = publication.await.unwrap().unwrap_err();
+            assert!(matches!(failure, NativeDbError::Sql(sqlx::Error::AnyDriverError(ref error)) if error.is::<crate::db::backend::CommitUnknown>()));
+            assert_eq!(std::fs::read(f.root.join(key)).unwrap(), physical);
+            // Original driver's finish remains explicitly unconfirmed; drain
+            // before any explicit new request, never observe to reclassify it.
+            assert!(f.backend.close().await.is_err());
+            sdk_no_post_failure_sql(&f.driver.exchanges(), lost.ordinal);
+            let fresh = Backend::LibsqlRemote(std::sync::Arc::new(crate::db::backend::RemoteDatabase::from_test_driver(f.driver.database().await.unwrap(), std::num::NonZeroU32::new(1).unwrap())));
+            f.recovery = Some(fresh.clone());
+            let same = queue_restore_backend(&fresh, f.workspace, f.actor, f.session, request, &hash, b"native SDK finish policy control").await.unwrap();
+            assert_eq!(same, claim.job_id);
+            let status = status_backend(&fresh, f.workspace, f.actor, f.session, same).await.unwrap();
+            assert_eq!(status.status, "completed");
+            assert_eq!(status.project_id, Some(archive.graph.project.id));
+            assert!(matches!(publish_backend(&fresh, &claim, &archive, &keys, &crate::db::quota::StorageQuota::Unlimited, &hash, &CancellationToken::new()).await, Err(NativeDbError::Conflict) | Err(NativeDbError::Fenced)));
+            let captured = capture_backend(&fresh, f.workspace, f.actor, f.session, &Selection { project: archive.graph.project.id, zotero_connectors: &[] }).await.unwrap();
+            assert_eq!(captured.file_keys, keys);
+            assert_eq!(captured.archive.graph.documents.len(), 1);
+            assert_eq!(captured.archive.graph.documents[0].content_json, archive.graph.documents[0].content_json);
+            assert_eq!(std::fs::read(f.root.join(key)).unwrap(), physical);
+        }).catch_unwind().await;
+        let close = f.finish().await;
+        if let Err(panic) = body {
+            std::panic::resume_unwind(panic);
+        }
+        assert!(
+            close.is_err(),
+            "lost original finish must not become confirmed cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_archive_sdk_actual_commit_rejection_retains_file_and_fresh_command_progresses()
+    {
+        use futures_util::FutureExt;
+        let mut f = SdkFixture::new().await;
+        let body = std::panic::AssertUnwindSafe(async {
+            let (claim, _, hash, archive, keys) = f.claim().await;
+            let connector = Uuid::now_v7();
+            let mut tx = f.backend.begin_write().await.unwrap();
+            let crate::db::backend::DbTransaction::SqliteFamily(family) = &mut tx else { unreachable!() };
+            family.execute("INSERT INTO zotero_connectors(id,workspace_id,owner_user_id,library_type,remote_library_id,library_url) VALUES(?1,?2,?3,'user',1,'https://example.invalid/control')", &[Cell::uuid(connector),Cell::uuid(f.workspace),Cell::uuid(f.actor)]).await.unwrap();
+            tx.commit().await.unwrap();
+            let before = f.driver.exchanges().len();
+            fault(claim.job_id, Fault::Deferred(connector));
+            let failure = publish_backend(&f.backend, &claim, &archive, &keys, &crate::db::quota::StorageQuota::Unlimited, &hash, &CancellationToken::new()).await.unwrap_err();
+            assert!(matches!(failure, NativeDbError::Sql(sqlx::Error::AnyDriverError(ref error)) if error.is::<crate::db::backend::CommitUnknown>()));
+            assert!(f.backend.close().await.is_err());
+            let exchanges = f.driver.exchanges();
+            let rejected = exchanges.iter().find(|exchange| exchange.ordinal >= before && exchange.has_commit).unwrap();
+            sdk_closed_finish_response(rejected, true, false); // Real deferred FK rejection, not lost ACK.
+            assert!(!rejected.reply_lost);
+            sdk_no_post_failure_sql(&exchanges, rejected.ordinal);
+            let fresh = Backend::LibsqlRemote(std::sync::Arc::new(crate::db::backend::RemoteDatabase::from_test_driver(f.driver.database().await.unwrap(), std::num::NonZeroU32::new(1).unwrap())));
+            f.recovery = Some(fresh.clone());
+            let status = status_backend(&fresh, f.workspace, f.actor, f.session, claim.job_id).await.unwrap();
+            assert_eq!(status.status, "running");
+            assert_eq!(status.project_id, None);
+            let mut read = fresh.begin_read().await.unwrap();
+            let crate::db::backend::DbTransaction::SqliteFamily(family) = &mut read else { unreachable!() };
+            let row = family.query("SELECT (SELECT count(*) FROM projects WHERE workspace_id=?1),(SELECT count(*) FROM document_states WHERE workspace_id=?1),(SELECT count(*) FROM events WHERE workspace_id=?1),(SELECT count(*) FROM attachment_object_cleanups WHERE workspace_id=?1)", &[Cell::uuid(f.workspace)]).await.unwrap();
+            assert_eq!((row[0].cell(0).unwrap().integer().unwrap(),row[0].cell(1).unwrap().integer().unwrap(),row[0].cell(2).unwrap().integer().unwrap(),row[0].cell(3).unwrap().integer().unwrap()), (0,0,0,1));
+            read.rollback().await.unwrap();
+            assert_eq!(std::fs::read(f.root.join(keys.values().next().unwrap())).unwrap(), archive.bytes(&archive.graph.attachments[0].payload_entry).unwrap());
+            // This is an explicit retry after fixture-observed real Close ACK,
+            // not an automatic observer or re-publication of unknown effects.
+            publish_backend(&fresh, &claim, &archive, &keys, &crate::db::quota::StorageQuota::Unlimited, &hash, &CancellationToken::new()).await.unwrap();
+            assert_eq!(status_backend(&fresh, f.workspace, f.actor, f.session, claim.job_id).await.unwrap().status, "completed");
+        }).catch_unwind().await;
+        let close = f.finish().await;
+        if let Err(panic) = body {
+            std::panic::resume_unwind(panic);
+        }
+        assert!(
+            close.is_err(),
+            "original failed SDK finish must remain unconfirmed"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_archive_sdk_actual_statement_cancel_rollback_and_healthy_progress() {
+        use futures_util::FutureExt;
+        for cancelled in [false, true] {
+            let f = SdkFixture::new().await;
+            let body = std::panic::AssertUnwindSafe(async {
+                let (claim, _, hash, archive, keys) = f.claim().await;
+                let before = f.driver.exchanges().len();
+                fault(claim.job_id, if cancelled { Fault::Cancel } else { Fault::Statement });
+                let failure = publish_backend(&f.backend, &claim, &archive, &keys, &crate::db::quota::StorageQuota::Unlimited, &hash, &CancellationToken::new()).await.unwrap_err();
+                if cancelled {
+                    assert!(matches!(failure, NativeDbError::Archive(ArchiveError::Cancelled)));
+                } else {
+                    let NativeDbError::Sql(error) = failure else { panic!("real statement refusal lost typed DB cause"); };
+                    assert!(!crate::db::backend::is_rollback_cleanup_unknown(&error));
+                    assert!(!matches!(error, sqlx::Error::AnyDriverError(ref cause) if cause.is::<crate::db::backend::CommitUnknown>()));
+                }
+                let exchanges = f.driver.exchanges();
+                assert!(!exchanges.iter().any(|exchange| exchange.ordinal >= before && exchange.has_commit));
+                let rollback = exchanges.iter().find(|exchange| exchange.ordinal >= before && exchange.has_close).unwrap();
+                assert!(rollback.request["requests"].as_array().unwrap().iter().filter_map(|request| request["batch"]["steps"].as_array()).flatten().any(|step| step["stmt"]["sql"] == "ROLLBACK;"));
+                sdk_closed_finish_response(rollback, false, true);
+                let mut read = f.backend.begin_read().await.unwrap();
+                let crate::db::backend::DbTransaction::SqliteFamily(family) = &mut read else { unreachable!() };
+                let row = family.query("SELECT (SELECT count(*) FROM projects WHERE workspace_id=?1),(SELECT count(*) FROM document_states WHERE workspace_id=?1),(SELECT count(*) FROM events WHERE workspace_id=?1),(SELECT count(*) FROM attachment_object_cleanups WHERE workspace_id=?1)", &[Cell::uuid(f.workspace)]).await.unwrap();
+                assert_eq!((row[0].cell(0).unwrap().integer().unwrap(),row[0].cell(1).unwrap().integer().unwrap(),row[0].cell(2).unwrap().integer().unwrap(),row[0].cell(3).unwrap().integer().unwrap()), (0,0,0,1));
+                read.rollback().await.unwrap();
+                let key = keys.values().next().unwrap();
+                assert_eq!(std::fs::read(f.root.join(key)).unwrap(), archive.bytes(&archive.graph.attachments[0].payload_entry).unwrap());
+                publish_backend(&f.backend, &claim, &archive, &keys, &crate::db::quota::StorageQuota::Unlimited, &hash, &CancellationToken::new()).await.unwrap();
+                assert_eq!(status_backend(&f.backend, f.workspace, f.actor, f.session, claim.job_id).await.unwrap().status, "completed");
+                assert_eq!(std::fs::read(f.root.join(key)).unwrap(), archive.bytes(&archive.graph.attachments[0].payload_entry).unwrap());
+            }).catch_unwind().await;
+            let close = f.finish().await;
+            if let Err(panic) = body {
+                std::panic::resume_unwind(panic);
+            }
+            close.expect("acknowledged original rollback and healthy progress must close cleanly");
+        }
+    }
+
     struct Fixture {
         root: PathBuf,
         pool: sqlx::SqlitePool,
