@@ -2927,76 +2927,196 @@ mod selected_import_tests {
     }
     #[tokio::test]
     async fn import_selected_daily_retains_actual_failed_sync_document_and_refs() {
-        let f = Fixture::new().await;
-        let literal = b"actual failed sync retained bytes";
-        let (_, key) = f.attachment(literal.len() as i64, "text/plain").await;
-        let storage =
-            crate::attachments::ObjectStorage::local(f.root.join("actual-sync-retention"));
-        storage.put_bytes(&key, literal.to_vec()).await.unwrap();
-        let credential = session(&f).await;
-        let job = create_sync_import_job_backend(&f.backend, f.workspace, f.user, credential)
+        for stale in [false, true] {
+            let f = Fixture::new().await;
+            let literal = b"actual failed sync retained bytes";
+            let (_, key) = f.attachment(literal.len() as i64, "text/plain").await;
+            let storage =
+                crate::attachments::ObjectStorage::local(f.root.join("actual-sync-retention"));
+            storage.put_bytes(&key, literal.to_vec()).await.unwrap();
+            let credential = session(&f).await;
+            let job = create_sync_import_job_backend(&f.backend, f.workspace, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut tx = f.backend.begin_write().await.unwrap();
+            tx.operation().set_tenant(f.workspace).await.unwrap();
+            assert!(tx
+                .operation()
+                .append_sync_import_document_ref(f.workspace, job.id, f.user, f.document)
+                .await
+                .unwrap());
+            tx.commit().await.unwrap();
+            let content = r#"{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"retained synchronous body"}]}]}"#;
+            sqlx::query("UPDATE documents SET content_json=?2,text=?3 WHERE id=?1")
+                .bind(f.document.as_bytes().as_slice())
+                .bind(content)
+                .bind("retained synchronous body")
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let native_state = b"retained synchronous native state";
+            sqlx::query(
+                "INSERT INTO document_states(workspace_id,document_id,state) VALUES(?1,?2,?3)",
+            )
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.document.as_bytes().as_slice())
+            .bind(native_state.as_slice())
+            .execute(&f.pool)
             .await
-            .unwrap()
             .unwrap();
-        let mut tx = f.backend.begin_write().await.unwrap();
-        tx.operation().set_tenant(f.workspace).await.unwrap();
-        assert!(tx
-            .operation()
-            .append_sync_import_document_ref(f.workspace, job.id, f.user, f.document)
+            let revision = Uuid::now_v7();
+            sqlx::query("INSERT INTO revisions(id,workspace_id,target_kind,target_id,y_snapshot,content_json,text,reason,created_by) VALUES(?1,?2,'document',?3,?4,?5,?6,'manual',?7)")
+                .bind(revision.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.document.as_bytes().as_slice()).bind(native_state.as_slice()).bind(content).bind("retained synchronous body").bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+            if stale {
+                sqlx::query("UPDATE import_jobs SET updated_at=1 WHERE id=?1")
+                    .bind(job.id.as_bytes().as_slice())
+                    .execute(&f.pool)
+                    .await
+                    .unwrap();
+            } else {
+                assert!(finish_sync_import_job_backend(
+                    &f.backend,
+                    f.workspace,
+                    job.id,
+                    f.user,
+                    credential,
+                    ImportStatus::Failed
+                )
+                .await
+                .unwrap());
+            }
+            let before =
+                get_import_job_backend(&f.backend, f.workspace, f.user, credential, job.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(before.source, ImportSource::MarkdownZip);
+            assert_eq!(
+                before.status,
+                if stale {
+                    ImportStatus::Pending
+                } else {
+                    ImportStatus::Failed
+                }
+            );
+            assert_eq!(before.created_refs.document_ids, vec![f.document]);
+            // A genuine separate failed async obligation in this SAME sweep.
+            // It owns a different document/key, so retention cannot be passed
+            // by disabling cleanup or by counting unrelated retained refs.
+            let async_doc = Uuid::now_v7();
+            sqlx::query("INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,'async partial',?3,'W',2,'published',2,?4,'{\"type\":\"doc\",\"content\":[]}')")
+                .bind(async_doc.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(async_doc.simple().to_string()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+            let async_bytes = b"eligible async cleanup bytes";
+            let (async_attachment, async_key) =
+                f.attachment(async_bytes.len() as i64, "text/plain").await;
+            sqlx::query("UPDATE attachments SET document_id=?2 WHERE id=?1")
+                .bind(async_attachment.as_bytes().as_slice())
+                .bind(async_doc.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            storage
+                .put_bytes(&async_key, async_bytes.to_vec())
+                .await
+                .unwrap();
+            queued(&f, credential, ImportSource::NotionZip).await;
+            let async_claim = claim(&f).await;
+            refs(&f, &async_claim, async_doc, Some(&async_key)).await;
+            assert!(
+                finish_import_job_backend(&f.backend, &async_claim, ImportStatus::Failed)
+                    .await
+                    .unwrap()
+            );
+            let daily = daily(&f).await;
+            assert_eq!(
+                crate::import_job::sweep_orphan_imports_with_maintenance_claim_backend(
+                    &f.backend,
+                    &storage,
+                    &CancellationToken::new(),
+                    daily.proof(),
+                    daily.policy()
+                )
+                .await
+                .unwrap(),
+                if stale { 2 } else { 1 }
+            );
+            let after = get_import_job_backend(&f.backend, f.workspace, f.user, credential, job.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.status, ImportStatus::Failed);
+            assert_eq!(after.created_refs, before.created_refs);
+            assert_eq!(
+                std::fs::read(
+                    f.root
+                        .join("actual-sync-retention/objects")
+                        .join(&key)
+                        .join("payload")
+                )
+                .unwrap(),
+                literal
+            );
+            let retained: (String, String, Vec<u8>) = sqlx::query_as("SELECT d.content_json,d.text,s.state FROM documents d JOIN document_states s ON s.workspace_id=d.workspace_id AND s.document_id=d.id WHERE d.id=?1")
+                .bind(f.document.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+            assert_eq!(
+                retained,
+                (
+                    content.into(),
+                    "retained synchronous body".into(),
+                    native_state.to_vec()
+                )
+            );
+            let history: (Vec<u8>, String, String) =
+                sqlx::query_as("SELECT y_snapshot,content_json,text FROM revisions WHERE id=?1")
+                    .bind(revision.as_bytes().as_slice())
+                    .fetch_one(&f.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                history,
+                (
+                    native_state.to_vec(),
+                    content.into(),
+                    "retained synchronous body".into()
+                )
+            );
+            let retained_attachment: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM attachments WHERE document_id=?1 AND storage_key=?2",
+            )
+            .bind(f.document.as_bytes().as_slice())
+            .bind(&key)
+            .fetch_one(&f.pool)
             .await
-            .unwrap());
-        tx.commit().await.unwrap();
-        assert!(finish_sync_import_job_backend(
-            &f.backend,
-            f.workspace,
-            job.id,
-            f.user,
-            credential,
-            ImportStatus::Failed
-        )
-        .await
-        .unwrap());
-        let before = get_import_job_backend(&f.backend, f.workspace, f.user, credential, job.id)
-            .await
-            .unwrap()
             .unwrap();
-        assert_eq!(before.source, ImportSource::MarkdownZip);
-        assert_eq!(before.status, ImportStatus::Failed);
-        assert_eq!(before.created_refs.document_ids, vec![f.document]);
-        let daily = daily(&f).await;
-        assert_eq!(
-            crate::import_job::sweep_orphan_imports_with_maintenance_claim_backend(
+            assert_eq!(retained_attachment, 1);
+            let purged: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM documents WHERE id=?1),(SELECT count(*) FROM attachments WHERE id=?2),(SELECT count(*) FROM events WHERE target_id=?3 AND verb='document.purged')")
+                .bind(async_doc.as_bytes().as_slice()).bind(async_attachment.as_bytes().as_slice()).bind(f.document.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+            assert_eq!(purged, (0, 0, 0));
+            assert!(storage.head(&async_key).await.unwrap().is_none());
+            let async_status = get_import_job_backend(
                 &f.backend,
-                &storage,
-                &CancellationToken::new(),
-                daily.proof(),
-                daily.policy()
+                f.workspace,
+                f.user,
+                credential,
+                async_claim.job_id,
             )
-            .await
-            .unwrap(),
-            0
-        );
-        let after = get_import_job_backend(&f.backend, f.workspace, f.user, credential, job.id)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(after.status, before.status);
-        assert_eq!(after.created_refs, before.created_refs);
-        assert_eq!(
-            std::fs::read(
-                f.root
-                    .join("actual-sync-retention/objects")
-                    .join(&key)
-                    .join("payload")
+            assert_eq!(async_status.status, ImportStatus::Failed);
+            assert!(async_status.created_refs.is_empty());
+            let async_purged: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM events WHERE target_id=?1 AND verb='document.purged'",
             )
-            .unwrap(),
-            literal
-        );
-        let retained: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM documents WHERE id=?1),(SELECT count(*) FROM attachments WHERE document_id=?1 AND storage_key=?2)")
-            .bind(f.document.as_bytes().as_slice()).bind(&key).fetch_one(&f.pool).await.unwrap();
-        assert_eq!(retained, (1, 1));
-        daily.release().await.unwrap();
-        f.close().await;
+            .bind(async_doc.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+            assert_eq!(async_purged, 1);
+            daily.release().await.unwrap();
+            f.close().await;
+        }
     }
     #[tokio::test]
     async fn import_selected_daily_retains_failed_markdown_zip_and_rechecks_source() {
