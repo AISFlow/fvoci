@@ -614,12 +614,13 @@ mod backend_tests {
             while f.pool.num_idle() != 1 {
                 tokio::task::yield_now().await;
             }
-            assert_eq!(f.pool.num_idle(), 1); // Provider wait owns no app connection.
+            let provider_idle = f.pool.num_idle();
             provider.state.release.notify_one();
             phase = "writer acquisition behind reservation";
             while f.pool.num_idle() != 0 {
                 tokio::task::yield_now().await;
             }
+            provider_idle
         })
         .await; // Both pool observations share the original five-second budget.
         cancel.cancel();
@@ -648,6 +649,7 @@ mod backend_tests {
             barrier.is_ok(),
             "embedding cancellation barrier failed during {phase}"
         );
+        assert_eq!(barrier.unwrap(), 1); // Blocked provider owned no app connection.
         rollback.unwrap();
         provider_stopped.unwrap();
         backend_closed.unwrap();
