@@ -54,8 +54,8 @@ class ObserverControls(unittest.TestCase):
     def assert_diagnostic(self, result, code, primitive, kind, errno, line):
         exit_code, receipt = result
         self.assertEqual(exit_code, 1)
-        self.assertEqual(receipt, {"scope": "LAUNCHER_CGROUP_ONLY_NOT_IMAGE_QUALIFIED", "reader_sha": "dbe5af0280d2e652a488e36ab37ebbf8e0d3e844",
-            "reader_source_sha256": "e7867a9cc7d14a704b8ebe3bb035d46168352728b7e2d61a494014a999d1dce1", "result": code,
+        self.assertEqual(receipt, {"scope": "LAUNCHER_CGROUP_ONLY_NOT_IMAGE_QUALIFIED", "reader_sha": "05c9611c5c140030df582dd99fd518a022948a31",
+            "reader_source_sha256": "4712f6e06d653c50e04020fdabfbfdd48e7b2ea090876b277b3aeb317698d038", "result": code,
             "diagnostic": {"primitive": primitive, "exception_class": kind, "errno": errno, "source_line": line}})
 
     def test_healthy_once_never_build_or_process(self):
@@ -78,7 +78,7 @@ class ObserverControls(unittest.TestCase):
     def test_parse_error_never_emit_rejected_bytes(self):
         (self.cg / "parent/memory.max").write_text("PRIVATE_TOKEN https://private.invalid")
         result = self.run_reader()
-        self.assert_diagnostic(result, "CGROUP_METADATA_UNKNOWN", "MEMORY_MAX_PARSE", "ValueError", None, 318)
+        self.assert_diagnostic(result, "CGROUP_METADATA_UNKNOWN", "MEMORY_MAX_PARSE", "ValueError", None, 319)
         self.assertNotIn("PRIVATE_TOKEN", json.dumps(result)); self.assertNotIn("https://", json.dumps(result))
 
     def test_decode_error_class_closed(self):
@@ -86,15 +86,15 @@ class ObserverControls(unittest.TestCase):
         self.assert_diagnostic(self.run_reader(), "CGROUP_METADATA_UNKNOWN", "MEMORY_PEAK_READ_PARSE", "ValueError", None, 192)
 
     def test_explicit_shape_and_counter_refusals(self):
-        for text, primitive, line in [("oom 0\noom 0\n", "MEMORY_EVENTS_SHAPE", 322),
-                                      ("oom 0\n", "MEMORY_COUNTERS_PREDICATE", 324)]:
+        for text, primitive, line in [("oom 0\noom 0\n", "MEMORY_EVENTS_SHAPE", 323),
+                                      ("oom 0\n", "MEMORY_COUNTERS_PREDICATE", 325)]:
             (self.cg / "parent/memory.events").write_text(text)
             self.assert_diagnostic(self.run_reader(), "CGROUP_METADATA_UNKNOWN", primitive, "Refusal", None, line)
 
     def test_hidden_subtree_refusal_keeps_closed_code(self):
         # ROOT-approved replacement of the old literal namespace mismatch.
         (self.cg / "cgroup.type").write_text("domain")
-        self.assert_diagnostic(self.run_reader(), "CGROUP_HOST_ROOT_INVALID", "ROOT_MARKER_PREDICATE", "Refusal", None, 292)
+        self.assert_diagnostic(self.run_reader(), "CGROUP_HOST_ROOT_INVALID", "ROOT_MARKER_PREDICATE", "Refusal", None, 293)
 
     def test_root_marker_errno_disambiguated_without_path(self):
         original = self.reader.os.open
@@ -133,8 +133,8 @@ class ObserverControls(unittest.TestCase):
         with patch.object(O, "READER_PATH", link):
             with self.assertRaisesRegex(ValueError, "OBSERVER_SOURCE_UNVERIFIED"): O.load_reader()
         lines = (HERE / "shipping-image-producer.py").read_text().splitlines()
-        self.assertIn('"memory.peak"', lines[319]); self.assertIn('"memory.events"', lines[320])
-        self.assertIn('"memory.max"', lines[316]); self.assertEqual(O.FUNCTION_RANGES["cgroup_chain"], (273, 350))
+        self.assertIn('"memory.peak"', lines[320]); self.assertIn('"memory.events"', lines[321])
+        self.assertIn('"memory.max"', lines[317]); self.assertEqual(O.FUNCTION_RANGES["cgroup_chain"], (273, 351))
         with patch.dict(O.FUNCTION_RANGES, {"cgroup_text": (183, 194)}), patch.object(O, "READER_PATH", HERE / "shipping-image-producer.py"):
             with self.assertRaisesRegex(ValueError, "OBSERVER_SOURCE_UNVERIFIED"): O.load_reader()
 
@@ -158,15 +158,22 @@ class ObserverControls(unittest.TestCase):
 
     def test_foreign_direct_membership_and_proc_masks_closed(self):
         file = self.cg / "parent/cgroup.procs"; original = file.read_bytes(); file.write_text("42\n")
-        self.assert_diagnostic(self.run_reader(), "CGROUP_METADATA_UNKNOWN", "DIRECT_MEMBERSHIP_PREDICATE", "Refusal", None, 313)
+        self.assert_diagnostic(self.run_reader(), "CGROUP_METADATA_UNKNOWN", "DIRECT_MEMBERSHIP_PREDICATE", "Refusal", None, 314)
         file.write_bytes(original)
         mount = self.proc / "self/mountinfo"
         mount.write_text(mount.read_text() + f"3 2 0:9 / {self.proc}/{self.reader.os.getpid()}/stat rw - tmpfs tmpfs rw\n")
         self.assert_diagnostic(self.run_reader(), "CGROUP_ANCESTORS_HIDDEN", "PROC_MOUNT_MASK_PREDICATE", "Refusal", None, 255)
 
     def test_genuine_visibility_never_invokes_init_readlink(self):
-        with patch.object(self.reader.os, "readlink", side_effect=AssertionError("NO_INIT_NAMESPACE_FALLBACK")):
+        original = self.reader.os.readlink
+        def own_pid_only(path):
+            self.assertEqual(path, self.proc / "self"); return original(path)
+        with patch.object(self.reader.os, "readlink", side_effect=own_pid_only):
             self.assertEqual(self.run_reader()[0], 0)
+
+    def test_foreign_proc_pid_view_closed_without_foreign_directory_read(self):
+        (self.proc / "self").unlink(); (self.proc / "self").symlink_to("42")
+        self.assert_diagnostic(self.run_reader(), "CGROUP_METADATA_UNKNOWN", "PROC_SELF_PID_BIND", "Refusal", None, 282)
 
     def test_unknown_foreign_frame_cannot_claim_pinned_primitive(self):
         error = OSError(13, "PRIVATE_TOKEN", "memory.max")
