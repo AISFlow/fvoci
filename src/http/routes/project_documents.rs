@@ -940,10 +940,38 @@ mod selected_create_http_tests {
             .await
             .unwrap();
         let status = response.status();
+        if !status.is_success() {
+            assert_eq!(
+                response.headers()[axum::http::header::CONTENT_TYPE],
+                "application/problem+json"
+            );
+        }
         let bytes = axum::body::to_bytes(response.into_body(), 16384)
             .await
             .unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    fn assert_metadata_problem(status: StatusCode, body: &Value, private_values: &[String]) {
+        // Literal public AppError contract, independent of the returned metadata.
+        let (title, code) = match status {
+            StatusCode::UNAUTHORIZED => ("authentication required", "authentication_required"),
+            StatusCode::NOT_FOUND => ("not found", "not_found"),
+            StatusCode::INTERNAL_SERVER_ERROR => ("internal error", "internal_error"),
+            _ => panic!("unexpected metadata refusal status: {status}"),
+        };
+        assert_eq!(
+            body,
+            &json!({"type":"about:blank","title":title,"status":status.as_u16(),"code":code})
+        );
+        // Exact shape also excludes document/content fields, source and params.
+        let serialized = serde_json::to_string(body).unwrap();
+        for value in private_values {
+            assert!(
+                !serialized.contains(value.as_str()),
+                "private metadata in problem response"
+            );
+        }
     }
 
     #[tokio::test]
@@ -964,6 +992,18 @@ mod selected_create_http_tests {
         let id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
         let path = format!("{}/{}", create_path(f.workspace, project), id);
         let before = counts(&f, project).await;
+        let private_values = [
+            id.to_string(),
+            f.workspace.to_string(),
+            project.to_string(),
+            f.document.to_string(),
+            f.user.to_string(),
+            "GET metadata 한글".to_string(),
+            "OFF-2".to_string(),
+            "S31".to_string(),
+            "OFF-1".to_string(),
+            json!({"type":"doc","content":[]}).to_string(),
+        ];
         let read_token = pat(&f, "documents.read").await;
         let write_token = pat(&f, "documents.write").await;
         for (auth, bearer) in [(&token, false), (&read_token, true), (&write_token, true)] {
@@ -1018,8 +1058,7 @@ mod selected_create_http_tests {
         ] {
             let (status, body) = get_metadata(app.clone(), target, auth, bearer).await;
             assert_eq!(status, expected, "{body}");
-            assert!(body.get("title").is_none());
-            assert!(body.get("displayId").is_none());
+            assert_metadata_problem(status, &body, &private_values);
         }
         sqlx::query("UPDATE api_tokens SET expires_at=1 WHERE token_hash=?1")
             .bind(crate::auth::token::hash_token(&read_token))
@@ -1071,8 +1110,7 @@ mod selected_create_http_tests {
                 .unwrap();
             let (status, body) = get_metadata(app.clone(), &path, Some(&token), false).await;
             assert_eq!(status, expected, "{body}");
-            assert!(body.get("title").is_none());
-            assert!(body.get("displayId").is_none());
+            assert_metadata_problem(status, &body, &private_values);
             sqlx::query(restore)
                 .bind(target.as_bytes().as_slice())
                 .execute(&f.pool)
@@ -1123,7 +1161,19 @@ mod selected_create_http_tests {
             .unwrap();
         let (status, body) = get_metadata(app.clone(), &path, Some(&token), false).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
-        assert!(body.get("title").is_none());
+        assert_metadata_problem(
+            status,
+            &body,
+            &[
+                f.document.to_string(),
+                f.workspace.to_string(),
+                project.to_string(),
+                f.user.to_string(),
+                "S31".to_string(),
+                "OFF-1".to_string(),
+                json!({"type":"doc","content":[]}).to_string(),
+            ],
+        );
         sqlx::query("ALTER TABLE metadata_http_fault_projects RENAME TO projects")
             .execute(&f.pool)
             .await
