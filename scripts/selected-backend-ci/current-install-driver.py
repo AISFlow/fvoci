@@ -10,8 +10,46 @@ import subprocess
 import sys
 import time
 
-from current_binding import load_current
-current = load_current('install', __file__)
+def record_install_failure(error, phase):
+    """Optional bounded observation; never changes the original exit or proof."""
+    try:
+        driver = pathlib.Path(__file__).resolve()
+        line = sys._getframe(1).f_lineno
+        if error is not None:
+            frame = error.__traceback__
+            while frame:
+                if pathlib.Path(frame.tb_frame.f_code.co_filename).resolve() == driver:
+                    line = frame.tb_lineno
+                frame = frame.tb_next
+        kind = 'ProcessExit' if error is None else type(error).__name__
+        if kind not in ('AssertionError', 'RuntimeError', 'PermissionError', 'OSError', 'TimeoutExpired', 'ProcessExit'):
+            kind = 'OtherError'
+        runtime = pathlib.Path(os.environ['FVOCI_CI_SELECTED_RUNS'])
+        output = runtime.parent
+        assert runtime.is_absolute() and runtime == output / 'runtime'
+        assert not output.is_symlink() and output.stat().st_uid == os.getuid()
+        assert output.stat().st_mode & 0o777 == 0o700
+        digest = lambda path: hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+        observation = {'schema':1, 'source':os.environ['GITHUB_SHA'],
+            'driver_sha256':digest(driver),
+            'allocation_sha256':digest(os.environ['FVOCI_ROOT_CURRENT_ALLOCATION']),
+            'binding_sha256':digest(os.environ['FVOCI_ROOT_CURRENT_BINDING']),
+            'phase':phase, 'line':line, 'type':kind}
+        # Exclusive create keeps the first observed origin, including a test exit.
+        with (output / 'install-failure-origin.json').open('x') as file:
+            os.fchmod(file.fileno(), 0o600)
+            json.dump(observation, file)
+    except BaseException:
+        # Missing/inaccessible observation stays UNKNOWN; never mask the failure.
+        pass
+
+
+try:
+    from current_binding import load_current
+    current = load_current('install', __file__)
+except BaseException as error:
+    record_install_failure(error, 'before-binding')
+    raise
 P = current['run']
 E = P.parent
 W = pathlib.Path(__file__).resolve().parents[2]
@@ -90,6 +128,7 @@ receipt = {
 write(P / 'start.json', receipt)
 created = False
 code = 1
+install_phase = 'preparation'
 try:
     command(['docker', 'create', '--name', NAME, '--network', 'none', '--user', '0',
              '--label', 'fvoci.owner=' + os.environ['FVOCI_CI_OWNER'],
@@ -135,13 +174,17 @@ try:
     receipt.update(command=args, body_start_utc=now())
     write(P / 'progress.json', receipt)
     started = time.monotonic()
+    install_phase = 'test-body'
     result = command(args, logfile=P / 'test.log', check=False)
     code = result.returncode
+    if code != 0:
+        record_install_failure(None, install_phase)
     receipt.update(body_end_utc=now(), exit_code=code, body_seconds=time.monotonic()-started,
                    log_sha256=sha(P / 'test.log'))
     copy = command(['docker', 'cp', NAME + ':/fvoci/run', str(P / 'retained-run')], check=False)
     receipt['durable_receipt_copy_exit'] = copy.returncode
     raw = (P / 'test.log').read_text()
+    install_phase = 'test-results'
     if code == 0:
         assert re.search(r'test result: ok\. 4 passed; 0 failed; 0 ignored;', raw), 'exact executed counts'
         processes = list((P / 'retained-run').rglob('*process.json'))
@@ -149,6 +192,7 @@ try:
         assert all(json.loads(f.read_text())['status'] is not None for f in processes)
         receipt.update(actual_tests=4, ignored=0, actual_owned_process_receipts=15)
 except BaseException as error:
+    record_install_failure(error, install_phase)
     receipt['driver_error'] = str(error)
     code = code or 1
 finally:

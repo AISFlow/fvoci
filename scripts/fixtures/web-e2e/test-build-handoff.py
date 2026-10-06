@@ -1589,4 +1589,217 @@ class RestartBrowserDiagnosticTest(unittest.TestCase):
             self.assertEqual(row['restart_browser_diagnostic']['observation']['restart_verdict']['status'], 'passed')
             self.assertEqual(row['receipt_final_exit'], 7); self.assertTrue(closed); self.assertIsNone(error)
 
+class InstallationFailureProjectionTest(unittest.TestCase):
+    """Actual capture/assertion AST, fake receipts only; no product processes."""
+    driver = ROOT/'scripts/selected-backend-ci/current-install-driver.py'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.output = Path(self.tmp.name)/'output'; self.output.mkdir(mode=0o700)
+        self.runtime = self.output/'runtime'; self.runtime.mkdir(mode=0o700)
+        self.runroot = self.runtime/'root-current-install-0123456789ab'
+        self.before = {'head':SHA, 'tree':TREE, 'tracked':{
+            'scripts/selected-backend-ci/current-install-driver.py':H.CI.sha(self.driver),
+            'scripts/selected-backend-ci/current_binding.py':H.CI.sha(ROOT/'scripts/selected-backend-ci/current_binding.py')}}
+        self.put('before.json', self.before)
+        self.put('install-binding.json', {'schema':1, 'ready':True, 'source':SHA, 'compiledSource':SHA, 'tree':TREE})
+        self.grant = {'schema':1, 'status':'GRANTED', 'owner':'fixture', 'exclusiveCIJob':True,
+            'currentCIJobConfirmed':True, 'runId':'123', 'runAttempt':'1', 'source':SHA,
+            'compiledSource':SHA, 'tree':TREE, 'lane':'install', 'backend':None,
+            'runRoot':str(self.runroot), 'driverSha256':H.CI.sha(self.driver),
+            'bindingSha256':H.CI.sha(self.output/'install-binding.json'),
+            'bindingModuleSha256':H.CI.sha(ROOT/'scripts/selected-backend-ci/current_binding.py')}
+        self.put('install-allocation.json', self.grant)
+        self.stage = {'schema':1, 'source':SHA, 'tree':TREE, 'owner':'fixture', 'runId':'123', 'runAttempt':'1',
+            'runRoot':str(self.runroot), 'driver_sha256':H.CI.sha(self.driver),
+            'allocation_sha256':H.CI.sha(self.output/'install-allocation.json'),
+            'binding_sha256':H.CI.sha(self.output/'install-binding.json'), 'exit':7}
+        self.put('install-launcher-stage.json', self.stage)
+        self.environment = {'GITHUB_SHA':SHA, 'GITHUB_JOB':'collaboration-flow', 'GITHUB_RUN_ID':'123',
+            'GITHUB_RUN_ATTEMPT':'1', 'FVOCI_CI_SELECTED_RUNS':str(self.runtime),
+            'FVOCI_ROOT_CURRENT_ALLOCATION':str(self.output/'install-allocation.json'),
+            'FVOCI_ROOT_CURRENT_BINDING':str(self.output/'install-binding.json')}
+        env = patch.dict(os.environ, self.environment); env.start(); self.addCleanup(env.stop)
+        self.tree = ast.parse(self.driver.read_text())
+        helper = next(n for n in self.tree.body if isinstance(n,ast.FunctionDef) and n.name=='record_install_failure')
+        self.namespace = {'__file__':str(self.driver)}
+        imports = [n for n in self.tree.body if isinstance(n,(ast.Import,ast.ImportFrom))]
+        exec(compile(ast.Module(body=imports+[helper],type_ignores=[]),str(self.driver),'exec'),self.namespace)
+
+    def put(self, name, value): (self.output/name).write_text(json.dumps(value))
+    def origin(self): return json.loads((self.output/'install-failure-origin.json').read_text())
+    def projected(self): return H.CI.installation_failure_diagnostic(self.output,self.before,'fixture')
+    def captured_error(self, phase, code=0):
+        original = [n for n in self.tree.body if isinstance(n,ast.Try)][1]
+        body = ast.parse("raise RuntimeError('PRIVATE_CANARY_URL password=PRIVATE_CANARY_SECRET')").body[0]
+        ast.copy_location(body, original.body[0])
+        controlled = ast.Try(body=[body],handlers=copy.deepcopy(original.handlers),orelse=[],finalbody=[])
+        ast.copy_location(controlled, original)
+        self.namespace.update(receipt={},code=code,install_phase=phase)
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[controlled],type_ignores=[])),str(self.driver),'exec'),self.namespace)
+        return self.origin()
+
+    def test_before_binding_failure_is_observed_without_creating_run_or_waiving_binding(self):
+        before_binding = [n for n in self.tree.body if isinstance(n,ast.Try)][0]
+        def refusal(*args): raise PermissionError('PRIVATE_CANARY_SECRET token=PRIVATE_CANARY_URL')
+        module = type('OwnedBindingStub', (), {'load_current':staticmethod(refusal)})()
+        with patch.dict(sys.modules, {'current_binding':module}):
+            with self.assertRaisesRegex(PermissionError,'PRIVATE_CANARY_SECRET'):
+                exec(compile(ast.Module(body=[before_binding],type_ignores=[]),str(self.driver),'exec'),self.namespace)
+        origin=self.origin(); observed=self.projected()
+        self.assertEqual(origin['phase'],'before-binding'); self.assertEqual(origin['type'],'PermissionError')
+        self.assertEqual(observed['launcher_observed_driver_exit'],7)
+        self.assertEqual(observed['origin']['line'],before_binding.body[1].lineno)
+        self.assertFalse(self.runroot.exists()); self.assertNotIn('PRIVATE_CANARY',json.dumps(observed))
+
+    def test_caught_prerequisite_failure_keeps_first_exit_and_private_canary_out_of_projection(self):
+        origin=self.captured_error('preparation',code=7)
+        self.assertEqual(self.namespace['code'],7)
+        self.assertIn('PRIVATE_CANARY',self.namespace['receipt']['driver_error'])
+        self.assertEqual(self.projected()['origin'],{k:origin[k] for k in ('driver_sha256','phase','line','type')})
+        self.assertNotIn('PRIVATE_CANARY',json.dumps(self.projected()))
+        self.assertEqual((self.output/'install-failure-origin.json').stat().st_mode & 0o777,0o600)
+
+    def test_optional_origin_io_failure_does_not_replace_before_binding_exception(self):
+        before_binding = [n for n in self.tree.body if isinstance(n,ast.Try)][0]
+        def refusal(*args): raise RuntimeError('PRIVATE_CANARY_FIRST_FAILURE')
+        module = type('OwnedBindingStub', (), {'load_current':staticmethod(refusal)})()
+        (self.output/'install-binding.json').unlink()
+        with patch.dict(sys.modules, {'current_binding':module}):
+            with self.assertRaisesRegex(RuntimeError,'PRIVATE_CANARY_FIRST_FAILURE'):
+                exec(compile(ast.Module(body=[before_binding],type_ignores=[]),str(self.driver),'exec'),self.namespace)
+        self.assertFalse((self.output/'install-failure-origin.json').exists())
+        self.assertEqual(self.projected(),{'launcher_observed_driver_exit':None,'origin':None})
+
+    def test_test_process_exit_has_exact_producer_line_and_first_origin_survives_later_error(self):
+        process_exit=next(n for n in ast.walk(self.tree) if isinstance(n,ast.If) and
+            ast.unparse(n.test)=='code != 0' and 'record_install_failure' in ast.unparse(n))
+        self.namespace.update(code=7,install_phase='test-body')
+        exec(compile(ast.Module(body=[process_exit],type_ignores=[]),str(self.driver),'exec'),self.namespace)
+        first=self.origin(); self.captured_error('test-results',code=7)
+        self.assertEqual(self.origin(),first)
+        self.assertEqual(first['line'],process_exit.body[0].lineno)
+        self.assertEqual(self.projected()['origin']['type'],'ProcessExit')
+        self.assertEqual(self.projected()['origin']['phase'],'test-body')
+        self.assertEqual(self.namespace['code'],7)
+
+    def test_four_tests_and_fifteen_settled_process_assertions_remain_effective(self):
+        count_check=next(n for n in ast.walk(self.tree) if isinstance(n,ast.If) and
+            ast.unparse(n.test)=='code == 0')
+        retained=self.output/'retained-run'; retained.mkdir()
+        for count, status, raw in ((15,0,'test result: ok. 4 passed; 0 failed; 0 ignored;'),
+                                  (14,0,'test result: ok. 4 passed; 0 failed; 0 ignored;'),
+                                  (15,None,'test result: ok. 4 passed; 0 failed; 0 ignored;'),
+                                  (15,0,'test result: ok. 3 passed; 1 failed; 0 ignored;')):
+            with self.subTest(count=count,status=status,raw=raw):
+                for p in retained.iterdir():p.unlink()
+                for n in range(count):(retained/(str(n)+'-process.json')).write_text(json.dumps({'status':status}))
+                namespace={**self.namespace,'P':self.output,'code':0,'raw':raw,'receipt':{}}
+                code=compile(ast.Module(body=[count_check],type_ignores=[]),str(self.driver),'exec')
+                if count==15 and status==0 and '4 passed' in raw:
+                    exec(code,namespace); self.assertEqual(namespace['receipt']['actual_tests'],4)
+                    self.assertEqual(namespace['receipt']['actual_owned_process_receipts'],15)
+                else:
+                    with self.assertRaises(AssertionError):exec(code,namespace)
+
+    def test_missing_origin_remains_unknown_with_qualified_waited_numeric_exit(self):
+        self.assertEqual(self.projected(),{'launcher_observed_driver_exit':7,'origin':None})
+        self.put('install-failure-origin.json',{'message':'PRIVATE_CANARY_URL'})
+        self.assertEqual(self.projected(),{'launcher_observed_driver_exit':7,'origin':None})
+
+    def test_stage_and_allocation_identity_mutations_refuse_exit_projection(self):
+        original=copy.deepcopy(self.stage)
+        mutations={'schema':True,'source':'f'*40,'tree':'f'*40,'owner':'PRIVATE_CANARY_OWNER',
+            'runId':'124','runAttempt':'2','runRoot':str(self.output/'foreign'),
+            'driver_sha256':'f'*64,'allocation_sha256':'f'*64,'binding_sha256':'f'*64,
+            'exit':True,'extra':'PRIVATE_CANARY_URL'}
+        for field,value in mutations.items():
+            with self.subTest(field=field):
+                stage={**original,field:value}; self.put('install-launcher-stage.json',stage)
+                self.assertEqual(self.projected(),{'launcher_observed_driver_exit':None,'origin':None})
+        self.put('install-launcher-stage.json',original)
+        for exit in (-256,256,'PRIVATE_CANARY_EXIT'):
+            self.put('install-launcher-stage.json',{**original,'exit':exit})
+            self.assertIsNone(self.projected()['launcher_observed_driver_exit'])
+        self.put('install-launcher-stage.json',original)
+        self.before['tracked']['scripts/selected-backend-ci/current-install-driver.py']='f'*64
+        self.assertIsNone(self.projected()['launcher_observed_driver_exit'])
+
+    def test_foreign_grant_binding_and_symlink_stage_remain_unknown(self):
+        for field,value in {'status':'REFUSED','exclusiveCIJob':False,'currentCIJobConfirmed':False,
+                'lane':'postgres','compiledSource':'f'*40,'bindingModuleSha256':'f'*64}.items():
+            with self.subTest(field=field):
+                self.put('install-allocation.json',{**self.grant,field:value})
+                stage={**self.stage,'allocation_sha256':H.CI.sha(self.output/'install-allocation.json')}
+                self.put('install-launcher-stage.json',stage)
+                self.assertIsNone(self.projected()['launcher_observed_driver_exit'])
+        self.put('install-allocation.json',self.grant); self.put('install-launcher-stage.json',self.stage)
+        self.put('install-binding.json',{'source':'PRIVATE_CANARY_URL'})
+        self.assertIsNone(self.projected()['launcher_observed_driver_exit'])
+        stage=self.output/'install-launcher-stage.json'; stage.unlink(); stage.symlink_to(self.output/'before.json')
+        self.assertIsNone(self.projected()['launcher_observed_driver_exit'])
+
+    def test_origin_schema_source_phase_type_line_and_private_extras_are_not_published(self):
+        original=self.captured_error('preparation')
+        mutations={'schema':True,'source':'f'*40,'driver_sha256':'f'*64,
+            'allocation_sha256':'f'*64,'binding_sha256':'f'*64,'phase':'PRIVATE_CANARY_URL',
+            'type':'PRIVATE_CANARY_SECRET','line':True,'extra':'PRIVATE_CANARY_BODY'}
+        for field,value in mutations.items():
+            with self.subTest(field=field):
+                self.put('install-failure-origin.json',{**original,field:value})
+                self.assertEqual(self.projected(),{'launcher_observed_driver_exit':7,'origin':None})
+        for line in (0,len(self.driver.read_text().splitlines())+1):
+            self.put('install-failure-origin.json',{**original,'line':line})
+            self.assertIsNone(self.projected()['origin'])
+        self.put('install-failure-origin.json',{**original,'type':'ProcessExit'})
+        self.assertIsNone(self.projected()['origin'])
+        self.put('install-failure-origin.json',original)
+        self.put('install-launcher-stage.json',{**self.stage,'exit':0})
+        self.assertEqual(self.projected(),{'launcher_observed_driver_exit':0,'origin':None})
+
+    def test_missing_aggregate_still_refuses_closure_and_private_publication(self):
+        self.captured_error('preparation')
+        captured=io.StringIO()
+        with patch.object(H.CI,'identity',return_value='fixture'),patch.object(os,'getuid',return_value=1000), \
+                patch.object(os,'getgid',return_value=1000),patch('sys.stdout',captured):
+            with self.assertRaises(FileNotFoundError):H.CI.runtime_ownership_return(self.output)
+        summary=json.loads(captured.getvalue())
+        self.assertFalse(summary['ownership_return_qualified']); self.assertEqual(summary['phase'],'selected-receipt')
+        self.assertEqual(summary['lanes'],[])
+        self.assertEqual(summary['installation_failure']['launcher_observed_driver_exit'],7)
+        self.assertEqual(summary['installation_failure']['origin']['phase'],'preparation')
+        self.assertFalse((self.output/'runtime-close-stage.json').exists())
+        self.assertFalse((self.output/'selected-ci-receipt.json').exists())
+        self.assertNotIn('PRIVATE_CANARY',captured.getvalue()); self.assertNotIn(str(self.output),captured.getvalue())
+        # Workflow/footer privacy boundary stays original; no path publication before closure.
+        footer=(ROOT/'scripts/run-web-e2e.sh').read_text()
+        self.assertLess(footer.index('if [[ "$ownership_status" -eq 0 ]]'),footer.index('selected-private-diagnostics<<'))
+
+    def test_actual_parent_first_assertion_keeps_pg_sqlite_unreached_even_when_capture_fails(self):
+        parent=ast.parse((ROOT/'scripts/run-selected-backend-e2e.py').read_text())
+        function=next(n for n in parent.body if isinstance(n,ast.FunctionDef) and n.name=='run')
+        loop=next(n for n in function.body if isinstance(n,ast.For) and
+            isinstance(n.target,ast.Name) and n.target.id=='lane')
+        start=next(i for i,n in enumerate(loop.body) if isinstance(n,ast.If) and
+            ast.unparse(n.test)=="lane == 'install'" and 'install-launcher-stage.json' in ast.unparse(n))
+        end=next(i for i,n in enumerate(loop.body) if i > start and isinstance(n,ast.If) and
+            ast.unparse(n.test)=="lane == 'install'" and 'assert r.returncode == 0' in ast.unparse(n))
+        body=loop.body[start:end+1]
+        for fault in (False,True):
+            with self.subTest(capture_fault=fault):
+                def writer(path,value):
+                    if fault:raise PermissionError('PRIVATE_CANARY_WRITE_FAILURE')
+                    H.CI.write(path,value)
+                namespace={'lane':'install','r':type('Waited',(),{'returncode':7})(), 'output':self.output,
+                    'before':self.before,'owner':'fixture','env':self.environment,'runroot':self.runroot,
+                    'driver':self.driver,'allocation':self.output/'install-allocation.json',
+                    'manifest':self.output/'install-binding.json','write':writer,'sha':H.CI.sha,
+                    'results':[],'code':0,'closed':None}
+                with self.assertRaisesRegex(AssertionError,'current installation4 failed'):
+                    exec(compile(ast.Module(body=body,type_ignores=[]),'<actual parent fail-fast AST>','exec'),namespace)
+                self.assertEqual(namespace['code'],7); self.assertEqual(len(namespace['results']),1)
+                self.assertEqual(namespace['results'][0]['lane'],'install'); self.assertIsNone(namespace['closed'])
+                self.assertFalse((self.output/'selected-ci-receipt.json').exists())
+
+
 if __name__=='__main__':unittest.main()

@@ -242,6 +242,72 @@ sys.exit(bool(missing))
     print(','.join(map(str,groups)))
 
 
+def installation_failure_diagnostic(output, before, owner):
+    """Installation observation only, independently of the all-lane close proof."""
+    unknown = {'launcher_observed_driver_exit':None, 'origin':None}
+    try:
+        stage_path = output/'install-launcher-stage.json'
+        if stage_path.is_symlink():
+            return unknown
+        stage = read(stage_path)
+        required = {'schema', 'source', 'tree', 'owner', 'runId', 'runAttempt',
+                    'runRoot', 'driver_sha256', 'allocation_sha256', 'binding_sha256', 'exit'}
+        if type(stage) is not dict or set(stage) != required:
+            return unknown
+        driver = TEMPLATES/'current-install-driver.py'
+        digest = sha(driver)
+        allocation = output/'install-allocation.json'
+        binding = output/'install-binding.json'
+        if any(path.is_symlink() for path in (allocation, binding, driver, TEMPLATES/'current_binding.py', output/'runtime')):
+            return unknown
+        grant = read(allocation)
+        manifest = read(binding)
+        expected = {'source':before['head'], 'tree':before['tree'], 'owner':owner,
+                    'runId':os.environ['GITHUB_RUN_ID'], 'runAttempt':os.environ['GITHUB_RUN_ATTEMPT']}
+        if (type(stage['schema']) is not int or stage['schema'] != 1 or type(stage['exit']) is not int or not -255 <= stage['exit'] <= 255 or
+                not all(stage[key] == value == grant.get(key) for key, value in expected.items()) or
+                stage['allocation_sha256'] != sha(allocation) or stage['binding_sha256'] != sha(binding) or
+                stage['driver_sha256'] != digest or grant.get('driverSha256') != digest or
+                before.get('tracked', {}).get('scripts/selected-backend-ci/current-install-driver.py') != digest or
+                before.get('tracked', {}).get('scripts/selected-backend-ci/current_binding.py') != sha(TEMPLATES/'current_binding.py') or
+                grant.get('schema') != 1 or grant.get('status') != 'GRANTED' or
+                grant.get('exclusiveCIJob') is not True or grant.get('currentCIJobConfirmed') is not True or
+                grant.get('lane') != 'install' or grant.get('backend') is not None or
+                grant.get('compiledSource') != before['head'] or grant.get('bindingSha256') != sha(binding) or
+                grant.get('bindingModuleSha256') != sha(TEMPLATES/'current_binding.py') or
+                manifest.get('schema') != 1 or manifest.get('ready') is not True or
+                manifest.get('source') != before['head'] or manifest.get('compiledSource') != before['head'] or
+                manifest.get('tree') != before['tree']):
+            return unknown
+        root = Path(stage['runRoot'])
+        if (type(stage['runRoot']) is not str or stage['runRoot'] != grant.get('runRoot') or
+                not root.is_absolute() or root.parent != output/'runtime' or root.is_symlink() or
+                not re.fullmatch(r'root-current-install-[0-9a-f]{12}', root.name)):
+            return unknown
+        observed = {'launcher_observed_driver_exit':stage['exit'], 'origin':None}
+        origin_path = output/'install-failure-origin.json'
+        if origin_path.is_symlink():
+            return observed
+        origin = read(origin_path)
+        if (type(origin) is dict and set(origin) == {'schema', 'source', 'driver_sha256',
+                'allocation_sha256', 'binding_sha256', 'phase', 'line', 'type'} and
+                type(origin['schema']) is int and origin['schema'] == 1 and
+                origin['source'] == before['head'] and origin['driver_sha256'] == digest and
+                origin['allocation_sha256'] == stage['allocation_sha256'] and
+                origin['binding_sha256'] == stage['binding_sha256'] and
+                type(origin['phase']) is str and origin['phase'] in
+                    ('before-binding', 'preparation', 'test-body', 'test-results') and
+                type(origin['type']) is str and origin['type'] in
+                    ('AssertionError', 'RuntimeError', 'PermissionError', 'OSError', 'TimeoutExpired', 'OtherError', 'ProcessExit') and
+                type(origin['line']) is int and 1 <= origin['line'] <= len(driver.read_text().splitlines()) and
+                stage['exit'] != 0 and (origin['type'] != 'ProcessExit' or origin['phase'] == 'test-body')):
+            observed['origin'] = {key:origin[key] for key in ('driver_sha256', 'phase', 'line', 'type')}
+        return observed
+    except BaseException:
+        # Preserve a qualified waited exit even when the optional origin is absent.
+        return locals().get('observed', unknown)
+
+
 def runtime_ownership_return(output):
     """A waited launcher alone does not prove its product resources retired."""
     diagnostic = {'schema':1, 'phase':'identity', 'source':None, 'tree':None,
@@ -254,6 +320,7 @@ def runtime_ownership_return(output):
         assert before['head'] == os.environ['GITHUB_SHA']
         diagnostic.update(source=before['head'],
             tree=before['tree'] if re.fullmatch('[0-9a-f]{40}', str(before['tree'])) else None)
+        diagnostic['installation_failure'] = installation_failure_diagnostic(output, before, owner)
         runtime = output/'runtime'
         allocated = list(output.glob('*-allocation.json')) + list(output.glob('*-binding.json'))
         no_start = not allocated and (not runtime.exists() or not any(runtime.iterdir()))
@@ -572,6 +639,14 @@ def run(output):
         if lane=='postgres':env['FVOCI_E2E_SELECTED_AUXILIARY']='normal-api'
         else:env.pop('FVOCI_E2E_SELECTED_AUXILIARY',None)
         with (output/(lane+'-driver.log')).open('x') as log:r=subprocess.run([sys.executable,str(driver)],env=env,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)
+        if lane == 'install':
+            try:
+                write(output/'install-launcher-stage.json', {'schema':1, 'source':before['head'], 'tree':before['tree'],
+                    'owner':owner, 'runId':env['GITHUB_RUN_ID'], 'runAttempt':env['GITHUB_RUN_ATTEMPT'],
+                    'runRoot':str(runroot), 'driver_sha256':sha(driver), 'allocation_sha256':sha(allocation),
+                    'binding_sha256':sha(manifest), 'exit':r.returncode})
+            except BaseException:
+                pass  # Optional diagnostic must not replace the original fail-fast exit.
         results.append({'lane':lane,'exit':r.returncode,'actualSource':before['head'],'runRoot':str(runroot)})
         code=code or r.returncode
         if lane=='postgres':
