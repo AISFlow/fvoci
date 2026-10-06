@@ -277,7 +277,10 @@ def runtime_ownership_return(output):
                             'recorded_process_identities_retired':bool, 'cleanup_errors':list}
                 origin = facts.get('original_driver_failure_origin')
                 driver = TEMPLATES / ('current-' + run['lane'] + '-driver.py')
+                # Legacy receipts omit optional diagnostics and their driver binding.
+                # A declared valid binding still requires the real template's hash.
                 bound_driver = (run['lane'] in ('postgres', 'sqlite') and facts.get('source') == before['head'] and
+                                type(facts.get('driver_sha256')) is str and re.fullmatch('[0-9a-f]{64}', facts['driver_sha256']) and
                                 sha(driver) == facts.get('driver_sha256'))
                 phases = ('preparation', 'copied-native-hashes', 'owned-network-mode', 'normal-runtime') if run['lane'] == 'sqlite' else (
                     'preparation', 'copied-native-hashes', 'normal-runtime', 'browser-run', 'durable-readback', 'server-restart')

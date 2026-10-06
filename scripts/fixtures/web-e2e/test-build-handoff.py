@@ -965,6 +965,36 @@ class FailureOriginTest(unittest.TestCase):
         return next(node for node in ast.walk(ast.parse(self.driver.read_text()))
                     if isinstance(node,ast.Assert) and ast.unparse(node.test).startswith('[line.split()[0]'))
 
+    def test_absent_optional_bindings_admit_closed_pg_and_sqlite_without_templates(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(H.CI, 'TEMPLATES', Path(tmp)/'missing-templates'):
+            summary,error,closed=self.project({}, target_lane='install')
+        self.assertIsNone(error);self.assertTrue(closed)
+        self.assertEqual([lane['lane'] for lane in summary['lanes']], ['install','postgres','sqlite'])
+        for lane in summary['lanes'][1:]:
+            self.assertIsNone(lane['original_driver_failure_origin'])
+            self.assertIsNone(lane['original_browser_failure'])
+            self.assertIsNone(lane['network_mode_observation'])
+        self.assertTrue(summary['ownership_return_qualified'])
+
+    def test_optional_binding_omission_does_not_waive_declared_valid_driver_io(self):
+        function=next(node for node in ast.parse((ROOT/'scripts/run-selected-backend-e2e.py').read_text()).body
+                      if isinstance(node,ast.FunctionDef) and node.name=='runtime_ownership_return')
+        binding=next(node for node in ast.walk(function) if isinstance(node,ast.Assign) and
+                     any(isinstance(target,ast.Name) and target.id=='bound_driver' for target in node.targets))
+        code=compile(ast.Module(body=[binding],type_ignores=[]),'<actual bound_driver AST>','exec')
+        with tempfile.TemporaryDirectory() as tmp:
+            namespace={'run':{'lane':'postgres'},'before':{'head':SHA},'driver':Path(tmp)/'missing-driver.py',
+                       're':H.CI.re,'sha':H.CI.sha}
+            for digest in (None,True,1,'','f'*63,'PRIVATE_CANARY_HASH'):
+                with self.subTest(digest=digest):
+                    namespace['facts']={'source':SHA,'driver_sha256':digest}
+                    exec(code,namespace)
+                    self.assertFalse(namespace['bound_driver'])
+            namespace['facts']={'source':SHA,'driver_sha256':'f'*64}
+            with self.assertRaises(FileNotFoundError):exec(code,namespace)
+            with patch.dict(namespace,{'sha':lambda path: (_ for _ in ()).throw(PermissionError('private IO'))}):
+                with self.assertRaises(PermissionError):exec(code,namespace)
+
     def test_original_hash_and_network_failures_have_exact_source_origin(self):
         check=self.hash_assertion()
         values={'hashes':'b'*64+' server\n'+'a'*64+' migrate\n'+'c'*64+' engine\n',
