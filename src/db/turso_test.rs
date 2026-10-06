@@ -763,7 +763,6 @@ async fn turso_primary_current12_install_resume() -> Result<(), &'static str> {
     primary?;
     close
 }
-
 const INVENTORY_TEST_NAME: &str = "db::turso_test::turso_primary_migration_target_inventory";
 
 fn inventory_selection(
@@ -886,6 +885,136 @@ fn inventory_finish(result: Option<Result<(), &'static str>>) -> &'static str {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InventoryPrimaryDiagnostic {
+    Ok,
+    BeginFailed,
+    WrongProductBackend,
+    WrongBackend,
+    FkQueryFailed,
+    FkDecodeFailed,
+    ForeignKeysNotOne,
+    LiteralQueryFailed,
+    LiteralDecodeFailed,
+    LiteralMismatch,
+    CurrentLineageChanged,
+    QueryFailed,
+    DecodeFailed,
+    PrefixRefused,
+    SchemaRefused,
+    SnapshotMismatch,
+    HashInvalid,
+}
+
+impl InventoryPrimaryDiagnostic {
+    fn from_result(result: Result<(), &'static str>) -> Option<Self> {
+        Some(match result {
+            Ok(()) => Self::Ok,
+            Err("BEGIN_FAILED") => Self::BeginFailed,
+            Err("WRONG_PRODUCT_BACKEND") => Self::WrongProductBackend,
+            Err("WRONG_BACKEND") => Self::WrongBackend,
+            Err("FK_QUERY_FAILED") => Self::FkQueryFailed,
+            Err("FK_DECODE_FAILED") => Self::FkDecodeFailed,
+            Err("FOREIGN_KEYS_NOT_ONE") => Self::ForeignKeysNotOne,
+            Err("LITERAL_QUERY_FAILED") => Self::LiteralQueryFailed,
+            Err("LITERAL_DECODE_FAILED") => Self::LiteralDecodeFailed,
+            Err("LITERAL_MISMATCH") => Self::LiteralMismatch,
+            Err("CURRENT_LINEAGE_CHANGED") => Self::CurrentLineageChanged,
+            Err("INVENTORY_QUERY_FAILED") => Self::QueryFailed,
+            Err("INVENTORY_DECODE_FAILED") => Self::DecodeFailed,
+            Err("INVENTORY_PREFIX_REFUSED") => Self::PrefixRefused,
+            Err("INVENTORY_SCHEMA_REFUSED") => Self::SchemaRefused,
+            Err("INVENTORY_SNAPSHOT_MISMATCH") => Self::SnapshotMismatch,
+            Err("INVENTORY_HASH_INVALID") => Self::HashInvalid,
+            Err(_) => return None,
+        })
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::Ok => "OK",
+            Self::BeginFailed => "BEGIN_FAILED",
+            Self::WrongProductBackend => "WRONG_PRODUCT_BACKEND",
+            Self::WrongBackend => "WRONG_BACKEND",
+            Self::FkQueryFailed => "FK_QUERY_FAILED",
+            Self::FkDecodeFailed => "FK_DECODE_FAILED",
+            Self::ForeignKeysNotOne => "FOREIGN_KEYS_NOT_ONE",
+            Self::LiteralQueryFailed => "LITERAL_QUERY_FAILED",
+            Self::LiteralDecodeFailed => "LITERAL_DECODE_FAILED",
+            Self::LiteralMismatch => "LITERAL_MISMATCH",
+            Self::CurrentLineageChanged => "CURRENT_LINEAGE_CHANGED",
+            Self::QueryFailed => "INVENTORY_QUERY_FAILED",
+            Self::DecodeFailed => "INVENTORY_DECODE_FAILED",
+            Self::PrefixRefused => "INVENTORY_PREFIX_REFUSED",
+            Self::SchemaRefused => "INVENTORY_SCHEMA_REFUSED",
+            Self::SnapshotMismatch => "INVENTORY_SNAPSHOT_MISMATCH",
+            Self::HashInvalid => "INVENTORY_HASH_INVALID",
+        }
+    }
+}
+
+fn inventory_failure_diagnostic(
+    primary: Result<(), &'static str>,
+    rollback: Option<Result<(), &'static str>>,
+    close: Result<(), &'static str>,
+    leases_zero: bool,
+) -> Option<(
+    InventoryPrimaryDiagnostic,
+    &'static str,
+    &'static str,
+    &'static str,
+)> {
+    if primary.is_ok() && rollback == Some(Ok(())) && close.is_ok() && leases_zero {
+        return None;
+    }
+    let primary = InventoryPrimaryDiagnostic::from_result(primary)?;
+    if matches!(
+        primary,
+        InventoryPrimaryDiagnostic::BeginFailed | InventoryPrimaryDiagnostic::WrongProductBackend
+    ) != rollback.is_none()
+    {
+        return None;
+    }
+    let rollback = match rollback {
+        None => "NOT_STARTED",
+        Some(Ok(())) => "OK",
+        Some(Err("ROLLBACK_UNCONFIRMED")) => "ROLLBACK_UNCONFIRMED",
+        Some(Err(_)) => return None,
+    };
+    let close = match close {
+        Ok(()) => "OK",
+        Err("CLOSE_FAILED") => "CLOSE_FAILED",
+        Err("LEASES_NOT_ZERO") => "LEASES_NOT_ZERO",
+        Err(_) => return None,
+    };
+    Some((
+        primary,
+        rollback,
+        close,
+        if leases_zero { "ZERO" } else { "FAILED" },
+    ))
+}
+
+fn inventory_settled_result(
+    primary: Result<TursoTargetInventory, &'static str>,
+    rollback: Option<Result<(), &'static str>>,
+    close: Result<(), &'static str>,
+    leases_zero: bool,
+    admitted: bool,
+) -> Result<(), &'static str> {
+    // Same original primary -> rollback -> close -> lease -> disclosure priority.
+    primary?;
+    rollback.ok_or("ROLLBACK_NOT_STARTED")??;
+    close?;
+    if !leases_zero {
+        return Err("LEASES_NOT_ZERO");
+    }
+    if !admitted {
+        return Err("INVENTORY_DISCLOSURE_REFUSED");
+    }
+    Ok(())
+}
+
 async fn inventory_in_writer(tx: &mut DbTx) -> Result<TursoTargetInventory, &'static str> {
     same_stream_readback(tx).await?;
     let family = remote_family(tx)?;
@@ -983,18 +1112,25 @@ async fn turso_primary_migration_target_inventory() -> Result<(), &'static str> 
         classification, prefix, hash, inventory_finish(rollback), inventory_finish(Some(close)),
         if leases_zero { "ZERO" } else { "FAILED" },
     );
+    if !admitted {
+        // Explicit static producer line and RETURN boundary. Libtest's later
+        // returned-Error text is untrusted output, never the cause oracle.
+        match inventory_failure_diagnostic(
+            primary.as_ref().map(|_| ()).map_err(|code| *code), rollback, close, leases_zero,
+        ) {
+            Some((primary, rollback, close, leases)) => println!(
+                "\nFVOCI_TURSO_INVENTORY_DIAGNOSTIC primary={} rollback={} close={} leases={}",
+                primary.code(), rollback, close, leases,
+            ),
+            None => println!(
+                "\nFVOCI_TURSO_INVENTORY_DIAGNOSTIC primary=UNKNOWN rollback=UNKNOWN close=UNKNOWN leases=UNKNOWN"
+            ),
+        }
+        println!("FVOCI_TURSO_INVENTORY_RETURN");
+    }
     // Both outcomes are retained; primary errors keep priority. A fresh state
     // observation never reconciles the old failed migration/finish receipt.
-    primary?;
-    rollback.ok_or("ROLLBACK_NOT_STARTED")??;
-    close?;
-    if !leases_zero {
-        return Err("LEASES_NOT_ZERO");
-    }
-    if !admitted {
-        return Err("INVENTORY_DISCLOSURE_REFUSED");
-    }
-    Ok(())
+    inventory_settled_result(primary, rollback, close, leases_zero, admitted)
 }
 
 #[cfg(test)]
@@ -1201,5 +1337,188 @@ mod inventory_policy_tests {
             1
         );
         f.close().await;
+    }
+
+    #[test]
+    fn inventory_diagnostics_close_the_current_primary_code_set() {
+        for code in [
+            "BEGIN_FAILED",
+            "WRONG_PRODUCT_BACKEND",
+            "WRONG_BACKEND",
+            "FK_QUERY_FAILED",
+            "FK_DECODE_FAILED",
+            "FOREIGN_KEYS_NOT_ONE",
+            "LITERAL_QUERY_FAILED",
+            "LITERAL_DECODE_FAILED",
+            "LITERAL_MISMATCH",
+            "CURRENT_LINEAGE_CHANGED",
+            "INVENTORY_QUERY_FAILED",
+            "INVENTORY_DECODE_FAILED",
+            "INVENTORY_PREFIX_REFUSED",
+            "INVENTORY_SCHEMA_REFUSED",
+            "INVENTORY_SNAPSHOT_MISMATCH",
+            "INVENTORY_HASH_INVALID",
+        ] {
+            assert_eq!(
+                InventoryPrimaryDiagnostic::from_result(Err(code))
+                    .unwrap()
+                    .code(),
+                code
+            );
+        }
+        assert_eq!(
+            InventoryPrimaryDiagnostic::from_result(Ok(())),
+            Some(InventoryPrimaryDiagnostic::Ok)
+        );
+        for code in [
+            "OK",
+            "CONNECT_FAILED",
+            "PRODUCT_CONFIGURATION_FAILED",
+            "DDL_FAILED",
+            "COMMIT_UNCONFIRMED",
+            "UNKNOWN",
+        ] {
+            assert_eq!(InventoryPrimaryDiagnostic::from_result(Err(code)), None);
+        }
+    }
+
+    #[test]
+    fn inventory_diagnostics_retain_original_rollback_close_and_lease_facts() {
+        // Pure outcome vectors, never fabricated remote finish/close receipts.
+        for rollback in [Ok(()), Err("ROLLBACK_UNCONFIRMED")] {
+            for close in [Ok(()), Err("CLOSE_FAILED"), Err("LEASES_NOT_ZERO")] {
+                for leases in [false, true] {
+                    assert_eq!(
+                        inventory_failure_diagnostic(
+                            Err("INVENTORY_SCHEMA_REFUSED"),
+                            Some(rollback),
+                            close,
+                            leases
+                        ),
+                        Some((
+                            InventoryPrimaryDiagnostic::SchemaRefused,
+                            if rollback.is_ok() {
+                                "OK"
+                            } else {
+                                "ROLLBACK_UNCONFIRMED"
+                            },
+                            close.err().unwrap_or("OK"),
+                            if leases { "ZERO" } else { "FAILED" }
+                        )),
+                    );
+                }
+            }
+        }
+        for code in ["BEGIN_FAILED", "WRONG_PRODUCT_BACKEND"] {
+            assert!(inventory_failure_diagnostic(Err(code), None, Ok(()), true).is_some());
+            assert_eq!(
+                inventory_failure_diagnostic(Err(code), Some(Ok(())), Ok(()), true),
+                None
+            );
+        }
+        assert_eq!(
+            inventory_failure_diagnostic(Err("INVENTORY_QUERY_FAILED"), None, Ok(()), true),
+            None
+        );
+        assert_eq!(
+            inventory_failure_diagnostic(Ok(()), None, Ok(()), true),
+            None
+        );
+    }
+
+    #[test]
+    fn inventory_settlement_keeps_primary_then_rollback_then_close_then_lease_priority() {
+        let healthy = || {
+            Ok(TursoTargetInventory {
+                prefix: 12,
+                schema_sha256: "a".repeat(64),
+            })
+        };
+        assert_eq!(
+            inventory_settled_result(
+                Err("INVENTORY_SCHEMA_REFUSED"),
+                Some(Err("ROLLBACK_UNCONFIRMED")),
+                Err("CLOSE_FAILED"),
+                false,
+                false
+            ),
+            Err("INVENTORY_SCHEMA_REFUSED")
+        );
+        assert_eq!(
+            inventory_settled_result(Err("BEGIN_FAILED"), None, Err("CLOSE_FAILED"), false, false),
+            Err("BEGIN_FAILED")
+        );
+        assert_eq!(
+            inventory_settled_result(
+                healthy(),
+                Some(Err("ROLLBACK_UNCONFIRMED")),
+                Err("CLOSE_FAILED"),
+                false,
+                false
+            ),
+            Err("ROLLBACK_UNCONFIRMED")
+        );
+        assert_eq!(
+            inventory_settled_result(healthy(), None, Err("CLOSE_FAILED"), false, false),
+            Err("ROLLBACK_NOT_STARTED")
+        );
+        assert_eq!(
+            inventory_settled_result(healthy(), Some(Ok(())), Err("CLOSE_FAILED"), false, false),
+            Err("CLOSE_FAILED")
+        );
+        assert_eq!(
+            inventory_settled_result(healthy(), Some(Ok(())), Ok(()), false, false),
+            Err("LEASES_NOT_ZERO")
+        );
+        assert_eq!(
+            inventory_settled_result(healthy(), Some(Ok(())), Ok(()), true, false),
+            Err("INVENTORY_DISCLOSURE_REFUSED")
+        );
+        assert_eq!(
+            inventory_settled_result(healthy(), Some(Ok(())), Ok(()), true, true),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn inventory_diagnostics_never_reflect_private_or_unknown_codes_or_invent_failure() {
+        assert_eq!(
+            inventory_failure_diagnostic(Ok(()), Some(Ok(())), Ok(()), true),
+            None
+        );
+        for private in [
+            "",
+            "UNKNOWN",
+            "schema_refused",
+            "INVENTORY_SCHEMA_REFUSED_EXTRA",
+            "INVENTORY_SCHEMA_REFUSED\nFAKE_PRIVATE_TOKEN",
+            "libsql://FAKE_PRIVATE_TOKEN",
+            "\rFAKE_PRIVATE_TOKEN",
+            "\u{2028}FAKE_PRIVATE_TOKEN",
+        ] {
+            assert_eq!(InventoryPrimaryDiagnostic::from_result(Err(private)), None);
+            assert_eq!(
+                inventory_failure_diagnostic(Err(private), Some(Ok(())), Ok(()), true),
+                None
+            );
+            assert_eq!(
+                inventory_failure_diagnostic(
+                    Err("INVENTORY_QUERY_FAILED"),
+                    Some(Err(private)),
+                    Ok(()),
+                    true
+                ),
+                None
+            );
+            assert_eq!(
+                inventory_failure_diagnostic(
+                    Err("INVENTORY_QUERY_FAILED"),
+                    Some(Ok(())),
+                    Err(private),
+                    true
+                ),
+                None
+            );
+        }
     }
 }

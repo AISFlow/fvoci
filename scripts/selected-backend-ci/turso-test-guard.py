@@ -308,6 +308,62 @@ def run_inventory(checkout_sha, inputs):
     run_primary(checkout_sha, inputs)
 
 
+INVENTORY_PRIMARY_CODES = frozenset({
+    "BEGIN_FAILED", "WRONG_PRODUCT_BACKEND", "WRONG_BACKEND", "FK_QUERY_FAILED",
+    "FK_DECODE_FAILED", "FOREIGN_KEYS_NOT_ONE", "LITERAL_QUERY_FAILED",
+    "LITERAL_DECODE_FAILED", "LITERAL_MISMATCH", "CURRENT_LINEAGE_CHANGED",
+    "INVENTORY_QUERY_FAILED", "INVENTORY_DECODE_FAILED", "INVENTORY_PREFIX_REFUSED",
+    "INVENTORY_SCHEMA_REFUSED", "INVENTORY_SNAPSHOT_MISMATCH", "INVENTORY_HASH_INVALID",
+})
+
+
+def inventory_failure_diagnostic(result, output):
+    # Same LF/single-CRLF separator policy as the migration diagnostic. A
+    # static producer RETURN boundary separates facts from untrusted libtest
+    # returned-Error bytes. No returned Error is parsed as a code or ACK.
+    if result.returncode == 0 or len(output) > 32768 or any(output.count(marker) != 1 for marker in (
+        "FVOCI_TURSO_INVENTORY_RECEIPT", "FVOCI_TURSO_INVENTORY_DIAGNOSTIC",
+        "FVOCI_TURSO_INVENTORY_RETURN",
+    )):
+        return
+    match = re.fullmatch(
+        r"(?:\r?\n)*running 1 test\r?\n"
+        r"test " + re.escape(INVENTORY_TEST_NAME) + r" \.\.\. "
+        r"FVOCI_TURSO_INVENTORY_RECEIPT classification=REFUSED prefix=NONE schema_sha256=NONE "
+        r"rollback=(OK|FAILED|NOT_STARTED) close=(OK|FAILED) leases=(ZERO|FAILED)\r?\n\r?\n"
+        r"FVOCI_TURSO_INVENTORY_DIAGNOSTIC primary=([A-Z_]+) rollback=([A-Z_]+) "
+        r"close=([A-Z_]+) leases=(ZERO|FAILED)\r?\n"
+        r"FVOCI_TURSO_INVENTORY_RETURN\r?\n(?P<harness>(?:[^\n]*\n)*?)"
+        r"FAILED\r?\n(?:\r?\n)*failures:\r?\n(?:\r?\n)*failures:\r?\n"
+        r"    " + re.escape(INVENTORY_TEST_NAME) + r"\r?\n(?:\r?\n)*"
+        r"test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured; "
+        r"[0-9]+ filtered out; finished in [0-9]+\.[0-9]+s\r?\n(?:\r?\n)*",
+        output,
+    )
+    if match is None:
+        return
+    rollback_receipt, close_receipt, lease_receipt, primary, rollback, close, leases, harness = match.groups()
+    # Opaque harness output may contain private errors; never reflect it or
+    # adopt its framing/meaning. Extra producer markers/tests/results refuse.
+    if len(harness) > 16384 or any(marker in harness for marker in (
+        "FVOCI_TURSO_", "test ", "test result:", "running ", "failures:",
+    )) or re.search(r"(?:^|\n)FAILED\r?(?:\n|$)", harness):
+        return
+    if (primary not in INVENTORY_PRIMARY_CODES | {"OK"}
+            or rollback not in ("OK", "NOT_STARTED", "ROLLBACK_UNCONFIRMED")
+            or close not in ("OK", "CLOSE_FAILED", "LEASES_NOT_ZERO")
+            or leases != lease_receipt
+            or rollback_receipt != {"OK": "OK", "NOT_STARTED": "NOT_STARTED", "ROLLBACK_UNCONFIRMED": "FAILED"}[rollback]
+            or (close == "OK") != (close_receipt == "OK")
+            or (primary in ("BEGIN_FAILED", "WRONG_PRODUCT_BACKEND")) != (rollback == "NOT_STARTED")
+            or (primary == "OK" and rollback == "OK" and close == "OK" and leases == "ZERO")):
+        return
+    print("TURSO_INVENTORY_FAILURE classification=REFUSED prefix=NONE schema_sha256=NONE"
+          + " rollback=" + rollback_receipt + " close=" + close_receipt + " leases=" + lease_receipt)
+    print("TURSO_INVENTORY_DIAGNOSTIC primary=" + primary + " rollback=" + rollback
+          + " close=" + close + " leases=" + leases)
+
+
 def inventory_result(result, output):
     # Recognize the maintained serial libtest --nocapture framing literally:
     # test NAME ... RECEIPT\nok, plus one complete PASS summary. No stripping
@@ -323,6 +379,7 @@ def inventory_result(result, output):
         output,
     )
     if result.returncode != 0 or match is None:
+        inventory_failure_diagnostic(result, output)
         reject("TURSO_INVENTORY_FAILED")
     classification, prefix, schema_hash = match.groups()
     if not ((classification == "BLANK" and prefix == "0")

@@ -905,5 +905,154 @@ class InventoryTests(unittest.TestCase):
         self.assertNotIn("secrets.", workflow[:workflow.index("      - name: Real primary selected phase")])
 
 
+class InventoryFailureTests(unittest.TestCase):
+    primary_codes = {
+        "BEGIN_FAILED", "WRONG_PRODUCT_BACKEND", "WRONG_BACKEND", "FK_QUERY_FAILED",
+        "FK_DECODE_FAILED", "FOREIGN_KEYS_NOT_ONE", "LITERAL_QUERY_FAILED",
+        "LITERAL_DECODE_FAILED", "LITERAL_MISMATCH", "CURRENT_LINEAGE_CHANGED",
+        "INVENTORY_QUERY_FAILED", "INVENTORY_DECODE_FAILED", "INVENTORY_PREFIX_REFUSED",
+        "INVENTORY_SCHEMA_REFUSED", "INVENTORY_SNAPSHOT_MISMATCH", "INVENTORY_HASH_INVALID",
+    }
+
+    def failure(self, primary="INVENTORY_SCHEMA_REFUSED", rollback="OK", close="OK", leases="ZERO", harness=None):
+        rb = {"OK": "OK", "NOT_STARTED": "NOT_STARTED", "ROLLBACK_UNCONFIRMED": "FAILED"}[rollback]
+        if harness is None:
+            # Illustrative libtest returned Error, never the cause oracle. Use
+            # each original priority-selected code so *_FAILED stays opaque.
+            returned = primary if primary != "OK" else rollback if rollback != "OK" else close if close != "OK" else "LEASES_NOT_ZERO" if leases == "FAILED" else "INVENTORY_DISCLOSURE_REFUSED"
+            harness = 'Error: "' + returned + '"\n'
+        return ("\nrunning 1 test\ntest " + guard.INVENTORY_TEST_NAME
+                + " ... FVOCI_TURSO_INVENTORY_RECEIPT classification=REFUSED prefix=NONE schema_sha256=NONE"
+                + " rollback=" + rb + " close=" + ("OK" if close == "OK" else "FAILED") + " leases=" + leases
+                + "\n\nFVOCI_TURSO_INVENTORY_DIAGNOSTIC primary=" + primary + " rollback=" + rollback
+                + " close=" + close + " leases=" + leases + "\nFVOCI_TURSO_INVENTORY_RETURN\n"
+                + harness + "FAILED\n\nfailures:\n\nfailures:\n    " + guard.INVENTORY_TEST_NAME
+                + "\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 100 filtered out; finished in 0.00s\n\n")
+
+    def failed_output(self, text, status=1):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(guard.AdmissionError) as caught:
+                guard.inventory_result(subprocess.CompletedProcess([], status, b""), text)
+        self.assertEqual(str(caught.exception), "TURSO_INVENTORY_FAILED")
+        self.assertNotIn("TURSO_INVENTORY_PASS", output.getvalue())
+        self.assertNotIn("FAKE_PRIVATE_TOKEN", output.getvalue())
+        self.assertNotIn("opaque returned error", output.getvalue())
+        return output.getvalue()
+
+    def test_current_codes_and_exact_refused_settled_cleanup_disclose_only_failure(self):
+        self.assertEqual(guard.INVENTORY_PRIMARY_CODES, self.primary_codes)
+        for code in sorted(self.primary_codes):
+            rollbacks = ("NOT_STARTED",) if code in ("BEGIN_FAILED", "WRONG_PRODUCT_BACKEND") else ("OK", "ROLLBACK_UNCONFIRMED")
+            for rollback in rollbacks:
+                for close in ("OK", "CLOSE_FAILED", "LEASES_NOT_ZERO"):
+                    for leases in ("ZERO", "FAILED"):
+                        for ending in ("\n", "\r\n"):
+                            output = self.failed_output(self.failure(code, rollback, close, leases).replace("\n", ending))
+                            self.assertIn("TURSO_INVENTORY_DIAGNOSTIC primary=" + code + " rollback=" + rollback
+                                          + " close=" + close + " leases=" + leases + "\n", output)
+                            self.assertIn("classification=REFUSED prefix=NONE schema_sha256=NONE", output)
+
+    def test_primary_ok_records_only_real_finish_or_local_lease_failure_not_all_healthy(self):
+        for rollback, close, leases in (
+            ("ROLLBACK_UNCONFIRMED", "OK", "ZERO"), ("ROLLBACK_UNCONFIRMED", "CLOSE_FAILED", "FAILED"),
+            ("OK", "CLOSE_FAILED", "ZERO"), ("OK", "LEASES_NOT_ZERO", "FAILED"), ("OK", "OK", "FAILED"),
+        ):
+            output = self.failed_output(self.failure("OK", rollback, close, leases))
+            self.assertIn("primary=OK rollback=" + rollback + " close=" + close + " leases=" + leases, output)
+        for primary, rollback in (("OK", "OK"), ("OK", "NOT_STARTED"),
+                                  ("BEGIN_FAILED", "OK"), ("INVENTORY_QUERY_FAILED", "NOT_STARTED")):
+            self.assertEqual(self.failed_output(self.failure(primary, rollback)), "")
+
+    def test_unknown_private_malformed_and_duplicate_codes_keep_cause_unknown(self):
+        valid = self.failure()
+        diagnostic = valid.split("\n\nFVOCI_TURSO_INVENTORY_DIAGNOSTIC", 1)[1].split("\n", 1)[0]
+        for code in ("UNKNOWN", "CONNECT_FAILED", "DDL_FAILED", "COMMIT_UNCONFIRMED", "SCHEMA_VALIDATION_FAILED", "",
+                     "inventory_schema_refused", "INVENTORY_SCHEMA_REFUSED_EXTRA", "FAKE_PRIVATE_TOKEN", "libsql://FAKE_PRIVATE_TOKEN"):
+            self.assertEqual(self.failed_output(valid.replace("primary=INVENTORY_SCHEMA_REFUSED", "primary=" + code)), "")
+        for changed in (
+            valid.replace("primary=INVENTORY_SCHEMA_REFUSED", "primary=INVENTORY_SCHEMA_REFUSED\nFAKE_PRIVATE_TOKEN"),
+            valid.replace("rollback=OK close=OK", "rollback=UNKNOWN close=OK"),
+            valid.replace("close=OK leases=ZERO\nFVOCI_TURSO_INVENTORY_RETURN", "close=BEGIN_FAILED leases=ZERO\nFVOCI_TURSO_INVENTORY_RETURN"),
+            valid.replace("FVOCI_TURSO_INVENTORY_DIAGNOSTIC" + diagnostic, "FVOCI_TURSO_INVENTORY_DIAGNOSTIC" + diagnostic + "\nFVOCI_TURSO_INVENTORY_DIAGNOSTIC" + diagnostic),
+            valid.replace("FVOCI_TURSO_INVENTORY_RETURN", "FVOCI_TURSO_INVENTORY_RETURN\nFVOCI_TURSO_INVENTORY_RETURN"),
+            valid.replace("\n\nFVOCI_TURSO_INVENTORY_DIAGNOSTIC", "\n\nFAKE_PRIVATE_TOKEN FVOCI_TURSO_INVENTORY_DIAGNOSTIC"),
+            valid.replace("\nFVOCI_TURSO_INVENTORY_RETURN", " FAKE_PRIVATE_TOKEN\nFVOCI_TURSO_INVENTORY_RETURN"),
+            valid.replace("primary=INVENTORY_SCHEMA_REFUSED", "private=INVENTORY_SCHEMA_REFUSED"),
+            valid.replace("\n\nFVOCI_TURSO_INVENTORY_DIAGNOSTIC" + diagnostic + "\n", "\n"),
+            valid.replace("FVOCI_TURSO_INVENTORY_RETURN", "FAKE_RETURN"),
+        ):
+            self.assertEqual(self.failed_output(changed), "")
+
+    def test_failure_cannot_forge_pass_counts_status_wrong_case_or_cleanup_tuple(self):
+        valid = self.failure()
+        for changed, status in (
+            (valid, 0), (valid.replace("0 passed", "1 passed"), 1),
+            (valid.replace("1 failed", "0 failed"), 1), (valid.replace("0 ignored", "1 ignored"), 1),
+            (valid.replace("0 measured", "1 measured"), 1), (valid.replace("running 1 test", "running 2 tests"), 1),
+            (valid.replace(guard.INVENTORY_TEST_NAME, guard.MIGRATION_TEST_NAME), 1),
+            (valid.replace("classification=REFUSED", "classification=CURRENT"), 1),
+            (valid.replace("prefix=NONE", "prefix=12"), 1), (valid.replace("schema_sha256=NONE", "schema_sha256=" + "a" * 64), 1),
+            (valid.replace("rollback=OK close=OK leases=ZERO\n\n", "rollback=FAILED close=OK leases=ZERO\n\n"), 1),
+            (valid.replace("rollback=OK close=OK leases=ZERO\n\n", "rollback=OK close=FAILED leases=ZERO\n\n"), 1),
+            (valid.replace("close=OK leases=ZERO\nFVOCI_TURSO_INVENTORY_RETURN", "close=OK leases=FAILED\nFVOCI_TURSO_INVENTORY_RETURN"), 1),
+            (valid + valid, 1), (valid[valid.index("test result:"):], 1),
+            (valid.replace("test result: FAILED.", "test result: ok."), 1),
+            (valid.replace("\nFAILED\n", "\nok\n"), 1),
+            (InventoryTests().success() + valid, 1), (valid + "test other::case ... ok\n", 1),
+        ):
+            self.assertEqual(self.failed_output(changed, status), "")
+
+    def test_static_return_boundary_never_interprets_or_exposes_error_text(self):
+        for private in ('Error: "FAKE_PRIVATE_TOKEN"\n', "libsql://FAKE_PRIVATE_TOKEN\n",
+                        'Error: "CLOSE_FAILED"\n', "unqualified future harness framing FAKE_PRIVATE_TOKEN\n", ""):
+            output = self.failed_output(self.failure(harness=private))
+            self.assertIn("primary=INVENTORY_SCHEMA_REFUSED rollback=OK close=OK leases=ZERO", output)
+            self.assertNotIn("primary=CLOSE_FAILED", output)
+        for forged in ("test other::case ... ok\n", "test result: ok. 1 passed\n", "running 2 tests\n", "FAILED\n",
+                       "FVOCI_TURSO_MIGRATION_DIAGNOSTIC primary=DDL_FAILED close=OK\n", "x" * 16385 + "\n"):
+            self.assertEqual(self.failed_output(self.failure(harness=forged)), "")
+        self.assertEqual(self.failed_output(self.failure() + "x" * 32769), "")
+
+    def test_only_lf_and_single_crlf_delimit_diagnostic_producer_lines(self):
+        valid = self.failure()
+        for separator in ("\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            self.assertEqual(self.failed_output(valid.replace("leases=ZERO\nFVOCI_TURSO_INVENTORY_RETURN",
+                                                            "leases=ZERO" + separator + "FAKE_PRIVATE_TOKEN\nFVOCI_TURSO_INVENTORY_RETURN")), "")
+        for ending in ("\r", "\r\r\n"):
+            self.assertEqual(self.failed_output(valid.replace("\nFVOCI_TURSO_INVENTORY_RETURN", ending + "FVOCI_TURSO_INVENTORY_RETURN")), "")
+
+    def test_failed_inventory_still_rejects_and_mutated_whole_binding_cannot_disclose(self):
+        with InventoryTests().frozen() as (_, _, run):
+            run.return_value = subprocess.CompletedProcess([], 1, self.failure(harness='Error: "FAKE_PRIVATE_TOKEN"\n').encode())
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                with self.assertRaises(guard.AdmissionError) as caught:
+                    guard.run_inventory("a" * 40, InventoryTests.inputs)
+            self.assertEqual(str(caught.exception), "TURSO_INVENTORY_FAILED")
+            self.assertIn("primary=INVENTORY_SCHEMA_REFUSED", output.getvalue())
+            self.assertNotIn("FAKE_PRIVATE_TOKEN", output.getvalue())
+            self.assertNotIn("TURSO_INVENTORY_PASS", output.getvalue())
+            run.assert_called_once()
+        for mutation in ("binary", "native", "cargo", "manifest", "source"):
+            with InventoryTests().frozen() as (root, _, run):
+                def change(*args, **kwargs):
+                    paths = {"binary": "turso-connection-libtest", "native": "fvoci-sqlite/consumer-inputs.json",
+                             "cargo": "turso-compile.json", "manifest": "turso-connection-build.json"}
+                    if mutation == "source":
+                        guard.source_digest.return_value = "changed"
+                    elif mutation == "manifest":
+                        with (root / paths[mutation]).open("a") as stream:
+                            stream.write(" ")
+                    else:
+                        (root / paths[mutation]).write_bytes(b"FAKE_PRIVATE_TOKEN")
+                    return subprocess.CompletedProcess([], 1, self.failure().encode())
+                run.side_effect = change
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    with self.assertRaises(guard.AdmissionError) as caught:
+                        guard.run_inventory("a" * 40, InventoryTests.inputs)
+                self.assertEqual(str(caught.exception), "COMPILED_TEST_BINDING_FAILED")
+                self.assertEqual(output.getvalue(), "")
+                run.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
