@@ -2203,10 +2203,30 @@ impl TaskScalar {
             ScalarPolicy::Text(value) => Self::Text(value.clone()),
             ScalarPolicy::Number(value) => Self::Number(decimal_value(value)?),
             ScalarPolicy::Date(value) => Self::Date(*value),
-            ScalarPolicy::Instant(value) => Self::Instant(*value),
+            ScalarPolicy::Instant(value) => Self::Instant(task_query_instant(*value)?),
             ScalarPolicy::Boolean(value) => Self::Boolean(*value),
         })
     }
+}
+// PostgreSQL REL_18_3 ParseFractionalSecond parses the fractional decimal
+// with strtod and uses rint(frac * 1000000). Delegate decimal parsing and
+// ties-to-even rounding to the standard library; chrono owns calendar/carry.
+// This is a query adapter, not a lossy replacement of the storage codec.
+fn task_query_instant(at: DateTime<Utc>) -> Result<DateTime<Utc>, sqlx::Error> {
+    let nanos = at.timestamp_subsec_nanos();
+    // chrono represents a parsed leap second with nanos >= 1_000_000_000.
+    let whole = i64::from(nanos / 1_000_000_000);
+    let fraction = format!("0.{:09}", nanos % 1_000_000_000)
+        .parse::<f64>()
+        .map_err(|_| sqlx::Error::Protocol("invalid Task query fraction".into()))?;
+    let micros = (fraction * 1_000_000.0).round_ties_even() as u32;
+    let second = at
+        .timestamp()
+        .checked_add(whole)
+        .and_then(|second| second.checked_add(i64::from(micros / 1_000_000)))
+        .ok_or_else(|| sqlx::Error::Protocol("Task query instant overflow".into()))?;
+    DateTime::from_timestamp(second, (micros % 1_000_000) * 1000)
+        .ok_or_else(|| sqlx::Error::Protocol("Task query instant out of range".into()))
 }
 
 fn decimal_value(value: &str) -> Result<bigdecimal::BigDecimal, sqlx::Error> {
@@ -2562,10 +2582,7 @@ fn task_projection_matches(
     query: &ParsedTaskListQuery,
     zone: &TaskTimeZone,
 ) -> Result<bool, sqlx::Error> {
-    // Qualification boundary: PostgreSQL casts the query's RFC3339 text
-    // to microseconds. The allocated PG vectors must establish that precision
-    // adapter before this selected reader is adopted.
-    if row.created > query.as_of {
+    if row.created > task_query_instant(query.as_of)? {
         return Ok(false);
     }
     if let Some(title) = &query.view.filters.title {
@@ -6225,6 +6242,54 @@ mod selected_task_projection_tests {
         assert_ne!(
             decimal_value("9007199254740992").unwrap(),
             decimal_value("9007199254740993").unwrap()
+        );
+    }
+
+    #[test]
+    fn selected_query_fraction_matches_pg7_text_cast_vectors() {
+        // Original restricted PG18.3 observation P01-P18, including negative
+        // and PG-epoch boundaries: half-up and epoch truncation both fail.
+        for base in [
+            "1969-12-31T23:59:59",
+            "1999-12-31T23:59:59",
+            "2026-12-31T23:59:59",
+        ] {
+            for (fraction, micros) in [
+                ("000000499", 0u32),
+                ("000000500", 0),
+                ("000000501", 1),
+                ("999999499", 999999),
+                ("999999500", 1_000_000),
+                ("999999501", 1_000_000),
+            ] {
+                let at = crate::tasks::parse_iso_datetime(&format!("{base}.{fraction}Z")).unwrap();
+                let actual = task_query_instant(at).unwrap();
+                assert_eq!(
+                    actual.timestamp(),
+                    at.timestamp() + i64::from(micros / 1_000_000)
+                );
+                assert_eq!(actual.timestamp_subsec_nanos(), (micros % 1_000_000) * 1000);
+            }
+        }
+        let input = crate::tasks::parse_iso_datetime("9999-12-31T23:59:59.999999501Z").unwrap();
+        assert_eq!(
+            task_query_instant(input).unwrap().to_rfc3339(),
+            "+10000-01-01T00:00:00+00:00"
+        );
+        let literal = crate::tasks::parse_iso_datetime("2026-01-01T00:00:00.000000500Z").unwrap();
+        assert_eq!(
+            TaskScalar::from_policy(&ScalarPolicy::Instant(literal)).unwrap(),
+            TaskScalar::Instant(crate::tasks::parse_iso_datetime("2026-01-01T00:00:00Z").unwrap())
+        );
+        let mut query =
+            crate::tasks::list_query::parse_task_list_query(None, None, None, Some(50), None, None)
+                .unwrap();
+        query.as_of = literal;
+        let mut row = projection(1);
+        row.created = crate::tasks::parse_iso_datetime("2026-01-01T00:00:00.000001Z").unwrap();
+        assert!(
+            !task_projection_matches(&row, &query, &TaskTimeZone::from_name("UTC").unwrap())
+                .unwrap()
         );
     }
 
