@@ -538,9 +538,12 @@ mod selected_create_http_tests {
     }
     async fn session(f: &Fixture, credential: Uuid) -> String {
         let token = crate::auth::token::new_token();
-        sqlx::query("UPDATE sessions SET token_hash=?1 WHERE id=?2")
+        let expires = crate::db::identity::stored_now()
+            + chrono::Duration::seconds(crate::auth::token::SESSION_TTL_SECS);
+        sqlx::query("UPDATE sessions SET token_hash=?1,expires_at=?3 WHERE id=?2")
             .bind(token.hash)
             .bind(credential.as_bytes().as_slice())
+            .bind(expires.timestamp_micros())
             .execute(&f.pool)
             .await
             .unwrap();
@@ -592,6 +595,37 @@ mod selected_create_http_tests {
             .await
             .unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn sqlite_http_project_cookie_fixture_lookup_rejects_old_expiry_and_accepts_session_ttl()
+    {
+        let (f, credential, project) = setup().await;
+        let before = counts(&f, project).await;
+        let old =
+            crate::db::identity::find_live_session_backend(&f.backend, &credential.to_string())
+                .await;
+        assert!(
+            matches!(old, Err(sqlx::Error::Protocol(message)) if message == "SQLite instant out of range")
+        );
+
+        let before_issue = crate::db::identity::stored_now();
+        let token = session(&f, credential).await;
+        let after_issue = crate::db::identity::stored_now();
+        let live = crate::db::identity::find_live_session_backend(
+            &f.backend,
+            &crate::auth::token::hash_token(&token),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(live.session_id, credential);
+        assert_eq!(live.user_id, f.user);
+        let ttl = chrono::Duration::seconds(crate::auth::token::SESSION_TTL_SECS);
+        assert!(live.expires_at >= before_issue + ttl);
+        assert!(live.expires_at <= after_issue + ttl);
+        assert_eq!(counts(&f, project).await, before);
+        f.close().await;
     }
 
     #[tokio::test]
