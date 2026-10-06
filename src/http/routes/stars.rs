@@ -360,7 +360,7 @@ mod selected_list_access_http_tests {
             .unwrap();
         sqlx::query("INSERT INTO statuses(id,workspace_id,project_id,workflow_id,name,category,sort_key) VALUES(?1,?2,?3,?4,'todo','todo','V')").bind(status.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(workflow.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
         sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,created_by,content_json) VALUES(?1,?2,?3,7,'작업 😀',?4,?5,'{\"type\":\"doc\"}')").bind(task.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(status.as_bytes().as_slice()).bind(f.actor.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
-        sqlx::query("INSERT INTO documents(id,workspace_id,project_id,title,path,sort_key,number,created_by,content_json) VALUES(?1,?2,?3,'project document',?4,'V',8,?5,'{\"type\":\"doc\"}')").bind(doc.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(doc.simple().to_string()).bind(f.actor.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO documents(id,workspace_id,project_id,title,path,sort_key,number,created_by,content_json,status,schema_version) VALUES(?1,?2,?3,'project document',?4,'V',8,?5,'{\"type\":\"doc\"}','draft',?6)").bind(doc.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(doc.simple().to_string()).bind(f.actor.as_bytes().as_slice()).bind(crate::db::documents::DOCUMENT_SCHEMA_VERSION).execute(&f.pool).await.unwrap();
         (project, doc, task)
     }
 
