@@ -763,3 +763,443 @@ async fn turso_primary_current12_install_resume() -> Result<(), &'static str> {
     primary?;
     close
 }
+
+const INVENTORY_TEST_NAME: &str = "db::turso_test::turso_primary_migration_target_inventory";
+
+fn inventory_selection(
+    lookup: impl Fn(&str) -> Option<String>,
+    args: &[String],
+) -> Result<(), &'static str> {
+    // Same four maintained migration-helper gates; inventory performs no DDL
+    // but reserves a writer, so it cannot use the connection-only admission.
+    for (name, expected) in [
+        ("FVOCI_TEST_TURSO_MIGRATION_SELECTED", "1"),
+        ("FVOCI_TEST_TURSO_PHASE", "migration"),
+        ("FVOCI_TEST_TURSO_DESTRUCTIVE", "true"),
+        ("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "true"),
+    ] {
+        if lookup(name).as_deref() != Some(expected) {
+            return Err("EXPLICIT_INVENTORY_SELECTION_REQUIRED");
+        }
+    }
+    for required in [
+        INVENTORY_TEST_NAME,
+        "--ignored",
+        "--exact",
+        "--test-threads=1",
+    ] {
+        if args
+            .iter()
+            .skip(1)
+            .filter(|arg| arg.as_str() == required)
+            .count()
+            != 1
+        {
+            return Err("EXPLICIT_INVENTORY_SELECTION_REQUIRED");
+        }
+    }
+    if args.iter().skip(1).any(|arg| {
+        !matches!(
+            arg.as_str(),
+            INVENTORY_TEST_NAME | "--ignored" | "--exact" | "--test-threads=1" | "--nocapture"
+        )
+    }) {
+        return Err("EXPLICIT_INVENTORY_SELECTION_REQUIRED");
+    }
+    Ok(())
+}
+
+fn inventory_prefix(
+    exists: i64,
+    count: Option<i64>,
+    compiled_steps: usize,
+) -> Result<usize, &'static str> {
+    if compiled_steps != 12 {
+        return Err("CURRENT_LINEAGE_CHANGED");
+    }
+    match (exists, count) {
+        (0, None) => Ok(0),
+        (1, Some(count @ 0..=12)) => Ok(count as usize),
+        _ => Err("INVENTORY_PREFIX_REFUSED"),
+    }
+}
+
+struct TursoTargetInventory {
+    prefix: u8,
+    schema_sha256: String,
+}
+
+impl TursoTargetInventory {
+    // This only checks disclosure shape. The caller MUST first obtain the
+    // maintained full ledger/catalog snapshot on the SAME reserved writer.
+    fn from_snapshot(
+        prefix: usize,
+        snapshot: super::migrate::TursoTestSchemaSnapshot,
+    ) -> Result<Self, &'static str> {
+        if prefix > 12 || snapshot.receipts.len() != prefix {
+            return Err("INVENTORY_SNAPSHOT_MISMATCH");
+        }
+        if !inventory_hash(&snapshot.schema_sha256) {
+            return Err("INVENTORY_HASH_INVALID");
+        }
+        Ok(Self {
+            prefix: prefix as u8,
+            schema_sha256: snapshot.schema_sha256,
+        })
+    }
+}
+
+fn inventory_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|value| value.is_ascii_digit() || (b'a'..=b'f').contains(&value))
+}
+
+fn inventory_disclosure(
+    primary: &Result<TursoTargetInventory, &'static str>,
+    rollback: Option<Result<(), &'static str>>,
+    close: Result<(), &'static str>,
+    leases_zero: bool,
+) -> Option<(&'static str, u8, &str)> {
+    if rollback != Some(Ok(())) || close.is_err() || !leases_zero {
+        return None;
+    }
+    let value = primary.as_ref().ok()?;
+    if !inventory_hash(&value.schema_sha256) {
+        return None;
+    }
+    let class = match value.prefix {
+        0 => "BLANK",
+        1..=11 => "PREFIX",
+        12 => "CURRENT",
+        _ => return None,
+    };
+    Some((class, value.prefix, &value.schema_sha256))
+}
+
+fn inventory_finish(result: Option<Result<(), &'static str>>) -> &'static str {
+    match result {
+        None => "NOT_STARTED",
+        Some(Ok(())) => "OK",
+        Some(Err(_)) => "FAILED",
+    }
+}
+
+async fn inventory_in_writer(tx: &mut DbTx) -> Result<TursoTargetInventory, &'static str> {
+    same_stream_readback(tx).await?;
+    let family = remote_family(tx)?;
+    let exists = family
+        .query(
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='schema_migrations'",
+            &[],
+        )
+        .await
+        .map_err(|_| "INVENTORY_QUERY_FAILED")?;
+    if exists.len() != 1 {
+        return Err("INVENTORY_DECODE_FAILED");
+    }
+    let exists = exists[0]
+        .cell(0)
+        .and_then(|cell| cell.integer())
+        .map_err(|_| "INVENTORY_DECODE_FAILED")?;
+    let count = if exists == 1 {
+        let count = family
+            .query("SELECT count(*) FROM schema_migrations", &[])
+            .await
+            .map_err(|_| "INVENTORY_QUERY_FAILED")?;
+        if count.len() != 1 {
+            return Err("INVENTORY_DECODE_FAILED");
+        }
+        Some(
+            count[0]
+                .cell(0)
+                .and_then(|cell| cell.integer())
+                .map_err(|_| "INVENTORY_DECODE_FAILED")?,
+        )
+    } else {
+        None
+    };
+    // A count selects one expected prefix, never proves a ledger/catalog.
+    let prefix = inventory_prefix(exists, count, super::migrate::compiled_sqlite_steps().len())?;
+    let snapshot = super::migrate::turso_test_schema_in_writer(family, prefix)
+        .await
+        .map_err(|_| "INVENTORY_SCHEMA_REFUSED")?;
+    TursoTargetInventory::from_snapshot(prefix, snapshot)
+}
+
+async fn inventory_observe(
+    backend: &Backend,
+) -> (
+    Result<TursoTargetInventory, &'static str>,
+    Option<Result<(), &'static str>>,
+) {
+    if !matches!(backend, Backend::LibsqlRemote(_)) {
+        return (Err("WRONG_PRODUCT_BACKEND"), None);
+    }
+    let mut tx = match backend.begin_write().await {
+        Ok(tx) => tx,
+        Err(_) => return (Err("BEGIN_FAILED"), None),
+    };
+    let primary = inventory_in_writer(&mut tx).await;
+    // Every query/schema/decode failure still settles the original stream.
+    // No DDL, DML, commit, reset or alternate observer occurs here.
+    let rollback = tx.rollback().await.map_err(|_| "ROLLBACK_UNCONFIRMED");
+    (primary, Some(rollback))
+}
+
+#[tokio::test]
+#[ignore = "manual trusted-ref target inventory; same migration gates, no schema/data mutation"]
+async fn turso_primary_migration_target_inventory() -> Result<(), &'static str> {
+    let args: Vec<String> = std::env::args().collect();
+    inventory_selection(|name| std::env::var(name).ok(), &args)?;
+    let settings = DatabaseSettings::from_env().map_err(|_| "PRODUCT_CONFIGURATION_FAILED")?;
+    let DatabaseSettings::LibsqlRemote {
+        primary_url,
+        auth_token,
+    } = settings
+    else {
+        return Err("WRONG_PRODUCT_BACKEND");
+    };
+    let (url, token) = configuration(primary_url, auth_token)?;
+    let backend = Backend::LibsqlRemote(
+        RemoteDatabase::connect(url, token, 1)
+            .await
+            .map_err(|_| "CONNECT_FAILED")?,
+    );
+    let (primary, rollback) = inventory_observe(&backend).await;
+    let close = close_migration_owner(&backend).await;
+    let leases_zero = backend
+        .connection_stats()
+        .is_ok_and(|stats| stats.size == 0);
+    let disclosure = inventory_disclosure(&primary, rollback, close, leases_zero);
+    let admitted = disclosure.is_some();
+    let (classification, prefix, hash) = match disclosure {
+        Some((class, prefix, hash)) => (class, prefix.to_string(), hash),
+        None => ("REFUSED", "NONE".to_owned(), "NONE"),
+    };
+    println!(
+        "FVOCI_TURSO_INVENTORY_RECEIPT classification={} prefix={} schema_sha256={} rollback={} close={} leases={}",
+        classification, prefix, hash, inventory_finish(rollback), inventory_finish(Some(close)),
+        if leases_zero { "ZERO" } else { "FAILED" },
+    );
+    // Both outcomes are retained; primary errors keep priority. A fresh state
+    // observation never reconciles the old failed migration/finish receipt.
+    primary?;
+    rollback.ok_or("ROLLBACK_NOT_STARTED")??;
+    close?;
+    if !leases_zero {
+        return Err("LEASES_NOT_ZERO");
+    }
+    if !admitted {
+        return Err("INVENTORY_DISCLOSURE_REFUSED");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod inventory_policy_tests {
+    use super::*;
+
+    fn args() -> Vec<String> {
+        [
+            "libtest",
+            INVENTORY_TEST_NAME,
+            "--ignored",
+            "--exact",
+            "--test-threads=1",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    }
+
+    fn flags() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("FVOCI_TEST_TURSO_MIGRATION_SELECTED", "1"),
+            ("FVOCI_TEST_TURSO_PHASE", "migration"),
+            ("FVOCI_TEST_TURSO_DESTRUCTIVE", "true"),
+            ("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "true"),
+        ]
+    }
+
+    #[test]
+    fn inventory_requires_exact_selection_and_each_migration_gate() {
+        let valid = flags();
+        let lookup = |name: &str| {
+            valid
+                .iter()
+                .find(|pair| pair.0 == name)
+                .map(|pair| pair.1.to_owned())
+        };
+        inventory_selection(lookup, &args()).unwrap();
+        let mut captured = args();
+        captured.push("--nocapture".into());
+        inventory_selection(lookup, &captured).unwrap();
+        for index in 0..valid.len() {
+            let mut missing = valid.clone();
+            missing.remove(index);
+            assert_eq!(
+                inventory_selection(
+                    |name| missing
+                        .iter()
+                        .find(|pair| pair.0 == name)
+                        .map(|pair| pair.1.to_owned()),
+                    &args()
+                ),
+                Err("EXPLICIT_INVENTORY_SELECTION_REQUIRED")
+            );
+            let mut wrong = valid.clone();
+            wrong[index].1 = if index == 1 { "connection" } else { "false" };
+            assert!(inventory_selection(
+                |name| wrong
+                    .iter()
+                    .find(|pair| pair.0 == name)
+                    .map(|pair| pair.1.to_owned()),
+                &args()
+            )
+            .is_err());
+        }
+        for index in 1..args().len() {
+            let mut missing = args();
+            missing.remove(index);
+            assert!(inventory_selection(lookup, &missing).is_err());
+            let mut duplicate = args();
+            duplicate.push(duplicate[index].clone());
+            assert!(inventory_selection(lookup, &duplicate).is_err());
+        }
+        let mut migration = args();
+        migration[1] = MIGRATION_TEST_NAME.into();
+        assert!(inventory_selection(lookup, &migration).is_err());
+        let mut extra = args();
+        extra.push("--include-ignored".into());
+        assert!(inventory_selection(lookup, &extra).is_err());
+    }
+
+    #[test]
+    fn inventory_prefix_never_admits_unknown_or_ahead_ledger_count() {
+        assert_eq!(inventory_prefix(0, None, 12), Ok(0));
+        for count in 0..=12 {
+            assert_eq!(inventory_prefix(1, Some(count), 12), Ok(count as usize));
+        }
+        for (exists, count) in [
+            (0, Some(0)),
+            (1, None),
+            (2, Some(1)),
+            (-1, None),
+            (1, Some(-1)),
+            (1, Some(13)),
+            (1, Some(i64::MAX)),
+        ] {
+            assert!(inventory_prefix(exists, count, 12).is_err());
+        }
+        assert!(inventory_prefix(0, None, 11).is_err());
+        assert!(inventory_prefix(1, Some(12), 13).is_err());
+    }
+
+    #[test]
+    fn inventory_discloses_only_bounded_verified_shape_after_full_settlement() {
+        let hash = "a".repeat(64);
+        for prefix in 0..=12 {
+            // Pure disclosure policy vectors, never fabricated remote receipts.
+            let observed = Ok(TursoTargetInventory {
+                prefix,
+                schema_sha256: hash.clone(),
+            });
+            let expected = match prefix {
+                0 => "BLANK",
+                12 => "CURRENT",
+                _ => "PREFIX",
+            };
+            assert_eq!(
+                inventory_disclosure(&observed, Some(Ok(())), Ok(()), true),
+                Some((expected, prefix, hash.as_str()))
+            );
+            for rollback in [None, Some(Ok(())), Some(Err("ROLLBACK_UNCONFIRMED"))] {
+                for close in [Ok(()), Err("CLOSE_FAILED")] {
+                    for leases in [false, true] {
+                        let actual = inventory_disclosure(&observed, rollback, close, leases);
+                        if rollback == Some(Ok(())) && close.is_ok() && leases {
+                            assert_eq!(actual, Some((expected, prefix, hash.as_str())));
+                        } else {
+                            assert_eq!(actual, None);
+                        }
+                    }
+                }
+            }
+        }
+        for invalid in [
+            "private://CANARY_TOKEN",
+            "CANARY_TOKEN\nFAKE",
+            "a",
+            &"a".repeat(65),
+            &"G".repeat(64),
+        ] {
+            let observed = Ok(TursoTargetInventory {
+                prefix: 12,
+                schema_sha256: invalid.into(),
+            });
+            assert_eq!(
+                inventory_disclosure(&observed, Some(Ok(())), Ok(()), true),
+                None
+            );
+        }
+        let ahead = Ok(TursoTargetInventory {
+            prefix: 13,
+            schema_sha256: hash,
+        });
+        assert_eq!(
+            inventory_disclosure(&ahead, Some(Ok(())), Ok(()), true),
+            None
+        );
+        for error in [
+            "INVENTORY_QUERY_FAILED",
+            "INVENTORY_SCHEMA_REFUSED",
+            "ROLLBACK_UNCONFIRMED",
+            "private://CANARY_TOKEN",
+        ] {
+            assert_eq!(
+                inventory_disclosure(&Err(error), Some(Ok(())), Ok(()), true),
+                None
+            );
+        }
+        assert_eq!(inventory_finish(None), "NOT_STARTED");
+        assert_eq!(inventory_finish(Some(Ok(()))), "OK");
+        assert_eq!(
+            inventory_finish(Some(Err("private://CANARY_TOKEN"))),
+            "FAILED"
+        );
+        let incomplete = super::super::migrate::TursoTestSchemaSnapshot {
+            receipts: vec![],
+            schema_sha256: "a".repeat(64),
+        };
+        assert!(TursoTargetInventory::from_snapshot(1, incomplete).is_err());
+    }
+
+    #[tokio::test]
+    async fn inventory_wrong_backend_refuses_without_changing_actual_local_catalog() {
+        let f = crate::db::attachment_preview::tests::Fixture::new().await;
+        let before: Vec<(String, String, String, Option<String>)> =
+            sqlx::query_as("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name")
+                .fetch_all(&f.pool)
+                .await
+                .unwrap();
+        let (primary, rollback) = inventory_observe(&f.backend).await;
+        assert!(matches!(primary, Err("WRONG_PRODUCT_BACKEND")));
+        assert_eq!(rollback, None);
+        let after: Vec<(String, String, String, Option<String>)> =
+            sqlx::query_as("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name")
+                .fetch_all(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        f.close().await;
+    }
+}
