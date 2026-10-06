@@ -1715,29 +1715,123 @@ mod selected_tag_pool_tests {
         assert_eq!(full.items[0].name, "E\u{301}cho");
         assert_eq!(full.items[1].name, "a000");
         assert_eq!(full.items[99].name, "a098");
-        // Equal names are a raw ordering witness, not an API duplicate-create
-        // contract (the selected creator prevents case-equivalent duplicates).
-        let tied = Uuid::now_v7();
-        sqlx::query(
+        // The real schema rejects equal names even for a raw fixture INSERT.
+        let before: (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM document_tags),
+                    (SELECT count(*) FROM document_tag_assignments),
+                    (SELECT count(*) FROM audit_log),(SELECT count(*) FROM events)",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        let rejected = Uuid::now_v7();
+        let duplicate = sqlx::query(
             "INSERT INTO document_tags(id,workspace_id,name,color) VALUES(?1,?2,'Écho','blue')",
         )
-        .bind(tied.as_bytes().as_slice())
+        .bind(rejected.as_bytes().as_slice())
+        .bind(f.workspace.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap_err();
+        let sqlx::Error::Database(duplicate) = duplicate else {
+            panic!("expected the retained tag-name uniqueness constraint");
+        };
+        assert_eq!(duplicate.code().as_deref(), Some("2067"));
+        assert_eq!(
+            duplicate.message(),
+            "UNIQUE constraint failed: index 'document_tags_workspace_id_lower_name_idx'"
+        );
+        let after: (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM document_tags),
+                    (SELECT count(*) FROM document_tag_assignments),
+                    (SELECT count(*) FROM audit_log),(SELECT count(*) FROM events)",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(after, before);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM document_tags WHERE id=?1")
+                .bind(rejected.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM document_tag_assignments
+                 WHERE workspace_id=?1 AND document_id=?2 AND tag_id=?3",
+            )
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.document.as_bytes().as_slice())
+            .bind(echo.id.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+            1
+        );
+        let unchanged = list_tags_backend(&f.backend, f.workspace, &actor, Some("Écho"), 100)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.items.len(), 1);
+        let original = &unchanged.items[0];
+        assert_eq!(
+            (
+                original.id,
+                original.workspace_id,
+                &original.name,
+                &original.color,
+                original.created_at,
+                original.updated_at,
+                original.assignment_count,
+            ),
+            (
+                echo.id,
+                echo.workspace_id,
+                &echo.name,
+                &echo.color,
+                echo.created_at,
+                echo.updated_at,
+                1,
+            )
+        );
+        // A legal distinct name sorts after Écho, while its ID sorts before it.
+        // This witnesses BINARY name order rather than an impossible name tie.
+        let ordered = Uuid::from_u128(1);
+        assert!(ordered < echo.id);
+        sqlx::query(
+            "INSERT INTO document_tags(id,workspace_id,name,color) VALUES(?1,?2,'Écho bis','blue')",
+        )
+        .bind(ordered.as_bytes().as_slice())
         .bind(f.workspace.as_bytes().as_slice())
         .execute(&f.pool)
         .await
         .unwrap();
-        let mut expected = [echo.id, tied];
-        expected.sort();
+        let ordered_pool = list_tags_backend(&f.backend, f.workspace, &actor, Some("Écho"), 100)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            list_tags_backend(&f.backend, f.workspace, &actor, Some("Écho"), 100)
-                .await
-                .unwrap()
-                .unwrap()
+            ordered_pool.items.iter().map(|t| t.id).collect::<Vec<_>>(),
+            [echo.id, ordered]
+        );
+        assert_eq!(
+            ordered_pool
                 .items
                 .iter()
-                .map(|t| t.id)
+                .map(|t| t.name.as_str())
                 .collect::<Vec<_>>(),
-            expected
+            ["Écho", "Écho bis"]
+        );
+        assert_eq!(
+            ordered_pool
+                .items
+                .iter()
+                .map(|t| t.assignment_count)
+                .collect::<Vec<_>>(),
+            [1, 0]
         );
         // Pool counts retain PG's assignment semantics even for a trashed doc.
         sqlx::query("UPDATE documents SET deleted_at=1 WHERE id=?1")
