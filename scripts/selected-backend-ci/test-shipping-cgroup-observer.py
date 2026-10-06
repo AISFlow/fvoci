@@ -5,6 +5,10 @@ import copy
 import importlib.util
 import io
 import json
+import os
+import stat
+import subprocess
+from contextlib import contextmanager
 import tempfile
 import types
 import unittest
@@ -181,6 +185,267 @@ class ObserverControls(unittest.TestCase):
         code, receipt = O.observe(target, self.filename)
         self.assertEqual(code, 1); self.assertEqual(receipt["diagnostic"],
             {"primitive": "UNKNOWN", "exception_class": "OSError", "errno": 13, "source_line": None})
+
+
+
+class InstalledStatControls(unittest.TestCase):
+    """Synthetic metadata/children only; never inspect installed system tools."""
+    @staticmethod
+    def info(**changes):
+        fields = dict(st_dev=1, st_ino=2, st_mode=stat.S_IFREG | 0o755, st_uid=0, st_gid=0,
+                      st_size=80000, st_mtime_ns=1, st_ctime_ns=1)
+        fields.update(changes); return types.SimpleNamespace(**fields)
+
+    def test_each_original_condition_independent_including_two_size_bounds(self):
+        healthy = O.stat_predicate(self.info())
+        self.assertEqual(healthy, {"booleans": dict(regular=True, uid_zero=True, no_group_other_write=True, positive_size=True, size_le1048576=True), "original_predicate": True})
+        for key, change in [("regular", dict(st_mode=stat.S_IFLNK | 0o755)), ("uid_zero", dict(st_uid=1000)),
+                            ("no_group_other_write", dict(st_mode=stat.S_IFREG | 0o777)),
+                            ("positive_size", dict(st_size=0)), ("size_le1048576", dict(st_size=1048577))]:
+            with self.subTest(key=key):
+                result = O.stat_predicate(self.info(**change))
+                self.assertFalse(result["original_predicate"]); self.assertFalse(result["booleans"][key])
+                self.assertEqual(sum(not value for value in result["booleans"].values()), 1)
+        self.assertTrue(O.stat_predicate(self.info(st_size=1048576))["original_predicate"])
+
+    def provenance(self, links=None, changes=None):
+        links = links or {}; changes = changes or {}
+        def lstat(path):
+            if str(path) in changes: return self.info(**changes[str(path)])
+            return self.info(st_mode=(stat.S_IFLNK | 0o777) if str(path) in links else
+                             (stat.S_IFREG | 0o755) if str(path).endswith(("stat", "coreutils", "readelf", "dpkg-query")) else stat.S_IFDIR | 0o755)
+        return patch.object(Path, "lstat", lstat), patch.object(O.os, "readlink", side_effect=lambda p: links[str(p)])
+
+    def test_system_symlink_provenance_never_changes_original_regular_refusal(self):
+        a, b = self.provenance({"/usr/bin/stat": "coreutils"})
+        with a, b:
+            path, info, watches, hops = O.system_leaf(Path('/usr/bin/stat'), float('inf'))
+            self.assertEqual(path, Path('/usr/bin/coreutils')); self.assertEqual(hops, 1)
+            self.assertFalse(O.stat_predicate(Path('/usr/bin/stat').lstat())["original_predicate"])
+            O.check_system_watches(watches)
+
+    def test_symlink_loop_escape_more_than8_and_parent_mode_refused(self):
+        cases = [({"/usr/bin/stat": "stat"}, {}, "LINK_LOOP_OR_DEPTH"),
+                 ({"/usr/bin/stat": "/private/SECRET"}, {}, "SYSTEM_PATH"),
+                 ({f"/usr/bin/{name}": str(n+1) for n,name in enumerate(['stat',*map(str,range(1,9))])}, {}, "LINK_HOPS"),
+                 ({}, {"/usr/bin": {"st_mode": stat.S_IFDIR | 0o777}}, "SYSTEM_MODE"),
+                 ({}, {"/usr": {"st_uid": 42}}, "SYSTEM_UID")]
+        for links, changes, reason in cases:
+            with self.subTest(reason=reason):
+                a,b=self.provenance(links, changes)
+                with a,b,self.assertRaisesRegex(O.MetadataMissing, reason): O.system_leaf(Path('/usr/bin/stat'), float('inf'))
+
+    def test_provenance_identity_drift_and_metadata_byte_cap(self):
+        with patch.object(Path,'lstat',return_value=self.info(st_ino=3)), self.assertRaisesRegex(O.MetadataMissing,'IDENTITY_DRIFT'):
+            O.check_system_watches({Path('/usr/bin/stat'): O.metadata_identity(self.info())})
+        with patch.object(O,'system_leaf',return_value=(Path('/usr/bin/stat'), self.info(st_size=32*1024**2+1), {}, 0)), patch.object(O.os,'open') as opened:
+            with self.assertRaisesRegex(O.MetadataMissing,'DIAGNOSTIC_INPUT_BYTES'):
+                with O.held_system_leaf(Path('/usr/bin/stat'),float('inf')): self.fail('oversize accepted')
+            opened.assert_not_called()
+
+    def test_held_leaf_closes_on_consumer_error_and_closing_drift(self):
+        @contextmanager
+        def unused(): yield
+        for drift in [False,True]:
+            with patch.object(O,'system_leaf',return_value=(Path('/usr/bin/stat'), self.info(), {}, 0)), patch.object(O.os,'open',return_value=90), \
+                 patch.object(O.os,'fstat',side_effect=[self.info(),self.info(st_ino=3)] if drift else [self.info()]), patch.object(O.os,'close') as closed:
+                with self.assertRaises(O.MetadataMissing if drift else RuntimeError):
+                    with O.held_system_leaf(Path('/usr/bin/stat'),float('inf')):
+                        if not drift: raise RuntimeError('PRIVATE_TOKEN')
+                closed.assert_called_once_with(90)
+
+    @contextmanager
+    def fake_leaf(self,*args,**kwargs):
+        yield 90, Path('/usr/bin/stat'), self.info(), {}, 0
+
+    def fake_child(self, code=0, live=False):
+        child=Mock(pid=123,returncode=code);child.stdout=Mock();child.stderr=Mock()
+        child.stdout.fileno.return_value=100;child.stderr.fileno.return_value=101
+        child.poll.return_value=None if live else code
+        return child
+
+    def test_query_exact_env_held_exec_fd_output_and_positive_reap(self):
+        child=self.fake_child();queries=[]
+        def read(fd,size):
+            if fd==100 and not getattr(read,'done',False):
+                read.done=True;return b'package: /usr/bin/stat\n'
+            return b''
+        with patch.object(O,'held_system_leaf',side_effect=self.fake_leaf),patch.object(O,'metadata_hash',return_value='h'), \
+             patch.object(O.subprocess,'Popen',return_value=child) as popen,patch.object(O.select,'select',side_effect=lambda pending,*a:(pending,[],[])), \
+             patch.object(O.os,'read',side_effect=read):
+            data=O.metadata_query(['/usr/bin/dpkg-query','--no-pager','--search','--','/usr/bin/stat'],float('inf'),queries)
+        self.assertIn(b'package',data);self.assertTrue(queries[0]['reaped']);self.assertEqual(queries[0]['exit'],0)
+        self.assertEqual(popen.call_args.kwargs['env'],{'LC_ALL':'C.UTF-8','PATH':'/usr/bin:/bin'})
+        self.assertEqual(popen.call_args.kwargs['executable'],'/proc/self/fd/90');self.assertEqual(popen.call_args.kwargs['pass_fds'],(90,))
+        child.wait.assert_called();child.stdout.close.assert_called_once();child.stderr.close.assert_called_once()
+
+    def test_query_deadline_output_exit_hash_error_kill_reap_closed(self):
+        for kind in ['deadline','stdout','stderr','exit','hash']:
+            child=self.fake_child(code=7 if kind=='exit' else 0,live=True);queries=[]
+            def reads(fd,size):return (b'x'*32769 if fd==100 else b'') if kind=='stdout' else (b'x'*4097 if fd==101 else b'') if kind=='stderr' else b''
+            with self.subTest(kind=kind),patch.object(O,'held_system_leaf',side_effect=self.fake_leaf), \
+                 patch.object(O,'metadata_hash',side_effect=['before','after'] if kind=='hash' else lambda *a:'h'),patch.object(O.subprocess,'Popen',return_value=child), \
+                 patch.object(O.select,'select',side_effect=lambda pending,*a:([] if kind=='deadline' else pending,[],[])),patch.object(O.os,'read',side_effect=reads):
+                with self.assertRaises(O.MetadataMissing):O.metadata_query(['/usr/bin/readelf'],float('inf'),queries,input_fd=91)
+            child.kill.assert_called_once();child.wait.assert_called();self.assertTrue(queries[0]['reaped'])
+            self.assertEqual(queries[0]['result'],'MISSING');child.stdout.close.assert_called_once();child.stderr.close.assert_called_once()
+
+    def test_query_spawn_errno_no_raw_text_and_no_fourth_or_foreign_tool(self):
+        queries=[]
+        with patch.object(O,'held_system_leaf',side_effect=self.fake_leaf),patch.object(O,'metadata_hash',return_value='h'), \
+             patch.object(O.subprocess,'Popen',side_effect=OSError(13,'PRIVATE_TOKEN','/private/SECRET')):
+            with self.assertRaises(OSError):O.metadata_query(['/usr/bin/readelf'],float('inf'),queries)
+        self.assertEqual(queries[0]['errno'],13);self.assertIsNone(queries[0]['pid']);self.assertNotIn('SECRET',json.dumps(queries))
+        for argv,used in [(['/usr/bin/stat'],[]),(['/usr/bin/readelf'],[{}, {}, {}])]:
+            with patch.object(O.subprocess,'Popen') as popen,self.assertRaisesRegex(O.MetadataMissing,'QUERY_COUNT'):
+                O.metadata_query(argv,float('inf'),used)
+            popen.assert_not_called()
+
+    def test_package_two_queries_exact_paths_validated_fields(self):
+        queries=[];outputs=[b'coreutils: /usr/bin/stat\n',b'coreutils\t9.7-1ubuntu1\tamd64\tinstalled\tcoreutils\t9.7-1ubuntu1\n']
+        with patch.object(O,'metadata_query',side_effect=outputs) as query:
+            result=O.installed_packages([Path('/usr/bin/stat')],float('inf'),queries)
+        self.assertEqual(result['records'][0]['package'],'coreutils');self.assertEqual(query.call_count,2)
+        self.assertEqual(query.call_args_list[0].args[0],['/usr/bin/dpkg-query','--no-pager','--search','--','/usr/bin/stat'])
+        self.assertEqual(query.call_args_list[1].args[0][-2:],['--','coreutils'])
+
+    def test_package_missing_ambiguous_injected_or_wrong_fields_closed(self):
+        for output in [b'',b'one, two: /usr/bin/stat\n',b'coreutils: /private/SECRET\n',b'diversion by PRIVATE_TOKEN from: /usr/bin/stat\n']:
+            with patch.object(O,'metadata_query',return_value=output) as query,self.assertRaises(O.MetadataMissing):
+                O.installed_packages([Path('/usr/bin/stat')],float('inf'),[])
+            self.assertEqual(query.call_count,1)
+        with patch.object(O,'metadata_query',side_effect=[b'coreutils: /usr/bin/stat\n',b'coreutils\tPRIVATE_TOKEN\tamd64\tinstalled\tcoreutils\t1\n']),self.assertRaisesRegex(O.MetadataMissing,'PACKAGE_FIELDS'):
+            O.installed_packages([Path('/usr/bin/stat')],float('inf'),[])
+
+    def elf_output(self,loader='/lib64/ld-linux-x86-64.so.2'):
+        return ("  Class: ELF64\n  Data: 2's complement, little endian\n  Type: DYN (Position-Independent Executable file)\n"
+                "  Machine: Advanced Micro Devices X86-64\n"+f" [Requesting program interpreter: {loader}]\n"+
+                " 0x0000000000000001 (NEEDED) Shared library: [libc.so.6]\n").encode()
+
+    def test_elf_headers_interpreter_identity_without_loading_or_soname_leak(self):
+        with patch.object(O,'metadata_query',return_value=self.elf_output()) as query,patch.object(O,'system_leaf',return_value=(Path('/usr/lib/loader'),self.info(),{},1)), \
+             patch.object(O.subprocess,'Popen',side_effect=AssertionError('NO_LOADER')):
+            result=O.installed_elf(91,float('inf'),[])
+        self.assertEqual(result['class'],'ELF64');self.assertEqual(result['machine'],'X86_64');self.assertEqual(result['type'],'DYN')
+        self.assertEqual(result['result'],'OBSERVED_METADATA_NOT_LOADED');self.assertNotIn('libc.so.6',json.dumps(result))
+        self.assertEqual(query.call_args.kwargs['input_fd'],91);self.assertEqual(query.call_args.args[0][-1],'/proc/self/fd/91')
+
+    def test_nonelf_or_private_interpreter_and_helper_missing_are_closed(self):
+        for output in [b'PRIVATE_TOKEN',self.elf_output('/private/SECRET')]:
+            with patch.object(O,'metadata_query',return_value=output),self.assertRaises(O.MetadataMissing):O.installed_elf(91,float('inf'),[])
+        for error in [OSError(2,'PRIVATE_TOKEN','/private/SECRET'),O.MetadataMissing('QUERY_EXIT'),subprocess.TimeoutExpired('/private/SECRET',5)]:
+            result=O.metadata_error(error);self.assertEqual(result['result'],'MISSING');self.assertNotIn('SECRET',json.dumps(result))
+
+    def metadata_run(self,info=None,drift=False,query_missing=False,unreaped=False,lstat_errno=None):
+        info=info or self.info(st_size=2*1024**2);original=Path.lstat;calls=0
+        def lstat(path):
+            nonlocal calls
+            if path==Path('/usr/bin/stat'):
+                if lstat_errno is not None: raise OSError(lstat_errno, 'PRIVATE_TOKEN', '/private/SECRET')
+                calls+=1;return self.info(st_ino=9) if drift and calls>1 else info
+            if path in Path('/usr/bin/stat').parents:return self.info(st_mode=stat.S_IFDIR|0o755)
+            return original(path)
+        def package_query(paths,deadline,queries):
+            if unreaped: queries.append({'pid':123,'reaped':False,'exit':None})
+            if query_missing: raise OSError(2,'PRIVATE_TOKEN')
+            return {'result':'OBSERVED'}
+        with patch.object(O,'READER_PATH',HERE/'shipping-image-producer.py'),patch.object(Path,'lstat',lstat), \
+             patch.object(O,'system_leaf',return_value=(Path('/usr/bin/stat'),info,{},0)),patch.object(O,'held_system_leaf',side_effect=self.fake_leaf), \
+             patch.object(O,'metadata_hash',return_value='h'),patch.object(O,'installed_packages',side_effect=package_query), \
+             patch.object(O,'installed_elf',side_effect=OSError(2,'PRIVATE_TOKEN') if query_missing else None,return_value={'result':'OBSERVED_METADATA_NOT_LOADED'}), \
+             patch.object(O,'installed_kernel',return_value={'result':'VISIBLE_KERNEL_ONLY'}),patch.object(O,'observe',side_effect=AssertionError('NO_ORIGINAL_OBSERVATION')), \
+             patch.object(O,'load_reader',side_effect=AssertionError('NO_READER_EXEC')),patch.object(O.subprocess,'Popen',side_effect=AssertionError('NO_REAL_CHILD')):
+            return O.installed_stat_metadata()
+
+    def test_metadata_positive_records_false_original_size_and_optional_missing(self):
+        for missing in [False,True]:
+            code,receipt=self.metadata_run(query_missing=missing);self.assertEqual(code,0)
+            self.assertEqual(receipt['result'],'METADATA_OBSERVED_NOT_ADMITTED');self.assertFalse(receipt['stat']['original_predicate'])
+            self.assertFalse(receipt['stat']['booleans']['size_le1048576']);self.assertNotIn('PRIVATE_TOKEN',json.dumps(receipt))
+            self.assertEqual(receipt['packages']['result'],'MISSING' if missing else 'OBSERVED')
+
+    def test_closing_drift_and_wrong_source_not_green(self):
+        code,receipt=self.metadata_run(drift=True);self.assertEqual(code,1);self.assertEqual(receipt['result'],'METADATA_MISSING_NOT_ADMITTED')
+        with patch.object(O,'READER_PATH',HERE/'test-shipping-cgroup-observer.py'),patch.object(O,'system_leaf') as system:
+            code,receipt=O.installed_stat_metadata()
+        self.assertEqual(code,1);self.assertEqual(receipt['result'],'OBSERVER_SOURCE_UNVERIFIED');system.assert_not_called()
+
+    def test_query_five_second_cap_includes_closing_reserve(self):
+        child=self.fake_child(live=True);queries=[]
+        with patch.object(O,'held_system_leaf',side_effect=self.fake_leaf),patch.object(O,'metadata_hash',return_value='h'), \
+             patch.object(O.time,'monotonic',return_value=100),patch.object(O.subprocess,'Popen',return_value=child), \
+             patch.object(O.select,'select',return_value=([],[],[])) as select:
+            with self.assertRaisesRegex(O.MetadataMissing,'QUERY_DEADLINE'):
+                O.metadata_query(['/usr/bin/readelf'],200,queries)
+        self.assertEqual(select.call_args.args[-1],4.75)
+        self.assertEqual(child.wait.call_args.kwargs['timeout'],5)
+        self.assertTrue(queries[0]['reaped']);self.assertEqual(queries[0]['exit'],0)
+
+    def test_kernel_os_release_projection_omits_node_and_version_private_text(self):
+        uname=types.SimpleNamespace(release='6.17.0-1001-azure',machine='x86_64',version='PRIVATE_TOKEN',nodename='PRIVATE_NODE')
+        with patch.object(O.os,'uname',return_value=uname),patch.object(O,'held_system_leaf',side_effect=self.fake_leaf), \
+             patch.object(O.os,'read',return_value=b'ID=ubuntu\nVERSION_ID="26.04"\n'):
+            result=O.installed_kernel(float('inf'))
+        self.assertEqual(result['id'],'ubuntu');self.assertEqual(result['version_id'],'26.04');self.assertEqual(result['machine'],'x86_64')
+        self.assertNotIn('PRIVATE',json.dumps(result));self.assertEqual(len(result['version_sha256']),64)
+        with patch.object(O.os,'uname',return_value=uname),patch.object(O,'held_system_leaf',side_effect=self.fake_leaf), \
+             patch.object(O.os,'read',return_value=b'x'*4097),self.assertRaisesRegex(O.MetadataMissing,'OS_RELEASE_BYTES'):
+            O.installed_kernel(float('inf'))
+
+    def test_metadata_lstat_errno_and_unreaped_child_refuse_with_closed_receipt(self):
+        for number in [2,13]:
+            code,receipt=self.metadata_run(lstat_errno=number);self.assertEqual(code,1)
+            self.assertEqual(receipt['provenance_failure']['primitive'],'STAT_LSTAT');self.assertEqual(receipt['provenance_failure']['errno'],number)
+            self.assertNotIn('PRIVATE',json.dumps(receipt))
+        code,receipt=self.metadata_run(unreaped=True);self.assertEqual(code,1)
+        self.assertEqual(receipt['closing']['reason'],'CHILD_NOT_REAPED');self.assertFalse(receipt['queries'][0]['reaped'])
+
+    def test_query_closing_wait_failure_does_not_claim_reap_and_closes_pipes(self):
+        child=self.fake_child(live=True);child.wait.side_effect=subprocess.TimeoutExpired('/private/SECRET',5);queries=[]
+        with patch.object(O,'held_system_leaf',side_effect=self.fake_leaf),patch.object(O,'metadata_hash',return_value='h'), \
+             patch.object(O.subprocess,'Popen',return_value=child),patch.object(O.select,'select',return_value=([],[],[])):
+            with self.assertRaises(subprocess.TimeoutExpired):O.metadata_query(['/usr/bin/readelf'],float('inf'),queries)
+        child.kill.assert_called_once();self.assertFalse(queries[0]['reaped']);self.assertEqual(queries[0]['kind'],'QUERY_TIMEOUT')
+        child.stdout.close.assert_called_once();child.stderr.close.assert_called_once();self.assertNotIn('SECRET',json.dumps(queries))
+
+    def test_streamed_diagnostic_hash_bound_never_increases_original_stat_gate(self):
+        total=0
+        def read(fd,size):
+            nonlocal total
+            part=b'x'*size;total+=size;return part
+        with patch.object(O.os,'lseek'),patch.object(O.os,'read',side_effect=read),self.assertRaisesRegex(O.MetadataMissing,'DIAGNOSTIC_INPUT_BYTES'):
+            O.metadata_hash(90,float('inf'))
+        self.assertEqual(total,33554433);self.assertFalse(O.stat_predicate(self.info(st_size=33554432))['original_predicate'])
+        with patch.object(O.os,'lseek'),patch.object(O.os,'read',side_effect=[b'abc',b'']):
+            self.assertEqual(O.metadata_hash(90,float('inf')),'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+
+    def test_metadata_global_deadline_and_invalid_system_path_never_spawn(self):
+        with patch.object(O.time,'monotonic',return_value=31),self.assertRaisesRegex(O.MetadataMissing,'DEADLINE'):
+            O.metadata_tick(30)
+        for name in ['/private/SECRET','/usr/bin/*','/usr/bin/../SECRET']:
+            with patch.object(Path,'lstat') as lstat,self.assertRaisesRegex(O.MetadataMissing,'SYSTEM_PATH'):
+                O.system_leaf(Path(name),float('inf'))
+            lstat.assert_not_called()
+
+    def test_aarch64_elf_positive_and_hostile_closed_error(self):
+        output=self.elf_output().replace(b'Advanced Micro Devices X86-64',b'AArch64')
+        with patch.object(O,'metadata_query',return_value=output),patch.object(O,'system_leaf',return_value=(Path('/usr/lib/loader'),self.info(),{},0)):
+            self.assertEqual(O.installed_elf(90,float('inf'),[])['machine'],'AARCH64')
+        class Hostile:
+            def __str__(self):raise AssertionError('NO_STRINGIFICATION')
+        for error in [RuntimeError(Hostile()),O.MetadataMissing(Hostile()),O.MetadataMissing('PRIVATE_TOKEN')]:
+            self.assertEqual(O.metadata_error(error)['result'],'MISSING');self.assertNotIn('PRIVATE',json.dumps(O.metadata_error(error)))
+
+    def test_literal_mode_only_and_extra_args_refused_never_observe(self):
+        expected={'scope':'INSTALLED_STAT_METADATA_ONLY_NOT_ADMITTED_NOT_IMAGE_QUALIFIED','result':'METADATA_OBSERVED_NOT_ADMITTED'}
+        stream=io.StringIO()
+        with patch.object(O,'installed_stat_metadata',return_value=(0,expected)) as mode,patch.object(O,'observe') as observe,redirect_stdout(stream):
+            self.assertEqual(O.main(['--installed-stat-metadata']),0)
+        mode.assert_called_once_with();observe.assert_not_called();self.assertEqual(json.loads(stream.getvalue()),expected)
+        for args in [['--installed-stat-metadata','--reader','/private/SECRET'],['--installed-stat-metadata=true'],['--installed-stat-metadata','--installed-stat-metadata']]:
+            with patch.object(O,'installed_stat_metadata') as mode,patch.object(O,'observe') as observe,redirect_stdout(io.StringIO()) as stream:
+                self.assertEqual(O.main(args),1)
+            mode.assert_not_called();observe.assert_not_called();self.assertEqual(json.loads(stream.getvalue())['result'],'OBSERVER_ARGUMENT_REFUSED')
 
 
 if __name__ == "__main__":

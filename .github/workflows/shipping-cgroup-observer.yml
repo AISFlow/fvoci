@@ -44,5 +44,5 @@ jobs:
           persist-credentials: false
       - name: Pure observer controls
         run: python3 -B tooling/scripts/selected-backend-ci/test-shipping-cgroup-observer.py
-      - name: One pinned launcher cgroup observation
-        run: python3 -B tooling/scripts/selected-backend-ci/shipping-cgroup-observer.py
+      - name: One pinned installed stat metadata observation
+        run: python3 -B tooling/scripts/selected-backend-ci/shipping-cgroup-observer.py --installed-stat-metadata

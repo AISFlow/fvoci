@@ -2394,6 +2394,16 @@ class RegistryMutationCliTest(unittest.TestCase):
                 proc, output = self._plan_against(root)
                 self._assert_no_green_outputs(proc, output, "exact trusted manual diagnostic-only contract required")
 
+    def test_shipping_installed_stat_literal_mode_mutations_refuse_before_outputs(self) -> None:
+        command = "run: python3 -B tooling/scripts/selected-backend-ci/shipping-cgroup-observer.py --installed-stat-metadata"
+        for replacement in [command.removesuffix(" --installed-stat-metadata"), command + " --reader /foreign",
+                            command + " || true", command.replace("--installed-stat-metadata", "--installed-stat-metadata=true")]:
+            with self.subTest(change=replacement):
+                root = self._mutated_root(); path = root / ".github/workflows" / SEL.SHIPPING_OBSERVER_WORKFLOW_FILE
+                text = path.read_text(); self.assertIn(command, text); path.write_text(text.replace(command, replacement, 1))
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, "exact trusted manual diagnostic-only contract required")
+
     def _mutated_root(self) -> Path:
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, True)
