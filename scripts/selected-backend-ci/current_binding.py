@@ -80,7 +80,7 @@ def load_current(lane, driver):
     after = referenced(m['sourceInputsAfter'])
     assert before == after and before['head'] == m['source'] and before['tree'] == m['tree']
     assert before['tracked'] and before['external']
-    assert before['tracked']['apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'] == '871ec11473d6ba4d0019475fcef48d41fff96991b364a85ca51635f262f0943d'
+    assert before['tracked']['apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'] == 'e8cfb17ea01f7e1296903907cf2ee379b339894668e38b4d1e5279b6bb6295fe'
     if lane == 'postgres':
         assert before['tracked']['apps/web/e2e-pending/workspace-wiki-selected-auxiliary.ts'] == 'c38b23f590e08f68f4a7abf64d71976e9b088f66631982e73e8f26aa8d606f57'
     assert subprocess.check_output(['git','-c','safe.directory='+str(W),'-C',str(W),'status','--short'], text=True) == before['status']

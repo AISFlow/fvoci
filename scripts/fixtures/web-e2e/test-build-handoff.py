@@ -1829,4 +1829,40 @@ class InstallationFailureProjectionTest(unittest.TestCase):
                 self.assertFalse((self.output/'selected-ci-receipt.json').exists())
 
 
+class CurrentSelectedSpecPinTest(unittest.TestCase):
+    SELECTED_SPEC = 'apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'
+    # Independently reviewed metadata correction, not a value read from the guard.
+    REVIEWED_SHA256 = 'e8cfb17ea01f7e1296903907cf2ee379b339894668e38b4d1e5279b6bb6295fe'
+    HISTORICAL_8DD_SHA256 = '871ec11473d6ba4d0019475fcef48d41fff96991b364a85ca51635f262f0943d'
+
+    def setUp(self):
+        path = ROOT / 'scripts/selected-backend-ci/current_binding.py'
+        tree = ast.parse(path.read_text())
+        function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'load_current')
+        guards = [n for n in function.body if isinstance(n, ast.Assert) and
+                  self.SELECTED_SPEC in ast.unparse(n)]
+        self.assertEqual(len(guards), 1)
+        self.predicate = compile(ast.Module(body=guards, type_ignores=[]), str(path), 'exec')
+
+    def check_digest(self, digest):
+        exec(self.predicate, {'before': {'tracked': {self.SELECTED_SPEC: digest}}})
+
+    def test_reviewed_current_physical_spec_is_admitted(self):
+        actual = hashlib.sha256((ROOT / self.SELECTED_SPEC).read_bytes()).hexdigest()
+        self.assertEqual(actual, self.REVIEWED_SHA256)
+        self.check_digest(actual)
+
+    def test_historical_8dd_spec_is_refused(self):
+        with self.assertRaises(AssertionError):
+            self.check_digest(self.HISTORICAL_8DD_SHA256)
+
+    def test_foreign_spec_digest_is_refused(self):
+        with self.assertRaises(AssertionError):
+            self.check_digest('f' * 64)
+
+    def test_missing_spec_is_refused(self):
+        with self.assertRaises(KeyError):
+            exec(self.predicate, {'before': {'tracked': {}}})
+
+
 if __name__=='__main__':unittest.main()
