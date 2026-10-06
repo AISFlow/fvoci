@@ -2392,7 +2392,10 @@ pub enum RemoteMigrationError {
         source: sqlx::Error,
         drain: Option<sqlx::Error>,
     },
-    /// DDL or the receipt of one step failed and that step was rolled back.
+    /// DDL or the receipt of one step failed. The existing applier attempts
+    /// the rollback and folds its result into `source`, so no rollback
+    /// confirmation exists here: the step's settlement is withheld (or an
+    /// unconfirmed cleanup when the typed marker is present).
     Step {
         version: i32,
         source: sqlx::Error,
@@ -2955,7 +2958,20 @@ mod remote_helper_display_tests {
             errors[5].to_string(),
             "remote migration step 7 failed; rollback confirmation withheld: driver error withheld; remote stream drain failed at close"
         );
-        assert_eq!(errors[5].settlement(), "rollback-confirmation-withheld");
+        // A Step whose drain failed claims no settlement at all; the withheld
+        // confirmation is reported only for a Step with a clean drain.
+        assert_eq!(errors[5].settlement(), "drain-failed");
+        let withheld = RemoteMigrationError::Step {
+            version: 7,
+            source: protocol_canary(),
+            drain: None,
+        };
+        assert_eq!(withheld.settlement(), "rollback-confirmation-withheld");
+        assert_eq!(
+            withheld.to_string(),
+            "remote migration step 7 failed; rollback confirmation withheld: driver error withheld"
+        );
+        assert_secret_free(&format!("{withheld:?}"));
         let unconfirmed = RemoteMigrationError::Step {
             version: 2,
             source: unconfirmed_migration_cleanup(protocol_canary()),
