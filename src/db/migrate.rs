@@ -3091,9 +3091,11 @@ mod remote_primary_helper_tests {
                 std::env::var_os("FVOCI_TEST_SQLD")
                     .expect("allocated pinned official sqld required; no SDK skip"),
             );
+            // The maintained fixture creates the run directory itself
+            // (`create_dir`, never `create_dir_all`): the caller only provides a
+            // nonexistent unique path and reaps it after the receipt.
             let root =
                 std::env::temp_dir().join(format!("fvoci-remote-helper-{}", uuid::Uuid::now_v7()));
-            std::fs::create_dir_all(&root).unwrap();
             let driver = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
             Self { driver, root }
         }
