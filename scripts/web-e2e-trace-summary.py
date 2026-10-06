@@ -257,6 +257,165 @@ def diagnostic_digest(trace):
     }
     return result if len(json.dumps(result).encode()) <= 49152 else unavailable("output_size_limit")
 
+TASK_DIAGNOSTIC_NAMES = {
+    f"w3-task-{schedule}-wire-coherence.json": schedule
+    for schedule in ("natural", "server-readonly", "retired-grant")
+}
+TASK_EVENT_KINDS = (
+    "transport-open", "auth-received", "frame-hold", "frame-release", "frame-delivery",
+    "persist-request", "persist-ack", "browser-open", "browser-close",
+    "browser-authenticated", "browser-state", "http-archive", "http-unarchive",
+    "http-denied", "cleanup-start",
+)
+TASK_COUNTERS = (
+    "order", "socket", "activeSocket", "frame", "authenticationEpoch",
+    "initialAuthenticationEpoch", "updates", "localUpdates", "unauthorizedLocalWrites",
+    "violations", "dropped", "requestCount", "ackCount",
+)
+TASK_BOOLEANS = (
+    "authenticated", "editable", "canPersistAffordance", "saveEnabled", "ownerBroken",
+    "sameRoot", "sameEditor", "sameElement", "sameDoc", "sameProvider", "sameClientId",
+    "sameSocket", "archived", "canEdit", "completed",
+)
+TASK_ENUMS = {
+    "scope": ("readonly", "read-write", "unknown"),
+    "authenticatedScope": ("readonly", "read-write", "unknown"),
+    "status": ("connected", "connecting", "disconnected", "unauthorized", "unknown"),
+    "dom": ("true", "false", "unknown"),
+}
+
+
+def task_diagnostic_digest(trace):
+    """Project only the Task observer contract; raw attachments remain private."""
+    def unavailable(reason):
+        return {"available": False, "reason": reason}
+
+    def reject_constant(_value):
+        raise ValueError("Non-JSON numeric constant")
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate JSON key")
+            result[key] = value
+        return result
+
+    def load(content):
+        return json.loads(content, parse_constant=reject_constant, object_pairs_hook=unique_object)
+
+    def counter(value, limit=1_000_000):
+        return value == "unknown" or type(value) is int and 0 <= value <= limit
+
+    field_names = set(TASK_COUNTERS + TASK_BOOLEANS + ("elapsedMs", "code", *TASK_ENUMS))
+
+    def fields(value, event=False):
+        allowed = field_names | ({"kind"} if event else set())
+        if type(value) is not dict or value.keys() - allowed:
+            raise ValueError("Invalid fields")
+        result = {}
+        for key in TASK_COUNTERS + ("elapsedMs", "code"):
+            number = value.get(key, "unknown")
+            limit = 3_600_000 if key == "elapsedMs" else 4999 if key == "code" else 1_000_000
+            if not counter(number, limit):
+                raise ValueError("Invalid counter")
+            result[key] = number
+        for key in TASK_BOOLEANS:
+            boolean = value.get(key, "unknown")
+            if type(boolean) is not bool and boolean != "unknown":
+                raise ValueError("Invalid boolean")
+            result[key] = boolean
+        for key, choices in TASK_ENUMS.items():
+            enum = value.get(key, "unknown")
+            if type(enum) is not str or enum not in choices:
+                raise ValueError("Invalid enum")
+            result[key] = enum
+        if event:
+            kind = value.get("kind")
+            if type(kind) is not str or kind not in TASK_EVENT_KINDS:
+                raise ValueError("Invalid event kind")
+            result["kind"] = kind
+        return result
+
+    def lane(value):
+        if type(value) is not dict or value.keys() - {"events", "dropped"}:
+            raise ValueError("Invalid lane")
+        events = value.get("events")
+        dropped = value.get("dropped", "unknown")
+        if type(events) is not list or len(events) > 256 or not counter(dropped):
+            raise ValueError("Invalid lane limit")
+        result, previous = [], 0
+        for event in events:
+            projected = fields(event, event=True)
+            order = projected["order"]
+            if type(order) is int:
+                if order <= previous:
+                    raise ValueError("Invalid lane order")
+                previous = order
+            result.append(projected)
+        return {"events": result, "dropped": dropped}
+
+    members = trace.infolist()
+    if len(members) > 4096:
+        return unavailable("member_limit")
+    named = [item for item in members if item.filename == "test.trace"]
+    if len(named) != 1 or named[0].is_dir() or named[0].flag_bits & 1 or (named[0].external_attr >> 16) & 0o170000 not in (0, 0o100000):
+        return unavailable("missing_or_invalid_test_trace")
+    if named[0].file_size > 4 * 1024 * 1024:
+        return unavailable("test_trace_size_limit")
+    try:
+        lines = trace.read(named[0]).splitlines()
+        if len(lines) > 10000:
+            return unavailable("test_event_limit")
+        references = []
+        for line in lines:
+            event = load(line)
+            if type(event) is not dict:
+                return unavailable("invalid_test_event")
+            attachments = event.get("attachments", [])
+            if type(attachments) is not list or len(attachments) > 32:
+                return unavailable("invalid_attachment_list")
+            for reference in attachments:
+                if type(reference) is not dict:
+                    return unavailable("invalid_attachment_reference")
+                name = reference.get("name")
+                if type(name) is str and name.startswith("w3-task-"):
+                    if name not in TASK_DIAGNOSTIC_NAMES:
+                        return unavailable("invalid_attachment_name")
+                    references.append(reference)
+        if len(references) != 1:
+            return unavailable("missing_or_duplicate_attachment")
+        reference = references[0]
+        path = reference.get("file")
+        if reference.keys() - {"name", "contentType", "file"} or reference.get("contentType") != "application/json" or type(path) is not str or not re.fullmatch(r"attachments/[a-f0-9]{40,64}", path):
+            return unavailable("invalid_attachment_reference")
+        matching = [item for item in members if item.filename == path]
+        if len(matching) != 1 or matching[0].is_dir() or matching[0].flag_bits & 1 or (matching[0].external_attr >> 16) & 0o170000 not in (0, 0o100000):
+            return unavailable("missing_or_invalid_attachment_member")
+        if matching[0].file_size > 1024 * 1024:
+            return unavailable("attachment_size_limit")
+        data = load(trace.read(matching[0]))
+    except (ValueError, UnicodeError, RecursionError, RuntimeError, NotImplementedError, EOFError, zipfile.BadZipFile, OSError):
+        return unavailable("invalid_attachment_data")
+    policy = {
+        "schema": "w3-task-fresh-admission-v1",
+        "routeDeliveryMeaning": "route-send-returned",
+        "routeToProviderSocketBinding": "unknown",
+        "crossLaneClockOrder": "unknown",
+    }
+    if type(data) is not dict or set(data) != set(policy) | {"route", "browser", "state", "completed"}:
+        return unavailable("invalid_schema")
+    if any(data[key] != value for key, value in policy.items()) or type(data["completed"]) is not bool:
+        return unavailable("invalid_policy_or_completed")
+    try:
+        result = {"available": True, "schedule": TASK_DIAGNOSTIC_NAMES[reference["name"]], **policy,
+                  "route": lane(data["route"]), "browser": lane(data["browser"]),
+                  "state": fields(data["state"]), "completed": data["completed"]}
+    except ValueError:
+        return unavailable("invalid_fields_or_lane")
+    return result if len(json.dumps(result).encode()) <= 1024 * 1024 else unavailable("output_size_limit")
+
+
 def redact(text):
     text = DB_URL.sub("postgres://redacted", text)
     text = PATH_TOKEN.sub(r"\1<redacted>", text)
@@ -282,6 +441,7 @@ def clip(text, limit=600):
 rows = []
 with zipfile.ZipFile(sys.argv[1]) as trace:
     diagnostic = diagnostic_digest(trace)
+    task_diagnostic = task_diagnostic_digest(trace)
     names = sorted(trace.namelist())
     for name in names:
         if not name.endswith(".network"):
@@ -338,3 +498,4 @@ if len(ordered) > MAX_LINES:
 for when, kind, text in ordered:
     print(f"+{when - base:9.1f} {kind:9} {text}")
 print("w3-template-diagnostic " + json.dumps(diagnostic, ensure_ascii=True, separators=(",", ":")))
+print("w3-task-admission-diagnostic " + json.dumps(task_diagnostic, ensure_ascii=True, separators=(",", ":")))
