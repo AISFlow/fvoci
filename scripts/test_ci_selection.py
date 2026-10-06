@@ -246,7 +246,7 @@ class SchemaCatalogLifecycleTest(unittest.TestCase):
                 facts = {"tables":[{"name":"fixture"}],"ledger":[{}]*12,
                          "app_role":{"role":env["FVOCI_SCHEMA_CATALOG_APP_ROLE"],"attributes":attrs}}
                 Path(env["FVOCI_SCHEMA_CATALOG_OUT"]).write_text(json.dumps(facts))
-                count = 2 if defect == "count" else 3
+                count = 3 if defect == "count" else 4
                 return subprocess.CompletedProcess(args, 0,
                     f"test result: ok. {count} passed; 0 failed; 0 ignored;".encode(),
                     b"SKIP postgres_catalog_dump" if defect == "skip" else b"")
