@@ -808,7 +808,7 @@ class GlobalRootVisibilityControls(unittest.TestCase):
     def test_fixed_stat_argv_bounded_output_wait_and_error_closure(self):
         from types import SimpleNamespace
         info = SimpleNamespace(st_mode=0o100755, st_uid=0, st_dev=1, st_ino=2, st_size=100)
-        def tool_stat(path): return info if path == Path("/usr/bin/stat") else SimpleNamespace(st_mode=0o40755, st_uid=0)
+        def tool_stat(path): return info if path == Path("/usr/bin/gnustat") else SimpleNamespace(st_mode=0o40755, st_uid=0)
         for output, status, error in [(b"63677270\n", 0, None), (b"9fa0\n", 0, "CGROUP_HOST_ROOT_INVALID"),
                                       (b"63677270\n", 1, "CGROUP_HOST_ROOT_INVALID"), (b"x"*33, 0, "CGROUP_METADATA_UNKNOWN")]:
             child = unittest.mock.Mock(returncode=status); child.stdout.fileno.return_value = 987
@@ -818,7 +818,7 @@ class GlobalRootVisibilityControls(unittest.TestCase):
                 if error:
                     with self.assertRaisesRegex(P.Refusal, error): P.cgroup_filesystem(123, b"63677270")
                 else: self.assertEqual(P.cgroup_filesystem(123, b"63677270"), P.digest(b"synthetic tool"))
-            self.assertEqual(spawn.call_args.args[0], ["/usr/bin/stat", "--file-system", "--format=%t", "--", "/proc/self/fd/123"])
+            self.assertEqual(spawn.call_args.args[0], ["/usr/bin/gnustat", "--file-system", "--format=%t", "--", "/proc/self/fd/123"])
             self.assertEqual(spawn.call_args.kwargs["pass_fds"], (123,)); self.assertEqual(spawn.call_args.kwargs["env"], {"LC_ALL": "C", "PATH": "/usr/bin:/bin"})
             child.wait.assert_called(); child.stdout.close.assert_called_once()
         child = unittest.mock.Mock(returncode=None); child.poll.return_value = None
@@ -826,6 +826,35 @@ class GlobalRootVisibilityControls(unittest.TestCase):
                 patch.object(P.subprocess, "Popen", return_value=child), patch.object(P.select, "select", return_value=([], [], [])):
             with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_filesystem(123, b"63677270")
         child.kill.assert_called_once(); child.wait.assert_called_once_with(timeout=5); child.stdout.close.assert_called_once()
+
+    def test_coinstalled_gnu_stat_avoids_uutils_link_without_relaxing_gate(self):
+        from types import SimpleNamespace
+        regular = dict(st_mode=0o100755, st_uid=0, st_dev=1, st_ino=2, st_size=100)
+        # Actual hosted /usr/bin/stat was a 31-byte link to 11807104-byte uutils.
+        # Ubuntu gnu-coreutils coinstalls gnustat; these identities are synthetic.
+        for delta in [{}, {"st_mode": 0o120777}, {"st_size": 1024**2+1}]:
+            with self.subTest(delta=delta):
+                def metadata(path):
+                    if path == Path("/usr/bin/stat"):
+                        return SimpleNamespace(**{**regular, "st_mode": 0o120777, "st_size": 31})
+                    if path == Path("/usr/bin/gnustat"):
+                        return SimpleNamespace(**{**regular, **delta})
+                    return SimpleNamespace(st_mode=0o40755, st_uid=0)
+                child = unittest.mock.Mock(returncode=0); child.stdout.fileno.return_value = 987
+                with patch.object(Path, "lstat", autospec=True, side_effect=metadata), \
+                        patch.object(Path, "read_bytes", return_value=b"synthetic GNU tool"), \
+                        patch.object(P.subprocess, "Popen", return_value=child) as spawn, \
+                        patch.object(P.select, "select", return_value=([child.stdout], [], [])), \
+                        patch.object(P.os, "read", side_effect=[b"63677270\n", b""]):
+                    if delta:
+                        with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"):
+                            P.cgroup_filesystem(123, b"63677270")
+                        spawn.assert_not_called()
+                    else:
+                        self.assertEqual(P.cgroup_filesystem(123, b"63677270"), P.digest(b"synthetic GNU tool"))
+                        self.assertEqual(spawn.call_args.args[0], ["/usr/bin/gnustat", "--file-system", "--format=%t", "--", "/proc/self/fd/123"])
+                        self.assertEqual(spawn.call_args.kwargs["pass_fds"], (123,))
+                        child.wait.assert_called(); child.stdout.close.assert_called_once()
 
     def test_mount_and_root_replacement_drift_and_all_owned_fds_closed(self):
         proc, root = self.make_chain(); file = proc / "self/mountinfo"; original = file.read_text(); read = P.cgroup_text
@@ -856,14 +885,14 @@ class GlobalRootVisibilityControls(unittest.TestCase):
         base = dict(st_mode=0o100755, st_uid=0, st_dev=1, st_ino=2, st_size=100)
         for delta in [dict(st_uid=1000), dict(st_mode=0o100777), dict(st_mode=0o120777), dict(st_size=1024**2+1)]:
             info = SimpleNamespace(**{**base, **delta})
-            def metadata(path): return info if path == Path("/usr/bin/stat") else SimpleNamespace(st_mode=0o40755, st_uid=0)
+            def metadata(path): return info if path == Path("/usr/bin/gnustat") else SimpleNamespace(st_mode=0o40755, st_uid=0)
             with patch.object(Path, "lstat", autospec=True, side_effect=metadata), patch.object(P.subprocess, "Popen") as spawn:
                 with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_filesystem(123, b"63677270")
             spawn.assert_not_called()
         with patch.object(Path, "lstat", return_value=SimpleNamespace(st_mode=0o40777, st_uid=0)), patch.object(P.subprocess, "Popen") as spawn:
             with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_filesystem(123, b"63677270")
         spawn.assert_not_called()
-        def metadata(path): return SimpleNamespace(**base) if path == Path("/usr/bin/stat") else SimpleNamespace(st_mode=0o40755, st_uid=0)
+        def metadata(path): return SimpleNamespace(**base) if path == Path("/usr/bin/gnustat") else SimpleNamespace(st_mode=0o40755, st_uid=0)
         child = unittest.mock.Mock(returncode=0)
         with patch.object(Path, "lstat", autospec=True, side_effect=metadata), patch.object(Path, "read_bytes", side_effect=[b"original", b"changed"]), \
                 patch.object(P.subprocess, "Popen", return_value=child), patch.object(P.select, "select", return_value=([child.stdout], [], [])), \

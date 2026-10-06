@@ -196,7 +196,7 @@ def cgroup_text(fd: int, name: str) -> str:
 
 def cgroup_filesystem(fd: int, expected: bytes) -> str:
     """Fixed maintained stat primitive; no shell, privilege or ABI structure."""
-    tool = Path("/usr/bin/stat")
+    tool = Path("/usr/bin/gnustat")
     for parent in tool.parents:
         info = parent.lstat()
         require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022, "CGROUP_METADATA_UNKNOWN")
