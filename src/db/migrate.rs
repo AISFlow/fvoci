@@ -2527,6 +2527,20 @@ impl RemoteMigrationError {
             Self::Cancelled { drain, .. } => drain.as_ref(),
         }
     }
+    /// Settlement of the failed work as far as a typed receipt proves it.
+    /// `Step` never carries a rollback receipt (the existing applier folds a
+    /// failed rollback into its error), so it is `rollback-confirmation-withheld`
+    /// unless the typed unconfirmed-cleanup marker is present.
+    pub fn settlement(&self) -> &'static str {
+        match self {
+            Self::Step { source, .. } if cleanup_is_unconfirmed(source) => "cleanup-unconfirmed",
+            Self::Step { .. } => "rollback-confirmation-withheld",
+            Self::CommitUnknown { .. } => "commit-unknown",
+            Self::Cancelled { .. } => "cancel-checkpoint-settled",
+            Self::Gate { .. } | Self::Connect { .. } => "no-write-opened",
+            Self::Drain { .. } => "drain-failed",
+        }
+    }
     /// Whether the owned stream drain at close reported a failure.
     pub fn drain_failed(&self) -> bool {
         match self {
@@ -2559,7 +2573,12 @@ impl std::fmt::Display for RemoteMigrationError {
             ),
             Self::Step { version, source, .. } => write!(
                 f,
-                "remote migration step {version} failed and was rolled back: {}{drain}",
+                "remote migration step {version} failed; {}: {}{drain}",
+                if cleanup_is_unconfirmed(source) {
+                    "cleanup unconfirmed, admission quarantined"
+                } else {
+                    "rollback confirmation withheld"
+                },
                 bounded_gate_text(source)
             ),
             Self::CommitUnknown { version, .. } => write!(
@@ -2591,6 +2610,7 @@ impl std::fmt::Debug for RemoteMigrationError {
             Self::Connect { .. } | Self::Gate { .. } | Self::Drain { .. } => {}
         }
         debug.field("gate", &self.gate());
+        debug.field("settlement", &self.settlement());
         debug.field("source", &"<withheld>");
         debug.field("drain_failed", &self.drain_failed());
         debug.finish()
@@ -2605,6 +2625,38 @@ fn is_commit_unknown(error: &sqlx::Error) -> bool {
         sqlx::Error::AnyDriverError(source)
             if source.downcast_ref::<super::backend::CommitUnknown>().is_some()
     )
+}
+
+/// Classifies one failed step of the existing applier. Only the applier's own
+/// typed cancellation checkpoint message becomes `Cancelled`; a concurrently
+/// cancelled token never erases a primary failure or an unknown settlement.
+/// The applier folds a failed rollback into its error
+/// (`sqlite_validation_error_after_rollback`), so a `Step` failure carries no
+/// rollback receipt: its settlement is reported as withheld, or as an
+/// unconfirmed cleanup when the typed `MigrationCleanupUnconfirmed` is present.
+fn classify_step_failure(
+    version: i32,
+    source: sqlx::Error,
+    settled: usize,
+) -> RemoteMigrationError {
+    if is_commit_unknown(&source) {
+        RemoteMigrationError::CommitUnknown {
+            version,
+            source,
+            drain: None,
+        }
+    } else if gate_code(&source).is_some_and(|(code, _)| code == "GATE_CANCELLED") {
+        RemoteMigrationError::Cancelled {
+            last_settled: settled,
+            drain: None,
+        }
+    } else {
+        RemoteMigrationError::Step {
+            version,
+            source,
+            drain: None,
+        }
+    }
 }
 
 /// Applies the policy of the contract on an already admitted remote backend
@@ -2673,26 +2725,7 @@ async fn remote_migrate_admitted(
         }
         match apply_sqlite_migration_step(backend, step, Some(cancel)).await {
             Ok(()) => settled += 1,
-            Err(source) if is_commit_unknown(&source) => {
-                return Err(RemoteMigrationError::CommitUnknown {
-                    version: step.version,
-                    source,
-                    drain: None,
-                });
-            }
-            Err(_) if cancel.is_cancelled() => {
-                return Err(RemoteMigrationError::Cancelled {
-                    last_settled: settled,
-                    drain: None,
-                });
-            }
-            Err(source) => {
-                return Err(RemoteMigrationError::Step {
-                    version: step.version,
-                    source,
-                    drain: None,
-                });
-            }
+            Err(source) => return Err(classify_step_failure(step.version, source, settled)),
         }
     }
     let current = assert_sqlite_schema_current(backend).await.map_err(gate)?;
@@ -2854,8 +2887,66 @@ mod remote_helper_display_tests {
         assert!(errors[5].drain_failed() && !errors[6].drain_failed());
         assert_eq!(
             format!("{:?}", errors[6]),
-            "RemoteMigrationError { code: \"REMOTE_MIGRATION_COMMIT_UNKNOWN\", version: 3, gate: None, source: \"<withheld>\", drain_failed: false }"
+            "RemoteMigrationError { code: \"REMOTE_MIGRATION_COMMIT_UNKNOWN\", version: 3, gate: None, settlement: \"commit-unknown\", source: \"<withheld>\", drain_failed: false }"
         );
+        assert_eq!(
+            errors[5].to_string(),
+            "remote migration step 7 failed; rollback confirmation withheld: driver error withheld; remote stream drain failed at close"
+        );
+        assert_eq!(errors[5].settlement(), "rollback-confirmation-withheld");
+        let unconfirmed = RemoteMigrationError::Step {
+            version: 2,
+            source: unconfirmed_migration_cleanup(protocol_canary()),
+            drain: None,
+        };
+        assert_eq!(unconfirmed.settlement(), "cleanup-unconfirmed");
+        assert_secret_free(&unconfirmed.to_string());
+        assert_secret_free(&format!("{unconfirmed:?}"));
+        assert_eq!(
+            unconfirmed.to_string(),
+            "remote migration step 2 failed; cleanup unconfirmed, admission quarantined: driver error withheld"
+        );
+    }
+
+    #[test]
+    fn step_failures_keep_their_primary_cause_and_only_typed_checkpoints_cancel() {
+        // A typed cancellation checkpoint of the existing applier maps to Cancelled.
+        let cancelled =
+            classify_step_failure(4, schema_error("SQLite migration cancelled before DDL"), 3);
+        assert!(matches!(
+            cancelled,
+            RemoteMigrationError::Cancelled {
+                last_settled: 3,
+                drain: None
+            }
+        ));
+        // A primary failure is never erased, whatever a token says concurrently.
+        let primary = classify_step_failure(4, schema_error("SQLite migration gap"), 3);
+        assert!(matches!(
+            &primary,
+            RemoteMigrationError::Step { version: 4, .. }
+        ));
+        assert_eq!(primary.gate(), Some("GATE_STEP_GAP"));
+        assert_eq!(primary.settlement(), "rollback-confirmation-withheld");
+        // An unknown settlement keeps precedence over any other classification.
+        let unknown = classify_step_failure(
+            5,
+            sqlx::Error::AnyDriverError(Box::new(super::super::backend::CommitUnknown {
+                source: driver_error(),
+            })),
+            4,
+        );
+        assert!(matches!(
+            &unknown,
+            RemoteMigrationError::CommitUnknown { version: 5, .. }
+        ));
+        assert_secret_free(&unknown.to_string());
+        assert_secret_free(&format!("{unknown:?}"));
+        // A folded rollback failure or an unconfirmed cleanup stays a Step
+        // failure with its typed settlement, never Cancelled.
+        let folded = classify_step_failure(6, unconfirmed_migration_cleanup(driver_error()), 5);
+        assert_eq!(folded.settlement(), "cleanup-unconfirmed");
+        assert_eq!(folded.code(), "REMOTE_MIGRATION_STEP_FAILED");
     }
 
     #[test]
