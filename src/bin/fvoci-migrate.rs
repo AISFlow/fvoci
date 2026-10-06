@@ -161,10 +161,35 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 migrate::run_sqlite_migrations(&path).await?;
             }
             Ok("libsql-remote") => {
-                return Err(
-                    "remote migration requires the pending primary server/migrator admission"
-                        .into(),
-                );
+                let settings = fvoci_server::config::DatabaseSettings::from_env()?;
+                // Cancellation owner analogous to the preparation launcher: the
+                // original helper future is pinned and, after a signal, awaited
+                // to its settlement (never dropped); the settled result is
+                // printed, the signal code is the exit, nothing is retried and
+                // no server starts from here.
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut term = signal(SignalKind::terminate())?;
+                let mut int = signal(SignalKind::interrupt())?;
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let migration = migrate::run_remote_migrations(&settings, &cancel);
+                tokio::pin!(migration);
+                let (signal_code, result) = tokio::select! {
+                    result = &mut migration => (None, result),
+                    _ = term.recv() => {
+                        eprintln!("fvoci-migrate: SIGTERM cancellation requested; awaiting the remote migration settlement before exit");
+                        cancel.cancel();
+                        (Some(143), migration.await)
+                    },
+                    _ = int.recv() => {
+                        eprintln!("fvoci-migrate: SIGINT cancellation requested; awaiting the remote migration settlement before exit");
+                        cancel.cancel();
+                        (Some(130), migration.await)
+                    },
+                };
+                let (code, text) =
+                    fvoci_server::prepare::remote_migrator_exit(signal_code, &result);
+                eprintln!("fvoci-migrate: {text}");
+                std::process::exit(code);
             }
             _ => {
                 return Err(

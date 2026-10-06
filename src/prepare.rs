@@ -350,6 +350,61 @@ pub enum PreparationError {
     Cancelled {
         sqlite_drain: Option<migrate::SqliteMigrationDrain>,
     },
+    /// The qualified remote helper refused or failed. The bounded error keeps
+    /// its closed code, gate, stage, settlement and drain meaning; its Display
+    /// and Debug never carry the settings, endpoint, token or raw driver text.
+    #[error("remote preparation refused ({code}, gate {gate}, settlement {settlement}): {0}", code = .0.code(), gate = .0.gate().unwrap_or("none"), settlement = .0.settlement())]
+    Remote(#[source] migrate::RemoteMigrationError),
+    /// A signal arrived after the remote migration settled: the settled
+    /// result stays truthful and the server is not started.
+    #[error(
+        "preparation cancelled after the remote migration settled; no server start: {outcome:?}"
+    )]
+    RemoteCancelledAfterSettlement {
+        outcome: migrate::RemoteMigrationOutcome,
+    },
+}
+
+/// Startup refusal text of the remote lane for `fvoci-server`: the bounded
+/// error display with its closed codes; never the settings, endpoint, token
+/// or raw driver text.
+pub fn remote_startup_refusal(error: &migrate::RemoteMigrationError) -> String {
+    format!(
+        "remote normal startup refused ({}, gate {}, settlement {}): {error}",
+        error.code(),
+        error.gate().unwrap_or("none"),
+        error.settlement()
+    )
+}
+
+/// Exit code and operator text of the bare remote migrator. `0` only for a
+/// settled `Current`, `Installed` or `Resumed` without a signal (the helper
+/// has already drained its stream, otherwise it returns `Drain`); a signal
+/// exits with its own code after the original future settled and keeps the
+/// settled result in the text; every error is non-zero with the bounded
+/// display (an unknown commit already carries the same-command rerun
+/// guidance). Nothing is retried here.
+pub fn remote_migrator_exit(
+    signal_code: Option<i32>,
+    result: &Result<migrate::RemoteMigrationOutcome, migrate::RemoteMigrationError>,
+) -> (i32, String) {
+    let settled = match result {
+        Ok(outcome) => format!("remote migration settled: {outcome:?}"),
+        Err(error) => format!(
+            "remote migration failed ({}, gate {}, settlement {}): {error}",
+            error.code(),
+            error.gate().unwrap_or("none"),
+            error.settlement()
+        ),
+    };
+    match (signal_code, result) {
+        (Some(code), _) => (
+            code,
+            format!("signal during the remote migration; original result kept, no server start: {settled}"),
+        ),
+        (None, Ok(_)) => (0, settled),
+        (None, Err(_)) => (1, settled),
+    }
 }
 
 #[cfg(feature = "db-tests")]
@@ -810,9 +865,174 @@ pub async fn prepare_with_cancel(
             }
             Ok(())
         }
-        crate::config::DatabaseSettings::LibsqlRemote { .. } => {
-            Err("remote preparation requires the pending primary server/migrator admission".into())
+        settings @ crate::config::DatabaseSettings::LibsqlRemote { .. } => {
+            // Remote primary preparation through the qualified helper: one
+            // admitted stream, blank or exact-prefix states installed or
+            // resumed, current left untouched, every other state refused
+            // before any write, always closed and drained. There is no
+            // file-system install directory or handoff for a remote primary,
+            // and preparation never advertises readiness: the server start
+            // after it goes through its own current-only startup gate.
+            let deadline = prepare_deadline()?;
+            let meili = std::env::var("FVOCI_MEILI_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty());
+            if let Some(url) = &meili {
+                tokio::select! {
+                    result = wait_for_meili(url.trim(), deadline) => result?,
+                    _ = cancel.cancelled() => return Err(PreparationError::Cancelled { sqlite_drain: None }),
+                }
+            }
+            if cancel.is_cancelled() {
+                return Err(PreparationError::Cancelled { sqlite_drain: None });
+            }
+            let outcome = migrate::run_remote_migrations(&settings, cancel)
+                .await
+                .map_err(PreparationError::Remote)?;
+            tracing::info!(outcome = ?outcome, "remote primary preparation settled");
+            if cancel.is_cancelled() {
+                return Err(PreparationError::RemoteCancelledAfterSettlement { outcome });
+            }
+            if meili.is_some() {
+                let key_file = std::env::var("FVOCI_MEILI_KEY_FILE")
+                    .unwrap_or_else(|_| DEFAULT_MEILI_KEY_FILE.to_string());
+                tokio::select! {
+                    result = ensure_meili_key_file(Path::new(&key_file)) => result?,
+                    _ = cancel.cancelled() => return Err(PreparationError::RemoteCancelledAfterSettlement { outcome }),
+                }
+            }
+            Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod remote_caller_tests {
+    use super::*;
+    use crate::db::migrate::{GateStage, RemoteMigrationError, RemoteMigrationOutcome};
+
+    const SECRET: &str = "https://primary.secret.example/?authToken=TOKEN-VALUE";
+
+    fn driver_secret() -> sqlx::Error {
+        sqlx::Error::AnyDriverError(SECRET.into())
+    }
+    fn protocol_secret() -> sqlx::Error {
+        sqlx::Error::Protocol(format!("gate text leaking {SECRET}"))
+    }
+    fn assert_secret_free(text: &str) {
+        for needle in ["secret.example", "TOKEN-VALUE", "authToken", "leaking"] {
+            assert!(!text.contains(needle), "{needle} leaked: {text}");
+        }
+    }
+
+    #[test]
+    fn startup_refusal_repeats_only_closed_codes_and_bounded_text() {
+        let error = RemoteMigrationError::Gate {
+            stage: GateStage::StartupGate,
+            source: driver_secret(),
+            drain: Some(protocol_secret()),
+        };
+        let text = remote_startup_refusal(&error);
+        assert_secret_free(&text);
+        assert!(text.starts_with("remote normal startup refused (REMOTE_SCHEMA_GATE_REFUSED, gate none, settlement drain-failed): remote startup gate refused"), "{text}");
+        let ahead = RemoteMigrationError::Gate {
+            stage: GateStage::StartupGate,
+            source: sqlx::Error::Protocol(
+                "SQLite schema is ahead, incomplete or unprepared".into(),
+            ),
+            drain: None,
+        };
+        let text = remote_startup_refusal(&ahead);
+        assert!(
+            text.contains("gate GATE_AHEAD_INCOMPLETE_UNPREPARED")
+                && text.contains("settlement no-write-opened"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn migrator_exit_is_zero_only_for_a_settled_outcome_without_a_signal() {
+        let (code, text) = remote_migrator_exit(None, &Ok(RemoteMigrationOutcome::Current));
+        assert_eq!(code, 0);
+        assert_eq!(text, "remote migration settled: Current");
+        let (code, text) = remote_migrator_exit(
+            None,
+            &Ok(RemoteMigrationOutcome::Resumed { from: 1, to: 12 }),
+        );
+        assert_eq!(
+            (code, text.as_str()),
+            (0, "remote migration settled: Resumed { from: 1, to: 12 }")
+        );
+        // A signal after settlement keeps the truthful result and exits with the signal code.
+        let (code, text) = remote_migrator_exit(
+            Some(143),
+            &Ok(RemoteMigrationOutcome::Installed { steps: 12 }),
+        );
+        assert_eq!(code, 143);
+        assert!(
+            text.contains("no server start") && text.contains("Installed { steps: 12 }"),
+            "{text}"
+        );
+        // Unknown commit: non-zero, closed code, rerun guidance, no secret.
+        let unknown = RemoteMigrationError::CommitUnknown {
+            version: 3,
+            source: driver_secret(),
+            drain: None,
+        };
+        let (code, text) = remote_migrator_exit(None, &Err(unknown));
+        assert_eq!(code, 1);
+        assert_secret_free(&text);
+        assert!(
+            text.contains("REMOTE_MIGRATION_COMMIT_UNKNOWN")
+                && text.contains("settlement commit-unknown")
+                && text.contains("rerun resumes from the ledger"),
+            "{text}"
+        );
+        // A signal during a failing run still reports the failure, never zero.
+        let cancelled = RemoteMigrationError::Cancelled {
+            last_settled: 2,
+            drain: Some(protocol_secret()),
+        };
+        let (code, text) = remote_migrator_exit(Some(130), &Err(cancelled));
+        assert_eq!(code, 130);
+        assert_secret_free(&text);
+        assert!(
+            text.contains("REMOTE_MIGRATION_CANCELLED") && text.contains("settlement drain-failed"),
+            "{text}"
+        );
+        let (code, _) = remote_migrator_exit(
+            None,
+            &Err(RemoteMigrationError::Drain {
+                source: driver_secret(),
+            }),
+        );
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn preparation_error_variants_keep_meaning_without_secrets() {
+        let error = PreparationError::Remote(RemoteMigrationError::Step {
+            version: 7,
+            source: protocol_secret(),
+            drain: Some(driver_secret()),
+        });
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+        assert_secret_free(&display);
+        assert_secret_free(&debug);
+        assert!(display.starts_with("remote preparation refused (REMOTE_MIGRATION_STEP_FAILED, gate none, settlement drain-failed): remote migration step 7 failed"), "{display}");
+        assert!(
+            debug.contains("REMOTE_MIGRATION_STEP_FAILED") && debug.contains("<withheld>"),
+            "{debug}"
+        );
+        assert!(std::error::Error::source(&error).is_some());
+        let settled = PreparationError::RemoteCancelledAfterSettlement {
+            outcome: RemoteMigrationOutcome::Resumed { from: 4, to: 12 },
+        };
+        assert_eq!(
+            settled.to_string(),
+            "preparation cancelled after the remote migration settled; no server start: Resumed { from: 4, to: 12 }"
+        );
     }
 }
 

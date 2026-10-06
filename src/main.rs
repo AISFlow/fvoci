@@ -251,14 +251,19 @@ async fn server_main() -> Result<(), Box<dyn std::error::Error>> {
             }
             backend
         }
-        // Remote request/transaction code is real, but normal startup must
-        // not advertise readiness before the root-owned primary installation
-        // admission has been connected. This lane remains required work.
+        // Remote normal startup: connect with the app pool size and admit the
+        // backend only when the existing gate reports the exact compiled
+        // lineage (current only). Nothing is migrated or repaired here; every
+        // other ledger state closes the handle and refuses, and the refusal
+        // text repeats only the closed gate texts and codes, never the
+        // settings, endpoint, token or raw driver text.
         DatabaseSettings::LibsqlRemote { .. } => {
-            return Err(
-                "remote normal startup requires the pending primary server/migrator admission"
-                    .into(),
-            );
+            match migrate::connect_remote_app(&config.database, app_pool_max).await {
+                Ok(backend) => backend,
+                Err(error) => {
+                    return Err(fvoci_server::prepare::remote_startup_refusal(&error).into());
+                }
+            }
         }
     };
     if let Some(meili) = config.meili.as_ref() {
