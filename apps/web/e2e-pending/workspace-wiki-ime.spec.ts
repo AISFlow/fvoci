@@ -194,7 +194,9 @@ async function modelBlocks(
           readError = true;
         }
       };
-      const transaction = (event: ImeTransaction) => record("transaction", undefined, event);
+      const transaction = (event: ImeTransaction) => {
+        record("transaction", undefined, event);
+      };
       const finish = () => {
         if (!finished) {
           record("finish");
@@ -208,7 +210,9 @@ async function modelBlocks(
           }
           if (transactionListening) {
             try {
-              editor.off!("transaction", transaction);
+              const off = editor.off?.bind(editor);
+              if (off) off("transaction", transaction);
+              else cleanupError = true;
             } catch {
               cleanupError = true;
             }
