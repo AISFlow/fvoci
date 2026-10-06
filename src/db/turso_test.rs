@@ -855,12 +855,12 @@ fn inventory_hash(value: &str) -> bool {
             .all(|value| value.is_ascii_digit() || (b'a'..=b'f').contains(&value))
 }
 
-fn inventory_disclosure(
-    primary: &Result<TursoTargetInventory, &'static str>,
+fn inventory_disclosure<'a>(
+    primary: &'a Result<TursoTargetInventory, &'static str>,
     rollback: Option<Result<(), &'static str>>,
     close: Result<(), &'static str>,
     leases_zero: bool,
-) -> Option<(&'static str, u8, &str)> {
+) -> Option<(&'static str, u8, &'a str)> {
     if rollback != Some(Ok(())) || close.is_err() || !leases_zero {
         return None;
     }
