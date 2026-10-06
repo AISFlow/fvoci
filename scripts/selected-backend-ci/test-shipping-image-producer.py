@@ -682,11 +682,19 @@ class GlobalRootVisibilityControls(unittest.TestCase):
     def test_genuine_root_independent_of_unavailable_or_different_init_namespace(self):
         proc, root = self.make_chain()
         (proc / "1/ns/cgroup").unlink(); (proc / "1/ns/cgroup").symlink_to("different:[2]")
-        with patch.object(P.os, "readlink", side_effect=AssertionError("NO_INIT_READLINK_OR_FALLBACK")):
+        original = P.os.readlink
+        def own_pid_only(path):
+            self.assertEqual(path, proc / "self"); return original(path)
+        with patch.object(P.os, "readlink", side_effect=own_pid_only):
             proof = {}; rows = P.cgroup_chain(root=root, proc=proc, proof=proof)
         self.assertEqual([r["path"] for r in rows], ["parent", "parent/child"])
         self.assertEqual(proof["pid"], [str(P.os.getpid()), 100, "parent/child"])
         self.assertEqual(len(proof["root"]), 64)
+
+    def test_foreign_proc_pid_namespace_view_refuses_before_numeric_pid_use(self):
+        proc, root = self.make_chain()
+        (proc / "self").unlink(); (proc / "self").symlink_to("42")
+        with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_chain(root=root, proc=proc)
 
     def test_present_markers_and_disabled_controller_subtrees_refused(self):
         proc, root = self.make_chain()
@@ -933,16 +941,15 @@ class ClosingPhaseControls(unittest.TestCase):
 
     def test_recorded_parent_reread_without_leaf_pid_and_identity_refusal(self):
         proc, root = HostedExperimentalResourceControls.make_chain(self)
-        with patch.object(P.os, "readlink", side_effect=lambda p: "cgroup:[1]"):
-            proof = {}; before = P.cgroup_chain(root=root, proc=proc, proof=proof)
-            (proc / "self/cgroup").unlink()
-            parent = root / "parent"
-            (parent / "memory.current").write_text("150")
-            after = P.cgroup_chain(root=root, proc=proc, relative="parent", proof=proof)
-            self.assertEqual(after[0]["identity"], before[0]["identity"])
-            self.assertEqual(after[0]["current"], 150)
-            self.assertEqual(after[0]["path"], "parent")
-            with self.assertRaisesRegex(P.Refusal, "CGROUP_PATH_INVALID"): P.cgroup_chain(root=root, proc=proc, relative="../parent", proof=proof)
+        proof = {}; before = P.cgroup_chain(root=root, proc=proc, proof=proof)
+        (proc / "self/cgroup").unlink()
+        parent = root / "parent"
+        (parent / "memory.current").write_text("150")
+        after = P.cgroup_chain(root=root, proc=proc, relative="parent", proof=proof)
+        self.assertEqual(after[0]["identity"], before[0]["identity"])
+        self.assertEqual(after[0]["current"], 150)
+        self.assertEqual(after[0]["path"], "parent")
+        with self.assertRaisesRegex(P.Refusal, "CGROUP_PATH_INVALID"): P.cgroup_chain(root=root, proc=proc, relative="../parent", proof=proof)
         producer = self.producer; producer.builder_created = True; producer.cid = self.cid
         producer.builder_closing = True; producer.builder_parent = "parent"; producer.chains["builder"] = ["original", "builder"]
         stopped = copy.deepcopy(self.live); stopped["State"].update(Running=False, Pid=0)

@@ -279,6 +279,7 @@ def cgroup_chain(pid: str = "self", root: Path = Path("/sys/fs/cgroup"), proc: P
         with ExitStack() as stack:
             root_fd = cgroup_open_absolute(stack, root); proc_fd = cgroup_open_absolute(stack, proc)
             root_tool = cgroup_filesystem(root_fd, b"63677270"); proc_tool = cgroup_filesystem(proc_fd, b"9fa0")
+            require(os.readlink(proc / "self") == str(os.getpid()), "CGROUP_METADATA_UNKNOWN")
             self_fd = cgroup_open_directory(stack, str(os.getpid()), parent=proc_fd)
             mounts = cgroup_mounts(cgroup_text(self_fd, "mountinfo"), root, proc, pid)
             for path, fd in [(root, root_fd), (proc, proc_fd)]:
