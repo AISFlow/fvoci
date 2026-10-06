@@ -22,10 +22,12 @@ use crate::api::dto::{
 };
 use crate::auth::session::SessionUser;
 use crate::db::labels::{
-    create_label, list_project_labels, list_workspace_labels, purge_label, update_label,
+    create_label, list_project_labels_backend as list_project_labels, list_workspace_labels,
+    purge_label, update_label,
 };
 use crate::db::milestones::{
-    create_milestone, list_project_milestones, purge_milestone, update_milestone,
+    create_milestone, list_project_milestones_backend as list_project_milestones,
+    purge_milestone, update_milestone,
 };
 use crate::db::projects::ProjectDbError;
 use crate::db::task_activity::{
@@ -483,12 +485,7 @@ async fn list_project_labels_route(
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = list_project_labels(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/tasks.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         project_id,
         actor_user_id,
@@ -638,12 +635,7 @@ async fn list_project_milestones_route(
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = list_project_milestones(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/tasks.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         project_id,
         actor_user_id,

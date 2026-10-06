@@ -83,6 +83,65 @@ async fn list_by_project_tx(
         .collect())
 }
 
+/// Selected project read: the credential, current grants and returned rows
+/// share one snapshot. The public PostgreSQL reader remains unchanged.
+pub async fn list_project_milestones_backend(
+    backend: &crate::db::backend::Backend,
+    workspace: Uuid,
+    project: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<Vec<MilestoneRow>, ProjectDbError>, sqlx::Error> {
+    use crate::db::backend::{Backend, OperationTx};
+    use crate::db::codec::Cell;
+    use crate::projects::ProjectPermission;
+
+    if let Backend::Postgres(pool) = backend {
+        return list_project_milestones(pool, workspace, project, actor, credential).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result: Result<Result<Vec<MilestoneRow>, ProjectDbError>, sqlx::Error> = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        if !op.session_is_live(actor, credential).await? {
+            return Ok(Err(ProjectDbError::Forbidden));
+        }
+        if !op.workspace_is_live(workspace).await?
+            || !op.project_permission_by_id(workspace, actor, project).await?
+                .is_some_and(|permission| permission.at_least(ProjectPermission::View))
+        {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        let OperationTx::SqliteFamily(family) = op else {
+            unreachable!("PostgreSQL uses the preserved project reader")
+        };
+        family.require_tenant(workspace)?;
+        let rows = family.query(
+            "SELECT id,project_id,name,due_date,sort_key,created_at,updated_at FROM milestones WHERE workspace_id=?1 AND project_id=?2 ORDER BY sort_key COLLATE BINARY,id",
+            &[Cell::uuid(workspace),Cell::uuid(project)],
+        ).await?;
+        Ok(Ok(rows.iter().map(|row| Ok(map_milestone_row(row.cell(0)?.id()?,row.cell(1)?.id()?,row.cell(2)?.string()?,row.cell(3)?.optional(Cell::date)?,row.cell(4)?.string()?,row.cell(5)?.datetime()?,row.cell(6)?.datetime()?)))
+            .collect::<Result<Vec<_>,sqlx::Error>>()?))
+    }.await;
+    // A failed release is not a successful read. Preserve both the original
+    // domain/driver refusal and the failed cleanup when there is one.
+    if let Err(cleanup) = tx.rollback().await {
+        let original: Option<Box<dyn std::error::Error + Send + Sync>> = match result {
+            Ok(Err(refusal)) => Some(Box::new(ProjectMilestonesReadRefusal(refusal))),
+            Err(error) => Some(Box::new(error)),
+            Ok(Ok(_)) => None,
+        };
+        return Err(crate::db::backend::rollback_cleanup_unknown(
+            original, cleanup,
+        ));
+    }
+    result
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("project milestones read refused: {0:?}")]
+struct ProjectMilestonesReadRefusal(ProjectDbError);
+
 pub async fn list_project_milestones(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -296,4 +355,274 @@ pub async fn project_milestone_exists(
     .fetch_one(&mut **tx)
     .await?;
     Ok(exists.0)
+}
+
+#[cfg(test)]
+mod selected_project_read_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+
+    #[tokio::test]
+    async fn selected_milestones_read_nonempty_order_current_grants_and_credential_refusals() {
+        let f = Fixture::new().await;
+        let (_, task) = f.task_attachment().await;
+        let project: Vec<u8> = sqlx::query_scalar("SELECT project_id FROM tasks WHERE id=?1")
+            .bind(task.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        let project = Uuid::from_slice(&project).unwrap();
+        let credential = Uuid::now_v7();
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,9223372036854775807)")
+            .bind(credential.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice())
+            .bind(credential.to_string()).execute(&f.pool).await.unwrap();
+        let first = Uuid::from_u128(100);
+        let last = Uuid::from_u128(200);
+        // Reverse insertion, equal primary sort value: id is the stable tie.
+        for id in [last, first] {
+            sqlx::query("INSERT INTO milestones(id,workspace_id,project_id,name,due_date,sort_key,created_at,updated_at) VALUES(?1,?2,?3,'same 😀','2026-10-06','V',1760000000000000,1760000000000001)")
+                .bind(id.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice())
+                .bind(project.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        }
+        let earlier = Uuid::from_u128(300);
+        sqlx::query("INSERT INTO milestones(id,workspace_id,project_id,name,due_date,sort_key) VALUES(?1,?2,?3,'Alpha',NULL,'A')")
+            .bind(earlier.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice())
+            .bind(project.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let other_project = Uuid::now_v7();
+        sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'OTHER','Other','workspace',?3)")
+            .bind(other_project.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO milestones(id,workspace_id,project_id,name,due_date,sort_key) VALUES(?1,?2,?3,'FOREIGN',NULL,'0')")
+            .bind(Uuid::from_u128(1).as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice())
+            .bind(other_project.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let rows =
+            list_project_milestones_backend(&f.backend, f.workspace, project, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![earlier, first, last]
+        );
+        assert_eq!(rows[1].project_id, project);
+        assert_eq!(rows[1].name, "same 😀");
+        assert_eq!(rows[1].created_at.timestamp_micros(), 1760000000000000);
+        assert_eq!(rows[1].updated_at.timestamp_micros(), 1760000000000001);
+        assert_eq!(rows[1].due_date, NaiveDate::from_ymd_opt(2026, 10, 6));
+        assert_eq!(rows[1].sort_key, "V");
+        // Wrong tenant/target cannot disclose the populated rows.
+        assert!(matches!(
+            list_project_milestones_backend(
+                &f.backend,
+                Uuid::now_v7(),
+                project,
+                f.user,
+                credential
+            )
+            .await
+            .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        assert!(matches!(
+            list_project_milestones_backend(
+                &f.backend,
+                f.workspace,
+                Uuid::now_v7(),
+                f.user,
+                credential
+            )
+            .await
+            .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        assert!(matches!(
+            list_project_milestones_backend(
+                &f.backend,
+                f.workspace,
+                project,
+                f.user,
+                Uuid::now_v7()
+            )
+            .await
+            .unwrap(),
+            Err(ProjectDbError::Forbidden)
+        ));
+        // A private project has no implicit owner/admin grant.
+        sqlx::query("UPDATE projects SET visibility='private' WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_project_milestones_backend(&f.backend, f.workspace, project, f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        let group = Uuid::now_v7();
+        sqlx::query("INSERT INTO groups(id,workspace_id,name) VALUES(?1,?2,'readers')")
+            .bind(group.as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO group_members(workspace_id,group_id,user_id) VALUES(?1,?2,?3)")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(group.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,group_id,role) VALUES(?1,?2,?3,?4,'viewer')")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice())
+            .bind(project.as_bytes().as_slice()).bind(group.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert_eq!(
+            list_project_milestones_backend(&f.backend, f.workspace, project, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap()
+                .len(),
+            3
+        );
+        sqlx::query("DELETE FROM group_members WHERE group_id=?1")
+            .bind(group.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_project_milestones_backend(&f.backend, f.workspace, project, f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        // Restore ordinary access, then prove each current revocation independently.
+        sqlx::query("UPDATE projects SET visibility='workspace' WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET deleted_at=1 WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_project_milestones_backend(&f.backend, f.workspace, project, f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        sqlx::query("UPDATE projects SET deleted_at=NULL WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE memberships SET role='guest' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_project_milestones_backend(&f.backend, f.workspace, project, f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        sqlx::query("UPDATE memberships SET role='owner' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_project_milestones_backend(&f.backend, f.workspace, project, f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::Forbidden)
+        ));
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET suspended_at=1 WHERE id=?1")
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_project_milestones_backend(&f.backend, f.workspace, project, f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::Forbidden)
+        ));
+        sqlx::query("UPDATE users SET suspended_at=NULL WHERE id=?1")
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sessions SET expires_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_project_milestones_backend(&f.backend, f.workspace, project, f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::Forbidden)
+        ));
+        sqlx::query("UPDATE sessions SET expires_at=9223372036854775807 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE workspaces SET deleted_at=1 WHERE id=?1")
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_project_milestones_backend(&f.backend, f.workspace, project, f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        sqlx::query("UPDATE workspaces SET deleted_at=NULL WHERE id=?1")
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_project_milestones_backend(
+                &f.backend,
+                f.workspace,
+                project,
+                Uuid::now_v7(),
+                credential
+            )
+            .await
+            .unwrap(),
+            Err(ProjectDbError::Forbidden)
+        ));
+        // Denials do not poison the pool or edit business state.
+        assert_eq!(
+            list_project_milestones_backend(&f.backend, f.workspace, project, f.user, credential)
+                .await
+                .unwrap()
+                .unwrap()
+                .len(),
+            3
+        );
+        let effects:(i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM milestones),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log)")
+            .fetch_one(&f.pool).await.unwrap();
+        assert_eq!(effects, (4, 0, 0));
+        f.close().await;
+    }
 }
