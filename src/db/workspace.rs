@@ -2419,6 +2419,7 @@ pub(crate) mod selected_personal_workspace_tests {
                 .unwrap();
             assert_eq!(ensure(&f, credential).await.unwrap().unwrap().id, meta.id);
         }
+        let before = snapshot(&f).await;
         let mut blocker = f.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
         let mut pending = Box::pin(ensure(&f, credential));
         std::future::poll_fn(|cx| {
@@ -2435,7 +2436,6 @@ pub(crate) mod selected_personal_workspace_tests {
             .await
             .unwrap();
         blocker.commit().await.unwrap();
-        let before = snapshot(&f).await;
         assert!(matches!(
             pending.await.unwrap(),
             Err(WorkspaceDbError::Forbidden)
