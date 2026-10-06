@@ -162,7 +162,7 @@ def admit(measured: dict, profile: str = LEGACY_PROFILE, *, running: bool = Fals
     require(measured["free_bytes"] >= DISK_FLOOR and measured["effective_mem_available"] >= floor, "RESOURCE_NOTADMITTED")
 
 
-def cgroup_chain(pid: str = "self", root: Path = Path("/sys/fs/cgroup"), proc: Path = Path("/proc")) -> list[dict]:
+def cgroup_chain(pid: str = "self", root: Path = Path("/sys/fs/cgroup"), proc: Path = Path("/proc"), *, relative: str | None = None) -> list[dict]:
     """Host-view v2 chain; refuse hidden ancestors or incomplete counters."""
     try:
         mounts = [line.split(" - ", 1) for line in (proc / "self/mountinfo").read_text().splitlines()]
@@ -171,9 +171,10 @@ def cgroup_chain(pid: str = "self", root: Path = Path("/sys/fs/cgroup"), proc: P
                 os.readlink(proc / "self/ns/cgroup") == os.readlink(proc / "1/ns/cgroup"), "CGROUP_ANCESTORS_HIDDEN")
         require({"cpu", "memory"} <= set((root / "cgroup.controllers").read_text().split()) and
                 not (root / "memory.max").exists(), "CGROUP_HOST_ROOT_INVALID")
-        lines = (proc / pid / "cgroup").read_text().splitlines()
-        require(len(lines) == 1 and lines[0].startswith("0::/"), "CGROUP_METADATA_UNKNOWN")
-        relative = lines[0][4:]
+        if relative is None:
+            lines = (proc / pid / "cgroup").read_text().splitlines()
+            require(len(lines) == 1 and lines[0].startswith("0::/"), "CGROUP_METADATA_UNKNOWN")
+            relative = lines[0][4:]
         require(not relative or safe_path(relative), "CGROUP_PATH_INVALID")
         rows = []
         for index in range(1, len(PurePosixPath(relative).parts) + 1):
@@ -192,7 +193,7 @@ def cgroup_chain(pid: str = "self", root: Path = Path("/sys/fs/cgroup"), proc: P
             require(len(cpu) == 2 and (cpu[0] == "max" or int(cpu[0]) > 0) and int(cpu[1]) > 0, "CGROUP_METADATA_UNKNOWN")
             s = path.stat()
             container = re.fullmatch(r"(?:docker-)?([0-9a-f]{64})(?:\.scope)?", path.name)
-            rows.append({"identity": digest(encoded([name, s.st_dev, s.st_ino])), "memory_max": maximum,
+            rows.append({"path": name, "identity": digest(encoded([name, s.st_dev, s.st_ino])), "memory_max": maximum,
                          "current": current, "peak": peak, "events": events, "cpu_max": cpu,
                          "container_id": container[1] if container else None})
         return rows
@@ -358,6 +359,7 @@ class Producer:
         require(profile in {LEGACY_PROFILE, HOSTED_PROFILE}, "RESOURCE_PROFILE_INVALID")
         self.work = work; self.builder = builder; self.cid = None; self.stages = []; self.paths = []
         self.builder_created = False; self.minimum = None; self.host = None
+        self.builder_closing = False; self.builder_parent = None; self.builder_terminal = None
         self.profile = profile; self.builder_closed = False; self.cgroups = {}; self.chains = {}; self.phases = {}
         self.memory_floor = MEMORY_FLOOR if profile == LEGACY_PROFILE else BUILDER_MEMORY + HOST_RESERVE
 
@@ -384,12 +386,21 @@ class Producer:
                         leaf = chains["builder"][-1]
                         require(leaf["container_id"] == self.cid and leaf["memory_max"] == BUILDER_MEMORY and leaf["cpu_max"] == ["200000", "100000"] and
                                 leaf["current"] <= BUILDER_MEMORY and leaf["peak"] <= BUILDER_MEMORY, "BUILDER_CGROUPS_INVALID")
+                        self.builder_parent = chains["builder"][-2]["path"] if len(chains["builder"]) > 1 else ""
                     else:
-                        require(stage in {"before-bootstrap", "builder-bootstrap"} and live["State"]["Pid"] == 0, "BUILDER_NOT_RUNNING")
-                require(stage in {"before-bootstrap", "builder-bootstrap"} or "builder" in chains, "BUILDER_METADATA_UNKNOWN")
+                        require((self.builder_closing or stage in {"before-bootstrap", "builder-bootstrap"}) and
+                                type(live["State"].get("Pid")) is int and live["State"]["Pid"] == 0, "BUILDER_NOT_RUNNING")
+                        if self.builder_closing and self.builder_parent is not None:
+                            # PID0 cannot supply final leaf counters. Re-read the
+                            # recorded parent chain; never substitute stale usage.
+                            chains["builder-ancestors"] = cgroup_chain(relative=self.builder_parent)
+                            require([r["identity"] for r in chains["builder-ancestors"]] == self.chains["builder"][:-1],
+                                    "CGROUP_IDENTITY_DRIFT")
+                require(self.builder_closing or stage in {"before-bootstrap", "builder-bootstrap"} or "builder" in chains,
+                        "BUILDER_METADATA_UNKNOWN")
                 # Until the verified container is live, retain the full starting
                 # commitment. Absence during bootstrap never proves a live cap.
-                running = "builder" in chains
+                running = "builder" in chains or (self.builder_closing and "builder" in self.chains)
             available = measured["effective_mem_available"]
             for role, rows in chains.items():
                 ids = [r["identity"] for r in rows]
@@ -409,7 +420,7 @@ class Producer:
                     require(all(row["events"][k] == old["initial_events"][k] for k in ["oom", "oom_kill", "oom_group_kill"]), "CGROUP_OOM_INCREMENT")
                     old.update(last_events=row["events"].copy(), peak=row["peak"], current=row["current"])
                     if row["memory_max"] is not None and not (role == "builder" and index == len(rows)-1):
-                        require(role != "builder" or row["memory_max"] >= BUILDER_MEMORY + HOST_RESERVE, "BUILDER_ANCESTOR_BUDGET_INVALID")
+                        require(role not in {"builder", "builder-ancestors"} or row["memory_max"] >= BUILDER_MEMORY + HOST_RESERVE, "BUILDER_ANCESTOR_BUDGET_INVALID")
                         available = min(available, max(0, row["memory_max"] - row["current"]))
             measured["effective_mem_available"] = available
         if self.minimum is None:
@@ -431,7 +442,8 @@ class Producer:
             "start_memory_floor": MEMORY_FLOOR if self.profile == LEGACY_PROFILE else BUILDER_MEMORY + HOST_RESERVE,
             "running_memory_floor": MEMORY_FLOOR if self.profile == LEGACY_PROFILE else HOST_RESERVE,
             "builder_budget": BUILDER_MEMORY, "host_reserve": HOST_RESERVE if self.profile == HOSTED_PROFILE else None,
-            "phases": self.phases, "chains": self.chains, "cgroups": self.cgroups}))
+            "phases": self.phases, "chains": self.chains, "cgroups": self.cgroups,
+            **({"builder_terminal": self.builder_terminal} if self.profile == HOSTED_PROFILE else {})}))
 
     def command(self, stage: str, argv: list[str], monitored: bool = False) -> bytes:
         start = utc()
@@ -485,11 +497,28 @@ class Producer:
         if self.cid is None:
             return
         r = self.owned_builder()
-        if r["State"]["Running"]:
-            self.command("builder-stop-" + str(len(self.stages)), ["docker", "stop", self.cid])
-        r = self.owned_builder()
-        require(not r["State"]["Running"] and r["State"]["Pid"] == 0 and not r["NetworkSettings"].get("Ports"), "BUILDER_CLOSURE_FAILED")
-        self.builder_closed = True
+        experimental = self.profile == HOSTED_PROFILE
+        self.builder_closing = experimental
+        try:
+            if experimental: self.check_resources("builder-closing", running=True)
+            if r["State"]["Running"]:
+                if experimental:
+                    self.command("builder-stop-" + str(len(self.stages)), ["docker", "stop", self.cid], monitored=True)
+                else:
+                    self.command("builder-stop-" + str(len(self.stages)), ["docker", "stop", self.cid])
+            r = self.owned_builder()
+            if experimental:
+                require(type(r["State"].get("Running")) is bool and type(r["State"].get("OOMKilled")) is bool,
+                        "BUILDER_METADATA_UNKNOWN")
+                require(not r["State"]["OOMKilled"], "BUILDER_OOM")
+                require(type(r["State"].get("Pid")) is int, "BUILDER_PID_INVALID")
+            require(not r["State"]["Running"] and r["State"]["Pid"] == 0 and not r["NetworkSettings"].get("Ports"), "BUILDER_CLOSURE_FAILED")
+            if experimental:
+                self.check_resources("builder-closing", running=True)
+                self.builder_terminal = {"oom_killed": False, "cgroup_counters": "UNKNOWN"}
+            self.builder_closed = True
+        finally:
+            self.builder_closing = False
 
     def build(self, product: Path, tooling: Path, tooling_sha: str) -> dict:
         require(platform.system() == "Linux" and platform.machine() == "x86_64", "HOST_OS_ARCH_INVALID")
