@@ -58,8 +58,8 @@ class ObserverControls(unittest.TestCase):
     def assert_diagnostic(self, result, code, primitive, kind, errno, line):
         exit_code, receipt = result
         self.assertEqual(exit_code, 1)
-        self.assertEqual(receipt, {"scope": "LAUNCHER_CGROUP_ONLY_NOT_IMAGE_QUALIFIED", "reader_sha": "05c9611c5c140030df582dd99fd518a022948a31",
-            "reader_source_sha256": "4712f6e06d653c50e04020fdabfbfdd48e7b2ea090876b277b3aeb317698d038", "result": code,
+        self.assertEqual(receipt, {"scope": "LAUNCHER_CGROUP_ONLY_NOT_IMAGE_QUALIFIED", "reader_sha": "cea0784defc3551d3ae0bfe0c8fa74350c2b464b",
+            "reader_source_sha256": "574882e7a6064ce7f974ba3645e88996fcc09bc094ed45cdb339f5d21a4d3226", "result": code,
             "diagnostic": {"primitive": primitive, "exception_class": kind, "errno": errno, "source_line": line}})
 
     def test_healthy_once_never_build_or_process(self):

@@ -2375,7 +2375,7 @@ class RegistryMutationCliTest(unittest.TestCase):
             ("refs/heads/fvoci/v060-shipping-551-reviewed", "refs/heads/arbitrary"),
             ("    runs-on: ubuntu-26.04", "    runs-on: ubuntu-latest"),
             ("    timeout-minutes: 5", "    timeout-minutes: 45"),
-            ("ref: 05c9611c5c140030df582dd99fd518a022948a31", "ref: ${{ inputs.ref }}"),
+            ("ref: cea0784defc3551d3ae0bfe0c8fa74350c2b464b", "ref: ${{ inputs.ref }}"),
             ("ref: ${{ github.sha }}", "ref: main"),
             ("persist-credentials: false", "persist-credentials: true"),
             ("persist-credentials: false", "persist-credentials: 0"),
