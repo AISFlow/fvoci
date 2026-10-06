@@ -51,6 +51,7 @@ WORKFLOW_YAML: dict[str, str] = {
 # cannot run for untrusted refs and write scopes stay in the listed jobs.
 RELEASE_WORKFLOW_FILE = "release.yml"
 TURSO_MANUAL_WORKFLOW_FILE = "turso-test.yml"
+SHIPPING_OBSERVER_WORKFLOW_FILE = "shipping-cgroup-observer.yml"
 RELEASE_WRITE_SCOPES: dict[str, frozenset[str]] = {
     "build": frozenset({"packages"}),
     "index": frozenset({"packages"}),
@@ -1749,7 +1750,7 @@ def _verify_web_build_handoff(jobs: dict) -> list[str]:
 def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     workflows_dir = repo_root / ".github" / "workflows"
-    allowed_files = {*WORKFLOW_YAML.values(), RELEASE_WORKFLOW_FILE, TURSO_MANUAL_WORKFLOW_FILE}
+    allowed_files = {*WORKFLOW_YAML.values(), RELEASE_WORKFLOW_FILE, TURSO_MANUAL_WORKFLOW_FILE, SHIPPING_OBSERVER_WORKFLOW_FILE}
     discovered_files = list_workflow_files(repo_root)
     if not workflows_dir.is_dir():
         errors.append("missing .github/workflows directory")
@@ -1960,8 +1961,45 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
     if turso_path.is_file():
         errors.extend(verify_turso_workflow(turso_path))
 
+    observer_path = workflows_dir / SHIPPING_OBSERVER_WORKFLOW_FILE
+    if not observer_path.is_file():
+        errors.append(f"missing manual diagnostic workflow {SHIPPING_OBSERVER_WORKFLOW_FILE}")
+    else:
+        errors.extend(verify_shipping_observer_workflow(observer_path))
+
     errors.extend(verify_rust_suite_registry(repo_root))
     return errors
+
+
+def verify_shipping_observer_workflow(path: Path) -> list[str]:
+    """Explicit manual diagnostic registry; no PR selection or install changes."""
+    data, error = _load_yaml_mapping(path)
+    if error:
+        return [f"{path.name}: {error}"]
+    checkout = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
+    expected = {
+        "name": "Shipping cgroup observation", "on": {"workflow_dispatch": None},
+        "permissions": {"contents": "read"},
+        "concurrency": {"group": "shipping-cgroup-observer", "cancel-in-progress": False},
+        "jobs": {"observe": {
+            "if": "github.event_name == 'workflow_dispatch' && github.repository == 'AISFlow/fvoci' && github.ref == 'refs/heads/fvoci/v060-shipping-551-reviewed'",
+            "runs-on": "ubuntu-26.04", "timeout-minutes": 5,
+            "steps": [
+                {"uses": checkout, "with": {"ref": "${{ github.sha }}", "path": "tooling", "persist-credentials": False}},
+                {"uses": checkout, "with": {"ref": "288dacdcdbe1f76a7f885e6a13c17014dc4bb95d", "path": "reader", "persist-credentials": False}},
+                {"name": "Pure observer controls", "run": "python3 -B tooling/scripts/selected-backend-ci/test-shipping-cgroup-observer.py"},
+                {"name": "One pinned launcher cgroup observation", "run": "python3 -B tooling/scripts/selected-backend-ci/shipping-cgroup-observer.py"},
+            ],
+        }},
+    }
+    # PyYAML's existing loader handles the YAML1.1 'on' key convention.
+    if True in data and "on" not in data:
+        data["on"] = data.pop(True)
+    try:
+        matches = json.dumps(data, sort_keys=True) == json.dumps(expected, sort_keys=True)
+    except (TypeError, ValueError):
+        matches = False
+    return [] if matches else [f"{path.name}: exact trusted manual diagnostic-only contract required"]
 
 
 def verify_turso_workflow(path: Path) -> list[str]:

@@ -1,0 +1,32 @@
+name: Shipping cgroup observation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shipping-cgroup-observer
+  cancel-in-progress: false
+
+jobs:
+  observe:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'AISFlow/fvoci' && github.ref == 'refs/heads/fvoci/v060-shipping-551-reviewed'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 288dacdcdbe1f76a7f885e6a13c17014dc4bb95d
+          path: reader
+          persist-credentials: false
+      - name: Pure observer controls
+        run: python3 -B tooling/scripts/selected-backend-ci/test-shipping-cgroup-observer.py
+      - name: One pinned launcher cgroup observation
+        run: python3 -B tooling/scripts/selected-backend-ci/shipping-cgroup-observer.py

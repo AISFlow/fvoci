@@ -2349,6 +2349,49 @@ class RegistryMutationCliTest(unittest.TestCase):
                 self._assert_no_green_outputs(proc, output, needle)
 
 
+    def test_shipping_observer_manual_contract_is_separate_and_install_exact(self) -> None:
+        path = ROOT / ".github/workflows" / SEL.SHIPPING_OBSERVER_WORKFLOW_FILE
+        self.assertEqual(SEL.verify_shipping_observer_workflow(path), [])
+        self.assertEqual(set(SEL.WORKFLOW_JOBS), {"web", "rust", "documents", "collab-engine", "install"})
+        self.assertEqual(set(SEL.WORKFLOW_YAML), set(SEL.WORKFLOW_JOBS))
+        self.assertNotIn("observe", {job for jobs in SEL.WORKFLOW_JOBS.values() for job in jobs})
+        prior = git(ROOT, "show", "288dacdcdbe1f76a7f885e6a13c17014dc4bb95d:.github/workflows/install.yml").stdout
+        self.assertEqual((ROOT / ".github/workflows/install.yml").read_text(), prior)
+
+    def test_shipping_observer_missing_registry_file_refuses_before_outputs(self) -> None:
+        root = self._mutated_root()
+        (root / ".github/workflows" / SEL.SHIPPING_OBSERVER_WORKFLOW_FILE).unlink()
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "missing manual diagnostic workflow shipping-cgroup-observer.yml")
+
+    def test_shipping_observer_manual_mutations_refuse_before_outputs(self) -> None:
+        cases = [
+            ("  workflow_dispatch:\n", "  pull_request_target:\n"),
+            ("  workflow_dispatch:\n", "  workflow_dispatch:\n    inputs:\n      ref:\n        type: string\n"),
+            ("  contents: read", "  contents: write"),
+            ("  cancel-in-progress: false", "  cancel-in-progress: true"),
+            ("github.repository == 'AISFlow/fvoci'", "github.repository == 'attacker/fvoci'"),
+            ("refs/heads/fvoci/v060-shipping-551-reviewed", "refs/heads/arbitrary"),
+            ("    runs-on: ubuntu-26.04", "    runs-on: ubuntu-latest"),
+            ("    timeout-minutes: 5", "    timeout-minutes: 45"),
+            ("ref: 288dacdcdbe1f76a7f885e6a13c17014dc4bb95d", "ref: ${{ inputs.ref }}"),
+            ("ref: ${{ github.sha }}", "ref: main"),
+            ("persist-credentials: false", "persist-credentials: true"),
+            ("persist-credentials: false", "persist-credentials: 0"),
+            ("    timeout-minutes: 5\n", "    timeout-minutes: 5\n    environment: production\n"),
+            ("    timeout-minutes: 5\n", "    timeout-minutes: 5\n    env:\n      TOKEN: ${{ secrets.TOKEN }}\n"),
+            ("test-shipping-cgroup-observer.py", "test-shipping-cgroup-observer.py || true"),
+            ("run: python3 -B tooling/scripts/selected-backend-ci/shipping-cgroup-observer.py", "run: python3 -B tooling/scripts/selected-backend-ci/shipping-image-producer.py"),
+            ("run: python3 -B tooling/scripts/selected-backend-ci/shipping-cgroup-observer.py", "run: sudo python3 -B tooling/scripts/selected-backend-ci/shipping-cgroup-observer.py"),
+            ("run: python3 -B tooling/scripts/selected-backend-ci/shipping-cgroup-observer.py", "run: python3 -B tooling/scripts/selected-backend-ci/shipping-cgroup-observer.py --reader /foreign"),
+        ]
+        for old, new in cases:
+            with self.subTest(change=new):
+                root = self._mutated_root(); path = root / ".github/workflows" / SEL.SHIPPING_OBSERVER_WORKFLOW_FILE
+                text = path.read_text(); self.assertIn(old, text); path.write_text(text.replace(old, new, 1))
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, "exact trusted manual diagnostic-only contract required")
+
     def _mutated_root(self) -> Path:
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, True)
