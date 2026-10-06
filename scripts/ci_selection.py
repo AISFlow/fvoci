@@ -751,9 +751,9 @@ RUST_INTEGRATION_MANUAL_TARGETS: frozenset[str] = frozenset({"collab_capacity_pr
 RUST_NATIVE_ARM64_STEP = "Native server build and policy tests (ARM64)"
 RUST_NATIVE_ARM64_RUN = "cargo build --locked --offline --bins\ncargo test --locked --offline --lib"
 RUST_DB_TESTS_FEATURE = "db-tests"
-# Exact accepted local SQLite/library cohort; a successful zero-match Cargo
+# Exact maintained SQLite/library cohort; a successful zero-match Cargo
 # invocation or ignored test is not execution. The default plain run stays.
-RUST_SELECTED_LIBRARY_STEP = "Selected SQLite library controls (28 exact tests)"
+RUST_SELECTED_LIBRARY_STEP = "Selected SQLite library controls (33 exact tests)"
 RUST_SELECTED_LIBRARY_FILTERS: tuple[str, ...] = (
     'db::stars::selected_star_read_finish_tests::star_read_cleanup_retains_refusal_and_driver_without_returning_rows',
     'db::groups::selected_group_read_finish_tests::group_read_cleanup_retains_refusal_and_driver_without_returning_rows',
@@ -783,11 +783,17 @@ RUST_SELECTED_LIBRARY_FILTERS: tuple[str, ...] = (
     'http::routes::projects::selected_pending_get_http_tests::sqlite_http_pending_gets_literal_project_workflow_tag_and_members',
     'http::routes::projects::selected_pending_get_http_tests::sqlite_http_pending_gets_pat_scopes_tenant_and_document_count_disclosure',
     'http::routes::projects::selected_pending_get_http_tests::sqlite_http_pending_gets_current_denials_fault_and_healthy_retry',
+    'db::project_documents::selected_metadata_backend_tests::sqlite_project_metadata_literal_status_and_archived_view',
+    'db::project_documents::selected_metadata_backend_tests::sqlite_project_metadata_current_grants_tenant_and_credential_denials',
+    'db::project_documents::selected_metadata_backend_tests::sqlite_project_metadata_driver_error_and_healthy_retry',
+    'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_metadata_cookie_pat_literal_and_current_denials',
+    'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_metadata_driver_error_and_healthy_retry',
 )
 # Preserve the accepted original18 prefix separately from the GET extension.
 RUST_SELECTED_LIBRARY_ORIGINAL_FILTERS_SHA256 = 'f9221b4d6b32402a3e125643d3fc67dfb600df8ef27b8e76013bb8b46ade7c80'
 RUST_SELECTED_LIBRARY_GET_FILTERS_SHA256 = '157c4dc2ec55fbece3f7aeb85433c6e6552c8e2e91075f191dea15cab8c37e86'
-RUST_SELECTED_LIBRARY_FILTERS_SHA256 = 'cf66062ce99ea766e1dea94a64d4656134a67516163f2b814e2009aebab41323'
+RUST_SELECTED_LIBRARY_METADATA_FILTERS_SHA256 = '8c8191b4b26800b5ed8980bc75e8c3ac6b1f6df55611dc9a3665c16db139ae46'
+RUST_SELECTED_LIBRARY_FILTERS_SHA256 = '423ad989daa4461f6ae66bcf363cd4d871bb3dd240ec2ede7547b080800ab920'
 RUST_SELECTED_LIBRARY_RUN = """set -euo pipefail
 python3 - <<'PYLIB'
 import subprocess
@@ -826,19 +832,21 @@ def selected_library_result_error(test_filter: str, returncode: int, output: str
 
 
 def verify_selected_library_execution(jobs: dict) -> list[str]:
-    """Bind the maintained step, features and original18 plus new10 exact filter cohort."""
+    """Bind the maintained step, features and original18, GET10 and metadata5 exact filter cohort."""
     errors: list[str] = []
     if (
-        len(RUST_SELECTED_LIBRARY_FILTERS) != 28
-        or len(set(RUST_SELECTED_LIBRARY_FILTERS)) != 28
+        len(RUST_SELECTED_LIBRARY_FILTERS) != 33
+        or len(set(RUST_SELECTED_LIBRARY_FILTERS)) != 33
         or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[:18]).encode()).hexdigest()
         != RUST_SELECTED_LIBRARY_ORIGINAL_FILTERS_SHA256
-        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[18:]).encode()).hexdigest()
+        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[18:28]).encode()).hexdigest()
         != RUST_SELECTED_LIBRARY_GET_FILTERS_SHA256
+        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[28:]).encode()).hexdigest()
+        != RUST_SELECTED_LIBRARY_METADATA_FILTERS_SHA256
         or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS).encode()).hexdigest()
         != RUST_SELECTED_LIBRARY_FILTERS_SHA256
     ):
-        errors.append("rust: selected library registry must retain all28 exact filters (original18 prefix and new10 GET)")
+        errors.append("rust: selected library registry must retain all33 exact filters (original18 prefix, GET10 and metadata5)")
     fast = jobs.get("fast", {})
     steps = fast.get("steps", [])
     matches = [s for s in steps if isinstance(s, dict) and s.get("name") == RUST_SELECTED_LIBRARY_STEP]
