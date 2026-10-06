@@ -148,7 +148,7 @@ mod selected_member_removal_invitation_tests {
         let foreign = Uuid::now_v7();
         sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES(?1,?2,'Foreign')")
             .bind(foreign.as_bytes().as_slice())
-            .bind(foreign.to_string())
+            .bind(foreign.simple().to_string())
             .execute(&f.pool)
             .await
             .unwrap();
