@@ -7,10 +7,14 @@ Root may publish the reviewed fixed source to the single hardcoded branch
 fixtures/source admission**, with no Environment, credentials, build or probe.
 The secret job permits only manual dispatch on main or that exact same-repo
 reviewed branch, checking exact github.sha. No free-form checkout input, PR,
-fork, pull_request_target or other ref is allowed. GitHub documentation says
-the workflow must be on the default branch for manual dispatch; bootstrap/API
-eligibility on the reviewed branch is not yet verified. Root must record the
-actual API acceptance or rejection, without an arbitrary-ref/merge fallback. [GitHub manual dispatch](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch).
+fork, pull_request_target or other ref is allowed. GitHub documents the default-
+branch requirement for manual dispatch. The designated reviewed branch was
+actually dispatched in [run37312388258](https://github.com/AISFlow/fvoci/actions/runs/37312388258)
+at `04d36b34d1a79e7499f87a31646492eea1a1bbfd` and completed the non-destructive
+connection probe. That historical execution proves this branch consumer path,
+not current migration or this candidate. Root must record each new exact
+checkout and API acceptance/rejection without an arbitrary-ref/merge fallback.
+[GitHub manual dispatch](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch).
 
 Use the user-designated isolated test database. The dedicated Environment is
 **AISFlow/fvoci → Settings → Environments → `fvoci-turso-test`**. Register only:
