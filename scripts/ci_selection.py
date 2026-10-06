@@ -753,7 +753,7 @@ RUST_NATIVE_ARM64_RUN = "cargo build --locked --offline --bins\ncargo test --loc
 RUST_DB_TESTS_FEATURE = "db-tests"
 # Exact maintained SQLite/library cohort; a successful zero-match Cargo
 # invocation or ignored test is not execution. The default plain run stays.
-RUST_SELECTED_LIBRARY_STEP = "Selected SQLite library controls (35 exact tests)"
+RUST_SELECTED_LIBRARY_STEP = "Selected SQLite library controls (44 exact tests)"
 RUST_SELECTED_LIBRARY_FILTERS: tuple[str, ...] = (
     'db::stars::selected_star_read_finish_tests::star_read_cleanup_retains_refusal_and_driver_without_returning_rows',
     'db::groups::selected_group_read_finish_tests::group_read_cleanup_retains_refusal_and_driver_without_returning_rows',
@@ -790,13 +790,24 @@ RUST_SELECTED_LIBRARY_FILTERS: tuple[str, ...] = (
     'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_metadata_driver_error_and_healthy_retry',
     'db::labels::selected_project_read_tests::selected_labels_read_nonempty_order_current_grants_and_credential_refusals',
     'db::milestones::selected_project_read_tests::selected_milestones_read_nonempty_order_current_grants_and_credential_refusals',
+    'db::workspace::selected_personal_workspace_tests::sqlite_personal_bootstrap_stable_concurrent_mapping_and_private_slug_collision',
+    'db::workspace::selected_personal_workspace_tests::sqlite_personal_bootstrap_current_credentials_mapping_and_queued_writer_denials',
+    'db::workspace::selected_personal_workspace_tests::sqlite_personal_bootstrap_event_audit_and_commit_fk_failures_then_healthy_retry',
+    'db::workspace::selected_personal_workspace_tests::personal_bootstrap_rollback_cleanup_retains_domain_and_driver_causes',
+    'db::quota::selected_seat_admission_tests::sqlite_seat_admission_exact_billable_predicate_limit_existing_and_unlimited',
+    'db::quota::selected_seat_admission_tests::sqlite_seat_admission_writer_context_driver_failure_and_healthy_retry',
+    'db::quota::selected_seat_admission_tests::quota_context_restore_failure_retains_original_refusal_or_driver',
+    'http::routes::workspaces::selected_personal_bootstrap_http_tests::sqlite_http_personal_bootstrap_cookie_origin_session_only_and_stable_replay',
+    'http::routes::workspaces::selected_personal_bootstrap_http_tests::sqlite_http_personal_bootstrap_seat_limit_and_publication_failure_then_healthy_retry',
 )
 # Preserve the accepted original18 prefix separately from the GET extension.
 RUST_SELECTED_LIBRARY_ORIGINAL_FILTERS_SHA256 = 'f9221b4d6b32402a3e125643d3fc67dfb600df8ef27b8e76013bb8b46ade7c80'
 RUST_SELECTED_LIBRARY_GET_FILTERS_SHA256 = '157c4dc2ec55fbece3f7aeb85433c6e6552c8e2e91075f191dea15cab8c37e86'
 RUST_SELECTED_LIBRARY_METADATA_FILTERS_SHA256 = '8c8191b4b26800b5ed8980bc75e8c3ac6b1f6df55611dc9a3665c16db139ae46'
 RUST_SELECTED_LIBRARY_AUX_FILTERS_SHA256 = '7e7702addc4c016b2e885adb2447d0324da4c857dfa874fb8bc0e9dddc88a71d'
-RUST_SELECTED_LIBRARY_FILTERS_SHA256 = '479c869c1734119e7ee091d490dbda12d1df5f59fcd73eea78478649f23b1c87'
+RUST_SELECTED_LIBRARY_ORIGINAL35_FILTERS_SHA256 = '479c869c1734119e7ee091d490dbda12d1df5f59fcd73eea78478649f23b1c87'
+RUST_SELECTED_LIBRARY_BOOTSTRAP_FILTERS_SHA256 = '1baee892b0bc67c4289d4e6ee57b801963d08793f9107f99f72d0e41bc7a18a0'
+RUST_SELECTED_LIBRARY_FILTERS_SHA256 = 'b1d7fff1c44346a300454eff3b0721e1a2078842308a1847b9e9411e23741cb1'
 RUST_SELECTED_LIBRARY_RUN = """set -euo pipefail
 python3 - <<'PYLIB'
 import subprocess
@@ -835,23 +846,27 @@ def selected_library_result_error(test_filter: str, returncode: int, output: str
 
 
 def verify_selected_library_execution(jobs: dict) -> list[str]:
-    """Bind the maintained step, features and original18, GET10, metadata5 and aux2 exact filter cohort."""
+    """Bind the maintained step, features and original35 plus bootstrap9 exact filter cohort."""
     errors: list[str] = []
     if (
-        len(RUST_SELECTED_LIBRARY_FILTERS) != 35
-        or len(set(RUST_SELECTED_LIBRARY_FILTERS)) != 35
+        len(RUST_SELECTED_LIBRARY_FILTERS) != 44
+        or len(set(RUST_SELECTED_LIBRARY_FILTERS)) != 44
         or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[:18]).encode()).hexdigest()
         != RUST_SELECTED_LIBRARY_ORIGINAL_FILTERS_SHA256
         or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[18:28]).encode()).hexdigest()
         != RUST_SELECTED_LIBRARY_GET_FILTERS_SHA256
         or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[28:33]).encode()).hexdigest()
         != RUST_SELECTED_LIBRARY_METADATA_FILTERS_SHA256
-        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[33:]).encode()).hexdigest()
+        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[33:35]).encode()).hexdigest()
         != RUST_SELECTED_LIBRARY_AUX_FILTERS_SHA256
+        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[:35]).encode()).hexdigest()
+        != RUST_SELECTED_LIBRARY_ORIGINAL35_FILTERS_SHA256
+        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[35:]).encode()).hexdigest()
+        != RUST_SELECTED_LIBRARY_BOOTSTRAP_FILTERS_SHA256
         or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS).encode()).hexdigest()
         != RUST_SELECTED_LIBRARY_FILTERS_SHA256
     ):
-        errors.append("rust: selected library registry must retain all35 exact filters (original18 prefix, GET10, metadata5 and aux2)")
+        errors.append("rust: selected library registry must retain all44 exact filters (original35 prefix and bootstrap9)")
     fast = jobs.get("fast", {})
     steps = fast.get("steps", [])
     matches = [s for s in steps if isinstance(s, dict) and s.get("name") == RUST_SELECTED_LIBRARY_STEP]
