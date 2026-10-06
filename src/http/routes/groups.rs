@@ -15,7 +15,7 @@ use crate::api::dto::{
 use crate::auth::session::SessionUser;
 use crate::db::groups::{
     add_group_member, add_group_to_document, add_group_to_project, create_group,
-    list_document_group_grants, list_group_members, list_groups, list_project_group_grants,
+    list_document_group_grants, list_group_members, list_groups_backend, list_project_group_grants,
     purge_group, remove_group_from_document, remove_group_from_project, remove_group_member,
     GroupDbError, GroupRow,
 };
@@ -109,19 +109,9 @@ async fn list_groups_route(
     .await?;
     let actor_user_id = Uuid::parse_str(&user.user_id)
         .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let result = list_groups(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/groups.rs")
-            .map_err(internal)?,
-        workspace_id,
-        actor_user_id,
-        session_id,
-    )
-    .await
-    .map_err(internal)?;
+    let result = list_groups_backend(&state.auth.db.pool, workspace_id, actor_user_id, session_id)
+        .await
+        .map_err(internal)?;
     match result {
         Ok(items) => Ok(Json(GroupListResponse {
             items: items.into_iter().map(group_output).collect(),

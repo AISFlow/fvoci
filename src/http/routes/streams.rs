@@ -25,8 +25,9 @@ use crate::http::guard::check_origin;
 use crate::http::routes::tasks::{internal, require_session};
 use crate::http::state::AppState;
 use crate::streams::{
-    initial_cursor, poll_access_events, poll_task_events, poll_workspace_task_events,
-    project_stream_access, task_stream_wire_hint, workspace_stream_access, EventCursor,
+    initial_access_cursor_backend, initial_cursor, poll_access_events_backend, poll_task_events,
+    poll_workspace_task_events, project_stream_access, task_stream_wire_hint,
+    workspace_stream_access, workspace_stream_access_backend, BackendAccessCursor, EventCursor,
     StreamAccess, StreamAcquireError, StreamGuard, StreamHub, STREAM_CHANNEL_CAPACITY,
     STREAM_KEEPALIVE, STREAM_POLL_INTERVAL,
 };
@@ -432,30 +433,24 @@ async fn workspace_access_stream(
     )
     .await?;
     admit(
-        workspace_stream_access(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/streams.rs")
-                .map_err(internal)?,
-            workspace_id,
-            user_id,
-            session_id,
-        )
-        .await,
+        workspace_stream_access_backend(&state.auth.db.pool, workspace_id, user_id, session_id)
+            .await,
     )?;
 
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/streams.rs")
-        .map_err(internal)?
-        .clone();
+    let backend = state.auth.db.pool.clone();
     let hub = state.streams.clone();
-    let cursor = initial_cursor(&pool).await.map_err(internal)?;
-    let stream = access_sse_stream(hub, pool, workspace_id, user_id, session_id, cursor, guard);
+    let cursor = initial_access_cursor_backend(&backend)
+        .await
+        .map_err(internal)?;
+    let stream = access_sse_stream(
+        hub,
+        backend,
+        workspace_id,
+        user_id,
+        session_id,
+        cursor,
+        guard,
+    );
     Ok(sse_response(stream))
 }
 
@@ -736,11 +731,11 @@ impl Stream for AccessSseStream {
 
 fn access_sse_stream(
     hub: Arc<StreamHub>,
-    pool: sqlx::PgPool,
+    backend: crate::db::backend::Backend,
     workspace_id: Uuid,
     user_id: Uuid,
     session_id: Uuid,
-    cursor: EventCursor,
+    cursor: BackendAccessCursor,
     guard: StreamGuard,
 ) -> AccessSseStream {
     let (end_tx, end_rx) = tokio::sync::mpsc::channel(1);
@@ -756,7 +751,9 @@ fn access_sse_stream(
                 _ = tokio::time::sleep(STREAM_POLL_INTERVAL) => {}
             }
             // Credential, membership and access events share one transaction.
-            match poll_access_events(&pool, workspace_id, user_id, session_id, &cursor).await {
+            match poll_access_events_backend(&backend, workspace_id, user_id, session_id, &cursor)
+                .await
+            {
                 Ok(Some(next)) => cursor = next,
                 Ok(None) => break,
                 Err(err) => {

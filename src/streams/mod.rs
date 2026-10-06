@@ -3,6 +3,10 @@
 mod events;
 mod hub;
 
+pub(crate) use events::{
+    initial_access_cursor_backend, poll_access_events_backend, workspace_stream_access_backend,
+    BackendAccessCursor,
+};
 pub use events::{
     initial_cursor, poll_access_events, poll_task_events, poll_workspace_task_events,
     project_stream_access, task_stream_wire_hint, workspace_stream_access, EventCursor, EventPage,

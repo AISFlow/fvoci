@@ -199,6 +199,67 @@ pub async fn list_groups(
         .collect()))
 }
 
+/// Selected workspace group list only. Preserve PG wrappers and current
+/// member (not manager-only) read authority, with one family read snapshot.
+pub async fn list_groups_backend(
+    backend: &crate::db::backend::Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    credential_id: Uuid,
+) -> Result<Result<Vec<GroupRow>, GroupDbError>, sqlx::Error> {
+    use crate::db::backend::{Backend, OperationTx};
+    use crate::db::codec::Cell;
+    if let Backend::Postgres(pool) = backend {
+        return list_groups(pool, workspace_id, actor_user_id, credential_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        if !op.session_is_live(actor_user_id,credential_id).await? {
+            return Ok(Err(GroupDbError::Forbidden));
+        }
+        if !op.workspace_is_live(workspace_id).await? {
+            return Ok(Err(GroupDbError::NotFound));
+        }
+        if op.membership_role(workspace_id,actor_user_id,false).await?.is_none() {
+            return Ok(Err(GroupDbError::NotFound));
+        }
+        let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+        let rows = family.query("SELECT id,workspace_id,name,created_at,updated_at FROM groups WHERE workspace_id=?1 ORDER BY created_at,id", &[Cell::uuid(workspace_id)]).await?;
+        let items = rows.into_iter().map(|r| Ok(GroupRow {
+            id:r.cell(0)?.id()?,workspace_id:r.cell(1)?.id()?,name:r.cell(2)?.string()?,
+            created_at:r.cell(3)?.datetime()?,updated_at:r.cell(4)?.datetime()?,
+        })).collect::<Result<Vec<_>,sqlx::Error>>()?;
+        Ok(Ok(items))
+    }.await;
+    let cleanup = tx.rollback().await;
+    group_read_after_rollback(result, cleanup)
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("group list read refused: {0:?}")]
+struct GroupReadRefusal(GroupDbError);
+
+fn group_read_after_rollback(
+    result: Result<Result<Vec<GroupRow>, GroupDbError>, sqlx::Error>,
+    cleanup: Result<(), sqlx::Error>,
+) -> Result<Result<Vec<GroupRow>, GroupDbError>, sqlx::Error> {
+    match cleanup {
+        Ok(()) => result,
+        Err(cleanup) => {
+            let original: Option<Box<dyn std::error::Error + Send + Sync>> = match result {
+                Err(driver) => Some(Box::new(driver)),
+                Ok(Err(refusal)) => Some(Box::new(GroupReadRefusal(refusal))),
+                Ok(Ok(_)) => None,
+            };
+            Err(crate::db::backend::rollback_cleanup_unknown(
+                original, cleanup,
+            ))
+        }
+    }
+}
+
 pub async fn create_group(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -887,5 +948,52 @@ mod tests {
         assert!(normalize_group_name("   ").is_err());
         assert!(normalize_group_name(&"한".repeat(101)).is_err());
         assert!(normalize_group_name(&"한".repeat(100)).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod selected_group_read_finish_tests {
+    use super::*;
+    #[test]
+    fn group_read_cleanup_retains_refusal_and_driver_without_returning_rows() {
+        for domain in [true, false] {
+            let result = if domain {
+                Ok(Err(GroupDbError::Forbidden))
+            } else {
+                Err(sqlx::Error::Protocol("original group SQL fault".into()))
+            };
+            let error = group_read_after_rollback(
+                result,
+                Err(sqlx::Error::Protocol(
+                    "synthetic returned cleanup failure".into(),
+                )),
+            )
+            .unwrap_err();
+            let sqlx::Error::AnyDriverError(source) = error else {
+                panic!("typed cleanup receipt required")
+            };
+            let receipt = source
+                .downcast_ref::<crate::db::backend::RollbackCleanupUnknown>()
+                .unwrap();
+            let original = receipt.original.as_ref().unwrap();
+            if domain {
+                assert!(matches!(
+                    original.downcast_ref::<GroupReadRefusal>().unwrap().0,
+                    GroupDbError::Forbidden
+                ));
+            } else {
+                assert!(
+                    matches!(original.downcast_ref::<sqlx::Error>(),Some(sqlx::Error::Protocol(message)) if message=="original group SQL fault")
+                );
+            }
+        }
+        assert!(group_read_after_rollback(
+            Ok(Ok(Vec::new())),
+            Err(sqlx::Error::Protocol(
+                "synthetic returned cleanup failure".into()
+            ))
+        )
+        .is_err());
+        // Propagation only: does not claim remote failure/settlement execution.
     }
 }
