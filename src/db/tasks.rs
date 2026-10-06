@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::str::FromStr;
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -2144,6 +2144,53 @@ pub async fn list_project_tasks_backend(
     credential: Uuid,
     query: &ParsedTaskListQuery,
 ) -> Result<Result<TaskListPage, ProjectDbError>, sqlx::Error> {
+    list_project_tasks_backend_with_use(
+        backend,
+        workspace,
+        project,
+        actor,
+        credential,
+        query,
+        TaskScalarUse::Production,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum TaskScalarUse {
+    Production,
+    // Bootstrap only in the DB-test binary: never an endpoint/env fallback.
+    #[cfg(all(test, feature = "db-tests"))]
+    ReferenceQualification,
+}
+
+impl TaskScalarUse {
+    fn require_runtime(self, profile: &TaskScalarProfile) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Production => profile.require_runtime(),
+            #[cfg(all(test, feature = "db-tests"))]
+            Self::ReferenceQualification => Ok(()),
+        }
+    }
+
+    fn locale(self, profile: &TaskScalarProfile) -> Result<TaskTextLocale, sqlx::Error> {
+        match self {
+            Self::Production => TaskTextLocale::for_profile(profile),
+            #[cfg(all(test, feature = "db-tests"))]
+            Self::ReferenceQualification => TaskTextLocale::new(),
+        }
+    }
+}
+
+async fn list_project_tasks_backend_with_use(
+    backend: &Backend,
+    workspace: Uuid,
+    project: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    query: &ParsedTaskListQuery,
+    scalar_use: TaskScalarUse,
+) -> Result<Result<TaskListPage, ProjectDbError>, sqlx::Error> {
     if let Backend::Postgres(pool) = backend {
         return list_project_tasks(pool, workspace, project, actor, credential, query).await;
     }
@@ -2166,7 +2213,7 @@ pub async fn list_project_tasks_backend(
             unreachable!("PostgreSQL uses the preserved project reader")
         };
         family.require_tenant(workspace)?;
-        list_project_tasks_family(family, workspace, project, actor, query).await
+        list_project_tasks_family(family, workspace, project, actor, query, scalar_use).await
     }
     .await;
     if let Err(cleanup) = tx.rollback().await {
@@ -2239,40 +2286,373 @@ struct TaskOrderCell {
     value: Option<TaskScalar>,
     desc: bool,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskPageKey {
+    cells: Vec<TaskOrderCell>,
+    id: Uuid,
+}
 
-impl Ord for TaskOrderCell {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Different query plans are never mixed in one heap; keep Ord/Eq
-        // consistent even if a caller accidentally compares two plans.
-        if self.desc != other.desc {
-            return self.desc.cmp(&other.desc);
+fn task_scalar_error(message: &'static str) -> sqlx::Error {
+    sqlx::Error::Protocol(message.into())
+}
+
+fn task_scalar_sha256(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct TaskScalarReference {
+    encoding: String,
+    provider: String,
+    deterministic: bool,
+    lc_collate: String,
+    lc_ctype: String,
+    collation_version: String,
+    tzdata_version: String,
+    image_digest: String,
+    names_sha256: String,
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskScalarRuntime {
+    arch: String,
+    glibc_version: String,
+    locale_archive_sha256: String,
+    qualification_sha256: String,
+}
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct TaskScalarZone {
+    name: String,
+    tzif_base64: String,
+    sha256: String,
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskScalarProfile {
+    schema_version: u32,
+    reference: TaskScalarReference,
+    runtime_profiles: Vec<TaskScalarRuntime>,
+    zones: Vec<TaskScalarZone>,
+    #[serde(skip)]
+    identity: String,
+    #[serde(skip)]
+    data_identity: String,
+    #[serde(skip)]
+    decoded_zones: Vec<Vec<u8>>,
+    #[serde(skip)]
+    runtime_checked: std::sync::OnceLock<Result<(), &'static str>>,
+}
+
+// Exact real public PREP asset; runtime_profiles is empty, so production still
+// refuses admission. ROOT's later qualified envelope requires a reviewed hash
+// update and final-candidate admission/refusal tests, never an implicit fallback.
+const TASK_SCALAR_PROFILE_SHA256: &str =
+    "f3db49e34407399e19fa1654d22b6faf322ab19ee8461e0c214e83e12a82a90c";
+
+impl TaskScalarProfile {
+    fn decode_sealed(raw: &str, expected: &str) -> Result<Self, &'static str> {
+        if task_scalar_sha256(raw.as_bytes()) != expected {
+            return Err("Task scalar compiled profile checksum mismatch");
         }
-        // NULLS LAST is independent of direction, just as in the SQL tuple.
-        match (&self.value, &other.value) {
+        Self::decode(raw)
+    }
+
+    fn decode(raw: &str) -> Result<Self, &'static str> {
+        use base64::Engine;
+        let mut profile: Self =
+            serde_json::from_str(raw).map_err(|_| "Task scalar profile schema invalid")?;
+        let r = &profile.reference;
+        if profile.schema_version != 1
+            || r.encoding != "UTF8"
+            || r.provider != "c"
+            || !r.deterministic
+            || r.lc_collate != "en_US.utf8"
+            || r.lc_ctype != "en_US.utf8"
+            || r.collation_version != "2.41"
+            || r.tzdata_version != "2026a"
+            || r.image_digest
+                != "sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db"
+            || r.names_sha256 != "104662bf43ab373bc83f5999f5a18bc5ac094baeeca996e1a8f761fad8279c8c"
+        {
+            return Err("Task scalar reference profile mismatch");
+        }
+        if profile.zones.len() != 487
+            || profile
+                .zones
+                .windows(2)
+                .any(|pair| pair[0].name >= pair[1].name)
+            || task_scalar_sha256(
+                profile
+                    .zones
+                    .iter()
+                    .map(|zone| zone.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .as_bytes(),
+            ) != r.names_sha256
+        {
+            return Err("Task scalar zone admission mismatch");
+        }
+        for zone in &profile.zones {
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(&zone.tzif_base64)
+                .map_err(|_| "Task scalar TZif base64 invalid")?;
+            if task_scalar_sha256(&data) != zone.sha256 {
+                return Err("Task scalar TZif checksum mismatch");
+            }
+            tz::TimeZone::from_tz_data(&data).map_err(|_| "Task scalar TZif invalid")?;
+            profile.decoded_zones.push(data);
+        }
+        let hash = |value: &str| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && value != "0".repeat(64)
+        };
+        let mut architectures = HashSet::new();
+        for runtime in &profile.runtime_profiles {
+            if !matches!(runtime.arch.as_str(), "x86_64" | "aarch64")
+                || !architectures.insert(runtime.arch.clone())
+                || runtime.glibc_version.is_empty()
+                || !runtime
+                    .glibc_version
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || b == b'.')
+                || !hash(&runtime.locale_archive_sha256)
+                || !hash(&runtime.qualification_sha256)
+            {
+                return Err("Task scalar runtime profile invalid");
+            }
+        }
+        // Qualification binds immutable reference+zone input, independently
+        // of the envelope that later carries the qualification receipt itself.
+        let data =
+            serde_json::to_vec(&(profile.schema_version, &profile.reference, &profile.zones))
+                .map_err(|_| "Task scalar data identity invalid")?;
+        profile.data_identity = task_scalar_sha256(&data);
+        profile.identity = task_scalar_sha256(raw.as_bytes());
+        Ok(profile)
+    }
+
+    fn compiled() -> Result<&'static Self, sqlx::Error> {
+        static PROFILE: std::sync::OnceLock<Result<TaskScalarProfile, &'static str>> =
+            std::sync::OnceLock::new();
+        PROFILE
+            .get_or_init(|| {
+                let raw = include_str!("task_scalar_pg18_profile.json");
+                Self::decode_sealed(raw, TASK_SCALAR_PROFILE_SHA256)
+            })
+            .as_ref()
+            .map_err(|error| task_scalar_error(error))
+    }
+
+    fn require_runtime(&self) -> Result<(), sqlx::Error> {
+        // An environment-provided search path must not replace qualified data,
+        // even after immutable package validation has been cached.
+        if std::env::var_os("LOCPATH").is_some() {
+            return Err(task_scalar_error("Task GNU locale search path unsupported"));
+        }
+        self.runtime_checked
+            .get_or_init(|| {
+                #[cfg(all(target_os = "linux", target_env = "gnu"))]
+                {
+                    let runtime = self
+                        .runtime_profiles
+                        .iter()
+                        .find(|runtime| runtime.arch == std::env::consts::ARCH)
+                        .ok_or("Task scalar runtime qualification unavailable")?;
+                    // SAFETY: GNU returns a static, NUL-terminated version string.
+                    let version = unsafe { std::ffi::CStr::from_ptr(libc::gnu_get_libc_version()) }
+                        .to_str()
+                        .map_err(|_| "Task GNU version invalid")?;
+                    if version != runtime.glibc_version {
+                        return Err("Task GNU version mismatch");
+                    }
+                    let archive = std::fs::read("/usr/lib/locale/locale-archive")
+                        .map_err(|_| "Task GNU locale archive unavailable")?;
+                    if task_scalar_sha256(&archive) != runtime.locale_archive_sha256 {
+                        return Err("Task GNU locale archive mismatch");
+                    }
+                    Ok(())
+                }
+                #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+                Err("Task scalar GNU target unavailable")
+            })
+            .as_ref()
+            .copied()
+            .map_err(|error| task_scalar_error(error))
+    }
+}
+
+/// This guard exists only during synchronous batch processing, never across
+/// a DB await. GNU owns comparison/case mapping; no process locale is changed.
+struct TaskTextLocale {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    handle: libc::locale_t,
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+unsafe extern "C" {
+    // GNU's x86_64/aarch64 ABI uses unsigned int for wint_t; target ABI and
+    // implementation/data provenance require the ROOT qualification receipt.
+    fn strcoll_l(
+        left: *const libc::c_char,
+        right: *const libc::c_char,
+        locale: libc::locale_t,
+    ) -> libc::c_int;
+    fn towlower_l(value: libc::c_uint, locale: libc::locale_t) -> libc::c_uint;
+}
+
+impl TaskTextLocale {
+    fn for_profile(profile: &TaskScalarProfile) -> Result<Self, sqlx::Error> {
+        profile.require_runtime()?;
+        Self::new()
+    }
+
+    // Qualification exercises the actual bridge on PREP data; production must
+    // use for_profile, requiring a separately sealed architecture receipt.
+    fn new() -> Result<Self, sqlx::Error> {
+        Self::open(c"en_US.utf8")
+    }
+
+    fn open(name: &std::ffi::CStr) -> Result<Self, sqlx::Error> {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            // SAFETY: valid CStr, valid masks and no borrowed base; production
+            // fixes the locale name. The successful handle is exclusively owned.
+            let handle = unsafe {
+                libc::newlocale(
+                    libc::LC_COLLATE_MASK | libc::LC_CTYPE_MASK,
+                    name.as_ptr(),
+                    std::ptr::null_mut(),
+                )
+            };
+            if handle.is_null() {
+                return Err(task_scalar_error("Task GNU locale unavailable"));
+            }
+            Ok(Self { handle })
+        }
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        {
+            let _ = name;
+            Err(task_scalar_error("Task scalar GNU target unavailable"))
+        }
+    }
+
+    fn lower_literal(&self, value: &str) -> Result<String, sqlx::Error> {
+        if value.contains('\0') {
+            return Err(task_scalar_error("Task scalar text contains NUL"));
+        }
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            value
+                .chars()
+                .map(|value| {
+                    // SAFETY: valid Unicode scalar fits GNU wint_t; the owned,
+                    // unmodified locale remains live throughout this call.
+                    char::from_u32(unsafe { towlower_l(u32::from(value), self.handle) })
+                        .ok_or_else(|| task_scalar_error("Task GNU case mapping invalid"))
+                })
+                .collect()
+        }
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        Err(task_scalar_error("Task scalar GNU target unavailable"))
+    }
+
+    fn compare(&self, left: &str, right: &str) -> Result<Ordering, sqlx::Error> {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            let a = std::ffi::CString::new(left)
+                .map_err(|_| task_scalar_error("Task scalar text contains NUL"))?;
+            let b = std::ffi::CString::new(right)
+                .map_err(|_| task_scalar_error("Task scalar text contains NUL"))?;
+            // SAFETY: both C strings and the exclusively owned locale outlive
+            // the call. errno is thread-local; no await/thread hop occurs here.
+            let (order, error) = unsafe {
+                *libc::__errno_location() = 0;
+                let order = strcoll_l(a.as_ptr(), b.as_ptr(), self.handle);
+                (order, *libc::__errno_location())
+            };
+            if error != 0 {
+                return Err(task_scalar_error("Task GNU comparison failed"));
+            }
+            // PostgreSQL's deterministic collation resolves locale-equal
+            // strings with byte order; equality never normalizes code points.
+            Ok(order
+                .cmp(&0)
+                .then_with(|| left.as_bytes().cmp(right.as_bytes())))
+        }
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        {
+            let _ = (left, right);
+            Err(task_scalar_error("Task scalar GNU target unavailable"))
+        }
+    }
+}
+
+impl Drop for TaskTextLocale {
+    fn drop(&mut self) {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        // SAFETY: newlocale succeeded, ownership was never shared/transferred,
+        // and every comparison has completed before this synchronous drop.
+        unsafe {
+            libc::freelocale(self.handle)
+        }
+    }
+}
+
+fn compare_task_page_key(
+    left: &TaskPageKey,
+    right: &TaskPageKey,
+    sort: &[ViewSort],
+    locale: &TaskTextLocale,
+) -> Result<Ordering, sqlx::Error> {
+    if left.cells.len() != sort.len() || right.cells.len() != sort.len() {
+        return Err(task_scalar_error("Task scalar sort plan mismatch"));
+    }
+    for ((left, right), term) in left.cells.iter().zip(&right.cells).zip(sort) {
+        let desc = term.direction == SortDirection::Desc;
+        if left.desc != desc || right.desc != desc {
+            return Err(task_scalar_error("Task scalar sort direction mismatch"));
+        }
+        let order = match (&left.value, &right.value) {
             (None, None) => Ordering::Equal,
             (None, Some(_)) => Ordering::Greater,
             (Some(_), None) => Ordering::Less,
             (Some(left), Some(right)) => {
-                let order = left.cmp(right);
-                if self.desc {
+                if std::mem::discriminant(left) != std::mem::discriminant(right) {
+                    return Err(task_scalar_error("Task scalar sort type mismatch"));
+                }
+                if [left, right]
+                    .iter()
+                    .any(|value| matches!(value, TaskScalar::Text(text) if text.contains('\0')))
+                {
+                    return Err(task_scalar_error("Task scalar text contains NUL"));
+                }
+                let order = match (left, right) {
+                    (TaskScalar::Text(a), TaskScalar::Text(b))
+                        if !matches!(term.field, SortField::Title | SortField::Rank) =>
+                    {
+                        locale.compare(a, b)?
+                    }
+                    _ => left.cmp(right),
+                };
+                if desc {
                     order.reverse()
                 } else {
                     order
                 }
             }
+        };
+        if order != Ordering::Equal {
+            return Ok(order);
         }
     }
-}
-impl PartialOrd for TaskOrderCell {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct TaskPageKey {
-    cells: Vec<TaskOrderCell>,
-    id: Uuid,
+    Ok(left.id.cmp(&right.id))
 }
 
 #[derive(Debug, Clone)]
@@ -2339,7 +2719,12 @@ impl TaskProjection {
                     SortField::Status => Some(TaskScalar::Text(self.status_rank.clone())),
                 },
             })
-            .collect();
+            .collect::<Vec<_>>();
+        if cells.iter().any(
+            |cell| matches!(&cell.value, Some(TaskScalar::Text(value)) if value.contains('\0')),
+        ) {
+            return Err(task_scalar_error("Task scalar text contains NUL"));
+        }
         Ok(TaskPageKey { cells, id: self.id })
     }
 
@@ -2385,19 +2770,22 @@ struct TaskTimeZone {
 }
 impl TaskTimeZone {
     fn from_name(name: &str) -> Result<Self, sqlx::Error> {
-        // PostgreSQL's current reader uses exact known-name membership and UTC
-        // fallback. Do not accidentally broaden it through get's case folding.
-        let name = if jiff_tzdb::available().any(|known| known == name) {
-            name
-        } else {
-            "UTC"
-        };
-        let (_, data) = jiff_tzdb::get(name)
-            .ok_or_else(|| sqlx::Error::Protocol("bundled Task time zone unavailable".into()))?;
-        let zone = tz::TimeZone::from_tz_data(data)
-            .map_err(|_| sqlx::Error::Protocol("bundled Task TZif invalid".into()))?;
+        let profile = TaskScalarProfile::compiled()?;
+        // Exact PG catalog admission, including its real configured aliases;
+        // only unknown/case-mismatched names retain the original UTC fallback.
+        let index = profile
+            .zones
+            .binary_search_by(|zone| zone.name.as_str().cmp(name))
+            .or_else(|_| {
+                profile
+                    .zones
+                    .binary_search_by(|zone| zone.name.as_str().cmp("UTC"))
+            })
+            .map_err(|_| task_scalar_error("Task scalar UTC data unavailable"))?;
+        let zone = tz::TimeZone::from_tz_data(&profile.decoded_zones[index])
+            .map_err(|_| task_scalar_error("Task scalar TZif invalid"))?;
         Ok(Self {
-            name: name.to_owned(),
+            name: profile.zones[index].name.clone(),
             zone,
         })
     }
@@ -2422,26 +2810,30 @@ struct TaskPageEntry {
     key: TaskPageKey,
     cursor_key: String,
 }
-impl Ord for TaskPageEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.key
-            .cmp(&other.key)
-            .then_with(|| self.cursor_key.cmp(&other.cursor_key))
+fn retain_task_top_k(
+    selected: &mut Vec<TaskPageEntry>,
+    entry: TaskPageEntry,
+    capacity: usize,
+    sort: &[ViewSort],
+    locale: &TaskTextLocale,
+) -> Result<(), sqlx::Error> {
+    // Validate even the first entry before mutating the bounded selection.
+    compare_task_page_key(&entry.key, &entry.key, sort, locale)?;
+    let (mut low, mut high) = (0, selected.len());
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if compare_task_page_key(&selected[middle].key, &entry.key, sort, locale)? == Ordering::Less
+        {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
     }
-}
-impl PartialOrd for TaskPageEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+    if low < capacity {
+        selected.insert(low, entry);
+        selected.truncate(capacity);
     }
-}
-
-fn retain_task_top_k(heap: &mut BinaryHeap<TaskPageEntry>, entry: TaskPageEntry, capacity: usize) {
-    if heap.len() < capacity {
-        heap.push(entry);
-    } else if heap.peek().is_some_and(|largest| entry.key < largest.key) {
-        heap.pop();
-        heap.push(entry);
-    }
+    Ok(())
 }
 
 /// Both local and remote family query APIs collect one statement's rows. This
@@ -2581,15 +2973,19 @@ fn task_projection_matches(
     row: &TaskProjection,
     query: &ParsedTaskListQuery,
     zone: &TaskTimeZone,
+    locale: &TaskTextLocale,
 ) -> Result<bool, sqlx::Error> {
     if row.created > task_query_instant(query.as_of)? {
         return Ok(false);
     }
     if let Some(title) = &query.view.filters.title {
         // '%'/'_'/'\\' remain literal substring characters, not LIKE syntax.
-        // Unicode case mappings/default collation also require the pinned PG
-        // qualification; std lowercase is not claimed to prove ILIKE equality.
-        if !row.title.to_lowercase().contains(&title.to_lowercase()) {
+        // GNU maps individual code points, as PG's UTF8 libc lower/ILIKE
+        // paths do; Rust's full/context-sensitive lower is a different policy.
+        if !locale
+            .lower_literal(&row.title)?
+            .contains(&locale.lower_literal(title)?)
+        {
             return Ok(false);
         }
     }
@@ -2621,6 +3017,7 @@ async fn list_project_tasks_family(
     project: Uuid,
     actor: Uuid,
     query: &ParsedTaskListQuery,
+    scalar_use: TaskScalarUse,
 ) -> Result<Result<TaskListPage, ProjectDbError>, sqlx::Error> {
     let ws_project = [Cell::uuid(workspace), Cell::uuid(project)];
     for (sql, value) in [
@@ -2653,6 +3050,8 @@ async fn list_project_tasks_family(
             .cell(0)?
             .string()?,
     )?;
+    let profile = TaskScalarProfile::compiled()?;
+    scalar_use.require_runtime(profile)?;
     let plan = match prepare_selected_task_view(
         tx,
         ViewScope {
@@ -2671,7 +3070,9 @@ async fn list_project_tasks_family(
     let fingerprint = {
         use sha2::Digest;
         hex::encode(sha2::Sha256::digest(json!({
-        "policy": "selected-task-1", "tzdb": jiff_tzdb::VERSION,
+        "policy": "selected-task-2-gnu", "scalar_profile": &profile.identity,
+        "scalar_data": &profile.data_identity,
+        "scalar_arch": std::env::consts::ARCH,
         "query": filter_fingerprint(workspace, Some(project), &zone.name, query),
         "actor": actor,
         "catalog": plan.catalog.iter().map(|field| (field.id, field.version)).collect::<Vec<_>>()
@@ -2704,7 +3105,7 @@ async fn list_project_tasks_family(
         .checked_add(1)
         .ok_or_else(|| sqlx::Error::Protocol("Task page limit overflow".into()))?;
     let mut counts = BTreeMap::<Uuid, i64>::new();
-    let mut heap = BinaryHeap::with_capacity(capacity);
+    let mut selected = Vec::with_capacity(capacity);
     let mut after = None;
     loop {
         let mut rows =
@@ -2713,33 +3114,46 @@ async fn list_project_tasks_family(
             break;
         }
         let matches = task_projection_values(tx, workspace, &plan, &mut rows).await?;
-        for row in rows {
-            if after.is_some_and(|previous| row.id <= previous) {
-                return Err(sqlx::Error::Protocol("Task scan did not advance".into()));
+        {
+            // A raw GNU locale handle never enters the async suspension state.
+            // The next batch's query runs only after this guard has been dropped.
+            let locale = scalar_use.locale(profile)?;
+            for row in rows {
+                if after.is_some_and(|previous| row.id <= previous) {
+                    return Err(sqlx::Error::Protocol("Task scan did not advance".into()));
+                }
+                after = Some(row.id);
+                if !matches.contains(&row.id)
+                    || !task_projection_matches(&row, query, &zone, &locale)?
+                {
+                    continue;
+                }
+                let count = counts.entry(row.status).or_default();
+                *count = count
+                    .checked_add(1)
+                    .ok_or_else(|| sqlx::Error::Protocol("Task count overflow".into()))?;
+                let key = row.page_key(&plan.sort, &zone)?;
+                if let Some(anchor) = &anchor {
+                    if compare_task_page_key(&key, anchor, &plan.sort, &locale)?
+                        != Ordering::Greater
+                    {
+                        continue;
+                    }
+                }
+                retain_task_top_k(
+                    &mut selected,
+                    TaskPageEntry {
+                        key,
+                        cursor_key: row.cursor_key(&plan.sort, &zone)?,
+                    },
+                    capacity,
+                    &plan.sort,
+                    &locale,
+                )?;
             }
-            after = Some(row.id);
-            if !matches.contains(&row.id) || !task_projection_matches(&row, query, &zone)? {
-                continue;
-            }
-            let count = counts.entry(row.status).or_default();
-            *count = count
-                .checked_add(1)
-                .ok_or_else(|| sqlx::Error::Protocol("Task count overflow".into()))?;
-            let key = row.page_key(&plan.sort, &zone)?;
-            if anchor.as_ref().is_some_and(|anchor| key <= *anchor) {
-                continue;
-            }
-            retain_task_top_k(
-                &mut heap,
-                TaskPageEntry {
-                    key,
-                    cursor_key: row.cursor_key(&plan.sort, &zone)?,
-                },
-                capacity,
-            );
+            drop(locale);
         }
     }
-    let mut selected = heap.into_sorted_vec();
     let has_more = selected.len() == capacity;
     selected.truncate(capacity - 1);
     let next_cursor = if has_more {
@@ -6247,6 +6661,7 @@ mod selected_task_projection_tests {
 
     #[test]
     fn selected_query_fraction_matches_pg7_text_cast_vectors() {
+        let locale = TaskTextLocale::new().unwrap();
         // Original restricted PG18.3 observation P01-P18, including negative
         // and PG-epoch boundaries: half-up and epoch truncation both fail.
         for base in [
@@ -6287,14 +6702,18 @@ mod selected_task_projection_tests {
         query.as_of = literal;
         let mut row = projection(1);
         row.created = crate::tasks::parse_iso_datetime("2026-01-01T00:00:00.000001Z").unwrap();
-        assert!(
-            !task_projection_matches(&row, &query, &TaskTimeZone::from_name("UTC").unwrap())
-                .unwrap()
-        );
+        assert!(!task_projection_matches(
+            &row,
+            &query,
+            &TaskTimeZone::from_name("UTC").unwrap(),
+            &locale
+        )
+        .unwrap());
     }
 
     #[test]
     fn selected_top_k_nulls_last_both_directions_and_uuid_ties() {
+        let locale = TaskTextLocale::new().unwrap();
         let field = Uuid::from_u128(999);
         let zone = TaskTimeZone::from_name("UTC").unwrap();
         for (direction, expected) in [
@@ -6305,7 +6724,7 @@ mod selected_task_projection_tests {
                 field: SortField::Field(field),
                 direction,
             }];
-            let mut heap = BinaryHeap::new();
+            let mut selected = Vec::new();
             for (id, number) in [
                 (5, None),
                 (3, Some("10")),
@@ -6319,17 +6738,20 @@ mod selected_task_projection_tests {
                         .insert(field, TaskScalar::Number(decimal_value(number).unwrap()));
                 }
                 retain_task_top_k(
-                    &mut heap,
+                    &mut selected,
                     TaskPageEntry {
                         key: row.page_key(&sort, &zone).unwrap(),
                         cursor_key: row.cursor_key(&sort, &zone).unwrap(),
                     },
                     4,
-                );
-                assert!(heap.len() <= 4);
+                    &sort,
+                    &locale,
+                )
+                .unwrap();
+                assert!(selected.len() <= 4);
             }
             assert_eq!(
-                heap.into_sorted_vec()
+                selected
                     .iter()
                     .map(|entry| entry.key.id.as_u128())
                     .collect::<Vec<_>>(),
@@ -6369,6 +6791,7 @@ mod selected_task_projection_tests {
 
     #[test]
     fn selected_window_uses_utc_endpoints_and_literal_title_characters() {
+        let locale = TaskTextLocale::new().unwrap();
         let mut query = crate::tasks::list_query::parse_task_list_query(
             None,
             None,
@@ -6384,18 +6807,19 @@ mod selected_task_projection_tests {
         row.due_at = Some(crate::tasks::parse_iso_datetime("2026-03-08T04:30:00Z").unwrap());
         let zone = TaskTimeZone::from_name("America/New_York").unwrap();
         assert_eq!(row.due(&zone).unwrap().unwrap().to_string(), "2026-03-07");
-        assert!(task_projection_matches(&row, &query, &zone).unwrap());
+        assert!(task_projection_matches(&row, &query, &zone, &locale).unwrap());
         row.title = "arbitrary wildcard match".into();
-        assert!(!task_projection_matches(&row, &query, &zone).unwrap());
+        assert!(!task_projection_matches(&row, &query, &zone, &locale).unwrap());
         row.title = "literal %_\\ 😀".into();
         row.due_at = None;
-        assert!(!task_projection_matches(&row, &query, &zone).unwrap());
+        assert!(!task_projection_matches(&row, &query, &zone, &locale).unwrap());
         row.start = Some(NaiveDate::from_ymd_opt(2026, 3, 8).unwrap());
-        assert!(task_projection_matches(&row, &query, &zone).unwrap());
+        assert!(task_projection_matches(&row, &query, &zone, &locale).unwrap());
     }
 
     #[test]
     fn selected_title_byte_order_and_cursor_changed_value_refusal() {
+        let locale = TaskTextLocale::new().unwrap();
         let zone = TaskTimeZone::from_name("UTC").unwrap();
         let sort = vec![ViewSort {
             field: SortField::Title,
@@ -6410,7 +6834,15 @@ mod selected_task_projection_tests {
                 row
             })
             .collect::<Vec<_>>();
-        rows.sort_by_key(|row| row.page_key(&sort, &zone).unwrap());
+        rows.sort_by(|left, right| {
+            compare_task_page_key(
+                &left.page_key(&sort, &zone).unwrap(),
+                &right.page_key(&sort, &zone).unwrap(),
+                &sort,
+                &locale,
+            )
+            .unwrap()
+        });
         assert_eq!(
             rows.iter()
                 .map(|row| row.title.as_str())
@@ -6420,6 +6852,303 @@ mod selected_task_projection_tests {
         let key = rows[0].cursor_key(&sort, &zone).unwrap();
         rows[0].title.push('!');
         assert_ne!(key, rows[0].cursor_key(&sort, &zone).unwrap());
+    }
+    #[test]
+    fn selected_gnu_literal_lower_matches_original_pg_profile() {
+        // Actual sealed PG18.3 S8/S9 rows, not expectations from this wrapper.
+        let locale = TaskTextLocale::new().unwrap();
+        for (input, expected_hex) in [
+            ("Σ", "cf83"),
+            ("σ", "cf83"),
+            ("ς", "cf82"),
+            ("ΟΔΥΣΣΕΥΣ", "cebfceb4cf85cf83cf83ceb5cf85cf83"),
+            ("Οδυσσεύς", "cebfceb4cf85cf83cf83ceb5cf8dcf82"),
+            ("σς", "cf83cf82"),
+            ("ΣΑΣ", "cf83ceb1cf83"),
+            ("σας", "cf83ceb1cf82"),
+            ("İ", "69"),
+            ("ı", "c4b1"),
+            ("I", "69"),
+            ("i", "69"),
+            ("İstanbul", "697374616e62756c"),
+            ("ISTANBUL", "697374616e62756c"),
+            ("istanbul", "697374616e62756c"),
+            ("ıi", "c4b169"),
+            ("ß", "c39f"),
+            ("ẞ", "c39f"),
+            ("Straße", "73747261c39f65"),
+            ("STRASSE", "73747261737365"),
+            ("ﬁ", "efac81"),
+            ("ǅ", "c786"),
+            ("Ǆ", "c786"),
+            ("ǆ", "c786"),
+        ] {
+            assert_eq!(
+                hex::encode(locale.lower_literal(input).unwrap()),
+                expected_hex
+            );
+        }
+        for (left, right, equal) in [
+            ("İ", "i", true),
+            ("İ", "I", true),
+            ("ı", "I", false),
+            ("ı", "i", false),
+            ("İstanbul", "istanbul", true),
+            ("İstanbul", "ISTANBUL", true),
+            ("Σ", "σ", true),
+            ("Σ", "ς", false),
+            ("σ", "ς", false),
+            ("ΟΔΥΣΣΕΥΣ", "Οδυσσεύς", false),
+            ("ΟΔΥΣΣΕΥΣ", "οδυσσευς", false),
+            ("ß", "ss", false),
+            ("ß", "ẞ", true),
+            ("Straße", "STRASSE", false),
+            ("ǅ", "ǆ", true),
+            ("ǅ", "Ǆ", true),
+        ] {
+            assert_eq!(
+                locale.lower_literal(left).unwrap() == locale.lower_literal(right).unwrap(),
+                equal
+            );
+        }
+        assert!(locale
+            .lower_literal("literal %_\\ 😀")
+            .unwrap()
+            .contains("%_\\"));
+        assert_ne!(
+            locale.lower_literal("é").unwrap(),
+            locale.lower_literal("e\u{301}").unwrap()
+        );
+        assert!(locale.lower_literal("bad\0text").is_err());
+    }
+
+    #[test]
+    fn selected_gnu_default_and_c_sort_use_original_pg_orders() {
+        let locale = TaskTextLocale::new().unwrap();
+        let zone = TaskTimeZone::from_name("UTC").unwrap();
+        let field = Uuid::from_u128(123);
+        let default = [
+            "e", "E", "e\u{301}", "é", "i", "I", "İ", "ı", "ß", "ẞ", "z", "Z", "σ", "Σ", "ς", "中",
+        ];
+        let c = [
+            "E", "I", "Z", "e", "e\u{301}", "i", "z", "ß", "é", "İ", "ı", "Σ", "ς", "σ", "ẞ", "中",
+        ];
+        for (sort_field, expected) in [
+            (SortField::Title, c),
+            (SortField::Rank, c),
+            (SortField::Status, default),
+            (SortField::Field(field), default),
+        ] {
+            for direction in [SortDirection::Asc, SortDirection::Desc] {
+                let sort = [ViewSort {
+                    field: sort_field,
+                    direction,
+                }];
+                let mut selected = Vec::new();
+                for (index, text) in c.iter().enumerate() {
+                    let mut row = projection(index as u128 + 1);
+                    row.title = (*text).into();
+                    row.rank = (*text).into();
+                    row.status_rank = (*text).into();
+                    row.scalars.insert(field, TaskScalar::Text((*text).into()));
+                    retain_task_top_k(
+                        &mut selected,
+                        TaskPageEntry {
+                            key: row.page_key(&sort, &zone).unwrap(),
+                            cursor_key: (*text).into(),
+                        },
+                        16,
+                        &sort,
+                        &locale,
+                    )
+                    .unwrap();
+                }
+                let mut expected = expected.to_vec();
+                if direction == SortDirection::Desc {
+                    expected.reverse();
+                }
+                assert_eq!(
+                    selected
+                        .iter()
+                        .map(|row| row.cursor_key.as_str())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                let anchor = selected[7].key.clone();
+                assert_eq!(
+                    selected
+                        .iter()
+                        .filter(
+                            |row| compare_task_page_key(&row.key, &anchor, &sort, &locale).unwrap()
+                                == Ordering::Greater
+                        )
+                        .count(),
+                    8
+                );
+            }
+        }
+        // Actual PG keeps canonically equivalent spellings byte-distinct.
+        assert_eq!(locale.compare("e\u{301}", "é").unwrap(), Ordering::Less);
+    }
+
+    #[test]
+    fn selected_gnu_wrong_plan_and_nul_preserve_selection() {
+        assert!(TaskTextLocale::open(c"FVOCI_invalid_qualification_locale").is_err());
+        let locale = TaskTextLocale::new().unwrap();
+        let zone = TaskTimeZone::from_name("UTC").unwrap();
+        let sort = [ViewSort {
+            field: SortField::Status,
+            direction: SortDirection::Asc,
+        }];
+        let row = projection(1);
+        let mut selected = Vec::new();
+        retain_task_top_k(
+            &mut selected,
+            TaskPageEntry {
+                key: row.page_key(&sort, &zone).unwrap(),
+                cursor_key: "healthy".into(),
+            },
+            2,
+            &sort,
+            &locale,
+        )
+        .unwrap();
+        for bad in [
+            TaskPageKey {
+                cells: vec![],
+                id: Uuid::from_u128(2),
+            },
+            TaskPageKey {
+                cells: vec![TaskOrderCell {
+                    value: Some(TaskScalar::Text("bad\0text".into())),
+                    desc: false,
+                }],
+                id: Uuid::from_u128(2),
+            },
+            TaskPageKey {
+                cells: vec![TaskOrderCell {
+                    value: Some(TaskScalar::Text("V".into())),
+                    desc: true,
+                }],
+                id: Uuid::from_u128(2),
+            },
+        ] {
+            assert!(retain_task_top_k(
+                &mut selected,
+                TaskPageEntry {
+                    key: bad,
+                    cursor_key: "bad".into()
+                },
+                2,
+                &sort,
+                &locale
+            )
+            .is_err());
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0].cursor_key, "healthy");
+        }
+        let wrong_type = TaskPageKey {
+            cells: vec![TaskOrderCell {
+                value: Some(TaskScalar::Integer(1)),
+                desc: false,
+            }],
+            id: Uuid::from_u128(2),
+        };
+        assert!(compare_task_page_key(&selected[0].key, &wrong_type, &sort, &locale).is_err());
+        assert!(locale.compare("bad\0text", "valid").is_err());
+        assert_eq!(locale.compare("valid", "valid").unwrap(), Ordering::Equal);
+    }
+
+    #[test]
+    fn selected_scalar_profile_rejects_wrong_catalog_hash_schema_and_unqualified_runtime() {
+        use base64::Engine;
+        let raw = include_str!("task_scalar_pg18_profile.json");
+        let original: Value = serde_json::from_str(raw).unwrap();
+        let profile = TaskScalarProfile::decode(raw).unwrap();
+        assert_eq!(profile.zones.len(), 487);
+        assert_eq!(
+            profile.data_identity,
+            "87c748703be14b07e96a29ee04e031bca7c2f1f60267c9760af76b8de40bad71"
+        );
+        for name in ["UTC", "localtime", "posixrules"] {
+            assert!(profile.zones.iter().any(|zone| zone.name == name));
+        }
+        for bad in [
+            {
+                let mut value = original.clone();
+                value["reference"]["provider"] = json!("i");
+                value
+            },
+            {
+                let mut value = original.clone();
+                value["unexpected"] = json!(true);
+                value
+            },
+            {
+                let mut value = original.clone();
+                value["zones"][0]["name"] = json!("Mars/Olympus");
+                value
+            },
+            {
+                let mut value = original.clone();
+                value["zones"][0]["sha256"] = json!("0".repeat(64));
+                value
+            },
+            {
+                let mut value = original.clone();
+                let data = b"invalid TZif";
+                value["zones"][0]["tzif_base64"] =
+                    json!(base64::engine::general_purpose::STANDARD.encode(data));
+                value["zones"][0]["sha256"] = json!(task_scalar_sha256(data));
+                value
+            },
+        ] {
+            assert!(TaskScalarProfile::decode(&bad.to_string()).is_err());
+        }
+        let mut pending = original.clone();
+        pending["runtime_profiles"] = json!([]);
+        let pending = TaskScalarProfile::decode(&pending.to_string()).unwrap();
+        assert!(TaskTextLocale::for_profile(&pending).is_err());
+        // No fabricated architecture qualification is supplied by the test.
+        assert!(pending.runtime_profiles.is_empty());
+        let same_data = TaskScalarProfile::decode(&format!("{raw}\n")).unwrap();
+        assert_eq!(same_data.data_identity, profile.data_identity);
+        assert_ne!(same_data.identity, profile.identity);
+        assert_eq!(
+            TaskScalarProfile::decode(raw).unwrap().identity,
+            profile.identity
+        );
+        assert!(matches!(
+            TaskScalarProfile::decode_sealed(
+                &format!("{raw}\n"),
+                &task_scalar_sha256(raw.as_bytes())
+            ),
+            Err("Task scalar compiled profile checksum mismatch")
+        ));
+    }
+
+    #[test]
+    fn selected_scalar_full_catalog_uses_reference_data_and_exact_case_fallback() {
+        let profile = TaskScalarProfile::compiled().unwrap();
+        assert_eq!(profile.zones.len(), 487);
+        for zone in &profile.zones {
+            let actual = TaskTimeZone::from_name(&zone.name).unwrap();
+            assert_eq!(actual.name, zone.name);
+            actual
+                .date(crate::tasks::parse_iso_datetime("9999-12-31T12:00:00Z").unwrap())
+                .unwrap();
+        }
+        for unknown in ["america/new_york", "Mars/Olympus", "US/Eastern", " UTC "] {
+            assert_eq!(TaskTimeZone::from_name(unknown).unwrap().name, "UTC");
+        }
+        assert_eq!(
+            TaskTimeZone::from_name("localtime").unwrap().name,
+            "localtime"
+        );
+        assert_eq!(
+            TaskTimeZone::from_name("posixrules").unwrap().name,
+            "posixrules"
+        );
     }
 }
 
@@ -6487,6 +7216,175 @@ mod selected_project_list_tests {
         sqlx::query("INSERT INTO collection_fields(id,workspace_id,collection_id,key,name,type,sort_key) VALUES(?1,?2,?3,'number','Field',?4,'V')")
             .bind(field.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(collection.as_bytes().as_slice()).bind(kind).execute(&f.pool).await.unwrap();
         (collection, field)
+    }
+
+    #[tokio::test]
+    async fn selected_task_list_gnu_text_pages_literal_filter_and_error_recovery() {
+        gnu_text_pages_literal_filter_and_error_recovery(TaskScalarUse::Production).await;
+    }
+
+    #[tokio::test]
+    async fn selected_task_list_reference_qualification_gnu_text_pages_literal_filter_and_error_recovery(
+    ) {
+        // Bootstrap receipt only: this deliberately refuses an admitted envelope.
+        // ROOT runs the separate production selector after real admission.
+        assert!(TaskScalarProfile::compiled()
+            .unwrap()
+            .runtime_profiles
+            .is_empty());
+        gnu_text_pages_literal_filter_and_error_recovery(TaskScalarUse::ReferenceQualification)
+            .await;
+    }
+
+    async fn scalar_list(
+        f: &Fixture,
+        credential: Uuid,
+        project: Uuid,
+        query: &ParsedTaskListQuery,
+        scalar_use: TaskScalarUse,
+    ) -> TaskListPage {
+        list_project_tasks_backend_with_use(
+            &f.backend,
+            f.workspace,
+            project,
+            f.user,
+            credential,
+            query,
+            scalar_use,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    }
+
+    async fn gnu_text_pages_literal_filter_and_error_recovery(scalar_use: TaskScalarUse) {
+        let (f, credential, project, status) = setup().await;
+        if matches!(scalar_use, TaskScalarUse::ReferenceQualification) {
+            assert!(matches!(
+                list_project_tasks_backend(&f.backend, f.workspace, project, f.user, credential, &query(None, 7)).await,
+                Err(sqlx::Error::Protocol(message)) if message == "Task scalar runtime qualification unavailable"
+            ));
+        }
+        // Same authorization bridge before any scalar admission or projection.
+        assert!(matches!(
+            list_project_tasks_backend_with_use(
+                &f.backend,
+                f.workspace,
+                project,
+                f.user,
+                Uuid::now_v7(),
+                &query(None, 7),
+                scalar_use
+            )
+            .await,
+            Ok(Err(ProjectDbError::Forbidden))
+        ));
+        assert!(matches!(
+            list_project_tasks_backend_with_use(
+                &f.backend,
+                f.workspace,
+                Uuid::now_v7(),
+                f.user,
+                credential,
+                &query(None, 7),
+                scalar_use
+            )
+            .await,
+            Ok(Err(ProjectDbError::NotFound))
+        ));
+        let (collection, field) = field(&f, project, "text").await;
+        // Actual PG S10 order. IDs scan in C order, not this expected order;
+        // 48 scalar rows + one NULL seed force more than one batch/page.
+        let default = [
+            "e", "E", "e\u{301}", "é", "i", "I", "İ", "ı", "ß", "ẞ", "z", "Z", "σ", "Σ", "ς", "中",
+        ];
+        let c = [
+            "E", "I", "Z", "e", "e\u{301}", "i", "z", "ß", "é", "İ", "ı", "Σ", "ς", "σ", "ẞ", "中",
+        ];
+        for (index, text) in c.iter().enumerate() {
+            for repeat in 0..3 {
+                let id = Uuid::from_u128((index * 3 + repeat + 1) as u128);
+                let item = Uuid::now_v7();
+                sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,content_json,created_by,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'{}',?7,1760000000000000,1760000000000001)")
+                    .bind(id.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(index as i32*3+repeat as i32+2).bind(text).bind(status.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+                sqlx::query("INSERT INTO collection_items(id,workspace_id,collection_id,task_id) VALUES(?1,?2,?3,?4)")
+                    .bind(item.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(collection.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+                sqlx::query("INSERT INTO collection_values(workspace_id,collection_id,item_id,field_id,field_type,value_text) VALUES(?1,?2,?3,?4,'text',?5)")
+                    .bind(f.workspace.as_bytes().as_slice()).bind(collection.as_bytes().as_slice()).bind(item.as_bytes().as_slice()).bind(field.as_bytes().as_slice()).bind(text).execute(&f.pool).await.unwrap();
+            }
+        }
+        let seed: Vec<u8> =
+            sqlx::query_scalar("SELECT id FROM tasks WHERE project_id=?1 AND number=1")
+                .bind(project.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        for direction in ["asc", "desc"] {
+            let raw = json!({"sort":[{"field":field,"direction":direction}]}).to_string();
+            let mut request = query(Some(&raw), 7);
+            let mut actual = Vec::new();
+            loop {
+                let page = scalar_list(&f, credential, project, &request, scalar_use).await;
+                assert_eq!(page.status_counts, vec![(status, 49)]);
+                actual.extend(page.items.iter().map(|item| item.meta.id));
+                assert!(actual.len() <= 49, "duplicate/nonadvancing pagination");
+                let Some(cursor) = page.next_cursor else {
+                    break;
+                };
+                request.cursor = Some(crate::tasks::list_query::decode_cursor(&cursor).unwrap());
+            }
+            let mut ordered = default.to_vec();
+            if direction == "desc" {
+                ordered.reverse();
+            }
+            let mut expected = Vec::new();
+            for text in ordered {
+                let index = c.iter().position(|value| *value == text).unwrap();
+                expected
+                    .extend((0..3).map(|repeat| Uuid::from_u128((index * 3 + repeat + 1) as u128)));
+            }
+            expected.push(Uuid::from_slice(&seed).unwrap());
+            assert_eq!(actual, expected);
+        }
+        // Reverse dotted-I and non-contextual sigma exercise the real filter,
+        // not just a direct case-mapper assertion.
+        for (needle, count) in [("İ", 9), ("Σ", 6), ("%_\\", 0)] {
+            let raw = json!({"filters":{"title":needle}}).to_string();
+            let page =
+                scalar_list(&f, credential, project, &query(Some(&raw), 50), scalar_use).await;
+            assert_eq!(page.items.len(), count);
+            assert_eq!(
+                page.status_counts
+                    .iter()
+                    .map(|(_, count)| *count)
+                    .sum::<i64>(),
+                count as i64
+            );
+        }
+        let invalid = sqlx::query("UPDATE collection_values SET value_text=?1 WHERE item_id=(SELECT id FROM collection_items WHERE task_id=?2)")
+            .bind("bad\0text").bind(Uuid::from_u128(1).as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert_eq!(invalid.rows_affected(), 1);
+        let raw = json!({"sort":[{"field":field,"direction":"asc"}]}).to_string();
+        assert!(
+            matches!(list_project_tasks_backend_with_use(&f.backend, f.workspace, project, f.user, credential, &query(Some(&raw), 7), scalar_use).await,
+            Err(sqlx::Error::Protocol(message)) if message == "Task scalar text contains NUL")
+        );
+        sqlx::query("UPDATE collection_values SET value_text='E' WHERE item_id=(SELECT id FROM collection_items WHERE task_id=?1)").bind(Uuid::from_u128(1).as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert_eq!(
+            scalar_list(&f, credential, project, &query(Some(&raw), 100), scalar_use)
+                .await
+                .items
+                .len(),
+            49
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        f.close().await;
     }
 
     #[tokio::test]
