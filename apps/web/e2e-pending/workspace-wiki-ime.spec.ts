@@ -32,6 +32,7 @@ import type { components } from "../src/generated/api";
  *        ibus exit'
  */
 import { execFileSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { chromium, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import {
   createWikiDoc,
@@ -116,17 +117,152 @@ type LiveEditor = {
     selection: { empty: boolean; $from: { index(depth: number): number; parentOffset: number } };
   };
   view: { posAtDOM(node: Node, offset: number): number; hasFocus(): boolean; focus(): void };
+  on?(event: "transaction", handler: (event: ImeTransaction) => void): void;
+  off?(event: "transaction", handler: (event: ImeTransaction) => void): void;
+};
+
+type ImeTransaction = {
+  transaction: { selectionSet: boolean; docChanged: boolean; getMeta(key: string): unknown };
+};
+type ImeObservationHost = Window & {
+  __fvociImeHomeObservation?: { finish(): unknown };
 };
 
 /** The editor model's top-level blocks: text and UniqueID. */
-async function modelBlocks(page: Page): Promise<Array<{ text: string; id: unknown }>> {
-  return editorLocator(page).evaluate((root) => {
+async function modelBlocks(
+  page: Page,
+  observeHome = false,
+): Promise<Array<{ text: string; id: unknown }>> {
+  return editorLocator(page).evaluate((root, observeHome) => {
     const editor = (root as HTMLElement & { editor?: LiveEditor }).editor;
     if (!editor) throw new Error("missing live editor");
+    // Installed within this existing evaluation only for the mid+peer case:
+    // no extra await before the original paragraph click and native Home.
+    if (observeHome) {
+      const host = root.ownerDocument.defaultView as ImeObservationHost;
+      const doc = root.ownerDocument;
+      const events: Array<Record<string, string | number | boolean | null>> = [];
+      const started = performance.now();
+      let dropped = 0;
+      let setupError = false;
+      let readError = false;
+      let cleanupError = false;
+      let transactionListening = false;
+      let finished = false;
+      const listeners: Array<[string, EventListener, boolean]> = [];
+      const record = (event: string, input?: Event, tx?: ImeTransaction) => {
+        if (finished) return;
+        try {
+          const selection = editor.state.selection;
+          const native = doc.getSelection();
+          let browserBlock = null;
+          let browserOffset = null;
+          if (native?.isCollapsed && native.anchorNode && root.contains(native.anchorNode)) {
+            const pos = editor.state.doc.resolve(
+              editor.view.posAtDOM(native.anchorNode, native.anchorOffset),
+            );
+            browserBlock = pos.index(0);
+            browserOffset = pos.parentOffset;
+          }
+          const key = input instanceof KeyboardEvent ? input.key : "none";
+          const row = {
+            event,
+            key: ["Home", "End", "ArrowRight", "none"].includes(key) ? key : "other",
+            elapsedMs: Math.min(60_000, Math.max(0, Math.round(performance.now() - started))),
+            phase: input?.eventPhase ?? 0,
+            trusted: input?.isTrusted ?? null,
+            prevented: input?.defaultPrevented ?? null,
+            composing: input instanceof KeyboardEvent ? input.isComposing : null,
+            focused: editor.view.hasFocus(),
+            activeInside: !!doc.activeElement && root.contains(doc.activeElement),
+            rootConnected: root.isConnected,
+            sameEditor: (root as HTMLElement & { editor?: LiveEditor }).editor === editor,
+            modelBlock: selection.empty ? selection.$from.index(0) : null,
+            modelOffset: selection.empty ? selection.$from.parentOffset : null,
+            browserBlock,
+            browserOffset,
+            selectionSet: tx?.transaction.selectionSet ?? null,
+            docChanged: tx?.transaction.docChanged ?? null,
+            compositionMeta: tx ? tx.transaction.getMeta("composition") !== undefined : null,
+          };
+          if (events.length === 64) {
+            events.shift();
+            dropped = Math.min(1_000_000, dropped + 1);
+          }
+          events.push(row);
+        } catch {
+          readError = true;
+        }
+      };
+      const transaction = (event: ImeTransaction) => record("transaction", undefined, event);
+      const finish = () => {
+        if (!finished) {
+          record("finish");
+          finished = true;
+          for (const [name, listener, capture] of listeners) {
+            try {
+              doc.removeEventListener(name, listener, capture);
+            } catch {
+              cleanupError = true;
+            }
+          }
+          if (transactionListening) {
+            try {
+              editor.off!("transaction", transaction);
+            } catch {
+              cleanupError = true;
+            }
+          }
+        }
+        return {
+          schema: 1,
+          setupError,
+          readError,
+          cleanupError,
+          transactionAvailable: !!editor.on && !!editor.off,
+          dropped,
+          events,
+        };
+      };
+      try {
+        host.__fvociImeHomeObservation = { finish };
+        for (const name of [
+          "pointerdown",
+          "pointerup",
+          "focus",
+          "blur",
+          "keydown",
+          "keyup",
+          "selectionchange",
+        ]) {
+          for (const capture of [true, false]) {
+            const listener: EventListener = (event) => {
+              if (
+                name !== "selectionchange" &&
+                !(event.target instanceof Node && root.contains(event.target))
+              )
+                return;
+              record(name, event);
+            };
+            // Track before registration so partial setup still cleans up.
+            listeners.push([name, listener, capture]);
+            doc.addEventListener(name, listener, { capture, passive: true });
+          }
+        }
+        if (editor.on && editor.off) {
+          transactionListening = true;
+          editor.on("transaction", transaction);
+        }
+        record("installed");
+      } catch {
+        setupError = true;
+        finish();
+      }
+    }
     const out: Array<{ text: string; id: unknown }> = [];
     editor.state.doc.forEach((node) => out.push({ text: node.textContent, id: node.attrs.id }));
     return out;
-  });
+  }, observeHome);
 }
 
 /** The editor selection as top-level block and offset, null unless collapsed. */
@@ -315,6 +451,91 @@ async function peerEdit(a: Page, b: Page, block: number, expected: string[]): Pr
 const withRemote = (texts: string[], block: number) =>
   texts.map((text, i) => (i === block ? `${text} 원격` : text));
 
+/** Only scalar allowlisted observations leave the page; diagnostic failure
+ * never masks the original oracle. The original context-close await owns this
+ * finalization after the test body, including its failure path. */
+function closeObservedImeContext(ctx: BrowserContext, enabled: boolean): Promise<void> {
+  if (!enabled) return ctx.close();
+  return Promise.resolve()
+    .then(() =>
+      ctx.pages()[0]?.evaluate(() => {
+        const host = window as ImeObservationHost;
+        const result = host.__fvociImeHomeObservation?.finish();
+        delete host.__fvociImeHomeObservation;
+        return result;
+      }),
+    )
+    .then((raw) => {
+      const data = raw as Record<string, unknown> | undefined;
+      const number = (value: unknown, max: number) =>
+        typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= max
+          ? value
+          : null;
+      const boolean = (value: unknown) => (typeof value === "boolean" ? value : null);
+      const rows = Array.isArray(data?.events) ? data.events.slice(-64) : [];
+      const events = rows.map((rawRow: unknown) => {
+        const row = (rawRow ?? {}) as Record<string, unknown>;
+        const out: Record<string, string | number | boolean | null> = {
+          event: [
+            "installed",
+            "finish",
+            "pointerdown",
+            "pointerup",
+            "focus",
+            "blur",
+            "keydown",
+            "keyup",
+            "selectionchange",
+            "transaction",
+          ].includes(row.event as string)
+            ? (row.event as string)
+            : "invalid",
+          key: ["Home", "End", "ArrowRight", "none", "other"].includes(row.key as string)
+            ? (row.key as string)
+            : "invalid",
+          elapsedMs: number(row.elapsedMs, 60_000),
+          phase: number(row.phase, 3),
+        };
+        for (const key of [
+          "trusted",
+          "prevented",
+          "composing",
+          "focused",
+          "activeInside",
+          "rootConnected",
+          "sameEditor",
+          "selectionSet",
+          "docChanged",
+          "compositionMeta",
+        ])
+          out[key] = boolean(row[key]);
+        for (const key of ["modelBlock", "modelOffset", "browserBlock", "browserOffset"])
+          out[key] = number(row[key], 1_000_000);
+        return out;
+      });
+      const output = {
+        schema: 1,
+        available: data?.schema === 1,
+        setupError: boolean(data?.setupError),
+        readError: boolean(data?.readError),
+        cleanupError: boolean(data?.cleanupError),
+        transactionAvailable: boolean(data?.transactionAvailable),
+        dropped: number(data?.dropped, 1_000_000),
+        truncated:
+          (number(data?.dropped, 1_000_000) ?? 0) > 0 ||
+          rows.length !== (data?.events as unknown[] | undefined)?.length,
+        events,
+      };
+      const path = test.info().outputPath("ime-home-observations.json");
+      const body = JSON.stringify(output);
+      if (Buffer.byteLength(body, "utf8") > 32_768) return;
+      writeFileSync(path, body, { flag: "wx", mode: 0o600 });
+      return test.info().attach("ime-home-observations", { path, contentType: "application/json" });
+    })
+    .catch(() => undefined)
+    .finally(() => ctx.close());
+}
+
 for (const where of ["end", "empty", "mid"] as const) {
   for (const remote of [false, true]) {
     test(`CDP composition with the caret after the marked text (${where}${remote ? ", peer edit during preedit" : ""}) leaves no stray jamo`, async ({
@@ -338,7 +559,11 @@ for (const where of ["end", "empty", "mid"] as const) {
           await waitConnected(b);
         }
         await expectBlocks(a, SEED);
-        expect((await modelBlocks(a)).map((block) => block.id)).toEqual([null, null, null]);
+        expect((await modelBlocks(a, where === "mid" && remote)).map((block) => block.id)).toEqual([
+          null,
+          null,
+          null,
+        ]);
         await placeCaret(a, where);
 
         // Chromium's IME input path: each step replaces the marked text, the
@@ -376,7 +601,7 @@ for (const where of ["end", "empty", "mid"] as const) {
         const assigned = ids.filter((id) => id !== null);
         expect(new Set(assigned).size).toBe(assigned.length);
       } finally {
-        await ctxA.close();
+        await closeObservedImeContext(ctxA, where === "mid" && remote);
         await ctxB.close();
       }
     });
