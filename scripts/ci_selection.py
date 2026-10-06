@@ -1978,10 +1978,18 @@ def verify_shipping_observer_workflow(path: Path) -> list[str]:
         return [f"{path.name}: {error}"]
     checkout = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
     expected = {
-        "name": "Shipping cgroup observation", "on": {"workflow_dispatch": None},
+        "name": "Shipping cgroup observation",
+        "on": {"push": {"branches": ["fvoci/v060-shipping-551-reviewed"]}, "workflow_dispatch": None},
         "permissions": {"contents": "read"},
         "concurrency": {"group": "shipping-cgroup-observer", "cancel-in-progress": False},
-        "jobs": {"observe": {
+        "jobs": {"bootstrap": {
+            "if": "github.event_name == 'push' && github.repository == 'AISFlow/fvoci' && github.ref == 'refs/heads/fvoci/v060-shipping-551-reviewed'",
+            "runs-on": "ubuntu-26.04", "timeout-minutes": 5,
+            "steps": [
+                {"uses": checkout, "with": {"ref": "${{ github.sha }}", "path": "tooling", "persist-credentials": False}},
+                {"name": "Pure observer controls", "run": "python3 -B tooling/scripts/selected-backend-ci/test-shipping-cgroup-observer.py"},
+            ],
+        }, "observe": {
             "if": "github.event_name == 'workflow_dispatch' && github.repository == 'AISFlow/fvoci' && github.ref == 'refs/heads/fvoci/v060-shipping-551-reviewed'",
             "runs-on": "ubuntu-26.04", "timeout-minutes": 5,
             "steps": [

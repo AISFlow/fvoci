@@ -2366,6 +2366,7 @@ class RegistryMutationCliTest(unittest.TestCase):
 
     def test_shipping_observer_manual_mutations_refuse_before_outputs(self) -> None:
         cases = [
+            ("branches: [fvoci/v060-shipping-551-reviewed]", "branches: [main]"),
             ("  workflow_dispatch:\n", "  pull_request_target:\n"),
             ("  workflow_dispatch:\n", "  workflow_dispatch:\n    inputs:\n      ref:\n        type: string\n"),
             ("  contents: read", "  contents: write"),
@@ -2381,6 +2382,7 @@ class RegistryMutationCliTest(unittest.TestCase):
             ("    timeout-minutes: 5\n", "    timeout-minutes: 5\n    environment: production\n"),
             ("    timeout-minutes: 5\n", "    timeout-minutes: 5\n    env:\n      TOKEN: ${{ secrets.TOKEN }}\n"),
             ("test-shipping-cgroup-observer.py", "test-shipping-cgroup-observer.py || true"),
+            ("test-shipping-cgroup-observer.py", "shipping-cgroup-observer.py"),
             ("run: python3 -B tooling/scripts/selected-backend-ci/shipping-cgroup-observer.py", "run: python3 -B tooling/scripts/selected-backend-ci/shipping-image-producer.py"),
             ("run: python3 -B tooling/scripts/selected-backend-ci/shipping-cgroup-observer.py", "run: sudo python3 -B tooling/scripts/selected-backend-ci/shipping-cgroup-observer.py"),
             ("run: python3 -B tooling/scripts/selected-backend-ci/shipping-cgroup-observer.py", "run: python3 -B tooling/scripts/selected-backend-ci/shipping-cgroup-observer.py --reader /foreign"),
