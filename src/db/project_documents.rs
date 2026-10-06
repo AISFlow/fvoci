@@ -2553,7 +2553,7 @@ mod selected_metadata_backend_tests {
             CreateDocumentInput {
                 parent_id: Some(f.document),
                 title: "Metadata 한글 child",
-                icon: Some("📄"),
+                icon: Some(Some("📄")),
             },
             None,
         )
