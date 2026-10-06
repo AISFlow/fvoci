@@ -35,7 +35,7 @@ use crate::db::task_activity::{
 };
 use crate::db::tasks::{
     add_task_dependency, create_task, get_task_backend as get_task, list_project_dependencies,
-    list_project_tasks, move_task, patch_task_meta, remove_task_dependency, restore_task,
+    list_project_tasks_backend, move_task, patch_task_meta, remove_task_dependency, restore_task,
     trash_task, CreateTaskInput,
 };
 use crate::error::{AppError, ProblemCode};
@@ -1092,13 +1092,8 @@ async fn list_tasks(
     )
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
-    let result = list_project_tasks(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/tasks.rs")
-            .map_err(internal)?,
+    let result = list_project_tasks_backend(
+        &state.auth.db.pool,
         workspace_id,
         project_id,
         actor_user_id,

@@ -1,4 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
+use std::str::FromStr;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{json, Value};
@@ -25,8 +27,9 @@ use crate::db::projects::{
 };
 use crate::db::task_activity::{record_task_activity, task_activity_snapshot};
 use crate::db::view_query::{
-    compile_view_query, due_date_sql, scalar_value_sql, value_column, CompileOptions, CompiledView,
-    RootKind, SqlArgs, ViewScope,
+    compile_view_query, due_date_sql, prepare_selected_task_view, scalar_value_sql, selected_ids,
+    value_column, CompileOptions, CompiledView, CustomPolicy, RootKind, ScalarPolicy,
+    SelectedTaskView, SqlArgs, ViewScope,
 };
 use crate::db::workspace::workspace_is_live;
 use crate::projects::ProjectPermission;
@@ -2128,6 +2131,677 @@ pub async fn list_project_tasks(
         query,
     )
     .await
+}
+
+/// The selected project route uses the original PostgreSQL reader, or one
+/// authorized family snapshot. No read response is returned before release is
+/// acknowledged; cleanup uncertainty retains the original refusal/error.
+pub async fn list_project_tasks_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    project: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    query: &ParsedTaskListQuery,
+) -> Result<Result<TaskListPage, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_project_tasks(pool, workspace, project, actor, credential, query).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        if !op.session_is_live(actor, credential).await? {
+            return Ok(Err(ProjectDbError::Forbidden));
+        }
+        if !op.workspace_is_live(workspace).await?
+            || !op
+                .project_permission_by_id(workspace, actor, project)
+                .await?
+                .is_some_and(|permission| permission.at_least(ProjectPermission::View))
+        {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        let OperationTx::SqliteFamily(family) = op else {
+            unreachable!("PostgreSQL uses the preserved project reader")
+        };
+        family.require_tenant(workspace)?;
+        list_project_tasks_family(family, workspace, project, actor, query).await
+    }
+    .await;
+    if let Err(cleanup) = tx.rollback().await {
+        let original: Option<Box<dyn std::error::Error + Send + Sync>> = match result {
+            Ok(Err(refusal)) => Some(Box::new(ProjectTasksReadRefusal(refusal))),
+            Err(error) => Some(Box::new(error)),
+            Ok(Ok(_)) => None,
+        };
+        return Err(crate::db::backend::rollback_cleanup_unknown(
+            original, cleanup,
+        ));
+    }
+    result
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("project tasks read refused: {0:?}")]
+struct ProjectTasksReadRefusal(ProjectDbError);
+
+/// Exact typed values; decimal text is never cast to REAL or an integer.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum TaskScalar {
+    Text(String),
+    Number(bigdecimal::BigDecimal),
+    Date(NaiveDate),
+    Instant(DateTime<Utc>),
+    Boolean(bool),
+    Integer(i32),
+}
+
+impl TaskScalar {
+    fn from_policy(policy: &ScalarPolicy) -> Result<Self, sqlx::Error> {
+        Ok(match policy {
+            ScalarPolicy::Text(value) => Self::Text(value.clone()),
+            ScalarPolicy::Number(value) => Self::Number(decimal_value(value)?),
+            ScalarPolicy::Date(value) => Self::Date(*value),
+            ScalarPolicy::Instant(value) => Self::Instant(*value),
+            ScalarPolicy::Boolean(value) => Self::Boolean(*value),
+        })
+    }
+}
+
+fn decimal_value(value: &str) -> Result<bigdecimal::BigDecimal, sqlx::Error> {
+    bigdecimal::BigDecimal::from_str(value)
+        .map_err(|_| sqlx::Error::Protocol("invalid stored Task decimal".into()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskOrderCell {
+    value: Option<TaskScalar>,
+    desc: bool,
+}
+
+impl Ord for TaskOrderCell {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Different query plans are never mixed in one heap; keep Ord/Eq
+        // consistent even if a caller accidentally compares two plans.
+        if self.desc != other.desc {
+            return self.desc.cmp(&other.desc);
+        }
+        // NULLS LAST is independent of direction, just as in the SQL tuple.
+        match (&self.value, &other.value) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(_), None) => Ordering::Less,
+            (Some(left), Some(right)) => {
+                let order = left.cmp(right);
+                if self.desc {
+                    order.reverse()
+                } else {
+                    order
+                }
+            }
+        }
+    }
+}
+impl PartialOrd for TaskOrderCell {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TaskPageKey {
+    cells: Vec<TaskOrderCell>,
+    id: Uuid,
+}
+
+#[derive(Debug, Clone)]
+struct TaskProjection {
+    id: Uuid,
+    number: i32,
+    title: String,
+    priority: String,
+    status: Uuid,
+    start: Option<NaiveDate>,
+    due_date: Option<NaiveDate>,
+    due_at: Option<DateTime<Utc>>,
+    rank: String,
+    created: DateTime<Utc>,
+    updated: DateTime<Utc>,
+    status_rank: String,
+    scalars: HashMap<Uuid, TaskScalar>,
+}
+
+impl TaskProjection {
+    fn from_row(row: &FamilyRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.cell(0)?.id()?,
+            number: row.cell(1)?.int32()?,
+            title: row.cell(2)?.string()?,
+            priority: row.cell(3)?.string()?,
+            status: row.cell(4)?.id()?,
+            start: row.cell(5)?.optional(Cell::date)?,
+            due_date: row.cell(6)?.optional(Cell::date)?,
+            due_at: row.cell(7)?.optional(Cell::datetime)?,
+            rank: row.cell(8)?.string()?,
+            created: row.cell(9)?.datetime()?,
+            updated: row.cell(10)?.datetime()?,
+            status_rank: row.cell(11)?.string()?,
+            scalars: HashMap::new(),
+        })
+    }
+
+    fn due(&self, zone: &TaskTimeZone) -> Result<Option<NaiveDate>, sqlx::Error> {
+        match (self.due_date, self.due_at) {
+            (Some(date), _) => Ok(Some(date)),
+            (None, Some(at)) => zone.date(at).map(Some),
+            (None, None) => Ok(None),
+        }
+    }
+
+    fn page_key(&self, sort: &[ViewSort], zone: &TaskTimeZone) -> Result<TaskPageKey, sqlx::Error> {
+        let due = self.due(zone)?;
+        let cells = sort
+            .iter()
+            .map(|entry| TaskOrderCell {
+                desc: entry.direction == SortDirection::Desc,
+                value: match entry.field {
+                    SortField::Field(id) => self.scalars.get(&id).cloned(),
+                    SortField::Due => due.map(TaskScalar::Date),
+                    SortField::Created => Some(TaskScalar::Instant(self.created)),
+                    SortField::Updated => Some(TaskScalar::Instant(self.updated)),
+                    SortField::Number => Some(TaskScalar::Integer(self.number)),
+                    SortField::Priority => Some(TaskScalar::Integer(
+                        crate::tasks::list_query::priority_rank(&self.priority),
+                    )),
+                    SortField::Title => Some(TaskScalar::Text(self.title.clone())),
+                    SortField::Rank => Some(TaskScalar::Text(self.rank.clone())),
+                    SortField::Status => Some(TaskScalar::Text(self.status_rank.clone())),
+                },
+            })
+            .collect();
+        Ok(TaskPageKey { cells, id: self.id })
+    }
+
+    fn cursor_key(&self, sort: &[ViewSort], zone: &TaskTimeZone) -> Result<String, sqlx::Error> {
+        // Family cursors have their own version/catalog/TZDB fingerprint; the
+        // original PostgreSQL key and token spelling remain unchanged.
+        let tokens: Vec<_> = sort
+            .iter()
+            .filter_map(|entry| match entry.field {
+                SortField::Field(id) => Some((
+                    id,
+                    self.scalars.get(&id).map(|value| match value {
+                        TaskScalar::Number(number) => number.normalized().to_string(),
+                        TaskScalar::Text(text) => text.clone(),
+                        TaskScalar::Date(date) => date.to_string(),
+                        TaskScalar::Instant(at) => at.to_rfc3339(),
+                        TaskScalar::Boolean(flag) => flag.to_string(),
+                        TaskScalar::Integer(number) => number.to_string(),
+                    }),
+                )),
+                _ => None,
+            })
+            .collect();
+        Ok(cursor_key_for_row(
+            sort,
+            self.id,
+            self.created,
+            self.updated,
+            self.number,
+            &self.title,
+            &self.rank,
+            &self.priority,
+            &self.status_rank,
+            self.due(zone)?,
+            &tokens,
+        ))
+    }
+}
+
+struct TaskTimeZone {
+    name: String,
+    zone: tz::TimeZone,
+}
+impl TaskTimeZone {
+    fn from_name(name: &str) -> Result<Self, sqlx::Error> {
+        // PostgreSQL's current reader uses exact known-name membership and UTC
+        // fallback. Do not accidentally broaden it through get's case folding.
+        let name = if jiff_tzdb::available().any(|known| known == name) {
+            name
+        } else {
+            "UTC"
+        };
+        let (_, data) = jiff_tzdb::get(name)
+            .ok_or_else(|| sqlx::Error::Protocol("bundled Task time zone unavailable".into()))?;
+        let zone = tz::TimeZone::from_tz_data(data)
+            .map_err(|_| sqlx::Error::Protocol("bundled Task TZif invalid".into()))?;
+        Ok(Self {
+            name: name.to_owned(),
+            zone,
+        })
+    }
+    fn date(&self, at: DateTime<Utc>) -> Result<NaiveDate, sqlx::Error> {
+        let local = tz::DateTime::from_timespec(
+            at.timestamp(),
+            at.timestamp_subsec_nanos(),
+            self.zone.as_ref(),
+        )
+        .map_err(|_| sqlx::Error::Protocol("Task time zone projection failed".into()))?;
+        NaiveDate::from_ymd_opt(
+            local.year(),
+            u32::from(local.month()),
+            u32::from(local.month_day()),
+        )
+        .ok_or_else(|| sqlx::Error::Protocol("Task projected date out of range".into()))
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct TaskPageEntry {
+    key: TaskPageKey,
+    cursor_key: String,
+}
+impl Ord for TaskPageEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key
+            .cmp(&other.key)
+            .then_with(|| self.cursor_key.cmp(&other.cursor_key))
+    }
+}
+impl PartialOrd for TaskPageEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn retain_task_top_k(heap: &mut BinaryHeap<TaskPageEntry>, entry: TaskPageEntry, capacity: usize) {
+    if heap.len() < capacity {
+        heap.push(entry);
+    } else if heap.peek().is_some_and(|largest| entry.key < largest.key) {
+        heap.pop();
+        heap.push(entry);
+    }
+}
+
+/// Both local and remote family query APIs collect one statement's rows. This
+/// fixed projection (not the body/recurrence DTO) is therefore bounded to 32;
+/// EOF, not an arbitrary candidate ceiling, proves every count and page.
+async fn task_projection_batch(
+    tx: &mut FamilyTx,
+    workspace: Uuid,
+    project: Uuid,
+    actor: Uuid,
+    query: &ParsedTaskListQuery,
+    after: Option<Uuid>,
+    anchor: Option<Uuid>,
+) -> Result<Vec<TaskProjection>, sqlx::Error> {
+    let filters = &query.view.filters;
+    let optional_id = |id: Option<Uuid>| id.map(Cell::uuid).unwrap_or(Cell::Null);
+    let assignee = filters.assignee_id.as_ref().map(|assignee| match assignee {
+        AssigneeFilter::Me => actor,
+        AssigneeFilter::User(id) => *id,
+    });
+    let args = [
+        Cell::uuid(workspace),
+        Cell::uuid(project),
+        optional_id(after),
+        Cell::Integer(i64::from(query.archived)),
+        filters
+            .task_type
+            .as_ref()
+            .map(|value| Cell::Text(value.clone()))
+            .unwrap_or(Cell::Null),
+        optional_id(filters.status_id),
+        filters
+            .priority
+            .as_ref()
+            .map(|value| Cell::Text(value.clone()))
+            .unwrap_or(Cell::Null),
+        Cell::Integer(i64::from(filters.open_only)),
+        optional_id(filters.label_id),
+        optional_id(filters.milestone_id),
+        optional_id(assignee),
+        optional_id(anchor),
+    ];
+    tx.query(
+        "SELECT t.id,t.number,t.title,t.priority,t.status_id,t.start_date,t.due_date,t.due_at,t.sort_key,t.created_at,t.updated_at,s.sort_key FROM tasks t JOIN statuses s ON s.workspace_id=t.workspace_id AND s.project_id=t.project_id AND s.id=t.status_id WHERE t.workspace_id=?1 AND t.project_id=?2 AND t.deleted_at IS NULL AND ((?12 IS NOT NULL AND t.id=?12) OR (?12 IS NULL AND (?3 IS NULL OR t.id>?3) AND (t.archived_at IS NOT NULL)=?4 AND (?5 IS NULL OR t.type=?5) AND (?6 IS NULL OR t.status_id=?6) AND (?7 IS NULL OR t.priority=?7) AND (?8=0 OR s.category NOT IN ('done','canceled')) AND (?9 IS NULL OR EXISTS(SELECT 1 FROM task_labels l WHERE l.workspace_id=t.workspace_id AND l.task_id=t.id AND l.label_id=?9)) AND (?10 IS NULL OR t.milestone_id=?10) AND (?11 IS NULL OR EXISTS(SELECT 1 FROM task_assignees a WHERE a.workspace_id=t.workspace_id AND a.task_id=t.id AND a.user_id=?11)))) ORDER BY t.id LIMIT 32",
+        &args,
+    ).await?.iter().map(TaskProjection::from_row).collect()
+}
+
+async fn task_projection_values(
+    tx: &mut FamilyTx,
+    workspace: Uuid,
+    plan: &SelectedTaskView,
+    candidates: &mut [TaskProjection],
+) -> Result<HashSet<Uuid>, sqlx::Error> {
+    let ids: Vec<_> = candidates.iter().map(|row| row.id).collect();
+    let scalar_ids: Vec<_> = plan
+        .catalog
+        .iter()
+        .filter(|field| value_column(&field.field_type).is_some())
+        .map(|field| field.id)
+        .collect();
+    let mut values = HashMap::new();
+    if !scalar_ids.is_empty() && !ids.is_empty() {
+        let rows = tx.query(
+            "SELECT ci.task_id,v.field_id,v.value_text,v.value_number,v.value_date,v.value_ts,v.value_bool FROM collection_items ci JOIN collection_values v ON v.workspace_id=ci.workspace_id AND v.collection_id=ci.collection_id AND v.item_id=ci.id WHERE ci.workspace_id=?1 AND hex(ci.task_id) IN (SELECT value FROM json_each(?2)) AND hex(v.field_id) IN (SELECT value FROM json_each(?3))",
+            &[Cell::uuid(workspace), selected_ids(&ids), selected_ids(&scalar_ids)],
+        ).await?;
+        for row in rows {
+            let task = row.cell(0)?.id()?;
+            let field = row.cell(1)?.id()?;
+            let kind = &plan
+                .catalog
+                .iter()
+                .find(|entry| entry.id == field)
+                .ok_or_else(|| sqlx::Error::Protocol("Task scalar catalog mismatch".into()))?
+                .field_type;
+            let value = match kind.as_str() {
+                "text" | "paragraph" => TaskScalar::Text(row.cell(2)?.string()?),
+                "number" => TaskScalar::Number(decimal_value(&row.cell(3)?.string()?)?),
+                "date" => TaskScalar::Date(row.cell(4)?.date()?),
+                "datetime" => TaskScalar::Instant(row.cell(5)?.datetime()?),
+                "checkbox" => TaskScalar::Boolean(row.cell(6)?.boolean()?),
+                _ => return Err(sqlx::Error::Protocol("invalid Task scalar type".into())),
+            };
+            if values.insert((task, field), value).is_some() {
+                return Err(sqlx::Error::Protocol(
+                    "duplicate Task scalar projection".into(),
+                ));
+            }
+        }
+    }
+    let mut matches: HashSet<_> = ids.iter().copied().collect();
+    for (field, policy) in &plan.predicates {
+        match policy {
+            CustomPolicy::Scalar { equals, .. } => {
+                let expected = equals.as_ref().map(TaskScalar::from_policy).transpose()?;
+                matches.retain(|task| values.get(&(*task, *field)) == expected.as_ref());
+            }
+            CustomPolicy::Set { people, equals } => {
+                // EXISTS makes one result per candidate even for an unbounded
+                // historical set. It does not copy every option/person row.
+                let sql = if *people {
+                    "SELECT t.id,EXISTS(SELECT 1 FROM collection_items ci JOIN collection_people v ON v.workspace_id=ci.workspace_id AND v.collection_id=ci.collection_id AND v.item_id=ci.id WHERE ci.workspace_id=t.workspace_id AND ci.task_id=t.id AND v.field_id=?3 AND (?4 IS NULL OR v.user_id=?4)) FROM tasks t WHERE t.workspace_id=?1 AND hex(t.id) IN (SELECT value FROM json_each(?2))"
+                } else {
+                    "SELECT t.id,EXISTS(SELECT 1 FROM collection_items ci JOIN collection_choices v ON v.workspace_id=ci.workspace_id AND v.collection_id=ci.collection_id AND v.item_id=ci.id WHERE ci.workspace_id=t.workspace_id AND ci.task_id=t.id AND v.field_id=?3 AND (?4 IS NULL OR v.option_id=?4)) FROM tasks t WHERE t.workspace_id=?1 AND hex(t.id) IN (SELECT value FROM json_each(?2))"
+                };
+                let rows = tx
+                    .query(
+                        sql,
+                        &[
+                            Cell::uuid(workspace),
+                            selected_ids(&ids),
+                            Cell::uuid(*field),
+                            equals.map(Cell::uuid).unwrap_or(Cell::Null),
+                        ],
+                    )
+                    .await?;
+                for row in rows {
+                    if row.cell(1)?.boolean()? != equals.is_some() {
+                        matches.remove(&row.cell(0)?.id()?);
+                    }
+                }
+            }
+        }
+    }
+    for candidate in candidates {
+        for field in &scalar_ids {
+            if let Some(value) = values.remove(&(candidate.id, *field)) {
+                candidate.scalars.insert(*field, value);
+            }
+        }
+    }
+    Ok(matches)
+}
+
+fn task_projection_matches(
+    row: &TaskProjection,
+    query: &ParsedTaskListQuery,
+    zone: &TaskTimeZone,
+) -> Result<bool, sqlx::Error> {
+    // Qualification boundary: PostgreSQL casts the query's RFC3339 text
+    // to microseconds. The allocated PG vectors must establish that precision
+    // adapter before this selected reader is adopted.
+    if row.created > query.as_of {
+        return Ok(false);
+    }
+    if let Some(title) = &query.view.filters.title {
+        // '%'/'_'/'\\' remain literal substring characters, not LIKE syntax.
+        // Unicode case mappings/default collation also require the pinned PG
+        // qualification; std lowercase is not claimed to prove ILIKE equality.
+        if !row.title.to_lowercase().contains(&title.to_lowercase()) {
+            return Ok(false);
+        }
+    }
+    if let Some(before) = query.view.filters.due_before {
+        if !row.due(zone)?.is_some_and(|due| due <= before) {
+            return Ok(false);
+        }
+    }
+    if let (Some(from), Some(to)) = (query.from, query.to) {
+        // The original window uses UTC endpoints; actor-local Due is a
+        // separate sort/filter expression. PostgreSQL LEAST/GREATEST ignore
+        // a single NULL, and a wholly undated row does not intersect a window.
+        let due = row
+            .due_date
+            .or_else(|| row.due_at.map(|at| at.date_naive()));
+        let ends = row.start.into_iter().chain(due).collect::<Vec<_>>();
+        if !ends.iter().min().is_some_and(|date| *date <= to)
+            || !ends.iter().max().is_some_and(|date| *date >= from)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn list_project_tasks_family(
+    tx: &mut FamilyTx,
+    workspace: Uuid,
+    project: Uuid,
+    actor: Uuid,
+    query: &ParsedTaskListQuery,
+) -> Result<Result<TaskListPage, ProjectDbError>, sqlx::Error> {
+    let ws_project = [Cell::uuid(workspace), Cell::uuid(project)];
+    for (sql, value) in [
+        ("SELECT EXISTS(SELECT 1 FROM labels WHERE workspace_id=?1 AND project_id=?2 AND id=?3)", query.view.filters.label_id),
+        ("SELECT EXISTS(SELECT 1 FROM milestones WHERE workspace_id=?1 AND project_id=?2 AND id=?3)", query.view.filters.milestone_id),
+    ] {
+        if let Some(id) = value {
+            if !tx.query(sql, &[ws_project[0].clone(),ws_project[1].clone(),Cell::uuid(id)]).await?
+                .first().ok_or(sqlx::Error::RowNotFound)?.cell(0)?.boolean()? {
+                return Ok(Err(ProjectDbError::InvalidInput));
+            }
+        }
+    }
+    if let Some(AssigneeFilter::User(user)) = query.view.filters.assignee_id {
+        if !tx.query("SELECT EXISTS(SELECT 1 FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.workspace_id=?1 AND u.id=?2 AND u.deleted_at IS NULL)", &[Cell::uuid(workspace),Cell::uuid(user)]).await?
+            .first().ok_or(sqlx::Error::RowNotFound)?.cell(0)?.boolean()? {
+            return Ok(Err(ProjectDbError::InvalidInput));
+        }
+    }
+    let name_rows = tx
+        .query(
+            "SELECT timezone FROM users WHERE id=?1",
+            &[Cell::uuid(actor)],
+        )
+        .await?;
+    let zone = TaskTimeZone::from_name(
+        &name_rows
+            .first()
+            .ok_or(sqlx::Error::RowNotFound)?
+            .cell(0)?
+            .string()?,
+    )?;
+    let plan = match prepare_selected_task_view(
+        tx,
+        ViewScope {
+            workspace_id: workspace,
+            project_id: Some(project),
+            collection_id: None,
+            kind: RootKind::Task,
+        },
+        &query.view,
+    )
+    .await?
+    {
+        Ok(plan) => plan,
+        Err(_) => return Ok(Err(ProjectDbError::InvalidInput)),
+    };
+    let fingerprint = {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(json!({
+        "policy": "selected-task-1", "tzdb": jiff_tzdb::VERSION,
+        "query": filter_fingerprint(workspace, Some(project), &zone.name, query),
+        "actor": actor,
+        "catalog": plan.catalog.iter().map(|field| (field.id, field.version)).collect::<Vec<_>>()
+        }).to_string().as_bytes()))
+    };
+    if query
+        .cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.f != fingerprint)
+    {
+        return Ok(Err(ProjectDbError::InvalidCursor));
+    }
+    let anchor = if let Some(cursor) = &query.cursor {
+        let mut rows =
+            task_projection_batch(tx, workspace, project, actor, query, None, Some(cursor.id))
+                .await?;
+        task_projection_values(tx, workspace, &plan, &mut rows).await?;
+        let Some(row) = rows.first() else {
+            return Ok(Err(ProjectDbError::InvalidCursor));
+        };
+        if row.cursor_key(&plan.sort, &zone)? != cursor.key {
+            return Ok(Err(ProjectDbError::InvalidCursor));
+        }
+        Some(row.page_key(&plan.sort, &zone)?)
+    } else {
+        None
+    };
+    let capacity = usize::try_from(query.limit)
+        .map_err(|_| sqlx::Error::Protocol("invalid parsed Task limit".into()))?
+        .checked_add(1)
+        .ok_or_else(|| sqlx::Error::Protocol("Task page limit overflow".into()))?;
+    let mut counts = BTreeMap::<Uuid, i64>::new();
+    let mut heap = BinaryHeap::with_capacity(capacity);
+    let mut after = None;
+    loop {
+        let mut rows =
+            task_projection_batch(tx, workspace, project, actor, query, after, None).await?;
+        if rows.is_empty() {
+            break;
+        }
+        let matches = task_projection_values(tx, workspace, &plan, &mut rows).await?;
+        for row in rows {
+            if after.is_some_and(|previous| row.id <= previous) {
+                return Err(sqlx::Error::Protocol("Task scan did not advance".into()));
+            }
+            after = Some(row.id);
+            if !matches.contains(&row.id) || !task_projection_matches(&row, query, &zone)? {
+                continue;
+            }
+            let count = counts.entry(row.status).or_default();
+            *count = count
+                .checked_add(1)
+                .ok_or_else(|| sqlx::Error::Protocol("Task count overflow".into()))?;
+            let key = row.page_key(&plan.sort, &zone)?;
+            if anchor.as_ref().is_some_and(|anchor| key <= *anchor) {
+                continue;
+            }
+            retain_task_top_k(
+                &mut heap,
+                TaskPageEntry {
+                    key,
+                    cursor_key: row.cursor_key(&plan.sort, &zone)?,
+                },
+                capacity,
+            );
+        }
+    }
+    let mut selected = heap.into_sorted_vec();
+    let has_more = selected.len() == capacity;
+    selected.truncate(capacity - 1);
+    let next_cursor = if has_more {
+        selected.last().map(|last| {
+            encode_cursor(&TaskListCursor {
+                id: last.key.id,
+                key: last.cursor_key.clone(),
+                f: fingerprint,
+                as_of: query.as_of,
+            })
+        })
+    } else {
+        None
+    };
+    let ids = selected
+        .iter()
+        .map(|entry| entry.key.id)
+        .collect::<Vec<_>>();
+    let mut items = hydrate_selected_tasks(tx, workspace, project, &ids).await?;
+    let ordered = ids
+        .into_iter()
+        .map(|id| {
+            items
+                .remove(&id)
+                .ok_or_else(|| sqlx::Error::Protocol("selected Task hydration missing".into()))
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    Ok(Ok(TaskListPage {
+        items: ordered,
+        status_counts: counts.into_iter().collect(),
+        next_cursor,
+    }))
+}
+
+async fn hydrate_selected_tasks(
+    tx: &mut FamilyTx,
+    workspace: Uuid,
+    project: Uuid,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, TaskListItemRow>, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let args = [
+        Cell::uuid(workspace),
+        Cell::uuid(project),
+        selected_ids(ids),
+    ];
+    let rows = tx.query("SELECT id,project_id,number,title,type,priority,status_id,start_date,due_date,due_at,estimate,parent_id,milestone_id,sort_key,schema_version,version,archived_at,created_by,created_at,updated_at,recurrence FROM tasks WHERE workspace_id=?1 AND project_id=?2 AND deleted_at IS NULL AND hex(id) IN (SELECT value FROM json_each(?3))", &args).await?;
+    let mut items = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let record = map_task_detail_family_row(&row)?;
+        let id = record.id;
+        if items
+            .insert(
+                id,
+                TaskListItemRow {
+                    meta: row_to_meta(workspace, record, row.cell(20)?.optional(Cell::value)?),
+                    assignee_ids: Vec::new(),
+                    label_ids: Vec::new(),
+                },
+            )
+            .is_some()
+        {
+            return Err(sqlx::Error::Protocol("duplicate Task hydration".into()));
+        }
+    }
+    for (sql, assignees) in [
+        ("SELECT task_id,user_id FROM task_assignees WHERE workspace_id=?1 AND hex(task_id) IN (SELECT value FROM json_each(?2)) ORDER BY task_id,user_id", true),
+        ("SELECT task_id,label_id FROM task_labels WHERE workspace_id=?1 AND hex(task_id) IN (SELECT value FROM json_each(?2)) ORDER BY task_id,label_id", false),
+    ] {
+        for row in tx.query(sql, &[Cell::uuid(workspace),selected_ids(ids)]).await? {
+            let item = items.get_mut(&row.cell(0)?.id()?)
+                .ok_or_else(|| sqlx::Error::Protocol("Task reference hydration mismatch".into()))?;
+            if assignees { item.assignee_ids.push(row.cell(1)?.id()?); }
+            else { item.label_ids.push(row.cell(1)?.id()?); }
+        }
+    }
+    Ok(items)
 }
 
 /// Source `listTasks(projectId = null)`: live tasks of every live project the
@@ -5491,5 +6165,641 @@ mod selected_import_task_tests {
         no_effects(&f).await;
         f.backend.close().await.unwrap();
         std::fs::remove_dir_all(&f.root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod selected_task_projection_tests {
+    use super::*;
+
+    fn projection(id: u128) -> TaskProjection {
+        TaskProjection {
+            id: Uuid::from_u128(id),
+            number: id as i32,
+            title: "literal %_\\ 😀".into(),
+            priority: "none".into(),
+            status: Uuid::nil(),
+            start: None,
+            due_date: None,
+            due_at: None,
+            rank: "V".into(),
+            created: DateTime::from_timestamp(1760000000, 0).unwrap(),
+            updated: DateTime::from_timestamp(1760000000, 0).unwrap(),
+            status_rank: "V".into(),
+            scalars: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn selected_decimal_orders_exact_large_and_fractional_values() {
+        let values = [
+            "9007199254740993",
+            "10",
+            "9",
+            "9007199254740992",
+            "0.0000000000000000002",
+            "0.0000000000000000001",
+            "-10",
+        ];
+        let mut sorted = values
+            .into_iter()
+            .map(|value| (decimal_value(value).unwrap(), value))
+            .collect::<Vec<_>>();
+        sorted.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            sorted.iter().map(|entry| entry.1).collect::<Vec<_>>(),
+            vec![
+                "-10",
+                "0.0000000000000000001",
+                "0.0000000000000000002",
+                "9",
+                "10",
+                "9007199254740992",
+                "9007199254740993"
+            ]
+        );
+        assert_eq!(
+            decimal_value("+009.000").unwrap(),
+            decimal_value("9").unwrap()
+        );
+        assert_ne!(
+            decimal_value("9007199254740992").unwrap(),
+            decimal_value("9007199254740993").unwrap()
+        );
+    }
+
+    #[test]
+    fn selected_top_k_nulls_last_both_directions_and_uuid_ties() {
+        let field = Uuid::from_u128(999);
+        let zone = TaskTimeZone::from_name("UTC").unwrap();
+        for (direction, expected) in [
+            (SortDirection::Asc, vec![1, 2, 3, 4]),
+            (SortDirection::Desc, vec![3, 1, 2, 4]),
+        ] {
+            let sort = vec![ViewSort {
+                field: SortField::Field(field),
+                direction,
+            }];
+            let mut heap = BinaryHeap::new();
+            for (id, number) in [
+                (5, None),
+                (3, Some("10")),
+                (2, Some("9")),
+                (4, None),
+                (1, Some("9")),
+            ] {
+                let mut row = projection(id);
+                if let Some(number) = number {
+                    row.scalars
+                        .insert(field, TaskScalar::Number(decimal_value(number).unwrap()));
+                }
+                retain_task_top_k(
+                    &mut heap,
+                    TaskPageEntry {
+                        key: row.page_key(&sort, &zone).unwrap(),
+                        cursor_key: row.cursor_key(&sort, &zone).unwrap(),
+                    },
+                    4,
+                );
+                assert!(heap.len() <= 4);
+            }
+            assert_eq!(
+                heap.into_sorted_vec()
+                    .iter()
+                    .map(|entry| entry.key.id.as_u128())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn selected_tzif_preserves_year_9999_dst_and_due_date_precedence() {
+        let utc = TaskTimeZone::from_name("UTC").unwrap();
+        let ny = TaskTimeZone::from_name("America/New_York").unwrap();
+        let parsed = |raw| crate::tasks::parse_iso_datetime(raw).unwrap();
+        assert_eq!(
+            utc.date(parsed("9999-12-31T23:59:59.999999Z"))
+                .unwrap()
+                .to_string(),
+            "9999-12-31"
+        );
+        for (raw, date) in [
+            ("2026-03-08T04:59:59Z", "2026-03-07"),
+            ("2026-03-08T05:00:00Z", "2026-03-08"),
+            ("2026-11-01T05:30:00Z", "2026-11-01"),
+            ("2026-11-01T06:30:00Z", "2026-11-01"),
+            ("2699-07-01T03:30:00Z", "2699-06-30"),
+        ] {
+            assert_eq!(ny.date(parsed(raw)).unwrap().to_string(), date);
+        }
+        let mut row = projection(1);
+        row.due_at = Some(parsed("2026-03-08T04:59:59Z"));
+        row.due_date = Some(NaiveDate::from_ymd_opt(2026, 3, 10).unwrap());
+        assert_eq!(row.due(&ny).unwrap(), row.due_date);
+        for unknown in ["america/new_york", "Mars/Olympus", " UTC "] {
+            assert_eq!(TaskTimeZone::from_name(unknown).unwrap().name, "UTC");
+        }
+    }
+
+    #[test]
+    fn selected_window_uses_utc_endpoints_and_literal_title_characters() {
+        let mut query = crate::tasks::list_query::parse_task_list_query(
+            None,
+            None,
+            None,
+            Some(50),
+            Some("2026-03-08"),
+            Some("2026-03-08"),
+        )
+        .unwrap();
+        query.as_of = DateTime::from_timestamp(2000000000, 0).unwrap();
+        query.view.filters.title = Some("%_\\".into());
+        let mut row = projection(1);
+        row.due_at = Some(crate::tasks::parse_iso_datetime("2026-03-08T04:30:00Z").unwrap());
+        let zone = TaskTimeZone::from_name("America/New_York").unwrap();
+        assert_eq!(row.due(&zone).unwrap().unwrap().to_string(), "2026-03-07");
+        assert!(task_projection_matches(&row, &query, &zone).unwrap());
+        row.title = "arbitrary wildcard match".into();
+        assert!(!task_projection_matches(&row, &query, &zone).unwrap());
+        row.title = "literal %_\\ 😀".into();
+        row.due_at = None;
+        assert!(!task_projection_matches(&row, &query, &zone).unwrap());
+        row.start = Some(NaiveDate::from_ymd_opt(2026, 3, 8).unwrap());
+        assert!(task_projection_matches(&row, &query, &zone).unwrap());
+    }
+
+    #[test]
+    fn selected_title_byte_order_and_cursor_changed_value_refusal() {
+        let zone = TaskTimeZone::from_name("UTC").unwrap();
+        let sort = vec![ViewSort {
+            field: SortField::Title,
+            direction: SortDirection::Asc,
+        }];
+        let mut rows = ["😀", "é", "e\u{301}", "中", "Z", "a"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, title)| {
+                let mut row = projection(index as u128 + 1);
+                row.title = title.into();
+                row
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|row| row.page_key(&sort, &zone).unwrap());
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Z", "a", "e\u{301}", "é", "中", "😀"]
+        );
+        let key = rows[0].cursor_key(&sort, &zone).unwrap();
+        rows[0].title.push('!');
+        assert_ne!(key, rows[0].cursor_key(&sort, &zone).unwrap());
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod selected_project_list_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+
+    async fn setup() -> (Fixture, Uuid, Uuid, Uuid) {
+        let f = Fixture::new().await;
+        let (_, task) = f.task_attachment().await;
+        let (project, status): (Vec<u8>, Vec<u8>) =
+            sqlx::query_as("SELECT project_id,status_id FROM tasks WHERE id=?1")
+                .bind(task.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        let project = Uuid::from_slice(&project).unwrap();
+        let status = Uuid::from_slice(&status).unwrap();
+        let credential = Uuid::now_v7();
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,9223372036854775807)")
+            .bind(credential.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(credential.to_string())
+            .execute(&f.pool).await.unwrap();
+        sqlx::query(
+            "UPDATE tasks SET created_at=1760000000000000,updated_at=1760000000000001 WHERE id=?1",
+        )
+        .bind(task.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        (f, credential, project, status)
+    }
+
+    fn query(raw: Option<&str>, limit: i32) -> ParsedTaskListQuery {
+        let mut query = crate::tasks::list_query::parse_task_list_query(
+            raw,
+            None,
+            None,
+            Some(limit),
+            None,
+            None,
+        )
+        .unwrap();
+        query.as_of = crate::tasks::parse_iso_datetime("2026-10-06T00:00:00Z").unwrap();
+        query
+    }
+
+    async fn list(
+        f: &Fixture,
+        credential: Uuid,
+        project: Uuid,
+        query: &ParsedTaskListQuery,
+    ) -> TaskListPage {
+        list_project_tasks_backend(&f.backend, f.workspace, project, f.user, credential, query)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn field(f: &Fixture, project: Uuid, kind: &str) -> (Uuid, Uuid) {
+        let collection = Uuid::now_v7();
+        let field = Uuid::now_v7();
+        sqlx::query("INSERT INTO collections(id,workspace_id,project_id,kind,name) VALUES(?1,?2,?3,'task','List')")
+            .bind(collection.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO collection_fields(id,workspace_id,collection_id,key,name,type,sort_key) VALUES(?1,?2,?3,'number','Field',?4,'V')")
+            .bind(field.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(collection.as_bytes().as_slice()).bind(kind).execute(&f.pool).await.unwrap();
+        (collection, field)
+    }
+
+    #[tokio::test]
+    async fn selected_task_list_exhaustive_batches_exact_decimal_count_cursor_and_hydration() {
+        let (f, credential, project, status) = setup().await;
+        let (collection, field) = field(&f, project, "number").await;
+        let label = Uuid::now_v7();
+        sqlx::query("INSERT INTO labels(id,workspace_id,project_id,name,color) VALUES(?1,?2,?3,'attached','blue')")
+            .bind(label.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        // IDs scan in ascending insertion index; numeric sort runs in reverse,
+        // so the first page cannot be obtained by stopping after one batch.
+        for index in 1..=70u128 {
+            let id = Uuid::from_u128(index);
+            let item = Uuid::now_v7();
+            let number = if index == 69 {
+                "9007199254740992".to_owned()
+            } else if index == 70 {
+                "9007199254740993".to_owned()
+            } else {
+                (100 - index).to_string()
+            };
+            sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,content_json,created_by,created_at,updated_at,recurrence) VALUES(?1,?2,?3,?4,'literal %_\\ 😀',?5,'{}',?6,1760000000000000,1760000000000001,'{\"frequency\":\"weekly\"}')")
+                .bind(id.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(index as i32+1).bind(status.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+            sqlx::query("INSERT INTO collection_items(id,workspace_id,collection_id,task_id) VALUES(?1,?2,?3,?4)")
+                .bind(item.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(collection.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+            sqlx::query("INSERT INTO collection_values(workspace_id,collection_id,item_id,field_id,field_type,value_number) VALUES(?1,?2,?3,?4,'number',?5)")
+                .bind(f.workspace.as_bytes().as_slice()).bind(collection.as_bytes().as_slice()).bind(item.as_bytes().as_slice()).bind(field.as_bytes().as_slice()).bind(number).execute(&f.pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO task_assignees(workspace_id,task_id,user_id) VALUES(?1,?2,?3)",
+            )
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(id.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO task_labels(workspace_id,task_id,label_id) VALUES(?1,?2,?3)")
+                .bind(f.workspace.as_bytes().as_slice())
+                .bind(id.as_bytes().as_slice())
+                .bind(label.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+        }
+        // The fixture uses the maintained STRICT/FK schema: a made-up field
+        // cannot be smuggled into projection rows, and the failed statement
+        // must leave the healthy populated list intact.
+        let first_item: Vec<u8> =
+            sqlx::query_scalar("SELECT id FROM collection_items WHERE task_id=?1")
+                .bind(Uuid::from_u128(1).as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        let fk = sqlx::query("INSERT INTO collection_values(workspace_id,collection_id,item_id,field_id,field_type,value_number) VALUES(?1,?2,?3,?4,'number','1')")
+            .bind(f.workspace.as_bytes().as_slice()).bind(collection.as_bytes().as_slice())
+            .bind(first_item).bind(Uuid::now_v7().as_bytes().as_slice()).execute(&f.pool).await;
+        assert!(fk
+            .as_ref()
+            .err()
+            .and_then(sqlx::Error::as_database_error)
+            .is_some_and(|error| error.is_foreign_key_violation()));
+        let raw = json!({"sort":[{"field":field,"direction":"asc"}]}).to_string();
+        let mut request = query(Some(&raw), 7);
+        let mut actual = Vec::new();
+        let mut first_cursor = None;
+        loop {
+            let page = list(&f, credential, project, &request).await;
+            assert_eq!(page.status_counts, vec![(status, 71)]);
+            for item in &page.items {
+                if item.meta.id.as_u128() <= 70 {
+                    assert_eq!(item.assignee_ids, vec![f.user]);
+                    assert_eq!(item.label_ids, vec![label]);
+                    assert_eq!(item.meta.recurrence, Some(json!({"frequency":"weekly"})));
+                }
+            }
+            actual.extend(page.items.iter().map(|item| item.meta.id));
+            let Some(cursor) = page.next_cursor else {
+                break;
+            };
+            if first_cursor.is_none() {
+                first_cursor = Some(cursor.clone());
+            }
+            request.cursor = Some(crate::tasks::list_query::decode_cursor(&cursor).unwrap());
+            assert!(actual.len() <= 71, "duplicate/nonadvancing pagination");
+        }
+        let seed: Vec<u8> =
+            sqlx::query_scalar("SELECT id FROM tasks WHERE project_id=?1 AND number=1")
+                .bind(project.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        let mut expected = (1..=68u128).rev().map(Uuid::from_u128).collect::<Vec<_>>();
+        expected.extend([
+            Uuid::from_u128(69),
+            Uuid::from_u128(70),
+            Uuid::from_slice(&seed).unwrap(),
+        ]);
+        assert_eq!(actual, expected);
+        let exact=json!({"filters":{"custom":[{"fieldId":field,"operator":"equals","value":9007199254740992u64}]}}).to_string();
+        let page = list(&f, credential, project, &query(Some(&exact), 50)).await;
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.meta.id)
+                .collect::<Vec<_>>(),
+            vec![Uuid::from_u128(69)]
+        );
+        assert_eq!(page.status_counts, vec![(status, 1)]);
+        // Cursor key must be re-evaluated, not trusted from the client.
+        let mut stale = query(Some(&raw), 7);
+        stale.cursor =
+            Some(crate::tasks::list_query::decode_cursor(&first_cursor.unwrap()).unwrap());
+        sqlx::query("UPDATE collection_values SET value_number='999' WHERE item_id=(SELECT id FROM collection_items WHERE task_id=?1)")
+            .bind(stale.cursor.as_ref().unwrap().id.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert!(matches!(
+            list_project_tasks_backend(
+                &f.backend,
+                f.workspace,
+                project,
+                f.user,
+                credential,
+                &stale
+            )
+            .await
+            .unwrap(),
+            Err(ProjectDbError::InvalidCursor)
+        ));
+        assert_eq!(
+            list(&f, credential, project, &query(None, 100))
+                .await
+                .items
+                .len(),
+            71
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn selected_task_list_current_authority_refusals_restore_healthy_progress() {
+        let (f, credential, project, _) = setup().await;
+        let request = query(None, 50);
+        assert_eq!(list(&f, credential, project, &request).await.items.len(), 1);
+        for (workspace, target, actor, session, forbidden) in [
+            (Uuid::now_v7(), project, f.user, credential, false),
+            (f.workspace, Uuid::now_v7(), f.user, credential, false),
+            (f.workspace, project, Uuid::now_v7(), credential, true),
+            (f.workspace, project, f.user, Uuid::now_v7(), true),
+        ] {
+            let result =
+                list_project_tasks_backend(&f.backend, workspace, target, actor, session, &request)
+                    .await
+                    .unwrap();
+            assert!(if forbidden {
+                matches!(result, Err(ProjectDbError::Forbidden))
+            } else {
+                matches!(result, Err(ProjectDbError::NotFound))
+            });
+        }
+        sqlx::query("UPDATE projects SET visibility='private' WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_project_tasks_backend(
+                &f.backend,
+                f.workspace,
+                project,
+                f.user,
+                credential,
+                &request
+            )
+            .await
+            .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        let grant = Uuid::now_v7();
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'viewer')")
+            .bind(grant.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert_eq!(list(&f, credential, project, &request).await.items.len(), 1);
+        sqlx::query("DELETE FROM project_members WHERE id=?1")
+            .bind(grant.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_project_tasks_backend(
+                &f.backend,
+                f.workspace,
+                project,
+                f.user,
+                credential,
+                &request
+            )
+            .await
+            .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        sqlx::query("UPDATE projects SET visibility='workspace' WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        for (sql, restore, forbidden) in [
+            (
+                "UPDATE sessions SET revoked_at=1 WHERE id=?1",
+                "UPDATE sessions SET revoked_at=NULL WHERE id=?1",
+                true,
+            ),
+            (
+                "UPDATE projects SET deleted_at=1 WHERE id=?1",
+                "UPDATE projects SET deleted_at=NULL WHERE id=?1",
+                false,
+            ),
+        ] {
+            let id = if forbidden { credential } else { project };
+            sqlx::query(sql)
+                .bind(id.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let result = list_project_tasks_backend(
+                &f.backend,
+                f.workspace,
+                project,
+                f.user,
+                credential,
+                &request,
+            )
+            .await
+            .unwrap();
+            assert!(if forbidden {
+                matches!(result, Err(ProjectDbError::Forbidden))
+            } else {
+                matches!(result, Err(ProjectDbError::NotFound))
+            });
+            sqlx::query(restore)
+                .bind(id.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            assert_eq!(list(&f, credential, project, &request).await.items.len(), 1);
+        }
+        // No write-side products/outbox effects are introduced by refusal/read.
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tasks WHERE project_id=?1")
+                .bind(project.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn selected_task_list_catalog_reference_and_current_schema_cursor_refusals() {
+        let (f, credential, project, _) = setup().await;
+        let (collection, field) = field(&f, project, "user_multi").await;
+        let wrong = Uuid::now_v7();
+        for raw in [
+            json!({"filters":{"custom":[{"fieldId":wrong,"operator":"empty"}]}}),
+            json!({"filters":{"custom":[{"fieldId":field,"operator":"equals","value":wrong}]}}),
+            json!({"sort":[{"field":field,"direction":"asc"}]}),
+        ] {
+            assert!(matches!(
+                list_project_tasks_backend(
+                    &f.backend,
+                    f.workspace,
+                    project,
+                    f.user,
+                    credential,
+                    &query(Some(&raw.to_string()), 50)
+                )
+                .await
+                .unwrap(),
+                Err(ProjectDbError::InvalidInput)
+            ));
+        }
+        let raw = json!({"filters":{"custom":[{"fieldId":field,"operator":"empty"}]}}).to_string();
+        assert_eq!(
+            list(&f, credential, project, &query(Some(&raw), 50))
+                .await
+                .items
+                .len(),
+            1
+        );
+        sqlx::query("UPDATE collections SET deleted_at=1 WHERE id=?1")
+            .bind(collection.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_project_tasks_backend(
+                &f.backend,
+                f.workspace,
+                project,
+                f.user,
+                credential,
+                &query(Some(&raw), 50)
+            )
+            .await
+            .unwrap(),
+            Err(ProjectDbError::InvalidInput)
+        ));
+        sqlx::query("UPDATE collections SET deleted_at=NULL WHERE id=?1")
+            .bind(collection.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            list(&f, credential, project, &query(Some(&raw), 50))
+                .await
+                .items
+                .len(),
+            1
+        );
+        let extra = Uuid::now_v7();
+        sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,content_json,created_by,created_at,updated_at) SELECT ?1,workspace_id,project_id,2,'second',status_id,content_json,created_by,created_at,updated_at FROM tasks WHERE project_id=?2 AND number=1")
+            .bind(extra.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let mut continuation = query(Some(&raw), 1);
+        let first = list(&f, credential, project, &continuation).await;
+        assert_eq!(
+            first
+                .status_counts
+                .iter()
+                .map(|(_, count)| count)
+                .sum::<i64>(),
+            2
+        );
+        continuation.cursor =
+            Some(crate::tasks::list_query::decode_cursor(&first.next_cursor.unwrap()).unwrap());
+        sqlx::query("UPDATE collection_fields SET version=version+1 WHERE id=?1")
+            .bind(field.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_project_tasks_backend(
+                &f.backend,
+                f.workspace,
+                project,
+                f.user,
+                credential,
+                &continuation
+            )
+            .await
+            .unwrap(),
+            Err(ProjectDbError::InvalidCursor)
+        ));
+        assert_eq!(
+            list(&f, credential, project, &query(Some(&raw), 50))
+                .await
+                .items
+                .len(),
+            2
+        );
+        let badlabel = json!({"filters":{"labelId":wrong}}).to_string();
+        assert!(matches!(
+            list_project_tasks_backend(
+                &f.backend,
+                f.workspace,
+                project,
+                f.user,
+                credential,
+                &query(Some(&badlabel), 50)
+            )
+            .await
+            .unwrap(),
+            Err(ProjectDbError::InvalidInput)
+        ));
+        f.close().await;
     }
 }
