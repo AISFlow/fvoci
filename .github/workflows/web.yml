@@ -500,6 +500,7 @@ jobs:
           path: |
             ${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/error-context.md
             ${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/browser-summary.txt
+            ${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/ime-home-observations.json
             ${{ steps.browser.outputs.failure-artifacts }}/server.log
             ${{ steps.browser.outputs.failure-artifacts }}/owned-server/*.log
             ${{ steps.browser.outputs.failure-artifacts }}/net-events.log
