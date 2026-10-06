@@ -2449,7 +2449,7 @@ class RegistryMutationCliTest(unittest.TestCase):
             ("      destructive:\n", "      checkout_sha:\n", "fixed phase inputs"),
             ("default: connection", "default: migration", "fixed phase inputs"),
             ("default: false", "default: true", "fixed phase inputs"),
-            ("Connection read-only; migration requires both destructive gates; others NOT IMPLEMENTED", "All phases implemented", "fixed phase inputs"),
+            ("Connection read-only; migration and inventory require both destructive gates; others NOT IMPLEMENTED", "All phases implemented", "fixed phase inputs"),
             ("  contents: read\n", "  contents: write\n", "contents read only"),
             ("  cancel-in-progress: false\n", "  cancel-in-progress: true\n", "fixed database concurrency"),
             ("github.repository == 'AISFlow/fvoci'", "github.repository == 'attacker/fvoci'", "trusted admission"),
@@ -2477,6 +2477,27 @@ class RegistryMutationCliTest(unittest.TestCase):
                 path.write_text(text.replace(old, new, 1), encoding="utf-8")
                 proc, output = self._plan_against(root)
                 self._assert_no_green_outputs(proc, output, needle)
+
+    def test_turso_inventory_phase_registration_is_closed_before_outputs(self) -> None:
+        phases = "options: [connection, crud, transactions, migration, inventory, persistence, restore, ui-ack]"
+        cases = [
+            phases.replace(", inventory", ""),
+            phases.replace("inventory", "unapproved-phase"),
+            phases.replace("inventory", "inventory, unapproved-phase"),
+            phases.replace("inventory", "inventory, inventory"),
+            phases.replace("migration, inventory", "inventory, migration"),
+        ]
+        for mutated in cases:
+            with self.subTest(phases=mutated):
+                root = self._mutated_root()
+                path = root / ".github" / "workflows" / "turso-test.yml"
+                text = path.read_text(encoding="utf-8")
+                self.assertEqual(text.count(phases), 1)
+                path.write_text(text.replace(phases, mutated, 1), encoding="utf-8")
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(
+                    proc, output, "turso-test.yml: fixed phase inputs and non-destructive default"
+                )
 
     def test_turso_diagnostic_unit_registration_is_exact_and_before_secrets(self) -> None:
         unit = ("      - name: Credential-free frozen diagnostic unit (exactly one test)\n"
