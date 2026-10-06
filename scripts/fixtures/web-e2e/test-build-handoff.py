@@ -1404,4 +1404,32 @@ class FailureOriginTest(unittest.TestCase):
         self.assertIn('${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/ime-home-observations.json',collaboration)
         self.assertNotIn('/**/*.json',workflow)
 
+class SelectedBrowserLauncherTest(unittest.TestCase):
+    def browser_args(self, source, values):
+        assignments = [node for node in ast.walk(ast.parse(source.read_text()))
+                       if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == 'args'
+                                                              for target in node.targets)
+                       and isinstance(node.value, ast.List) and any(isinstance(item, ast.Constant) and item.value == 'test'
+                                                                  for item in node.value.elts)]
+        self.assertEqual(len(assignments), 1)
+        return eval(compile(ast.Expression(assignments[0].value), str(source), 'eval'), {'str': str}, values)
+
+    def test_both_selected_commands_use_installed_cli_without_package_resolution(self):
+        root = Path('/owned/locked-checkout'); bun = root / 'verified-bun'
+        for lane in ('postgres', 'sqlite'):
+            args = self.browser_args(ROOT / f'scripts/selected-backend-ci/current-{lane}-driver.py',
+                                     {'BUN': bun, 'W': root, 'SPEC': 'workspace-wiki-selected-backend.spec.ts'})
+            self.assertEqual(args, [str(bun), str(root / 'node_modules/.bin/playwright'), 'test', '--config',
+                                    'e2e-pending/collab-playwright.config.ts', '--reporter=line,json',
+                                    'workspace-wiki-selected-backend.spec.ts'])
+
+    def test_restart_command_keeps_exact_readback_selection_and_reporters(self):
+        root = Path('/owned/locked-checkout'); bun = root / 'verified-bun'
+        args = self.browser_args(ROOT / 'scripts/selected-backend-ci/restart_checkpoint.py',
+                                 {'g': {'BUN': bun, 'W': root, 'SPEC': 'workspace-wiki-selected-backend.spec.ts'},
+                                  'TITLE': 'selected normal main restart:'})
+        self.assertEqual(args, [str(bun), str(root / 'node_modules/.bin/playwright'), 'test', '--config',
+                                'e2e-pending/collab-playwright.config.ts', '--reporter=line,json', '--grep',
+                                'selected normal main restart:', 'workspace-wiki-selected-backend.spec.ts'])
+
 if __name__=='__main__':unittest.main()

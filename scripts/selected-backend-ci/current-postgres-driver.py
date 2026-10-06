@@ -500,7 +500,7 @@ try:
                       'chromium': {'path': chromium, 'sha256': sha(chromium)},
                       'chromium_directory_files': tree_hashes(Path(chromium).parent)}
     write(run / 'actual-browser-inputs.json', browser_inputs)
-    args = [str(BUN), '--bun', 'x', 'playwright', 'test', '--config', 'e2e-pending/collab-playwright.config.ts',
+    args = [str(BUN), str(W / 'node_modules/.bin/playwright'), 'test', '--config', 'e2e-pending/collab-playwright.config.ts',
             '--reporter=line,json', SPEC]
     receipt.update(browser_command=args, browser_environment_names=sorted(browser_env), browser_start_utc=now())
     write(run / 'browser-start.json', receipt)

@@ -219,7 +219,7 @@ def restart_same_app(g):
         env.update(CI='true', PLAYWRIGHT_BASE_URL=restart_base, FVOCI_E2E_SELECTED_BACKEND=selected,
                    FVOCI_E2E_SELECTED_RESTART_SOURCE=g['HEAD'], FVOCI_E2E_SELECTED_RESTART_CHECKPOINT=str(checkpoint_path),
                    FVOCI_E2E_RESULT_DIR=str(run / 'restart-browser'), PLAYWRIGHT_JSON_OUTPUT_FILE=str(run / 'restart-playwright-result.private.json'))
-        args = [str(g['BUN']), '--bun', 'x', 'playwright', 'test', '--config', 'e2e-pending/collab-playwright.config.ts',
+        args = [str(g['BUN']), str(g['W'] / 'node_modules/.bin/playwright'), 'test', '--config', 'e2e-pending/collab-playwright.config.ts',
                 '--reporter=line,json', '--grep', TITLE, g['SPEC']]
         receipt['restartBrowserCommand'] = args
         started = time.monotonic()
