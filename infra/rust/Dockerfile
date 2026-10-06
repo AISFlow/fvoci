@@ -46,7 +46,11 @@ RUN cargo fetch --locked \
 FROM rust-deps AS rust-build
 # Native bindgen/C prerequisites exist only in the builder (both GNU arches).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 gcc binutils curl ca-certificates libclang-18-dev=1:18.1.8-20ubuntu8 \
+ && apt-get install -y --no-install-recommends python3 gcc binutils curl ca-certificates libclang-18-dev=1:18.1.8-20ubuntu8 locales \
+ && localedef -i en_US -f UTF-8 en_US.UTF-8 \
+ && locale -a > /tmp/fvoci-locales \
+ && grep -Fx en_US.utf8 /tmp/fvoci-locales \
+ && rm /tmp/fvoci-locales \
  && mkdir /sqlite-build \
  && dpkg-query -W > /sqlite-build/build-packages.txt \
  && rm -rf /var/lib/apt/lists/*
@@ -92,7 +96,11 @@ FROM ubuntu AS runtime
 # No setuid/setgid files (su, passwd, mount, ...): nothing in the image
 # changes user through one, and the server's uid must not reach root by one.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl postgresql-client \
+ && apt-get install -y --no-install-recommends ca-certificates curl postgresql-client locales \
+ && localedef -i en_US -f UTF-8 en_US.UTF-8 \
+ && locale -a > /tmp/fvoci-locales \
+ && grep -Fx en_US.utf8 /tmp/fvoci-locales \
+ && rm /tmp/fvoci-locales \
  && rm -rf /var/lib/apt/lists/* \
  && userdel --remove ubuntu \
  && if getent group ubuntu >/dev/null; then groupdel ubuntu; fi \
@@ -105,6 +113,8 @@ COPY --from=rust-build --chown=root:root /src/target/release/fvoci-server /src/t
 COPY --from=rust-build --chown=root:root /src/target/release/collab-engine ./bin/
 COPY --from=rust-build --chown=root:root /src/crates/vendor/yrs-0.28.0/LICENSE ./share/licenses/yrs-0.28.0/
 COPY --from=rust-build --chown=root:root /src/vendor/libsql-0.9.30/LICENSE.md ./share/licenses/libsql-0.9.30/
+# Original maintained timezone-data license; the compiled asset is in the server.
+COPY --from=rust-build --chown=root:root /src/src/db/task_scalar_pg18_profile.LICENSE ./share/licenses/task-scalar-pg18/
 COPY --from=rust-build --chown=root:root /src/target/release/document-extract ./bin/
 # PDF export fonts (SIL OFL 1.1), read by the export child at run time (FVOCI_EXPORT_FONT_DIR).
 COPY --chown=root:root packages/editor/src/fonts/*.ttf ./share/fonts/

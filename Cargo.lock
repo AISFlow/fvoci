@@ -1522,6 +1522,7 @@ dependencies = [
  "jiff-tzdb",
  "krilla",
  "lettre",
+ "libc",
  "libsql",
  "libsql-sqlite3-parser",
  "libsqlite3-sys",
