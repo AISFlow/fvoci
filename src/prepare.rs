@@ -947,28 +947,47 @@ pub async fn prepare_with_cancel(
                 .await
                 .map_err(PreparationError::Remote)?;
             tracing::info!(outcome = ?outcome, "remote primary preparation settled");
-            if cancel.is_cancelled() {
-                return Err(PreparationError::RemoteCancelledAfterSettlement { outcome });
-            }
-            if meili.is_some() {
-                let key_file = std::env::var("FVOCI_MEILI_KEY_FILE")
-                    .unwrap_or_else(|_| DEFAULT_MEILI_KEY_FILE.to_string());
-                tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => return Err(PreparationError::RemoteCancelledAfterSettlement { outcome }),
-                    result = ensure_meili_key_file(Path::new(&key_file)) => result?,
-                }
-            }
-            // A cancellation that became ready together with the key-file
-            // completion (or after it) must still refuse before Ok: the
-            // launcher would otherwise exec the server. The settled outcome
-            // stays truthful in the error.
-            if cancel.is_cancelled() {
-                return Err(PreparationError::RemoteCancelledAfterSettlement { outcome });
-            }
-            Ok(())
+            let key_file = std::env::var("FVOCI_MEILI_KEY_FILE")
+                .unwrap_or_else(|_| DEFAULT_MEILI_KEY_FILE.to_string());
+            let key_file_step = meili
+                .is_some()
+                .then(|| ensure_meili_key_file(Path::new(&key_file)));
+            finish_remote_preparation(outcome, cancel, key_file_step).await
         }
     }
+}
+
+/// Post-settlement tail of the remote preparation: the cancellation observed
+/// right after the settlement, the optional Meili key-file step under a
+/// biased select that prefers the cancellation, and a final cancellation
+/// check before `Ok`. A cancellation seen at any of these points returns
+/// `RemoteCancelledAfterSettlement` with the settled outcome kept, so the
+/// launcher never execs the server after a signal; a key-file failure is
+/// propagated as an ordinary preparation error. There is no install
+/// directory or handoff for a remote primary.
+pub(crate) async fn finish_remote_preparation(
+    outcome: migrate::RemoteMigrationOutcome,
+    cancel: &tokio_util::sync::CancellationToken,
+    key_file: Option<impl std::future::Future<Output = Result<(), String>>>,
+) -> Result<(), PreparationError> {
+    if cancel.is_cancelled() {
+        return Err(PreparationError::RemoteCancelledAfterSettlement { outcome });
+    }
+    if let Some(step) = key_file {
+        tokio::pin!(step);
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(PreparationError::RemoteCancelledAfterSettlement { outcome }),
+            result = &mut step => result?,
+        }
+    }
+    // A cancellation that became ready together with the key-file completion
+    // (or after it) must still refuse before Ok: the launcher would otherwise
+    // exec the server. The settled outcome stays truthful in the error.
+    if cancel.is_cancelled() {
+        return Err(PreparationError::RemoteCancelledAfterSettlement { outcome });
+    }
+    Ok(())
 }
 
 /// Signal arbitration around one original future for the launcher and the
@@ -1175,6 +1194,93 @@ mod remote_caller_tests {
         assert!(!cancel.is_cancelled());
     }
 
+    /// The preparation tail: a cancellation that becomes ready only when the
+    /// key-file step completes (completion-triggered late cancellation) must
+    /// still refuse before Ok with the settled outcome kept. An omitted final
+    /// check returns Ok here and fails this test.
+    #[tokio::test]
+    async fn remote_preparation_tail_refuses_a_cancellation_that_arrives_with_the_key_file() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let late = cancel.clone();
+        let key_file = async move {
+            late.cancel();
+            Ok::<(), String>(())
+        };
+        let outcome = RemoteMigrationOutcome::Installed { steps: 12 };
+        let error = finish_remote_preparation(outcome, &cancel, Some(key_file))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PreparationError::RemoteCancelledAfterSettlement {
+                    outcome: RemoteMigrationOutcome::Installed { steps: 12 }
+                }
+            ),
+            "{error}"
+        );
+        // Cancellation already pending before the tail: refused before the key file runs.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = ran.clone();
+        let key_file = async move {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok::<(), String>(())
+        };
+        let error =
+            finish_remote_preparation(RemoteMigrationOutcome::Current, &cancel, Some(key_file))
+                .await
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            PreparationError::RemoteCancelledAfterSettlement {
+                outcome: RemoteMigrationOutcome::Current
+            }
+        ));
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "key file must not run after a cancellation"
+        );
+    }
+
+    /// Positive and error controls of the tail: no key file and no signal is
+    /// Ok; a successful key file without a signal is Ok; a failed key file is
+    /// an ordinary preparation error and never an exec.
+    #[tokio::test]
+    async fn remote_preparation_tail_completes_or_reports_the_key_file_without_a_signal() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let none: Option<std::future::Ready<Result<(), String>>> = None;
+        finish_remote_preparation(
+            RemoteMigrationOutcome::Resumed { from: 11, to: 12 },
+            &cancel,
+            none,
+        )
+        .await
+        .unwrap();
+        finish_remote_preparation(
+            RemoteMigrationOutcome::Current,
+            &cancel,
+            Some(std::future::ready(Ok::<(), String>(()))),
+        )
+        .await
+        .unwrap();
+        assert!(!cancel.is_cancelled());
+        let error = finish_remote_preparation(
+            RemoteMigrationOutcome::Current,
+            &cancel,
+            Some(std::future::ready(Err::<(), String>(
+                "key file unwritable".into(),
+            ))),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, PreparationError::Ordinary(ref text) if text == "key file unwritable"),
+            "{error}"
+        );
+    }
+
     /// Positive control: a plain completion with no signal selected and none
     /// pending exits 0 and lets the launcher continue; a fresh run is never
     /// treated as cancelled by the absence of a signal.
@@ -1235,7 +1341,15 @@ mod remote_caller_tests {
         assert_eq!(code, 0);
         assert_eq!(text, "remote migration settled: Current");
         let (code, text) = remote_migrator_exit(
-            None,
+            SignalObservation::NONE,
+            &Ok(RemoteMigrationOutcome::Installed { steps: 12 }),
+        );
+        assert_eq!(
+            (code, text.as_str()),
+            (0, "remote migration settled: Installed { steps: 12 }")
+        );
+        let (code, text) = remote_migrator_exit(
+            SignalObservation::NONE,
             &Ok(RemoteMigrationOutcome::Resumed { from: 1, to: 12 }),
         );
         assert_eq!(
@@ -1244,7 +1358,7 @@ mod remote_caller_tests {
         );
         // A signal after settlement keeps the truthful result and exits with the signal code.
         let (code, text) = remote_migrator_exit(
-            Some(143),
+            selected(143),
             &Ok(RemoteMigrationOutcome::Installed { steps: 12 }),
         );
         assert_eq!(code, 143);
@@ -1280,7 +1394,7 @@ mod remote_caller_tests {
             "{text}"
         );
         let (code, _) = remote_migrator_exit(
-            None,
+            SignalObservation::NONE,
             &Err(RemoteMigrationError::Drain {
                 source: driver_secret(),
             }),
