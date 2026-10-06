@@ -95,7 +95,7 @@ jobs:
       - run: python3 scripts/encryption_keys.py self-test
       - run: cargo clippy --locked --offline --all-targets --features db-tests -- -D warnings
       - run: cargo test --locked --offline --lib --bin fvoci-server
-      - name: Selected SQLite library controls (18 exact tests)
+      - name: Selected SQLite library controls (28 exact tests)
         run: |
           set -euo pipefail
           python3 - <<'PYLIB'

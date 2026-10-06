@@ -1902,15 +1902,53 @@ class RustSuiteRegistryTest(unittest.TestCase):
 
 
 class SelectedLibraryExecutionTest(unittest.TestCase):
+    ORIGINAL_FILTERS = (
+        'db::stars::selected_star_read_finish_tests::star_read_cleanup_retains_refusal_and_driver_without_returning_rows',
+        'db::groups::selected_group_read_finish_tests::group_read_cleanup_retains_refusal_and_driver_without_returning_rows',
+        'streams::events::selected_access_read_tests::sqlite_access_role_change_targets_and_wrong_workspace',
+        'streams::events::selected_access_read_tests::sqlite_access_counter_retention_rollback_and_inflight_writer',
+        'streams::events::selected_access_read_tests::sqlite_access_current_credential_membership_workspace_and_cursor_denials',
+        'streams::events::selected_access_read_tests::access_cleanup_uncertainty_withholds_observation_and_retains_driver_cause',
+        'http::routes::stars::selected_list_access_http_tests::sqlite_http_stars_nonempty_dtos_order_current_acl_and_pat_kinds',
+        'http::routes::stars::selected_list_access_http_tests::sqlite_http_groups_order_member_authority_pat_and_cross_tenant',
+        'http::routes::stars::selected_list_access_http_tests::sqlite_http_lists_recheck_current_credential_and_propagate_sql_fault',
+        'http::routes::stars::selected_list_access_http_tests::sqlite_http_access_role_change_bystander_and_read_error_end_real_body',
+        'http::routes::stars::selected_list_access_http_tests::sqlite_http_access_stream_current_revocation_close_drop_and_guard',
+        'db::project_documents::selected_create_finish_tests::project_create_rollback_retains_domain_and_driver_causes',
+        'db::project_documents::selected_create_backend_tests::sqlite_project_create_current_authority_and_parent_denials',
+        'db::project_documents::selected_create_backend_tests::sqlite_project_create_queued_writer_rechecks_credential_and_permission',
+        'db::project_documents::selected_create_backend_tests::sqlite_project_create_fk_publication_and_commit_failures_then_healthy_create',
+        'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_create_literal_request_metadata_number_order_and_publication',
+        'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_create_input_origin_current_authority_and_pat_scope_denials',
+        'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_create_real_fk_refusal_is_500_without_partial_effects',
+    )
+    GET_FILTERS = (
+        'db::projects::selected_project_read_tests::sqlite_project_reads_literal_counts_workflow_and_binary_order',
+        'db::projects::selected_project_read_tests::sqlite_project_reads_private_group_guest_and_current_authority',
+        'db::projects::selected_project_read_tests::sqlite_project_reads_driver_failure_rolls_back_and_healthy_retry',
+        'db::projects::selected_project_read_tests::project_read_cleanup_failure_withholds_rows_and_retains_typed_causes',
+        'db::document_tags::selected_tag_pool_tests::sqlite_tag_pool_unicode_search_past_page_limit_and_assignment_counts',
+        'db::document_tags::selected_tag_pool_tests::sqlite_tag_pool_current_authority_fault_and_healthy_retry',
+        'db::document_tags::selected_tag_pool_tests::tag_pool_cleanup_failure_withholds_rows_and_retains_typed_causes',
+        'http::routes::projects::selected_pending_get_http_tests::sqlite_http_pending_gets_literal_project_workflow_tag_and_members',
+        'http::routes::projects::selected_pending_get_http_tests::sqlite_http_pending_gets_pat_scopes_tenant_and_document_count_disclosure',
+        'http::routes::projects::selected_pending_get_http_tests::sqlite_http_pending_gets_current_denials_fault_and_healthy_retry',
+    )
+
     def success(self, name: str) -> str:
         return ("running 1 test\n" + f"test {name} ... ok\n"
                 + "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 99 filtered out; finished in 0.01s\n")
 
-    def test_exact18_filter_registry_and_existing_default_command(self) -> None:
+    def test_exact28_filter_registry_preserves_original18_and_existing_default_command(self) -> None:
         import hashlib
-        self.assertEqual(len(SEL.RUST_SELECTED_LIBRARY_FILTERS), 18)
-        self.assertEqual(len(set(SEL.RUST_SELECTED_LIBRARY_FILTERS)), 18)
-        self.assertEqual(hashlib.sha256("\n".join(SEL.RUST_SELECTED_LIBRARY_FILTERS).encode()).hexdigest(),
+        self.assertEqual(len(SEL.RUST_SELECTED_LIBRARY_FILTERS), 28)
+        self.assertEqual(SEL.RUST_SELECTED_LIBRARY_FILTERS[:18], self.ORIGINAL_FILTERS)
+        self.assertEqual(SEL.RUST_SELECTED_LIBRARY_FILTERS[18:], self.GET_FILTERS)
+        self.assertEqual(len(self.ORIGINAL_FILTERS), 18)
+        self.assertEqual(len(self.GET_FILTERS), 10)
+        self.assertEqual(len(set(SEL.RUST_SELECTED_LIBRARY_FILTERS)), 28)
+        self.assertEqual(len(set(SEL.RUST_SELECTED_LIBRARY_FILTERS[:18])), 18)
+        self.assertEqual(hashlib.sha256("\n".join(SEL.RUST_SELECTED_LIBRARY_FILTERS[:18]).encode()).hexdigest(),
                          "f9221b4d6b32402a3e125643d3fc67dfb600df8ef27b8e76013bb8b46ade7c80")
         data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/rust.yml")
         self.assertIsNone(error)
@@ -1962,13 +2000,16 @@ class SelectedLibraryExecutionTest(unittest.TestCase):
         ):
             fx.write_cargo()
             errors = SEL.verify_rust_suite_registry(fx.root)
-            self.assertTrue(any("all18 exact filters" in e for e in errors), errors)
+            self.assertTrue(any("all28 exact filters" in e for e in errors), errors)
 
     def test_zero_ignored_wrong_extra_and_failed_results_are_not_pass(self) -> None:
         name = SEL.RUST_SELECTED_LIBRARY_FILTERS[0]
         good = self.success(name)
         cases = [
             (0, ""),
+            (0, "running 1 test\n"),
+            (0, good.split("test result:", 1)[0]),
+            (0, good.replace(f"test {name} ... ok\n", "")),
             (1, good),
             (0, good.replace("running 1 test", "running 0 tests").replace("1 passed", "0 passed")),
             (0, good.replace("... ok", "... ignored").replace("1 passed", "0 passed").replace("0 ignored", "1 ignored")),
@@ -1979,12 +2020,13 @@ class SelectedLibraryExecutionTest(unittest.TestCase):
             (0, good.replace("0 measured", "1 measured")),
             (0, good.replace("0 failed", "1 failed")),
         ]
-        for exit_code, output in cases:
-            with self.subTest(exit=exit_code, output=output):
-                self.assertIsNotNone(SEL.selected_library_result_error(name, exit_code, output))
+        for expected_name in self.ORIGINAL_FILTERS + self.GET_FILTERS:
+            for exit_code, output in cases:
+                with self.subTest(name=expected_name, exit=exit_code, output=output):
+                    self.assertIsNotNone(SEL.selected_library_result_error(expected_name, exit_code, output.replace(name, expected_name)))
         self.assertIsNotNone(SEL.selected_library_result_error("missing::filter", 0, self.success("missing::filter")))
 
-    def run_workflow_fixture(self, output_kind: str):
+    def run_workflow_fixture(self, output_kind: str, fail_index: int = 0):
         import contextlib
         import io
         from types import SimpleNamespace
@@ -1998,19 +2040,28 @@ class SelectedLibraryExecutionTest(unittest.TestCase):
         code = run[len(prefix):-len("\nPYLIB\n")]
         calls = []
         def fake_run(argv, **kwargs):
-            expected_filter = SEL.RUST_SELECTED_LIBRARY_FILTERS[len(calls)]
+            expected_filter = (self.ORIGINAL_FILTERS + self.GET_FILTERS)[len(calls)]
             self.assertEqual(argv, ["cargo", "test", "--locked", "--offline", "--features", "db-tests",
                                     "--lib", expected_filter, "--", "--exact"])
             self.assertEqual(kwargs, {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True})
             calls.append(argv)
             output = self.success(expected_filter)
-            if output_kind == "zero":
+            kind = output_kind if len(calls) - 1 == fail_index else "ok"
+            if kind == "zero":
                 output = output.replace("running 1 test", "running 0 tests").replace("1 passed", "0 passed")
-            elif output_kind == "ignored":
+            elif kind == "ignored":
                 output = output.replace("... ok", "... ignored").replace("1 passed", "0 passed").replace("0 ignored", "1 ignored")
-            elif output_kind == "wrong":
+            elif kind == "wrong":
                 output = output.replace(expected_filter, "wrong::test")
-            return SimpleNamespace(returncode=1 if output_kind == "command-failed" else 0, stdout=output)
+            elif kind == "missing":
+                output = ""
+            elif kind == "truncated":
+                output = output.split("test result:", 1)[0]
+            elif kind == "failed":
+                output = output.replace("... ok", "... FAILED").replace("0 failed", "1 failed")
+            elif kind == "count":
+                output = output.replace("running 1 test", "running 2 tests")
+            return SimpleNamespace(returncode=1 if kind == "command-failed" else 0, stdout=output)
         with mock.patch("subprocess.run", side_effect=fake_run), contextlib.redirect_stdout(io.StringIO()):
             if output_kind == "ok":
                 exec(compile(code, "maintained-rust-selected-library-step", "exec"), {})
@@ -2019,13 +2070,36 @@ class SelectedLibraryExecutionTest(unittest.TestCase):
                     exec(compile(code, "maintained-rust-selected-library-step", "exec"), {})
         return calls
 
-    def test_actual_workflow_script_executes18_canonical_commands_without_env_override(self) -> None:
-        self.assertEqual(len(self.run_workflow_fixture("ok")), 18)
+    def test_actual_workflow_script_executes28_canonical_commands_without_env_override(self) -> None:
+        self.assertEqual(len(self.run_workflow_fixture("ok")), 28)
 
     def test_actual_workflow_script_fails_first_refusal_without_retry_or_later_execution(self) -> None:
         for kind in ("zero", "ignored", "wrong", "command-failed"):
             with self.subTest(kind=kind):
                 self.assertEqual(len(self.run_workflow_fixture(kind)), 1)
+
+    def test_registry_original_removal_reorder_and_get_omission_duplicate_unknown_fail(self) -> None:
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/rust.yml")
+        self.assertIsNone(error)
+        expected = self.ORIGINAL_FILTERS + self.GET_FILTERS
+        variants = [("original-reordered", (expected[1], expected[0]) + expected[2:]),
+                    ("get-reordered", expected[:18] + (expected[19], expected[18]) + expected[20:]),
+                    ("all-get-missing", self.ORIGINAL_FILTERS)]
+        for index, name in enumerate(expected):
+            variants.append(("missing:" + name, expected[:index] + expected[index + 1:]))
+        for index, name in enumerate(self.GET_FILTERS, 18):
+            variants.append(("duplicate:" + name, expected[:index] + (expected[index - 1],) + expected[index + 1:]))
+            variants.append(("unknown:" + name, expected[:index] + ("unknown::filter",) + expected[index + 1:]))
+        for mutation, filters in variants:
+            with self.subTest(mutation=mutation), mock.patch.object(SEL, "RUST_SELECTED_LIBRARY_FILTERS", filters):
+                errors = SEL.verify_selected_library_execution(data["jobs"])
+                self.assertTrue(any("all28 exact filters" in error for error in errors), errors)
+
+    def test_actual_workflow_script_refuses_each_new_get_result_without_retry(self) -> None:
+        for fail_index in range(18, 28):
+            for kind in ("missing", "zero", "ignored", "wrong", "count", "truncated", "failed", "command-failed"):
+                with self.subTest(filter=self.GET_FILTERS[fail_index - 18], kind=kind):
+                    self.assertEqual(len(self.run_workflow_fixture(kind, fail_index)), fail_index + 1)
 
 
 class RegistryMutationCliTest(unittest.TestCase):
