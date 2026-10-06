@@ -1,6 +1,7 @@
 //! Explicit manual primary consumers, never part of automatic DB suites.
 //! Connection is read-only; migration requires both explicit destructive gates.
-//! No synthetic transport, reset, retry, or normal startup unlock is used.
+//! No synthetic transport, retry, or normal startup unlock is used.
+//! Disposable reset is separately selected; ordinary consumers never reset.
 use super::backend::{Backend, DbTx, FamilyTx, RemoteDatabase};
 use super::codec::Cell;
 use crate::config::DatabaseSettings;
@@ -1552,5 +1553,645 @@ mod inventory_policy_tests {
                 None
             );
         }
+    }
+}
+
+// Separately selected disposable test-schema operation. Ordinary consumers
+// never invoke this route or reset a nonblank schema on their own behalf.
+const RESET_TEST_NAME: &str = "db::turso_test::turso_primary_disposable_prefix11_reset";
+
+fn reset_selection(
+    lookup: impl Fn(&str) -> Option<String>,
+    args: &[String],
+) -> Result<(), &'static str> {
+    // The dedicated selector/exact body separates reset from migration. The
+    // unchanged migration tuple admits ONLY reuse of its immutable snapshot.
+    for (name, expected) in [
+        ("FVOCI_TEST_TURSO_RESET_SELECTED", "1"),
+        ("FVOCI_TEST_TURSO_MIGRATION_SELECTED", "1"),
+        ("FVOCI_TEST_TURSO_PHASE", "migration"),
+        ("FVOCI_TEST_TURSO_DESTRUCTIVE", "true"),
+        ("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "true"),
+    ] {
+        if lookup(name).as_deref() != Some(expected) {
+            return Err("EXPLICIT_RESET_SELECTION_REQUIRED");
+        }
+    }
+    for required in [RESET_TEST_NAME, "--ignored", "--exact", "--test-threads=1"] {
+        if args
+            .iter()
+            .skip(1)
+            .filter(|arg| arg.as_str() == required)
+            .count()
+            != 1
+        {
+            return Err("EXPLICIT_RESET_SELECTION_REQUIRED");
+        }
+    }
+    if args.iter().skip(1).any(|arg| {
+        !matches!(
+            arg.as_str(),
+            RESET_TEST_NAME | "--ignored" | "--exact" | "--test-threads=1" | "--nocapture"
+        )
+    }) {
+        return Err("EXPLICIT_RESET_SELECTION_REQUIRED");
+    }
+    if args
+        .iter()
+        .skip(1)
+        .filter(|arg| arg.as_str() == "--nocapture")
+        .count()
+        > 1
+    {
+        return Err("EXPLICIT_RESET_SELECTION_REQUIRED");
+    }
+    Ok(())
+}
+
+// Literal statements only, reviewed against the compiled schema. Remove
+// triggers before implicit DROP deletes, then children before FK parents,
+// and the ledger last. FK enforcement is NEVER disabled or deferred.
+const RESET_DROP_STATEMENTS: [&str; 126] = [
+    "DROP TRIGGER IF EXISTS \"api_tokens_scopes_insert\";",
+    "DROP TRIGGER IF EXISTS \"api_tokens_scopes_update\";",
+    "DROP TRIGGER IF EXISTS \"event_sequence_no_delete\";",
+    "DROP TRIGGER IF EXISTS \"event_sequence_no_reset\";",
+    "DROP TRIGGER IF EXISTS \"event_sequence_no_replace\";",
+    "DROP TRIGGER IF EXISTS \"timer_segment_time_entry_purge\";",
+    "DROP TRIGGER IF EXISTS \"task_timer_legacy_tracking_insert\";",
+    "DROP TRIGGER IF EXISTS \"task_timer_legacy_tracking_close\";",
+    "DROP TRIGGER IF EXISTS \"documents_path_insert\";",
+    "DROP TRIGGER IF EXISTS \"documents_path_update\";",
+    "DROP TRIGGER IF EXISTS \"wiki_create_commands_document_purge\";",
+    "DROP TRIGGER IF EXISTS \"collab_fence_counter_no_delete\";",
+    "DROP TRIGGER IF EXISTS \"collab_fence_counter_no_reset\";",
+    "DROP TRIGGER IF EXISTS \"collab_fence_counter_no_replace\";",
+    "DROP TRIGGER IF EXISTS \"body_save_commands_document_purge\";",
+    "DROP TRIGGER IF EXISTS \"body_save_commands_task_purge\";",
+    "DROP TRIGGER IF EXISTS \"attachment_object_cleanups_after_attachment_delete\";",
+    "DROP TRIGGER IF EXISTS \"collection_items_scope_insert\";",
+    "DROP TRIGGER IF EXISTS \"collection_items_scope_update\";",
+    "DROP TRIGGER IF EXISTS \"collections_keep_scope\";",
+    "DROP TRIGGER IF EXISTS \"documents_keep_collection_scope\";",
+    "DROP TRIGGER IF EXISTS \"tasks_keep_collection_scope\";",
+    "DROP TRIGGER IF EXISTS \"collection_fields_identity\";",
+    "DROP TRIGGER IF EXISTS \"zotero_reference_document_purge\";",
+    "DROP TRIGGER IF EXISTS \"personal_input_document_purge\";",
+    "DROP TRIGGER IF EXISTS \"personal_input_task_purge\";",
+    "DROP TRIGGER IF EXISTS \"personal_input_project_purge\";",
+    "DROP TABLE IF EXISTS \"magic_tokens\";",
+    "DROP TABLE IF EXISTS \"legal_documents\";",
+    "DROP TABLE IF EXISTS \"user_consents\";",
+    "DROP TABLE IF EXISTS \"user_mfa\";",
+    "DROP TABLE IF EXISTS \"identity_links\";",
+    "DROP TABLE IF EXISTS \"mfa_challenges\";",
+    "DROP TABLE IF EXISTS \"oidc_states\";",
+    "DROP TABLE IF EXISTS \"api_tokens\";",
+    "DROP TABLE IF EXISTS \"group_members\";",
+    "DROP TABLE IF EXISTS \"invitations\";",
+    "DROP TABLE IF EXISTS \"workspace_holidays\";",
+    "DROP TABLE IF EXISTS \"instance_settings\";",
+    "DROP TABLE IF EXISTS \"instance_settings_meta\";",
+    "DROP TABLE IF EXISTS \"workspace_oidc\";",
+    "DROP TABLE IF EXISTS \"events\";",
+    "DROP TABLE IF EXISTS \"audit_log\";",
+    "DROP TABLE IF EXISTS \"outbox_consumers\";",
+    "DROP TABLE IF EXISTS \"outbox_failures\";",
+    "DROP TABLE IF EXISTS \"processed_events\";",
+    "DROP TABLE IF EXISTS \"event_sequence\";",
+    "DROP TABLE IF EXISTS \"project_members\";",
+    "DROP TABLE IF EXISTS \"task_assignees\";",
+    "DROP TABLE IF EXISTS \"task_labels\";",
+    "DROP TABLE IF EXISTS \"task_dependencies\";",
+    "DROP TABLE IF EXISTS \"task_activity\";",
+    "DROP TABLE IF EXISTS \"task_states\";",
+    "DROP TABLE IF EXISTS \"task_collab_updates\";",
+    "DROP TABLE IF EXISTS \"task_collab_op_receipts\";",
+    "DROP TABLE IF EXISTS \"task_timer_segments\";",
+    "DROP TABLE IF EXISTS \"task_timer_legacy_open\";",
+    "DROP TABLE IF EXISTS \"task_timer_commands\";",
+    "DROP TABLE IF EXISTS \"task_timer_audit\";",
+    "DROP TABLE IF EXISTS \"document_states\";",
+    "DROP TABLE IF EXISTS \"document_collab_updates\";",
+    "DROP TABLE IF EXISTS \"document_collab_op_receipts\";",
+    "DROP TABLE IF EXISTS \"revisions\";",
+    "DROP TABLE IF EXISTS \"document_members\";",
+    "DROP TABLE IF EXISTS \"comments\";",
+    "DROP TABLE IF EXISTS \"stars\";",
+    "DROP TABLE IF EXISTS \"share_links\";",
+    "DROP TABLE IF EXISTS \"document_tag_assignments\";",
+    "DROP TABLE IF EXISTS \"task_origins\";",
+    "DROP TABLE IF EXISTS \"templates\";",
+    "DROP TABLE IF EXISTS \"wiki_create_commands\";",
+    "DROP TABLE IF EXISTS \"collab_fence_counter\";",
+    "DROP TABLE IF EXISTS \"collab_room_fences\";",
+    "DROP TABLE IF EXISTS \"body_save_commands\";",
+    "DROP TABLE IF EXISTS \"task_collab_room_fences\";",
+    "DROP TABLE IF EXISTS \"attachment_text\";",
+    "DROP TABLE IF EXISTS \"attachment_object_cleanups\";",
+    "DROP TABLE IF EXISTS \"collection_values\";",
+    "DROP TABLE IF EXISTS \"collection_choices\";",
+    "DROP TABLE IF EXISTS \"collection_people\";",
+    "DROP TABLE IF EXISTS \"collection_views\";",
+    "DROP TABLE IF EXISTS \"views\";",
+    "DROP TABLE IF EXISTS \"notifications\";",
+    "DROP TABLE IF EXISTS \"notification_prefs\";",
+    "DROP TABLE IF EXISTS \"ics_tokens\";",
+    "DROP TABLE IF EXISTS \"instance_config\";",
+    "DROP TABLE IF EXISTS \"push_deliveries\";",
+    "DROP TABLE IF EXISTS \"webhook_deliveries\";",
+    "DROP TABLE IF EXISTS \"github_installations\";",
+    "DROP TABLE IF EXISTS \"github_install_states\";",
+    "DROP TABLE IF EXISTS \"github_issue_links\";",
+    "DROP TABLE IF EXISTS \"github_deliveries\";",
+    "DROP TABLE IF EXISTS \"zotero_credentials\";",
+    "DROP TABLE IF EXISTS \"zotero_memberships\";",
+    "DROP TABLE IF EXISTS \"zotero_links\";",
+    "DROP TABLE IF EXISTS \"import_deferred_events\";",
+    "DROP TABLE IF EXISTS \"personal_input_commands\";",
+    "DROP TABLE IF EXISTS \"personal_transfer_commands\";",
+    "DROP TABLE IF EXISTS \"maintenance_job_claims\";",
+    "DROP TABLE IF EXISTS \"memberships\";",
+    "DROP TABLE IF EXISTS \"groups\";",
+    "DROP TABLE IF EXISTS \"labels\";",
+    "DROP TABLE IF EXISTS \"time_entries\";",
+    "DROP TABLE IF EXISTS \"task_timer_runs\";",
+    "DROP TABLE IF EXISTS \"document_tags\";",
+    "DROP TABLE IF EXISTS \"attachments\";",
+    "DROP TABLE IF EXISTS \"collection_items\";",
+    "DROP TABLE IF EXISTS \"collection_options\";",
+    "DROP TABLE IF EXISTS \"push_subscriptions\";",
+    "DROP TABLE IF EXISTS \"webhooks\";",
+    "DROP TABLE IF EXISTS \"zotero_references\";",
+    "DROP TABLE IF EXISTS \"zotero_collections\";",
+    "DROP TABLE IF EXISTS \"import_jobs\";",
+    "DROP TABLE IF EXISTS \"sessions\";",
+    "DROP TABLE IF EXISTS \"tasks\";",
+    "DROP TABLE IF EXISTS \"documents\";",
+    "DROP TABLE IF EXISTS \"collection_fields\";",
+    "DROP TABLE IF EXISTS \"zotero_connectors\";",
+    "DROP TABLE IF EXISTS \"statuses\";",
+    "DROP TABLE IF EXISTS \"milestones\";",
+    "DROP TABLE IF EXISTS \"collections\";",
+    "DROP TABLE IF EXISTS \"workflows\";",
+    "DROP TABLE IF EXISTS \"projects\";",
+    "DROP TABLE IF EXISTS \"users\";",
+    "DROP TABLE IF EXISTS \"workspaces\";",
+    "DROP TABLE IF EXISTS \"schema_migrations\";",
+];
+
+#[derive(Debug, PartialEq, Eq)]
+struct ResetOutcome {
+    primary: &'static str,
+    rollback: &'static str,
+    commit: &'static str,
+    blank: &'static str,
+    steps: usize,
+}
+
+impl ResetOutcome {
+    fn refused(primary: &'static str) -> Self {
+        Self {
+            primary,
+            rollback: "NOT_STARTED",
+            commit: "NOT_STARTED",
+            blank: "NOT_RUN",
+            steps: 0,
+        }
+    }
+}
+
+async fn reset_transaction(backend: &Backend) -> ResetOutcome {
+    if !matches!(backend, Backend::LibsqlRemote(_)) {
+        return ResetOutcome::refused("WRONG_PRODUCT_BACKEND");
+    }
+    let mut tx = match backend.begin_write().await {
+        Ok(tx) => tx,
+        Err(_) => return ResetOutcome::refused("BEGIN_FAILED"),
+    };
+    let mut steps = 0;
+    let primary = async {
+        same_stream_readback(&mut tx).await?;
+        if super::migrate::compiled_sqlite_steps().len() != 12 {
+            return Err("CURRENT_LINEAGE_CHANGED");
+        }
+        let family = remote_family(&mut tx)?;
+        // Bound to the actually observed designated PREFIX11. Full ledger and
+        // catalog validation is BEFORE any drop, on this same writer stream.
+        super::migrate::turso_test_schema_in_writer(family, 11)
+            .await
+            .map_err(|_| "RESET_SCHEMA_REFUSED")?;
+        for statement in RESET_DROP_STATEMENTS {
+            family
+                .execute(statement, &[])
+                .await
+                .map_err(|_| "RESET_DDL_FAILED")?;
+            steps += 1;
+        }
+        same_stream_readback(&mut tx)
+            .await
+            .map_err(|_| "RESET_BLANK_IN_WRITER_FAILED")?;
+        super::migrate::turso_test_schema_in_writer(remote_family(&mut tx)?, 0)
+            .await
+            .map_err(|_| "RESET_BLANK_IN_WRITER_FAILED")?;
+        Ok::<(), &'static str>(())
+    }
+    .await;
+    if let Err(primary) = primary {
+        // Preserve primary cause; the result is only the original submitted
+        // rollback's return, never fabricated remote settlement or durability.
+        let rollback = if tx.rollback().await.is_ok() {
+            "RETURNED_OK"
+        } else {
+            "UNCONFIRMED"
+        };
+        return ResetOutcome {
+            primary,
+            rollback,
+            commit: "NOT_STARTED",
+            blank: "NOT_RUN",
+            steps,
+        };
+    }
+    if tx.commit_with_cleanup().await.is_err() {
+        // Maintained typed cleanup is awaited. Remote commit uncertainty NEVER
+        // permits an alternate observer, rollback, retry or inferred success.
+        return ResetOutcome {
+            primary: "COMMIT_UNCONFIRMED",
+            rollback: "NOT_STARTED",
+            commit: "UNCONFIRMED",
+            blank: "NOT_RUN",
+            steps,
+        };
+    }
+    // Backend::begin_write opens a NEW SDK connection/stream. This full blank
+    // gate observes a new stream only after the original commit returned OK.
+    let blank = migration_snapshot(backend, 0).await;
+    ResetOutcome {
+        primary: if blank.is_ok() {
+            "OK"
+        } else {
+            "RESET_FRESH_BLANK_FAILED"
+        },
+        rollback: "NOT_STARTED",
+        commit: "RETURNED_OK",
+        blank: if blank.is_ok() { "CONFIRMED" } else { "FAILED" },
+        steps,
+    }
+}
+
+#[tokio::test]
+#[ignore = "manual trusted-ref explicitly authorized disposable PREFIX11 reset only"]
+async fn turso_primary_disposable_prefix11_reset() -> Result<(), &'static str> {
+    let args: Vec<String> = std::env::args().collect();
+    reset_selection(|name| std::env::var(name).ok(), &args)?;
+    let settings = DatabaseSettings::from_env().map_err(|_| "PRODUCT_CONFIGURATION_FAILED")?;
+    let DatabaseSettings::LibsqlRemote {
+        primary_url,
+        auth_token,
+    } = settings
+    else {
+        return Err("WRONG_PRODUCT_BACKEND");
+    };
+    let (url, token) = configuration(primary_url, auth_token)?;
+    let backend = Backend::LibsqlRemote(
+        RemoteDatabase::connect(url, token, 1)
+            .await
+            .map_err(|_| "CONNECT_FAILED")?,
+    );
+    let outcome = reset_transaction(&backend).await;
+    // Backend close ALWAYS awaits original local cleanup/drain, including
+    // failure/quarantined commit; local drain is not a server Close ACK.
+    let close = close_migration_owner(&backend).await;
+    let leases_zero = backend
+        .connection_stats()
+        .is_ok_and(|stats| stats.size == 0);
+    println!("FVOCI_TURSO_RESET_RECEIPT primary={} rollback={} commit={} blank={} steps={} close={} drain={} leases={}",
+        outcome.primary, outcome.rollback, outcome.commit, outcome.blank, outcome.steps,
+        if close.is_ok() { "OK" } else { "FAILED" },
+        if close.is_ok() { "LOCAL_OK" } else { "UNCONFIRMED" },
+        if leases_zero { "ZERO" } else { "FAILED" });
+    if outcome.primary != "OK" || close.is_err() || !leases_zero {
+        // Explicit static boundary: untrusted libtest returned Error follows.
+        println!("\nFVOCI_TURSO_RESET_RETURN");
+    }
+    if outcome.primary != "OK" {
+        return Err(outcome.primary);
+    }
+    close?;
+    if !leases_zero {
+        return Err("LEASES_NOT_ZERO");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod reset_policy_tests {
+    use super::*;
+
+    fn flags() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("FVOCI_TEST_TURSO_RESET_SELECTED", "1"),
+            ("FVOCI_TEST_TURSO_MIGRATION_SELECTED", "1"),
+            ("FVOCI_TEST_TURSO_PHASE", "migration"),
+            ("FVOCI_TEST_TURSO_DESTRUCTIVE", "true"),
+            ("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "true"),
+        ]
+    }
+
+    fn args() -> Vec<String> {
+        [
+            "libtest",
+            RESET_TEST_NAME,
+            "--ignored",
+            "--exact",
+            "--test-threads=1",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    }
+
+    #[test]
+    fn reset_requires_each_gate_and_exact_selected_body_before_connect() {
+        let valid = flags();
+        let lookup = |name: &str| {
+            valid
+                .iter()
+                .find(|item| item.0 == name)
+                .map(|item| item.1.to_owned())
+        };
+        assert_eq!(reset_selection(lookup, &args()), Ok(()));
+        for index in 0..valid.len() {
+            let mut missing = valid.clone();
+            missing.remove(index);
+            assert_eq!(
+                reset_selection(
+                    |name| missing
+                        .iter()
+                        .find(|item| item.0 == name)
+                        .map(|item| item.1.to_owned()),
+                    &args()
+                ),
+                Err("EXPLICIT_RESET_SELECTION_REQUIRED")
+            );
+            for wrong in ["false", "TRUE", "", "0", "inventory", "reset"] {
+                let mut values = valid.clone();
+                values[index].1 = wrong;
+                assert_eq!(
+                    reset_selection(
+                        |name| values
+                            .iter()
+                            .find(|item| item.0 == name)
+                            .map(|item| item.1.to_owned()),
+                        &args()
+                    ),
+                    Err("EXPLICIT_RESET_SELECTION_REQUIRED")
+                );
+            }
+        }
+        for index in 1..args().len() {
+            let mut missing = args();
+            missing.remove(index);
+            assert!(reset_selection(lookup, &missing).is_err());
+            let mut duplicate = args();
+            duplicate.push(duplicate[index].clone());
+            assert!(reset_selection(lookup, &duplicate).is_err());
+        }
+        for body in [MIGRATION_TEST_NAME, INVENTORY_TEST_NAME, TEST_NAME] {
+            let mut wrong = args();
+            wrong[1] = body.to_owned();
+            assert!(reset_selection(lookup, &wrong).is_err());
+        }
+        let mut extra = args();
+        extra.push("--include-ignored".into());
+        assert!(reset_selection(lookup, &extra).is_err());
+        let mut captured = args();
+        captured.push("--nocapture".into());
+        assert_eq!(reset_selection(lookup, &captured), Ok(()));
+        captured.push("--nocapture".into());
+        assert!(reset_selection(lookup, &captured).is_err());
+    }
+
+    #[test]
+    fn reset_plan_uses_only_literal_drops_with_ledger_last_and_no_fk_disable() {
+        assert_eq!(RESET_DROP_STATEMENTS.len(), 126);
+        assert_eq!(
+            RESET_DROP_STATEMENTS.last(),
+            Some(&"DROP TABLE IF EXISTS \"schema_migrations\";")
+        );
+        let mut names = std::collections::BTreeSet::new();
+        for (index, statement) in RESET_DROP_STATEMENTS.iter().enumerate() {
+            let prefix = if index < 27 {
+                "DROP TRIGGER IF EXISTS \""
+            } else {
+                "DROP TABLE IF EXISTS \""
+            };
+            let name = statement
+                .strip_prefix(prefix)
+                .unwrap()
+                .strip_suffix("\";")
+                .unwrap();
+            assert!(name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'));
+            assert!(names.insert((index < 27, name)));
+            assert!(!statement.contains("PRAGMA"));
+        }
+    }
+    #[tokio::test]
+    async fn reset_wrong_backend_preserves_actual_local_catalog_and_fk() {
+        let f = crate::db::attachment_preview::tests::Fixture::new().await;
+        let before: Vec<(String, String, String, Option<String>)> =
+            sqlx::query_as("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name")
+                .fetch_all(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            reset_transaction(&f.backend).await,
+            ResetOutcome::refused("WRONG_PRODUCT_BACKEND")
+        );
+        let after: Vec<(String, String, String, Option<String>)> =
+            sqlx::query_as("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name")
+                .fetch_all(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT 353")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            353
+        );
+        f.close().await;
+    }
+
+    async fn protocol_fixture() -> (
+        crate::db::libsql_finish_fixture::LibsqlFinishFixture,
+        std::path::PathBuf,
+        Backend,
+    ) {
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD")
+                .expect("ROOT allocated pinned official sqld required; no skip"),
+        );
+        let root = std::env::temp_dir().join(format!("fvoci-reset-{}", uuid::Uuid::now_v7()));
+        let driver = crate::db::libsql_finish_fixture::LibsqlFinishFixture::start(&sqld, &root)
+            .await
+            .unwrap();
+        let database = driver.database().await.unwrap();
+        let backend = Backend::LibsqlRemote(std::sync::Arc::new(RemoteDatabase::from_test_driver(
+            database,
+            std::num::NonZeroU32::new(1).unwrap(),
+        )));
+        (driver, root, backend)
+    }
+
+    async fn finish_fixture(
+        driver: crate::db::libsql_finish_fixture::LibsqlFinishFixture,
+        root: std::path::PathBuf,
+    ) {
+        let receipt = driver.finish().await.unwrap();
+        assert!(receipt.sqld_reaped);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "ROOT allocated official sqld and explicit migration helper gates required"]
+    async fn reset_known_populated_prefix11_reaches_blank_on_fresh_stream() {
+        let (driver, root, backend) = protocol_fixture().await;
+        super::super::migrate::turso_test_apply_prefix(&backend, 11)
+            .await
+            .unwrap();
+        migration_populate(&backend, uuid::Uuid::now_v7())
+            .await
+            .unwrap();
+        let outcome = reset_transaction(&backend).await;
+        assert_eq!(
+            outcome,
+            ResetOutcome {
+                primary: "OK",
+                rollback: "NOT_STARTED",
+                commit: "RETURNED_OK",
+                blank: "CONFIRMED",
+                steps: 126
+            }
+        );
+        assert!(migration_snapshot(&backend, 0)
+            .await
+            .unwrap()
+            .receipts
+            .is_empty());
+        close_migration_owner(&backend).await.unwrap();
+        assert_eq!(backend.connection_stats().unwrap().size, 0);
+        finish_fixture(driver, root).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "ROOT allocated official sqld and explicit migration helper gates required"]
+    async fn reset_unexpected_catalog_refuses_without_drops_and_healthy_reset_progresses() {
+        let (driver, root, backend) = protocol_fixture().await;
+        super::super::migrate::turso_test_apply_prefix(&backend, 11)
+            .await
+            .unwrap();
+        let workspace = uuid::Uuid::now_v7();
+        migration_populate(&backend, workspace).await.unwrap();
+        let before = migration_snapshot(&backend, 11).await.unwrap();
+        let mut tx = backend.begin_write().await.unwrap();
+        remote_family(&mut tx)
+            .unwrap()
+            .execute(
+                "CREATE TABLE reset_unexpected_object (id INTEGER PRIMARY KEY) STRICT",
+                &[],
+            )
+            .await
+            .unwrap();
+        tx.commit_with_cleanup().await.unwrap();
+        let refused = reset_transaction(&backend).await;
+        assert_eq!(refused.primary, "RESET_SCHEMA_REFUSED");
+        assert_eq!(refused.steps, 0);
+        assert_eq!(refused.commit, "NOT_STARTED");
+        assert_eq!(refused.rollback, "RETURNED_OK");
+        let mut tx = backend.begin_write().await.unwrap();
+        same_stream_readback(&mut tx).await.unwrap();
+        let rows = remote_family(&mut tx).unwrap().query("SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='reset_unexpected_object'", &[]).await.unwrap();
+        assert_eq!(rows[0].cell(0).unwrap(), Cell::Integer(1));
+        let rows = remote_family(&mut tx)
+            .unwrap()
+            .query(
+                "SELECT count(*) FROM workspaces WHERE id=?1",
+                &[Cell::uuid(workspace)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cell(0).unwrap(), Cell::Integer(1));
+        let rows = remote_family(&mut tx)
+            .unwrap()
+            .query(
+                "SELECT next_fence FROM collab_fence_counter WHERE id=1",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cell(0).unwrap(), Cell::Integer(17));
+        remote_family(&mut tx)
+            .unwrap()
+            .execute("DROP TABLE reset_unexpected_object", &[])
+            .await
+            .unwrap();
+        tx.commit_with_cleanup().await.unwrap();
+        assert_eq!(migration_snapshot(&backend, 11).await.unwrap(), before);
+        assert_eq!(reset_transaction(&backend).await.primary, "OK");
+        close_migration_owner(&backend).await.unwrap();
+        finish_fixture(driver, root).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "ROOT allocated official sqld and explicit migration helper gates required"]
+    async fn reset_lost_commit_reply_remains_unknown_without_fresh_blank_observer() {
+        let (driver, root, backend) = protocol_fixture().await;
+        super::super::migrate::turso_test_apply_prefix(&backend, 11)
+            .await
+            .unwrap();
+        let gate = driver.arm_commit_response_loss();
+        let reset = reset_transaction(&backend);
+        tokio::pin!(reset);
+        tokio::select! {
+            outcome = &mut reset => panic!("reset returned before held actual commit response: {outcome:?}"),
+            response = gate.wait_upstream_response() => response.unwrap(),
+        }
+        gate.release_lost_reply();
+        let outcome = reset.await;
+        assert_eq!(outcome.primary, "COMMIT_UNCONFIRMED");
+        assert_eq!(outcome.commit, "UNCONFIRMED");
+        assert_eq!(outcome.blank, "NOT_RUN");
+        assert_eq!(outcome.rollback, "NOT_STARTED");
+        assert_eq!(outcome.steps, 126);
+        assert!(close_migration_owner(&backend).await.is_err());
+        assert_eq!(backend.connection_stats().unwrap().size, 0);
+        let exchanges = driver.exchanges();
+        let commit = exchanges
+            .iter()
+            .rposition(|exchange| exchange.has_commit)
+            .unwrap();
+        assert!(exchanges[commit].reply_lost);
+        assert_eq!(exchanges[commit].upstream_status, Some(200));
+        // Local cleanup may Close. It must not execute a new blank SELECT or
+        // ROLLBACK as though the hidden original finish reply were confirmed.
+        for exchange in &exchanges[commit + 1..] {
+            let request = serde_json::to_string(&exchange.request).unwrap();
+            assert!(!request.contains("SELECT") && !request.contains("ROLLBACK"));
+        }
+        finish_fixture(driver, root).await;
     }
 }

@@ -142,7 +142,7 @@ class AdmissionTests(unittest.TestCase):
             self.assertEqual(guard.validate_dispatch(self.context, confirmed, "a" * 40), phase)
             self.assertEqual(guard.validate_target(confirmed,
                              {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true"}, self.secrets), phase)
-            if phase != "migration":
+            if phase not in ("migration", "reset"):
                 self.denied("NOT_IMPLEMENTED", guard.require_implemented, phase)
 
     def test_tls_primary_configuration_and_input_unchanged(self):
@@ -956,7 +956,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_workflow_retains_false_default_trust_serialization_and_presecret_pipeline(self):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/turso-test.yml").read_text()
-        self.assertIn("options: [connection, crud, transactions, migration, inventory, persistence, restore, ui-ack]", workflow)
+        self.assertIn("options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack]", workflow)
         self.assertIn("        default: connection\n", workflow)
         self.assertIn("        type: boolean\n        default: false\n", workflow)
         self.assertIn("  group: fvoci-turso-test-database\n  cancel-in-progress: false\n", workflow)
@@ -1120,6 +1120,138 @@ class InventoryFailureTests(unittest.TestCase):
                 self.assertEqual(str(caught.exception), "COMPILED_TEST_BINDING_FAILED")
                 self.assertEqual(output.getvalue(), "")
                 run.assert_called_once()
+
+
+class ResetTests(unittest.TestCase):
+    inputs = {"phase": "reset", "destructive": True}
+
+    @staticmethod
+    def success():
+        return ("\nrunning 1 test\ntest " + guard.RESET_TEST_NAME
+                + " ... FVOCI_TURSO_RESET_RECEIPT primary=OK rollback=NOT_STARTED commit=RETURNED_OK "
+                  "blank=CONFIRMED steps=126 close=OK drain=LOCAL_OK leases=ZERO\nok\n\n"
+                  "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out; finished in 0.00s\n\n")
+
+    def test_reset_requires_manual_confirmation_and_allow_before_child(self):
+        admission = AdmissionTests(); admission.setUp()
+        self.assertEqual(guard.validate_dispatch(admission.context, self.inputs, "a" * 40), "reset")
+        for context in (dict(admission.context, event_name="push", ref=guard.REVIEWED_REF),
+                        dict(admission.context, repository="attacker/fvoci"),
+                        dict(admission.context, ref="refs/heads/topic")):
+            with self.assertRaises(guard.AdmissionError):
+                guard.validate_dispatch(context, self.inputs, "a" * 40)
+        for destructive, allow in ((False, "false"), (False, "true"), (True, "false"), (True, "TRUE"), (True, "")):
+            with InventoryTests().frozen() as (_, _, run), mock.patch.dict(os.environ, {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": allow}):
+                with self.assertRaises(guard.AdmissionError) as error:
+                    guard.run_reset("a" * 40, dict(self.inputs, destructive=destructive))
+                self.assertEqual(str(error.exception), "DESTRUCTIVE_NOT_ALLOWED")
+                run.assert_not_called()
+        for phase in ("connection", "migration", "inventory", "unknown"):
+            with self.assertRaises(guard.AdmissionError) as error:
+                guard.run_reset("a" * 40, dict(self.inputs, phase=phase))
+            self.assertEqual(str(error.exception), "WRONG_CONSUMER_PHASE")
+
+    def test_reset_child_is_separate_exact_body_and_current_binding_no_secret_echo(self):
+        with InventoryTests().frozen() as (root, _, run), mock.patch.dict(os.environ, {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true"}):
+            run.return_value = subprocess.CompletedProcess([], 0, self.success().encode())
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                guard.run_reset("a" * 40, self.inputs)
+            run.assert_called_once()
+            self.assertEqual(run.call_args.args[0], [str(root / "turso-connection-libtest"), guard.RESET_TEST_NAME,
+                "--ignored", "--exact", "--test-threads=1", "--nocapture"])
+            child = run.call_args.kwargs["env"]
+            expected = {key: os.environ[key] for key in ("PATH", "LD_LIBRARY_PATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "TZ")}
+            expected.update({"FVOCI_DATABASE_BACKEND": "libsql-remote", "FVOCI_LIBSQL_URL": os.environ["FVOCI_LIBSQL_URL"],
+                "FVOCI_LIBSQL_AUTH_TOKEN": "FAKE_PRIVATE_TOKEN", "FVOCI_TEST_TURSO_RESET_SELECTED": "1",
+                "FVOCI_TEST_TURSO_MIGRATION_SELECTED": "1", "FVOCI_TEST_TURSO_PHASE": "migration",
+                "FVOCI_TEST_TURSO_DESTRUCTIVE": "true", "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true"})
+            self.assertEqual(child, expected)
+            self.assertIn("TURSO_RESET_PASS tests=1 ignored=0", output.getvalue())
+            self.assertNotIn("FAKE_PRIVATE_TOKEN", output.getvalue())
+        for mutation in ("source", "binary", "native", "cargo", "manifest"):
+            with self.subTest(mutation=mutation), InventoryTests().frozen() as (root, _, run), mock.patch.dict(os.environ, {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true"}):
+                def changed(*args, **kwargs):
+                    if mutation == "source":
+                        guard.source_digest.return_value = "changed"
+                    else:
+                        target = {"binary": "turso-connection-libtest", "native": "fvoci-sqlite/consumer-inputs.json",
+                                  "cargo": "turso-compile.json", "manifest": "turso-connection-build.json"}[mutation]
+                        with (root / target).open("ab") as stream:
+                            stream.write(b" ")
+                    return subprocess.CompletedProcess([], 0, self.success().encode())
+                run.side_effect = changed
+                with contextlib.redirect_stdout(io.StringIO()) as output, self.assertRaises(guard.AdmissionError) as error:
+                    guard.run_reset("a" * 40, self.inputs)
+                self.assertEqual(str(error.exception), "COMPILED_TEST_BINDING_FAILED")
+                self.assertEqual(output.getvalue(), "")
+
+    def test_reset_success_requires_original_complete_execution_and_settlement(self):
+        valid = self.success()
+        for text, status in [(valid, 1), (valid.replace("1 passed", "0 passed"), 0),
+            (valid.replace(guard.RESET_TEST_NAME, guard.MIGRATION_TEST_NAME), 0),
+            (valid.replace("commit=RETURNED_OK", "commit=UNCONFIRMED"), 0),
+            (valid.replace("blank=CONFIRMED", "blank=NOT_RUN"), 0),
+            (valid.replace("steps=126", "steps=125"), 0),
+            (valid.replace("close=OK", "close=FAILED"), 0),
+            (valid.replace("drain=LOCAL_OK", "drain=UNCONFIRMED"), 0),
+            (valid.replace("leases=ZERO", "leases=FAILED"), 0),
+            (valid + valid, 0), (valid + "FAKE_PRIVATE_TOKEN\n", 0),
+            (valid[valid.index("test result:"):], 0)]:
+            with self.subTest(text=text, status=status), contextlib.redirect_stdout(io.StringIO()) as output:
+                with self.assertRaises(guard.AdmissionError) as error:
+                    guard.reset_result(subprocess.CompletedProcess([], status, b""), text)
+                self.assertEqual(str(error.exception), "TURSO_RESET_FAILED")
+                self.assertEqual(output.getvalue(), "")
+
+    def test_reset_failed_primary_unknown_commit_or_cleanup_never_becomes_pass(self):
+        template = ("\nrunning 1 test\ntest " + guard.RESET_TEST_NAME + " ... FVOCI_TURSO_RESET_RECEIPT {}\n\n"
+                    "FVOCI_TURSO_RESET_RETURN\nError: FAKE_PRIVATE_TOKEN\nFAILED\n\nfailures:\n\nfailures:\n    "
+                    + guard.RESET_TEST_NAME + "\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 100 filtered out; finished in 0.00s\n")
+        for fields in (
+            "primary=RESET_SCHEMA_REFUSED rollback=RETURNED_OK commit=NOT_STARTED blank=NOT_RUN steps=0 close=OK drain=LOCAL_OK leases=ZERO",
+            "primary=RESET_DDL_FAILED rollback=UNCONFIRMED commit=NOT_STARTED blank=NOT_RUN steps=23 close=FAILED drain=UNCONFIRMED leases=ZERO",
+            "primary=COMMIT_UNCONFIRMED rollback=NOT_STARTED commit=UNCONFIRMED blank=NOT_RUN steps=126 close=FAILED drain=UNCONFIRMED leases=ZERO",
+            "primary=RESET_FRESH_BLANK_FAILED rollback=NOT_STARTED commit=RETURNED_OK blank=FAILED steps=126 close=OK drain=LOCAL_OK leases=ZERO",
+            "primary=OK rollback=NOT_STARTED commit=RETURNED_OK blank=CONFIRMED steps=126 close=FAILED drain=UNCONFIRMED leases=ZERO",
+        ):
+            text = template.format(fields)
+            with contextlib.redirect_stdout(io.StringIO()) as output, self.assertRaises(guard.AdmissionError):
+                guard.reset_result(subprocess.CompletedProcess([], 1, b""), text)
+            self.assertEqual(output.getvalue(), "TURSO_RESET_FAILURE " + fields + "\n")
+            self.assertNotIn("FAKE_PRIVATE_TOKEN", output.getvalue())
+            for mutated in (text.replace("primary=", "primary=PRIVATE_"),
+                            text.replace("0 passed; 1 failed", "1 passed; 0 failed"),
+                            text.replace("steps=126", "steps=127").replace("steps=23", "steps=127").replace("steps=0", "steps=127"),
+                            text.replace("FVOCI_TURSO_RESET_RETURN", "FAKE_PRIVATE_TOKEN"), text + text):
+                with contextlib.redirect_stdout(io.StringIO()) as output, self.assertRaises(guard.AdmissionError):
+                    guard.reset_result(subprocess.CompletedProcess([], 1, b""), mutated)
+                self.assertEqual(output.getvalue(), "")
+
+    def test_reset_plan_matches_current_literal_schema_and_child_before_parent_FK_order(self):
+        import re
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "src/db/turso_test.rs").read_text()
+        literal = source.split("const RESET_DROP_STATEMENTS: [&str; 126] = [", 1)[1].split("];", 1)[0]
+        statements = [json.loads(line.strip().removesuffix(",")) for line in literal.splitlines() if line.strip()]
+        tables = {}; triggers = set()
+        # Source fixture for the maintained literal DDL grammar, never a
+        # production parser or runtime catalog validation substitute.
+        for path in sorted((root / "migrations/sqlite/060").glob("*.sql")):
+            sql = path.read_text()
+            for match in re.finditer(r"CREATE TABLE (\w+)\s*\(", sql):
+                body = sql[match.start():sql.find(";", match.end())]
+                tables[match[1]] = set(re.findall(r"REFERENCES (\w+)", body)) - {match[1]}
+            triggers.update(re.findall(r"CREATE TRIGGER (\w+)", sql))
+        drop_triggers = [statement.removeprefix('DROP TRIGGER IF EXISTS "').removesuffix('";') for statement in statements[:27]]
+        drop_tables = [statement.removeprefix('DROP TABLE IF EXISTS "').removesuffix('";') for statement in statements[27:]]
+        self.assertEqual(len(statements), 126)
+        self.assertEqual(len(set(drop_triggers)), 27); self.assertEqual(set(drop_triggers), triggers)
+        self.assertEqual(len(set(drop_tables)), 99); self.assertEqual(set(drop_tables), set(tables))
+        self.assertEqual(drop_tables[-1], "schema_migrations")
+        for child, parents in tables.items():
+            for parent in parents:
+                self.assertLess(drop_tables.index(child), drop_tables.index(parent))
+        self.assertNotIn("PRAGMA", "".join(statements))
 
 
 if __name__ == "__main__":

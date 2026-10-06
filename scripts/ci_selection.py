@@ -1979,7 +1979,7 @@ def verify_turso_workflow(path: Path) -> list[str]:
     require(isinstance(triggers, dict) and set(triggers) == {"push", "workflow_dispatch"} and triggers.get("push") == {"branches": ["fvoci/v060-turso-verified-connection"]}, "manual dispatch only with fixed credential-free bootstrap")
     dispatch = triggers.get("workflow_dispatch", {}) if isinstance(triggers, dict) else {}
     require(dispatch.get("inputs") == {
-        "phase": {"description": "Connection and inventory read-only; migration requires both destructive gates; others NOT IMPLEMENTED", "type": "choice", "default": "connection", "options": ["connection", "crud", "transactions", "migration", "inventory", "persistence", "restore", "ui-ack"]},
+        "phase": {"description": "Connection and inventory read-only; migration and reset require both destructive gates; others NOT IMPLEMENTED", "type": "choice", "default": "connection", "options": ["connection", "crud", "transactions", "migration", "inventory", "reset", "persistence", "restore", "ui-ack"]},
         "destructive": {"description": "Explicit isolated test DB mutation confirmation (connection and inventory must be false)", "type": "boolean", "default": False},
     } if isinstance(dispatch, dict) else False, "fixed phase inputs and non-destructive default")
     require(data.get("permissions") == {"contents": "read"}, "contents read only")

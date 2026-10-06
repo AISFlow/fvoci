@@ -23,6 +23,7 @@ PHASES = (
     "transactions",
     "migration",
     "inventory",
+    "reset",
     "persistence",
     "restore",
     "ui-ack",
@@ -33,6 +34,7 @@ REVIEWED_REF = "refs/heads/fvoci/v060-turso-verified-connection"
 TEST_NAME = "db::turso_test::turso_primary_connection"
 MIGRATION_TEST_NAME = "db::turso_test::turso_primary_current12_install_resume"
 INVENTORY_TEST_NAME = "db::turso_test::turso_primary_migration_target_inventory"
+RESET_TEST_NAME = "db::turso_test::turso_primary_disposable_prefix11_reset"
 API_ROOT = "https://api.github.com/repos/AISFlow/fvoci/environments/fvoci-turso-test"
 
 
@@ -130,7 +132,7 @@ def validate_target(inputs, settings, secrets):
 def require_implemented(phase):
     if phase not in PHASES:
         reject("UNKNOWN_PHASE")
-    if phase not in ("connection", "migration", "inventory"):
+    if phase not in ("connection", "migration", "inventory", "reset"):
         reject("NOT_IMPLEMENTED")
 
 
@@ -314,6 +316,77 @@ def run_inventory(checkout_sha, inputs):
     run_primary(checkout_sha, inputs)
 
 
+def run_reset(checkout_sha, inputs):
+    if inputs.get("phase") != "reset":
+        reject("WRONG_CONSUMER_PHASE")
+    run_primary(checkout_sha, inputs)
+
+
+RESET_PRIMARY_CODES = frozenset({
+    "OK", "BEGIN_FAILED", "WRONG_PRODUCT_BACKEND", "WRONG_BACKEND",
+    "CURRENT_LINEAGE_CHANGED", "FK_QUERY_FAILED", "FK_DECODE_FAILED",
+    "FOREIGN_KEYS_NOT_ONE", "LITERAL_QUERY_FAILED", "LITERAL_DECODE_FAILED",
+    "LITERAL_MISMATCH", "RESET_SCHEMA_REFUSED", "RESET_DDL_FAILED",
+    "RESET_BLANK_IN_WRITER_FAILED", "COMMIT_UNCONFIRMED", "RESET_FRESH_BLANK_FAILED",
+})
+
+
+def reset_result(result, output):
+    receipt = (r"FVOCI_TURSO_RESET_RECEIPT primary=([A-Z_]+) "
+               r"rollback=(NOT_STARTED|RETURNED_OK|UNCONFIRMED) "
+               r"commit=(NOT_STARTED|RETURNED_OK|UNCONFIRMED) "
+               r"blank=(NOT_RUN|CONFIRMED|FAILED) steps=(0|[1-9][0-9]{0,2}) "
+               r"close=(OK|FAILED) drain=(LOCAL_OK|UNCONFIRMED) leases=(ZERO|FAILED)")
+    frame = r"\n*running 1 test\r?\n" + r"test " + re.escape(RESET_TEST_NAME) + r" \.\.\. "
+    success = re.fullmatch(frame + receipt + r"\r?\nok\r?\n\r?\n"
+        r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out; "
+        r"finished in \d+(?:\.\d+)?s\r?\n*", output)
+    healthy = ("OK", "NOT_STARTED", "RETURNED_OK", "CONFIRMED", "126", "OK", "LOCAL_OK", "ZERO")
+    if result.returncode == 0 and success and success.groups() == healthy:
+        print("TURSO_RESET_RECEIPT primary=OK rollback=NOT_STARTED commit=RETURNED_OK blank=CONFIRMED steps=126 close=OK drain=LOCAL_OK leases=ZERO")
+        print("TURSO_RESET_PASS tests=1 ignored=0")
+        return
+    # A failed frame can disclose closed producer facts but never become PASS.
+    if result.returncode != 0 and len(output) <= 32768:
+        failed = re.fullmatch(frame + receipt + r"\r?\n\r?\nFVOCI_TURSO_RESET_RETURN\r?\n"
+            r"([\s\S]{0,16384}?)FAILED\r?\n\r?\nfailures:\r?\n\r?\nfailures:\r?\n"
+            r"[ \t]+" + re.escape(RESET_TEST_NAME) + r"\r?\n\r?\n"
+            r"test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured; \d+ filtered out; "
+            r"finished in \d+(?:\.\d+)?s\r?\n*", output)
+        if failed:
+            primary, rollback, commit, blank, steps, close, drain, leases, opaque = failed.groups()
+            markers = ("FVOCI_TURSO_", "test result:", "running ", "test ", "failures:")
+            settled_shape = ((commit == "NOT_STARTED" and blank == "NOT_RUN") or
+                             (commit == "UNCONFIRMED" and primary == "COMMIT_UNCONFIRMED" and blank == "NOT_RUN" and rollback == "NOT_STARTED") or
+                             (commit == "RETURNED_OK" and rollback == "NOT_STARTED" and
+                              ((primary == "OK" and blank == "CONFIRMED") or
+                               (primary == "RESET_FRESH_BLANK_FAILED" and blank == "FAILED"))))
+            completed = int(steps)
+            before_effect = primary not in ("OK", "RESET_DDL_FAILED", "RESET_BLANK_IN_WRITER_FAILED",
+                                            "COMMIT_UNCONFIRMED", "RESET_FRESH_BLANK_FAILED")
+            stage_shape = ((before_effect and completed == 0 and commit == "NOT_STARTED") or
+                           (primary == "RESET_DDL_FAILED" and completed < 126 and commit == "NOT_STARTED") or
+                           (primary == "RESET_BLANK_IN_WRITER_FAILED" and completed == 126 and commit == "NOT_STARTED") or
+                           (primary in ("OK", "COMMIT_UNCONFIRMED", "RESET_FRESH_BLANK_FAILED") and completed == 126))
+            rollback_shape = ((primary in ("BEGIN_FAILED", "WRONG_PRODUCT_BACKEND") and rollback == "NOT_STARTED") or
+                              (commit != "NOT_STARTED" and rollback == "NOT_STARTED") or
+                              (primary not in ("BEGIN_FAILED", "WRONG_PRODUCT_BACKEND") and
+                               commit == "NOT_STARTED" and rollback in ("RETURNED_OK", "UNCONFIRMED")))
+            if (primary in RESET_PRIMARY_CODES and completed <= 126 and settled_shape and stage_shape and rollback_shape
+                    and ((close == "OK") == (drain == "LOCAL_OK"))
+                    and (primary != "COMMIT_UNCONFIRMED" or commit == "UNCONFIRMED")
+                    and (primary not in ("OK", "RESET_FRESH_BLANK_FAILED") or commit == "RETURNED_OK")
+                    and not (primary == "OK" and close == "OK" and leases == "ZERO")
+                    and output.count("FVOCI_TURSO_RESET_RECEIPT") == 1
+                    and output.count("FVOCI_TURSO_RESET_RETURN") == 1
+                    and not any(marker in opaque for marker in markers)
+                    and re.search(r"(?:^|\n)FAILED\r?(?:\n|$)", opaque) is None):
+                print("TURSO_RESET_FAILURE " + " ".join(("primary=" + primary, "rollback=" + rollback,
+                    "commit=" + commit, "blank=" + blank, "steps=" + steps,
+                    "close=" + close, "drain=" + drain, "leases=" + leases)))
+    reject("TURSO_RESET_FAILED")
+
+
 INVENTORY_PRIMARY_CODES = frozenset({
     "BEGIN_FAILED", "WRONG_PRODUCT_BACKEND", "WRONG_BACKEND", "FK_QUERY_FAILED",
     "FK_DECODE_FAILED", "FOREIGN_KEYS_NOT_ONE", "LITERAL_QUERY_FAILED",
@@ -492,9 +565,9 @@ def run_primary(checkout_sha, inputs):
     settings = {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": os.environ.get("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "")}
     credentials = {"FVOCI_TEST_TURSO_DATABASE_URL": os.environ.get("FVOCI_LIBSQL_URL", ""), "FVOCI_TEST_TURSO_AUTH_TOKEN": os.environ.get("FVOCI_LIBSQL_AUTH_TOKEN", "")}
     validate_target(inputs, settings, credentials)
-    # Inventory also binds the full maintained freeze receipt before/after its
-    # one child. Original connection/migration binding and parsers stay intact.
-    inventory_binding = diagnostic_unit_binding(checkout_sha) if phase == "inventory" else None
+    # Inventory/reset bind the full maintained freeze receipt before/after
+    # their one child. Original connection/migration binding and parsers stay intact.
+    inventory_binding = diagnostic_unit_binding(checkout_sha) if phase in ("inventory", "reset") else None
     root = Path(os.environ["RUNNER_TEMP"]).resolve()
     manifest = json.loads((root / "turso-connection-build.json").read_text())
     executable = root / "turso-connection-libtest"
@@ -523,6 +596,15 @@ def run_primary(checkout_sha, inputs):
             "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "false",
         })
         test_name = INVENTORY_TEST_NAME
+    elif phase == "reset":
+        child_env.update({
+            "FVOCI_TEST_TURSO_RESET_SELECTED": "1",
+            "FVOCI_TEST_TURSO_MIGRATION_SELECTED": "1",
+            "FVOCI_TEST_TURSO_PHASE": "migration",
+            "FVOCI_TEST_TURSO_DESTRUCTIVE": "true",
+            "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true",
+        })
+        test_name = RESET_TEST_NAME
     else:
         child_env.update({
             "FVOCI_TEST_TURSO_MIGRATION_SELECTED": "1",
@@ -537,10 +619,13 @@ def run_primary(checkout_sha, inputs):
         [str(executable), test_name, "--ignored", "--exact", "--test-threads=1", "--nocapture"],
         env=child_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
     )
-    if phase == "inventory":
+    if phase in ("inventory", "reset"):
         if diagnostic_unit_binding(checkout_sha) != inventory_binding:
             reject("COMPILED_TEST_BINDING_FAILED")
-        inventory_result(result, result.stdout.decode("utf-8", errors="replace"))
+        if phase == "reset":
+            reset_result(result, result.stdout.decode("utf-8", errors="replace"))
+        else:
+            inventory_result(result, result.stdout.decode("utf-8", errors="replace"))
         return
     output = result.stdout.decode("utf-8", errors="replace")
     if phase == "migration":
@@ -608,6 +693,8 @@ def main():
                 run_connection(checkout_sha, inputs)
             elif phase == "inventory":
                 run_inventory(checkout_sha, inputs)
+            elif phase == "reset":
+                run_reset(checkout_sha, inputs)
             else:
                 run_migration(checkout_sha, inputs)
         return 0
