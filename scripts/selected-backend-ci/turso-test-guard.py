@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Trusted manual admission and one explicitly selected real connection probe.
+"""Trusted manual admission and one explicitly selected real primary consumer.
 
 Pure fixtures do not call metadata APIs or the probe. Only --admit fetches public
 Environment metadata; only --consume reads the two runtime credential variables.
@@ -30,6 +30,7 @@ REPOSITORY = "AISFlow/fvoci"
 ENVIRONMENT = "fvoci-turso-test"
 REVIEWED_REF = "refs/heads/fvoci/v060-turso-verified-connection"
 TEST_NAME = "db::turso_test::turso_primary_connection"
+MIGRATION_TEST_NAME = "db::turso_test::turso_primary_current12_install_resume"
 API_ROOT = "https://api.github.com/repos/AISFlow/fvoci/environments/fvoci-turso-test"
 
 
@@ -59,6 +60,8 @@ def validate_dispatch(context, inputs, checkout_sha):
     if phase not in PHASES:
         reject("UNKNOWN_PHASE")
     destructive = boolean(inputs.get("destructive", False))
+    if bootstrap and phase != "connection":
+        reject("SECRET_MODE_REQUIRES_MANUAL")
     if phase == "connection" and destructive:
         reject("CONNECTION_MUST_BE_READ_ONLY")
     if phase != "connection" and not destructive:
@@ -119,7 +122,7 @@ def validate_target(inputs, settings, secrets):
 def require_implemented(phase):
     if phase not in PHASES:
         reject("UNKNOWN_PHASE")
-    if phase != "connection":
+    if phase not in ("connection", "migration"):
         reject("NOT_IMPLEMENTED")
 
 
@@ -228,6 +231,35 @@ def freeze_compiled_test(checkout_sha):
 
 
 def run_connection(checkout_sha, inputs):
+    if inputs.get("phase", "connection") != "connection":
+        reject("WRONG_CONSUMER_PHASE")
+    run_primary(checkout_sha, inputs)
+
+
+def run_migration(checkout_sha, inputs):
+    if inputs.get("phase") != "migration":
+        reject("WRONG_CONSUMER_PHASE")
+    run_primary(checkout_sha, inputs)
+
+
+def migration_result(result, output):
+    receipt = re.findall(
+        r"FVOCI_TURSO_MIGRATION_RECEIPT primary=(OK|FAILED) prefix=(OK|NOT_CONFIRMED) fk_rollback=(OK|NOT_CONFIRMED) current=(OK|NOT_CONFIRMED) restart=(OK|NOT_CONFIRMED) close=(OK|FAILED) leases=(ZERO|FAILED)(?:\r?\n|$)",
+        output,
+    )
+    if len(receipt) != 1:
+        reject("TURSO_MIGRATION_RECEIPT_MISSING")
+    print("TURSO_MIGRATION_RECEIPT " + " ".join(receipt[0]))
+    if (result.returncode != 0 or receipt[0] != ("OK", "OK", "OK", "OK", "OK", "OK", "ZERO")
+            or not re.search(r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out;", output)
+            or not re.search(r"test " + re.escape(MIGRATION_TEST_NAME) + r" \.\.\. ", output)):
+        reject("TURSO_MIGRATION_FAILED")
+    print("TURSO_MIGRATION_PASS tests=1 ignored=0")
+
+
+def run_primary(checkout_sha, inputs):
+    phase = inputs.get("phase", "connection")
+    require_implemented(phase)
     if os.environ.get("FVOCI_DATABASE_BACKEND") != "libsql-remote":
         reject("BACKEND_SELECTOR_REQUIRED")
     settings = {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": os.environ.get("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "")}
@@ -249,14 +281,27 @@ def run_connection(checkout_sha, inputs):
         "PATH", "LD_LIBRARY_PATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "TZ"
     ) if key in os.environ}
     child_env.update({"FVOCI_DATABASE_BACKEND": "libsql-remote", "FVOCI_LIBSQL_URL": credentials["FVOCI_TEST_TURSO_DATABASE_URL"], "FVOCI_LIBSQL_AUTH_TOKEN": credentials["FVOCI_TEST_TURSO_AUTH_TOKEN"]})
-    child_env["FVOCI_TEST_TURSO_CONNECTION_SELECTED"] = "1"
+    if phase == "connection":
+        child_env["FVOCI_TEST_TURSO_CONNECTION_SELECTED"] = "1"
+        test_name = TEST_NAME
+    else:
+        child_env.update({
+            "FVOCI_TEST_TURSO_MIGRATION_SELECTED": "1",
+            "FVOCI_TEST_TURSO_PHASE": "migration",
+            "FVOCI_TEST_TURSO_DESTRUCTIVE": "true",
+            "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true",
+        })
+        test_name = MIGRATION_TEST_NAME
     # Raw SDK/test errors can contain endpoint/query/token values. Capture only
     # in memory; never write/upload/reflect them. Do not retry a failed probe.
     result = subprocess.run(
-        [str(executable), TEST_NAME, "--ignored", "--exact", "--test-threads=1", "--nocapture"],
+        [str(executable), test_name, "--ignored", "--exact", "--test-threads=1", "--nocapture"],
         env=child_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
     )
     output = result.stdout.decode("utf-8", errors="replace")
+    if phase == "migration":
+        migration_result(result, output)
+        return
     receipt = re.findall(
         r"FVOCI_TURSO_RECEIPT primary=([A-Z_]+) rollback=(OK|FAILED|NOT_STARTED) close=(OK|FAILED|NOT_STARTED) leases=(ZERO|FAILED|NOT_OBSERVED)",
         output,
@@ -313,7 +358,10 @@ def main():
             freeze_compiled_test(checkout_sha)
             print("COMPILED_TEST_FROZEN_RUNTIME_NOT_RUN")
         else:
-            run_connection(checkout_sha, inputs)
+            if phase == "connection":
+                run_connection(checkout_sha, inputs)
+            else:
+                run_migration(checkout_sha, inputs)
         return 0
     except AdmissionError as error:
         print(str(error), file=sys.stderr)

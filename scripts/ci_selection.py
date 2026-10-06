@@ -1830,7 +1830,7 @@ def verify_turso_workflow(path: Path) -> list[str]:
     require(isinstance(triggers, dict) and set(triggers) == {"push", "workflow_dispatch"} and triggers.get("push") == {"branches": ["fvoci/v060-turso-verified-connection"]}, "manual dispatch only with fixed credential-free bootstrap")
     dispatch = triggers.get("workflow_dispatch", {}) if isinstance(triggers, dict) else {}
     require(dispatch.get("inputs") == {
-        "phase": {"description": "Connection is read-only; later phases are NOT IMPLEMENTED", "type": "choice", "default": "connection", "options": ["connection", "crud", "transactions", "migration", "persistence", "restore", "ui-ack"]},
+        "phase": {"description": "Connection read-only; migration requires both destructive gates; others NOT IMPLEMENTED", "type": "choice", "default": "connection", "options": ["connection", "crud", "transactions", "migration", "persistence", "restore", "ui-ack"]},
         "destructive": {"description": "Explicit isolated test DB mutation confirmation (connection must be false)", "type": "boolean", "default": False},
     } if isinstance(dispatch, dict) else False, "fixed phase inputs and non-destructive default")
     require(data.get("permissions") == {"contents": "read"}, "contents read only")
@@ -1863,7 +1863,7 @@ def verify_turso_workflow(path: Path) -> list[str]:
     require(set(steps[1]) == set(steps[2]) == {"name", "run"}, "no compilation credentials")
     require(steps[1].get("run") == "set -euo pipefail\nprintf 'CARGO_TARGET_DIR=%s/turso-target\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"\nrustup toolchain install 1.98.1 --profile minimal\nsudo apt-get update\nsudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8\nmkdir \"$RUNNER_TEMP/fvoci-sqlite\"\ndpkg-query -W > \"$RUNNER_TEMP/fvoci-sqlite/build-packages.txt\"\nbash scripts/prepare-sqlite-ci.sh --parent \"$RUNNER_TEMP/fvoci-sqlite\" \\\n  --github-env \"$GITHUB_ENV\" --github-output \"$GITHUB_OUTPUT\"\ncargo fetch --locked\n", "maintained pinned compiler/native preparation")
     require(steps[2].get("run") == "set -euo pipefail\ncargo test --locked --offline --lib --features db-tests --jobs 4 --no-run --message-format=json > \"$RUNNER_TEMP/turso-compile.json\"\npython3 scripts/selected-backend-ci/turso-test-guard.py --freeze\n", "fixed fresh compilation and ELF binding")
-    require(steps[3] == {"name": "Read-only real primary connection (exactly one test)", "env": {
+    require(steps[3] == {"name": "Real primary selected phase (exactly one test)", "env": {
         "FVOCI_DATABASE_BACKEND": "libsql-remote",
         "FVOCI_LIBSQL_URL": "${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}",
         "FVOCI_LIBSQL_AUTH_TOKEN": "${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}",

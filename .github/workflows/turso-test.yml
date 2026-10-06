@@ -1,4 +1,4 @@
-name: Turso isolated primary connection
+name: Turso isolated primary connection and migration
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       phase:
-        description: Connection is read-only; later phases are NOT IMPLEMENTED
+        description: Connection read-only; migration requires both destructive gates; others NOT IMPLEMENTED
         type: choice
         default: connection
         options: [connection, crud, transactions, migration, persistence, restore, ui-ack]
@@ -76,7 +76,7 @@ jobs:
           set -euo pipefail
           cargo test --locked --offline --lib --features db-tests --jobs 4 --no-run --message-format=json > "$RUNNER_TEMP/turso-compile.json"
           python3 scripts/selected-backend-ci/turso-test-guard.py --freeze
-      - name: Read-only real primary connection (exactly one test)
+      - name: Real primary selected phase (exactly one test)
         env:
           FVOCI_DATABASE_BACKEND: libsql-remote
           FVOCI_LIBSQL_URL: ${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}

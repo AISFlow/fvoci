@@ -1,6 +1,6 @@
-# Isolated Turso connection test
+# Isolated Turso primary connection and migration consumers
 
-The source consumer is prepared; Rust compilation and actual Turso execution are
+The source consumers are prepared; Rust compilation and actual Turso execution are
 **NOT RUN**. Independent review and a separately allocated execution are still required.
 Root may publish the reviewed fixed source to the single hardcoded branch
 `fvoci/v060-turso-verified-connection`. Its push bootstrap runs **only pure
@@ -42,7 +42,7 @@ GitHub metadata GET. It does not create or modify an Environment or policy;
 Environment job. Public metadata reads need no organization/admin token;
 private authenticated equivalents need Actions read access. [GitHub Environment API](https://docs.github.com/en/rest/deployments/environments#get-an-environment).
 
-The dedicated `turso-connection` job prepares the maintained pinned SQLite/Rust
+The dedicated `turso-connection` job (historical job ID retained) prepares the maintained pinned SQLite/Rust
 inputs and compiles the current library tests **without credentials**. It
 freezes the actual Cargo-emitted test ELF and binds source SHA/digest, emitted
 profile/features, binary hash and native preparation receipt. Only its final runtime step maps the two registered secrets to product
@@ -70,21 +70,70 @@ claimed to perform cooperative cleanup.
 The maintained SDK accepts a trusted server's Hrana `base_url` for subsequent
 requests. Initial URL validation does not prove follow-up endpoint behavior.
 This remains a specific maintained-SDK/trusted-primary assessment boundary, not
-a confirmed vulnerability or an adopted transport redesign. No SDK, dependency,
-product connection or transport framework was changed.
+a confirmed vulnerability or an adopted transport redesign. The same-version
+SDK patch below adds typed error inspection; upstream connection, transport and
+parser behavior are unchanged.
 
-All later phases remain **NOT IMPLEMENTED** and fail before credential
-consumption. They must cover current tenant authority/CRUD, receipt/version
-retry, concurrent/cancel/original-stream rollback and COMMIT reply loss with
-fresh-connection reconciliation, current migrations, persistence/restart,
-restore, UI persist ACK/revisions and fresh-client readback. ALLOW_DESTRUCTIVE
-must become explicitly true only for a future approved in-DB mutating phase,
-with its dispatch confirmation; it can never reset the connection phase.
-Before mutations, verify real target metadata and an isolated owned marker,
-reject foreign/mixed data, namespace by run ID/attempt, and clean only that run's
-objects. Keep primary and cleanup failures separate; unknown mutation outcome
-cannot cause blind retry/reset. Constant per-database concurrency uses
-`cancel-in-progress:false`; no service database resource deletion/recreation.
+Manual phase `migration` requires both dispatch `destructive=true` and
+Environment variable `FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE=true`. ROOT alone owns
+that flag lifecycle and the allocated isolated remote execution; the current
+registered flag remains false. Bootstrap pushes cannot select migration.
+The final consuming wrapper chooses exactly
+`db::turso_test::turso_primary_current12_install_resume`, exports the exact four
+cfg-test helper selection/phase/destructive flags, and requires one passed test
+plus the strict prefix/FK-rollback/current/restart/close/lease receipt. It uses
+the same source/ELF/native-input frozen qualification and credential filtering
+as connection; fake fixture receipt tests are not remote runtime evidence.
+
+This first migration slice is **not normal remote installation/startup support**.
+Normal server and `fvoci-migrate` remote refusal remain unchanged. The ignored
+manual consumer calls the maintained compiled SQLite registry and per-step
+migration owner through cfg(test, db-tests) Fable-owned helpers. Initial exact
+blank catalog admission occurs before DDL; unexpected/foreign/populated/current
+targets refuse, without automatic reset, service deletion or schema overwrite.
+The secret URL remains the designated target, not an invented host/DB-ID proof.
+ROOT may separately prepare/reset the user-authorized disposable test DB after
+concrete target checks; this consumer never performs that reset.
+
+The consumer applies genuine steps01–11, commits a uniquely identified test
+workspace and fence counter17, and verifies the complete-current gate refuses
+that exact partial lineage. It executes actual compiled step12 DDL in the same
+real reserved writer as an invalid task-fence INSERT, awaits original rollback,
+and checks original prefix receipts/catalog/data remain unchanged. A remote
+failure must be a specifically classified genuine FK rejection, not arbitrary
+HTTP/transport failure. The retained libsql0.9.30 source has a narrowly scoped
+FVOCI `Error::hrana_error_code()` accessor: it borrows the structured code from
+upstream Hrana stream/cursor-step errors, preserving the original error and
+message. The classifier accepts exact typed `SQLITE_CONSTRAINT_FOREIGNKEY` or
+public numeric787; generic19/text mentions, transport and arbitrary/nested boxed
+errors cannot satisfy the FK oracle. Original manifests/dependencies/features,
+transport and parser files are unchanged. Upstream accessor-absence compile
+control fails with E0599; the patched remote,tls library's five accessor controls
+passed at ROOT353d. That is SDK-only evidence, not actual Turso migration or a
+compile result for this wrapper composition. Provenance and full MIT notice are
+in `vendor/libsql-0.9.30/`; see the pinned
+[SDK error variants](https://github.com/tursodatabase/libsql/blob/0653c5788d77ef16a97c56ff3e9fdc11717a72d9/libsql/src/errors.rs)
+and [module visibility](https://github.com/tursodatabase/libsql/blob/0653c5788d77ef16a97c56ff3e9fdc11717a72d9/libsql/src/lib.rs).
+
+After original owner close, a fresh primary owner resumes current12, checks all
+nine claim seeds and preserved data, and performs rollback-only gap/digest/
+extra-object negative catalog checks with the maintained full comparator. It
+advances key8 generation7 by acknowledged commit, closes/reconnects, reruns the
+same maintained initializer, and compares complete raw receipt timestamps,
+lineage/hash/schema, original data/counter and every seeded key/generation.
+Only confirmed commits advance; remote uncertain commit/rollback stops without
+fresh-observer reconciliation or blind retry. Successful close is product owner
+drain/zero active leases, not an unexposed server Close ACK. The uniquely
+identified test workspace and current schema remain retained for ROOT inspection.
+
+Other phases (`crud`, `transactions`, `persistence`, `restore`, `ui-ack`) remain
+**NOT IMPLEMENTED** and refuse before credential consumption. Current tenant
+CRUD/authorization, request/version replay, real concurrent/cancel/uncertain
+finish, normal remote setup, backup/restore, real UI persist ACK and fresh-client
+history remain required separate product acceptance. Local SQLite or loopback
+SDK results cannot be labeled actual Turso PASS. Constant per-database
+concurrency remains `cancel-in-progress:false`; no service resource reset,
+provider/account/secret/policy/permission change is made by the worker.
 
 Pure local checks: `python3 scripts/selected-backend-ci/turso-test-fixtures.py`
 and `bash scripts/test-ci-selection.sh`. These do not prove Rust compilation,

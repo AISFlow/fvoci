@@ -160,10 +160,11 @@ class AdmissionTests(unittest.TestCase):
         self.denied("UNKNOWN_PHASE", guard.require_implemented, "echo FAKE")
 
     def test_every_fixed_phase_refuses_successful_noop(self):
-        for phase in ("crud", "transactions", "migration", "persistence", "restore", "ui-ack"):
+        for phase in ("crud", "transactions", "persistence", "restore", "ui-ack"):
             self.denied("NOT_IMPLEMENTED", guard.require_implemented, phase)
         # Permission to select a real fixture is not its execution or PASS.
         self.assertIsNone(guard.require_implemented("connection"))
+        self.assertIsNone(guard.require_implemented("migration"))
 
     def test_real_cli_unavailable_phase_and_redaction(self):
         sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
@@ -287,6 +288,76 @@ class AdmissionTests(unittest.TestCase):
                         self.assertEqual((root / "turso-connection-libtest").read_bytes(), binary.read_bytes())
                     else:
                         self.denied("COMPILED_TEST_BINDING_FAILED", guard.freeze_compiled_test, "a" * 40)
+
+    def test_migration_requires_manual_dispatch_and_both_destructive_flags(self):
+        inputs = {"phase": "migration", "destructive": True}
+        self.assertEqual(guard.validate_dispatch(self.context, inputs, "a" * 40), "migration")
+        self.denied("SECRET_MODE_REQUIRES_MANUAL", guard.validate_dispatch,
+                    dict(self.context, event_name="push", ref=guard.REVIEWED_REF), inputs, "a" * 40)
+        self.denied("DESTRUCTIVE_CONFIRMATION_REQUIRED", guard.validate_dispatch,
+                    self.context, dict(inputs, destructive=False), "a" * 40)
+        for settings in ({}, {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "false"}):
+            self.denied("DESTRUCTIVE_NOT_ALLOWED", guard.validate_target, inputs, settings, self.secrets)
+        self.assertEqual(guard.validate_target(inputs, {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true"}, self.secrets), "migration")
+        self.denied("WRONG_CONSUMER_PHASE", guard.run_connection, "a" * 40, inputs)
+        self.denied("WRONG_CONSUMER_PHASE", guard.run_migration, "a" * 40, self.inputs)
+
+    def test_migration_receipt_rejects_missing_partial_wrong_test_and_zero_execution(self):
+        valid = ("test " + guard.MIGRATION_TEST_NAME + " ... FVOCI_TURSO_MIGRATION_RECEIPT primary=OK prefix=OK fk_rollback=OK current=OK restart=OK close=OK leases=ZERO\nok\n"
+                 "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out;\n")
+        success = subprocess.CompletedProcess([], 0, b"")
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            guard.migration_result(success, valid)
+        self.assertIn("TURSO_MIGRATION_PASS tests=1 ignored=0", output.getvalue())
+        for changed, code in (
+            (valid.replace("1 passed", "0 passed"), "TURSO_MIGRATION_FAILED"),
+            (valid.replace("0 ignored", "1 ignored"), "TURSO_MIGRATION_FAILED"),
+            (valid.replace(guard.MIGRATION_TEST_NAME, guard.TEST_NAME), "TURSO_MIGRATION_FAILED"),
+            (valid.replace("fk_rollback=OK", "fk_rollback=NOT_CONFIRMED"), "TURSO_MIGRATION_FAILED"),
+            (valid.replace("restart=OK", "restart=NOT_CONFIRMED"), "TURSO_MIGRATION_FAILED"),
+            (valid.replace("close=OK", "close=FAILED"), "TURSO_MIGRATION_FAILED"),
+            (valid.replace("leases=ZERO", "leases=FAILED"), "TURSO_MIGRATION_FAILED"),
+            (valid.replace("FVOCI_TURSO_MIGRATION_RECEIPT", "FAKE_RECEIPT"), "TURSO_MIGRATION_RECEIPT_MISSING"),
+            (valid + valid, "TURSO_MIGRATION_RECEIPT_MISSING"),
+        ):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.denied(code, guard.migration_result, success, changed + "FAKE_PRIVATE_TOKEN_NEVER_PRINT")
+            self.assertNotIn("FAKE_PRIVATE_TOKEN", output.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.denied("TURSO_MIGRATION_FAILED", guard.migration_result, subprocess.CompletedProcess([], 1, b""), valid)
+
+    def test_migration_binding_exports_exact_four_flags_only_after_confirmation(self):
+        with tempfile.TemporaryDirectory(prefix="fvoci-turso-migration-pure-") as directory:
+            root = Path(directory)
+            binary = root / "turso-connection-libtest"
+            binary.write_bytes(b"\x7fELFpure fixture, never executed")
+            import hashlib
+            native = root / "fvoci-sqlite" / "consumer-inputs.json"
+            native.parent.mkdir()
+            native.write_bytes(b"pure metadata fixture, not native proof")
+            manifest = {"sha": "a" * 40, "source_digest": "fixture", "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "native_input_sha256": hashlib.sha256(native.read_bytes()).hexdigest()}
+            (root / "turso-connection-build.json").write_text(json.dumps(manifest))
+            environment = {"PATH": os.environ.get("PATH", ""), "FVOCI_DATABASE_BACKEND": "libsql-remote", "FVOCI_LIBSQL_URL": self.secrets["FVOCI_TEST_TURSO_DATABASE_URL"], "FVOCI_LIBSQL_AUTH_TOKEN": self.secrets["FVOCI_TEST_TURSO_AUTH_TOKEN"], "RUNNER_TEMP": directory, "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true", "UNRELATED_FAKE_CREDENTIAL": "never forwarded"}
+            inputs = {"phase": "migration", "destructive": True}
+            valid = ("test " + guard.MIGRATION_TEST_NAME + " ... FVOCI_TURSO_MIGRATION_RECEIPT primary=OK prefix=OK fk_rollback=OK current=OK restart=OK close=OK leases=ZERO\nok\n"
+                     "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out;\n").encode()
+            with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(guard, "source_digest", return_value="fixture"), mock.patch.object(guard.subprocess, "run") as run:
+                run.return_value = subprocess.CompletedProcess([], 0, valid)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    guard.run_migration("a" * 40, inputs)
+                self.assertEqual(run.call_args.args[0][1:], [guard.MIGRATION_TEST_NAME, "--ignored", "--exact", "--test-threads=1", "--nocapture"])
+                child = run.call_args.kwargs["env"]
+                for name, expected in (("FVOCI_TEST_TURSO_MIGRATION_SELECTED", "1"), ("FVOCI_TEST_TURSO_PHASE", "migration"), ("FVOCI_TEST_TURSO_DESTRUCTIVE", "true"), ("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "true")):
+                    self.assertEqual(child[name], expected)
+                self.assertNotIn("FVOCI_TEST_TURSO_CONNECTION_SELECTED", child)
+                self.assertNotIn("UNRELATED_FAKE_CREDENTIAL", child)
+                run.reset_mock()
+                with mock.patch.dict(os.environ, {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "false"}):
+                    self.denied("DESTRUCTIVE_NOT_ALLOWED", guard.run_migration, "a" * 40, inputs)
+                run.assert_not_called()
+                native.write_bytes(b"changed input")
+                self.denied("COMPILED_TEST_BINDING_FAILED", guard.run_migration, "a" * 40, inputs)
+                run.assert_not_called()
 
 
 if __name__ == "__main__":
