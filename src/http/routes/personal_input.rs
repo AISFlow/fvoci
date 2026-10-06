@@ -310,7 +310,7 @@ mod selected_personal_input_http_tests {
         problem(status, &result, ProblemCode::InvalidInput);
         let pat = crate::auth::token::new_token();
         sqlx::query("INSERT INTO api_tokens(id,workspace_id,user_id,token_hash,name,scopes) VALUES(?1,?2,?3,?4,'personal-input test',?5)")
-            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(pat.hash).bind(json!(["read","write"]).to_string()).execute(&f.pool).await.unwrap();
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(pat.hash).bind(json!(["documents.read","documents.write"]).to_string()).execute(&f.pool).await.unwrap();
         let (status, result) = post(
             app.clone(),
             f.workspace,
