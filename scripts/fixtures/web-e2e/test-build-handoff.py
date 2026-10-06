@@ -965,6 +965,36 @@ class FailureOriginTest(unittest.TestCase):
         return next(node for node in ast.walk(ast.parse(self.driver.read_text()))
                     if isinstance(node,ast.Assert) and ast.unparse(node.test).startswith('[line.split()[0]'))
 
+    def test_absent_optional_bindings_admit_closed_pg_and_sqlite_without_templates(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(H.CI, 'TEMPLATES', Path(tmp)/'missing-templates'):
+            summary,error,closed=self.project({}, target_lane='install')
+        self.assertIsNone(error);self.assertTrue(closed)
+        self.assertEqual([lane['lane'] for lane in summary['lanes']], ['install','postgres','sqlite'])
+        for lane in summary['lanes'][1:]:
+            self.assertIsNone(lane['original_driver_failure_origin'])
+            self.assertIsNone(lane['original_browser_failure'])
+            self.assertIsNone(lane['network_mode_observation'])
+        self.assertTrue(summary['ownership_return_qualified'])
+
+    def test_optional_binding_omission_does_not_waive_declared_valid_driver_io(self):
+        function=next(node for node in ast.parse((ROOT/'scripts/run-selected-backend-e2e.py').read_text()).body
+                      if isinstance(node,ast.FunctionDef) and node.name=='runtime_ownership_return')
+        binding=next(node for node in ast.walk(function) if isinstance(node,ast.Assign) and
+                     any(isinstance(target,ast.Name) and target.id=='bound_driver' for target in node.targets))
+        code=compile(ast.Module(body=[binding],type_ignores=[]),'<actual bound_driver AST>','exec')
+        with tempfile.TemporaryDirectory() as tmp:
+            namespace={'run':{'lane':'postgres'},'before':{'head':SHA},'driver':Path(tmp)/'missing-driver.py',
+                       're':H.CI.re,'sha':H.CI.sha}
+            for digest in (None,True,1,'','f'*63,'PRIVATE_CANARY_HASH'):
+                with self.subTest(digest=digest):
+                    namespace['facts']={'source':SHA,'driver_sha256':digest}
+                    exec(code,namespace)
+                    self.assertFalse(namespace['bound_driver'])
+            namespace['facts']={'source':SHA,'driver_sha256':'f'*64}
+            with self.assertRaises(FileNotFoundError):exec(code,namespace)
+            with patch.dict(namespace,{'sha':lambda path: (_ for _ in ()).throw(PermissionError('private IO'))}):
+                with self.assertRaises(PermissionError):exec(code,namespace)
+
     def test_original_hash_and_network_failures_have_exact_source_origin(self):
         check=self.hash_assertion()
         values={'hashes':'b'*64+' server\n'+'a'*64+' migrate\n'+'c'*64+' engine\n',
@@ -1238,5 +1268,140 @@ class FailureOriginTest(unittest.TestCase):
                     self.assertIsNone(summary['lanes'][1]['secondary_failure_origins']['post_input_failure_origin'])
                     self.assertNotIn('PRIVATE_CANARY',json.dumps(summary))
 
+
+    def observed_browser_diagnostic(self, lane, report=None, raw='PRIVATE_CANARY_STREAM', altered_inputs=False):
+        driver=ROOT/('scripts/selected-backend-ci/current-'+lane+'-driver.py')
+        function=next(n for n in ast.parse(driver.read_text()).body if isinstance(n,ast.FunctionDef) and n.name=='browser_failure_diagnostic')
+        with tempfile.TemporaryDirectory() as tmp:
+            run=Path(tmp);(run/'browser.log').write_text(raw)
+            if report is not None:
+                (run/'playwright-result.private.json').write_text(report if type(report) is str else json.dumps(report))
+            cache=run/'browser';chromium=cache/'chromium-1243/chrome-linux64/chrome'
+            chromium.parent.mkdir(parents=True);chromium.write_bytes(b'NOT BROWSER fixture')
+            spec=ROOT/'apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'
+            namespace={'sha':H.CI.sha,'__file__':str(driver),'sys':sys,'json':json,'Path':Path,'W':ROOT,'SPEC':spec.name,
+                       're':__import__('re'),'before':{'tracked':{str(spec.relative_to(ROOT)):H.CI.sha(spec)}}}
+            exec(compile(ast.Module(body=[copy.deepcopy(function)],type_ignores=[]),str(driver),'exec'),namespace)
+            inputs={'bun':{'sha256':'c'*64},'chromium':{'path':str(chromium),'sha256':H.CI.sha(chromium)}}
+            if altered_inputs:inputs['bun']['sha256']='PRIVATE_CANARY_INPUT_HASH'
+            return namespace['browser_failure_diagnostic'](run,7,{'PLAYWRIGHT_BROWSERS_PATH':str(cache)},inputs)
+
+    def test_both_driver_diagnostics_have_identical_bounded_producer_ast(self):
+        trees=[ast.parse((ROOT/('scripts/selected-backend-ci/current-'+lane+'-driver.py')).read_text()) for lane in ('postgres','sqlite')]
+        functions=[next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='browser_failure_diagnostic') for tree in trees]
+        self.assertEqual(ast.dump(functions[0]),ast.dump(functions[1]))
+        for tree in trees:
+            calls=[n for n in ast.walk(tree) if isinstance(n,ast.Call) and isinstance(n.func,ast.Name) and n.func.id=='browser_failure_diagnostic']
+            self.assertEqual(len(calls),1)
+            parent=next(n for n in ast.walk(tree) if isinstance(n,ast.If) and calls[0] in list(ast.walk(n)) and ast.unparse(n.test)=='code != 0')
+            self.assertEqual(ast.unparse(parent.test),'code != 0')
+
+    def test_diagnostic_missing_malformed_partial_and_hostile_reports_stay_unknown(self):
+        for lane in ('postgres','sqlite'):
+            for report,state in [(None,'MISSING'),('PRIVATE_CANARY_NON_JSON','MALFORMED'),([], 'MALFORMED'),
+                                 ({'secret':'PRIVATE_CANARY_PASSWORD'},'MALFORMED'),({'suites':[]},'MALFORMED')]:
+                with self.subTest(lane=lane,report=report):
+                    result=self.observed_browser_diagnostic(lane,report,altered_inputs=True)
+                    self.assertEqual(result['error_kind'],'UNKNOWN')
+                    self.assertIsNone(result['source_location'])
+                    self.assertEqual(result['report_state'],state)
+                    self.assertEqual(result['report_exists'],report is not None)
+                    self.assertIsNone(result['input_observation']['bun_sha256'])
+                    self.assertEqual(result['exit'],7)
+                    self.assertNotIn('PRIVATE_CANARY',json.dumps(result))
+                    self.assertNotIn('/tmp/',json.dumps(result))
+
+    def test_known_first_browser_errors_publish_only_static_enum_and_hashes(self):
+        cases=[('Playwright must run under Bun in CI (bun --bun x playwright)','BUN_CI_CONFIG_GUARD'),
+               ("browserType.launch: Executable doesn't exist at PRIVATE_CANARY_PATH?token=PRIVATE_CANARY_TOKEN",'BROWSER_EXECUTABLE_MISSING'),
+               ('Playwright must run under Bun in CI (bun --bun x playwright) PRIVATE_CANARY_SUFFIX','UNKNOWN')]
+        for lane in ('postgres','sqlite'):
+            for message,kind in cases:
+                with self.subTest(lane=lane,kind=kind):
+                    report={'errors':[{'message':message,'stack':'PRIVATE_CANARY_STACK','location':{'file':'PRIVATE_CANARY_PATH','line':1}}]}
+                    result=self.observed_browser_diagnostic(lane,report)
+                    self.assertEqual(result['error_kind'],kind)
+                    self.assertIsNone(result['source_location'])
+                    self.assertEqual(result['report_state'],'AVAILABLE')
+                    self.assertRegex(result['report_sha256'],'^[0-9a-f]{64}$')
+                    self.assertNotIn('PRIVATE_CANARY',json.dumps(result))
+            result=self.observed_browser_diagnostic(lane,None,'Error: Playwright must run under Bun in CI (bun --bun x playwright)\n')
+            self.assertEqual(result['error_kind'],'BUN_CI_CONFIG_GUARD')
+            self.assertEqual(result['report_state'],'MISSING')
+
+    def test_selected_diagnostic_location_requires_first_current_committed_error(self):
+        spec=ROOT/'apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'
+        for lane in ('postgres','sqlite'):
+            for status,kind in [('failed','SELECTED_SPEC_FAILURE'),('timedOut','SELECTED_SPEC_TIMEOUT')]:
+                result=self.observed_browser_diagnostic(lane,self.browser_error_report({'file':str(spec),'line':361},status))
+                self.assertEqual(result['error_kind'],kind)
+                self.assertEqual(result['source_location'],{'spec_sha256':H.CI.sha(spec),'line':361})
+                self.assertNotIn('PRIVATE_CANARY',json.dumps(result))
+            for location in [None,{'file':'PRIVATE_CANARY_PATH','line':361},{'file':str(spec),'line':True},
+                             {'file':str(spec),'line':0},{'file':str(spec),'line':10**6}]:
+                result=self.observed_browser_diagnostic(lane,self.browser_error_report(location))
+                self.assertEqual(result['error_kind'],'UNKNOWN');self.assertIsNone(result['source_location'])
+            report=self.browser_error_report(None)
+            report['suites'][0]['specs'][0]['tests'][0]['results'][0]['errors'].append({'location':{'file':str(spec),'line':361}})
+            self.assertEqual(self.observed_browser_diagnostic(lane,report)['error_kind'],'UNKNOWN')
+            for status,retry in [('passed',0),('failed',1),('failed',True)]:
+                result=self.observed_browser_diagnostic(lane,self.browser_error_report({'file':str(spec),'line':361},status,retry))
+                self.assertIsNone(result['source_location']);self.assertEqual(result['error_kind'],'UNKNOWN')
+
+    def test_source_bound_diagnostic_projects_both_lanes_without_changing_failure_or_closure(self):
+        for lane in ('postgres','sqlite'):
+            with patch.object(self,'driver',ROOT/('scripts/selected-backend-ci/current-'+lane+'-driver.py')):
+                diagnostic=self.observed_browser_diagnostic(lane)
+                for port in (True,None,False,'true',1):
+                    summary,error,closed=self.project({'browser_exit':7,'browser_failure_diagnostic':diagnostic},port,target_lane=lane)
+                    row=next(r for r in summary['lanes'] if r['lane']==lane)
+                    self.assertEqual(row['browser_failure_diagnostic'],diagnostic)
+                    self.assertEqual(row['receipt_final_exit'],7)
+                    self.assertEqual(closed,port is True);self.assertEqual(error is None,port is True)
+                    self.assertNotIn('PRIVATE_CANARY',json.dumps(summary))
+                summary,error,closed=self.project({},target_lane=lane)
+                self.assertIsNone(next(r for r in summary['lanes'] if r['lane']==lane)['browser_failure_diagnostic'])
+
+    def test_diagnostic_projection_refuses_unknown_fields_bindings_and_hostile_values(self):
+        for lane in ('postgres','sqlite'):
+            with patch.object(self,'driver',ROOT/('scripts/selected-backend-ci/current-'+lane+'-driver.py')):
+                valid=self.observed_browser_diagnostic(lane)
+                mutations=[('schema',True),('schema',2),('driver_sha256','f'*64),('line',True),('line',0),('line',10**6),
+                           ('exit',0),('exit',True),('exit',8),('error_kind','PRIVATE_CANARY_MESSAGE'),('report_exists',1),
+                           ('report_exists',True),('report_state','PRIVATE_CANARY_PATH'),('report_sha256','PRIVATE_CANARY_TOKEN'),
+                           ('log_sha256','PRIVATE_CANARY_URL'),('extra','PRIVATE_CANARY_STACK')]
+                for key,value in mutations:
+                    with self.subTest(lane=lane,key=key,value=value):
+                        summary,error,closed=self.project({'browser_exit':7,'browser_failure_diagnostic':{**valid,key:value}},target_lane=lane)
+                        self.assertIsNone(next(r for r in summary['lanes'] if r['lane']==lane)['browser_failure_diagnostic'])
+                        self.assertIsNone(error);self.assertTrue(closed);self.assertNotIn('PRIVATE_CANARY',json.dumps(summary))
+                for key,value in [('explicit_cache_path_present',1),('cache_owned_by_runtime','PRIVATE_CANARY'),
+                                  ('bun_sha256','PRIVATE_CANARY'),('extra','PRIVATE_CANARY')]:
+                    invalid={**valid,'input_observation':{**valid['input_observation'],key:value}}
+                    summary,error,closed=self.project({'browser_exit':7,'browser_failure_diagnostic':invalid},target_lane=lane)
+                    self.assertIsNone(next(r for r in summary['lanes'] if r['lane']==lane)['browser_failure_diagnostic'])
+                    self.assertNotIn('PRIVATE_CANARY',json.dumps(summary))
+                summary,error,closed=self.project({'source':'f'*40,'browser_exit':7,'browser_failure_diagnostic':valid},target_lane=lane)
+                self.assertFalse(closed);self.assertIsNotNone(error)
+                self.assertIsNone(next(r for r in summary['lanes'] if r['lane']==lane)['browser_failure_diagnostic'])
+
+    def test_diagnostic_projection_demotes_hostile_source_location_without_leaking(self):
+        spec=ROOT/'apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'
+        for lane in ('postgres','sqlite'):
+            with patch.object(self,'driver',ROOT/('scripts/selected-backend-ci/current-'+lane+'-driver.py')):
+                valid=self.observed_browser_diagnostic(lane,self.browser_error_report({'file':str(spec),'line':361}))
+                for location in [{'spec_sha256':'PRIVATE_CANARY','line':361}, {'spec_sha256':H.CI.sha(spec),'line':True},
+                                 {'spec_sha256':H.CI.sha(spec),'line':10**6}, {**valid['source_location'],'path':'PRIVATE_CANARY'}]:
+                    summary,error,closed=self.project({'browser_exit':7,'browser_failure_diagnostic':{**valid,'source_location':location}},target_lane=lane)
+                    observed=next(r for r in summary['lanes'] if r['lane']==lane)['browser_failure_diagnostic']
+                    self.assertIsNone(observed['source_location']);self.assertEqual(observed['error_kind'],'UNKNOWN')
+                    self.assertNotIn('PRIVATE_CANARY',json.dumps(summary))
+
+    def test_collaboration_upload_adds_only_exact_scalar_ime_basename(self):
+        workflow=(ROOT/'.github/workflows/web.yml').read_text()
+        self.assertEqual(workflow.count('/playwright-output/**/ime-home-observations.json'),1)
+        collaboration=workflow[workflow.index('name: collaboration-browser-failure-'):]
+        self.assertIn('${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/ime-home-observations.json',collaboration)
+        self.assertNotIn('/**/*.json',workflow)
 
 if __name__=='__main__':unittest.main()

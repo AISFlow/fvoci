@@ -54,6 +54,82 @@ def write(path, value):
     path.write_text(json.dumps(value, indent=2) + '\n')
 
 
+def browser_failure_diagnostic(run, code, browser_env, browser_inputs):
+    """Optional scalar-only evidence; never replace browser exit or retirement proof."""
+    report = run / 'playwright-result.private.json'
+    log = run / 'browser.log'
+    observation = {'schema': 1, 'driver_sha256': sha(__file__),
+                   'line': sys._getframe().f_lineno, 'exit': code,
+                   'error_kind': 'UNKNOWN', 'source_location': None,
+                   'report_exists': report.exists() or report.is_symlink(),
+                   'report_state': 'MISSING', 'report_sha256': None,
+                   'log_sha256': sha(log) if log.is_file() and not log.is_symlink() else None,
+                   'input_observation': {'explicit_cache_path_present': bool(browser_env.get('PLAYWRIGHT_BROWSERS_PATH')),
+                       'cache_owned_by_runtime': None, 'cache_matches_preflight': None,
+                       'chromium_file_exists': False, 'chromium_owned_by_runtime': None,
+                       'bun_sha256': browser_inputs.get('bun', {}).get('sha256'),
+                       'chromium_sha256': browser_inputs.get('chromium', {}).get('sha256')}}
+    for key in ('bun_sha256', 'chromium_sha256'):
+        digest = observation['input_observation'][key]
+        if not (type(digest) is str and re.fullmatch('[0-9a-f]{64}', digest)):
+            observation['input_observation'][key] = None
+    try:
+        chromium = Path(browser_inputs['chromium']['path'])
+        inputs = observation['input_observation']
+        inputs['chromium_file_exists'] = chromium.is_file() and not chromium.is_symlink()
+        if inputs['chromium_file_exists']:
+            facts = chromium.stat()
+            inputs['chromium_owned_by_runtime'] = (facts.st_uid, facts.st_gid) == (1000, 1000)
+        cache = browser_env.get('PLAYWRIGHT_BROWSERS_PATH')
+        if cache:
+            directory = Path(cache)
+            inputs['cache_matches_preflight'] = directory == chromium.parent.parent.parent
+            if inputs['cache_matches_preflight'] and directory.is_dir() and not directory.is_symlink():
+                facts = directory.stat()
+                inputs['cache_owned_by_runtime'] = (facts.st_uid, facts.st_gid) == (1000, 1000)
+    except (KeyError, TypeError, ValueError, OSError):
+        pass
+    try:
+        first = None
+        failed = None
+        if observation['report_exists']:
+            observation['report_state'] = 'UNREADABLE'
+            if report.is_file() and not report.is_symlink() and report.stat().st_size <= 4 * 1024 * 1024:
+                observation['report_sha256'] = sha(report)
+                observation['report_state'] = 'MALFORMED'
+                body = json.loads(report.read_text())
+                errors = body.get('errors', [])
+                if errors:
+                    first = errors[0]
+                else:
+                    failed = body['suites'][0]['specs'][0]['tests'][0]['results'][0]
+                    if failed['status'] in ('failed', 'timedOut') and type(failed['retry']) is int and failed['retry'] == 0:
+                        errors = failed.get('errors', [])
+                        first = errors[0] if errors else failed.get('error')
+                observation['report_state'] = 'AVAILABLE'
+        if type(first) is dict:
+            message = first.get('message')
+            if message == 'Playwright must run under Bun in CI (bun --bun x playwright)':
+                observation['error_kind'] = 'BUN_CI_CONFIG_GUARD'
+            elif type(message) is str and message.startswith("browserType.launch: Executable doesn't exist at "):
+                observation['error_kind'] = 'BROWSER_EXECUTABLE_MISSING'
+            location = first.get('location')
+            spec = W / 'apps/web/e2e-pending' / SPEC
+            if (failed is not None and type(location) is dict and location.get('file') == str(spec) and
+                    type(location.get('line')) is int and 1 <= location['line'] <= len(spec.read_text().splitlines()) and
+                    sha(spec) == before['tracked'].get('apps/web/e2e-pending/' + SPEC)):
+                observation['source_location'] = {'spec_sha256': sha(spec), 'line': location['line']}
+                if observation['error_kind'] == 'UNKNOWN':
+                    observation['error_kind'] = 'SELECTED_SPEC_TIMEOUT' if failed['status'] == 'timedOut' else 'SELECTED_SPEC_FAILURE'
+        elif (observation['report_state'] == 'MISSING' and log.is_file() and not log.is_symlink() and
+                log.stat().st_size <= 1024 * 1024 and
+                any(line.strip() == 'Error: Playwright must run under Bun in CI (bun --bun x playwright)' for line in log.read_text().splitlines())):
+            observation['error_kind'] = 'BUN_CI_CONFIG_GUARD'
+    except (KeyError, IndexError, TypeError, AttributeError, ValueError, OSError):
+        pass  # UNKNOWN/partial metadata is not a successful browser execution.
+    return observation
+
+
 def command(args, log=None, required=True, env=None, cwd=None):
     if log is None:
         result = subprocess.run(args, capture_output=True, text=True, env=env, cwd=cwd)
@@ -286,6 +362,8 @@ try:
     started = time.monotonic()
     result = command(args, run / 'browser.log', required=False, env=browser_env, cwd=W / 'apps/web')
     code = result.returncode
+    if code != 0:
+        receipt['browser_failure_diagnostic'] = browser_failure_diagnostic(run, code, browser_env, browser_inputs)
     receipt.update(browser_exit=code, browser_seconds=time.monotonic()-started,
                    browser_end_utc=now(), browser_log_sha256=sha(run / 'browser.log'))
     actors = sorted(dbroot.glob('actor-*.json'))
