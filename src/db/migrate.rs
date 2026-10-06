@@ -1201,6 +1201,49 @@ fn turso_test_process_flag(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
+/// The verified manual Turso job supplies exactly these values for the
+/// read-only inventory phase: snapshot only, nothing applied, destructive
+/// gates closed. Consumer-test guards only; the product never reads them.
+#[cfg(all(test, feature = "db-tests"))]
+const TURSO_TEST_INVENTORY_FLAGS: [(&str, &str); 4] = [
+    ("FVOCI_TEST_TURSO_MIGRATION_SELECTED", "1"),
+    ("FVOCI_TEST_TURSO_PHASE", "inventory"),
+    ("FVOCI_TEST_TURSO_DESTRUCTIVE", "false"),
+    ("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "false"),
+];
+
+/// Which exact closed four-flag tuple admitted a read-only snapshot.
+#[cfg(all(test, feature = "db-tests"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TursoTestSnapshotPhase {
+    /// The unchanged mutating migration tuple (`migration`, `true`, `true`).
+    Migration,
+    /// The closed read-only inventory tuple (`inventory`, `false`, `false`).
+    Inventory,
+}
+
+/// Snapshot-only admission: exactly the closed migration tuple OR exactly the
+/// closed read-only inventory tuple. A mixed, partial, inexact or any other
+/// tuple is refused by the first inventory flag that differs. This gate never
+/// admits the mutating prefix helper, which keeps
+/// `turso_test_require_migration_flags` and its explicit confirmation values.
+#[cfg(all(test, feature = "db-tests"))]
+fn turso_test_require_snapshot_flags(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<TursoTestSnapshotPhase, sqlx::Error> {
+    if turso_test_require_migration_flags(&lookup).is_ok() {
+        return Ok(TursoTestSnapshotPhase::Migration);
+    }
+    for (name, expected) in TURSO_TEST_INVENTORY_FLAGS {
+        if lookup(name).as_deref() != Some(expected) {
+            return Err(schema_error(format!(
+                "turso test snapshot refused: {name} must be exactly {expected:?} for the read-only inventory phase (or the whole mutating migration tuple)"
+            )));
+        }
+    }
+    Ok(TursoTestSnapshotPhase::Inventory)
+}
+
 /// Applies the first `through` compiled SQLite-family steps to the explicit
 /// remote test database, then validates exactly that prefix.
 ///
@@ -1272,8 +1315,9 @@ pub(crate) async fn turso_test_apply_prefix(
 /// finish (and any rollback after its own FK failure) and the readback.
 ///
 /// Guards run before the first query: the stream must be remote, the four
-/// manual-phase flags must be present with their exact values, and the stream
-/// must hold the writer reservation.
+/// manual-phase flags must form exactly the closed mutating migration tuple
+/// or exactly the closed read-only inventory tuple (snapshot only; nothing is
+/// applied either way), and the stream must hold the writer reservation.
 ///
 /// `expected_steps` is the number of receipts the stream must see (`0` blank,
 /// `11` prefix, `compiled_sqlite_steps().len()` current). The receipts are
@@ -1292,9 +1336,12 @@ pub(crate) async fn turso_test_schema_in_writer(
             "turso test writer snapshot requires the explicit remote libSQL stream",
         ));
     }
-    // Same manual-phase flags as the prefix helper, checked before any query
-    // on the borrowed stream (which is neither begun nor finished here).
-    turso_test_require_migration_flags(turso_test_process_flag)?;
+    // Snapshot-only admission (migration tuple or read-only inventory tuple),
+    // checked before any query on the borrowed stream (which is neither begun
+    // nor finished here). The mutating prefix helper keeps its own stricter
+    // migration-only guard.
+    let _admitted: TursoTestSnapshotPhase =
+        turso_test_require_snapshot_flags(turso_test_process_flag)?;
     family.require_writer()?;
     let compiled = compiled_sqlite_steps();
     if expected_steps > compiled.len() {
@@ -1353,7 +1400,10 @@ pub(crate) async fn turso_test_schema_in_writer(
 
 #[cfg(all(test, feature = "db-tests"))]
 mod turso_test_helper_guards {
-    use super::{turso_test_require_migration_flags, TURSO_TEST_MIGRATION_FLAGS};
+    use super::{
+        turso_test_require_migration_flags, turso_test_require_snapshot_flags,
+        TursoTestSnapshotPhase, TURSO_TEST_INVENTORY_FLAGS, TURSO_TEST_MIGRATION_FLAGS,
+    };
     use std::collections::BTreeMap;
 
     fn lookup<'m>(
@@ -1399,6 +1449,131 @@ mod turso_test_helper_guards {
             error.contains("FVOCI_TEST_TURSO_MIGRATION_SELECTED"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn snapshot_gate_accepts_exactly_the_migration_or_the_read_only_inventory_tuple() {
+        let migration: BTreeMap<_, _> = TURSO_TEST_MIGRATION_FLAGS.into_iter().collect();
+        let inventory: BTreeMap<_, _> = TURSO_TEST_INVENTORY_FLAGS.into_iter().collect();
+        assert_eq!(inventory.len(), 4);
+        assert_eq!(
+            turso_test_require_snapshot_flags(lookup(&migration)).unwrap(),
+            TursoTestSnapshotPhase::Migration
+        );
+        assert_eq!(
+            turso_test_require_snapshot_flags(lookup(&inventory)).unwrap(),
+            TursoTestSnapshotPhase::Inventory
+        );
+        // Wrong phase, each missing flag, mixed tuples (inventory phase with
+        // either destructive gate open, migration phase with a closed gate),
+        // "inventory true" and inexact spellings are refused by name.
+        let refused: Vec<(&str, Option<&str>, &str)> = vec![
+            (
+                "FVOCI_TEST_TURSO_PHASE",
+                Some("connection"),
+                "FVOCI_TEST_TURSO_PHASE",
+            ),
+            (
+                "FVOCI_TEST_TURSO_MIGRATION_SELECTED",
+                None,
+                "FVOCI_TEST_TURSO_MIGRATION_SELECTED",
+            ),
+            ("FVOCI_TEST_TURSO_PHASE", None, "FVOCI_TEST_TURSO_PHASE"),
+            (
+                "FVOCI_TEST_TURSO_DESTRUCTIVE",
+                None,
+                "FVOCI_TEST_TURSO_DESTRUCTIVE",
+            ),
+            (
+                "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE",
+                None,
+                "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE",
+            ),
+            (
+                "FVOCI_TEST_TURSO_DESTRUCTIVE",
+                Some("true"),
+                "FVOCI_TEST_TURSO_DESTRUCTIVE",
+            ),
+            (
+                "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE",
+                Some("true"),
+                "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE",
+            ),
+            (
+                "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE",
+                Some("False"),
+                "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE",
+            ),
+            (
+                "FVOCI_TEST_TURSO_DESTRUCTIVE",
+                Some("0"),
+                "FVOCI_TEST_TURSO_DESTRUCTIVE",
+            ),
+            (
+                "FVOCI_TEST_TURSO_MIGRATION_SELECTED",
+                Some("1 "),
+                "FVOCI_TEST_TURSO_MIGRATION_SELECTED",
+            ),
+        ];
+        for (name, value, named) in refused {
+            let mut map = inventory.clone();
+            match value {
+                Some(value) => {
+                    map.insert(name, value);
+                }
+                None => {
+                    map.remove(name);
+                }
+            }
+            let error = turso_test_require_snapshot_flags(lookup(&map))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(named), "{name} {value:?}: {error}");
+            assert!(error.contains("read-only inventory phase"), "{error}");
+        }
+        // Migration phase with a closed destructive gate is a mixed tuple too.
+        let mut mixed = migration.clone();
+        mixed.insert("FVOCI_TEST_TURSO_DESTRUCTIVE", "false");
+        let error = turso_test_require_snapshot_flags(lookup(&mixed))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("FVOCI_TEST_TURSO_PHASE"), "{error}");
+        // "inventory true": the inventory phase never opens a destructive gate.
+        let mut inventory_true = inventory.clone();
+        inventory_true.insert("FVOCI_TEST_TURSO_DESTRUCTIVE", "true");
+        inventory_true.insert("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "true");
+        let error = turso_test_require_snapshot_flags(lookup(&inventory_true))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("FVOCI_TEST_TURSO_DESTRUCTIVE"), "{error}");
+        let empty = BTreeMap::new();
+        let error = turso_test_require_snapshot_flags(lookup(&empty))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("FVOCI_TEST_TURSO_MIGRATION_SELECTED"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn mutating_prefix_guard_rejects_the_read_only_inventory_tuple() {
+        // The prefix helper keeps the strict migration-only guard: the closed
+        // inventory tuple (destructive false, allow false) is refused by phase.
+        let inventory: BTreeMap<_, _> = TURSO_TEST_INVENTORY_FLAGS.into_iter().collect();
+        let error = turso_test_require_migration_flags(lookup(&inventory))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("FVOCI_TEST_TURSO_PHASE"), "{error}");
+        assert!(error.contains("mutating migration phase"), "{error}");
+        // Even an inventory phase with both gates opened is not a migration tuple.
+        let mut opened = inventory.clone();
+        opened.insert("FVOCI_TEST_TURSO_DESTRUCTIVE", "true");
+        opened.insert("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "true");
+        let error = turso_test_require_migration_flags(lookup(&opened))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("FVOCI_TEST_TURSO_PHASE"), "{error}");
     }
 }
 
