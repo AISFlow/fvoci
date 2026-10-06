@@ -300,7 +300,7 @@ def installed_elf(fd, deadline, queries):
     values = re.findall(r"^\s*Type:\s*(EXEC|DYN|REL)(?: \([A-Za-z -]{1,80}\))?\s*$", output, re.M)
     metadata_require(len(values) == 1, "ELF_FIELDS"); fields["type"] = values[0]
     interpreters = re.findall(r"\[Requesting program interpreter: ([^\]\n]+)\]", output)
-    metadata_require(len(interpreters) <= 1, "ELF_INTERPRETER")
+    metadata_require(len(interpreters) <= 1 and output.count("Requesting program interpreter") == len(interpreters), "ELF_INTERPRETER")
     if interpreters:
         loader = Path(interpreters[0]); metadata_require(system_path(loader), "ELF_INTERPRETER")
         leaf, info, watches, hops = system_leaf(loader, deadline); check_system_watches(watches)
@@ -308,7 +308,8 @@ def installed_elf(fd, deadline, queries):
                                  "identity": metadata_record(info), "link_hops": hops}
     else: fields["interpreter"] = None
     needed = re.findall(r"\(NEEDED\).*\[([^\]\n]+)\]", output)
-    metadata_require(len(needed) <= 32 and all(re.fullmatch(r"[A-Za-z0-9_.+-]{1,128}", value) for value in needed), "ELF_NEEDED")
+    metadata_require(len(needed) <= 32 and output.count("(NEEDED") == len(needed) and
+                     all(re.fullmatch(r"[A-Za-z0-9_.+-]{1,128}", value) for value in needed), "ELF_NEEDED")
     fields["needed_sha256"] = [hashlib.sha256(value.encode()).hexdigest() for value in needed]
     return {"result": "OBSERVED_METADATA_NOT_LOADED", **fields}
 

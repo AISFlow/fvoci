@@ -436,6 +436,65 @@ class InstalledStatControls(unittest.TestCase):
         for error in [RuntimeError(Hostile()),O.MetadataMissing(Hostile()),O.MetadataMissing('PRIVATE_TOKEN')]:
             self.assertEqual(O.metadata_error(error)['result'],'MISSING');self.assertNotIn('PRIVATE',json.dumps(O.metadata_error(error)))
 
+    def test_present_truncated_interpreter_with_valid_headers_refuses(self):
+        valid=self.elf_output()
+        marker=b'[Requesting program interpreter: /lib64/ld-linux-x86-64.so.2]'
+        for replacement in [b'[Requesting program interpreter: /private/SECRET',
+                            b'Requesting program interpreter: /private/SECRET',
+                            marker+b' [Requesting program interpreter: /private/SECRET']:
+            output=valid.replace(marker,replacement)
+            with self.subTest(record=replacement),patch.object(O,'metadata_query',return_value=output), \
+                 patch.object(O,'system_leaf',return_value=(Path('/usr/lib/loader'),self.info(),{},0)) as system,patch.object(O.subprocess,'Popen',side_effect=AssertionError('NO_INSTALLED_IO')):
+                with self.assertRaisesRegex(O.MetadataMissing,'^ELF_INTERPRETER$'):O.installed_elf(91,float('inf'),[])
+            system.assert_not_called()
+
+    def test_present_truncated_needed_with_valid_headers_refuses(self):
+        valid=self.elf_output();marker=b'(NEEDED) Shared library: [libc.so.6]'
+        for replacement in [b'(NEEDED) Shared library: [libc.so.6',b'(NEEDED) Shared library: ',
+                            b'(NEEDED',marker+b' (NEEDED) Shared library: [truncated']:
+            output=valid.replace(marker,replacement)
+            with self.subTest(record=replacement),patch.object(O,'metadata_query',return_value=output), \
+                 patch.object(O,'system_leaf',return_value=(Path('/usr/lib/loader'),self.info(),{},0)), \
+                 patch.object(O.subprocess,'Popen',side_effect=AssertionError('NO_INSTALLED_IO')):
+                with self.assertRaisesRegex(O.MetadataMissing,'^ELF_NEEDED$'):O.installed_elf(91,float('inf'),[])
+
+    def test_absent_static_interpreter_and_needed_remain_observed(self):
+        output=b'\n'.join(line for line in self.elf_output().splitlines()
+                          if b'Requesting program interpreter' not in line and b'(NEEDED)' not in line)+b'\n'
+        output=output.replace(b'DYN (Position-Independent Executable file)',b'EXEC (Executable file)')
+        with patch.object(O,'metadata_query',return_value=output),patch.object(O,'system_leaf') as system, \
+             patch.object(O.subprocess,'Popen',side_effect=AssertionError('NO_INSTALLED_IO')):
+            result=O.installed_elf(91,float('inf'),[])
+        self.assertEqual(result['result'],'OBSERVED_METADATA_NOT_LOADED');self.assertEqual(result['type'],'EXEC')
+        self.assertIsNone(result['interpreter']);self.assertEqual(result['needed_sha256'],[]);system.assert_not_called()
+
+    def actual_metadata_elf_projection(self,output):
+        original=Path.lstat;info=self.info()
+        def lstat(path):
+            if path==Path('/usr/bin/stat'):return info
+            if path in Path('/usr/bin/stat').parents:return self.info(st_mode=stat.S_IFDIR|0o755)
+            return original(path)
+        with patch.object(O,'READER_PATH',HERE/'shipping-image-producer.py'),patch.object(Path,'lstat',lstat), \
+             patch.object(O,'system_leaf',return_value=(Path('/usr/bin/stat'),info,{},0)),patch.object(O,'held_system_leaf',side_effect=self.fake_leaf), \
+             patch.object(O,'metadata_hash',return_value='h'),patch.object(O,'installed_packages',return_value={'result':'OBSERVED'}), \
+             patch.object(O,'metadata_query',return_value=output),patch.object(O,'installed_kernel',return_value={'result':'VISIBLE_KERNEL_ONLY'}), \
+             patch.object(O,'observe',side_effect=AssertionError('NO_ORIGINAL_COLLECTOR')),patch.object(O,'load_reader',side_effect=AssertionError('NO_READER_EXEC')), \
+             patch.object(O.subprocess,'Popen',side_effect=AssertionError('NO_INSTALLED_IO')):
+            # Actual caller AND actual installed_elf; only installed IO is mocked.
+            return O.installed_stat_metadata()
+
+    def test_actual_metadata_caller_keeps_malformed_optional_elf_missing_not_admitted(self):
+        headers=b'\n'.join(line for line in self.elf_output().splitlines()
+                           if b'Requesting program interpreter' not in line and b'(NEEDED)' not in line)+b'\n'
+        for record,reason in [(b' [Requesting program interpreter: /private/SECRET\n','ELF_INTERPRETER'),
+                              (b' 0x0000000000000001 (NEEDED) Shared library: [libc.so.6\n','ELF_NEEDED')]:
+            with self.subTest(reason=reason):
+                code,receipt=self.actual_metadata_elf_projection(headers+record)
+                self.assertEqual(code,0);self.assertEqual(receipt['result'],'METADATA_OBSERVED_NOT_ADMITTED')
+                self.assertEqual(receipt['elf'],{'result':'MISSING','kind':'METADATA_BOUNDARY','reason':reason,'errno':None})
+                self.assertTrue(receipt['stat']['original_predicate']);self.assertNotIn('PRIVATE',json.dumps(receipt))
+                self.assertNotIn('/private/',json.dumps(receipt));self.assertNotIn('OBSERVED_METADATA_NOT_LOADED',json.dumps(receipt['elf']))
+
     def test_literal_mode_only_and_extra_args_refused_never_observe(self):
         expected={'scope':'INSTALLED_STAT_METADATA_ONLY_NOT_ADMITTED_NOT_IMAGE_QUALIFIED','result':'METADATA_OBSERVED_NOT_ADMITTED'}
         stream=io.StringIO()
