@@ -1356,7 +1356,9 @@ mod turso_test_helper_guards {
     use super::{turso_test_require_migration_flags, TURSO_TEST_MIGRATION_FLAGS};
     use std::collections::BTreeMap;
 
-    fn lookup(map: &BTreeMap<&'static str, &'static str>) -> impl Fn(&str) -> Option<String> + '_ {
+    fn lookup<'m>(
+        map: &'m BTreeMap<&'static str, &'static str>,
+    ) -> impl Fn(&str) -> Option<String> + 'm {
         move |name| map.get(name).map(|value| value.to_string())
     }
 

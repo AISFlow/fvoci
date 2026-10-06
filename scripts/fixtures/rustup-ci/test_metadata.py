@@ -15,6 +15,12 @@ SPEC = importlib.util.spec_from_file_location('prepare_rustup_ci_metadata', Path
 metadata = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(metadata)
 
+# Literal Rustup 1.29.1 public --installed format, independent of internal ROWS.
+PUBLIC_INSTALLED = ('cargo-x86_64-unknown-linux-gnu\n'
+                    'clippy-x86_64-unknown-linux-gnu\n'
+                    'rust-std-x86_64-unknown-linux-gnu\n'
+                    'rustc-x86_64-unknown-linux-gnu')
+
 
 class MetadataControls(unittest.TestCase):
     def setUp(self):
@@ -44,8 +50,69 @@ class MetadataControls(unittest.TestCase):
                         'rustup_identity': metadata.file_identity(self.rustup.lstat())}
 
     def prepare(self):
-        with patch.object(metadata, 'command', return_value='\n'.join(metadata.ROWS)):
+        with patch.object(metadata, 'command', return_value=PUBLIC_INSTALLED):
             return metadata.prepare(self.root, self.output, self.rustup, self.context)
+
+    def test_literal_public_names_and_exact_invocation(self):
+        with patch.object(metadata, 'command', return_value=PUBLIC_INSTALLED) as command:
+            self.assertEqual(metadata.installed(self.rustup), PUBLIC_INSTALLED.split('\n'))
+            command.assert_called_once_with([str(self.rustup), 'component', 'list', '--installed', '--toolchain',
+                                             '1.98.1-x86_64-unknown-linux-gnu'], strip=False)
+        self.assertIn('clippy-preview-x86_64-unknown-linux-gnu', metadata.ROWS)
+        self.assertNotIn('clippy-x86_64-unknown-linux-gnu', metadata.ROWS)
+        self.assertEqual(metadata.CANONICAL,
+                         b'cargo-x86_64-unknown-linux-gnu\nclippy-preview-x86_64-unknown-linux-gnu\n'
+                         b'rust-std-x86_64-unknown-linux-gnu\nrustc-x86_64-unknown-linux-gnu\n')
+
+    def test_literal_public_set_refusals_before_write(self):
+        rows = PUBLIC_INSTALLED.split('\n')
+        invalid = ['\n'.join(rows[:-1]), PUBLIC_INSTALLED + '\nunknown-x86_64-unknown-linux-gnu',
+                   '\n'.join((rows[0],) * 4), '\n'.join(rows[:3] + [rows[0]]),
+                   PUBLIC_INSTALLED.replace('x86_64', 'aarch64'),
+                   PUBLIC_INSTALLED.replace('clippy-', 'clippy-preview-'),
+                   PUBLIC_INSTALLED.replace('clippy-', 'rustfmt-'),
+                   PUBLIC_INSTALLED.replace('clippy-', 'clippy-nightly-'),
+                   PUBLIC_INSTALLED.replace('\n', ' (installed)\n') + ' (installed)',
+                   PUBLIC_INSTALLED.replace('\n', '\r\n'),
+                   PUBLIC_INSTALLED.replace('\n', '\x0b'),
+                   PUBLIC_INSTALLED.replace('\n', '\n\n')]
+        for text in invalid:
+            with self.subTest(text=text), patch.object(metadata, 'command', return_value=text):
+                with self.assertRaisesRegex(ValueError, 'public-installed-set'):
+                    metadata.prepare(self.root, self.output, self.rustup, self.context)
+                self.assertEqual(self.component.read_bytes(), metadata.CANONICAL)
+                self.assertFalse(self.output.exists())
+
+    def test_public_diagnostics_never_echo_unknown_output(self):
+        import io
+        raw = PUBLIC_INSTALLED + '\nunknown-component https://example.invalid/private-canary\n'
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), patch.object(metadata, 'command', return_value=raw):
+            with self.assertRaisesRegex(ValueError, 'public-installed-set'):
+                metadata.installed(self.rustup)
+        diagnostic = json.loads(output.getvalue())['rustup_installed']
+        self.assertEqual(diagnostic, {'recognized': PUBLIC_INSTALLED.split('\n'), 'row_count': 5,
+                                      'unknown_count': 1, 'raw_sha256': metadata.sha(raw.encode('ascii'))})
+        self.assertNotIn('unknown-component', output.getvalue())
+        self.assertNotIn('private-canary', output.getvalue())
+        self.assertNotIn('https://', output.getvalue())
+
+    def test_literal_public_terminal_lf_preserves_raw_hash(self):
+        import io
+        raw = PUBLIC_INSTALLED + '\n'
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), patch.object(metadata, 'command', return_value=raw):
+            self.assertEqual(metadata.installed(self.rustup), PUBLIC_INSTALLED.split('\n'))
+        self.assertEqual(json.loads(output.getvalue())['rustup_installed']['raw_sha256'], metadata.sha(raw.encode()))
+
+    def test_public_diagnostic_uses_unstripped_command_stdout(self):
+        import io
+        raw = (PUBLIC_INSTALLED + '\n').encode('ascii')
+        output = io.StringIO()
+        result = subprocess.CompletedProcess([], 0, stdout=raw, stderr=b'')
+        with contextlib.redirect_stdout(output), patch.object(metadata.subprocess, 'run', return_value=result):
+            self.assertEqual(metadata.installed(self.rustup), PUBLIC_INSTALLED.split('\n'))
+        self.assertEqual(json.loads(output.getvalue())['rustup_installed']['raw_sha256'], metadata.sha(raw))
 
     def refuses(self, action=None):
         if action:

@@ -461,7 +461,7 @@ async fn close_migration_owner(backend: &Backend) -> Result<(), &'static str> {
     backend.close().await.map_err(|_| "CLOSE_FAILED")?;
     if !backend
         .connection_stats()
-        .is_some_and(|stats| stats.size == 0)
+        .is_ok_and(|stats| stats.size == 0)
     {
         return Err("LEASES_NOT_ZERO");
     }
@@ -578,7 +578,7 @@ async fn turso_primary_current12_install_resume() -> Result<(), &'static str> {
         if close.is_ok() { "OK" } else { "FAILED" },
         if backend
             .connection_stats()
-            .is_some_and(|stats| stats.size == 0)
+            .is_ok_and(|stats| stats.size == 0)
         {
             "ZERO"
         } else {
