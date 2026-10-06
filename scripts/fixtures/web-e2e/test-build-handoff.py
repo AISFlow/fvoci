@@ -1707,6 +1707,33 @@ class InstallationFailureProjectionTest(unittest.TestCase):
         self.put('install-failure-origin.json',{'message':'PRIVATE_CANARY_URL'})
         self.assertEqual(self.projected(),{'launcher_observed_driver_exit':7,'origin':None})
 
+    def assert_noninteger_schema_refused(self, input, value):
+        self.assertEqual(self.projected(),{'launcher_observed_driver_exit':7,'origin':None})
+        grant=copy.deepcopy(self.grant)
+        if input == 'allocation':
+            grant['schema']=value
+        else:
+            binding=json.loads((self.output/'install-binding.json').read_text())
+            binding['schema']=value; self.put('install-binding.json',binding)
+            grant['bindingSha256']=H.CI.sha(self.output/'install-binding.json')
+        self.put('install-allocation.json',grant)
+        self.put('install-launcher-stage.json',{**self.stage,
+            'allocation_sha256':H.CI.sha(self.output/'install-allocation.json'),
+            'binding_sha256':H.CI.sha(self.output/'install-binding.json')})
+        self.assertEqual(self.projected(),{'launcher_observed_driver_exit':None,'origin':None})
+
+    def test_allocation_boolean_schema_refused_with_rebound_hashes(self):
+        self.assert_noninteger_schema_refused('allocation',True)
+
+    def test_allocation_float_schema_refused_with_rebound_hashes(self):
+        self.assert_noninteger_schema_refused('allocation',1.0)
+
+    def test_binding_boolean_schema_refused_with_rebound_hashes(self):
+        self.assert_noninteger_schema_refused('binding',True)
+
+    def test_binding_float_schema_refused_with_rebound_hashes(self):
+        self.assert_noninteger_schema_refused('binding',1.0)
+
     def test_stage_and_allocation_identity_mutations_refuse_exit_projection(self):
         original=copy.deepcopy(self.stage)
         mutations={'schema':True,'source':'f'*40,'tree':'f'*40,'owner':'PRIVATE_CANARY_OWNER',

@@ -270,12 +270,12 @@ def installation_failure_diagnostic(output, before, owner):
                 stage['driver_sha256'] != digest or grant.get('driverSha256') != digest or
                 before.get('tracked', {}).get('scripts/selected-backend-ci/current-install-driver.py') != digest or
                 before.get('tracked', {}).get('scripts/selected-backend-ci/current_binding.py') != sha(TEMPLATES/'current_binding.py') or
-                grant.get('schema') != 1 or grant.get('status') != 'GRANTED' or
+                type(grant.get('schema')) is not int or grant.get('schema') != 1 or grant.get('status') != 'GRANTED' or
                 grant.get('exclusiveCIJob') is not True or grant.get('currentCIJobConfirmed') is not True or
                 grant.get('lane') != 'install' or grant.get('backend') is not None or
                 grant.get('compiledSource') != before['head'] or grant.get('bindingSha256') != sha(binding) or
                 grant.get('bindingModuleSha256') != sha(TEMPLATES/'current_binding.py') or
-                manifest.get('schema') != 1 or manifest.get('ready') is not True or
+                type(manifest.get('schema')) is not int or manifest.get('schema') != 1 or manifest.get('ready') is not True or
                 manifest.get('source') != before['head'] or manifest.get('compiledSource') != before['head'] or
                 manifest.get('tree') != before['tree']):
             return unknown
