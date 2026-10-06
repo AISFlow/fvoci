@@ -743,16 +743,19 @@ if (process.env.FVOCI_E2E_SELECTED_RESTART_CHECKPOINT !== undefined) {
       );
       const currentMeta = await page.request.get(documentPath);
       expect(currentMeta.status()).toBe(200);
-      expect(await currentMeta.json()).toMatchObject({
+      const currentMetaBody = (await currentMeta.json()) as DocumentMeta;
+      expect(currentMetaBody).toMatchObject({
         id: seed.document.id,
         workspaceId: seed.workspaceId,
         number: seed.document.number,
-        displayId: seed.document.displayId,
         path: seed.document.path,
         parentId: null,
         projectId: null,
         createdBy: seed.creatorId,
       });
+      // Wiki GET omits displayId; its public reference derives from the persisted number.
+      expect(currentMetaBody).not.toHaveProperty("displayId");
+      expect(`WIKI-${String(currentMetaBody.number)}`).toBe(seed.document.displayId);
       const currentRevision = await revision(page, documentPath, seed.revision.id);
       expect(currentRevision).toEqual(seed.revision);
       const room = `${seed.workspaceId}:document:${seed.document.id}`;
