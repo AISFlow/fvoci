@@ -280,6 +280,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     durable: value((current) => current.durable, false),
     saving: value((current) => current.saving, false),
     creating: value((current) => current.creating, false),
+    pendingSave: value((current) => current.active && !!current.frozen, false),
     pendingDistinct: value((current) => current.distinct, null),
     conflict: value((current) => current.latest, null),
     comparison: value((current) => current.comparison, null),

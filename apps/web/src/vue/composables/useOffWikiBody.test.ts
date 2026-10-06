@@ -658,6 +658,272 @@ for (const host of [
   });
 }
 
+async function expectHostRejection(promise: Promise<void>, message?: string) {
+  const failure = await promise.then(
+    () => null,
+    (error: unknown) => error,
+  );
+  expect(failure).toHaveProperty("message", message ?? expect.any(String));
+}
+
+function hostSaveHarness(host: string, h: ReturnType<typeof harness>) {
+  const { descriptor, errors } = parse(
+    readFileSync(new URL(`../features/${host}`, import.meta.url), "utf8"),
+  );
+  expect(errors).toEqual([]);
+  const setup = ts.createSourceFile(
+    host,
+    required(descriptor.scriptSetup).content,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const predicate = setup.statements.find(
+    (node) =>
+      ts.isVariableStatement(node) &&
+      node.declarationList.declarations.some((entry) => entry.name.getText(setup) === "canPersist"),
+  );
+  const persist = setup.statements.find(
+    (node) => ts.isFunctionDeclaration(node) && node.name?.text === "persistBody",
+  );
+  const nodes = [...required(required(descriptor.template).ast).children];
+  const disabled: string[] = [];
+  while (nodes.length) {
+    const node = required(nodes.pop());
+    if (node.type !== NodeTypes.ELEMENT) continue;
+    nodes.push(...node.children);
+    if (
+      node.tag !== "UButton" ||
+      !node.props.some(
+        (prop) =>
+          prop.type === NodeTypes.DIRECTIVE &&
+          prop.name === "on" &&
+          prop.arg?.type === NodeTypes.SIMPLE_EXPRESSION &&
+          prop.arg.content === "click" &&
+          prop.exp?.type === NodeTypes.SIMPLE_EXPRESSION &&
+          prop.exp.content === "persistBody().catch(() => undefined)",
+      )
+    )
+      continue;
+    for (const prop of node.props) {
+      if (
+        prop.type === NodeTypes.DIRECTIVE &&
+        prop.name === "bind" &&
+        prop.arg?.type === NodeTypes.SIMPLE_EXPRESSION &&
+        prop.arg.content === "disabled" &&
+        prop.exp?.type === NodeTypes.SIMPLE_EXPRESSION
+      )
+        disabled.push(prop.exp.content);
+    }
+  }
+  expect(disabled).toHaveLength(1);
+  const readonly = Vue.ref(false);
+  const ready = Vue.ref(true);
+  const persisting = Vue.ref(false);
+  const environment = {
+    computed: Vue.computed,
+    offBody: h.body,
+    props: { offBody: h.body, workspaceId: original.workspaceId, documentId: original.targetId },
+    ready: Vue.computed(() => ready.value && h.body.doc.value !== null),
+    readOnly: Vue.computed(() => readonly.value || !h.body.writable.value),
+    realtimeOff: Vue.ref(true),
+    session: Vue.shallowRef(null),
+    persisting,
+    sourceAuthRetired: h.authRetired,
+    queryClient: { invalidateQueries: async () => {} },
+  };
+  const canPersist = runInNewContext(
+    `${ts.transpile(required(predicate).getText(setup))}\ncanPersist`,
+    environment,
+  ) as Vue.ComputedRef<boolean>;
+  const context = () => ({ ...environment, canPersist: { value: canPersist.value } });
+  const persistScript = ts.transpile(required(persist).getText(setup));
+  return {
+    canPersist,
+    // Vue templates unwrap setup refs; script guards read their .value.
+    disabled: () =>
+      runInNewContext(required(disabled[0]), { canPersist: canPersist.value }) as boolean,
+    invoke: () => runInNewContext(`${persistScript}\npersistBody()`, context()) as Promise<void>,
+    readonly,
+    ready,
+    persisting,
+  };
+}
+
+for (const host of [
+  "documents/WikiDocumentView.vue",
+  "documents/ProjectDocumentView.vue",
+  "tasks/TaskBodyEditor.vue",
+]) {
+  test(`actual ${host} save gate replays the restored unknown command despite conflict, only its ACK confirms`, async () => {
+    const h = harness();
+    try {
+      required(h.reads[0]).pending.resolve(source(original));
+      await settle();
+      const draft = required(h.body.draft.value);
+      const paragraph = draft.doc.getXmlFragment("prosemirror").get(0) as Y.XmlElement;
+      (paragraph.get(0) as Y.XmlText).insert(1, " retained after lost ACK");
+      const mine = draft.mine;
+      const saving = h.body.save();
+      const command = required(h.writes[0]).command;
+      const frozen = required(draft.frozen);
+      required(h.writes[0]).pending.reject(new Error("actual command response lost"));
+      expect(await saving).toBe(false);
+      h.enabled.value = false;
+      expect(draft.active).toBe(false);
+      h.enabled.value = true;
+      required(h.reads.at(-1)).pending.resolve({
+        ...source(original),
+        tailSeq: "1",
+        snapshotV1: frozen.snapshot,
+        contentJson: mine,
+      });
+      await settle();
+      const restored = required(h.body.draft.value);
+      expect(restored).not.toBe(draft);
+      expect(restored.active).toBe(true);
+      expect(restored.frozen).toEqual(frozen);
+      expect(restored.latest?.tailSeq).toBe("1");
+      expect(restored.mine).toEqual(mine);
+      expect(h.body.durable.value).toBe(false);
+      const ui = hostSaveHarness(host, h);
+      expect(ui.canPersist.value).toBe(true);
+      expect(ui.disabled()).toBe(false);
+      expect(h.body.pendingSave.value).toBe(true);
+
+      for (const flag of [ui.readonly, ui.persisting]) {
+        flag.value = true;
+        expect(ui.disabled()).toBe(true);
+        await expectHostRejection(ui.invoke(), "Body save unavailable");
+        expect(h.writes).toHaveLength(1);
+        flag.value = false;
+      }
+      ui.ready.value = false;
+      expect(ui.disabled()).toBe(true);
+      await expectHostRejection(ui.invoke(), "Body save unavailable");
+      expect(h.writes).toHaveLength(1);
+      ui.ready.value = true;
+      const copy = h.body.createDistinct({ projectId: null, parentId: null, title: "owned copy" });
+      expect(h.body.creating.value).toBe(true);
+      expect(ui.disabled()).toBe(true);
+      await expectHostRejection(ui.invoke(), "Body save unavailable");
+      expect(h.writes).toHaveLength(1);
+      required(h.creates[0]).pending.reject(new ProblemError(400, "invalid_input"));
+      expect(await copy).toBeNull();
+      expect(restored.distinct).toBeNull();
+
+      const retry = ui.invoke();
+      expect(h.writes).toHaveLength(2);
+      expect(required(h.writes[1]).command).toEqual(command);
+      expect(JSON.stringify(required(h.writes[1]).command)).toBe(JSON.stringify(command));
+      expect(ui.disabled()).toBe(true);
+      await expectHostRejection(ui.invoke(), "Body save unavailable");
+      expect(h.writes).toHaveLength(2);
+      required(h.writes[1]).pending.resolve({
+        commandId: "wrong acknowledgement",
+        targetId: original.targetId,
+        tailSeq: "1",
+        revisionId: "33333333-3333-4333-8333-333333333333",
+      });
+      await expectHostRejection(retry);
+      expect(restored.frozen).toEqual(frozen);
+      expect(h.body.durable.value).toBe(false);
+      const matched = ui.invoke();
+      expect(required(h.writes[2]).command).toEqual(command);
+      required(h.writes[2]).pending.resolve({
+        commandId: command.commandId,
+        targetId: original.targetId,
+        tailSeq: "1",
+        revisionId: "33333333-3333-4333-8333-333333333333",
+      });
+      await matched;
+      expect(restored.frozen).toBeNull();
+      expect(restored.latest).toBeNull();
+      expect(h.body.durable.value).toBe(true);
+      expect(h.body.pendingSave.value).toBe(false);
+      expect(restored.start.tailSeq).toBe("1");
+      expect(restored.mine).toEqual(mine);
+      h.scope.value = { ...original, credentialId: "different credential" };
+      expect(restored.active).toBe(false);
+      expect(ui.disabled()).toBe(true);
+      await expectHostRejection(ui.invoke(), "Body save unavailable");
+      expect(h.writes).toHaveLength(3);
+    } finally {
+      h.effects.stop();
+    }
+  });
+  test(`actual ${host} save gate denies ordinary conflict without a frozen command and read-only refresh`, async () => {
+    const h = harness();
+    try {
+      required(h.reads[0]).pending.resolve(source(original));
+      await settle();
+      const draft = required(h.body.draft.value);
+      const paragraph = draft.doc.getXmlFragment("prosemirror").get(0) as Y.XmlElement;
+      (paragraph.get(0) as Y.XmlText).insert(1, " unsent mine");
+      const mine = draft.mine;
+      h.enabled.value = false;
+      h.enabled.value = true;
+      const current = source(original, "another writer", "1");
+      required(h.reads.at(-1)).pending.resolve(current);
+      await settle();
+      const restored = required(h.body.draft.value);
+      expect(restored.frozen).toBeNull();
+      expect(h.body.pendingSave.value).toBe(false);
+      expect(restored.latest).toEqual(current);
+      expect(restored.mine).toEqual(mine);
+      expect(h.body.durable.value).toBe(false);
+      const ui = hostSaveHarness(host, h);
+      expect(ui.disabled()).toBe(true);
+      await expectHostRejection(ui.invoke(), "Body save unavailable");
+      expect(h.writes).toHaveLength(0);
+      const refresh = h.body.load();
+      required(h.reads.at(-1)).pending.resolve({ ...current, writable: false });
+      await refresh;
+      expect(h.body.writable.value).toBe(false);
+      expect(ui.disabled()).toBe(true);
+      await expectHostRejection(ui.invoke(), "Body save unavailable");
+      expect(h.writes).toHaveLength(0);
+      h.authRetired.value = true;
+      expect(restored.active).toBe(false);
+      expect(h.body.doc.value).toBeNull();
+      await expectHostRejection(ui.invoke(), "Body save unavailable");
+      expect(h.writes).toHaveLength(0);
+    } finally {
+      h.effects.stop();
+    }
+  });
+}
+
+test("malformed persisted frozen command cannot advertise or replay a pending save", async () => {
+  const h = harness();
+  try {
+    required(h.reads[0]).pending.resolve(source(original));
+    await settle();
+    const draft = required(h.body.draft.value);
+    const paragraph = draft.doc.getXmlFragment("prosemirror").get(0) as Y.XmlElement;
+    (paragraph.get(0) as Y.XmlText).insert(1, " owned mine");
+    const saving = h.body.save();
+    required(h.writes[0]).pending.reject(new Error("lost reply"));
+    expect(await saving).toBe(false);
+    h.enabled.value = false;
+    const key = ownerKey(original);
+    const saved = JSON.parse(required(h.slots.get(key))) as {
+      frozen: { command: BodySaveCommand };
+    };
+    saved.frozen.command.expectedTailSeq = "7";
+    h.slots.set(key, JSON.stringify(saved));
+    h.enabled.value = true;
+    required(h.reads.at(-1)).pending.resolve(source(original, "authorized current", "1"));
+    await settle();
+    expect(h.body.storageError.value).toBeInstanceOf(Error);
+    expect(h.body.draft.value?.frozen).toBeNull();
+    expect(h.body.pendingSave.value).toBe(false);
+    expect(h.writes).toHaveLength(1);
+  } finally {
+    h.effects.stop();
+  }
+});
+
 function required<T>(value: T | null | undefined): T {
   if (value == null) throw new Error("Missing required test fixture value");
   return value;

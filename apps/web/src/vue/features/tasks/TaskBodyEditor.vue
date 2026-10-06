@@ -114,7 +114,9 @@ const canPersist = computed(
     ready.value &&
     !readOnly.value &&
     (props.offBody
-      ? !props.offBody.saving.value && !props.offBody.conflict.value
+      ? !props.offBody.saving.value &&
+        !props.offBody.creating.value &&
+        (!props.offBody.conflict.value || props.offBody.pendingSave.value)
       : props.session !== null && props.session.status === "connected") &&
     !persisting.value,
 );

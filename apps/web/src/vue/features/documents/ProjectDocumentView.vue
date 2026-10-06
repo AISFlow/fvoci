@@ -422,7 +422,9 @@ const canPersist = computed(
     ready.value &&
     !readOnly.value &&
     (realtimeOff.value
-      ? !offBody.saving.value && !offBody.conflict.value
+      ? !offBody.saving.value &&
+        !offBody.creating.value &&
+        (!offBody.conflict.value || offBody.pendingSave.value)
       : session.value !== null && session.value.status === "connected") &&
     !persisting.value,
 );
