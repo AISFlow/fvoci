@@ -378,6 +378,8 @@ jobs:
               catalog = root / 'catalog.private.json'; private(catalog.name, b'')
               observer = {**os.environ, 'FVOCI_SCHEMA_CATALOG_DATABASE_URL':owner_url,
                           'FVOCI_SCHEMA_CATALOG_APP_ROLE':role, 'FVOCI_SCHEMA_CATALOG_OUT':str(catalog)}
+              # The fourth test owns a separate PG database/role on this isolated service.
+              observer['TEST_DATABASE_URL'] = os.environ['PREPARATION_DATABASE_URL']
               observer.pop('PREPARATION_DATABASE_URL', None)
               stdout = command('schema-target', ['cargo','test','--locked','--offline','--features','db-tests',
                                 '--test','schema_baseline_integration','--','--nocapture'], env=observer)
@@ -390,7 +392,7 @@ jobs:
               assert all(attrs[k] is False for k in ('superuser','createdb','createrole','replication','bypassrls'))
               assert attrs['member_of'] == []
               private('scope.json', json.dumps({'source':os.environ['GITHUB_SHA'],'catalog_sha256':hashlib.sha256(catalog.read_bytes()).hexdigest(),
-                  'actual_controls':4,'sqlite_controls':3,'postgres_catalog_reads':1,
+                  'actual_controls':4,'sqlite_controls':2,'postgres_catalog_reads':1,'postgres_app_role_gate_controls':1,
                   'normal_product_role_tests':'separate existing PostgreSQL integration suites'}).encode())
           except BaseException:
               failed = True
@@ -404,7 +406,7 @@ jobs:
               if created_role:
                   sql('drop-role', f'DROP ROLE "{role}";')
               if not failed:
-                  print('schema baseline: 3 SQLite controls + 1 prepared-owner catalog read passed; owned DB/role retired', flush=True)
+                  print('schema baseline: 2 SQLite controls + 1 prepared-owner catalog read + 1 PostgreSQL app-role gate passed; owned DB/role retired', flush=True)
           PYSCHEMA
 
       - name: Selected SQLite install lifetime controls

@@ -1563,11 +1563,11 @@ def selected_install_inventory(jobs: dict) -> tuple[set[str], str | None]:
 
 
 RUST_SCHEMA_BASELINE_STEP = "Schema baseline SQLite controls and prepared PostgreSQL catalog"
-RUST_SCHEMA_BASELINE_RUN_SHA256 = "c9bf322a494c2fb19aff33aadb2dadcf25b093638dd53413390186626b8d52a5"
+RUST_SCHEMA_BASELINE_RUN_SHA256 = "d16a7b44c1fb87bd8a25148a4976881dd70b84ba4d6aaffd09b862ef7caece72"
 
 
 def schema_baseline_inventory(jobs: dict) -> tuple[set[str], str | None]:
-    """Three actual local SDK controls and the configured catalog inspection tool.
+    """Two local SDK controls, the configured PG catalog tool and PG app-role gate.
     The catalog uses an owned prepared DB/owner, not a normal-server credential.
     """
     steps, err = _postgres_job_steps(jobs)
@@ -1583,7 +1583,7 @@ def schema_baseline_inventory(jobs: dict) -> tuple[set[str], str | None]:
     if (step.get("if") != "matrix.shard == 'a'" or "continue-on-error" in step
             or step.get("env") != expected_env
             or hashlib.sha256(str(step.get("run", "")).strip().encode()).hexdigest() != RUST_SCHEMA_BASELINE_RUN_SHA256):
-        return set(), "rust: schema baseline requires exact configured extraction, 3+1 actual controls and owned cleanup"
+        return set(), "rust: schema baseline requires exact configured extraction, 2+1+1 actual controls and owned cleanup"
     rows, err = _postgres_matrix_rows(jobs["postgres"])
     if err:
         return set(), err

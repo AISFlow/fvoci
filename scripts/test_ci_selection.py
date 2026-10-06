@@ -239,7 +239,7 @@ class SchemaCatalogLifecycleTest(unittest.TestCase):
                 self.assertEqual(args, ["cargo","test","--locked","--offline","--features","db-tests",
                                        "--test","schema_baseline_integration","--","--nocapture"])
                 self.assertNotIn("DATABASE_URL", env)
-                self.assertNotIn("TEST_DATABASE_URL", env)
+                self.assertEqual(env["TEST_DATABASE_URL"], "postgres://postgres:fixture-only@127.0.0.1:5432/postgres")
                 self.assertNotIn("PREPARATION_DATABASE_URL", env)
                 attrs = {"exists":True,"login":True,"member_of":[], **{k:False for k in ("superuser","createdb","createrole","replication","bypassrls")}}
                 if defect == "elevated": attrs["bypassrls"] = True
@@ -1419,14 +1419,16 @@ class RustSuiteRegistryTest(unittest.TestCase):
         jobs = data["jobs"]
         self.assertEqual(SEL.schema_baseline_inventory(jobs), ({"schema_baseline_integration"}, None))
         original = next(s for s in jobs["postgres"]["steps"] if s.get("name") == SEL.RUST_SCHEMA_BASELINE_STEP)
-        # Independent target contract: all three real SQLite tests and the configured
-        # PostgreSQL extractor execute, never the extractor's unconfigured return.
+        # Independent target contract: two SQLite controls, a configured PG catalog
+        # extractor and a separately owned PG app-role gate, all four actual tests.
         self.assertIn("'FVOCI_SCHEMA_CATALOG_DATABASE_URL':owner_url", original["run"])
         self.assertIn("'FVOCI_SCHEMA_CATALOG_APP_ROLE':role", original["run"])
         self.assertIn("'FVOCI_SCHEMA_CATALOG_OUT':str(catalog)", original["run"])
         self.assertIn("4 passed; 0 failed; 0 ignored;", original["run"])
+        self.assertIn("observer['TEST_DATABASE_URL'] = os.environ['PREPARATION_DATABASE_URL']", original["run"])
+        self.assertIn("'sqlite_controls':2,'postgres_catalog_reads':1,'postgres_app_role_gate_controls':1", original["run"])
         self.assertIn("'SKIP postgres_catalog_dump' not in", original["run"])
-        for mutation in ("missing", "masked", "wrong-row", "missing-url", "skip", "count", "owner-in-tests"):
+        for mutation in ("missing", "masked", "wrong-row", "missing-url", "skip", "count", "owner-in-tests", "missing-gate-url"):
             with self.subTest(mutation=mutation):
                 bad = copy.deepcopy(jobs)
                 step = next(s for s in bad["postgres"]["steps"] if s.get("name") == SEL.RUST_SCHEMA_BASELINE_STEP)
@@ -1436,6 +1438,7 @@ class RustSuiteRegistryTest(unittest.TestCase):
                 elif mutation == "missing-url": step["env"].pop("PREPARATION_DATABASE_URL")
                 elif mutation == "skip": step["run"] = step["run"].replace("'--','--nocapture'", "'--','--skip','postgres_catalog_dump'")
                 elif mutation == "count": step["run"] = step["run"].replace("4 passed; 0 failed; 0 ignored;", "3 passed; 0 failed; 0 ignored;")
+                elif mutation == "missing-gate-url": step["run"] = step["run"].replace("observer['TEST_DATABASE_URL'] = os.environ['PREPARATION_DATABASE_URL']", "observer.pop('TEST_DATABASE_URL', None)")
                 else: step["run"] = step["run"].replace("'DATABASE_URL':owner_url", "'TEST_DATABASE_URL':owner_url")
                 self.assertNotEqual(bad, jobs)
                 names, err = SEL.schema_baseline_inventory(bad)
