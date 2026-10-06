@@ -1419,12 +1419,12 @@ class RustSuiteRegistryTest(unittest.TestCase):
         jobs = data["jobs"]
         self.assertEqual(SEL.schema_baseline_inventory(jobs), ({"schema_baseline_integration"}, None))
         original = next(s for s in jobs["postgres"]["steps"] if s.get("name") == SEL.RUST_SCHEMA_BASELINE_STEP)
-        # Independent target contract: both real SQLite tests and the configured
+        # Independent target contract: all three real SQLite tests and the configured
         # PostgreSQL extractor execute, never the extractor's unconfigured return.
         self.assertIn("'FVOCI_SCHEMA_CATALOG_DATABASE_URL':owner_url", original["run"])
         self.assertIn("'FVOCI_SCHEMA_CATALOG_APP_ROLE':role", original["run"])
         self.assertIn("'FVOCI_SCHEMA_CATALOG_OUT':str(catalog)", original["run"])
-        self.assertIn("3 passed; 0 failed; 0 ignored;", original["run"])
+        self.assertIn("4 passed; 0 failed; 0 ignored;", original["run"])
         self.assertIn("'SKIP postgres_catalog_dump' not in", original["run"])
         for mutation in ("missing", "masked", "wrong-row", "missing-url", "skip", "count", "owner-in-tests"):
             with self.subTest(mutation=mutation):
@@ -1435,7 +1435,7 @@ class RustSuiteRegistryTest(unittest.TestCase):
                 elif mutation == "wrong-row": step["if"] = "matrix.shard == 'b'"
                 elif mutation == "missing-url": step["env"].pop("PREPARATION_DATABASE_URL")
                 elif mutation == "skip": step["run"] = step["run"].replace("'--','--nocapture'", "'--','--skip','postgres_catalog_dump'")
-                elif mutation == "count": step["run"] = step["run"].replace("3 passed; 0 failed; 0 ignored;", "2 passed; 0 failed; 0 ignored;")
+                elif mutation == "count": step["run"] = step["run"].replace("4 passed; 0 failed; 0 ignored;", "3 passed; 0 failed; 0 ignored;")
                 else: step["run"] = step["run"].replace("'DATABASE_URL':owner_url", "'TEST_DATABASE_URL':owner_url")
                 self.assertNotEqual(bad, jobs)
                 names, err = SEL.schema_baseline_inventory(bad)

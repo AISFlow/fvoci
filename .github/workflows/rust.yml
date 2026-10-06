@@ -381,7 +381,7 @@ jobs:
               observer.pop('PREPARATION_DATABASE_URL', None)
               stdout = command('schema-target', ['cargo','test','--locked','--offline','--features','db-tests',
                                 '--test','schema_baseline_integration','--','--nocapture'], env=observer)
-              assert re.search(r'test result: ok\. 3 passed; 0 failed; 0 ignored;', stdout), 'exact three actual controls required'
+              assert re.search(r'test result: ok\. 4 passed; 0 failed; 0 ignored;', stdout), 'exact four actual controls required'
               assert 'SKIP postgres_catalog_dump' not in (root/'schema-target.stderr.log').read_text()
               facts = json.loads(catalog.read_bytes())
               assert facts['tables'] and len(facts['ledger']) == 12
@@ -390,7 +390,7 @@ jobs:
               assert all(attrs[k] is False for k in ('superuser','createdb','createrole','replication','bypassrls'))
               assert attrs['member_of'] == []
               private('scope.json', json.dumps({'source':os.environ['GITHUB_SHA'],'catalog_sha256':hashlib.sha256(catalog.read_bytes()).hexdigest(),
-                  'actual_controls':3,'sqlite_controls':2,'postgres_catalog_reads':1,
+                  'actual_controls':4,'sqlite_controls':3,'postgres_catalog_reads':1,
                   'normal_product_role_tests':'separate existing PostgreSQL integration suites'}).encode())
           except BaseException:
               failed = True
@@ -404,7 +404,7 @@ jobs:
               if created_role:
                   sql('drop-role', f'DROP ROLE "{role}";')
               if not failed:
-                  print('schema baseline: 2 SQLite controls + 1 prepared-owner catalog read passed; owned DB/role retired', flush=True)
+                  print('schema baseline: 3 SQLite controls + 1 prepared-owner catalog read passed; owned DB/role retired', flush=True)
           PYSCHEMA
 
       - name: Selected SQLite install lifetime controls
