@@ -1960,13 +1960,26 @@ class SelectedLibraryExecutionTest(unittest.TestCase):
     'http::routes::workspaces::selected_personal_bootstrap_http_tests::sqlite_http_personal_bootstrap_seat_limit_and_publication_failure_then_healthy_retry',
     )
 
+    MEMBER_FILTERS = (
+        'db::workspace::selected_member_removal_tests::sqlite_member_removal_literal_effects_current_access_and_healthy_owner',
+        'db::workspace::selected_member_removal_tests::sqlite_member_removal_domain_matrix_tenant_and_queued_actor_revocation',
+        'db::workspace::selected_member_removal_tests::sqlite_member_removal_event_audit_deferred_fk_rollback_and_healthy_progress',
+        'db::workspace::selected_member_removal_tests::sqlite_member_removal_concurrent_owners_private_leads_single_winner',
+        'db::workspace::selected_member_removal_tests::member_removal_rollback_cleanup_retains_domain_and_driver_causes',
+        'db::projects::selected_member_removal_lead_tests::sqlite_workspace_removal_private_archived_direct_group_and_writer_scope',
+        'db::invitations::selected_member_removal_invitation_tests::sqlite_pending_inviter_roles_scope_accepted_and_empty_set',
+        'db::collections::selected_member_removal_view_tests::sqlite_shared_view_transfer_scope_version_overflow_rollback_and_healthy_progress',
+        'http::routes::workspaces::selected_personal_bootstrap_http_tests::member_removal::sqlite_http_member_delete_cookie_origin_pat_tenant_and_literal_success',
+        'http::routes::workspaces::selected_personal_bootstrap_http_tests::member_removal::sqlite_http_member_delete_audit_rollback_private_lead_refusal_and_healthy_progress',
+    )
+
     def success(self, name: str) -> str:
         return ("running 1 test\n" + f"test {name} ... ok\n"
                 + "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 99 filtered out; finished in 0.01s\n")
 
-    def test_exact44_filter_registry_preserves_original35_and_existing_default_command(self) -> None:
+    def test_exact54_filter_registry_preserves_original44_and_existing_default_command(self) -> None:
         import hashlib
-        self.assertEqual(len(SEL.RUST_SELECTED_LIBRARY_FILTERS), 44)
+        self.assertEqual(len(SEL.RUST_SELECTED_LIBRARY_FILTERS), 54)
         self.assertEqual(SEL.RUST_SELECTED_LIBRARY_FILTERS[:18], self.ORIGINAL_FILTERS)
         self.assertEqual(SEL.RUST_SELECTED_LIBRARY_FILTERS[18:28], self.GET_FILTERS)
         self.assertEqual(len(self.ORIGINAL_FILTERS), 18)
@@ -1975,11 +1988,15 @@ class SelectedLibraryExecutionTest(unittest.TestCase):
         self.assertEqual(len(self.METADATA_FILTERS), 5)
         self.assertEqual(SEL.RUST_SELECTED_LIBRARY_FILTERS[33:35], self.AUX_FILTERS)
         self.assertEqual(len(self.AUX_FILTERS), 2)
-        self.assertEqual(SEL.RUST_SELECTED_LIBRARY_FILTERS[35:], self.BOOTSTRAP_FILTERS)
+        self.assertEqual(SEL.RUST_SELECTED_LIBRARY_FILTERS[35:44], self.BOOTSTRAP_FILTERS)
         self.assertEqual(len(self.BOOTSTRAP_FILTERS), 9)
+        self.assertEqual(SEL.RUST_SELECTED_LIBRARY_FILTERS[44:], self.MEMBER_FILTERS)
+        self.assertEqual(len(self.MEMBER_FILTERS), 10)
+        self.assertEqual(hashlib.sha256("\n".join(SEL.RUST_SELECTED_LIBRARY_FILTERS[:44]).encode()).hexdigest(),
+                         "b1d7fff1c44346a300454eff3b0721e1a2078842308a1847b9e9411e23741cb1")
         self.assertEqual(hashlib.sha256("\n".join(SEL.RUST_SELECTED_LIBRARY_FILTERS[:35]).encode()).hexdigest(),
                          "479c869c1734119e7ee091d490dbda12d1df5f59fcd73eea78478649f23b1c87")
-        self.assertEqual(len(set(SEL.RUST_SELECTED_LIBRARY_FILTERS)), 44)
+        self.assertEqual(len(set(SEL.RUST_SELECTED_LIBRARY_FILTERS)), 54)
         self.assertEqual(len(set(SEL.RUST_SELECTED_LIBRARY_FILTERS[:18])), 18)
         self.assertEqual(hashlib.sha256("\n".join(SEL.RUST_SELECTED_LIBRARY_FILTERS[:18]).encode()).hexdigest(),
                          "f9221b4d6b32402a3e125643d3fc67dfb600df8ef27b8e76013bb8b46ade7c80")
@@ -2033,7 +2050,7 @@ class SelectedLibraryExecutionTest(unittest.TestCase):
         ):
             fx.write_cargo()
             errors = SEL.verify_rust_suite_registry(fx.root)
-            self.assertTrue(any("all44 exact filters" in e for e in errors), errors)
+            self.assertTrue(any("all54 exact filters" in e for e in errors), errors)
 
     def test_zero_ignored_wrong_extra_and_failed_results_are_not_pass(self) -> None:
         name = SEL.RUST_SELECTED_LIBRARY_FILTERS[0]
@@ -2053,7 +2070,7 @@ class SelectedLibraryExecutionTest(unittest.TestCase):
             (0, good.replace("0 measured", "1 measured")),
             (0, good.replace("0 failed", "1 failed")),
         ]
-        for expected_name in self.ORIGINAL_FILTERS + self.GET_FILTERS + self.METADATA_FILTERS + self.AUX_FILTERS + self.BOOTSTRAP_FILTERS:
+        for expected_name in self.ORIGINAL_FILTERS + self.GET_FILTERS + self.METADATA_FILTERS + self.AUX_FILTERS + self.BOOTSTRAP_FILTERS + self.MEMBER_FILTERS:
             for exit_code, output in cases:
                 with self.subTest(name=expected_name, exit=exit_code, output=output):
                     self.assertIsNotNone(SEL.selected_library_result_error(expected_name, exit_code, output.replace(name, expected_name)))
@@ -2073,7 +2090,7 @@ class SelectedLibraryExecutionTest(unittest.TestCase):
         code = run[len(prefix):-len("\nPYLIB\n")]
         calls = []
         def fake_run(argv, **kwargs):
-            expected_filter = (self.ORIGINAL_FILTERS + self.GET_FILTERS + self.METADATA_FILTERS + self.AUX_FILTERS + self.BOOTSTRAP_FILTERS)[len(calls)]
+            expected_filter = (self.ORIGINAL_FILTERS + self.GET_FILTERS + self.METADATA_FILTERS + self.AUX_FILTERS + self.BOOTSTRAP_FILTERS + self.MEMBER_FILTERS)[len(calls)]
             self.assertEqual(argv, ["cargo", "test", "--locked", "--offline", "--features", "db-tests",
                                     "--lib", expected_filter, "--", "--exact"])
             self.assertEqual(kwargs, {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True})
@@ -2103,8 +2120,8 @@ class SelectedLibraryExecutionTest(unittest.TestCase):
                     exec(compile(code, "maintained-rust-selected-library-step", "exec"), {})
         return calls
 
-    def test_actual_workflow_script_executes44_canonical_commands_without_env_override(self) -> None:
-        self.assertEqual(len(self.run_workflow_fixture("ok")), 44)
+    def test_actual_workflow_script_executes54_canonical_commands_without_env_override(self) -> None:
+        self.assertEqual(len(self.run_workflow_fixture("ok")), 54)
 
     def test_actual_workflow_script_fails_first_refusal_without_retry_or_later_execution(self) -> None:
         for kind in ("zero", "ignored", "wrong", "command-failed"):
@@ -2114,7 +2131,7 @@ class SelectedLibraryExecutionTest(unittest.TestCase):
     def test_registry_original_removal_reorder_and_get_omission_duplicate_unknown_fail(self) -> None:
         data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/rust.yml")
         self.assertIsNone(error)
-        expected = self.ORIGINAL_FILTERS + self.GET_FILTERS + self.METADATA_FILTERS + self.AUX_FILTERS + self.BOOTSTRAP_FILTERS
+        expected = self.ORIGINAL_FILTERS + self.GET_FILTERS + self.METADATA_FILTERS + self.AUX_FILTERS + self.BOOTSTRAP_FILTERS + self.MEMBER_FILTERS
         variants = [("original-reordered", (expected[1], expected[0]) + expected[2:]),
                     ("get-reordered", expected[:18] + (expected[19], expected[18]) + expected[20:]),
                     ("all-get-missing", self.ORIGINAL_FILTERS),
@@ -2123,16 +2140,18 @@ class SelectedLibraryExecutionTest(unittest.TestCase):
                     ("aux-reordered", expected[:33] + (expected[34], expected[33])),
                     ("all-aux-missing", expected[:33]),
                     ("all-bootstrap-missing", expected[:35]),
-                    ("bootstrap-reordered", expected[:35] + (expected[36], expected[35]) + expected[37:])]
+                    ("bootstrap-reordered", expected[:35] + (expected[36], expected[35]) + expected[37:]),
+                    ("all-member-missing", expected[:44]),
+                    ("member-reordered", expected[:44] + (expected[45], expected[44]) + expected[46:])]
         for index, name in enumerate(expected):
             variants.append(("missing:" + name, expected[:index] + expected[index + 1:]))
-        for index, name in enumerate(self.GET_FILTERS + self.METADATA_FILTERS + self.AUX_FILTERS + self.BOOTSTRAP_FILTERS, 18):
+        for index, name in enumerate(self.GET_FILTERS + self.METADATA_FILTERS + self.AUX_FILTERS + self.BOOTSTRAP_FILTERS + self.MEMBER_FILTERS, 18):
             variants.append(("duplicate:" + name, expected[:index] + (expected[index - 1],) + expected[index + 1:]))
             variants.append(("unknown:" + name, expected[:index] + ("unknown::filter",) + expected[index + 1:]))
         for mutation, filters in variants:
             with self.subTest(mutation=mutation), mock.patch.object(SEL, "RUST_SELECTED_LIBRARY_FILTERS", filters):
                 errors = SEL.verify_selected_library_execution(data["jobs"])
-                self.assertTrue(any("all44 exact filters" in error for error in errors), errors)
+                self.assertTrue(any("all54 exact filters" in error for error in errors), errors)
 
     def test_actual_workflow_script_refuses_each_new_get_result_without_retry(self) -> None:
         for fail_index in range(18, 28):
@@ -2157,6 +2176,12 @@ class SelectedLibraryExecutionTest(unittest.TestCase):
         for fail_index in range(35, 44):
             for kind in ("missing", "zero", "ignored", "wrong", "count", "truncated", "failed", "command-failed"):
                 with self.subTest(filter=self.BOOTSTRAP_FILTERS[fail_index - 35], kind=kind):
+                    self.assertEqual(len(self.run_workflow_fixture(kind, fail_index)), fail_index + 1)
+
+    def test_actual_workflow_script_refuses_each_member_result_without_retry(self) -> None:
+        for fail_index in range(44, 54):
+            for kind in ("missing", "zero", "ignored", "wrong", "count", "truncated", "failed", "command-failed"):
+                with self.subTest(filter=self.MEMBER_FILTERS[fail_index - 44], kind=kind):
                     self.assertEqual(len(self.run_workflow_fixture(kind, fail_index)), fail_index + 1)
 
 class RegistryMutationCliTest(unittest.TestCase):

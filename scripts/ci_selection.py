@@ -753,7 +753,7 @@ RUST_NATIVE_ARM64_RUN = "cargo build --locked --offline --bins\ncargo test --loc
 RUST_DB_TESTS_FEATURE = "db-tests"
 # Exact maintained SQLite/library cohort; a successful zero-match Cargo
 # invocation or ignored test is not execution. The default plain run stays.
-RUST_SELECTED_LIBRARY_STEP = "Selected SQLite library controls (44 exact tests)"
+RUST_SELECTED_LIBRARY_STEP = "Selected SQLite library controls (54 exact tests)"
 RUST_SELECTED_LIBRARY_FILTERS: tuple[str, ...] = (
     'db::stars::selected_star_read_finish_tests::star_read_cleanup_retains_refusal_and_driver_without_returning_rows',
     'db::groups::selected_group_read_finish_tests::group_read_cleanup_retains_refusal_and_driver_without_returning_rows',
@@ -799,6 +799,16 @@ RUST_SELECTED_LIBRARY_FILTERS: tuple[str, ...] = (
     'db::quota::selected_seat_admission_tests::quota_context_restore_failure_retains_original_refusal_or_driver',
     'http::routes::workspaces::selected_personal_bootstrap_http_tests::sqlite_http_personal_bootstrap_cookie_origin_session_only_and_stable_replay',
     'http::routes::workspaces::selected_personal_bootstrap_http_tests::sqlite_http_personal_bootstrap_seat_limit_and_publication_failure_then_healthy_retry',
+    'db::workspace::selected_member_removal_tests::sqlite_member_removal_literal_effects_current_access_and_healthy_owner',
+    'db::workspace::selected_member_removal_tests::sqlite_member_removal_domain_matrix_tenant_and_queued_actor_revocation',
+    'db::workspace::selected_member_removal_tests::sqlite_member_removal_event_audit_deferred_fk_rollback_and_healthy_progress',
+    'db::workspace::selected_member_removal_tests::sqlite_member_removal_concurrent_owners_private_leads_single_winner',
+    'db::workspace::selected_member_removal_tests::member_removal_rollback_cleanup_retains_domain_and_driver_causes',
+    'db::projects::selected_member_removal_lead_tests::sqlite_workspace_removal_private_archived_direct_group_and_writer_scope',
+    'db::invitations::selected_member_removal_invitation_tests::sqlite_pending_inviter_roles_scope_accepted_and_empty_set',
+    'db::collections::selected_member_removal_view_tests::sqlite_shared_view_transfer_scope_version_overflow_rollback_and_healthy_progress',
+    'http::routes::workspaces::selected_personal_bootstrap_http_tests::member_removal::sqlite_http_member_delete_cookie_origin_pat_tenant_and_literal_success',
+    'http::routes::workspaces::selected_personal_bootstrap_http_tests::member_removal::sqlite_http_member_delete_audit_rollback_private_lead_refusal_and_healthy_progress',
 )
 # Preserve the accepted original18 prefix separately from the GET extension.
 RUST_SELECTED_LIBRARY_ORIGINAL_FILTERS_SHA256 = 'f9221b4d6b32402a3e125643d3fc67dfb600df8ef27b8e76013bb8b46ade7c80'
@@ -807,7 +817,9 @@ RUST_SELECTED_LIBRARY_METADATA_FILTERS_SHA256 = '8c8191b4b26800b5ed8980bc75e8c3a
 RUST_SELECTED_LIBRARY_AUX_FILTERS_SHA256 = '7e7702addc4c016b2e885adb2447d0324da4c857dfa874fb8bc0e9dddc88a71d'
 RUST_SELECTED_LIBRARY_ORIGINAL35_FILTERS_SHA256 = '479c869c1734119e7ee091d490dbda12d1df5f59fcd73eea78478649f23b1c87'
 RUST_SELECTED_LIBRARY_BOOTSTRAP_FILTERS_SHA256 = '1baee892b0bc67c4289d4e6ee57b801963d08793f9107f99f72d0e41bc7a18a0'
-RUST_SELECTED_LIBRARY_FILTERS_SHA256 = 'b1d7fff1c44346a300454eff3b0721e1a2078842308a1847b9e9411e23741cb1'
+RUST_SELECTED_LIBRARY_ORIGINAL44_FILTERS_SHA256 = 'b1d7fff1c44346a300454eff3b0721e1a2078842308a1847b9e9411e23741cb1'
+RUST_SELECTED_LIBRARY_MEMBER_FILTERS_SHA256 = 'a77024442b3b63a39a70012a251fe5ed4948543b8a10156a09ace6d31d7ff09c'
+RUST_SELECTED_LIBRARY_FILTERS_SHA256 = 'aa10daa88b6f9860b43bfb628edb535f185cd4dacd7f1faad27f7d2178ab7498'
 RUST_SELECTED_LIBRARY_RUN = """set -euo pipefail
 python3 - <<'PYLIB'
 import subprocess
@@ -846,11 +858,11 @@ def selected_library_result_error(test_filter: str, returncode: int, output: str
 
 
 def verify_selected_library_execution(jobs: dict) -> list[str]:
-    """Bind the maintained step, features and original35 plus bootstrap9 exact filter cohort."""
+    """Bind the maintained step, features and original44 plus member10 exact filter cohort."""
     errors: list[str] = []
     if (
-        len(RUST_SELECTED_LIBRARY_FILTERS) != 44
-        or len(set(RUST_SELECTED_LIBRARY_FILTERS)) != 44
+        len(RUST_SELECTED_LIBRARY_FILTERS) != 54
+        or len(set(RUST_SELECTED_LIBRARY_FILTERS)) != 54
         or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[:18]).encode()).hexdigest()
         != RUST_SELECTED_LIBRARY_ORIGINAL_FILTERS_SHA256
         or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[18:28]).encode()).hexdigest()
@@ -861,12 +873,16 @@ def verify_selected_library_execution(jobs: dict) -> list[str]:
         != RUST_SELECTED_LIBRARY_AUX_FILTERS_SHA256
         or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[:35]).encode()).hexdigest()
         != RUST_SELECTED_LIBRARY_ORIGINAL35_FILTERS_SHA256
-        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[35:]).encode()).hexdigest()
+        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[35:44]).encode()).hexdigest()
         != RUST_SELECTED_LIBRARY_BOOTSTRAP_FILTERS_SHA256
+        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[:44]).encode()).hexdigest()
+        != RUST_SELECTED_LIBRARY_ORIGINAL44_FILTERS_SHA256
+        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[44:]).encode()).hexdigest()
+        != RUST_SELECTED_LIBRARY_MEMBER_FILTERS_SHA256
         or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS).encode()).hexdigest()
         != RUST_SELECTED_LIBRARY_FILTERS_SHA256
     ):
-        errors.append("rust: selected library registry must retain all44 exact filters (original35 prefix and bootstrap9)")
+        errors.append("rust: selected library registry must retain all54 exact filters (original44 prefix and member10)")
     fast = jobs.get("fast", {})
     steps = fast.get("steps", [])
     matches = [s for s in steps if isinstance(s, dict) and s.get("name") == RUST_SELECTED_LIBRARY_STEP]
