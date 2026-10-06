@@ -2449,7 +2449,7 @@ class RegistryMutationCliTest(unittest.TestCase):
             ("      destructive:\n", "      checkout_sha:\n", "fixed phase inputs"),
             ("default: connection", "default: migration", "fixed phase inputs"),
             ("default: false", "default: true", "fixed phase inputs"),
-            ("Connection read-only; migration and inventory require both destructive gates; others NOT IMPLEMENTED", "All phases implemented", "fixed phase inputs"),
+            ("Connection and inventory read-only; migration requires both destructive gates; others NOT IMPLEMENTED", "All phases implemented", "fixed phase inputs"),
             ("  contents: read\n", "  contents: write\n", "contents read only"),
             ("  cancel-in-progress: false\n", "  cancel-in-progress: true\n", "fixed database concurrency"),
             ("github.repository == 'AISFlow/fvoci'", "github.repository == 'attacker/fvoci'", "trusted admission"),
