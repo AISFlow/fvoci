@@ -266,9 +266,9 @@ mod tests {
 mod selected_list_access_http_tests {
     use super::*;
     use crate::db::notifications::family_runtime_fixture::Fixture;
-    use http_body_util::BodyExt;
+    use axum::body::HttpBody;
     use serde_json::{json, Value};
-    use std::sync::Arc;
+    use std::{future::poll_fn, pin::Pin, sync::Arc};
     use tower::ServiceExt;
 
     // Same maintained AppState construction as the selected import route
@@ -819,18 +819,24 @@ mod selected_list_access_http_tests {
             tx.commit().await.unwrap();
             if target == f.actor {
                 assert!(
-                    tokio::time::timeout(crate::streams::STREAM_POLL_INTERVAL * 2, body.frame())
-                        .await
-                        .is_err(),
+                    tokio::time::timeout(
+                        crate::streams::STREAM_POLL_INTERVAL * 2,
+                        poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)),
+                    )
+                    .await
+                    .is_err(),
                     "bystander event must leave actual body open"
                 );
             }
         }
         assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(10), body.frame())
-                .await
-                .unwrap()
-                .is_none(),
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)),
+            )
+            .await
+            .unwrap()
+            .is_none(),
             "current member role change must close actual body"
         );
         drop(body);
@@ -843,10 +849,13 @@ mod selected_list_access_http_tests {
             .await
             .unwrap();
         assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(10), body.frame())
-                .await
-                .unwrap()
-                .is_none(),
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)),
+            )
+            .await
+            .unwrap()
+            .is_none(),
             "read failure ends producer rather than emitting from stale cursor"
         );
         drop(body);
@@ -904,10 +913,13 @@ mod selected_list_access_http_tests {
             .await
             .unwrap();
         assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(10), body.frame())
-                .await
-                .unwrap()
-                .is_none(),
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)),
+            )
+            .await
+            .unwrap()
+            .is_none(),
             "actual access producer must close after credential revocation"
         );
         drop(body);
@@ -935,10 +947,13 @@ mod selected_list_access_http_tests {
         let mut body = res.into_body();
         hub.begin_shutdown();
         assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(10), body.frame())
-                .await
-                .unwrap()
-                .is_none(),
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)),
+            )
+            .await
+            .unwrap()
+            .is_none(),
             "server stop retires the actual access producer"
         );
         drop(body);
