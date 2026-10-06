@@ -179,6 +179,7 @@ rows = []
 server_row = None
 browser_inputs = {}
 code = 1
+driver_phase = 'preparation'
 try:
     command(['docker', 'create', '--name', name, '--network', 'host', '--user', '0',
              '--label', 'fvoci.owner=' + OWNER, '--label', 'fvoci.test-run=v060-current-normal-vue-sqlite',
@@ -205,9 +206,12 @@ try:
     command(['docker', 'exec', name, 'stat', '-c', '%n %u %g %a', *[dest for _, dest in copies]], run / 'copied-owned-files.log')
     hashes = command(['docker', 'exec', name, 'sha256sum', *[dest for _, dest in copies[:-1]]]).stdout
     (run / 'copied-executable-hashes.log').write_text(hashes)
+    driver_phase = 'copied-native-hashes'
     assert [line.split()[0] for line in hashes.splitlines()] == [binaries[path]['sha256'] for path in (server, migrate, engine)]
+    driver_phase = 'owned-network-mode'
     command(['docker', 'inspect', '--format', '{{.HostConfig.NetworkMode}}', name], run / 'actual-network-mode.log')
     assert (run / 'actual-network-mode.log').read_text().strip() == 'host'
+    driver_phase = 'normal-runtime'
     server_log = (run / 'normal-server.log').open('w')
     server_process = subprocess.Popen(['docker', 'exec', name, '/bin/sh', '-ec',
                                       '. /fvoci/inputs/environment.sh; exec /fvoci/bin/fvoci-migrate --start'],
@@ -287,6 +291,16 @@ try:
         receipt['current_schema_server_restart'] = restart_same_app(globals())
 except BaseException as error:
     receipt['original_driver_failure'] = {'type': type(error).__name__, 'message': str(error)}
+    origin = None
+    traceback = error.__traceback__
+    while traceback is not None:
+        if traceback.tb_frame.f_code.co_filename == __file__:
+            origin = traceback.tb_lineno
+        traceback = traceback.tb_next
+    receipt['original_driver_failure_origin'] = {
+        'phase': driver_phase, 'driver_sha256': sha(__file__), 'line': origin,
+        'type': type(error).__name__ if type(error).__name__ in
+            ('AssertionError', 'RuntimeError', 'PermissionError', 'OSError', 'TimeoutExpired') else 'OtherError'}
     code = code or 1
 finally:
     # Capture/reap only this named container/server; retain DB/storage and all raw evidence.

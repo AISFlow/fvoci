@@ -275,12 +275,22 @@ def runtime_ownership_return(output):
                 expected = {'source':str, 'final_exit_code':int, 'owned_container_absent':bool,
                             'actual_owned_process_receipts':int, 'owned_loopback_port_closed':bool,
                             'recorded_process_identities_retired':bool, 'cleanup_errors':list}
+                origin = facts.get('original_driver_failure_origin')
+                driver = TEMPLATES / ('current-' + run['lane'] + '-driver.py')
+                if not (run['lane'] == 'sqlite' and type(origin) is dict and
+                        set(origin) == {'phase', 'driver_sha256', 'line', 'type'} and
+                        origin['phase'] in ('preparation', 'copied-native-hashes', 'owned-network-mode', 'normal-runtime') and
+                        origin['type'] in ('AssertionError', 'RuntimeError', 'PermissionError', 'OSError', 'TimeoutExpired', 'OtherError') and
+                        origin['driver_sha256'] == sha(driver) == facts.get('driver_sha256') and
+                        type(origin['line']) is int and 1 <= origin['line'] <= len(driver.read_text().splitlines())):
+                    origin = None
                 # A whitelist only: no paths, URLs, failure messages or raw logs.
                 # Missing evidence remains missing and still refuses ownership return.
                 diagnostic['lanes'].append({'lane':run['lane'],
                     'launcher_observed_driver_exit':run['exit'] if type(run['exit']) is int else None,
                     'receipt_final_exit':facts.get('final_exit_code') if type(facts.get('final_exit_code')) is int else None,
                     'receipt_sha256':sha(root/'receipt.json'),
+                    'original_driver_failure_origin':origin,
                     'missing_required_fields':[key for key in required if key not in facts],
                     'invalid_required_fields':[key for key in required if key in facts and type(facts[key]) is not expected[key]],
                     'source_matches_current':facts.get('source') == before['head'],
@@ -289,6 +299,7 @@ def runtime_ownership_return(output):
                     'cleanup_error_count':len(facts['cleanup_errors']) if type(facts.get('cleanup_errors')) is list else None,
                     'original_driver_failure_sha256':hashlib.sha256(json.dumps(facts['original_driver_failure'],sort_keys=True).encode()).hexdigest()
                         if 'original_driver_failure' in facts else None})
+                assert all(key in facts and type(facts[key]) is expected[key] for key in required), 'missing or invalid current retirement proof'
                 assert facts['source'] == before['head'] and facts['final_exit_code'] == run['exit']
                 assert facts['owned_container_absent'] is True
                 if run['lane'] == 'install':

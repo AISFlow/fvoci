@@ -914,4 +914,114 @@ class HistoricalFixturePortabilityTest(unittest.TestCase):
                               'negative_controls':7}), flush=True)
 
 
+class FailureOriginTest(unittest.TestCase):
+    """Execute the actual exception/projection AST, with no product processes."""
+    driver = ROOT / 'scripts/selected-backend-ci/current-sqlite-driver.py'
+
+    def producer(self, phase, body, extra=None):
+        tree = ast.parse(self.driver.read_text())
+        original = next(node for node in tree.body if isinstance(node, ast.Try))
+        controlled = ast.Try(body=[body], handlers=copy.deepcopy(original.handlers), orelse=[], finalbody=[])
+        ast.copy_location(controlled, original)
+        namespace = {'__file__':str(self.driver), 'receipt':{}, 'code':0,
+                     'driver_phase':phase, 'sha':H.CI.sha, **(extra or {})}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[controlled], type_ignores=[])),
+                     str(self.driver), 'exec'), namespace)
+        self.assertEqual(namespace['code'],1)
+        return namespace['receipt']
+
+    def project(self, facts, port=True):
+        with tempfile.TemporaryDirectory() as tmp:
+            output=Path(tmp); runtime=output/'runtime';runtime.mkdir()
+            (output/'before.json').write_text(json.dumps({'head':SHA,'tree':TREE}))
+            runs=[]
+            for lane in ('install','postgres','sqlite'):
+                root=runtime/('root-current-'+lane+'-fixture');root.mkdir()
+                row={'source':SHA,'final_exit_code':7 if lane=='sqlite' else 0,
+                     'owned_container_absent':True,'owned_loopback_port_closed':True,
+                     'recorded_process_identities_retired':True,'cleanup_errors':[]}
+                if lane=='install':
+                    row['actual_owned_process_receipts']=15
+                    retained=root/'retained-run';retained.mkdir()
+                    for n in range(15):(retained/(str(n)+'-process.json')).write_text('{"status":0}')
+                if lane=='postgres':(root/'parent-receipt.json').write_text('{"all_owned_fixtures_closed":true}')
+                if lane=='sqlite':
+                    row.update(facts);row['driver_sha256']=H.CI.sha(self.driver)
+                    if port is None:row.pop('owned_loopback_port_closed')
+                    else:row['owned_loopback_port_closed']=port
+                (root/'receipt.json').write_text(json.dumps(row))
+                runs.append({'lane':lane,'runRoot':str(root),'exit':row['final_exit_code']})
+            (output/'selected-ci-receipt.json').write_text(json.dumps({'owner':'fixture','source':SHA,'tree':TREE,'runs':runs}))
+            captured=io.StringIO();error=None
+            with patch.object(H.CI,'identity',return_value='fixture'), patch.object(os,'getuid',return_value=1000), \
+                    patch.object(os,'getgid',return_value=1000), patch.dict(os.environ,{'GITHUB_JOB':'collaboration-flow','GITHUB_SHA':SHA}), \
+                    patch('sys.stdout',captured):
+                try:H.CI.runtime_ownership_return(output)
+                except AssertionError as caught:error=caught
+            return json.loads(captured.getvalue()),error,(output/'runtime-close-stage.json').exists()
+
+    def hash_assertion(self):
+        return next(node for node in ast.walk(ast.parse(self.driver.read_text()))
+                    if isinstance(node,ast.Assert) and ast.unparse(node.test).startswith('[line.split()[0]'))
+
+    def test_original_hash_and_network_failures_have_exact_source_origin(self):
+        check=self.hash_assertion()
+        values={'hashes':'b'*64+' server\n'+'a'*64+' migrate\n'+'c'*64+' engine\n',
+                'server':'server','migrate':'migrate','engine':'engine',
+                'binaries':{name:{'sha256':char*64} for name,char in zip(('server','migrate','engine'),'abc')}}
+        facts=self.producer('copied-native-hashes',copy.deepcopy(check),values)
+        self.assertEqual(facts['original_driver_failure'],{'type':'AssertionError','message':''})
+        origin=facts['original_driver_failure_origin']
+        self.assertEqual(origin,{'phase':'copied-native-hashes','driver_sha256':H.CI.sha(self.driver),'line':check.lineno,'type':'AssertionError'})
+        network=next(node for node in ast.walk(ast.parse(self.driver.read_text()))
+                     if isinstance(node,ast.Assert) and 'actual-network-mode.log' in ast.unparse(node.test))
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);(root/'actual-network-mode.log').write_text('bridge\n')
+            facts=self.producer('owned-network-mode',copy.deepcopy(network),{'run':root})
+        self.assertEqual(facts['original_driver_failure_origin']['line'],network.lineno)
+        self.assertEqual(facts['original_driver_failure_origin']['phase'],'owned-network-mode')
+
+    def test_count_hash_and_order_checks_remain_strict(self):
+        check=self.hash_assertion();namespace={'server':'server','migrate':'migrate','engine':'engine',
+            'binaries':{name:{'sha256':char*64} for name,char in zip(('server','migrate','engine'),'abc')}}
+        for chars in ('ab','abcd','bac','abd'):
+            with self.subTest(chars=chars):
+                namespace['hashes']=''.join(char*64+' file\n' for char in chars)
+                with self.assertRaises(AssertionError):exec(compile(ast.Module(body=[check],type_ignores=[]),str(self.driver),'exec'),namespace)
+        namespace['hashes']=''.join(char*64+' file\n' for char in 'abc')
+        exec(compile(ast.Module(body=[check],type_ignores=[]),str(self.driver),'exec'),namespace)
+
+    def test_missing_or_false_port_keeps_original_failure_and_refuses_return(self):
+        facts=self.producer('copied-native-hashes',copy.deepcopy(self.hash_assertion()),
+            {'hashes':'','server':'server','migrate':'migrate','engine':'engine','binaries':{name:{'sha256':'a'*64} for name in ('server','migrate','engine')}})
+        for port in (None,False,'true',1):
+            with self.subTest(port=port):
+                summary,error,closed=self.project(facts,port)
+                self.assertIsNotNone(error);self.assertFalse(closed)
+                self.assertFalse(summary['ownership_return_qualified'])
+                lane=summary['lanes'][-1]
+                self.assertEqual(lane['launcher_observed_driver_exit'],7)
+                self.assertEqual(lane['receipt_final_exit'],7)
+                self.assertEqual(lane['original_driver_failure_origin'],facts['original_driver_failure_origin'])
+
+    def test_unknown_or_foreign_origin_schema_type_and_source_are_not_published(self):
+        valid={'phase':'copied-native-hashes','driver_sha256':H.CI.sha(self.driver),'line':self.hash_assertion().lineno,'type':'AssertionError'}
+        for key,value in [('phase','PRIVATE_CANARY_URL'),('type','PRIVATE_CANARY_SECRET'),('line',True),('line',0),('line',10**6),('driver_sha256','f'*64),('extra','PRIVATE_CANARY_PATH')]:
+            with self.subTest(key=key,value=value):
+                origin={**valid,key:value};summary,error,closed=self.project({'original_driver_failure_origin':origin})
+                self.assertIsNone(error);self.assertTrue(closed)
+                self.assertIsNone(summary['lanes'][-1]['original_driver_failure_origin'])
+                self.assertNotIn('PRIVATE_CANARY',json.dumps(summary))
+
+    def test_private_exception_canary_is_hashed_not_published(self):
+        body=ast.parse("raise RuntimeError('PRIVATE_CANARY_URL secret=PRIVATE_CANARY_SECRET')").body[0]
+        ast.copy_location(body,self.hash_assertion())
+        facts=self.producer('normal-runtime',body)
+        self.assertIn('PRIVATE_CANARY',facts['original_driver_failure']['message'])
+        summary,error,closed=self.project(facts,None)
+        self.assertIsNotNone(error);self.assertFalse(closed)
+        self.assertNotIn('PRIVATE_CANARY',json.dumps(summary))
+        self.assertEqual(summary['lanes'][-1]['original_driver_failure_origin']['type'],'RuntimeError')
+
+
 if __name__=='__main__':unittest.main()
