@@ -457,6 +457,174 @@ async fn migration_catalog_negatives(backend: &Backend) -> Result<(), &'static s
     Ok(())
 }
 
+// This boundary accepts only consumer-owned static codes, never SDK errors.
+fn migration_diagnostic_code(result: Result<(), &'static str>) -> Option<&'static str> {
+    match result {
+        Ok(()) => Some("OK"),
+        Err("BEGIN_FAILED") => Some("BEGIN_FAILED"),
+        Err("CLOSE_FAILED") => Some("CLOSE_FAILED"),
+        Err("COMMIT_UNCONFIRMED") => Some("COMMIT_UNCONFIRMED"),
+        Err("CURRENT_APPLY_FAILED") => Some("CURRENT_APPLY_FAILED"),
+        Err("CURRENT_GATE_FAILED") => Some("CURRENT_GATE_FAILED"),
+        Err("CURRENT_GATE_MISMATCH") => Some("CURRENT_GATE_MISMATCH"),
+        Err("CURRENT_LINEAGE_CHANGED") => Some("CURRENT_LINEAGE_CHANGED"),
+        Err("DATA_DECODE_FAILED") => Some("DATA_DECODE_FAILED"),
+        Err("DATA_QUERY_FAILED") => Some("DATA_QUERY_FAILED"),
+        Err("DATA_WRITE_FAILED") => Some("DATA_WRITE_FAILED"),
+        Err("DATA_WRITE_MISMATCH") => Some("DATA_WRITE_MISMATCH"),
+        Err("DDL_FAILED") => Some("DDL_FAILED"),
+        Err("FENCE_WRITE_FAILED") => Some("FENCE_WRITE_FAILED"),
+        Err("FK_DECODE_FAILED") => Some("FK_DECODE_FAILED"),
+        Err("FK_FAILURE_MISSING") => Some("FK_FAILURE_MISSING"),
+        Err("FK_QUERY_FAILED") => Some("FK_QUERY_FAILED"),
+        Err("FK_ROLLBACK_PREFIX_CHANGED") => Some("FK_ROLLBACK_PREFIX_CHANGED"),
+        Err("FOREIGN_KEYS_NOT_ONE") => Some("FOREIGN_KEYS_NOT_ONE"),
+        Err("GENERATION_WRITE_FAILED") => Some("GENERATION_WRITE_FAILED"),
+        Err("GENERATION_WRITE_MISMATCH") => Some("GENERATION_WRITE_MISMATCH"),
+        Err("INCOMPLETE_PREFIX_REFUSAL_NOT_CONFIRMED") => {
+            Some("INCOMPLETE_PREFIX_REFUSAL_NOT_CONFIRMED")
+        }
+        Err("LEASES_NOT_ZERO") => Some("LEASES_NOT_ZERO"),
+        Err("LITERAL_DECODE_FAILED") => Some("LITERAL_DECODE_FAILED"),
+        Err("LITERAL_MISMATCH") => Some("LITERAL_MISMATCH"),
+        Err("LITERAL_QUERY_FAILED") => Some("LITERAL_QUERY_FAILED"),
+        Err("NEGATIVE_REFUSAL_NOT_CONFIRMED") => Some("NEGATIVE_REFUSAL_NOT_CONFIRMED"),
+        Err("NEGATIVE_ROLLBACK_CHANGED_CURRENT") => Some("NEGATIVE_ROLLBACK_CHANGED_CURRENT"),
+        Err("NEGATIVE_WRITE_FAILED") => Some("NEGATIVE_WRITE_FAILED"),
+        Err("PREFIX_APPLY_FAILED") => Some("PREFIX_APPLY_FAILED"),
+        Err("PREFIX_RECEIPTS_CHANGED") => Some("PREFIX_RECEIPTS_CHANGED"),
+        Err("PREFIX_VALIDATION_FAILED") => Some("PREFIX_VALIDATION_FAILED"),
+        Err("PRESERVED_DATA_MISMATCH") => Some("PRESERVED_DATA_MISMATCH"),
+        Err("RECONNECT_FAILED") => Some("RECONNECT_FAILED"),
+        Err("RESTART_APPLY_FAILED") => Some("RESTART_APPLY_FAILED"),
+        Err("RESTART_RECEIPTS_OR_SCHEMA_CHANGED") => Some("RESTART_RECEIPTS_OR_SCHEMA_CHANGED"),
+        Err("ROLLBACK_UNCONFIRMED") => Some("ROLLBACK_UNCONFIRMED"),
+        Err("SCHEMA_VALIDATION_FAILED") => Some("SCHEMA_VALIDATION_FAILED"),
+        Err("SEED_DECODE_FAILED") => Some("SEED_DECODE_FAILED"),
+        Err("SEED_MISMATCH") => Some("SEED_MISMATCH"),
+        Err("SEED_QUERY_FAILED") => Some("SEED_QUERY_FAILED"),
+        Err("UNEXPECTED_TARGET_DATA") => Some("UNEXPECTED_TARGET_DATA"),
+        Err("WRONG_BACKEND") => Some("WRONG_BACKEND"),
+        Err("WRONG_FK_FAILURE") => Some("WRONG_FK_FAILURE"),
+        Err(_) => None,
+    }
+}
+
+fn migration_failure_diagnostic(
+    primary: Result<(), &'static str>,
+    close: Result<(), &'static str>,
+) -> Option<(&'static str, &'static str)> {
+    if primary.is_ok() && close.is_ok() {
+        return None;
+    }
+    let primary = migration_diagnostic_code(primary)?;
+    // Final owner cleanup has only these two existing failure codes.
+    let close = match close {
+        Ok(()) => "OK",
+        Err("CLOSE_FAILED") => "CLOSE_FAILED",
+        Err("LEASES_NOT_ZERO") => "LEASES_NOT_ZERO",
+        Err(_) => return None,
+    };
+    Some((primary, close))
+}
+
+#[test]
+fn migration_diagnostics_disclose_only_known_static_failures() {
+    for code in [
+        "BEGIN_FAILED",
+        "CLOSE_FAILED",
+        "COMMIT_UNCONFIRMED",
+        "CURRENT_APPLY_FAILED",
+        "CURRENT_GATE_FAILED",
+        "CURRENT_GATE_MISMATCH",
+        "CURRENT_LINEAGE_CHANGED",
+        "DATA_DECODE_FAILED",
+        "DATA_QUERY_FAILED",
+        "DATA_WRITE_FAILED",
+        "DATA_WRITE_MISMATCH",
+        "DDL_FAILED",
+        "FENCE_WRITE_FAILED",
+        "FK_DECODE_FAILED",
+        "FK_FAILURE_MISSING",
+        "FK_QUERY_FAILED",
+        "FK_ROLLBACK_PREFIX_CHANGED",
+        "FOREIGN_KEYS_NOT_ONE",
+        "GENERATION_WRITE_FAILED",
+        "GENERATION_WRITE_MISMATCH",
+        "INCOMPLETE_PREFIX_REFUSAL_NOT_CONFIRMED",
+        "LEASES_NOT_ZERO",
+        "LITERAL_DECODE_FAILED",
+        "LITERAL_MISMATCH",
+        "LITERAL_QUERY_FAILED",
+        "NEGATIVE_REFUSAL_NOT_CONFIRMED",
+        "NEGATIVE_ROLLBACK_CHANGED_CURRENT",
+        "NEGATIVE_WRITE_FAILED",
+        "PREFIX_APPLY_FAILED",
+        "PREFIX_RECEIPTS_CHANGED",
+        "PREFIX_VALIDATION_FAILED",
+        "PRESERVED_DATA_MISMATCH",
+        "RECONNECT_FAILED",
+        "RESTART_APPLY_FAILED",
+        "RESTART_RECEIPTS_OR_SCHEMA_CHANGED",
+        "ROLLBACK_UNCONFIRMED",
+        "SCHEMA_VALIDATION_FAILED",
+        "SEED_DECODE_FAILED",
+        "SEED_MISMATCH",
+        "SEED_QUERY_FAILED",
+        "UNEXPECTED_TARGET_DATA",
+        "WRONG_BACKEND",
+        "WRONG_FK_FAILURE",
+    ] {
+        assert_eq!(migration_diagnostic_code(Err(code)), Some(code));
+        assert_eq!(
+            migration_failure_diagnostic(Err(code), Ok(())),
+            Some((code, "OK"))
+        );
+        assert_eq!(
+            migration_failure_diagnostic(Err(code), Err("CLOSE_FAILED")),
+            Some((code, "CLOSE_FAILED"))
+        );
+    }
+    assert_eq!(migration_diagnostic_code(Ok(())), Some("OK"));
+    assert_eq!(migration_failure_diagnostic(Ok(()), Ok(())), None);
+    assert_eq!(
+        migration_failure_diagnostic(Ok(()), Err("CLOSE_FAILED")),
+        Some(("OK", "CLOSE_FAILED"))
+    );
+    assert_eq!(
+        migration_failure_diagnostic(Ok(()), Err("LEASES_NOT_ZERO")),
+        Some(("OK", "LEASES_NOT_ZERO"))
+    );
+    // These errors are outside the post-owner migration aggregate or private
+    // transport/message values; no unknown string can be reflected in output.
+    for private in [
+        "",
+        "UNKNOWN_ERROR",
+        "CONNECT_FAILED",
+        "PRODUCT_CONFIGURATION_FAILED",
+        "MISSING_SECRET",
+        "INVALID_PRIMARY_URL",
+        "WRONG_FK_FAILURE_EXTRA",
+        "wrong_fk_failure",
+        "FK_QUERY_FAILED\nFAKE_PRIVATE_TOKEN",
+        "libsql://FAKE_PRIVATE_TOKEN.example.org",
+        "SDK: FAKE_PRIVATE_TOKEN",
+    ] {
+        assert_eq!(migration_diagnostic_code(Err(private)), None);
+        assert_eq!(migration_failure_diagnostic(Err(private), Ok(())), None);
+        assert_eq!(migration_failure_diagnostic(Ok(()), Err(private)), None);
+    }
+    // A valid primary code cannot be reused in the narrower close position.
+    assert_eq!(
+        migration_failure_diagnostic(Ok(()), Err("BEGIN_FAILED")),
+        None
+    );
+    assert_eq!(
+        migration_failure_diagnostic(Err("SCHEMA_VALIDATION_FAILED"), Err("BEGIN_FAILED")),
+        None
+    );
+}
+
 async fn close_migration_owner(backend: &Backend) -> Result<(), &'static str> {
     backend.close().await.map_err(|_| "CLOSE_FAILED")?;
     if !backend
@@ -585,6 +753,13 @@ async fn turso_primary_current12_install_resume() -> Result<(), &'static str> {
             "FAILED"
         }
     );
+    // Emit after original cleanup and receipt, without altering failure priority.
+    if let Some((primary_code, close_code)) = migration_failure_diagnostic(primary, close) {
+        println!(
+            "FVOCI_TURSO_MIGRATION_DIAGNOSTIC primary={} close={}",
+            primary_code, close_code,
+        );
+    }
     primary?;
     close
 }

@@ -242,6 +242,55 @@ def run_migration(checkout_sha, inputs):
     run_primary(checkout_sha, inputs)
 
 
+# Literal consumer codes only: no arbitrary SDK/test output may be echoed.
+MIGRATION_PRIMARY_CODES = frozenset({
+    "BEGIN_FAILED",
+    "CLOSE_FAILED",
+    "COMMIT_UNCONFIRMED",
+    "CURRENT_APPLY_FAILED",
+    "CURRENT_GATE_FAILED",
+    "CURRENT_GATE_MISMATCH",
+    "CURRENT_LINEAGE_CHANGED",
+    "DATA_DECODE_FAILED",
+    "DATA_QUERY_FAILED",
+    "DATA_WRITE_FAILED",
+    "DATA_WRITE_MISMATCH",
+    "DDL_FAILED",
+    "FENCE_WRITE_FAILED",
+    "FK_DECODE_FAILED",
+    "FK_FAILURE_MISSING",
+    "FK_QUERY_FAILED",
+    "FK_ROLLBACK_PREFIX_CHANGED",
+    "FOREIGN_KEYS_NOT_ONE",
+    "GENERATION_WRITE_FAILED",
+    "GENERATION_WRITE_MISMATCH",
+    "INCOMPLETE_PREFIX_REFUSAL_NOT_CONFIRMED",
+    "LEASES_NOT_ZERO",
+    "LITERAL_DECODE_FAILED",
+    "LITERAL_MISMATCH",
+    "LITERAL_QUERY_FAILED",
+    "NEGATIVE_REFUSAL_NOT_CONFIRMED",
+    "NEGATIVE_ROLLBACK_CHANGED_CURRENT",
+    "NEGATIVE_WRITE_FAILED",
+    "PREFIX_APPLY_FAILED",
+    "PREFIX_RECEIPTS_CHANGED",
+    "PREFIX_VALIDATION_FAILED",
+    "PRESERVED_DATA_MISMATCH",
+    "RECONNECT_FAILED",
+    "RESTART_APPLY_FAILED",
+    "RESTART_RECEIPTS_OR_SCHEMA_CHANGED",
+    "ROLLBACK_UNCONFIRMED",
+    "SCHEMA_VALIDATION_FAILED",
+    "SEED_DECODE_FAILED",
+    "SEED_MISMATCH",
+    "SEED_QUERY_FAILED",
+    "UNEXPECTED_TARGET_DATA",
+    "WRONG_BACKEND",
+    "WRONG_FK_FAILURE",
+})
+MIGRATION_CLOSE_CODES = frozenset({"CLOSE_FAILED", "LEASES_NOT_ZERO"})
+
+
 def migration_result(result, output):
     receipt = re.findall(
         r"FVOCI_TURSO_MIGRATION_RECEIPT primary=(OK|FAILED) prefix=(OK|NOT_CONFIRMED) fk_rollback=(OK|NOT_CONFIRMED) current=(OK|NOT_CONFIRMED) restart=(OK|NOT_CONFIRMED) close=(OK|FAILED) leases=(ZERO|FAILED)(?:\r?\n|$)",
@@ -250,6 +299,27 @@ def migration_result(result, output):
     if len(receipt) != 1:
         reject("TURSO_MIGRATION_RECEIPT_MISSING")
     print("TURSO_MIGRATION_RECEIPT " + " ".join(receipt[0]))
+    # Inspect every occurrence, including malformed/private injected lines.
+    # A diagnostic is never a success receipt and never authorizes a retry.
+    diagnostics = [line for line in output.splitlines()
+                   if "FVOCI_TURSO_MIGRATION_DIAGNOSTIC" in line]
+    if diagnostics:
+        if len(diagnostics) != 1 or receipt[0][0] != "FAILED":
+            reject("TURSO_MIGRATION_FAILED")
+        diagnostic = re.fullmatch(
+            r"FVOCI_TURSO_MIGRATION_DIAGNOSTIC primary=([A-Z_]+) close=([A-Z_]+)",
+            diagnostics[0],
+        )
+        if diagnostic is None:
+            reject("TURSO_MIGRATION_FAILED")
+        primary, close = diagnostic.groups()
+        if (primary not in MIGRATION_PRIMARY_CODES | {"OK"}
+                or close not in MIGRATION_CLOSE_CODES | {"OK"}
+                or (primary == "OK" and close == "OK")
+                or (close == "OK") != (receipt[0][5] == "OK")):
+            reject("TURSO_MIGRATION_FAILED")
+        # The complete, anchored line and both closed sets were validated.
+        print("TURSO_MIGRATION_DIAGNOSTIC primary=" + primary + " close=" + close)
     if (result.returncode != 0 or receipt[0] != ("OK", "OK", "OK", "OK", "OK", "OK", "ZERO")
             or not re.search(r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out;", output)
             or not re.search(r"test " + re.escape(MIGRATION_TEST_NAME) + r" \.\.\. ", output)):

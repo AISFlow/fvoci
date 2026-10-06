@@ -360,5 +360,131 @@ class AdmissionTests(unittest.TestCase):
                 run.assert_not_called()
 
 
+class MigrationDiagnosticTests(unittest.TestCase):
+    success = ("test " + guard.MIGRATION_TEST_NAME + " ... FVOCI_TURSO_MIGRATION_RECEIPT primary=OK prefix=OK fk_rollback=OK current=OK restart=OK close=OK leases=ZERO\nok\n"
+               "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out;\n")
+    failure = ("test " + guard.MIGRATION_TEST_NAME + " ... FVOCI_TURSO_MIGRATION_RECEIPT primary=FAILED prefix=NOT_CONFIRMED fk_rollback=NOT_CONFIRMED current=NOT_CONFIRMED restart=NOT_CONFIRMED close=OK leases=ZERO\nFAILED\n"
+               "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 100 filtered out;\n")
+
+    def failed_output(self, text, status=1):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(guard.AdmissionError) as caught:
+                guard.migration_result(subprocess.CompletedProcess([], status, b""), text)
+        self.assertEqual(str(caught.exception), "TURSO_MIGRATION_FAILED")
+        self.assertNotIn("TURSO_MIGRATION_PASS", output.getvalue())
+        self.assertNotIn("FAKE_PRIVATE_TOKEN", output.getvalue())
+        return output.getvalue()
+
+    def test_exact_static_codes_only_and_failures_never_become_pass(self):
+        # Contract extracted from the existing post-owner consumer failures.
+        expected = {
+            "BEGIN_FAILED",
+            "CLOSE_FAILED",
+            "COMMIT_UNCONFIRMED",
+            "CURRENT_APPLY_FAILED",
+            "CURRENT_GATE_FAILED",
+            "CURRENT_GATE_MISMATCH",
+            "CURRENT_LINEAGE_CHANGED",
+            "DATA_DECODE_FAILED",
+            "DATA_QUERY_FAILED",
+            "DATA_WRITE_FAILED",
+            "DATA_WRITE_MISMATCH",
+            "DDL_FAILED",
+            "FENCE_WRITE_FAILED",
+            "FK_DECODE_FAILED",
+            "FK_FAILURE_MISSING",
+            "FK_QUERY_FAILED",
+            "FK_ROLLBACK_PREFIX_CHANGED",
+            "FOREIGN_KEYS_NOT_ONE",
+            "GENERATION_WRITE_FAILED",
+            "GENERATION_WRITE_MISMATCH",
+            "INCOMPLETE_PREFIX_REFUSAL_NOT_CONFIRMED",
+            "LEASES_NOT_ZERO",
+            "LITERAL_DECODE_FAILED",
+            "LITERAL_MISMATCH",
+            "LITERAL_QUERY_FAILED",
+            "NEGATIVE_REFUSAL_NOT_CONFIRMED",
+            "NEGATIVE_ROLLBACK_CHANGED_CURRENT",
+            "NEGATIVE_WRITE_FAILED",
+            "PREFIX_APPLY_FAILED",
+            "PREFIX_RECEIPTS_CHANGED",
+            "PREFIX_VALIDATION_FAILED",
+            "PRESERVED_DATA_MISMATCH",
+            "RECONNECT_FAILED",
+            "RESTART_APPLY_FAILED",
+            "RESTART_RECEIPTS_OR_SCHEMA_CHANGED",
+            "ROLLBACK_UNCONFIRMED",
+            "SCHEMA_VALIDATION_FAILED",
+            "SEED_DECODE_FAILED",
+            "SEED_MISMATCH",
+            "SEED_QUERY_FAILED",
+            "UNEXPECTED_TARGET_DATA",
+            "WRONG_BACKEND",
+            "WRONG_FK_FAILURE",
+        }
+        self.assertEqual(guard.MIGRATION_PRIMARY_CODES, expected)
+        self.assertEqual(guard.MIGRATION_CLOSE_CODES, {"CLOSE_FAILED", "LEASES_NOT_ZERO"})
+        for primary in expected:
+            for close in ("OK", "CLOSE_FAILED", "LEASES_NOT_ZERO"):
+                with self.subTest(primary=primary, close=close):
+                    receipt = self.failure if close == "OK" else self.failure.replace("close=OK", "close=FAILED")
+                    diagnostic = "FVOCI_TURSO_MIGRATION_DIAGNOSTIC primary=" + primary + " close=" + close + "\n"
+                    output = self.failed_output(receipt + diagnostic + "SDK FAKE_PRIVATE_TOKEN\n")
+                    self.assertIn("TURSO_MIGRATION_DIAGNOSTIC primary=" + primary + " close=" + close + "\n", output)
+        for close in ("CLOSE_FAILED", "LEASES_NOT_ZERO"):
+            output = self.failed_output(self.failure.replace("close=OK", "close=FAILED") +
+                                        "FVOCI_TURSO_MIGRATION_DIAGNOSTIC primary=OK close=" + close + "\n")
+            self.assertIn("TURSO_MIGRATION_DIAGNOSTIC primary=OK close=" + close, output)
+
+    def test_unknown_malformed_duplicate_or_injected_diagnostics_do_not_echo(self):
+        known = "FVOCI_TURSO_MIGRATION_DIAGNOSTIC primary=SCHEMA_VALIDATION_FAILED close=OK\n"
+        for diagnostic in (
+            known + known,
+            known + "FVOCI_TURSO_MIGRATION_DIAGNOSTIC FAKE_PRIVATE_TOKEN\n",
+            known.replace("SCHEMA_VALIDATION_FAILED", "UNKNOWN_ERROR"),
+            known.replace("SCHEMA_VALIDATION_FAILED", "FAKE_PRIVATE_TOKEN"),
+            known.replace("SCHEMA_VALIDATION_FAILED", "SCHEMA_VALIDATION_FAILED_EXTRA"),
+            known.replace("SCHEMA_VALIDATION_FAILED", "schema_validation_failed"),
+            known.replace("SCHEMA_VALIDATION_FAILED", "CONNECT_FAILED"),
+            known.replace("SCHEMA_VALIDATION_FAILED", "MISSING_SECRET"),
+            known.replace("SCHEMA_VALIDATION_FAILED", ""),
+            known.replace("SCHEMA_VALIDATION_FAILED", "SCHEMA_VALIDATION_FAILED\nFAKE_PRIVATE_TOKEN"),
+            known.replace("SCHEMA_VALIDATION_FAILED", "SCHEMA_VALIDATION_FAILED\rFAKE_PRIVATE_TOKEN"),
+            known.replace("SCHEMA_VALIDATION_FAILED", "libsql://FAKE_PRIVATE_TOKEN.example.org"),
+            known.replace("close=OK", "close=BEGIN_FAILED"),
+            known.replace("close=OK", "close=FAKE_PRIVATE_TOKEN"),
+            known.replace("close=OK", "close=CLOSE_FAILED"),
+            known.replace("SCHEMA_VALIDATION_FAILED", "OK"),
+            "FAKE_PRIVATE_TOKEN " + known,
+            known.rstrip("\n") + " FAKE_PRIVATE_TOKEN\n",
+            known.replace("primary=", "private="),
+            known.replace(" close=", "\tclose="),
+        ):
+            with self.subTest(diagnostic=diagnostic):
+                output = self.failed_output(self.failure + diagnostic)
+                self.assertNotIn("TURSO_MIGRATION_DIAGNOSTIC", output)
+        # Missing diagnostic still fails; it is never fabricated from raw Err.
+        self.assertNotIn("TURSO_MIGRATION_DIAGNOSTIC", self.failed_output(self.failure + "SDK FAKE_PRIVATE_TOKEN\n"))
+
+    def test_diagnostic_cannot_replace_success_execution_or_cleanup_receipts(self):
+        diagnostic = "FVOCI_TURSO_MIGRATION_DIAGNOSTIC primary=SCHEMA_VALIDATION_FAILED close=OK\n"
+        for text, status in (
+            (self.success + diagnostic, 0),
+            (self.success + diagnostic, 1),
+            (self.failure + diagnostic, 0),
+            (self.failure.replace(guard.MIGRATION_TEST_NAME, guard.TEST_NAME) + diagnostic, 0),
+            (self.failure.replace("0 ignored", "1 ignored") + diagnostic, 0),
+            (self.failure.replace("1 failed", "0 failed") + diagnostic, 0),
+            (self.failure.replace("close=OK", "close=FAILED") + diagnostic, 0),
+        ):
+            with self.subTest(text=text, status=status):
+                self.failed_output(text, status)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            guard.migration_result(subprocess.CompletedProcess([], 0, b""), self.success + "SDK FAKE_PRIVATE_TOKEN\n")
+        self.assertIn("TURSO_MIGRATION_PASS tests=1 ignored=0", output.getvalue())
+        self.assertNotIn("TURSO_MIGRATION_DIAGNOSTIC", output.getvalue())
+        self.assertNotIn("FAKE_PRIVATE_TOKEN", output.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
