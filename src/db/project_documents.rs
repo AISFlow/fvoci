@@ -676,6 +676,38 @@ pub(crate) async fn create_project_document_operation(
     Ok(Ok(with_project_display_id(row_to_meta(row, true), &key)))
 }
 
+/// Read project metadata using the selected backend and its current read proof.
+pub async fn get_project_document_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    document_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return get_project_document(
+            pool,
+            workspace_id,
+            project_id,
+            document_id,
+            actor_user_id,
+            session_id,
+        )
+        .await;
+    }
+    crate::db::document_ops::authorize_document_backend(
+        backend,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        crate::db::document_ops::DocumentScope::Project(project_id),
+        document_id,
+        ProjectPermission::View,
+    )
+    .await
+}
+
 pub async fn get_project_document(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -2413,6 +2445,405 @@ pub(crate) mod selected_create_backend_tests {
             counts(&f, project).await,
             (before.0 + 1, 3, before.2 + 1, before.3 + 1)
         );
+        f.close().await;
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod selected_metadata_backend_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+    use crate::db::project_documents::selected_create_backend_tests::{counts, setup};
+
+    async fn fixture() -> (Fixture, Uuid, Uuid) {
+        let (f, credential, project) = setup().await;
+        let expires = crate::db::identity::stored_now()
+            + chrono::Duration::seconds(crate::auth::token::SESSION_TTL_SECS);
+        sqlx::query("UPDATE sessions SET expires_at=?1 WHERE id=?2")
+            .bind(expires.timestamp_micros())
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        (f, credential, project)
+    }
+
+    async fn update(f: &Fixture, sql: &str, id: Uuid) {
+        assert_eq!(
+            sqlx::query(sql)
+                .bind(id.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap()
+                .rows_affected(),
+            1
+        );
+    }
+
+    async fn rows(f: &Fixture) -> Vec<String> {
+        sqlx::query_scalar("SELECT json_array(hex(id),hex(workspace_id),title,icon,path,hex(parent_id),sort_key,hex(project_id),number,status,schema_version,text,chosung,version,hex(created_by),created_at,updated_at,deleted_at,content_json,kind) FROM documents ORDER BY id")
+            .fetch_all(&f.pool).await.unwrap()
+    }
+
+    async fn read(
+        f: &Fixture,
+        credential: Uuid,
+        project: Uuid,
+        document: Uuid,
+    ) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+        get_project_document_backend(
+            &f.backend,
+            f.workspace,
+            project,
+            document,
+            f.user,
+            credential,
+        )
+        .await
+    }
+
+    fn assert_root(meta: &DocumentMeta, f: &Fixture, project: Uuid) {
+        assert_eq!(meta.id, f.document);
+        assert_eq!(meta.workspace_id, f.workspace);
+        assert_eq!(meta.project_id, Some(project));
+        assert_eq!(meta.title, "S31");
+        assert_eq!(meta.number, 1);
+        assert_eq!(meta.display_id.as_deref(), Some("OFF-1"));
+        assert_eq!(meta.created_by, f.user);
+        assert_eq!(meta.content_json, json!({"type":"doc","content":[]}));
+        assert_eq!(meta.schema_version, DOCUMENT_SCHEMA_VERSION);
+        assert_eq!(meta.version, 1);
+    }
+
+    async fn denied(f: &Fixture, credential: Uuid, project: Uuid, forbidden: bool) {
+        let before = (counts(f, project).await, rows(f).await);
+        let result = read(f, credential, project, f.document).await.unwrap();
+        assert!(if forbidden {
+            matches!(result, Err(DocumentDbError::Forbidden))
+        } else {
+            matches!(result, Err(DocumentDbError::NotFound))
+        });
+        assert_eq!((counts(f, project).await, rows(f).await), before);
+    }
+
+    async fn foreign_keys(f: &Fixture) {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&f.pool)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn sqlite_project_metadata_literal_status_and_archived_view() {
+        let (f, credential, project) = fixture().await;
+        let created = create_project_document_backend(
+            &f.backend,
+            f.workspace,
+            project,
+            f.user,
+            credential,
+            CreateDocumentInput {
+                parent_id: Some(f.document),
+                title: "Metadata 한글 child",
+                icon: Some("📄"),
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let before = (counts(&f, project).await, rows(&f).await);
+        let root = read(&f, credential, project, f.document)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_root(&root, &f, project);
+        let meta = read(&f, credential, project, created.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&meta).unwrap(),
+            serde_json::to_value(&created).unwrap()
+        );
+        assert_eq!(meta.title, "Metadata 한글 child");
+        assert_eq!(meta.icon.as_deref(), Some("📄"));
+        assert_eq!(meta.workspace_id, f.workspace);
+        assert_eq!(meta.project_id, Some(project));
+        assert_eq!(meta.parent_id, Some(f.document));
+        assert_eq!(
+            meta.path,
+            format!("{}.{}", f.document.simple(), meta.id.simple())
+        );
+        assert!(!meta.sort_key.is_empty());
+        assert_eq!(meta.number, 2);
+        assert_eq!(meta.display_id.as_deref(), Some("OFF-2"));
+        assert_eq!(meta.status, "draft");
+        assert_eq!(meta.schema_version, DOCUMENT_SCHEMA_VERSION);
+        assert_eq!(meta.content_json, empty_document_json());
+        assert_eq!((counts(&f, project).await, rows(&f).await), before);
+        // View remains valid for every current status, including an archived project.
+        for status in ["draft", "published", "archived"] {
+            sqlx::query("UPDATE documents SET status=?1 WHERE id=?2")
+                .bind(status)
+                .bind(created.id.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let before = (counts(&f, project).await, rows(&f).await);
+            let meta = read(&f, credential, project, created.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(meta.status, status);
+            assert_eq!(meta.id, created.id);
+            assert_eq!((counts(&f, project).await, rows(&f).await), before);
+        }
+        update(
+            &f,
+            "UPDATE projects SET status='archived' WHERE id=?1",
+            project,
+        )
+        .await;
+        assert_root(
+            &read(&f, credential, project, f.document)
+                .await
+                .unwrap()
+                .unwrap(),
+            &f,
+            project,
+        );
+        foreign_keys(&f).await;
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_project_metadata_current_grants_tenant_and_credential_denials() {
+        let (f, credential, project) = fixture().await;
+        update(
+            &f,
+            "UPDATE projects SET visibility='private' WHERE id=?1",
+            project,
+        )
+        .await;
+        denied(&f, credential, project, false).await; // Creator/owner is not a private-project bypass.
+        update(
+            &f,
+            "UPDATE memberships SET role='guest' WHERE user_id=?1",
+            f.user,
+        )
+        .await;
+        let direct = Uuid::now_v7();
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'viewer')")
+            .bind(direct.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice())
+            .bind(project.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool).await.unwrap();
+        assert_root(
+            &read(&f, credential, project, f.document)
+                .await
+                .unwrap()
+                .unwrap(),
+            &f,
+            project,
+        );
+        update(&f, "DELETE FROM project_members WHERE id=?1", direct).await;
+        denied(&f, credential, project, false).await;
+        let group = Uuid::now_v7();
+        sqlx::query("INSERT INTO groups(id,workspace_id,name) VALUES(?1,?2,'Metadata readers')")
+            .bind(group.as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO group_members(workspace_id,group_id,user_id) VALUES(?1,?2,?3)")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(group.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,group_id,role) VALUES(?1,?2,?3,?4,'viewer')")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice())
+            .bind(project.as_bytes().as_slice()).bind(group.as_bytes().as_slice())
+            .execute(&f.pool).await.unwrap();
+        assert_root(
+            &read(&f, credential, project, f.document)
+                .await
+                .unwrap()
+                .unwrap(),
+            &f,
+            project,
+        );
+        update(&f, "DELETE FROM group_members WHERE group_id=?1", group).await;
+        denied(&f, credential, project, false).await;
+        update(
+            &f,
+            "UPDATE projects SET visibility='workspace' WHERE id=?1",
+            project,
+        )
+        .await;
+        denied(&f, credential, project, false).await; // Ungranted guest.
+        update(
+            &f,
+            "UPDATE memberships SET role='member' WHERE user_id=?1",
+            f.user,
+        )
+        .await;
+        assert_root(
+            &read(&f, credential, project, f.document)
+                .await
+                .unwrap()
+                .unwrap(),
+            &f,
+            project,
+        );
+        assert!(matches!(
+            get_project_document_backend(
+                &f.backend,
+                Uuid::now_v7(),
+                project,
+                f.document,
+                f.user,
+                credential
+            )
+            .await
+            .unwrap(),
+            Err(DocumentDbError::NotFound)
+        ));
+        assert!(matches!(
+            read(&f, credential, Uuid::now_v7(), f.document)
+                .await
+                .unwrap(),
+            Err(DocumentDbError::NotFound)
+        ));
+        assert!(matches!(
+            read(&f, credential, project, Uuid::now_v7()).await.unwrap(),
+            Err(DocumentDbError::NotFound)
+        ));
+        for (deny, restore, id, forbidden) in [
+            (
+                "UPDATE documents SET project_id=NULL WHERE id=?1",
+                "UPDATE documents SET project_id=?1 WHERE id=?2",
+                f.document,
+                false,
+            ),
+            (
+                "UPDATE documents SET deleted_at=1 WHERE id=?1",
+                "UPDATE documents SET deleted_at=NULL WHERE id=?1",
+                f.document,
+                false,
+            ),
+            (
+                "UPDATE projects SET deleted_at=1 WHERE id=?1",
+                "UPDATE projects SET deleted_at=NULL WHERE id=?1",
+                project,
+                false,
+            ),
+            (
+                "UPDATE workspaces SET deleted_at=1 WHERE id=?1",
+                "UPDATE workspaces SET deleted_at=NULL WHERE id=?1",
+                f.workspace,
+                false,
+            ),
+            (
+                "UPDATE users SET suspended_at=1 WHERE id=?1",
+                "UPDATE users SET suspended_at=NULL WHERE id=?1",
+                f.user,
+                true,
+            ),
+            (
+                "UPDATE users SET deleted_at=1 WHERE id=?1",
+                "UPDATE users SET deleted_at=NULL WHERE id=?1",
+                f.user,
+                true,
+            ),
+            (
+                "UPDATE sessions SET revoked_at=1 WHERE id=?1",
+                "UPDATE sessions SET revoked_at=NULL WHERE id=?1",
+                credential,
+                true,
+            ),
+            (
+                "UPDATE sessions SET expires_at=1 WHERE id=?1",
+                "UPDATE sessions SET expires_at=?1 WHERE id=?2",
+                credential,
+                true,
+            ),
+        ] {
+            update(&f, deny, id).await;
+            denied(&f, credential, project, forbidden).await;
+            if restore.contains("project_id=?1") {
+                sqlx::query(restore)
+                    .bind(project.as_bytes().as_slice())
+                    .bind(id.as_bytes().as_slice())
+                    .execute(&f.pool)
+                    .await
+                    .unwrap();
+            } else if restore.contains("expires_at=?1") {
+                let expires = crate::db::identity::stored_now()
+                    + chrono::Duration::seconds(crate::auth::token::SESSION_TTL_SECS);
+                sqlx::query(restore)
+                    .bind(expires.timestamp_micros())
+                    .bind(id.as_bytes().as_slice())
+                    .execute(&f.pool)
+                    .await
+                    .unwrap();
+            } else {
+                update(&f, restore, id).await;
+            }
+            assert_root(
+                &read(&f, credential, project, f.document)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                &f,
+                project,
+            );
+        }
+        // Removing workspace membership cascades direct/group access and denies the next read.
+        update(&f, "DELETE FROM memberships WHERE user_id=?1", f.user).await;
+        denied(&f, credential, project, false).await;
+        foreign_keys(&f).await;
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_project_metadata_driver_error_and_healthy_retry() {
+        let (f, credential, project) = fixture().await;
+        let before = (counts(&f, project).await, rows(&f).await);
+        // Break a real late query after credential/workspace proof; no fabricated error.
+        sqlx::query("ALTER TABLE projects RENAME TO metadata_fault_projects")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            read(&f, credential, project, f.document).await,
+            Err(sqlx::Error::Database(_))
+        ));
+        // The one-connection SQLite fixture observes local cleanup before this recovery write.
+        // It does not prove cleanup of an original remote transaction stream.
+        sqlx::query("ALTER TABLE metadata_fault_projects RENAME TO projects")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_root(
+            &read(&f, credential, project, f.document)
+                .await
+                .unwrap()
+                .unwrap(),
+            &f,
+            project,
+        );
+        assert_eq!((counts(&f, project).await, rows(&f).await), before);
+        foreign_keys(&f).await;
         f.close().await;
     }
 }

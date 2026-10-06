@@ -16,9 +16,9 @@ use crate::api::dto::{
 use crate::auth::session::SessionUser;
 use crate::db::documents::{CreateDocumentInput, UpdateDocumentMetaInput};
 use crate::db::project_documents::{
-    create_project_document_backend, get_project_document, list_project_document_tree_backend,
-    move_project_document, reorder_project_document, restore_project_document,
-    trash_project_document, update_project_document_meta,
+    create_project_document_backend, get_project_document_backend,
+    list_project_document_tree_backend, move_project_document, reorder_project_document,
+    restore_project_document, trash_project_document, update_project_document_meta,
 };
 use crate::documents::export::ExportFormat;
 use crate::error::{AppError, ProblemCode};
@@ -232,13 +232,8 @@ async fn get_document(
         Some(workspace_id),
     )
     .await?;
-    let result = get_project_document(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/project_documents.rs")
-            .map_err(internal)?,
+    let result = get_project_document_backend(
+        &state.auth.db.pool,
         workspace_id,
         project_id,
         document_id,
@@ -922,6 +917,235 @@ mod selected_create_http_tests {
             counts(&f, project).await,
             (before.0 + 1, 3, before.2 + 1, before.3 + 1)
         );
+        drop(app);
+        f.close().await;
+    }
+
+    async fn get_metadata(
+        app: Router,
+        path: &str,
+        token: Option<&str>,
+        bearer: bool,
+    ) -> (StatusCode, Value) {
+        let mut request = axum::http::Request::builder().method("GET").uri(path);
+        if let Some(token) = token {
+            request = if bearer {
+                request.header("authorization", format!("Bearer {token}"))
+            } else {
+                request.header("cookie", format!("fvoci_session={token}"))
+            };
+        }
+        let response = app
+            .oneshot(request.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 16384)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn sqlite_http_project_metadata_cookie_pat_literal_and_current_denials() {
+        let (f, credential, project) = setup().await;
+        let token = session(&f, credential).await;
+        let app = app(&f);
+        let (status, created) = post(
+            app.clone(),
+            &create_path(f.workspace, project),
+            Some(&token),
+            false,
+            "http://localhost",
+            json!({"parentId":f.document,"title":"GET metadata 한글","icon":"📄"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+        let path = format!("{}/{}", create_path(f.workspace, project), id);
+        let before = counts(&f, project).await;
+        let read_token = pat(&f, "documents.read").await;
+        let write_token = pat(&f, "documents.write").await;
+        for (auth, bearer) in [(&token, false), (&read_token, true), (&write_token, true)] {
+            let (status, body) = get_metadata(app.clone(), &path, Some(auth), bearer).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body, created);
+            assert_eq!(body["id"], id.to_string());
+            assert_eq!(body["workspaceId"], f.workspace.to_string());
+            assert_eq!(body["projectId"], project.to_string());
+            assert_eq!(body["parentId"], f.document.to_string());
+            assert_eq!(body["title"], "GET metadata 한글");
+            assert_eq!(body["icon"], "📄");
+            assert_eq!(body["number"], 2);
+            assert_eq!(body["displayId"], "OFF-2");
+            assert_eq!(body["status"], "draft");
+            assert_eq!(
+                body["schemaVersion"],
+                crate::db::documents::DOCUMENT_SCHEMA_VERSION
+            );
+            assert_eq!(body["version"], 1);
+            assert_eq!(body["createdBy"], f.user.to_string());
+            assert_eq!(
+                body["path"],
+                format!("{}.{}", f.document.simple(), id.simple())
+            );
+            assert!(!body["sortKey"].as_str().unwrap().is_empty());
+            assert!(body.get("contentJson").is_none());
+            assert!(body.get("tokenHash").is_none());
+        }
+        let wrong_scope_token = pat(&f, "tasks.read").await;
+        let wrong_tenant_path = format!("{}/{}", create_path(Uuid::now_v7(), project), id);
+        for (target, auth, bearer, expected) in [
+            (path.as_str(), None, false, StatusCode::UNAUTHORIZED),
+            (
+                path.as_str(),
+                Some(wrong_scope_token.as_str()),
+                true,
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                wrong_tenant_path.as_str(),
+                Some(read_token.as_str()),
+                true,
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                wrong_tenant_path.as_str(),
+                Some(token.as_str()),
+                false,
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            let (status, body) = get_metadata(app.clone(), target, auth, bearer).await;
+            assert_eq!(status, expected, "{body}");
+            assert!(body.get("title").is_none());
+            assert!(body.get("displayId").is_none());
+        }
+        sqlx::query("UPDATE api_tokens SET expires_at=1 WHERE token_hash=?1")
+            .bind(crate::auth::token::hash_token(&read_token))
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            get_metadata(app.clone(), &path, Some(&read_token), true)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let revoked_token = pat(&f, "documents.read").await;
+        sqlx::query("DELETE FROM api_tokens WHERE token_hash=?1")
+            .bind(crate::auth::token::hash_token(&revoked_token))
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            get_metadata(app.clone(), &path, Some(&revoked_token), true)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        for (deny, restore, target, expected) in [
+            (
+                "UPDATE sessions SET revoked_at=1 WHERE id=?1",
+                "UPDATE sessions SET revoked_at=NULL WHERE id=?1",
+                credential,
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                "UPDATE projects SET visibility='private' WHERE id=?1",
+                "UPDATE projects SET visibility='workspace' WHERE id=?1",
+                project,
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "UPDATE documents SET deleted_at=1 WHERE id=?1",
+                "UPDATE documents SET deleted_at=NULL WHERE id=?1",
+                id,
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            sqlx::query(deny)
+                .bind(target.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let (status, body) = get_metadata(app.clone(), &path, Some(&token), false).await;
+            assert_eq!(status, expected, "{body}");
+            assert!(body.get("title").is_none());
+            assert!(body.get("displayId").is_none());
+            sqlx::query(restore)
+                .bind(target.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let (status, body) = get_metadata(app.clone(), &path, Some(&token), false).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body, created);
+        }
+        sqlx::query("UPDATE sessions SET expires_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            get_metadata(app.clone(), &path, Some(&token), false)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(counts(&f, project).await, before);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&f.pool)
+            .await
+            .unwrap()
+            .is_empty());
+        drop(app);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_http_project_metadata_driver_error_and_healthy_retry() {
+        let (f, credential, project) = setup().await;
+        let token = session(&f, credential).await;
+        let app = app(&f);
+        let path = format!("{}/{}", create_path(f.workspace, project), f.document);
+        let before = counts(&f, project).await;
+        sqlx::query("ALTER TABLE projects RENAME TO metadata_http_fault_projects")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let (status, body) = get_metadata(app.clone(), &path, Some(&token), false).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert!(body.get("title").is_none());
+        sqlx::query("ALTER TABLE metadata_http_fault_projects RENAME TO projects")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let (status, body) = get_metadata(app.clone(), &path, Some(&token), false).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["id"], f.document.to_string());
+        assert_eq!(body["title"], "S31");
+        assert_eq!(body["displayId"], "OFF-1");
+        assert_eq!(counts(&f, project).await, before);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&f.pool)
+            .await
+            .unwrap()
+            .is_empty());
         drop(app);
         f.close().await;
     }
