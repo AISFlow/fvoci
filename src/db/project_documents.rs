@@ -2038,6 +2038,15 @@ pub(crate) mod selected_create_backend_tests {
             .bind(project.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap()
     }
 
+    async fn document_rows(f: &Fixture) -> Vec<String> {
+        // Observe every column and row, including unaffiliated/other-tenant
+        // documents that the project-filtered publication count cannot see.
+        sqlx::query_scalar("SELECT json_array(hex(id),hex(workspace_id),title,icon,path,hex(parent_id),sort_key,hex(project_id),number,status,schema_version,text,chosung,version,hex(created_by),created_at,updated_at,deleted_at,content_json,kind) FROM documents ORDER BY id")
+            .fetch_all(&f.pool)
+            .await
+            .unwrap()
+    }
+
     async fn create(
         f: &Fixture,
         credential: Uuid,
@@ -2064,12 +2073,14 @@ pub(crate) mod selected_create_backend_tests {
     async fn sqlite_project_create_current_authority_and_parent_denials() {
         let (f, credential, project) = setup().await;
         let before = counts(&f, project).await;
+        let documents_before = document_rows(&f).await;
         for parent in [None, Some(Uuid::now_v7())] {
             assert!(matches!(
                 create(&f, credential, project, parent).await.unwrap(),
                 Err(DocumentDbError::NotFound)
             ));
             assert_eq!(counts(&f, project).await, before);
+            assert_eq!(document_rows(&f).await, documents_before);
         }
         for (query, expected) in [
             (
@@ -2106,6 +2117,10 @@ pub(crate) mod selected_create_backend_tests {
                 .await
                 .unwrap();
             blocker.commit().await.unwrap();
+            // The fixture mutation is deliberate; only effects of the
+            // following rejected creation must leave this state unchanged.
+            let blocked_counts = counts(&f, project).await;
+            let blocked_documents = document_rows(&f).await;
             let refusal = create(&f, credential, project, Some(f.document))
                 .await
                 .unwrap()
@@ -2115,7 +2130,8 @@ pub(crate) mod selected_create_backend_tests {
                 "forbidden" => assert!(matches!(refusal, DocumentDbError::Forbidden)),
                 _ => assert!(matches!(refusal, DocumentDbError::NotFound)),
             }
-            assert_eq!(counts(&f, project).await, before);
+            assert_eq!(counts(&f, project).await, blocked_counts);
+            assert_eq!(document_rows(&f).await, blocked_documents);
             for (restore, id) in [
                 (
                     "UPDATE memberships SET role='owner' WHERE user_id=?1",
@@ -2147,6 +2163,8 @@ pub(crate) mod selected_create_backend_tests {
                 .execute(&f.pool)
                 .await
                 .unwrap();
+            assert_eq!(counts(&f, project).await, before);
+            assert_eq!(document_rows(&f).await, documents_before);
         }
         let deep = std::iter::repeat_n(
             f.document.simple().to_string(),
@@ -2160,6 +2178,7 @@ pub(crate) mod selected_create_backend_tests {
             .execute(&f.pool)
             .await
             .unwrap();
+        let deep_documents = document_rows(&f).await;
         assert!(matches!(
             create(&f, credential, project, Some(f.document))
                 .await
@@ -2167,6 +2186,7 @@ pub(crate) mod selected_create_backend_tests {
             Err(DocumentDbError::DepthLimit)
         ));
         assert_eq!(counts(&f, project).await, before);
+        assert_eq!(document_rows(&f).await, deep_documents);
         sqlx::query("UPDATE documents SET path=?1 WHERE id=?2")
             .bind(f.document.simple().to_string())
             .bind(f.document.as_bytes().as_slice())
@@ -2190,6 +2210,7 @@ pub(crate) mod selected_create_backend_tests {
             exhausted,
             "number namespace cannot overflow"
         );
+        assert_eq!(document_rows(&f).await, documents_before);
         sqlx::query("UPDATE projects SET next_number=2 WHERE id=?1")
             .bind(project.as_bytes().as_slice())
             .execute(&f.pool)
@@ -2215,6 +2236,7 @@ pub(crate) mod selected_create_backend_tests {
             Err(DocumentDbError::NotFound)
         ));
         assert_eq!(counts(&f, project).await, before);
+        assert_eq!(document_rows(&f).await, documents_before);
         assert_eq!(
             create(&f, credential, project, Some(f.document))
                 .await
