@@ -284,6 +284,75 @@ pub async fn list_project_document_tree_backend(
     result
 }
 
+/// Ordinary creation owns its writer; the OFF draft caller continues to own
+/// its borrowed creator, command receipt and native publication separately.
+pub async fn create_project_document_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    input: CreateDocumentInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return create_project_document(
+            pool,
+            workspace_id,
+            project_id,
+            actor_user_id,
+            session_id,
+            input,
+            client_ip,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = create_project_document_operation(
+        &mut tx.operation(),
+        workspace_id,
+        project_id,
+        actor_user_id,
+        session_id,
+        input,
+        client_ip,
+    )
+    .await;
+    if let Ok(Ok(meta)) = result {
+        // An uncertain finish is not a creation ACK or permission to retry.
+        // Retain this original writer's typed receipt; do not open an observer.
+        tx.commit_with_cleanup()
+            .await
+            .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+        Ok(Ok(meta))
+    } else {
+        project_create_after_rollback(result, tx.rollback().await)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("project document creation refused: {0:?}")]
+struct ProjectCreateRefusal(DocumentDbError);
+
+fn project_create_after_rollback(
+    result: Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error>,
+    cleanup: Result<(), sqlx::Error>,
+) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+    match cleanup {
+        Ok(()) => result,
+        Err(cleanup) => {
+            let original: Option<Box<dyn std::error::Error + Send + Sync>> = match result {
+                Err(driver) => Some(Box::new(driver)),
+                Ok(Err(refusal)) => Some(Box::new(ProjectCreateRefusal(refusal))),
+                Ok(Ok(_)) => None,
+            };
+            Err(crate::db::backend::rollback_cleanup_unknown(
+                original, cleanup,
+            ))
+        }
+    }
+}
+
 pub async fn create_project_document(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1881,6 +1950,446 @@ mod selected_tree_backend_tests {
         assert_eq!(
             after, before,
             "tree/filter reads cannot create, audit or grant anything"
+        );
+        f.close().await;
+    }
+}
+
+#[cfg(test)]
+mod selected_create_finish_tests {
+    use super::*;
+
+    #[test]
+    fn project_create_rollback_retains_domain_and_driver_causes() {
+        assert!(matches!(
+            project_create_after_rollback(Ok(Err(DocumentDbError::NotFound)), Ok(())),
+            Ok(Err(DocumentDbError::NotFound))
+        ));
+        let driver = project_create_after_rollback(
+            Err(sqlx::Error::Protocol("original publication fault".into())),
+            Ok(()),
+        )
+        .unwrap_err();
+        assert!(driver.to_string().contains("original publication fault"));
+        for original in [
+            Ok(Err(DocumentDbError::Forbidden)),
+            Err(sqlx::Error::Protocol("original publication fault".into())),
+        ] {
+            let error = project_create_after_rollback(
+                original,
+                Err(sqlx::Error::Protocol("original rollback fault".into())),
+            )
+            .unwrap_err();
+            let sqlx::Error::AnyDriverError(inner) = error else {
+                panic!("typed rollback uncertainty required")
+            };
+            let unknown = inner
+                .downcast_ref::<crate::db::backend::RollbackCleanupUnknown>()
+                .unwrap();
+            assert!(unknown
+                .cleanup
+                .to_string()
+                .contains("original rollback fault"));
+            let original = unknown.original.as_ref().unwrap();
+            if let Some(refusal) = original.downcast_ref::<ProjectCreateRefusal>() {
+                assert!(matches!(refusal.0, DocumentDbError::Forbidden));
+            } else {
+                assert!(original
+                    .downcast_ref::<sqlx::Error>()
+                    .unwrap()
+                    .to_string()
+                    .contains("original publication fault"));
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+pub(crate) mod selected_create_backend_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+    use std::future::Future;
+
+    pub(crate) async fn setup() -> (Fixture, Uuid, Uuid) {
+        let f = Fixture::new().await;
+        let credential = Uuid::now_v7();
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,9223372036854775807)")
+            .bind(credential.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(credential.to_string()).execute(&f.pool).await.unwrap();
+        let project = Uuid::now_v7();
+        sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by,next_number) VALUES(?1,?2,'OFF','OFF selected project','workspace',?3,2)")
+            .bind(project.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("UPDATE documents SET project_id=?1 WHERE id=?2")
+            .bind(project.as_bytes().as_slice())
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET root_document_id=?1 WHERE id=?2")
+            .bind(f.document.as_bytes().as_slice())
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        (f, credential, project)
+    }
+
+    pub(crate) async fn counts(f: &Fixture, project: Uuid) -> (i64, i64, i64, i64) {
+        sqlx::query_as("SELECT (SELECT count(*) FROM documents WHERE project_id=?1),(SELECT next_number FROM projects WHERE id=?1),(SELECT count(*) FROM events WHERE verb='document.created'),(SELECT count(*) FROM audit_log WHERE verb='document.created')")
+            .bind(project.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap()
+    }
+
+    async fn create(
+        f: &Fixture,
+        credential: Uuid,
+        project: Uuid,
+        parent: Option<Uuid>,
+    ) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+        create_project_document_backend(
+            &f.backend,
+            f.workspace,
+            project,
+            f.user,
+            credential,
+            CreateDocumentInput {
+                parent_id: parent,
+                title: "OFF project body",
+                icon: None,
+            },
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn sqlite_project_create_current_authority_and_parent_denials() {
+        let (f, credential, project) = setup().await;
+        let before = counts(&f, project).await;
+        for parent in [None, Some(Uuid::now_v7())] {
+            assert!(matches!(
+                create(&f, credential, project, parent).await.unwrap(),
+                Err(DocumentDbError::NotFound)
+            ));
+            assert_eq!(counts(&f, project).await, before);
+        }
+        for (query, expected) in [
+            (
+                "UPDATE memberships SET role='guest' WHERE user_id=?1",
+                "missing",
+            ),
+            (
+                "UPDATE projects SET status='archived' WHERE id=?1",
+                "missing",
+            ),
+            (
+                "UPDATE documents SET project_id=NULL WHERE id=?1",
+                "affiliation",
+            ),
+            ("UPDATE documents SET deleted_at=1 WHERE id=?1", "missing"),
+            ("UPDATE workspaces SET deleted_at=1 WHERE id=?1", "missing"),
+            ("UPDATE sessions SET expires_at=1 WHERE id=?1", "forbidden"),
+        ] {
+            let id = if query.contains("memberships") {
+                f.user
+            } else if query.contains("projects") {
+                project
+            } else if query.contains("workspaces") {
+                f.workspace
+            } else if query.contains("sessions") {
+                credential
+            } else {
+                f.document
+            };
+            let mut blocker = f.pool.begin().await.unwrap();
+            sqlx::query(query)
+                .bind(id.as_bytes().as_slice())
+                .execute(&mut *blocker)
+                .await
+                .unwrap();
+            blocker.commit().await.unwrap();
+            let refusal = create(&f, credential, project, Some(f.document))
+                .await
+                .unwrap()
+                .unwrap_err();
+            match expected {
+                "affiliation" => assert!(matches!(refusal, DocumentDbError::AffiliationMismatch)),
+                "forbidden" => assert!(matches!(refusal, DocumentDbError::Forbidden)),
+                _ => assert!(matches!(refusal, DocumentDbError::NotFound)),
+            }
+            assert_eq!(counts(&f, project).await, before);
+            for (restore, id) in [
+                (
+                    "UPDATE memberships SET role='owner' WHERE user_id=?1",
+                    f.user,
+                ),
+                ("UPDATE projects SET status='active' WHERE id=?1", project),
+                (
+                    "UPDATE documents SET deleted_at=NULL WHERE id=?1",
+                    f.document,
+                ),
+                (
+                    "UPDATE workspaces SET deleted_at=NULL WHERE id=?1",
+                    f.workspace,
+                ),
+                (
+                    "UPDATE sessions SET expires_at=9223372036854775807 WHERE id=?1",
+                    credential,
+                ),
+            ] {
+                sqlx::query(restore)
+                    .bind(id.as_bytes().as_slice())
+                    .execute(&f.pool)
+                    .await
+                    .unwrap();
+            }
+            sqlx::query("UPDATE documents SET project_id=?1 WHERE id=?2")
+                .bind(project.as_bytes().as_slice())
+                .bind(f.document.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+        }
+        let deep = std::iter::repeat_n(
+            f.document.simple().to_string(),
+            usize::try_from(MAX_TREE_DEPTH).unwrap(),
+        )
+        .collect::<Vec<_>>()
+        .join(".");
+        sqlx::query("UPDATE documents SET path=?1 WHERE id=?2")
+            .bind(deep)
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            create(&f, credential, project, Some(f.document))
+                .await
+                .unwrap(),
+            Err(DocumentDbError::DepthLimit)
+        ));
+        assert_eq!(counts(&f, project).await, before);
+        sqlx::query("UPDATE documents SET path=?1 WHERE id=?2")
+            .bind(f.document.simple().to_string())
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET next_number=2147483647 WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let exhausted = counts(&f, project).await;
+        assert!(matches!(
+            create(&f, credential, project, Some(f.document))
+                .await
+                .unwrap_err(),
+            sqlx::Error::RowNotFound
+        ));
+        assert_eq!(
+            counts(&f, project).await,
+            exhausted,
+            "number namespace cannot overflow"
+        );
+        sqlx::query("UPDATE projects SET next_number=2 WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        // An active credential still cannot create into a different tenant.
+        assert!(matches!(
+            create_project_document_backend(
+                &f.backend,
+                Uuid::now_v7(),
+                project,
+                f.user,
+                credential,
+                CreateDocumentInput {
+                    parent_id: Some(f.document),
+                    title: "foreign",
+                    icon: None
+                },
+                None
+            )
+            .await
+            .unwrap(),
+            Err(DocumentDbError::NotFound)
+        ));
+        assert_eq!(counts(&f, project).await, before);
+        assert_eq!(
+            create(&f, credential, project, Some(f.document))
+                .await
+                .unwrap()
+                .unwrap()
+                .number,
+            2
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_project_create_queued_writer_rechecks_credential_and_permission() {
+        let (f, credential, project) = setup().await;
+        let before = counts(&f, project).await;
+        for revoke_credential in [true, false] {
+            // Fixture pool has one connection: a polled Pending creator is
+            // demonstrably waiting for this holder, without sleeps or hooks.
+            let mut holder = f.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+            let backend = f.backend.clone();
+            let (workspace, actor, parent) = (f.workspace, f.user, f.document);
+            let (ready, observed) = tokio::sync::oneshot::channel();
+            let pending = tokio::spawn(async move {
+                let mut creation = Box::pin(create_project_document_backend(
+                    &backend,
+                    workspace,
+                    project,
+                    actor,
+                    credential,
+                    CreateDocumentInput {
+                        parent_id: Some(parent),
+                        title: "queued",
+                        icon: None,
+                    },
+                    None,
+                ));
+                let mut ready = Some(ready);
+                std::future::poll_fn(|cx| {
+                    let result = creation.as_mut().poll(cx);
+                    if result.is_pending() {
+                        if let Some(ready) = ready.take() {
+                            let _ = ready.send(());
+                        }
+                    }
+                    result
+                })
+                .await
+            });
+            observed.await.unwrap();
+            let query = if revoke_credential {
+                "UPDATE sessions SET expires_at=1 WHERE id=?1"
+            } else {
+                "UPDATE memberships SET role='guest' WHERE user_id=?1"
+            };
+            let id = if revoke_credential {
+                credential
+            } else {
+                f.user
+            };
+            sqlx::query(query)
+                .bind(id.as_bytes().as_slice())
+                .execute(&mut *holder)
+                .await
+                .unwrap();
+            holder.commit().await.unwrap();
+            let refusal = pending.await.unwrap().unwrap().unwrap_err();
+            if revoke_credential {
+                assert!(matches!(refusal, DocumentDbError::Forbidden));
+            } else {
+                assert!(matches!(refusal, DocumentDbError::NotFound));
+            }
+            assert_eq!(counts(&f, project).await, before);
+            sqlx::query("UPDATE sessions SET expires_at=9223372036854775807 WHERE id=?1")
+                .bind(credential.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE memberships SET role='owner' WHERE user_id=?1")
+                .bind(f.user.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            create(&f, credential, project, Some(f.document))
+                .await
+                .unwrap()
+                .unwrap()
+                .number,
+            2
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_project_create_fk_publication_and_commit_failures_then_healthy_create() {
+        let (f, credential, project) = setup().await;
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        let before = counts(&f, project).await;
+        sqlx::query(
+            "CREATE TABLE project_create_fk_probe(id BLOB REFERENCES documents(id)) STRICT",
+        )
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        for table in ["events", "audit_log"] {
+            sqlx::query(&format!("CREATE TRIGGER project_create_refuse AFTER INSERT ON {table} WHEN NEW.verb='document.created' BEGIN INSERT INTO project_create_fk_probe(id) VALUES(zeroblob(16)); END;")).execute(&f.pool).await.unwrap();
+            let error = create(&f, credential, project, Some(f.document))
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .as_database_error()
+                    .is_some_and(|error| error.is_foreign_key_violation()),
+                "original FK cause retained: {error}"
+            );
+            assert_eq!(
+                counts(&f, project).await,
+                before,
+                "document, number, event and audit roll back together"
+            );
+            sqlx::query("DROP TRIGGER project_create_refuse")
+                .execute(&f.pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("CREATE TABLE project_create_deferred_probe(id BLOB REFERENCES documents(id) DEFERRABLE INITIALLY DEFERRED) STRICT").execute(&f.pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER project_create_commit_refuse AFTER INSERT ON audit_log WHEN NEW.verb='document.created' BEGIN INSERT INTO project_create_deferred_probe(id) VALUES(zeroblob(16)); END;").execute(&f.pool).await.unwrap();
+        let error = create(&f, credential, project, Some(f.document))
+            .await
+            .unwrap_err();
+        let sqlx::Error::AnyDriverError(inner) = &error else {
+            panic!("typed original commit uncertainty required: {error}")
+        };
+        let unknown = inner
+            .downcast_ref::<crate::db::backend::CommitCleanupUnknown>()
+            .unwrap();
+        assert_eq!(
+            unknown.settlement,
+            crate::db::backend::CommitSettlement::LocalWriterReconcile
+        );
+        assert!(unknown
+            .source
+            .source
+            .as_database_error()
+            .is_some_and(|error| error.is_foreign_key_violation()));
+        // Fresh local SELECT observes queued rollback; it is not a remote
+        // settlement proof and never re-creates the uncertain result.
+        assert_eq!(counts(&f, project).await, before);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM project_create_deferred_probe")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        sqlx::query("DROP TRIGGER project_create_commit_refuse")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let healthy = create(&f, credential, project, Some(f.document))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(healthy.number, 2);
+        assert_eq!(healthy.display_id.as_deref(), Some("OFF-2"));
+        assert_eq!(
+            counts(&f, project).await,
+            (before.0 + 1, 3, before.2 + 1, before.3 + 1)
         );
         f.close().await;
     }
