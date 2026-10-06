@@ -2269,3 +2269,1006 @@ mod baseline_prefix_resume_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Remote (libsql-remote) primary preparation and normal startup gate.
+//
+// Contract: evidence record 323 (sql-baseline author), root msg_83b8ec1b25f4,
+// review fixes msg_f1cbaac09db8. Everything below reuses the existing
+// SQLite-family lineage, the existing per-step applier
+// (`apply_sqlite_migration_step`: one reserved writer stream per step, ledger
+// gap check inside that stream, cancellation checkpoints, receipt and commit)
+// and the existing gate (`assert_sqlite_schema_current`). Nothing here adds a
+// schema, a parser, a lease framework or an in-place upgrade path: the remote
+// backend installs the 0.6 baseline into an empty database, or resumes an
+// interrupted install that is an exact prefix of the compiled lineage. The
+// three production refusals (server startup, migrator binary, preparation)
+// stay in place until the wiring is independently reviewed; this module only
+// offers the replacement.
+//
+// Honest limits (G1/G2 of the contract): libSQL remote has no file lock and no
+// advisory lock. The process-local admission semaphore and lease accounting
+// bound this process only; they are not cross-server exclusion and there is no
+// `pg_stat_activity` equivalent, so live application writers cannot be
+// detected. Step-level safety still holds because each step runs inside one
+// `BEGIN IMMEDIATE` stream whose ledger gap check executes in the same write
+// transaction: two migrators cannot double-apply or interleave a step; the
+// loser sees the gap refusal or the already-applied skip. A single token also
+// means there is no owner/app privilege split on the remote backend; tenant
+// isolation stays the in-process `FamilyTx` discipline, never a database role.
+// ---------------------------------------------------------------------------
+
+/// Ledger state of a SQLite-family database as read by the existing gate
+/// helpers on one read stream (nothing is written).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SqliteFamilyState {
+    /// No ledger and no compiled objects: a fresh 0.6 install target.
+    Blank,
+    /// An exact, incomplete prefix of the compiled lineage: an interrupted
+    /// install that resumes from the next step.
+    Prefix(usize),
+    /// Every compiled step with matching digests and an exact catalog.
+    Current(usize),
+}
+
+/// Classifies the database without changing it. Ahead, gap, foreign lineage,
+/// changed digest, unmarked or populated objects and the retired development
+/// lineage are refused with the existing gate messages; they are never states.
+async fn classify_sqlite_family(
+    backend: &super::backend::Backend,
+) -> Result<SqliteFamilyState, sqlx::Error> {
+    use super::backend::DbTransaction;
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let DbTransaction::SqliteFamily(family) = &mut tx else {
+            return Err(schema_error(
+                "SQLite schema gate requires an actual SQLite-family handle",
+            ));
+        };
+        let applied = sqlite_applied(family).await?;
+        verify_sqlite_applied(&applied, false)?;
+        verify_sqlite_objects(family, applied.len()).await?;
+        let compiled = compiled_sqlite_steps().len();
+        Ok(match applied.len() {
+            0 => SqliteFamilyState::Blank,
+            count if count == compiled => SqliteFamilyState::Current(count),
+            count => SqliteFamilyState::Prefix(count),
+        })
+    }
+    .await;
+    match result {
+        Ok(state) => {
+            tx.rollback().await?;
+            Ok(state)
+        }
+        Err(error) => Err(sqlite_validation_error_after_rollback(
+            error,
+            tx.rollback().await,
+        )),
+    }
+}
+
+/// Outcome of one remote primary preparation / migration run. Step counts are
+/// the receipts validated by the gate after the run, not the steps this
+/// process believes it wrote: another migrator may have advanced the ledger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoteMigrationOutcome {
+    /// Ledger and catalog were already exact; nothing was changed.
+    Current,
+    /// A blank database received the whole compiled lineage.
+    Installed { steps: usize },
+    /// An exact incomplete prefix of `from` receipts was completed to `to`.
+    Resumed { from: usize, to: usize },
+}
+
+/// Bounded, typed failure of the remote helper. Neither `Display` nor `Debug`
+/// ever includes the endpoint, the token, a raw driver message or any text
+/// that is not one of the closed gate texts of [`gate_code`]. The underlying
+/// `sqlx::Error` stays reachable through [`Self::driver_source`] for a
+/// boundary that redacts, deliberately not through `Error::source`, and no
+/// log-safety claim is made for that raw value.
+pub enum RemoteMigrationError {
+    /// `RemoteDatabase::connect` refused the configured endpoint or token, or
+    /// the backend was not `libsql-remote`.
+    Connect { source: sqlx::Error },
+    /// The existing gate refused the database (ahead, gap, foreign lineage,
+    /// changed digest, unmarked or populated objects, retired lineage, or a
+    /// catalog that differs from the compiled capability after the run).
+    Gate {
+        source: sqlx::Error,
+        drain: Option<sqlx::Error>,
+    },
+    /// DDL or the receipt of one step failed and that step was rolled back.
+    Step {
+        version: i32,
+        source: sqlx::Error,
+        drain: Option<sqlx::Error>,
+    },
+    /// The COMMIT of one step did not settle: the receipt may or may not exist.
+    /// The next run re-reads the ledger and resumes safely either way.
+    CommitUnknown {
+        version: i32,
+        source: sqlx::Error,
+        drain: Option<sqlx::Error>,
+    },
+    /// Cancellation was observed at a checkpoint; `last_settled` receipts were
+    /// validated before the stop.
+    Cancelled {
+        last_settled: usize,
+        drain: Option<sqlx::Error>,
+    },
+    /// The run itself succeeded but closing the remote handle reported a
+    /// failed or unconfirmed stream cleanup.
+    Drain { source: sqlx::Error },
+}
+
+/// Closed set of gate texts this module repeats. The code is stable for
+/// receipts; the text is the canonical message, never the error's own string.
+/// A `Protocol` message outside this set is withheld like any other error.
+const GATE_TEXTS: [(&str, &str, &str); 13] = [
+    (
+        "GATE_AHEAD_INCOMPLETE_UNPREPARED",
+        "SQLite schema is ahead, incomplete or unprepared",
+        "SQLite schema is ahead, incomplete or unprepared",
+    ),
+    (
+        "GATE_GAP_FOREIGN_DIGEST",
+        "SQLite schema has a gap, foreign lineage or changed digest",
+        "SQLite schema has a gap, foreign lineage or changed digest",
+    ),
+    (
+        "GATE_CATALOG_DIFFERS",
+        "SQLite schema definitions differ from compiled capability; unmarked/populated or altered schema refused",
+        "SQLite schema definitions differ from compiled capability; unmarked/populated or altered schema refused",
+    ),
+    (
+        "GATE_RETIRED_LINEAGE",
+        "SQLite schema carries the retired lineage ",
+        "SQLite schema carries the retired development lineage; install into an empty database",
+    ),
+    (
+        "GATE_STEP_GAP",
+        "SQLite migration gap",
+        "SQLite migration gap",
+    ),
+    (
+        "GATE_REFERENCE_PIN",
+        "SQLite schema reference engine pin mismatch",
+        "SQLite schema reference engine pin mismatch",
+    ),
+    (
+        "GATE_FAMILY_HANDLE",
+        "SQLite schema gate requires an actual SQLite-family handle",
+        "SQLite schema gate requires an actual SQLite-family handle",
+    ),
+    (
+        "GATE_FAMILY_HANDLE",
+        "SQLite migrations require an actual SQLite-family handle",
+        "SQLite migrations require an actual SQLite-family handle",
+    ),
+    (
+        "GATE_BACKEND_KIND",
+        "remote migrator requires the libsql-remote backend",
+        "remote migrator requires the libsql-remote backend",
+    ),
+    (
+        "GATE_BACKEND_KIND",
+        "remote startup requires the libsql-remote backend",
+        "remote startup requires the libsql-remote backend",
+    ),
+    (
+        "GATE_ENDPOINT_SHAPE",
+        "remote libSQL requires a TLS primary endpoint and token",
+        "remote libSQL requires a TLS primary endpoint and token",
+    ),
+    (
+        "GATE_CANCELLED",
+        "SQLite migration cancelled",
+        "SQLite migration cancelled at a checkpoint",
+    ),
+    (
+        "GATE_VALIDATION_FAILED",
+        "schema validation failed",
+        "schema validation failed",
+    ),
+];
+
+/// Maps an error to its closed gate code and canonical text, if it is one of
+/// this module's own fixed `Protocol` messages (exact, or the fixed prefix of
+/// the retired-lineage and cancellation messages). Everything else is `None`.
+fn gate_code(error: &sqlx::Error) -> Option<(&'static str, &'static str)> {
+    let sqlx::Error::Protocol(message) = error else {
+        return None;
+    };
+    GATE_TEXTS
+        .iter()
+        .find(|(_, needle, _)| {
+            message == needle
+                || (matches!(
+                    *needle,
+                    "SQLite schema carries the retired lineage " | "SQLite migration cancelled"
+                ) && message.starts_with(needle))
+        })
+        .map(|(code, _, text)| (*code, *text))
+}
+
+fn bounded_gate_text(error: &sqlx::Error) -> &'static str {
+    gate_code(error).map_or("driver error withheld", |(_, text)| text)
+}
+
+impl RemoteMigrationError {
+    /// Stable code for operators and receipts.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Connect { .. } => "REMOTE_CONNECT_REFUSED",
+            Self::Gate { .. } => "REMOTE_SCHEMA_GATE_REFUSED",
+            Self::Step { .. } => "REMOTE_MIGRATION_STEP_FAILED",
+            Self::CommitUnknown { .. } => "REMOTE_MIGRATION_COMMIT_UNKNOWN",
+            Self::Cancelled { .. } => "REMOTE_MIGRATION_CANCELLED",
+            Self::Drain { .. } => "REMOTE_DRAIN_FAILED",
+        }
+    }
+    /// The closed gate code of the source when it is one of this module's own
+    /// fixed messages; `None` for driver errors and for `Cancelled`.
+    pub fn gate(&self) -> Option<&'static str> {
+        self.driver_source()
+            .and_then(gate_code)
+            .map(|(code, _)| code)
+    }
+    /// The underlying driver or gate error, for a boundary that redacts.
+    /// `Cancelled` carries no source unless the drain at close failed.
+    pub fn driver_source(&self) -> Option<&sqlx::Error> {
+        match self {
+            Self::Connect { source }
+            | Self::Gate { source, .. }
+            | Self::Step { source, .. }
+            | Self::CommitUnknown { source, .. }
+            | Self::Drain { source } => Some(source),
+            Self::Cancelled { drain, .. } => drain.as_ref(),
+        }
+    }
+    /// Whether the owned stream drain at close reported a failure.
+    pub fn drain_failed(&self) -> bool {
+        match self {
+            Self::Gate { drain, .. }
+            | Self::Step { drain, .. }
+            | Self::CommitUnknown { drain, .. }
+            | Self::Cancelled { drain, .. } => drain.is_some(),
+            Self::Drain { .. } => true,
+            Self::Connect { .. } => false,
+        }
+    }
+}
+
+impl std::fmt::Display for RemoteMigrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let drain = if self.drain_failed() {
+            "; remote stream drain failed at close"
+        } else {
+            ""
+        };
+        match self {
+            Self::Connect { .. } => write!(
+                f,
+                "remote libSQL primary connect refused (TLS endpoint and token required)"
+            ),
+            Self::Gate { source, .. } => write!(
+                f,
+                "remote schema gate refused: {}{drain}",
+                bounded_gate_text(source)
+            ),
+            Self::Step { version, source, .. } => write!(
+                f,
+                "remote migration step {version} failed and was rolled back: {}{drain}",
+                bounded_gate_text(source)
+            ),
+            Self::CommitUnknown { version, .. } => write!(
+                f,
+                "remote migration step {version} commit outcome is unknown; settlement receipt retained; rerun resumes from the ledger{drain}"
+            ),
+            Self::Cancelled { last_settled, .. } => write!(
+                f,
+                "remote migration cancelled after {last_settled} settled step(s){drain}"
+            ),
+            Self::Drain { .. } => write!(f, "remote stream drain failed at close"),
+        }
+    }
+}
+
+/// Redacted structural `Debug`: variant, numbers, codes and withheld markers
+/// only; the raw `sqlx::Error` values are never formatted.
+impl std::fmt::Debug for RemoteMigrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("RemoteMigrationError");
+        debug.field("code", &self.code());
+        match self {
+            Self::Step { version, .. } | Self::CommitUnknown { version, .. } => {
+                debug.field("version", version);
+            }
+            Self::Cancelled { last_settled, .. } => {
+                debug.field("last_settled", last_settled);
+            }
+            Self::Connect { .. } | Self::Gate { .. } | Self::Drain { .. } => {}
+        }
+        debug.field("gate", &self.gate());
+        debug.field("source", &"<withheld>");
+        debug.field("drain_failed", &self.drain_failed());
+        debug.finish()
+    }
+}
+
+impl std::error::Error for RemoteMigrationError {}
+
+fn is_commit_unknown(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::AnyDriverError(source)
+            if source.downcast_ref::<super::backend::CommitUnknown>().is_some()
+    )
+}
+
+/// Applies the policy of the contract on an already admitted remote backend
+/// and always closes it afterwards. Blank or exact-prefix states are migrated
+/// with the existing per-step applier; `Current` is a no-op; everything else is
+/// refused by the existing gate before any write stream is opened.
+async fn remote_migrate_backend(
+    backend: super::backend::Backend,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<RemoteMigrationOutcome, RemoteMigrationError> {
+    let outcome = remote_migrate_admitted(&backend, cancel).await;
+    let drain = backend.close().await.err();
+    match (outcome, drain) {
+        (Ok(outcome), None) => Ok(outcome),
+        (Ok(_), Some(source)) => Err(RemoteMigrationError::Drain { source }),
+        (Err(error), drain) => Err(match error {
+            RemoteMigrationError::Gate { source, .. } => {
+                RemoteMigrationError::Gate { source, drain }
+            }
+            RemoteMigrationError::Step {
+                version, source, ..
+            } => RemoteMigrationError::Step {
+                version,
+                source,
+                drain,
+            },
+            RemoteMigrationError::CommitUnknown {
+                version, source, ..
+            } => RemoteMigrationError::CommitUnknown {
+                version,
+                source,
+                drain,
+            },
+            RemoteMigrationError::Cancelled { last_settled, .. } => {
+                RemoteMigrationError::Cancelled {
+                    last_settled,
+                    drain,
+                }
+            }
+            other => other,
+        }),
+    }
+}
+
+async fn remote_migrate_admitted(
+    backend: &super::backend::Backend,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<RemoteMigrationOutcome, RemoteMigrationError> {
+    let gate = |source| RemoteMigrationError::Gate {
+        source,
+        drain: None,
+    };
+    let initial = match classify_sqlite_family(backend).await.map_err(gate)? {
+        SqliteFamilyState::Current(_) => return Ok(RemoteMigrationOutcome::Current),
+        SqliteFamilyState::Blank => 0,
+        SqliteFamilyState::Prefix(count) => count,
+    };
+    let compiled = compiled_sqlite_steps();
+    let mut settled = initial;
+    for step in compiled.iter().skip(initial) {
+        if cancel.is_cancelled() {
+            return Err(RemoteMigrationError::Cancelled {
+                last_settled: settled,
+                drain: None,
+            });
+        }
+        match apply_sqlite_migration_step(backend, step, Some(cancel)).await {
+            Ok(()) => settled += 1,
+            Err(source) if is_commit_unknown(&source) => {
+                return Err(RemoteMigrationError::CommitUnknown {
+                    version: step.version,
+                    source,
+                    drain: None,
+                });
+            }
+            Err(_) if cancel.is_cancelled() => {
+                return Err(RemoteMigrationError::Cancelled {
+                    last_settled: settled,
+                    drain: None,
+                });
+            }
+            Err(source) => {
+                return Err(RemoteMigrationError::Step {
+                    version: step.version,
+                    source,
+                    drain: None,
+                });
+            }
+        }
+    }
+    let current = assert_sqlite_schema_current(backend).await.map_err(gate)?;
+    Ok(if initial == 0 {
+        RemoteMigrationOutcome::Installed {
+            steps: current.applied_steps,
+        }
+    } else {
+        RemoteMigrationOutcome::Resumed {
+            from: initial,
+            to: current.applied_steps,
+        }
+    })
+}
+
+/// Remote primary preparation and migrator for the SQLite-family lineage.
+///
+/// Opens ONE admitted stream (`max_connections = 1`), classifies the ledger
+/// with the existing gate, applies only `Blank` or exact-prefix states through
+/// the existing per-step applier under `cancel`, re-runs the full gate, then
+/// always closes and drains the handle. The settings are read only to connect;
+/// neither the endpoint nor the token appears in any returned text.
+pub async fn run_remote_migrations(
+    settings: &crate::config::DatabaseSettings,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<RemoteMigrationOutcome, RemoteMigrationError> {
+    let crate::config::DatabaseSettings::LibsqlRemote {
+        primary_url,
+        auth_token,
+    } = settings
+    else {
+        return Err(RemoteMigrationError::Connect {
+            source: schema_error("remote migrator requires the libsql-remote backend"),
+        });
+    };
+    let database =
+        super::backend::RemoteDatabase::connect(primary_url.clone(), auth_token.clone(), 1)
+            .await
+            .map_err(|source| RemoteMigrationError::Connect { source })?;
+    remote_migrate_backend(super::backend::Backend::LibsqlRemote(database), cancel).await
+}
+
+/// Normal startup gate for the remote backend: connects with the server pool
+/// size and returns the backend only when the existing gate reports the exact
+/// compiled lineage. Any other state closes the handle and refuses; nothing is
+/// ever migrated at startup.
+pub async fn connect_remote_app(
+    settings: &crate::config::DatabaseSettings,
+    app_pool_max: u32,
+) -> Result<super::backend::Backend, RemoteMigrationError> {
+    let crate::config::DatabaseSettings::LibsqlRemote {
+        primary_url,
+        auth_token,
+    } = settings
+    else {
+        return Err(RemoteMigrationError::Connect {
+            source: schema_error("remote startup requires the libsql-remote backend"),
+        });
+    };
+    let database = super::backend::RemoteDatabase::connect(
+        primary_url.clone(),
+        auth_token.clone(),
+        app_pool_max,
+    )
+    .await
+    .map_err(|source| RemoteMigrationError::Connect { source })?;
+    let backend = super::backend::Backend::LibsqlRemote(database);
+    match assert_sqlite_schema_current(&backend).await {
+        Ok(_) => Ok(backend),
+        Err(source) => {
+            let drain = backend.close().await.err();
+            Err(RemoteMigrationError::Gate { source, drain })
+        }
+    }
+}
+
+#[cfg(test)]
+mod remote_helper_display_tests {
+    use super::*;
+
+    const SECRET: &str = "https://primary.secret.example/?authToken=TOKEN-VALUE";
+
+    fn driver_error() -> sqlx::Error {
+        sqlx::Error::AnyDriverError(SECRET.into())
+    }
+    fn protocol_canary() -> sqlx::Error {
+        schema_error(format!("gate message leaking {SECRET}"))
+    }
+    fn assert_secret_free(text: &str) {
+        for needle in ["secret.example", "TOKEN-VALUE", "authToken", "leaking"] {
+            assert!(!text.contains(needle), "{needle} leaked: {text}");
+        }
+    }
+
+    #[test]
+    fn display_and_debug_never_repeat_endpoint_token_or_driver_text() {
+        let errors = [
+            RemoteMigrationError::Connect {
+                source: driver_error(),
+            },
+            RemoteMigrationError::Connect {
+                source: protocol_canary(),
+            },
+            RemoteMigrationError::Gate {
+                source: driver_error(),
+                drain: Some(protocol_canary()),
+            },
+            RemoteMigrationError::Gate {
+                source: protocol_canary(),
+                drain: None,
+            },
+            RemoteMigrationError::Gate {
+                source: schema_error("SQLite schema is ahead, incomplete or unprepared"),
+                drain: None,
+            },
+            RemoteMigrationError::Step {
+                version: 7,
+                source: protocol_canary(),
+                drain: Some(driver_error()),
+            },
+            RemoteMigrationError::CommitUnknown {
+                version: 3,
+                source: driver_error(),
+                drain: None,
+            },
+            RemoteMigrationError::Cancelled {
+                last_settled: 5,
+                drain: Some(protocol_canary()),
+            },
+            RemoteMigrationError::Drain {
+                source: protocol_canary(),
+            },
+        ];
+        for error in &errors {
+            assert_secret_free(&error.to_string());
+            assert_secret_free(&format!("{error:?}"));
+            assert_secret_free(&format!("{error:#?}"));
+            assert!(std::error::Error::source(error).is_none());
+            assert!(!error.code().is_empty());
+        }
+        assert_eq!(
+            errors[4].to_string(),
+            "remote schema gate refused: SQLite schema is ahead, incomplete or unprepared"
+        );
+        assert_eq!(errors[4].gate(), Some("GATE_AHEAD_INCOMPLETE_UNPREPARED"));
+        assert_eq!(
+            errors[2].to_string(),
+            "remote schema gate refused: driver error withheld; remote stream drain failed at close"
+        );
+        assert_eq!(
+            errors[3].to_string(),
+            "remote schema gate refused: driver error withheld"
+        );
+        assert_eq!(errors[3].gate(), None);
+        assert_eq!(
+            errors[6].to_string(),
+            "remote migration step 3 commit outcome is unknown; settlement receipt retained; rerun resumes from the ledger"
+        );
+        assert!(errors[5].drain_failed() && !errors[6].drain_failed());
+        assert_eq!(
+            format!("{:?}", errors[6]),
+            "RemoteMigrationError { code: \"REMOTE_MIGRATION_COMMIT_UNKNOWN\", version: 3, gate: None, source: \"<withheld>\", drain_failed: false }"
+        );
+    }
+
+    #[test]
+    fn gate_codes_are_a_closed_set() {
+        let retired = schema_error(format!(
+            "SQLite schema carries the retired lineage {RETIRED_SQLITE_LINEAGE}; {RETIRED_LINEAGE_HINT}"
+        ));
+        assert_eq!(
+            gate_code(&retired),
+            Some((
+                "GATE_RETIRED_LINEAGE",
+                "SQLite schema carries the retired development lineage; install into an empty database"
+            ))
+        );
+        assert_eq!(
+            gate_code(&schema_error("SQLite migration cancelled before DDL")),
+            Some((
+                "GATE_CANCELLED",
+                "SQLite migration cancelled at a checkpoint"
+            ))
+        );
+        assert_eq!(
+            gate_code(&schema_error("SQLite migration gap")).map(|(c, _)| c),
+            Some("GATE_STEP_GAP")
+        );
+        assert_eq!(
+            gate_code(&schema_error("SQLite migration gap elsewhere")),
+            None
+        );
+        assert_eq!(gate_code(&protocol_canary()), None);
+        assert_eq!(gate_code(&driver_error()), None);
+        let cancelled = RemoteMigrationError::Cancelled {
+            last_settled: 2,
+            drain: None,
+        };
+        assert!(cancelled.driver_source().is_none() && cancelled.gate().is_none());
+        let connect = RemoteMigrationError::Connect {
+            source: schema_error("remote migrator requires the libsql-remote backend"),
+        };
+        assert_eq!(connect.gate(), Some("GATE_BACKEND_KIND"));
+    }
+}
+
+/// Actual remote-family execution of the helper against the maintained
+/// libsql 0.9.30 -> proxy -> official sqld fixture (`FVOCI_TEST_SQLD`, no
+/// skip), through the maintained `RemoteDatabase::from_test_driver` admission.
+/// Explicitly selected only; never part of the registered cohorts.
+#[cfg(all(test, feature = "db-tests"))]
+mod remote_primary_helper_tests {
+    use super::super::backend::{Backend, DbTransaction, RemoteDatabase};
+    use super::super::codec::Cell;
+    use super::super::libsql_finish_fixture::LibsqlFinishFixture;
+    use super::*;
+    use std::num::NonZeroU32;
+    use std::path::PathBuf;
+    use tokio_util::sync::CancellationToken;
+
+    struct Fixture {
+        driver: LibsqlFinishFixture,
+        root: PathBuf,
+    }
+
+    impl Fixture {
+        async fn start() -> Self {
+            let sqld = PathBuf::from(
+                std::env::var_os("FVOCI_TEST_SQLD")
+                    .expect("allocated pinned official sqld required; no SDK skip"),
+            );
+            let root =
+                std::env::temp_dir().join(format!("fvoci-remote-helper-{}", uuid::Uuid::now_v7()));
+            std::fs::create_dir_all(&root).unwrap();
+            let driver = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
+            Self { driver, root }
+        }
+        /// A fresh admitted backend over the same fixture database, exactly
+        /// like the helper's own single-stream admission.
+        async fn backend(&self) -> Backend {
+            let database = self.driver.database().await.unwrap();
+            Backend::LibsqlRemote(std::sync::Arc::new(RemoteDatabase::from_test_driver(
+                database,
+                NonZeroU32::new(1).unwrap(),
+            )))
+        }
+        async fn finish(self) {
+            let receipt = self.driver.finish().await.unwrap();
+            assert!(receipt.sqld_reaped, "{receipt:?}");
+            std::fs::remove_dir_all(self.root).unwrap();
+        }
+    }
+
+    /// One bound write on a fresh single stream, committed; the system
+    /// context mirrors the maintained migration fixtures.
+    async fn write(backend: &Backend, statement: &'static str, args: &[Cell]) {
+        let mut tx = backend.begin_write().await.unwrap();
+        let DbTransaction::SqliteFamily(family) = &mut tx else {
+            panic!("remote family handle expected");
+        };
+        family.replace_system_context(true);
+        family.execute(statement, args).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    async fn gate_of(f: &Fixture) -> RemoteMigrationError {
+        remote_migrate_backend(f.backend().await, &CancellationToken::new())
+            .await
+            .unwrap_err()
+    }
+
+    fn assert_gate(error: &RemoteMigrationError, code: &str) {
+        assert_eq!(error.code(), "REMOTE_SCHEMA_GATE_REFUSED", "{error:?}");
+        assert_eq!(error.gate(), Some(code), "{error:?}");
+        assert!(!error.drain_failed(), "{error:?}");
+    }
+
+    async fn assert_current(f: &Fixture) {
+        assert_eq!(
+            remote_migrate_backend(f.backend().await, &CancellationToken::new())
+                .await
+                .unwrap(),
+            RemoteMigrationOutcome::Current
+        );
+    }
+
+    async fn receipts(f: &Fixture) -> Vec<i64> {
+        let backend = f.backend().await;
+        let mut tx = backend.begin_read().await.unwrap();
+        let DbTransaction::SqliteFamily(family) = &mut tx else {
+            panic!("remote family handle expected");
+        };
+        let rows = family
+            .query(
+                "SELECT version FROM schema_migrations ORDER BY version",
+                &[],
+            )
+            .await
+            .unwrap();
+        let versions = rows
+            .iter()
+            .map(|row| row.cell(0).unwrap().integer().unwrap())
+            .collect();
+        tx.rollback().await.unwrap();
+        backend.close().await.unwrap();
+        versions
+    }
+
+    #[tokio::test]
+    async fn blank_installs_the_whole_lineage_then_reports_current() {
+        let f = Fixture::start().await;
+        let cancel = CancellationToken::new();
+        let first = remote_migrate_backend(f.backend().await, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(first, RemoteMigrationOutcome::Installed { steps: 12 });
+        assert_eq!(receipts(&f).await, (1..=12).collect::<Vec<i64>>());
+        assert_current(&f).await;
+        let backend = f.backend().await;
+        let capability = assert_sqlite_schema_current(&backend).await.unwrap();
+        assert_eq!(capability.applied_steps, 12);
+        backend.close().await.unwrap();
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn exact_incomplete_prefix_resumes_and_preserves_rows() {
+        let f = Fixture::start().await;
+        let backend = f.backend().await;
+        for step in compiled_sqlite_steps().iter().take(7) {
+            apply_sqlite_migration_step(&backend, step, None)
+                .await
+                .unwrap();
+        }
+        let workspace = uuid::Uuid::now_v7();
+        write(
+            &backend,
+            "INSERT INTO workspaces(id,slug,name) VALUES(?1,'remote-resume','interrupted install literal')",
+            &[Cell::uuid(workspace)],
+        )
+        .await;
+        backend.close().await.unwrap();
+        let outcome = remote_migrate_backend(f.backend().await, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RemoteMigrationOutcome::Resumed { from: 7, to: 12 });
+        let backend = f.backend().await;
+        let mut tx = backend.begin_read().await.unwrap();
+        let DbTransaction::SqliteFamily(family) = &mut tx else {
+            panic!("remote family handle expected");
+        };
+        let rows = family
+            .query(
+                "SELECT id,name FROM workspaces WHERE slug='remote-resume'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cell(0).unwrap().id().unwrap(), workspace);
+        assert_eq!(
+            rows[0].cell(1).unwrap().string().unwrap(),
+            "interrupted install literal"
+        );
+        tx.rollback().await.unwrap();
+        backend.close().await.unwrap();
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn ahead_gap_foreign_digest_drift_unmarked_and_retired_are_refused_without_writes() {
+        let f = Fixture::start().await;
+        remote_migrate_backend(f.backend().await, &CancellationToken::new())
+            .await
+            .unwrap();
+        let steps = compiled_sqlite_steps();
+        // Ahead: a thirteenth receipt beyond this binary's lineage.
+        let backend = f.backend().await;
+        write(
+            &backend,
+            "INSERT INTO schema_migrations(version,lineage,sql_sha256,applied_at) VALUES(13,'fvoci-sqlite-060',?1,unixepoch()*1000000)",
+            &[Cell::text(steps[11].sha256)],
+        )
+        .await;
+        backend.close().await.unwrap();
+        assert_gate(&gate_of(&f).await, "GATE_AHEAD_INCOMPLETE_UNPREPARED");
+        let backend = f.backend().await;
+        write(
+            &backend,
+            "DELETE FROM schema_migrations WHERE version=13",
+            &[],
+        )
+        .await;
+        backend.close().await.unwrap();
+        assert_current(&f).await;
+        // Gap: receipt 6 missing between 5 and 7.
+        let backend = f.backend().await;
+        write(
+            &backend,
+            "DELETE FROM schema_migrations WHERE version=6",
+            &[],
+        )
+        .await;
+        backend.close().await.unwrap();
+        assert_gate(&gate_of(&f).await, "GATE_GAP_FOREIGN_DIGEST");
+        let backend = f.backend().await;
+        write(
+            &backend,
+            "INSERT INTO schema_migrations(version,lineage,sql_sha256,applied_at) VALUES(6,'fvoci-sqlite-060',?1,unixepoch()*1000000)",
+            &[Cell::text(steps[5].sha256)],
+        )
+        .await;
+        backend.close().await.unwrap();
+        assert_current(&f).await;
+        // Foreign lineage on one receipt.
+        let backend = f.backend().await;
+        write(
+            &backend,
+            "UPDATE schema_migrations SET lineage='foreign-lineage' WHERE version=3",
+            &[],
+        )
+        .await;
+        backend.close().await.unwrap();
+        assert_gate(&gate_of(&f).await, "GATE_GAP_FOREIGN_DIGEST");
+        let backend = f.backend().await;
+        write(
+            &backend,
+            "UPDATE schema_migrations SET lineage='fvoci-sqlite-060' WHERE version=3",
+            &[],
+        )
+        .await;
+        backend.close().await.unwrap();
+        assert_current(&f).await;
+        // Changed digest on one receipt.
+        let backend = f.backend().await;
+        write(
+            &backend,
+            "UPDATE schema_migrations SET sql_sha256='0000000000000000000000000000000000000000000000000000000000000000' WHERE version=1",
+            &[],
+        )
+        .await;
+        backend.close().await.unwrap();
+        assert_gate(&gate_of(&f).await, "GATE_GAP_FOREIGN_DIGEST");
+        let backend = f.backend().await;
+        write(
+            &backend,
+            "UPDATE schema_migrations SET sql_sha256=?1 WHERE version=1",
+            &[Cell::text(steps[0].sha256)],
+        )
+        .await;
+        backend.close().await.unwrap();
+        assert_current(&f).await;
+        // Incomplete ledger with catalog drift: receipt 12 deleted while the
+        // objects of step 12 remain; the prefix of 11 receipts is exact, so the
+        // objects verifier (not the ahead check) refuses the altered catalog.
+        let backend = f.backend().await;
+        write(
+            &backend,
+            "DELETE FROM schema_migrations WHERE version=12",
+            &[],
+        )
+        .await;
+        backend.close().await.unwrap();
+        assert_gate(&gate_of(&f).await, "GATE_CATALOG_DIFFERS");
+        let backend = f.backend().await;
+        write(
+            &backend,
+            "INSERT INTO schema_migrations(version,lineage,sql_sha256,applied_at) VALUES(12,'fvoci-sqlite-060',?1,unixepoch()*1000000)",
+            &[Cell::text(steps[11].sha256)],
+        )
+        .await;
+        backend.close().await.unwrap();
+        assert_current(&f).await;
+        // Unmarked object next to a complete ledger.
+        let backend = f.backend().await;
+        write(
+            &backend,
+            "CREATE TABLE remote_unmarked_object(value INTEGER) STRICT",
+            &[],
+        )
+        .await;
+        backend.close().await.unwrap();
+        assert_gate(&gate_of(&f).await, "GATE_CATALOG_DIFFERS");
+        let backend = f.backend().await;
+        write(&backend, "DROP TABLE remote_unmarked_object", &[]).await;
+        backend.close().await.unwrap();
+        assert_current(&f).await;
+        // Retired development lineage: refused by its own message, never rewritten.
+        let backend = f.backend().await;
+        write(
+            &backend,
+            "UPDATE schema_migrations SET lineage='fvoci-sqlite-current-v1' WHERE version=12",
+            &[],
+        )
+        .await;
+        backend.close().await.unwrap();
+        assert_gate(&gate_of(&f).await, "GATE_RETIRED_LINEAGE");
+        let backend = f.backend().await;
+        write(
+            &backend,
+            "UPDATE schema_migrations SET lineage='fvoci-sqlite-060' WHERE version=12",
+            &[],
+        )
+        .await;
+        backend.close().await.unwrap();
+        assert_current(&f).await;
+        assert_eq!(receipts(&f).await, (1..=12).collect::<Vec<i64>>());
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_the_first_step_leaves_a_blank_database() {
+        let f = Fixture::start().await;
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let error = remote_migrate_backend(f.backend().await, &cancel)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RemoteMigrationError::Cancelled {
+                last_settled: 0,
+                drain: None
+            }
+        ));
+        let backend = f.backend().await;
+        assert_eq!(
+            classify_sqlite_family(&backend).await.unwrap(),
+            SqliteFamilyState::Blank
+        );
+        backend.close().await.unwrap();
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn lost_commit_reply_reports_unknown_and_the_rerun_resumes_from_the_real_receipt() {
+        let f = Fixture::start().await;
+        let gate = f.driver.arm_commit_response_loss();
+        let cancel = CancellationToken::new();
+        let backend = f.backend().await;
+        let mut run = tokio::spawn(async move { remote_migrate_backend(backend, &cancel).await });
+        tokio::select! {
+            response = gate.wait_upstream_response() => response.unwrap(),
+            early = &mut run => panic!("helper finished before the upstream COMMIT fault gate: {early:?}"),
+        }
+        assert!(!run.is_finished());
+        gate.release_lost_reply();
+        let error = run.await.unwrap().unwrap_err();
+        let RemoteMigrationError::CommitUnknown { version, .. } = &error else {
+            panic!("expected CommitUnknown, got {error:?}");
+        };
+        assert_eq!(*version, 1, "the first step's COMMIT reply was withheld");
+        assert_eq!(error.code(), "REMOTE_MIGRATION_COMMIT_UNKNOWN");
+        // The maintained fixture records that the upstream accepted the COMMIT
+        // before the reply was cut: a fresh connection must observe exactly
+        // receipt 1, and only then may the rerun resume from 1.
+        let lost = f
+            .driver
+            .exchanges()
+            .into_iter()
+            .find(|exchange| exchange.reply_lost)
+            .expect("one withheld reply recorded");
+        assert!(lost.has_commit, "{lost:?}");
+        assert_eq!(lost.upstream_status, Some(200), "{lost:?}");
+        assert_eq!(receipts(&f).await, vec![1]);
+        let backend = f.backend().await;
+        assert_eq!(
+            classify_sqlite_family(&backend).await.unwrap(),
+            SqliteFamilyState::Prefix(1)
+        );
+        backend.close().await.unwrap();
+        let rerun = remote_migrate_backend(f.backend().await, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(rerun, RemoteMigrationOutcome::Resumed { from: 1, to: 12 });
+        assert_eq!(receipts(&f).await, (1..=12).collect::<Vec<i64>>());
+        f.finish().await;
+    }
+}
