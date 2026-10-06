@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use futures_util::FutureExt;
+
 use fvoci_server::attachments::{verify_stored_objects, ObjectStorage};
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::config::storage_settings_from_env;
@@ -80,38 +82,34 @@ fn start(server_args: &[String]) -> ! {
                 let cancel = tokio_util::sync::CancellationToken::new();
                 let preparation = prepare::prepare_with_cancel(&cancel);
                 tokio::pin!(preparation);
-                // Signal arms first and biased: a signal that is ready together
-                // with the completion wins; after a completion the streams are
-                // probed once more so a simultaneously delivered signal never
-                // lets the server start.
-                tokio::select! {
-                    biased;
-                    _ = term.recv() => {
-                        eprintln!("fvoci: preparation SIGTERM cancellation requested; awaiting original owner before exit");
-                        cancel.cancel();
-                        Ok(PreparationOutcome::Signalled { code: 143, result: preparation.await })
+                // Signal arms first and biased inside the arbitration; after a
+                // completion the streams are probed once more so a signal that
+                // was delivered together with the completion never lets the
+                // server start. The original future is always awaited.
+                let (selected, result) = prepare::arbitrate_signals(
+                    preparation.as_mut(),
+                    &cancel,
+                    term.recv().map(|_| ()),
+                    int.recv().map(|_| ()),
+                )
+                .await;
+                let observation = prepare::SignalObservation {
+                    selected,
+                    pending_after_completion: if selected.is_none() {
+                        prepare::pending_signal_code(&mut term, &mut int)
+                    } else {
+                        None
                     },
-                    _ = int.recv() => {
-                        eprintln!("fvoci: preparation SIGINT cancellation requested; awaiting original owner before exit");
-                        cancel.cancel();
-                        Ok(PreparationOutcome::Signalled { code: 130, result: preparation.await })
-                    },
-                    result = &mut preparation => {
-                        let observation = prepare::SignalObservation {
-                            selected: None,
-                            pending_after_completion: prepare::pending_signal_code(&mut term, &mut int),
-                        };
-                        match prepare::preparation_signal_decision(observation) {
-                            Some(code) => {
-                                eprintln!("fvoci: signal delivered while preparation completed; settled result kept, no server exec");
-                                Ok(PreparationOutcome::Signalled { code, result })
-                            }
-                            None => {
-                                result?;
-                                Ok(PreparationOutcome::Prepared)
-                            }
-                        }
-                    },
+                };
+                match prepare::preparation_signal_decision(observation) {
+                    Some(code) => {
+                        eprintln!("fvoci: preparation signal (exit {code}) observed; original owner awaited, settled result kept, no server exec");
+                        Ok(PreparationOutcome::Signalled { code, result })
+                    }
+                    None => {
+                        result?;
+                        Ok(PreparationOutcome::Prepared)
+                    }
                 }
             });
         // Every preparation connection is closed before the server exists.
@@ -190,28 +188,27 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let cancel = tokio_util::sync::CancellationToken::new();
                 let migration = migrate::run_remote_migrations(&settings, &cancel);
                 tokio::pin!(migration);
-                // Signal arms first and biased; after a completion the streams
-                // are probed once more so a simultaneously delivered signal is
-                // never reported as a clean exit 0.
-                let (observation, result) = tokio::select! {
-                    biased;
-                    _ = term.recv() => {
-                        eprintln!("fvoci-migrate: SIGTERM cancellation requested; awaiting the remote migration settlement before exit");
-                        cancel.cancel();
-                        (fvoci_server::prepare::SignalObservation { selected: Some(143), pending_after_completion: None }, migration.await)
+                // Biased arbitration (SIGTERM, SIGINT, then completion); a signal
+                // cancels and the original future is awaited to settlement; after
+                // a completion the streams are probed once more so a signal
+                // delivered together with the completion is never exit 0.
+                let (selected, result) = fvoci_server::prepare::arbitrate_signals(
+                    migration.as_mut(),
+                    &cancel,
+                    term.recv().map(|_| ()),
+                    int.recv().map(|_| ()),
+                )
+                .await;
+                if let Some(code) = selected {
+                    eprintln!("fvoci-migrate: signal (exit {code}) cancellation requested; remote migration settlement awaited");
+                }
+                let observation = fvoci_server::prepare::SignalObservation {
+                    selected,
+                    pending_after_completion: if selected.is_none() {
+                        fvoci_server::prepare::pending_signal_code(&mut term, &mut int)
+                    } else {
+                        None
                     },
-                    _ = int.recv() => {
-                        eprintln!("fvoci-migrate: SIGINT cancellation requested; awaiting the remote migration settlement before exit");
-                        cancel.cancel();
-                        (fvoci_server::prepare::SignalObservation { selected: Some(130), pending_after_completion: None }, migration.await)
-                    },
-                    result = &mut migration => (
-                        fvoci_server::prepare::SignalObservation {
-                            selected: None,
-                            pending_after_completion: fvoci_server::prepare::pending_signal_code(&mut term, &mut int),
-                        },
-                        result,
-                    ),
                 };
                 let (code, text) =
                     fvoci_server::prepare::remote_migrator_exit(observation, &result);

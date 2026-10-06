@@ -954,12 +954,52 @@ pub async fn prepare_with_cancel(
                 let key_file = std::env::var("FVOCI_MEILI_KEY_FILE")
                     .unwrap_or_else(|_| DEFAULT_MEILI_KEY_FILE.to_string());
                 tokio::select! {
-                    result = ensure_meili_key_file(Path::new(&key_file)) => result?,
+                    biased;
                     _ = cancel.cancelled() => return Err(PreparationError::RemoteCancelledAfterSettlement { outcome }),
+                    result = ensure_meili_key_file(Path::new(&key_file)) => result?,
                 }
+            }
+            // A cancellation that became ready together with the key-file
+            // completion (or after it) must still refuse before Ok: the
+            // launcher would otherwise exec the server. The settled outcome
+            // stays truthful in the error.
+            if cancel.is_cancelled() {
+                return Err(PreparationError::RemoteCancelledAfterSettlement { outcome });
             }
             Ok(())
         }
+    }
+}
+
+/// Signal arbitration around one original future for the launcher and the
+/// bare remote migrator: biased, SIGTERM then SIGINT before the completion
+/// arm. When a signal wins, the token is cancelled and the original future
+/// is awaited to its settlement (never dropped), returning the signal code
+/// with the settled output. When the completion wins, `None` is returned and
+/// the caller must probe the signal streams once more
+/// ([`pending_signal_code`]) before deciding on exit `0` or a server exec,
+/// because a signal delivered together with the completion is not visible
+/// here. No timeout, no retry, no replacement of the original future.
+pub async fn arbitrate_signals<T>(
+    original: std::pin::Pin<&mut impl std::future::Future<Output = T>>,
+    cancel: &tokio_util::sync::CancellationToken,
+    term: impl std::future::Future<Output = ()>,
+    int: impl std::future::Future<Output = ()>,
+) -> (Option<i32>, T) {
+    let mut original = original;
+    tokio::pin!(term);
+    tokio::pin!(int);
+    tokio::select! {
+        biased;
+        _ = &mut term => {
+            cancel.cancel();
+            (Some(143), original.await)
+        },
+        _ = &mut int => {
+            cancel.cancel();
+            (Some(130), original.await)
+        },
+        output = &mut original => (None, output),
     }
 }
 
@@ -1052,6 +1092,87 @@ mod remote_caller_tests {
             pending_after_completion: Some(143),
         };
         assert_eq!(both.decisive(), Some(130));
+    }
+
+    /// Controllable futures: the original future and SIGTERM are both ready
+    /// at the first poll. The biased arbitration must take the signal, cancel
+    /// the token and still await the original to its settled output.
+    #[tokio::test]
+    async fn arbitration_prefers_a_simultaneously_ready_signal_and_keeps_the_output() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let original = async { 7 };
+        tokio::pin!(original);
+        let (selected, output) = arbitrate_signals(
+            original.as_mut(),
+            &cancel,
+            std::future::ready(()),
+            std::future::pending::<()>(),
+        )
+        .await;
+        assert_eq!((selected, output), (Some(143), 7));
+        assert!(cancel.is_cancelled());
+        // SIGINT alone ready together with the completion: 130.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let original = async { 8 };
+        tokio::pin!(original);
+        let (selected, output) = arbitrate_signals(
+            original.as_mut(),
+            &cancel,
+            std::future::pending::<()>(),
+            std::future::ready(()),
+        )
+        .await;
+        assert_eq!((selected, output), (Some(130), 8));
+    }
+
+    /// Controllable futures: the original is pending until it observes the
+    /// cancellation; the signal arrives while it is pending. The original
+    /// must be awaited after the cancel and its settled output retained.
+    #[tokio::test]
+    async fn arbitration_cancels_then_awaits_the_pending_original_to_settlement() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let observed = cancel.clone();
+        let original = async move {
+            observed.cancelled().await;
+            "settled after cancel"
+        };
+        tokio::pin!(original);
+        let (fire, armed) = tokio::sync::oneshot::channel::<()>();
+        let term = async move {
+            let _ = armed.await;
+        };
+        let fire_task = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            let _ = fire.send(());
+        });
+        let (selected, output) = arbitrate_signals(
+            original.as_mut(),
+            &cancel,
+            term,
+            std::future::pending::<()>(),
+        )
+        .await;
+        fire_task.await.unwrap();
+        assert_eq!((selected, output), (Some(143), "settled after cancel"));
+        assert!(cancel.is_cancelled());
+    }
+
+    /// Controllable futures: no signal at all; the completion wins, the token
+    /// stays uncancelled and the caller is told to probe (None).
+    #[tokio::test]
+    async fn arbitration_reports_a_plain_completion_without_cancelling() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let original = async { Ok::<u8, ()>(1) };
+        tokio::pin!(original);
+        let (selected, output) = arbitrate_signals(
+            original.as_mut(),
+            &cancel,
+            std::future::pending::<()>(),
+            std::future::pending::<()>(),
+        )
+        .await;
+        assert_eq!((selected, output), (None, Ok(1)));
+        assert!(!cancel.is_cancelled());
     }
 
     /// Positive control: a plain completion with no signal selected and none
