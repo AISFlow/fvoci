@@ -734,7 +734,8 @@ pub(crate) mod selected_personal_input_tests {
 
     pub(crate) async fn setup() -> (Fixture, Uuid) {
         let f = Fixture::new().await;
-        sqlx::query("UPDATE workspaces SET kind='personal',next_wiki_number=2 WHERE id=?1")
+        // S31 seeds wiki number 1; the canonical counter stores the last assigned number.
+        sqlx::query("UPDATE workspaces SET kind='personal',next_document_number=1 WHERE id=?1")
             .bind(f.workspace.as_bytes().as_slice())
             .execute(&f.pool)
             .await
@@ -801,7 +802,7 @@ pub(crate) mod selected_personal_input_tests {
             "SELECT json_group_array(v) FROM (SELECT json_array(hex(id),seq,verb,hex(target_id),payload,channel) v FROM events ORDER BY id)",
             "SELECT json_group_array(v) FROM (SELECT json_array(hex(id),verb,hex(target_id),payload,ip) v FROM audit_log ORDER BY id)",
             "SELECT json_group_array(v) FROM (SELECT json_array(hex(id),hex(task_id),changes) v FROM task_activity ORDER BY id)",
-            "SELECT json_group_array(v) FROM (SELECT json_array(hex(id),next_wiki_number) v FROM workspaces ORDER BY id)",
+            "SELECT json_group_array(v) FROM (SELECT json_array(hex(id),next_document_number) v FROM workspaces ORDER BY id)",
             "SELECT json_group_array(json_array(id,last_seq)) FROM event_sequence",
             "SELECT json_group_array(v) FROM (SELECT json_array(hex(document_id),hex(state),writer_generation,snapshot_cutoff_seq,tail_seq) v FROM document_states ORDER BY document_id)",
             "SELECT json_group_array(v) FROM (SELECT json_array(hex(task_id),hex(state),writer_generation,snapshot_cutoff_seq,tail_seq) v FROM task_states ORDER BY task_id)",
