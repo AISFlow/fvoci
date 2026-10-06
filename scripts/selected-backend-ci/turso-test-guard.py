@@ -66,7 +66,9 @@ def validate_dispatch(context, inputs, checkout_sha):
         reject("SECRET_MODE_REQUIRES_MANUAL")
     if phase == "connection" and destructive:
         reject("CONNECTION_MUST_BE_READ_ONLY")
-    if phase != "connection" and not destructive:
+    if phase == "inventory" and destructive:
+        reject("INVENTORY_MUST_BE_READ_ONLY")
+    if phase not in ("connection", "inventory") and not destructive:
         reject("DESTRUCTIVE_CONFIRMATION_REQUIRED")
     return phase
 
@@ -84,7 +86,11 @@ def validate_target(inputs, settings, secrets):
     destructive = boolean(inputs.get("destructive", False))
     if phase == "connection" and destructive:
         reject("CONNECTION_MUST_BE_READ_ONLY")
-    if phase != "connection" and (
+    if phase == "inventory" and (
+        destructive or settings.get("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE") != "false"
+    ):
+        reject("INVENTORY_MUST_BE_READ_ONLY")
+    if phase not in ("connection", "inventory") and (
         not destructive or settings.get("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE") != "true"
     ):
         reject("DESTRUCTIVE_NOT_ALLOWED")
@@ -508,6 +514,15 @@ def run_primary(checkout_sha, inputs):
     if phase == "connection":
         child_env["FVOCI_TEST_TURSO_CONNECTION_SELECTED"] = "1"
         test_name = TEST_NAME
+    elif phase == "inventory":
+        # The read-only body gets its own exact mode, never migration authority.
+        child_env.update({
+            "FVOCI_TEST_TURSO_MIGRATION_SELECTED": "1",
+            "FVOCI_TEST_TURSO_PHASE": "inventory",
+            "FVOCI_TEST_TURSO_DESTRUCTIVE": "false",
+            "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "false",
+        })
+        test_name = INVENTORY_TEST_NAME
     else:
         child_env.update({
             "FVOCI_TEST_TURSO_MIGRATION_SELECTED": "1",
@@ -515,7 +530,7 @@ def run_primary(checkout_sha, inputs):
             "FVOCI_TEST_TURSO_DESTRUCTIVE": "true",
             "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true",
         })
-        test_name = INVENTORY_TEST_NAME if phase == "inventory" else MIGRATION_TEST_NAME
+        test_name = MIGRATION_TEST_NAME
     # Raw SDK/test errors can contain endpoint/query/token values. Capture only
     # in memory; never write/upload/reflect them. Do not retry a failed probe.
     result = subprocess.run(

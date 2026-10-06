@@ -114,8 +114,36 @@ class AdmissionTests(unittest.TestCase):
         self.denied("CONNECTION_MUST_BE_READ_ONLY", guard.validate_target, dict(self.inputs, destructive=True), self.settings, self.secrets)
 
     def test_future_phase_requires_explicit_dispatch_confirmation(self):
-        for phase in guard.PHASES[1:]:
+        for phase in (phase for phase in guard.PHASES if phase not in ("connection", "inventory")):
             self.denied("DESTRUCTIVE_CONFIRMATION_REQUIRED", guard.validate_dispatch, self.context, dict(self.inputs, phase=phase), "a" * 40)
+
+    def test_inventory_readonly_admission_is_exact_and_other_phases_stay_destructive(self):
+        inventory = {"phase": "inventory", "destructive": False}
+        original = copy.deepcopy((inventory, self.settings, self.secrets))
+        self.assertEqual(guard.validate_dispatch(self.context, inventory, "a" * 40), "inventory")
+        self.assertEqual(guard.validate_target(inventory, self.settings, self.secrets), "inventory")
+        self.assertEqual((inventory, self.settings, self.secrets), original)
+        for value in ("false", "true", 0, 1, None):
+            self.denied("INVALID_BOOLEAN", guard.validate_dispatch, self.context,
+                        dict(inventory, destructive=value), "a" * 40)
+            self.denied("INVALID_BOOLEAN", guard.validate_target,
+                        dict(inventory, destructive=value), self.settings, self.secrets)
+        for phase in guard.PHASES:
+            if phase in ("connection", "inventory"):
+                continue
+            inputs = {"phase": phase, "destructive": False}
+            self.denied("DESTRUCTIVE_CONFIRMATION_REQUIRED", guard.validate_dispatch,
+                        self.context, inputs, "a" * 40)
+            for flag, allow in ((False, "false"), (False, "true"), (True, "false"), (True, "")):
+                self.denied("DESTRUCTIVE_NOT_ALLOWED", guard.validate_target,
+                            dict(inputs, destructive=flag),
+                            {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": allow}, self.secrets)
+            confirmed = dict(inputs, destructive=True)
+            self.assertEqual(guard.validate_dispatch(self.context, confirmed, "a" * 40), phase)
+            self.assertEqual(guard.validate_target(confirmed,
+                             {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true"}, self.secrets), phase)
+            if phase != "migration":
+                self.denied("NOT_IMPLEMENTED", guard.require_implemented, phase)
 
     def test_tls_primary_configuration_and_input_unchanged(self):
         original = copy.deepcopy((self.inputs, self.settings, self.secrets))
@@ -656,7 +684,7 @@ class MigrationDiagnosticSeparatorTests(unittest.TestCase):
 
 class InventoryTests(unittest.TestCase):
     hash = "a" * 64
-    inputs = {"phase": "inventory", "destructive": True}
+    inputs = {"phase": "inventory", "destructive": False}
 
     def success(self, classification="CURRENT", prefix=12):
         return ("\nrunning 1 test\ntest " + guard.INVENTORY_TEST_NAME
@@ -681,7 +709,7 @@ class InventoryTests(unittest.TestCase):
                 "FVOCI_DATABASE_BACKEND": "libsql-remote",
                 "FVOCI_LIBSQL_URL": "libsql://isolated-owner.aws-us-east-1.turso.io",
                 "FVOCI_LIBSQL_AUTH_TOKEN": "FAKE_PRIVATE_TOKEN",
-                "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true",
+                "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "false",
                 "LD_LIBRARY_PATH": "/fixture/lib",
                 "SSL_CERT_FILE": "/fixture/cert",
                 "SSL_CERT_DIR": "/fixture/certs",
@@ -779,18 +807,18 @@ class InventoryTests(unittest.TestCase):
             expected = {key: os.environ[key] for key in ("PATH", "LD_LIBRARY_PATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "TZ")}
             expected.update({"FVOCI_DATABASE_BACKEND": "libsql-remote", "FVOCI_LIBSQL_URL": os.environ["FVOCI_LIBSQL_URL"],
                              "FVOCI_LIBSQL_AUTH_TOKEN": "FAKE_PRIVATE_TOKEN", "FVOCI_TEST_TURSO_MIGRATION_SELECTED": "1",
-                             "FVOCI_TEST_TURSO_PHASE": "migration", "FVOCI_TEST_TURSO_DESTRUCTIVE": "true",
-                             "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true"})
+                             "FVOCI_TEST_TURSO_PHASE": "inventory", "FVOCI_TEST_TURSO_DESTRUCTIVE": "false",
+                             "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "false"})
             self.assertEqual(run.call_args.kwargs, {"env": expected, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "check": False})
             self.assertNotIn("FAKE_PRIVATE_TOKEN", output.getvalue())
 
     def test_false_flags_backend_and_wrong_phase_refuse_before_child(self):
         with self.frozen() as (_, _, run):
-            for value in ("false", "TRUE", "", "FAKE_PRIVATE_TOKEN"):
+            for value in ("true", "FALSE", "", "FAKE_PRIVATE_TOKEN"):
                 with mock.patch.dict(os.environ, {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": value}):
-                    self.denied_run("DESTRUCTIVE_NOT_ALLOWED")
+                    self.denied_run("INVENTORY_MUST_BE_READ_ONLY")
                 run.assert_not_called()
-            self.denied_run("DESTRUCTIVE_NOT_ALLOWED", dict(self.inputs, destructive=False))
+            self.denied_run("INVENTORY_MUST_BE_READ_ONLY", dict(self.inputs, destructive=True))
             for value in ("true", 1, None):
                 self.denied_run("INVALID_BOOLEAN", dict(self.inputs, destructive=value))
             with mock.patch.dict(os.environ, {"FVOCI_DATABASE_BACKEND": "sqlite"}):
@@ -798,6 +826,46 @@ class InventoryTests(unittest.TestCase):
             for phase in ("migration", "connection", "unknown"):
                 self.denied_run("WRONG_CONSUMER_PHASE", dict(self.inputs, phase=phase))
             run.assert_not_called()
+
+    def test_inventory_mixed_or_missing_allow_gate_refuses_before_binding_or_child(self):
+        for destructive in (False, True):
+            for allow in (None, "false", "true", "FALSE", "", 0, False):
+                if destructive is False and allow == "false":
+                    continue  # The positive exact tuple is exercised by the real wrapper fixture.
+                with self.subTest(destructive=destructive, allow=allow), self.frozen() as (_, _, run):
+                    with mock.patch.dict(os.environ, {}):
+                        if allow is None:
+                            os.environ.pop("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE")
+                        else:
+                            os.environ["FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE"] = str(allow)
+                        with mock.patch.object(guard, "diagnostic_unit_binding") as binding:
+                            self.denied_run("INVENTORY_MUST_BE_READ_ONLY",
+                                            dict(self.inputs, destructive=destructive))
+                            binding.assert_not_called()
+                    run.assert_not_called()
+
+    def test_inventory_child_does_not_inherit_ambient_migration_authority(self):
+        with self.frozen() as (_, _, run):
+            with mock.patch.dict(os.environ, {
+                "FVOCI_TEST_TURSO_MIGRATION_SELECTED": "0",
+                "FVOCI_TEST_TURSO_PHASE": "migration",
+                "FVOCI_TEST_TURSO_DESTRUCTIVE": "true",
+            }):
+                before = dict(os.environ)
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    guard.run_inventory("a" * 40, self.inputs)
+                run.assert_called_once()
+                child = run.call_args.kwargs["env"]
+                for name, expected in (("FVOCI_TEST_TURSO_MIGRATION_SELECTED", "1"),
+                                       ("FVOCI_TEST_TURSO_PHASE", "inventory"),
+                                       ("FVOCI_TEST_TURSO_DESTRUCTIVE", "false"),
+                                       ("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "false")):
+                    self.assertEqual(child[name], expected)
+                self.assertEqual(dict(os.environ), before)
+                self.assertNotIn("FVOCI_TEST_TURSO_CONNECTION_SELECTED", child)
+                self.assertNotIn("FVOCI_DATABASE_APP_URL", child)
+                self.assertNotIn("UNRELATED_FAKE_CREDENTIAL", child)
+                self.assertNotIn("FAKE_PRIVATE_TOKEN", output.getvalue())
 
     def test_complete_frozen_binding_and_elf_controls_before_inventory(self):
         for key in ("sha", "source_digest", "binary_sha256", "native_input_sha256", "cargo_output_sha256"):
@@ -856,20 +924,20 @@ class InventoryTests(unittest.TestCase):
             (dict(context, ref="refs/heads/topic"), self.inputs, "UNTRUSTED_DISPATCH"),
             (dict(context, event_name="push", ref=guard.REVIEWED_REF), self.inputs, "SECRET_MODE_REQUIRES_MANUAL"),
             (dict(context, sha="b" * 40), self.inputs, "CHECKOUT_MISMATCH"),
-            (context, dict(self.inputs, destructive=False), "DESTRUCTIVE_CONFIRMATION_REQUIRED"),
+            (context, dict(self.inputs, destructive=True), "INVENTORY_MUST_BE_READ_ONLY"),
         ):
             with self.assertRaises(guard.AdmissionError) as error:
                 guard.validate_dispatch(changed, inputs, "a" * 40)
             self.assertEqual(str(error.exception), code)
         for event, repository, ref, sha, destructive, expected in (
-            ("workflow_dispatch", guard.REPOSITORY, "refs/heads/main", "a" * 40, "true", 0),
-            ("workflow_dispatch", guard.REPOSITORY, guard.REVIEWED_REF, "a" * 40, "true", 0),
-            ("push", guard.REPOSITORY, guard.REVIEWED_REF, "a" * 40, "true", 78),
-            ("pull_request", guard.REPOSITORY, "refs/heads/main", "a" * 40, "true", 78),
-            ("workflow_dispatch", "attacker/fvoci", "refs/heads/main", "a" * 40, "true", 78),
-            ("workflow_dispatch", guard.REPOSITORY, "refs/heads/topic", "a" * 40, "true", 78),
-            ("workflow_dispatch", guard.REPOSITORY, "refs/heads/main", "b" * 40, "true", 78),
-            ("workflow_dispatch", guard.REPOSITORY, "refs/heads/main", "a" * 40, "false", 78),
+            ("workflow_dispatch", guard.REPOSITORY, "refs/heads/main", "a" * 40, "false", 0),
+            ("workflow_dispatch", guard.REPOSITORY, guard.REVIEWED_REF, "a" * 40, "false", 0),
+            ("push", guard.REPOSITORY, guard.REVIEWED_REF, "a" * 40, "false", 78),
+            ("pull_request", guard.REPOSITORY, "refs/heads/main", "a" * 40, "false", 78),
+            ("workflow_dispatch", "attacker/fvoci", "refs/heads/main", "a" * 40, "false", 78),
+            ("workflow_dispatch", guard.REPOSITORY, "refs/heads/topic", "a" * 40, "false", 78),
+            ("workflow_dispatch", guard.REPOSITORY, "refs/heads/main", "b" * 40, "false", 78),
+            ("workflow_dispatch", guard.REPOSITORY, "refs/heads/main", "a" * 40, "true", 78),
         ):
             with tempfile.TemporaryDirectory(prefix="fvoci-inventory-route-pure-") as directory:
                 event_path = Path(directory) / "event.json"

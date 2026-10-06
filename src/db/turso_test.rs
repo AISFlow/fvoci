@@ -769,13 +769,13 @@ fn inventory_selection(
     lookup: impl Fn(&str) -> Option<String>,
     args: &[String],
 ) -> Result<(), &'static str> {
-    // Same four maintained migration-helper gates; inventory performs no DDL
-    // but reserves a writer, so it cannot use the connection-only admission.
+    // Inventory reserves a writer for a snapshot but cannot authorize mutation.
+    // Its exact read-only tuple is distinct from the mutating migration tuple.
     for (name, expected) in [
         ("FVOCI_TEST_TURSO_MIGRATION_SELECTED", "1"),
-        ("FVOCI_TEST_TURSO_PHASE", "migration"),
-        ("FVOCI_TEST_TURSO_DESTRUCTIVE", "true"),
-        ("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "true"),
+        ("FVOCI_TEST_TURSO_PHASE", "inventory"),
+        ("FVOCI_TEST_TURSO_DESTRUCTIVE", "false"),
+        ("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "false"),
     ] {
         if lookup(name).as_deref() != Some(expected) {
             return Err("EXPLICIT_INVENTORY_SELECTION_REQUIRED");
@@ -1153,9 +1153,9 @@ mod inventory_policy_tests {
     fn flags() -> Vec<(&'static str, &'static str)> {
         vec![
             ("FVOCI_TEST_TURSO_MIGRATION_SELECTED", "1"),
-            ("FVOCI_TEST_TURSO_PHASE", "migration"),
-            ("FVOCI_TEST_TURSO_DESTRUCTIVE", "true"),
-            ("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "true"),
+            ("FVOCI_TEST_TURSO_PHASE", "inventory"),
+            ("FVOCI_TEST_TURSO_DESTRUCTIVE", "false"),
+            ("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "false"),
         ]
     }
 
@@ -1186,7 +1186,11 @@ mod inventory_policy_tests {
                 Err("EXPLICIT_INVENTORY_SELECTION_REQUIRED")
             );
             let mut wrong = valid.clone();
-            wrong[index].1 = if index == 1 { "connection" } else { "false" };
+            wrong[index].1 = match index {
+                1 => "migration",
+                2 | 3 => "true",
+                _ => "false",
+            };
             assert!(inventory_selection(
                 |name| wrong
                     .iter()
@@ -1210,6 +1214,34 @@ mod inventory_policy_tests {
         let mut extra = args();
         extra.push("--include-ignored".into());
         assert!(inventory_selection(lookup, &extra).is_err());
+    }
+
+    #[test]
+    fn inventory_rejects_migration_and_mixed_destructive_modes() {
+        for phase in ["inventory", "migration", "connection", "unknown"] {
+            for destructive in ["false", "true", "FALSE", "", "0"] {
+                for allow in ["false", "true", "FALSE", "", "0"] {
+                    let valid = flags();
+                    let selected = inventory_selection(
+                        |name| match name {
+                            "FVOCI_TEST_TURSO_PHASE" => Some(phase.to_owned()),
+                            "FVOCI_TEST_TURSO_DESTRUCTIVE" => Some(destructive.to_owned()),
+                            "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE" => Some(allow.to_owned()),
+                            _ => valid
+                                .iter()
+                                .find(|pair| pair.0 == name)
+                                .map(|pair| pair.1.to_owned()),
+                        },
+                        &args(),
+                    );
+                    if phase == "inventory" && destructive == "false" && allow == "false" {
+                        assert_eq!(selected, Ok(()));
+                    } else {
+                        assert_eq!(selected, Err("EXPLICIT_INVENTORY_SELECTION_REQUIRED"));
+                    }
+                }
+            }
+        }
     }
 
     #[test]
