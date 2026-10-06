@@ -175,6 +175,117 @@ pub async fn list_tags(
     }))
 }
 
+/// Selected tag-pool display/search keeps PG's locale-sensitive entrypoint.
+/// Family search uses existing Rust Unicode lowercase, BINARY name/UUID ties,
+/// and bounds each fetched page without limiting the searched workspace pool.
+pub async fn list_tags_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: &Actor,
+    q: Option<&str>,
+    limit: i64,
+) -> TagResult<TagPool> {
+    if let Backend::Postgres(pool) = backend {
+        return list_tags(pool, workspace_id, actor, q, limit).await;
+    }
+    if !(1..=TAG_POOL_LIMIT_MAX).contains(&limit) {
+        return Err(sqlx::Error::Protocol("invalid tag pool limit".into()));
+    }
+    let limit = usize::try_from(limit)
+        .map_err(|_| sqlx::Error::Protocol("invalid tag pool limit".into()))?;
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        if !op
+            .session_is_live(actor.user_id, actor.credential_id)
+            .await?
+            || !op.workspace_is_live(workspace_id).await?
+        {
+            return Ok(Err(TagDbError::NotFound));
+        }
+        let Some(role) = op
+            .membership_role(workspace_id, actor.user_id, false)
+            .await?
+        else {
+            return Ok(Err(TagDbError::NotFound));
+        };
+        let OperationTx::SqliteFamily(family) = op else {
+            unreachable!()
+        };
+        family.require_tenant(workspace_id)?;
+        let needle = q
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+            .map(str::to_lowercase);
+        let mut after: Option<(String, Uuid)> = None;
+        let mut items = Vec::new();
+        loop {
+            let rows = family
+                .query(
+                    "SELECT t.id,t.workspace_id,t.name,t.color,t.created_at,t.updated_at,
+                        (SELECT count(*) FROM document_tag_assignments a
+                         WHERE a.workspace_id=t.workspace_id AND a.tag_id=t.id)
+                 FROM document_tags t WHERE t.workspace_id=?1
+                   AND (?2 IS NULL OR t.name COLLATE BINARY>?2
+                        OR (t.name COLLATE BINARY=?2 AND t.id>?3))
+                 ORDER BY t.name COLLATE BINARY,t.id LIMIT 128",
+                    &[
+                        Cell::uuid(workspace_id),
+                        Cell::optional_text(after.as_ref().map(|(name, _)| name.as_str())),
+                        Cell::optional_uuid(after.as_ref().map(|(_, id)| *id)),
+                    ],
+                )
+                .await?;
+            for row in &rows {
+                let mut tag = family_tag_row(row)?;
+                after = Some((tag.name.clone(), tag.id));
+                if needle
+                    .as_ref()
+                    .is_some_and(|needle| !tag.name.to_lowercase().contains(needle))
+                {
+                    continue;
+                }
+                tag.assignment_count = row.cell(6)?.integer()?;
+                items.push(tag);
+                if items.len() == limit {
+                    break;
+                }
+            }
+            if items.len() == limit || rows.len() < 128 {
+                break;
+            }
+        }
+        Ok(Ok(TagPool {
+            can_create: at_least(role, WorkspaceRole::Member),
+            can_manage: at_least(role, WorkspaceRole::Admin),
+            items,
+        }))
+    }
+    .await;
+    let cleanup = tx.rollback().await;
+    tag_pool_read_after_rollback(result, cleanup)
+}
+
+fn tag_pool_read_after_rollback(
+    result: TagResult<TagPool>,
+    cleanup: Result<(), sqlx::Error>,
+) -> TagResult<TagPool> {
+    match cleanup {
+        Ok(()) => result,
+        Err(cleanup) => {
+            let original: Option<Box<dyn std::error::Error + Send + Sync>> = match result {
+                Err(driver) => Some(Box::new(driver)),
+                Ok(Err(refusal)) => Some(Box::new(TagReadRefusal(refusal))),
+                Ok(Ok(_)) => None,
+            };
+            Err(crate::db::backend::rollback_cleanup_unknown(
+                original, cleanup,
+            ))
+        }
+    }
+}
+
 pub async fn create_tag(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
@@ -1491,5 +1602,344 @@ mod selected_tag_write_tests {
         );
         f.pool.close().await;
         std::fs::remove_dir_all(&f.root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod selected_tag_pool_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+
+    async fn actor(f: &Fixture) -> Actor {
+        let credential_id = Uuid::now_v7();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        tx.operation()
+            .create_session(
+                credential_id,
+                f.user,
+                "selected-tag-pool",
+                crate::db::identity::stored_now()
+                    + chrono::Duration::seconds(crate::auth::token::SESSION_TTL_SECS),
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        Actor {
+            user_id: f.user,
+            credential_id,
+            client_ip: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_tag_pool_unicode_search_past_page_limit_and_assignment_counts() {
+        let f = Fixture::new().await;
+        let actor = actor(&f).await;
+        for index in 0..130 {
+            sqlx::query(
+                "INSERT INTO document_tags(id,workspace_id,name,color) VALUES(?1,?2,?3,'blue')",
+            )
+            .bind(Uuid::now_v7().as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(format!("a{index:03}"))
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        }
+        let echo = create_tag_backend(&f.backend, f.workspace, &actor, "Écho", "blue")
+            .await
+            .unwrap()
+            .unwrap();
+        let eclair = create_tag_backend(&f.backend, f.workspace, &actor, "Éclair", "green")
+            .await
+            .unwrap()
+            .unwrap();
+        let decomposed = create_tag_backend(&f.backend, f.workspace, &actor, "E\u{301}cho", "red")
+            .await
+            .unwrap()
+            .unwrap();
+        assign_tag_backend(
+            &f.backend,
+            f.workspace,
+            &actor,
+            f.document,
+            Affiliation::Wiki,
+            echo.id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let pool = list_tags_backend(&f.backend, f.workspace, &actor, Some(" é "), 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(pool.can_create && pool.can_manage);
+        assert_eq!(
+            pool.items.iter().map(|t| t.id).collect::<Vec<_>>(),
+            [echo.id, eclair.id]
+        );
+        assert_eq!(
+            pool.items
+                .iter()
+                .map(|t| t.assignment_count)
+                .collect::<Vec<_>>(),
+            [1, 0]
+        );
+        assert_eq!(pool.items[0].name, "Écho");
+        assert_eq!(pool.items[0].color, "blue");
+        assert_eq!(pool.items[0].workspace_id, f.workspace);
+        assert!(pool.items[0].created_at <= pool.items[0].updated_at);
+        assert_eq!(
+            list_tags_backend(&f.backend, f.workspace, &actor, Some("É"), 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .items[0]
+                .id,
+            echo.id
+        );
+        assert_eq!(
+            list_tags_backend(&f.backend, f.workspace, &actor, Some("E\u{301}"), 100)
+                .await
+                .unwrap()
+                .unwrap()
+                .items[0]
+                .id,
+            decomposed.id
+        );
+        let full = list_tags_backend(&f.backend, f.workspace, &actor, Some("  "), 100)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(full.items.len(), 100);
+        assert_eq!(full.items[0].name, "E\u{301}cho");
+        assert_eq!(full.items[1].name, "a000");
+        assert_eq!(full.items[99].name, "a098");
+        // Equal names are a raw ordering witness, not an API duplicate-create
+        // contract (the selected creator prevents case-equivalent duplicates).
+        let tied = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO document_tags(id,workspace_id,name,color) VALUES(?1,?2,'Écho','blue')",
+        )
+        .bind(tied.as_bytes().as_slice())
+        .bind(f.workspace.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        let mut expected = [echo.id, tied];
+        expected.sort();
+        assert_eq!(
+            list_tags_backend(&f.backend, f.workspace, &actor, Some("Écho"), 100)
+                .await
+                .unwrap()
+                .unwrap()
+                .items
+                .iter()
+                .map(|t| t.id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        // Pool counts retain PG's assignment semantics even for a trashed doc.
+        sqlx::query("UPDATE documents SET deleted_at=1 WHERE id=?1")
+            .bind(f.document.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            list_tags_backend(&f.backend, f.workspace, &actor, Some("Écho"), 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .items[0]
+                .assignment_count,
+            1
+        );
+        for limit in [0, 101] {
+            assert!(
+                list_tags_backend(&f.backend, f.workspace, &actor, None, limit)
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_tag_pool_current_authority_fault_and_healthy_retry() {
+        let f = Fixture::new().await;
+        let actor = actor(&f).await;
+        let tag = create_tag_backend(&f.backend, f.workspace, &actor, "Healthy", "blue")
+            .await
+            .unwrap()
+            .unwrap();
+        for (role, create, manage) in [
+            ("guest", false, false),
+            ("member", true, false),
+            ("admin", true, true),
+        ] {
+            sqlx::query("UPDATE memberships SET role=?1 WHERE workspace_id=?2 AND user_id=?3")
+                .bind(role)
+                .bind(f.workspace.as_bytes().as_slice())
+                .bind(f.user.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let pool = list_tags_backend(&f.backend, f.workspace, &actor, None, 100)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!((pool.can_create, pool.can_manage), (create, manage));
+            assert_eq!(pool.items[0].id, tag.id);
+        }
+        assert!(matches!(
+            list_tags_backend(&f.backend, Uuid::now_v7(), &actor, None, 100)
+                .await
+                .unwrap(),
+            Err(TagDbError::NotFound)
+        ));
+        sqlx::query("ALTER TABLE document_tags RENAME COLUMN color TO broken_color")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(
+            list_tags_backend(&f.backend, f.workspace, &actor, None, 100)
+                .await
+                .is_err()
+        );
+        sqlx::query("ALTER TABLE document_tags RENAME COLUMN broken_color TO color")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            list_tags_backend(&f.backend, f.workspace, &actor, None, 100)
+                .await
+                .unwrap()
+                .unwrap()
+                .items[0]
+                .id,
+            tag.id
+        );
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(actor.credential_id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_tags_backend(&f.backend, f.workspace, &actor, None, 100)
+                .await
+                .unwrap(),
+            Err(TagDbError::NotFound)
+        ));
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(actor.credential_id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET deleted_at=1 WHERE id=?1")
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_tags_backend(&f.backend, f.workspace, &actor, None, 100)
+                .await
+                .unwrap(),
+            Err(TagDbError::NotFound)
+        ));
+        sqlx::query("UPDATE users SET deleted_at=NULL WHERE id=?1")
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE workspaces SET deleted_at=1 WHERE id=?1")
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_tags_backend(&f.backend, f.workspace, &actor, None, 100)
+                .await
+                .unwrap(),
+            Err(TagDbError::NotFound)
+        ));
+        sqlx::query("UPDATE workspaces SET deleted_at=NULL WHERE id=?1")
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_tags_backend(&f.backend, f.workspace, &actor, None, 100)
+                .await
+                .unwrap(),
+            Err(TagDbError::NotFound)
+        ));
+        f.close().await;
+    }
+
+    #[test]
+    fn tag_pool_cleanup_failure_withholds_rows_and_retains_typed_causes() {
+        // Pure propagation only; no actual remote cleanup is claimed.
+        let pool = TagPool {
+            can_create: true,
+            can_manage: true,
+            items: vec![],
+        };
+        let error = tag_pool_read_after_rollback(
+            Ok(Ok(pool)),
+            Err(sqlx::Error::Protocol("cleanup".into())),
+        )
+        .unwrap_err();
+        let sqlx::Error::AnyDriverError(source) = error else {
+            panic!("missing cleanup envelope")
+        };
+        let unknown = source
+            .downcast_ref::<crate::db::backend::RollbackCleanupUnknown>()
+            .unwrap();
+        assert!(unknown.original.is_none());
+        assert!(matches!(&unknown.cleanup,sqlx::Error::Protocol(message) if message=="cleanup"));
+        let error = tag_pool_read_after_rollback(
+            Ok(Err(TagDbError::NotFound)),
+            Err(sqlx::Error::Protocol("cleanup".into())),
+        )
+        .unwrap_err();
+        let sqlx::Error::AnyDriverError(source) = error else {
+            panic!("missing cleanup envelope")
+        };
+        assert_eq!(
+            source
+                .downcast_ref::<crate::db::backend::RollbackCleanupUnknown>()
+                .unwrap()
+                .original
+                .as_ref()
+                .unwrap()
+                .downcast_ref::<TagReadRefusal>()
+                .unwrap()
+                .0,
+            TagDbError::NotFound
+        );
+        let error = tag_pool_read_after_rollback(
+            Err(sqlx::Error::Protocol("original query".into())),
+            Err(sqlx::Error::Protocol("cleanup".into())),
+        )
+        .unwrap_err();
+        let sqlx::Error::AnyDriverError(source) = error else {
+            panic!("missing cleanup envelope")
+        };
+        assert!(
+            matches!(source.downcast_ref::<crate::db::backend::RollbackCleanupUnknown>().unwrap().original.as_ref().unwrap().downcast_ref::<sqlx::Error>(),Some(sqlx::Error::Protocol(message)) if message=="original query")
+        );
     }
 }

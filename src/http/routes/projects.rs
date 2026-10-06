@@ -19,8 +19,9 @@ use crate::api::dto::{
 use crate::auth::session::SessionUser;
 use crate::db::projects::{
     add_project_member, clone_project, create_project_backend as create_project, get_project,
-    get_project_workflow, list_deleted_projects, list_project_members, list_projects,
-    remove_project_member, restore_project, set_project_archived, trash_project, update_project,
+    get_project_workflow_backend as get_project_workflow, list_deleted_projects,
+    list_project_members, list_projects_backend as list_projects, remove_project_member,
+    restore_project, set_project_archived, trash_project, update_project,
     update_project_member_role, CloneProjectInput, CreateProjectInput, ProjectDbError,
     UpdateProjectInput,
 };
@@ -279,19 +280,9 @@ async fn list_projects_route(
             Err(err) => Err(map_project_error(err)),
         };
     }
-    let result = list_projects(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/projects.rs")
-            .map_err(internal)?,
-        workspace_id,
-        actor_user_id,
-        session_id,
-    )
-    .await
-    .map_err(internal)?;
+    let result = list_projects(&state.auth.db.pool, workspace_id, actor_user_id, session_id)
+        .await
+        .map_err(internal)?;
     match result {
         Ok(items) => Ok(Json(ProjectListResponse {
             items: items
@@ -767,12 +758,7 @@ async fn get_workflow(
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = get_project_workflow(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/projects.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         project_id,
         actor_user_id,
@@ -1229,6 +1215,395 @@ mod selected_project_create_http_tests {
         .unwrap();
         assert_eq!(count, 2);
         assert_eq!(audits, before + 1);
+        f.close().await;
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod selected_pending_get_http_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+    use serde_json::Value;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn app(f: &Fixture) -> Router {
+        router().merge(super::super::document_tags::router()).merge(super::super::workspaces::router())
+            .with_state(AppState {
+                realtime_mode:crate::config::RealtimeMode::Off,native_engine:None,
+                auth:Arc::new(crate::auth::AuthService{db:crate::db::Db::from_backend(f.backend.clone()),password_keys:crate::auth::password::Keyring::parse(r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,"test").unwrap()}),
+                branding_name:"FVOCI".into(),public_origin:"http://localhost".into(),cookie_secure:false,
+                rate_limiter:crate::http::rate_limit::RateLimiter::new(),storage:crate::attachments::ObjectStorage::local(f.root.join("storage")),
+                upload:crate::attachments::UploadLimits{part_size_bytes:24,max_file_size_bytes:1024,create_rate_per_5min:20,part_put_slots:crate::attachments::PartPutSlots::new(2)},
+                collab:None,meili:None,search_embedder:None,markdown:None,import_wake:None,
+                import_extractor_available:false,preview_extract:None,quota:Default::default(),
+                mailer:Arc::new(crate::mail::Mailer::disabled()),streams:AppState::fresh_streams(),
+            })
+    }
+    async fn setup() -> (Fixture, Uuid, String, Uuid, Uuid) {
+        let f = Fixture::new().await;
+        let credential = Uuid::now_v7();
+        let token = crate::auth::token::new_token();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        tx.operation()
+            .create_session(
+                credential,
+                f.user,
+                &token.hash,
+                crate::db::identity::stored_now()
+                    + chrono::Duration::seconds(crate::auth::token::SESSION_TTL_SECS),
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let project = create_project(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            CreateProjectInput {
+                key: "GET",
+                name: "Pending GET 中",
+                visibility: "workspace",
+                description: Some("Literal read"),
+                icon: Some("📄"),
+                lead_user_id: None,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let actor = crate::db::collections::Actor {
+            user_id: f.user,
+            credential_id: credential,
+            client_ip: None,
+        };
+        let tag = crate::db::document_tags::create_tag_backend(
+            &f.backend,
+            f.workspace,
+            &actor,
+            "Écho",
+            "blue",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        crate::db::document_tags::assign_tag_backend(
+            &f.backend,
+            f.workspace,
+            &actor,
+            f.document,
+            crate::db::document_tags::Affiliation::Wiki,
+            tag.id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        (f, credential, token.token, project.id, tag.id)
+    }
+    async fn pat(f: &Fixture, scopes: &[&str]) -> String {
+        let token = crate::auth::token::new_token();
+        sqlx::query("INSERT INTO api_tokens(id,workspace_id,user_id,token_hash,name,scopes) VALUES(?1,?2,?3,?4,'pending GET',?5)")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice()).bind(token.hash).bind(json!(scopes).to_string()).execute(&f.pool).await.unwrap();
+        token.token
+    }
+    fn get_paths(workspace: Uuid, project: Uuid) -> [String; 4] {
+        [
+            format!("/api/v1/workspaces/{workspace}/projects"),
+            format!("/api/v1/workspaces/{workspace}/projects/{project}/workflow"),
+            format!("/api/v1/workspaces/{workspace}/document-tags?limit=100"),
+            format!("/api/v1/workspaces/{workspace}/members"),
+        ]
+    }
+    async fn get(
+        app: Router,
+        path: &str,
+        token: Option<&str>,
+        bearer: bool,
+    ) -> (StatusCode, Value) {
+        let mut request = axum::http::Request::builder().uri(path);
+        if let Some(token) = token {
+            request = if bearer {
+                request.header("authorization", format!("Bearer {token}"))
+            } else {
+                request.header("cookie", format!("fvoci_session={token}"))
+            };
+        }
+        let response = app
+            .oneshot(request.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 16384)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn sqlite_http_pending_gets_literal_project_workflow_tag_and_members() {
+        let (f, _, token, project, tag) = setup().await;
+        let app = app(&f);
+        let paths = get_paths(f.workspace, project);
+        let (status, body) = get(app.clone(), &paths[0], Some(&token), false).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        let item = &body["items"][0];
+        assert_eq!(item["id"], project.to_string());
+        assert_eq!(item["workspaceId"], f.workspace.to_string());
+        assert_eq!(item["key"], "GET");
+        assert_eq!(item["name"], "Pending GET 中");
+        assert_eq!(item["description"], "Literal read");
+        assert_eq!(item["icon"], "📄");
+        assert_eq!(item["status"], "active");
+        assert_eq!(item["documentCount"], 1);
+        assert_eq!(item["taskCount"], 0);
+        assert_eq!(item["openTaskCount"], 0);
+        assert_eq!(item["canEdit"], true);
+        assert_eq!(item["canManage"], true);
+        let root = Uuid::parse_str(item["rootDocumentId"].as_str().unwrap()).unwrap();
+        let stored: Vec<u8> =
+            sqlx::query_scalar("SELECT root_document_id FROM projects WHERE id=?1")
+                .bind(project.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, root.as_bytes());
+        let (status, body) = get(app.clone(), &paths[1], Some(&token), false).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["projectId"], project.to_string());
+        let workflow = Uuid::parse_str(body["id"].as_str().unwrap()).unwrap();
+        let stored: Vec<u8> = sqlx::query_scalar("SELECT id FROM workflows WHERE project_id=?1")
+            .bind(project.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, workflow.as_bytes());
+        let statuses = body["statuses"].as_array().unwrap();
+        assert_eq!(
+            statuses
+                .iter()
+                .map(|s| (
+                    s["category"].as_str().unwrap(),
+                    s["sortKey"].as_str().unwrap()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("backlog", "V"),
+                ("todo", "W"),
+                ("in_progress", "X"),
+                ("in_progress", "Y"),
+                ("done", "Z"),
+                ("canceled", "a")
+            ]
+        );
+        for status in statuses {
+            let id = Uuid::parse_str(status["id"].as_str().unwrap()).unwrap();
+            assert!(!id.is_nil());
+            assert!(!status["name"].as_str().unwrap().is_empty());
+            assert!(status["wipLimit"].is_null());
+        }
+        let (status, body) = get(app.clone(), &paths[2], Some(&token), false).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["canCreate"], true);
+        assert_eq!(body["canManage"], true);
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        assert_eq!(body["items"][0]["id"], tag.to_string());
+        assert_eq!(body["items"][0]["name"], "Écho");
+        assert_eq!(body["items"][0]["color"], "blue");
+        assert_eq!(body["items"][0]["assignmentCount"], 1);
+        let (status, body) = get(app, &paths[3], Some(&token), false).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        assert_eq!(body["items"][0]["userId"], f.user.to_string());
+        assert_eq!(body["items"][0]["role"], "owner");
+        assert_eq!(body["items"][0]["email"], "s31@example.test");
+        assert_eq!(body["items"][0]["givenName"], "S31");
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_http_pending_gets_pat_scopes_tenant_and_document_count_disclosure() {
+        let (f, _, _, project, _) = setup().await;
+        let app = app(&f);
+        let paths = get_paths(f.workspace, project);
+        let read = pat(&f, &["projects.read"]).await;
+        let (status, body) = get(app.clone(), &paths[0], Some(&read), true).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["items"][0]["id"], project.to_string());
+        assert!(body["items"][0]["documentCount"].is_null());
+        assert_eq!(body["items"][0]["taskCount"], 0);
+        assert_eq!(
+            get(app.clone(), &paths[1], Some(&read), true).await.0,
+            StatusCode::NOT_FOUND
+        );
+        for path in &paths[2..] {
+            assert_eq!(
+                get(app.clone(), path, Some(&read), true).await.0,
+                StatusCode::NOT_FOUND
+            );
+        }
+        let tasks = pat(&f, &["tasks.read"]).await;
+        assert_eq!(
+            get(app.clone(), &paths[1], Some(&tasks), true).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            get(app.clone(), &paths[0], Some(&tasks), true).await.0,
+            StatusCode::NOT_FOUND
+        );
+        let full = pat(
+            &f,
+            &[
+                "projects.read",
+                "tasks.read",
+                "documents.read",
+                "workspace.manage",
+            ],
+        )
+        .await;
+        assert_eq!(
+            get(app.clone(), &paths[0], Some(&full), true).await.1["items"][0]["documentCount"],
+            1
+        );
+        for path in &paths {
+            assert_eq!(
+                get(app.clone(), path, Some(&full), true).await.0,
+                StatusCode::OK
+            );
+        }
+        let other_workspace = Uuid::now_v7();
+        sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES(?1,'pending-get-other','Other')")
+            .bind(other_workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')")
+            .bind(other_workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            get(
+                app.clone(),
+                &get_paths(other_workspace, project)[0],
+                Some(&full),
+                true
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        for path in get_paths(Uuid::now_v7(), project) {
+            assert_eq!(
+                get(app.clone(), &path, Some(&full), true).await.0,
+                StatusCode::NOT_FOUND
+            );
+        }
+        for path in &paths {
+            assert_eq!(
+                get(app.clone(), path, None, false).await.0,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        let documents = pat(&f, &["documents.read"]).await;
+        assert_eq!(
+            get(app.clone(), &paths[0], Some(&documents), true).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            get(app.clone(), &paths[1], Some(&documents), true).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            get(app.clone(), &paths[2], Some(&documents), true).await.0,
+            StatusCode::OK
+        );
+        sqlx::query("DELETE FROM api_tokens WHERE user_id=?1")
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        for path in &paths {
+            assert_eq!(
+                get(app.clone(), path, Some(&full), true).await.0,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_http_pending_gets_current_denials_fault_and_healthy_retry() {
+        let (f, credential, token, project, tag) = setup().await;
+        let app = app(&f);
+        let paths = get_paths(f.workspace, project);
+        sqlx::query("ALTER TABLE document_tags RENAME COLUMN color TO broken_color")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            get(app.clone(), &paths[2], Some(&token), false).await.0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        sqlx::query("ALTER TABLE document_tags RENAME COLUMN broken_color TO color")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let (status, body) = get(app.clone(), &paths[2], Some(&token), false).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["items"][0]["id"], tag.to_string());
+        sqlx::query("UPDATE projects SET visibility='private' WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM project_members WHERE user_id=?1")
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let (status, body) = get(app.clone(), &paths[0], Some(&token), false).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["items"].as_array().unwrap().is_empty());
+        assert_eq!(
+            get(app.clone(), &paths[1], Some(&token), false).await.0,
+            StatusCode::NOT_FOUND
+        );
+        for path in get_paths(Uuid::now_v7(), project) {
+            assert_eq!(
+                get(app.clone(), &path, Some(&token), false).await.0,
+                StatusCode::NOT_FOUND
+            );
+        }
+        sqlx::query("UPDATE memberships SET role='guest' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            get(app.clone(), &paths[3], Some(&token), false).await.0,
+            StatusCode::NOT_FOUND
+        );
+        let (status, pool) = get(app.clone(), &paths[2], Some(&token), false).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(pool["canCreate"], false);
+        assert_eq!(pool["canManage"], false);
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        for path in &paths {
+            assert_eq!(
+                get(app.clone(), path, Some(&token), false).await.0,
+                StatusCode::UNAUTHORIZED
+            );
+        }
         f.close().await;
     }
 }

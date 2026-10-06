@@ -128,13 +128,8 @@ async fn list_members(
         Some(workspace_id),
     )
     .await?;
-    let result = crate::db::workspace::list_members(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/workspaces.rs")
-            .map_err(internal)?,
+    let result = crate::db::workspace::list_members_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,

@@ -1475,6 +1475,125 @@ pub async fn clone_project(
     }))
 }
 
+/// Active selected-project list. Authority, grants and grouped counts share
+/// one read snapshot; the original PostgreSQL/RLS entrypoint is unchanged.
+pub async fn list_projects_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<Vec<ProjectListItem>, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_projects(pool, workspace_id, actor_user_id, session_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        if !op.session_is_live(actor_user_id, session_id).await? {
+            return Ok(Err(ProjectDbError::Forbidden));
+        }
+        if !op.workspace_is_live(workspace_id).await? {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        let Some(role) = op.membership_role(workspace_id, actor_user_id, false).await? else {
+            return Ok(Err(ProjectDbError::NotFound));
+        };
+        let OperationTx::SqliteFamily(family) = op else { unreachable!() };
+        family.require_tenant(workspace_id)?;
+        // Fetch current grants once, not one permission query per project.
+        let grants = family.query(
+            "SELECT project_id,role FROM project_members
+             WHERE workspace_id=?1 AND user_id=?2
+             UNION ALL
+             SELECT pm.project_id,pm.role FROM project_members pm
+             JOIN group_members gm ON gm.workspace_id=pm.workspace_id AND gm.group_id=pm.group_id
+             WHERE pm.workspace_id=?1 AND gm.user_id=?2 AND pm.group_id IS NOT NULL",
+            &[Cell::uuid(workspace_id),Cell::uuid(actor_user_id)],
+        ).await?;
+        let mut roles = std::collections::HashMap::<Uuid,ProjectMemberRole>::new();
+        for grant in grants {
+            if let Some(granted) = ProjectMemberRole::parse(&grant.cell(1)?.string()?) {
+                roles.entry(grant.cell(0)?.id()?)
+                    .and_modify(|current| {
+                        if granted.permission() > current.permission() { *current = granted; }
+                    })
+                    .or_insert(granted);
+            }
+        }
+        let rows = family.query(
+            "SELECT p.id,p.key,p.name,p.description,p.icon,p.visibility,p.root_document_id,
+                    p.status,p.created_by,p.created_at,p.updated_at,
+                    COALESCE(dc.n,0),COALESCE(tc.n,0),COALESCE(tc.open_n,0)
+             FROM projects p
+             LEFT JOIN (
+                 SELECT workspace_id,project_id,count(*) AS n FROM documents
+                 WHERE workspace_id=?1 AND project_id IS NOT NULL AND deleted_at IS NULL
+                 GROUP BY workspace_id,project_id
+             ) dc ON dc.workspace_id=p.workspace_id AND dc.project_id=p.id
+             LEFT JOIN (
+                 SELECT t.workspace_id,t.project_id,
+                     count(*) FILTER (WHERE t.deleted_at IS NULL AND t.archived_at IS NULL) AS n,
+                     count(*) FILTER (WHERE t.deleted_at IS NULL AND t.archived_at IS NULL
+                                      AND s.category NOT IN ('done','canceled')) AS open_n
+                 FROM tasks t JOIN statuses s ON s.workspace_id=t.workspace_id
+                     AND s.project_id=t.project_id AND s.id=t.status_id
+                 WHERE t.workspace_id=?1 GROUP BY t.workspace_id,t.project_id
+             ) tc ON tc.workspace_id=p.workspace_id AND tc.project_id=p.id
+             WHERE p.workspace_id=?1 AND p.deleted_at IS NULL
+               AND ((p.visibility='workspace' AND ?2=0)
+                    OR EXISTS(SELECT 1 FROM project_members pm WHERE pm.workspace_id=p.workspace_id
+                              AND pm.project_id=p.id AND pm.user_id=?3)
+                    OR EXISTS(SELECT 1 FROM project_members pm JOIN group_members gm
+                              ON gm.workspace_id=pm.workspace_id AND gm.group_id=pm.group_id
+                              WHERE pm.workspace_id=p.workspace_id AND pm.project_id=p.id AND gm.user_id=?3))
+             ORDER BY p.key COLLATE BINARY",
+            &[Cell::uuid(workspace_id),Cell::Integer(i64::from(u8::from(role==WorkspaceRole::Guest))),Cell::uuid(actor_user_id)],
+        ).await?;
+        let mut items = Vec::with_capacity(rows.len());
+        for row in rows {
+            let project = project_created_family_row(&row, workspace_id)?;
+            let permission = effective_permission(role, &project.visibility, roles.get(&project.id).copied());
+            items.push(ProjectListItem {
+                project,
+                document_count: row.cell(11)?.integer()?,
+                task_count: row.cell(12)?.integer()?,
+                open_task_count: row.cell(13)?.integer()?,
+                can_edit: permission.at_least(ProjectPermission::Edit),
+                can_manage: permission.at_least(ProjectPermission::Manage),
+            });
+        }
+        Ok(Ok(items))
+    }.await;
+    let cleanup = tx.rollback().await;
+    project_read_after_rollback(result, cleanup)
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("project read refused: {0:?}")]
+struct ProjectReadRefusal(ProjectDbError);
+
+// The two actual selected readers return different typed rows. Withhold either
+// observation if original-stream cleanup is unknown, retaining its first cause.
+fn project_read_after_rollback<T>(
+    result: Result<Result<T, ProjectDbError>, sqlx::Error>,
+    cleanup: Result<(), sqlx::Error>,
+) -> Result<Result<T, ProjectDbError>, sqlx::Error> {
+    match cleanup {
+        Ok(()) => result,
+        Err(cleanup) => {
+            let original: Option<Box<dyn std::error::Error + Send + Sync>> = match result {
+                Err(driver) => Some(Box::new(driver)),
+                Ok(Err(refusal)) => Some(Box::new(ProjectReadRefusal(refusal))),
+                Ok(Ok(_)) => None,
+            };
+            Err(crate::db::backend::rollback_cleanup_unknown(
+                original, cleanup,
+            ))
+        }
+    }
+}
+
 pub async fn list_projects(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -2187,6 +2306,83 @@ pub async fn remove_project_member(
         return Err(err);
     }
     Ok(Ok(()))
+}
+
+pub async fn get_project_workflow_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<WorkflowRow, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return get_project_workflow(pool, workspace_id, project_id, actor_user_id, session_id)
+            .await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        if !op.session_is_live(actor_user_id, session_id).await? {
+            return Ok(Err(ProjectDbError::Forbidden));
+        }
+        if !op.workspace_is_live(workspace_id).await?
+            || op
+                .membership_role(workspace_id, actor_user_id, false)
+                .await?
+                .is_none()
+        {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        if !op
+            .project_permission_by_id(workspace_id, actor_user_id, project_id)
+            .await?
+            .is_some_and(|permission| permission.at_least(ProjectPermission::View))
+        {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        let OperationTx::SqliteFamily(family) = op else {
+            unreachable!()
+        };
+        family.require_tenant(workspace_id)?;
+        let rows = family
+            .query(
+                "SELECT id FROM workflows WHERE workspace_id=?1 AND project_id=?2 LIMIT 1",
+                &[Cell::uuid(workspace_id), Cell::uuid(project_id)],
+            )
+            .await?;
+        let Some(row) = rows.first() else {
+            return Ok(Err(ProjectDbError::NotFound));
+        };
+        let id = row.cell(0)?.id()?;
+        let rows = family
+            .query(
+                "SELECT id,name,category,sort_key,wip_limit FROM statuses
+            WHERE workspace_id=?1 AND project_id=?2 ORDER BY sort_key COLLATE BINARY",
+                &[Cell::uuid(workspace_id), Cell::uuid(project_id)],
+            )
+            .await?;
+        let statuses = rows
+            .iter()
+            .map(|row| {
+                Ok(WorkflowStatusRow {
+                    id: row.cell(0)?.id()?,
+                    name: row.cell(1)?.string()?,
+                    category: row.cell(2)?.string()?,
+                    sort_key: row.cell(3)?.string()?,
+                    wip_limit: row.cell(4)?.optional(Cell::int32)?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+        Ok(Ok(WorkflowRow {
+            id,
+            project_id,
+            statuses,
+        }))
+    }
+    .await;
+    let cleanup = tx.rollback().await;
+    project_read_after_rollback(result, cleanup)
 }
 
 pub async fn get_project_workflow(
@@ -3155,5 +3351,437 @@ mod selected_project_create_tests {
             .unwrap();
         assert!(create(&f, session, "WAITING", None).await.unwrap().is_ok());
         f.close().await;
+    }
+}
+
+#[cfg(test)]
+mod selected_project_read_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+
+    async fn credential(f: &Fixture) -> Uuid {
+        let id = Uuid::now_v7();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        tx.operation()
+            .create_session(
+                id,
+                f.user,
+                "selected-project-read",
+                crate::db::identity::stored_now()
+                    + chrono::Duration::seconds(crate::auth::token::SESSION_TTL_SECS),
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        id
+    }
+    async fn create(f: &Fixture, credential: Uuid, key: &str, visibility: &str) -> ProjectRow {
+        create_project_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            CreateProjectInput {
+                key,
+                name: key,
+                visibility,
+                description: Some("read fixture"),
+                icon: None,
+                lead_user_id: None,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    }
+    async fn list(f: &Fixture, credential: Uuid) -> Vec<ProjectListItem> {
+        list_projects_backend(&f.backend, f.workspace, f.user, credential)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    async fn workflow(f: &Fixture, credential: Uuid, project: Uuid) -> WorkflowRow {
+        get_project_workflow_backend(&f.backend, f.workspace, project, f.user, credential)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn sqlite_project_reads_literal_counts_workflow_and_binary_order() {
+        let f = Fixture::new().await;
+        let credential = credential(&f).await;
+        let private = create(&f, credential, "ZZ", "private").await;
+        let public = create(&f, credential, "AA", "workspace").await;
+        let flow = workflow(&f, credential, public.id).await;
+        assert_eq!(flow.project_id, public.id);
+        let stored: Vec<u8> =
+            sqlx::query_scalar("SELECT id FROM workflows WHERE workspace_id=?1 AND project_id=?2")
+                .bind(f.workspace.as_bytes().as_slice())
+                .bind(public.id.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, flow.id.as_bytes());
+        assert_eq!(
+            flow.statuses
+                .iter()
+                .map(|s| (s.category.as_str(), s.sort_key.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("backlog", "V"),
+                ("todo", "W"),
+                ("in_progress", "X"),
+                ("in_progress", "Y"),
+                ("done", "Z"),
+                ("canceled", "a")
+            ]
+        );
+        assert!(flow
+            .statuses
+            .iter()
+            .all(|s| !s.id.is_nil() && !s.name.is_empty() && s.wip_limit.is_none()));
+        sqlx::query("UPDATE statuses SET wip_limit=3 WHERE id=?1")
+            .bind(flow.statuses[2].id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            workflow(&f, credential, public.id).await.statuses[2].wip_limit,
+            Some(3)
+        );
+        // Real baseline FK constraints remain enabled; rows below are count
+        // fixtures, not a replacement for the existing document/task creators.
+        for (index, (status, deleted)) in [
+            ("draft", None),
+            ("published", None),
+            ("archived", None),
+            ("published", Some(1_i64)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = Uuid::now_v7();
+            sqlx::query("INSERT INTO documents(id,workspace_id,project_id,title,path,sort_key,number,status,schema_version,created_by,content_json,deleted_at) VALUES(?1,?2,?3,'Count',?4,'V',?5,?6,?7,?8,'{\"type\":\"doc\",\"content\":[]}',?9)")
+                .bind(id.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(public.id.as_bytes().as_slice())
+                .bind(to_path_label(id)).bind(i64::try_from(index).unwrap()+2).bind(status).bind(DOCUMENT_SCHEMA_VERSION)
+                .bind(f.user.as_bytes().as_slice()).bind(deleted).execute(&f.pool).await.unwrap();
+        }
+        for (index, (status_index, archived, deleted)) in [
+            (0, None, None),
+            (4, None, None),
+            (5, None, None),
+            (1, Some(1_i64), None),
+            (1, None, Some(1_i64)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,content_json,created_by,archived_at,deleted_at) VALUES(?1,?2,?3,?4,'Count',?5,'{}',?6,?7,?8)")
+                .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(public.id.as_bytes().as_slice())
+                .bind(i64::try_from(index).unwrap()+1).bind(flow.statuses[status_index].id.as_bytes().as_slice())
+                .bind(f.user.as_bytes().as_slice()).bind(archived).bind(deleted).execute(&f.pool).await.unwrap();
+        }
+        sqlx::query("UPDATE projects SET status='archived' WHERE id=?1")
+            .bind(public.id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let items = list(&f, credential).await;
+        assert_eq!(
+            items.iter().map(|i| i.project.id).collect::<Vec<_>>(),
+            [public.id, private.id]
+        );
+        assert_eq!(items[0].project.status, "archived");
+        assert_eq!(items[0].project.root_document_id, public.root_document_id);
+        assert_eq!(
+            (
+                items[0].document_count,
+                items[0].task_count,
+                items[0].open_task_count
+            ),
+            (4, 3, 1)
+        );
+        assert_eq!(
+            (
+                items[1].document_count,
+                items[1].task_count,
+                items[1].open_task_count
+            ),
+            (1, 0, 0)
+        );
+        assert!(items.iter().all(|i| i.can_edit && i.can_manage));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        sqlx::query("UPDATE projects SET deleted_at=1 WHERE id=?1")
+            .bind(public.id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(list(&f, credential).await.len(), 1);
+        assert!(matches!(
+            get_project_workflow_backend(&f.backend, f.workspace, public.id, f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_project_reads_private_group_guest_and_current_authority() {
+        let f = Fixture::new().await;
+        let credential = credential(&f).await;
+        let public = create(&f, credential, "AA", "workspace").await;
+        let private = create(&f, credential, "ZZ", "private").await;
+        // No workspace-owner bypass of private projects, even if the actor was
+        // their creator. Fixture revocation leaves the product read unchanged.
+        sqlx::query("DELETE FROM project_members WHERE user_id=?1")
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            list(&f, credential)
+                .await
+                .iter()
+                .map(|i| i.project.id)
+                .collect::<Vec<_>>(),
+            [public.id]
+        );
+        assert!(matches!(
+            get_project_workflow_backend(&f.backend, f.workspace, private.id, f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        let group = Uuid::now_v7();
+        sqlx::query("INSERT INTO groups(id,workspace_id,name) VALUES(?1,?2,'Read viewers')")
+            .bind(group.as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO group_members(workspace_id,group_id,user_id) VALUES(?1,?2,?3)")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(group.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,group_id,role) VALUES(?1,?2,?3,?4,'viewer')").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(private.id.as_bytes().as_slice()).bind(group.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let items = list(&f, credential).await;
+        assert_eq!(items.len(), 2);
+        assert!(!items[1].can_edit && !items[1].can_manage);
+        assert_eq!(
+            workflow(&f, credential, private.id).await.project_id,
+            private.id
+        );
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'member')").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(private.id.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert!(list(&f, credential).await[1].can_edit);
+        assert!(!list(&f, credential).await[1].can_manage);
+        sqlx::query("DELETE FROM project_members WHERE user_id=?1")
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE memberships SET role='guest' WHERE user_id=?1")
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            list(&f, credential)
+                .await
+                .iter()
+                .map(|i| i.project.id)
+                .collect::<Vec<_>>(),
+            [private.id]
+        );
+        sqlx::query("DELETE FROM group_members WHERE user_id=?1")
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(list(&f, credential).await.is_empty());
+        assert!(matches!(
+            get_project_workflow_backend(&f.backend, f.workspace, private.id, f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        assert!(matches!(
+            list_projects_backend(&f.backend, Uuid::now_v7(), f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_projects_backend(&f.backend, f.workspace, f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::Forbidden)
+        ));
+        assert!(matches!(
+            get_project_workflow_backend(&f.backend, f.workspace, public.id, f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::Forbidden)
+        ));
+        sqlx::query("UPDATE sessions SET revoked_at=NULL,expires_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_projects_backend(&f.backend, f.workspace, f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::Forbidden)
+        ));
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_project_reads_driver_failure_rolls_back_and_healthy_retry() {
+        let f = Fixture::new().await;
+        let credential = credential(&f).await;
+        let project = create(&f, credential, "AA", "workspace").await;
+        sqlx::query("ALTER TABLE projects RENAME COLUMN key TO broken_key")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(
+            list_projects_backend(&f.backend, f.workspace, f.user, credential)
+                .await
+                .is_err()
+        );
+        sqlx::query("ALTER TABLE projects RENAME COLUMN broken_key TO key")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(list(&f, credential).await[0].project.id, project.id);
+        sqlx::query("ALTER TABLE statuses RENAME COLUMN category TO broken_category")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(get_project_workflow_backend(
+            &f.backend,
+            f.workspace,
+            project.id,
+            f.user,
+            credential
+        )
+        .await
+        .is_err());
+        sqlx::query("ALTER TABLE statuses RENAME COLUMN broken_category TO category")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(workflow(&f, credential, project.id).await.statuses.len(), 6);
+        sqlx::query("UPDATE users SET suspended_at=1 WHERE id=?1")
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_projects_backend(&f.backend, f.workspace, f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::Forbidden)
+        ));
+        sqlx::query("UPDATE users SET suspended_at=NULL WHERE id=?1")
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE workspaces SET deleted_at=1 WHERE id=?1")
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            get_project_workflow_backend(&f.backend, f.workspace, project.id, f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        sqlx::query("UPDATE workspaces SET deleted_at=NULL WHERE id=?1")
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            list_projects_backend(&f.backend, f.workspace, f.user, credential)
+                .await
+                .unwrap(),
+            Err(ProjectDbError::NotFound)
+        ));
+        f.close().await;
+    }
+
+    #[test]
+    fn project_read_cleanup_failure_withholds_rows_and_retains_typed_causes() {
+        // Pure returned-error propagation only. This does not simulate or prove
+        // the settlement of an actual remote provider transaction.
+        let error = project_read_after_rollback::<Vec<ProjectListItem>>(
+            Ok(Ok(vec![])),
+            Err(sqlx::Error::Protocol("cleanup".into())),
+        )
+        .unwrap_err();
+        let sqlx::Error::AnyDriverError(source) = error else {
+            panic!("missing cleanup envelope")
+        };
+        let unknown = source
+            .downcast_ref::<crate::db::backend::RollbackCleanupUnknown>()
+            .unwrap();
+        assert!(unknown.original.is_none());
+        assert!(matches!(&unknown.cleanup,sqlx::Error::Protocol(message) if message=="cleanup"));
+        let error = project_read_after_rollback::<WorkflowRow>(
+            Ok(Err(ProjectDbError::NotFound)),
+            Err(sqlx::Error::Protocol("cleanup".into())),
+        )
+        .unwrap_err();
+        let sqlx::Error::AnyDriverError(source) = error else {
+            panic!("missing cleanup envelope")
+        };
+        assert!(matches!(
+            source
+                .downcast_ref::<crate::db::backend::RollbackCleanupUnknown>()
+                .unwrap()
+                .original
+                .as_ref()
+                .unwrap()
+                .downcast_ref::<ProjectReadRefusal>(),
+            Some(ProjectReadRefusal(ProjectDbError::NotFound))
+        ));
+        let error = project_read_after_rollback::<WorkflowRow>(
+            Err(sqlx::Error::Protocol("original query".into())),
+            Err(sqlx::Error::Protocol("cleanup".into())),
+        )
+        .unwrap_err();
+        let sqlx::Error::AnyDriverError(source) = error else {
+            panic!("missing cleanup envelope")
+        };
+        assert!(
+            matches!(source.downcast_ref::<crate::db::backend::RollbackCleanupUnknown>().unwrap().original.as_ref().unwrap().downcast_ref::<sqlx::Error>(),Some(sqlx::Error::Protocol(message)) if message=="original query")
+        );
     }
 }
