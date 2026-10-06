@@ -209,7 +209,20 @@ try:
     driver_phase = 'copied-native-hashes'
     assert [line.split()[0] for line in hashes.splitlines()] == [binaries[path]['sha256'] for path in (server, migrate, engine)]
     driver_phase = 'owned-network-mode'
-    command(['docker', 'inspect', '--format', '{{.HostConfig.NetworkMode}}', name], run / 'actual-network-mode.log')
+    inspected = command(['docker', 'inspect', '--format', '{{.HostConfig.NetworkMode}}', name], required=False)
+    for filename, value in [('actual-network-mode.log', inspected.stdout),
+                            ('actual-network-mode-stderr.private.log', inspected.stderr)]:
+        with (run / filename).open('w') as output:
+            os.fchmod(output.fileno(), 0o600)
+            output.write(value)
+    mode = inspected.stdout.strip()
+    receipt['network_mode_observation'] = {
+        'phase': driver_phase, 'driver_sha256': sha(__file__), 'line': sys._getframe().f_lineno,
+        'exit': inspected.returncode, 'stdout_mode': mode if mode in ('host', 'bridge', 'none', 'default') else 'UNKNOWN',
+        'stdout_sha256': hashlib.sha256(inspected.stdout.encode()).hexdigest(),
+        'stderr_present': bool(inspected.stderr), 'stderr_sha256': hashlib.sha256(inspected.stderr.encode()).hexdigest()}
+    if inspected.returncode:
+        raise RuntimeError(f'owned command failed exit={inspected.returncode}; executable=docker')
     assert (run / 'actual-network-mode.log').read_text().strip() == 'host'
     driver_phase = 'normal-runtime'
     server_log = (run / 'normal-server.log').open('w')

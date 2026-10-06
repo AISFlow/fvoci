@@ -329,6 +329,7 @@ rows = []
 server_row = None
 browser_inputs = {}
 code = 1
+driver_phase = 'preparation'
 try:
     command(['docker', 'create', '--name', name, '--network', 'host', '--user', '0',
              '--label', 'fvoci.owner=' + OWNER, '--label', 'fvoci.test-run=v060-current-normal-vue-pg',
@@ -352,8 +353,10 @@ try:
     command(['docker', 'exec', name, 'chmod', '0600', copies[-1][1]])
     command(['docker', 'cp', str(dist) + '/.', name + ':/srv/fvoci-web'])
     hashes = command(['docker', 'exec', name, 'sha256sum', *[dest for _, dest in copies[:-1]]]).stdout
+    driver_phase = 'copied-native-hashes'
     assert [line.split()[0] for line in hashes.splitlines()] == [binaries[path]['sha256'] for path in (server, migrate, engine)]
     (run / 'copied-executable-hashes.log').write_text(hashes)
+    driver_phase = 'normal-runtime'
     server_log = (run / 'normal-server.log').open('w')
     server_process = subprocess.Popen(['docker', 'exec', name, '/bin/sh', '-ec',
                                       '. /fvoci/inputs/environment.sh; exec /fvoci/bin/fvoci-migrate --start'],
@@ -426,13 +429,36 @@ try:
     receipt.update(browser_command=args, browser_environment_names=sorted(browser_env), browser_start_utc=now())
     write(run / 'browser-start.json', receipt)
     started = time.monotonic()
+    driver_phase = 'browser-run'
     result = command(args, run / 'browser.log', required=False, env=browser_env, cwd=W / 'apps/web')
     code = result.returncode
+    if code != 0:
+        receipt['original_browser_failure'] = {
+            'phase': driver_phase, 'driver_sha256': sha(__file__), 'line': sys._getframe().f_lineno,
+            'exit': code, 'log_sha256': sha(run / 'browser.log'),
+            'report_sha256': sha(run / 'playwright-result.private.json') if (run / 'playwright-result.private.json').exists() else None,
+            'assertion_location': None}
+        # Only the first actual JSON error at the exact committed selected spec.
+        # Missing/foreign locations stay unknown; never derive one from a stack/message.
+        try:
+            failed = json.loads((run / 'playwright-result.private.json').read_text())['suites'][0]['specs'][0]['tests'][0]['results'][0]
+            errors = failed.get('errors', [])
+            first = errors[0] if errors else failed.get('error')
+            location = first.get('location') if type(first) is dict else None
+            spec = W / 'apps/web/e2e-pending' / SPEC
+            if (failed['status'] in ('failed', 'timedOut') and type(failed['retry']) is int and failed['retry'] == 0 and
+                    type(location) is dict and location.get('file') == str(spec) and
+                    type(location.get('line')) is int and 1 <= location['line'] <= len(spec.read_text().splitlines()) and
+                    sha(spec) == before['tracked'].get('apps/web/e2e-pending/' + SPEC)):
+                receipt['original_browser_failure']['assertion_location'] = {'spec_sha256': sha(spec), 'line': location['line']}
+        except (KeyError, IndexError, TypeError, AttributeError, ValueError, OSError):
+            pass  # Diagnostic unavailable; the original nonzero browser status remains.
     receipt.update(browser_exit=code, browser_seconds=time.monotonic()-started,
                    browser_end_utc=now(), browser_log_sha256=sha(run / 'browser.log'))
     if (run / 'playwright-result.private.json').exists():
         os.chmod(run / 'playwright-result.private.json', 0o600)
         receipt['actual_json_report_sha256'] = sha(run / 'playwright-result.private.json')
+    driver_phase = 'durable-readback'
     if code == 0:
         assert re.search(r'\b1 passed\b', (run / 'browser.log').read_text())
         report = json.loads((run / 'playwright-result.private.json').read_text())
@@ -505,9 +531,20 @@ try:
                        actual_wrong_tenant_hidden=hidden, actual_restricted_role_durable_commit=durable,
                        tested_product_flow='identical actual currentVue setup/login/stable wiki create/nonempty nativeON/matching durableACK/manual DSSV reconstruction/fresh cookie actor and new connection native-body-ID-permission-history readback')
     if code == 0:
+        driver_phase = 'server-restart'
         receipt['current_schema_server_restart'] = restart_same_app(globals())
 except BaseException as error:
     receipt['original_driver_failure'] = {'type': type(error).__name__, 'message': str(error)}
+    origin = None
+    traceback = error.__traceback__
+    while traceback is not None:
+        if traceback.tb_frame.f_code.co_filename == __file__:
+            origin = traceback.tb_lineno
+        traceback = traceback.tb_next
+    receipt['original_driver_failure_origin'] = {
+        'phase': driver_phase, 'driver_sha256': sha(__file__), 'line': origin,
+        'type': type(error).__name__ if type(error).__name__ in
+            ('AssertionError', 'RuntimeError', 'PermissionError', 'OSError', 'TimeoutExpired') else 'OtherError'}
     code = code or 1
 finally:
     # Preserve bounded synthetic tracer state before maintained wrappers remove
@@ -523,6 +560,16 @@ finally:
         receipt['retained_native_state_sha256'] = sha(run / 'retained-native-tracer-state.json')
     except BaseException as error:
         receipt['native_evidence_preservation_error'] = {'type': type(error).__name__, 'message': str(error)}
+        origin = None
+        traceback = error.__traceback__
+        while traceback is not None:
+            if traceback.tb_frame.f_code.co_filename == __file__:
+                origin = traceback.tb_lineno
+            traceback = traceback.tb_next
+        receipt['native_evidence_preservation_origin'] = {
+            'phase': 'native-preservation', 'driver_sha256': sha(__file__), 'line': origin,
+            'type': type(error).__name__ if type(error).__name__ in
+                ('AssertionError', 'RuntimeError', 'PermissionError', 'OSError', 'TimeoutExpired') else 'OtherError'}
         code = code or 1
     cleanup_errors = []
     if created:
@@ -583,6 +630,16 @@ finally:
         receipt['exact_source_artifact_inputs_unchanged'] = True
     except BaseException as error:
         receipt['exact_source_artifact_inputs_unchanged'] = False
+        origin = None
+        traceback = error.__traceback__
+        while traceback is not None:
+            if traceback.tb_frame.f_code.co_filename == __file__:
+                origin = traceback.tb_lineno
+            traceback = traceback.tb_next
+        receipt['post_input_failure_origin'] = {
+            'phase': 'post-input-check', 'driver_sha256': sha(__file__), 'line': origin,
+            'type': type(error).__name__ if type(error).__name__ in
+                ('AssertionError', 'RuntimeError', 'PermissionError', 'OSError', 'TimeoutExpired') else 'OtherError'}
         cleanup_errors.append(f'post-input check {type(error).__name__}: {error}')
     if cleanup_errors:
         code = code or 1

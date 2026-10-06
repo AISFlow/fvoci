@@ -277,13 +277,54 @@ def runtime_ownership_return(output):
                             'recorded_process_identities_retired':bool, 'cleanup_errors':list}
                 origin = facts.get('original_driver_failure_origin')
                 driver = TEMPLATES / ('current-' + run['lane'] + '-driver.py')
-                if not (run['lane'] == 'sqlite' and facts.get('source') == before['head'] and type(origin) is dict and
+                bound_driver = (run['lane'] in ('postgres', 'sqlite') and facts.get('source') == before['head'] and
+                                sha(driver) == facts.get('driver_sha256'))
+                phases = ('preparation', 'copied-native-hashes', 'owned-network-mode', 'normal-runtime') if run['lane'] == 'sqlite' else (
+                    'preparation', 'copied-native-hashes', 'normal-runtime', 'browser-run', 'durable-readback', 'server-restart')
+                if not (bound_driver and type(origin) is dict and
                         set(origin) == {'phase', 'driver_sha256', 'line', 'type'} and
-                        origin['phase'] in ('preparation', 'copied-native-hashes', 'owned-network-mode', 'normal-runtime') and
+                        origin['phase'] in phases and
                         origin['type'] in ('AssertionError', 'RuntimeError', 'PermissionError', 'OSError', 'TimeoutExpired', 'OtherError') and
                         origin['driver_sha256'] == sha(driver) == facts.get('driver_sha256') and
                         type(origin['line']) is int and 1 <= origin['line'] <= len(driver.read_text().splitlines())):
                     origin = None
+                network = facts.get('network_mode_observation')
+                if not (bound_driver and run['lane'] == 'sqlite' and type(network) is dict and
+                        set(network) == {'phase', 'driver_sha256', 'line', 'exit', 'stdout_mode', 'stdout_sha256', 'stderr_present', 'stderr_sha256'} and
+                        network['phase'] == 'owned-network-mode' and network['driver_sha256'] == sha(driver) and
+                        type(network['line']) is int and 1 <= network['line'] <= len(driver.read_text().splitlines()) and
+                        type(network['exit']) is int and -255 <= network['exit'] <= 255 and
+                        network['stdout_mode'] in ('host', 'bridge', 'none', 'default', 'UNKNOWN') and
+                        type(network['stderr_present']) is bool and
+                        all(type(network[key]) is str and re.fullmatch('[0-9a-f]{64}', network[key])
+                            for key in ('stdout_sha256', 'stderr_sha256'))):
+                    network = None
+                browser = facts.get('original_browser_failure')
+                if not (bound_driver and run['lane'] == 'postgres' and type(browser) is dict and
+                        set(browser) == {'phase', 'driver_sha256', 'line', 'exit', 'log_sha256', 'report_sha256', 'assertion_location'} and
+                        browser['phase'] == 'browser-run' and browser['driver_sha256'] == sha(driver) and
+                        type(browser['line']) is int and 1 <= browser['line'] <= len(driver.read_text().splitlines()) and
+                        type(browser['exit']) is int and -255 <= browser['exit'] <= 255 and browser['exit'] != 0 and
+                        type(browser['log_sha256']) is str and re.fullmatch('[0-9a-f]{64}', browser['log_sha256']) and
+                        (browser['report_sha256'] is None or type(browser['report_sha256']) is str and
+                         re.fullmatch('[0-9a-f]{64}', browser['report_sha256']))):
+                    browser = None
+                if browser is not None:
+                    location = browser['assertion_location']
+                    spec = ROOT / 'apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'
+                    if not (type(location) is dict and set(location) == {'spec_sha256', 'line'} and
+                            location['spec_sha256'] == sha(spec) == before.get('tracked', {}).get(str(spec.relative_to(ROOT))) and
+                            type(location['line']) is int and 1 <= location['line'] <= len(spec.read_text().splitlines())):
+                        browser = {**browser, 'assertion_location': None}
+                secondary = {}
+                for key, phase in (('native_evidence_preservation_origin', 'native-preservation'),
+                                   ('post_input_failure_origin', 'post-input-check')):
+                    record = facts.get(key)
+                    secondary[key] = record if (bound_driver and run['lane'] == 'postgres' and type(record) is dict and
+                        set(record) == {'phase', 'driver_sha256', 'line', 'type'} and record['phase'] == phase and
+                        record['driver_sha256'] == sha(driver) and type(record['line']) is int and
+                        1 <= record['line'] <= len(driver.read_text().splitlines()) and record['type'] in
+                        ('AssertionError', 'RuntimeError', 'PermissionError', 'OSError', 'TimeoutExpired', 'OtherError')) else None
                 # A whitelist only: no paths, URLs, failure messages or raw logs.
                 # Missing evidence remains missing and still refuses ownership return.
                 diagnostic['lanes'].append({'lane':run['lane'],
@@ -291,6 +332,13 @@ def runtime_ownership_return(output):
                     'receipt_final_exit':facts.get('final_exit_code') if type(facts.get('final_exit_code')) is int else None,
                     'receipt_sha256':sha(root/'receipt.json'),
                     'original_driver_failure_origin':origin,
+                    'network_mode_observation':network,
+                    'original_browser_failure':browser,
+                    'secondary_failure_origins':secondary,
+                    'native_preservation_error_sha256':hashlib.sha256(json.dumps(facts['native_evidence_preservation_error'],sort_keys=True).encode()).hexdigest()
+                        if 'native_evidence_preservation_error' in facts else None,
+                    'exact_source_artifact_inputs_unchanged':facts.get('exact_source_artifact_inputs_unchanged')
+                        if type(facts.get('exact_source_artifact_inputs_unchanged')) is bool else None,
                     'missing_required_fields':[key for key in required if key not in facts],
                     'invalid_required_fields':[key for key in required if key in facts and type(facts[key]) is not expected[key]],
                     'source_matches_current':facts.get('source') == before['head'],
