@@ -586,3 +586,52 @@ for label, arguments, reason in rejects:
     assert run(label, **arguments) == {"available": False, "reason": reason}, label
 print(f"trace-summary Task fixtures: {checks - len(rejects)} positive + {len(rejects)} rejection controls PASS")
 PY
+
+# Supported DEFLATE decoding can fail independently of ZIP headers or method99.
+# Keep a genuine compressed-body regression, including stdout/stderr privacy.
+python3 - "$ROOT/scripts/web-e2e-trace-summary.py" "$WORK" <<'PY'
+import json, pathlib, struct, subprocess, sys, zipfile, zlib
+script, work = sys.argv[1], pathlib.Path(sys.argv[2])
+member = "attachments/" + "f" * 40
+canary = "TASK_DEFLATE_PRIVATE_BODY"
+data = {"schema": "w3-task-fresh-admission-v1", "routeDeliveryMeaning": "route-send-returned",
+        "routeToProviderSocketBinding": "unknown", "crossLaneClockOrder": "unknown",
+        "route": {"events": [], "dropped": 0}, "browser": {"events": []}, "state": {}, "completed": False}
+reference = {"name": "w3-task-retired-grant-wire-coherence.json", "contentType": "application/json", "file": member}
+for corrupt in (False, True):
+    archive = work / ("task-supported-deflate-corrupt.zip" if corrupt else "task-supported-deflate-valid.zip")
+    payload = dict(data, privateBody=canary) if corrupt else data
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as trace:
+        trace.writestr("test.trace", json.dumps({"type": "after", "attachments": [reference]}))
+        item = zipfile.ZipInfo(member); item.compress_type = zipfile.ZIP_DEFLATED; item.external_attr = 0o100600 << 16
+        trace.writestr(item, json.dumps(payload))
+    if corrupt:
+        raw = bytearray(archive.read_bytes())
+        with zipfile.ZipFile(archive) as trace:
+            item = trace.getinfo(member)
+            assert item.compress_type == 8 and item.flag_bits == 0 and not item.is_dir()
+            assert item.external_attr >> 16 == 0o100600
+            header = item.header_offset
+        name_size, extra_size = struct.unpack_from("<HH", raw, header + 26)
+        offset = header + 30 + name_size + extra_size
+        assert json.loads(zlib.decompress(raw[offset:offset + item.compress_size], -15)) == payload
+        raw[offset] = 0x07  # BFINAL1 + reserved BTYPE3: genuinely invalid DEFLATE block.
+        try:
+            zlib.decompress(raw[offset:offset + item.compress_size], -15)
+            raise AssertionError("fixture corruption did not fail supported decoding")
+        except zlib.error:
+            pass
+        archive.write_bytes(raw)
+    result = subprocess.run([sys.executable, script, str(archive)], capture_output=True, timeout=20)
+    assert result.returncode == 0 and result.stderr == b"", "supported-DEFLATE containment failed"
+    assert canary.encode() not in result.stdout + result.stderr
+    prefix = "w3-task-admission-diagnostic "
+    records = [json.loads(line[len(prefix):]) for line in result.stdout.decode().splitlines() if line.startswith(prefix)]
+    assert len(records) == 1
+    if corrupt:
+        assert records[0] == {"available": False, "reason": "invalid_attachment_data"}
+        assert b"zlib.error" not in result.stdout and b"Traceback" not in result.stdout
+    else:
+        assert records[0]["available"] is True and records[0]["completed"] is False
+print("trace-summary Task DEFLATE fixtures: 1 valid supported decoder + 1 corrupt-body fixed/private refusal PASS")
+PY

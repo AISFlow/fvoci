@@ -287,6 +287,8 @@ TASK_ENUMS = {
 
 def task_diagnostic_digest(trace):
     """Project only the Task observer contract; raw attachments remain private."""
+    import zlib
+
     def unavailable(reason):
         return {"available": False, "reason": reason}
 
@@ -395,7 +397,7 @@ def task_diagnostic_digest(trace):
         if matching[0].file_size > 1024 * 1024:
             return unavailable("attachment_size_limit")
         data = load(trace.read(matching[0]))
-    except (ValueError, UnicodeError, RecursionError, RuntimeError, NotImplementedError, EOFError, zipfile.BadZipFile, OSError):
+    except (ValueError, UnicodeError, RecursionError, RuntimeError, NotImplementedError, EOFError, zipfile.BadZipFile, OSError, zlib.error):
         return unavailable("invalid_attachment_data")
     policy = {
         "schema": "w3-task-fresh-admission-v1",
