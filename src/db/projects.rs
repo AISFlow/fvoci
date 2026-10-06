@@ -695,6 +695,134 @@ pub(crate) async fn seed_workflow(
     Ok(workflow_id)
 }
 
+impl OperationTx<'_, '_> {
+    pub(crate) async fn workspace_removal_blocked_by_private_leads(
+        &mut self,
+        workspace: Uuid,
+        target: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                workspace_removal_blocked_by_private_leads(tx, workspace, target).await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                // The maintained policy counts lead grant rows, including
+                // NULL-user group grants, not the group's current user count.
+                let rows = tx.query(
+                    "SELECT EXISTS(SELECT 1 FROM projects p JOIN project_members mine ON mine.workspace_id=p.workspace_id AND mine.project_id=p.id WHERE p.workspace_id=?1 AND p.deleted_at IS NULL AND p.visibility='private' AND mine.user_id=?2 AND mine.role='lead' AND NOT EXISTS(SELECT 1 FROM project_members other WHERE other.workspace_id=p.workspace_id AND other.project_id=p.id AND other.role='lead' AND (other.user_id IS NULL OR other.user_id<>?2)))",
+                    &[Cell::uuid(workspace), Cell::uuid(target)],
+                ).await?;
+                rows.first()
+                    .ok_or(sqlx::Error::RowNotFound)?
+                    .cell(0)?
+                    .boolean()
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod selected_member_removal_lead_tests {
+    use super::*;
+    use crate::db::workspace::selected_member_removal_tests::{fixture, project, remove, snapshot};
+
+    #[tokio::test]
+    async fn sqlite_workspace_removal_private_archived_direct_group_and_writer_scope() {
+        let (f, credential, target, _) = fixture().await;
+        let project = project(&f, target, "private").await;
+        let before = snapshot(&f).await;
+        assert!(matches!(
+            remove(&f, credential, target).await.unwrap(),
+            Err(crate::db::workspace::WorkspaceDbError::LastProjectLead)
+        ));
+        assert_eq!(snapshot(&f).await, before);
+        sqlx::query("UPDATE projects SET status='archived' WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let before = snapshot(&f).await;
+        assert!(matches!(
+            remove(&f, credential, target).await.unwrap(),
+            Err(crate::db::workspace::WorkspaceDbError::LastProjectLead)
+        ));
+        assert_eq!(snapshot(&f).await, before);
+        let mut read = f.backend.begin_read().await.unwrap();
+        read.operation().set_tenant(f.workspace).await.unwrap();
+        assert!(read
+            .operation()
+            .workspace_removal_blocked_by_private_leads(f.workspace, target)
+            .await
+            .is_err());
+        read.rollback().await.unwrap();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        {
+            let mut op = tx.operation();
+            op.set_tenant(f.workspace).await.unwrap();
+            assert!(op
+                .workspace_removal_blocked_by_private_leads(Uuid::now_v7(), target)
+                .await
+                .is_err());
+            assert!(op
+                .workspace_removal_blocked_by_private_leads(f.workspace, target)
+                .await
+                .unwrap());
+        }
+        tx.rollback().await.unwrap();
+        sqlx::query("UPDATE projects SET deleted_at=1 WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        tx.operation().set_tenant(f.workspace).await.unwrap();
+        assert!(!tx
+            .operation()
+            .workspace_removal_blocked_by_private_leads(f.workspace, target)
+            .await
+            .unwrap());
+        tx.rollback().await.unwrap();
+        sqlx::query("UPDATE projects SET deleted_at=NULL WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let group = Uuid::now_v7();
+        let grant = Uuid::now_v7();
+        sqlx::query("INSERT INTO groups(id,workspace_id,name) VALUES(?1,?2,'Lead grant retained')")
+            .bind(group.as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        // A NULL-user group lead counts as another grant even with no group users.
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,group_id,role) VALUES(?1,?2,?3,?4,'lead')").bind(grant.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(group.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        remove(&f, credential, target).await.unwrap().unwrap();
+        let kept: (Option<Vec<u8>>, Vec<u8>, String) =
+            sqlx::query_as("SELECT user_id,group_id,role FROM project_members WHERE id=?1")
+                .bind(grant.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(kept, (None, group.as_bytes().to_vec(), "lead".into()));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM project_members WHERE project_id=?1 AND user_id=?2"
+            )
+            .bind(project.as_bytes().as_slice())
+            .bind(target.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+            0
+        );
+        crate::db::workspace::selected_personal_workspace_tests::foreign_keys(&f).await;
+        f.close().await;
+    }
+}
+
 pub(crate) async fn workspace_removal_blocked_by_private_leads(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,

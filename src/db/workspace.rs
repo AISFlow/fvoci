@@ -1526,6 +1526,208 @@ pub async fn set_member_role(
     Ok(member.ok_or(WorkspaceDbError::NotFound))
 }
 
+/// Selected membership removal holds the actual writer through authority,
+/// policy, cascades and event/audit publication. PG retains its public wrapper.
+pub async fn remove_member_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    target: Uuid,
+    ip: Option<&str>,
+) -> Result<Result<(), WorkspaceDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return remove_member(pool, workspace, actor, credential, target, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = remove_member_operation(
+        &mut tx.operation(),
+        workspace,
+        actor,
+        credential,
+        target,
+        ip,
+    )
+    .await;
+    if let Ok(Ok(())) = result {
+        tx.commit_with_cleanup()
+            .await
+            .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+        Ok(Ok(()))
+    } else {
+        member_removal_after_rollback(result, tx.rollback().await)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("workspace member removal refused: {0:?}")]
+struct MemberRemovalRefusal(WorkspaceDbError);
+
+fn member_removal_after_rollback(
+    result: Result<Result<(), WorkspaceDbError>, sqlx::Error>,
+    cleanup: Result<(), sqlx::Error>,
+) -> Result<Result<(), WorkspaceDbError>, sqlx::Error> {
+    match cleanup {
+        Ok(()) => result,
+        Err(cleanup) => {
+            let original: Option<Box<dyn std::error::Error + Send + Sync>> = match result {
+                Err(driver) => Some(Box::new(driver)),
+                Ok(Err(refusal)) => Some(Box::new(MemberRemovalRefusal(refusal))),
+                Ok(Ok(())) => None,
+            };
+            Err(super::backend::rollback_cleanup_unknown(original, cleanup))
+        }
+    }
+}
+
+async fn remove_member_operation(
+    op: &mut OperationTx<'_, '_>,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    target: Uuid,
+    ip: Option<&str>,
+) -> Result<Result<(), WorkspaceDbError>, sqlx::Error> {
+    op.set_tenant(workspace).await?;
+    op.lock_membership_users(&[actor, target]).await?;
+    if !op.recheck_session(actor, credential).await? {
+        return Ok(Err(WorkspaceDbError::Forbidden));
+    }
+    let kind = {
+        let OperationTx::SqliteFamily(tx) = op else {
+            return Err(sqlx::Error::Protocol(
+                "member removal operation requires family writer".into(),
+            ));
+        };
+        tx.require_writer()?;
+        tx.require_tenant(workspace)?;
+        let rows = tx
+            .query(
+                "SELECT kind FROM workspaces WHERE id=?1 AND deleted_at IS NULL",
+                &[Cell::uuid(workspace)],
+            )
+            .await?;
+        rows.first().map(|row| row.cell(0)?.string()).transpose()?
+    };
+    let Some(kind) = kind else {
+        return Ok(Err(WorkspaceDbError::NotFound));
+    };
+    let actor_role = match op.membership_role(workspace, actor, true).await? {
+        Some(role) if role.at_least(WorkspaceRole::Admin) => role,
+        _ => return Ok(Err(WorkspaceDbError::Forbidden)),
+    };
+    if kind == "personal" {
+        return Ok(Err(WorkspaceDbError::PersonalImmutable));
+    }
+    if actor == target {
+        return Ok(Err(WorkspaceDbError::SelfChange));
+    }
+    let live_target = {
+        let OperationTx::SqliteFamily(tx) = op else {
+            unreachable!()
+        };
+        let rows = tx
+            .query(
+                "SELECT deleted_at IS NULL FROM users WHERE id=?1",
+                &[Cell::uuid(target)],
+            )
+            .await?;
+        rows.first()
+            .map(|row| row.cell(0)?.boolean())
+            .transpose()?
+            .unwrap_or(false)
+    };
+    if !live_target {
+        return Ok(Err(WorkspaceDbError::NotFound));
+    }
+    let target_role = match op.membership_role(workspace, target, true).await? {
+        Some(role) => role,
+        None => return Ok(Err(WorkspaceDbError::NotFound)),
+    };
+    if !actor_role.at_least(target_role) {
+        return Ok(Err(WorkspaceDbError::RoleCap));
+    }
+    if target_role == WorkspaceRole::Owner {
+        let OperationTx::SqliteFamily(tx) = op else {
+            unreachable!()
+        };
+        let rows = tx
+            .query(
+                "SELECT count(*) FROM memberships WHERE workspace_id=?1 AND role='owner'",
+                &[Cell::uuid(workspace)],
+            )
+            .await?;
+        if rows
+            .first()
+            .ok_or(sqlx::Error::RowNotFound)?
+            .cell(0)?
+            .integer()?
+            <= 1
+        {
+            return Ok(Err(WorkspaceDbError::LastOwner));
+        }
+    }
+    if op
+        .workspace_removal_blocked_by_private_leads(workspace, target)
+        .await?
+    {
+        return Ok(Err(WorkspaceDbError::LastProjectLead));
+    }
+    let revoked = op
+        .remove_pending_by_inviter(
+            workspace,
+            target,
+            &[
+                WorkspaceRole::Owner,
+                WorkspaceRole::Admin,
+                WorkspaceRole::Member,
+                WorkspaceRole::Guest,
+            ],
+        )
+        .await?;
+    let transferred = op
+        .transfer_shared_view_ownership(workspace, target, actor)
+        .await?;
+    {
+        let OperationTx::SqliteFamily(tx) = op else {
+            unreachable!()
+        };
+        if tx
+            .execute(
+                "DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2",
+                &[Cell::uuid(workspace), Cell::uuid(target)],
+            )
+            .await?
+            != 1
+        {
+            return Err(sqlx::Error::RowNotFound);
+        }
+    }
+    let payload = json!({"userId":target.to_string(),"role":target_role.as_str(),"revokedInvitations":revoked,"transferredSharedViews":transferred});
+    op.append_event(crate::db::identity::EventAppend {
+        id: Uuid::now_v7(),
+        workspace_id: Some(workspace),
+        actor_user_id: Some(actor),
+        verb: "workspace_member.removed".into(),
+        target_type: Some("workspace_member".into()),
+        target_id: Some(target),
+        payload: payload.clone(),
+    })
+    .await?;
+    op.append_audit(crate::db::identity::AuditAppend {
+        id: Uuid::now_v7(),
+        workspace_id: Some(workspace),
+        actor_user_id: Some(actor),
+        verb: "workspace_member.removed".into(),
+        target_type: Some("workspace_member".into()),
+        target_id: Some(target),
+        payload,
+        ip: ip.map(str::to_string),
+    })
+    .await?;
+    Ok(Ok(()))
+}
+
 pub async fn remove_member(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -2185,6 +2387,678 @@ pub async fn lock_sign_in_user(
     user_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     crate::db::identity::lock_sign_in(tx, user_id).await
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+pub(crate) mod selected_member_removal_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+    use std::future::Future;
+
+    type RemovalPublicationRow = (Vec<u8>, Vec<u8>, String, String, String);
+    type TransferredViewRow = (Vec<u8>, String, String, String, String, i64, i64);
+
+    pub(crate) async fn add_member(f: &Fixture, role: &str) -> (Uuid, Uuid) {
+        let user = Uuid::now_v7();
+        let credential = Uuid::now_v7();
+        sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,?2,'Removal fixture')")
+            .bind(user.as_bytes().as_slice())
+            .bind(format!("{user}@example.test"))
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,?3)")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(user.as_bytes().as_slice())
+            .bind(role)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let expiry = crate::db::identity::stored_now()
+            + chrono::Duration::seconds(crate::auth::token::SESSION_TTL_SECS);
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,?4)")
+            .bind(credential.as_bytes().as_slice())
+            .bind(user.as_bytes().as_slice())
+            .bind(credential.to_string())
+            .bind(expiry.timestamp_micros())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        (user, credential)
+    }
+
+    pub(crate) async fn fixture() -> (Fixture, Uuid, Uuid, Uuid) {
+        let (f, credential) = super::selected_personal_workspace_tests::fixture().await;
+        let (target, target_credential) = add_member(&f, "member").await;
+        (f, credential, target, target_credential)
+    }
+
+    pub(crate) async fn invitation(
+        f: &Fixture,
+        workspace: Uuid,
+        inviter: Uuid,
+        role: &str,
+        accepted: bool,
+    ) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query("INSERT INTO invitations(id,workspace_id,email,role,token_hash,invited_by,expires_at,accepted_at) VALUES(?1,?2,'invite@example.test',?3,?4,?5,1,?6)")
+            .bind(id.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(role).bind(id.to_string()).bind(inviter.as_bytes().as_slice()).bind(accepted.then_some(1_i64)).execute(&f.pool).await.unwrap();
+        id
+    }
+
+    pub(crate) async fn project(f: &Fixture, target: Uuid, visibility: &str) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,?3,'Removal project',?4,?5)")
+            .bind(id.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(format!("R{}", &id.simple().to_string()[20..]).to_uppercase()).bind(visibility).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).bind(target.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        id
+    }
+
+    pub(crate) async fn views(f: &Fixture, target: Uuid) -> (Uuid, Uuid) {
+        let collection = Uuid::now_v7();
+        sqlx::query("INSERT INTO collections(id,workspace_id,kind,name) VALUES(?1,?2,'document','Retained collection')")
+            .bind(collection.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let shared = Uuid::now_v7();
+        let private = Uuid::now_v7();
+        for (id, visibility) in [(shared, "shared"), (private, "private")] {
+            sqlx::query("INSERT INTO collection_views(id,workspace_id,collection_id,owner_id,visibility,name,type,config,version,updated_at) VALUES(?1,?2,?3,?4,?5,'Literal retained view','table','{\"filter\":\"unchanged\"}',7,1)")
+                .bind(id.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(collection.as_bytes().as_slice()).bind(target.as_bytes().as_slice()).bind(visibility).execute(&f.pool).await.unwrap();
+        }
+        (shared, private)
+    }
+
+    pub(crate) async fn snapshot(f: &Fixture) -> Vec<Vec<String>> {
+        // Auth expiry/revocation and sliding are deliberately outside the
+        // business-state oracle; a barrier may change only those fields.
+        let mut rows = super::selected_personal_workspace_tests::snapshot(f).await;
+        for sql in [
+            "SELECT json_array(hex(id),hex(workspace_id),email,role,hex(invited_by),expires_at,accepted_at,created_at,updated_at) FROM invitations ORDER BY id",
+            "SELECT json_array(hex(id),hex(workspace_id),hex(collection_id),hex(owner_id),visibility,name,type,config,version,created_at,updated_at) FROM collection_views ORDER BY id",
+            "SELECT json_array(hex(id),hex(workspace_id),hex(project_id),hex(user_id),hex(group_id),role,created_at,updated_at) FROM project_members ORDER BY id",
+            "SELECT json_array(hex(id),hex(workspace_id),key,name,visibility,status,deleted_at,next_number,created_at,updated_at) FROM projects ORDER BY id",
+            "SELECT json_array(hex(workspace_id),hex(group_id),hex(user_id),created_at,updated_at) FROM group_members ORDER BY workspace_id,group_id,user_id",
+            "SELECT json_array(hex(id),hex(workspace_id),name,created_at,updated_at) FROM groups ORDER BY id",
+            "SELECT json_array(hex(id),hex(workspace_id),hex(user_id),name,scopes,expires_at,created_at) FROM api_tokens ORDER BY id",
+            "SELECT json_array(hex(id),hex(workspace_id),title,icon,path,hex(parent_id),sort_key,number,status,content_json,updated_at) FROM documents ORDER BY id",
+            "SELECT json_array(hex(workspace_id),hex(document_id),hex(state),encoding,compacted_at,created_at,updated_at,writer_generation,snapshot_cutoff_seq,tail_seq) FROM document_states ORDER BY workspace_id,document_id",
+            "SELECT json_array(hex(workspace_id),hex(document_id),seq,hex(op_id),hex(payload),created_at) FROM document_collab_updates ORDER BY workspace_id,document_id,seq",
+            "SELECT json_array(hex(workspace_id),hex(document_id),hex(op_id),seq,payload_len,hex(payload_sha256),hex(actor_user_id),created_at) FROM document_collab_op_receipts ORDER BY workspace_id,document_id,op_id",
+            "SELECT json_array(hex(id),hex(workspace_id),hex(project_id),kind,name,version,deleted_at,created_at,updated_at) FROM collections ORDER BY id",
+        ] {
+            rows.push(sqlx::query_scalar(sql).fetch_all(&f.pool).await.unwrap());
+        }
+        rows
+    }
+
+    pub(crate) async fn remove(
+        f: &Fixture,
+        credential: Uuid,
+        target: Uuid,
+    ) -> Result<Result<(), WorkspaceDbError>, sqlx::Error> {
+        remove_member_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            target,
+            Some("203.0.113.71"),
+        )
+        .await
+    }
+
+    pub(crate) async fn assert_publication(
+        f: &Fixture,
+        target: Uuid,
+        revoked: i64,
+        transferred: u64,
+    ) {
+        let payload = json!({"userId":target.to_string(),"role":"member","revokedInvitations":revoked,"transferredSharedViews":transferred});
+        for table in ["events", "audit_log"] {
+            let rows: Vec<RemovalPublicationRow> = sqlx::query_as(&format!("SELECT workspace_id,actor_user_id,target_type,verb,payload FROM {table} WHERE target_id=?1 AND verb='workspace_member.removed'"))
+                .bind(target.as_bytes().as_slice()).fetch_all(&f.pool).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0, f.workspace.as_bytes());
+            assert_eq!(rows[0].1, f.user.as_bytes());
+            assert_eq!(rows[0].2, "workspace_member");
+            assert_eq!(rows[0].3, "workspace_member.removed");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&rows[0].4).unwrap(),
+                payload
+            );
+        }
+        let ip: Option<String> = sqlx::query_scalar(
+            "SELECT ip FROM audit_log WHERE target_id=?1 AND verb='workspace_member.removed'",
+        )
+        .bind(target.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(ip.as_deref(), Some("203.0.113.71"));
+    }
+
+    #[tokio::test]
+    async fn sqlite_member_removal_literal_effects_current_access_and_healthy_owner() {
+        let (f, credential, target, peer_credential) = fixture().await;
+        let (shared, private) = views(&f, target).await;
+        let (owner_shared, owner_private) = views(&f, f.user).await;
+        let owner_views: Vec<String> = sqlx::query_scalar("SELECT json_array(hex(id),hex(owner_id),config,version,updated_at) FROM collection_views WHERE owner_id=?1 ORDER BY id")
+            .bind(f.user.as_bytes().as_slice()).fetch_all(&f.pool).await.unwrap();
+        let peer_token = Uuid::now_v7();
+        sqlx::query("INSERT INTO api_tokens(id,workspace_id,user_id,token_hash,name,scopes) VALUES(?1,?2,?3,?4,'Removed peer token','[\"documents.read\"]')")
+            .bind(peer_token.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(target.as_bytes().as_slice()).bind(peer_token.to_string()).execute(&f.pool).await.unwrap();
+        let project = project(&f, target, "workspace").await;
+        let mut removed = Vec::new();
+        for role in ["owner", "admin", "member", "guest"] {
+            removed.push(invitation(&f, f.workspace, target, role, false).await);
+        }
+        let accepted = invitation(&f, f.workspace, target, "member", true).await;
+        let other = invitation(&f, f.workspace, f.user, "member", false).await;
+        let group = Uuid::now_v7();
+        sqlx::query("INSERT INTO groups(id,workspace_id,name) VALUES(?1,?2,'Retained group')")
+            .bind(group.as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO group_members(workspace_id,group_id,user_id) VALUES(?1,?2,?3)")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(group.as_bytes().as_slice())
+            .bind(target.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let cursor = crate::streams::initial_access_cursor_backend(&f.backend)
+            .await
+            .unwrap();
+        assert!(matches!(
+            crate::streams::workspace_stream_access_backend(
+                &f.backend,
+                f.workspace,
+                target,
+                peer_credential
+            )
+            .await
+            .unwrap(),
+            crate::streams::StreamAccess::Allowed
+        ));
+        let docs_before: Vec<Vec<String>> = snapshot(&f).await.into_iter().skip(13).collect();
+        remove(&f, credential, target).await.unwrap().unwrap();
+        let view: TransferredViewRow = sqlx::query_as("SELECT owner_id,visibility,name,type,config,version,updated_at FROM collection_views WHERE id=?1")
+            .bind(shared.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+        assert_eq!(view.0, f.user.as_bytes());
+        assert_eq!(
+            (
+                view.1.as_str(),
+                view.2.as_str(),
+                view.3.as_str(),
+                view.4.as_str()
+            ),
+            (
+                "shared",
+                "Literal retained view",
+                "table",
+                "{\"filter\":\"unchanged\"}"
+            )
+        );
+        assert_eq!(view.5, 8);
+        assert!(view.6 > 1);
+        assert_eq!(sqlx::query_scalar::<_,String>("SELECT json_array(hex(id),hex(owner_id),config,version,updated_at) FROM collection_views WHERE id=?1").bind(owner_shared.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap(),owner_views.iter().find(|row| row.contains(&owner_shared.simple().to_string().to_uppercase())).unwrap().clone());
+        assert_eq!(sqlx::query_scalar::<_,String>("SELECT json_array(hex(id),hex(owner_id),config,version,updated_at) FROM collection_views WHERE id=?1").bind(owner_private.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap(),owner_views.iter().find(|row| row.contains(&owner_private.simple().to_string().to_uppercase())).unwrap().clone());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM api_tokens WHERE id=?1")
+                .bind(peer_token.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM collection_views WHERE id=?1")
+                .bind(private.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        for id in removed {
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM invitations WHERE id=?1")
+                    .bind(id.as_bytes().as_slice())
+                    .fetch_one(&f.pool)
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        for id in [accepted, other] {
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM invitations WHERE id=?1")
+                    .bind(id.as_bytes().as_slice())
+                    .fetch_one(&f.pool)
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM project_members WHERE project_id=?1 AND user_id=?2"
+            )
+            .bind(project.as_bytes().as_slice())
+            .bind(target.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM group_members WHERE group_id=?1")
+                .bind(group.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM groups WHERE id=?1")
+                .bind(group.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_publication(&f, target, 4, 1).await;
+        assert!(crate::streams::poll_access_events_backend(
+            &f.backend,
+            f.workspace,
+            target,
+            peer_credential,
+            &cursor
+        )
+        .await
+        .unwrap()
+        .is_none());
+        let after = snapshot(&f).await;
+        assert!(matches!(
+            remove(&f, credential, target).await.unwrap(),
+            Err(WorkspaceDbError::NotFound)
+        ));
+        assert_eq!(snapshot(&f).await, after);
+        let mut tx = f.backend.begin_write().await.unwrap();
+        {
+            let mut op = tx.operation();
+            op.set_tenant(f.workspace).await.unwrap();
+            assert!(matches!(
+                op.authorize_collab_write(
+                    crate::collab::wire::CollabKind::Document,
+                    f.workspace,
+                    target,
+                    peer_credential,
+                    f.document,
+                    &mut crate::db::collab::CollabDbStageTimings::default()
+                )
+                .await
+                .unwrap(),
+                Err(crate::db::collab::CollabDbError::Forbidden)
+            ));
+            op.authorize_collab_write(
+                crate::collab::wire::CollabKind::Document,
+                f.workspace,
+                f.user,
+                credential,
+                f.document,
+                &mut crate::db::collab::CollabDbStageTimings::default(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        tx.rollback().await.unwrap();
+        assert_eq!(snapshot(&f).await, after);
+        assert_eq!(
+            snapshot(&f).await.into_iter().skip(13).collect::<Vec<_>>(),
+            docs_before
+        );
+        super::selected_personal_workspace_tests::foreign_keys(&f).await;
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_member_removal_domain_matrix_tenant_and_queued_actor_revocation() {
+        let (f, credential, target, peer_credential) = fixture().await;
+        let before = snapshot(&f).await;
+        assert!(matches!(
+            remove_member_backend(
+                &f.backend,
+                f.workspace,
+                target,
+                peer_credential,
+                f.user,
+                None
+            )
+            .await
+            .unwrap(),
+            Err(WorkspaceDbError::Forbidden)
+        ));
+        assert!(matches!(
+            remove(&f, credential, f.user).await.unwrap(),
+            Err(WorkspaceDbError::SelfChange)
+        ));
+        assert!(matches!(
+            remove_member_backend(&f.backend, Uuid::now_v7(), f.user, credential, target, None)
+                .await
+                .unwrap(),
+            Err(WorkspaceDbError::NotFound)
+        ));
+        assert_eq!(snapshot(&f).await, before);
+        for (sql, restore, error) in [
+            (
+                "UPDATE workspaces SET kind='personal' WHERE id=?1",
+                "UPDATE workspaces SET kind='team' WHERE id=?1",
+                "personal",
+            ),
+            (
+                "UPDATE workspaces SET deleted_at=1 WHERE id=?1",
+                "UPDATE workspaces SET deleted_at=NULL WHERE id=?1",
+                "missing",
+            ),
+        ] {
+            sqlx::query(sql)
+                .bind(f.workspace.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let before = snapshot(&f).await;
+            let result = remove(&f, credential, target).await.unwrap();
+            assert!(match error {
+                "personal" => matches!(result, Err(WorkspaceDbError::PersonalImmutable)),
+                _ => matches!(result, Err(WorkspaceDbError::NotFound)),
+            });
+            assert_eq!(snapshot(&f).await, before);
+            sqlx::query(restore)
+                .bind(f.workspace.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE memberships SET role='admin' WHERE user_id=?1")
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE memberships SET role='owner' WHERE user_id=?1")
+            .bind(target.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let before = snapshot(&f).await;
+        assert!(matches!(
+            remove(&f, credential, target).await.unwrap(),
+            Err(WorkspaceDbError::RoleCap)
+        ));
+        assert_eq!(snapshot(&f).await, before);
+        sqlx::query("UPDATE memberships SET role='owner' WHERE user_id=?1")
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE memberships SET role='member' WHERE user_id=?1")
+            .bind(target.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET deleted_at=1 WHERE id=?1")
+            .bind(target.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let before = snapshot(&f).await;
+        assert!(matches!(
+            remove(&f, credential, target).await.unwrap(),
+            Err(WorkspaceDbError::NotFound)
+        ));
+        assert_eq!(snapshot(&f).await, before);
+        sqlx::query("UPDATE users SET deleted_at=NULL WHERE id=?1")
+            .bind(target.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        for (deny, restore, id) in [
+            (
+                "UPDATE users SET suspended_at=1 WHERE id=?1",
+                "UPDATE users SET suspended_at=NULL WHERE id=?1",
+                f.user,
+            ),
+            (
+                "UPDATE users SET deleted_at=1 WHERE id=?1",
+                "UPDATE users SET deleted_at=NULL WHERE id=?1",
+                f.user,
+            ),
+            (
+                "UPDATE sessions SET expires_at=1 WHERE id=?1",
+                "UPDATE sessions SET expires_at=?2 WHERE id=?1",
+                credential,
+            ),
+        ] {
+            sqlx::query(deny)
+                .bind(id.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let before = snapshot(&f).await;
+            assert!(matches!(
+                remove(&f, credential, target).await.unwrap(),
+                Err(WorkspaceDbError::Forbidden)
+            ));
+            assert_eq!(snapshot(&f).await, before);
+            let query = sqlx::query(restore).bind(id.as_bytes().as_slice());
+            if id == credential {
+                let expiry = crate::db::identity::stored_now()
+                    + chrono::Duration::seconds(crate::auth::token::SESSION_TTL_SECS);
+                query
+                    .bind(expiry.timestamp_micros())
+                    .execute(&f.pool)
+                    .await
+                    .unwrap();
+            } else {
+                query.execute(&f.pool).await.unwrap();
+            }
+        }
+        // Baseline before acquire; no fair-pool snapshot may precede driving pending.
+        let before = snapshot(&f).await;
+        let mut blocker = f.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let mut pending = Box::pin(remove(&f, credential, target));
+        std::future::poll_fn(|cx| {
+            assert!(
+                pending.as_mut().poll(cx).is_pending(),
+                "held writer must queue the consumer"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        blocker.commit().await.unwrap();
+        assert!(matches!(
+            pending.await.unwrap(),
+            Err(WorkspaceDbError::Forbidden)
+        ));
+        assert_eq!(snapshot(&f).await, before);
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        // Suspended target parity: existing PG removal only rejects deleted targets.
+        sqlx::query("UPDATE users SET suspended_at=1 WHERE id=?1")
+            .bind(target.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        remove(&f, credential, target).await.unwrap().unwrap();
+        assert_publication(&f, target, 0, 0).await;
+        super::selected_personal_workspace_tests::foreign_keys(&f).await;
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_member_removal_event_audit_deferred_fk_rollback_and_healthy_progress() {
+        let (f, credential, target, _) = fixture().await;
+        let (shared, _) = views(&f, target).await;
+        invitation(&f, f.workspace, target, "member", false).await;
+        let before = snapshot(&f).await;
+        for table in ["events", "audit_log"] {
+            sqlx::query(&format!("CREATE TRIGGER removal_refuse BEFORE INSERT ON {table} WHEN NEW.verb='workspace_member.removed' BEGIN SELECT RAISE(ABORT,'member publication refused'); END")).execute(&f.pool).await.unwrap();
+            let error = remove(&f, credential, target).await.err().unwrap();
+            assert!(
+                matches!(&error,sqlx::Error::Database(e) if e.message().contains("member publication refused"))
+            );
+            assert_eq!(snapshot(&f).await, before);
+            sqlx::query("DROP TRIGGER removal_refuse")
+                .execute(&f.pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("CREATE TABLE removal_commit_probe(workspace_id BLOB REFERENCES workspaces(id) DEFERRABLE INITIALLY DEFERRED) STRICT").execute(&f.pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER removal_commit_refuse AFTER INSERT ON audit_log WHEN NEW.verb='workspace_member.removed' BEGIN INSERT INTO removal_commit_probe VALUES(zeroblob(16)); END").execute(&f.pool).await.unwrap();
+        let error = remove(&f, credential, target).await.err().unwrap();
+        let sqlx::Error::AnyDriverError(source) = error else {
+            panic!("typed original commit receipt required")
+        };
+        let receipt = source
+            .downcast_ref::<crate::db::backend::CommitCleanupUnknown>()
+            .unwrap();
+        assert_eq!(
+            receipt.settlement,
+            crate::db::backend::CommitSettlement::LocalWriterReconcile
+        );
+        assert!(
+            matches!(&receipt.source.source,sqlx::Error::Database(e) if e.message().contains("FOREIGN KEY"))
+        );
+        assert_eq!(snapshot(&f).await, before);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM removal_commit_probe")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        sqlx::query("DROP TRIGGER removal_commit_refuse")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        remove(&f, credential, target).await.unwrap().unwrap();
+        assert_publication(&f, target, 1, 1).await;
+        assert_eq!(
+            sqlx::query_scalar::<_, Vec<u8>>("SELECT owner_id FROM collection_views WHERE id=?1")
+                .bind(shared.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            f.user.as_bytes()
+        );
+        super::selected_personal_workspace_tests::foreign_keys(&f).await;
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_member_removal_concurrent_owners_private_leads_single_winner() {
+        let (f, credential, target, peer_credential) = fixture().await;
+        sqlx::query("UPDATE memberships SET role='owner' WHERE user_id=?1")
+            .bind(target.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let project = project(&f, target, "private").await;
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let (a, b) = tokio::join!(
+            remove(&f, credential, target),
+            remove_member_backend(
+                &f.backend,
+                f.workspace,
+                target,
+                peer_credential,
+                f.user,
+                None
+            )
+        );
+        let a = a.unwrap();
+        let b = b.unwrap();
+        assert!(matches!(
+            (&a, &b),
+            (Ok(()), Err(WorkspaceDbError::Forbidden)) | (Err(WorkspaceDbError::Forbidden), Ok(()))
+        ));
+        let survivor = if a.is_ok() { f.user } else { target };
+        let owners: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT user_id FROM memberships WHERE workspace_id=?1 AND role='owner'",
+        )
+        .bind(f.workspace.as_bytes().as_slice())
+        .fetch_all(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(owners, vec![survivor.as_bytes().to_vec()]);
+        let leads: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT user_id FROM project_members WHERE project_id=?1 AND role='lead'",
+        )
+        .bind(project.as_bytes().as_slice())
+        .fetch_all(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(leads, vec![survivor.as_bytes().to_vec()]);
+        let expected = json!({"userId":if survivor==f.user{target}else{f.user}.to_string(),"role":"owner","revokedInvitations":0,"transferredSharedViews":0});
+        for table in ["events", "audit_log"] {
+            let row:(Vec<u8>,String)=sqlx::query_as(&format!("SELECT actor_user_id,payload FROM {table} WHERE workspace_id=?1 AND verb='workspace_member.removed'"))
+                .bind(f.workspace.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+            assert_eq!(row.0, survivor.as_bytes());
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&row.1).unwrap(),
+                expected
+            );
+            assert_eq!(sqlx::query_scalar::<_,i64>(&format!("SELECT count(*) FROM {table} WHERE workspace_id=?1 AND verb='workspace_member.removed'")).bind(f.workspace.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap(),1);
+        }
+        super::selected_personal_workspace_tests::foreign_keys(&f).await;
+        f.close().await;
+    }
+
+    #[test]
+    fn member_removal_rollback_cleanup_retains_domain_and_driver_causes() {
+        for (index, result) in [
+            Ok(Err(WorkspaceDbError::LastProjectLead)),
+            Err(sqlx::Error::Protocol("original removal driver".into())),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let error = member_removal_after_rollback(
+                result,
+                Err(sqlx::Error::Protocol("synthetic removal cleanup".into())),
+            )
+            .unwrap_err();
+            let sqlx::Error::AnyDriverError(source) = error else {
+                panic!("typed rollback failure required")
+            };
+            let receipt = source
+                .downcast_ref::<crate::db::backend::RollbackCleanupUnknown>()
+                .unwrap();
+            let original = receipt.original.as_ref().unwrap();
+            if index == 0 {
+                assert!(original
+                    .downcast_ref::<MemberRemovalRefusal>()
+                    .is_some_and(|r| matches!(&r.0, WorkspaceDbError::LastProjectLead)));
+            } else {
+                assert!(original.downcast_ref::<sqlx::Error>().is_some_and(
+                    |r| matches!(r,sqlx::Error::Protocol(s) if s=="original removal driver")
+                ));
+            }
+            assert!(
+                matches!(&receipt.cleanup,sqlx::Error::Protocol(s) if s=="synthetic removal cleanup")
+            );
+        }
+    }
 }
 
 #[cfg(all(test, feature = "db-tests"))]

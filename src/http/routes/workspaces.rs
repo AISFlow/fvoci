@@ -338,13 +338,8 @@ async fn remove_member(
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
-    let result = crate::db::workspace::remove_member(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/workspaces.rs")
-            .map_err(internal)?,
+    let result = crate::db::workspace::remove_member_backend(
+        &state.auth.db.pool,
         workspace_id,
         actor_user_id,
         session_id,
@@ -517,6 +512,197 @@ mod selected_personal_bootstrap_http_tests {
             .await
             .unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    mod member_removal {
+        use super::*;
+        use crate::db::workspace::selected_member_removal_tests::{
+            assert_publication as assert_removal_publication, fixture as removal_fixture,
+            snapshot as removal_snapshot,
+        };
+
+        async fn delete(
+            app: Router,
+            workspace: Uuid,
+            target: Uuid,
+            token: Option<&str>,
+            bearer: bool,
+            origin: &str,
+        ) -> (StatusCode, Value) {
+            let mut request = axum::http::Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/workspaces/{workspace}/members/{target}"))
+                .extension(ConnectInfo(
+                    "203.0.113.71:42424".parse::<SocketAddr>().unwrap(),
+                ))
+                .header("origin", origin);
+            if let Some(token) = token {
+                request = if bearer {
+                    request.header("authorization", format!("Bearer {token}"))
+                } else {
+                    request.header("cookie", format!("fvoci_session={token}"))
+                };
+            }
+            let response = app
+                .oneshot(request.body(axum::body::Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 16384)
+                .await
+                .unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        }
+
+        #[tokio::test]
+        async fn sqlite_http_member_delete_cookie_origin_pat_tenant_and_literal_success() {
+            let (f, credential, target, peer_credential) = removal_fixture().await;
+            let token = cookie(&f, credential).await;
+            let peer = cookie(&f, peer_credential).await;
+            let app = app(&f);
+            let pat = crate::auth::token::new_token();
+            sqlx::query("INSERT INTO api_tokens(id,workspace_id,user_id,token_hash,name,scopes) VALUES(?1,?2,?3,?4,'Removal test','[\"workspace.manage\"]')")
+                .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(&pat.hash).execute(&f.pool).await.unwrap();
+            for (auth, bearer, origin, workspace, status) in [
+                (
+                    None,
+                    false,
+                    "http://localhost",
+                    f.workspace,
+                    StatusCode::UNAUTHORIZED,
+                ),
+                (
+                    Some(token.as_str()),
+                    false,
+                    "http://foreign.test",
+                    f.workspace,
+                    StatusCode::FORBIDDEN,
+                ),
+                (
+                    Some(pat.token.as_str()),
+                    true,
+                    "http://localhost",
+                    f.workspace,
+                    StatusCode::NOT_FOUND,
+                ),
+                (
+                    Some(peer.as_str()),
+                    false,
+                    "http://localhost",
+                    f.workspace,
+                    StatusCode::NOT_FOUND,
+                ),
+                (
+                    Some(token.as_str()),
+                    false,
+                    "http://localhost",
+                    Uuid::now_v7(),
+                    StatusCode::NOT_FOUND,
+                ),
+            ] {
+                let before = removal_snapshot(&f).await;
+                let (actual, body) =
+                    delete(app.clone(), workspace, target, auth, bearer, origin).await;
+                assert_eq!(actual, status, "{body}");
+                assert!(body.get("ok").is_none());
+                assert!(body.get("userId").is_none());
+                assert_eq!(removal_snapshot(&f).await, before);
+            }
+            let (status, body) = delete(
+                app.clone(),
+                f.workspace,
+                target,
+                Some(&token),
+                false,
+                "http://localhost",
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body, json!({"ok":true}));
+            assert_removal_publication(&f, target, 0, 0).await;
+            let before = removal_snapshot(&f).await;
+            assert_eq!(
+                delete(
+                    app.clone(),
+                    f.workspace,
+                    target,
+                    Some(&token),
+                    false,
+                    "http://localhost"
+                )
+                .await
+                .0,
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(removal_snapshot(&f).await, before);
+            foreign_keys(&f).await;
+            drop(app);
+            f.close().await;
+        }
+
+        #[tokio::test]
+        async fn sqlite_http_member_delete_audit_rollback_private_lead_refusal_and_healthy_progress(
+        ) {
+            let (f, credential, target, _) = removal_fixture().await;
+            let token = cookie(&f, credential).await;
+            let app = app(&f);
+            let project =
+                crate::db::workspace::selected_member_removal_tests::project(&f, target, "private")
+                    .await;
+            let before = removal_snapshot(&f).await;
+            assert_eq!(
+                delete(
+                    app.clone(),
+                    f.workspace,
+                    target,
+                    Some(&token),
+                    false,
+                    "http://localhost"
+                )
+                .await
+                .0,
+                StatusCode::CONFLICT
+            );
+            assert_eq!(removal_snapshot(&f).await, before);
+            sqlx::query("UPDATE projects SET visibility='workspace' WHERE id=?1")
+                .bind(project.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let before = removal_snapshot(&f).await;
+            sqlx::query("CREATE TRIGGER http_remove_refuse BEFORE INSERT ON audit_log WHEN NEW.verb='workspace_member.removed' BEGIN SELECT RAISE(ABORT,'HTTP removal audit refused'); END").execute(&f.pool).await.unwrap();
+            let (status, body) = delete(
+                app.clone(),
+                f.workspace,
+                target,
+                Some(&token),
+                false,
+                "http://localhost",
+            )
+            .await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+            assert!(body.get("ok").is_none());
+            assert_eq!(removal_snapshot(&f).await, before);
+            sqlx::query("DROP TRIGGER http_remove_refuse")
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let (status, body) = delete(
+                app.clone(),
+                f.workspace,
+                target,
+                Some(&token),
+                false,
+                "http://localhost",
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body, json!({"ok":true}));
+            assert_removal_publication(&f, target, 0, 0).await;
+            foreign_keys(&f).await;
+            drop(app);
+            f.close().await;
+        }
     }
 
     #[tokio::test]

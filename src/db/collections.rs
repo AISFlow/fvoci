@@ -1695,6 +1695,105 @@ pub async fn project_collection(
 
 /// Source `transferSharedViewOwnership`: a removed member's shared views stay
 /// with the collection (the remover takes ownership); private views cascade.
+impl crate::db::backend::OperationTx<'_, '_> {
+    pub(crate) async fn transfer_shared_view_ownership(
+        &mut self,
+        workspace: Uuid,
+        from: Uuid,
+        to: Uuid,
+    ) -> Result<u64, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => transfer_shared_view_ownership(tx, workspace, from, to).await,
+            Self::SqliteFamily(tx) => {
+                use crate::db::codec::Cell;
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                tx.execute(
+                    "UPDATE collection_views SET owner_id=?3,version=version+1,updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE workspace_id=?1 AND owner_id=?2 AND visibility='shared'",
+                    &[Cell::uuid(workspace), Cell::uuid(from), Cell::uuid(to)],
+                ).await
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod selected_member_removal_view_tests {
+    use super::*;
+    use crate::db::workspace::selected_member_removal_tests::{fixture, remove, snapshot, views};
+
+    #[tokio::test]
+    async fn sqlite_shared_view_transfer_scope_version_overflow_rollback_and_healthy_progress() {
+        let (f, credential, target, _) = fixture().await;
+        let (shared, private) = views(&f, target).await;
+        let before = snapshot(&f).await;
+        let mut read = f.backend.begin_read().await.unwrap();
+        read.operation().set_tenant(f.workspace).await.unwrap();
+        assert!(read
+            .operation()
+            .transfer_shared_view_ownership(f.workspace, target, f.user)
+            .await
+            .is_err());
+        read.rollback().await.unwrap();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        {
+            let mut op = tx.operation();
+            op.set_tenant(f.workspace).await.unwrap();
+            assert!(op
+                .transfer_shared_view_ownership(Uuid::now_v7(), target, f.user)
+                .await
+                .is_err());
+            assert_eq!(
+                op.transfer_shared_view_ownership(f.workspace, target, f.user)
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+        tx.rollback().await.unwrap();
+        assert_eq!(snapshot(&f).await, before);
+        sqlx::query("UPDATE collection_views SET version=2147483647 WHERE id=?1")
+            .bind(shared.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let before = snapshot(&f).await;
+        assert!(matches!(
+            remove(&f, credential, target).await,
+            Err(sqlx::Error::Database(_))
+        ));
+        assert_eq!(snapshot(&f).await, before);
+        sqlx::query("UPDATE collection_views SET version=7 WHERE id=?1")
+            .bind(shared.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        remove(&f, credential, target).await.unwrap().unwrap();
+        let stored: (Vec<u8>, String, String, i64, i64) = sqlx::query_as(
+            "SELECT owner_id,name,config,version,updated_at FROM collection_views WHERE id=?1",
+        )
+        .bind(shared.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(stored.0, f.user.as_bytes());
+        assert_eq!(stored.1, "Literal retained view");
+        assert_eq!(stored.2, "{\"filter\":\"unchanged\"}");
+        assert_eq!(stored.3, 8);
+        assert!(stored.4 > 1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM collection_views WHERE id=?1")
+                .bind(private.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        crate::db::workspace::selected_personal_workspace_tests::foreign_keys(&f).await;
+        f.close().await;
+    }
+}
+
 pub(crate) async fn transfer_shared_view_ownership(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,

@@ -100,6 +100,125 @@ struct GrantDetails<'a> {
     consents: &'a [(String, i32)],
 }
 
+impl crate::db::backend::OperationTx<'_, '_> {
+    pub(crate) async fn remove_pending_by_inviter(
+        &mut self,
+        workspace: Uuid,
+        inviter: Uuid,
+        roles: &[WorkspaceRole],
+    ) -> Result<i64, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => remove_pending_by_inviter(tx, workspace, inviter, roles).await,
+            Self::SqliteFamily(tx) => {
+                use crate::db::codec::Cell;
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                if roles.is_empty() {
+                    return Ok(0);
+                }
+                let count = tx.execute(
+                    "DELETE FROM invitations WHERE workspace_id=?1 AND invited_by=?2 AND accepted_at IS NULL AND ((?3=1 AND role='owner') OR (?4=1 AND role='admin') OR (?5=1 AND role='member') OR (?6=1 AND role='guest'))",
+                    &[
+                        Cell::uuid(workspace), Cell::uuid(inviter),
+                        Cell::Integer(i64::from(roles.contains(&WorkspaceRole::Owner))),
+                        Cell::Integer(i64::from(roles.contains(&WorkspaceRole::Admin))),
+                        Cell::Integer(i64::from(roles.contains(&WorkspaceRole::Member))),
+                        Cell::Integer(i64::from(roles.contains(&WorkspaceRole::Guest))),
+                    ],
+                ).await?;
+                i64::try_from(count)
+                    .map_err(|_| sqlx::Error::Protocol("invitation removal count overflow".into()))
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod selected_member_removal_invitation_tests {
+    use super::*;
+    use crate::db::workspace::selected_member_removal_tests::{fixture, invitation, snapshot};
+
+    #[tokio::test]
+    async fn sqlite_pending_inviter_roles_scope_accepted_and_empty_set() {
+        let (f, _, target, _) = fixture().await;
+        let owner = invitation(&f, f.workspace, target, "owner", false).await;
+        let member = invitation(&f, f.workspace, target, "member", false).await;
+        let accepted = invitation(&f, f.workspace, target, "member", true).await;
+        let other = invitation(&f, f.workspace, f.user, "member", false).await;
+        let foreign = Uuid::now_v7();
+        sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES(?1,?2,'Foreign')")
+            .bind(foreign.as_bytes().as_slice())
+            .bind(foreign.to_string())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let other_tenant = invitation(&f, foreign, target, "member", false).await;
+        let before = snapshot(&f).await;
+        let mut read = f.backend.begin_read().await.unwrap();
+        read.operation().set_tenant(f.workspace).await.unwrap();
+        assert!(read
+            .operation()
+            .remove_pending_by_inviter(f.workspace, target, &[WorkspaceRole::Member])
+            .await
+            .is_err());
+        read.rollback().await.unwrap();
+        let mut tx = f.backend.begin_write().await.unwrap();
+        {
+            let mut op = tx.operation();
+            op.set_tenant(f.workspace).await.unwrap();
+            assert_eq!(
+                op.remove_pending_by_inviter(f.workspace, target, &[])
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert!(op
+                .remove_pending_by_inviter(foreign, target, &[WorkspaceRole::Member])
+                .await
+                .is_err());
+            assert_eq!(
+                op.remove_pending_by_inviter(
+                    f.workspace,
+                    target,
+                    &[WorkspaceRole::Member, WorkspaceRole::Member]
+                )
+                .await
+                .unwrap(),
+                1
+            );
+        }
+        tx.commit_with_cleanup().await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM invitations WHERE id=?1")
+                .bind(member.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        for id in [owner, accepted, other, other_tenant] {
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM invitations WHERE id=?1")
+                    .bind(id.as_bytes().as_slice())
+                    .fetch_one(&f.pool)
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+        // Only the invitation snapshot changes; no publication/other business rows.
+        let after = snapshot(&f).await;
+        assert_ne!(after[6], before[6]);
+        for (index, (a, b)) in before.iter().zip(after.iter()).enumerate() {
+            if index != 6 {
+                assert_eq!(a, b);
+            }
+        }
+        crate::db::workspace::selected_personal_workspace_tests::foreign_keys(&f).await;
+        f.close().await;
+    }
+}
+
 pub async fn remove_pending_by_inviter(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
