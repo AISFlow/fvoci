@@ -1012,6 +1012,9 @@ class FailureOriginTest(unittest.TestCase):
                 self.assertIsNone(error);self.assertTrue(closed)
                 self.assertIsNone(summary['lanes'][-1]['original_driver_failure_origin'])
                 self.assertNotIn('PRIVATE_CANARY',json.dumps(summary))
+        summary,error,closed=self.project({'source':'f'*40,'original_driver_failure_origin':valid})
+        self.assertIsNotNone(error);self.assertFalse(closed)
+        self.assertIsNone(summary['lanes'][-1]['original_driver_failure_origin'])
 
     def test_private_exception_canary_is_hashed_not_published(self):
         body=ast.parse("raise RuntimeError('PRIVATE_CANARY_URL secret=PRIVATE_CANARY_SECRET')").body[0]

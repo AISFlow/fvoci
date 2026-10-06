@@ -277,7 +277,7 @@ def runtime_ownership_return(output):
                             'recorded_process_identities_retired':bool, 'cleanup_errors':list}
                 origin = facts.get('original_driver_failure_origin')
                 driver = TEMPLATES / ('current-' + run['lane'] + '-driver.py')
-                if not (run['lane'] == 'sqlite' and type(origin) is dict and
+                if not (run['lane'] == 'sqlite' and facts.get('source') == before['head'] and type(origin) is dict and
                         set(origin) == {'phase', 'driver_sha256', 'line', 'type'} and
                         origin['phase'] in ('preparation', 'copied-native-hashes', 'owned-network-mode', 'normal-runtime') and
                         origin['type'] in ('AssertionError', 'RuntimeError', 'PermissionError', 'OSError', 'TimeoutExpired', 'OtherError') and
