@@ -61,7 +61,7 @@ COPY apps/web ./apps/web/
 WORKDIR /src/apps/web
 RUN bun --bun run build
 
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
 # No setuid/setgid files (su, passwd, mount, ...): nothing in the image
 # changes user through one, and the server's uid must not reach root by one.
 RUN apt-get update \
