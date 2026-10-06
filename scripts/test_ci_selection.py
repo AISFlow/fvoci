@@ -1901,6 +1901,133 @@ class RustSuiteRegistryTest(unittest.TestCase):
         self.assertTrue(any("continue-on-error" in err for err in errors))
 
 
+class SelectedLibraryExecutionTest(unittest.TestCase):
+    def success(self, name: str) -> str:
+        return ("running 1 test\n" + f"test {name} ... ok\n"
+                + "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 99 filtered out; finished in 0.01s\n")
+
+    def test_exact18_filter_registry_and_existing_default_command(self) -> None:
+        import hashlib
+        self.assertEqual(len(SEL.RUST_SELECTED_LIBRARY_FILTERS), 18)
+        self.assertEqual(len(set(SEL.RUST_SELECTED_LIBRARY_FILTERS)), 18)
+        self.assertEqual(hashlib.sha256("\n".join(SEL.RUST_SELECTED_LIBRARY_FILTERS).encode()).hexdigest(),
+                         "f9221b4d6b32402a3e125643d3fc67dfb600df8ef27b8e76013bb8b46ade7c80")
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/rust.yml")
+        self.assertIsNone(error)
+        self.assertEqual(SEL.verify_selected_library_execution(data["jobs"]), [])
+        for name in SEL.RUST_SELECTED_LIBRARY_FILTERS:
+            self.assertIsNone(SEL.selected_library_result_error(name, 0, self.success(name)))
+
+    def test_missing_duplicate_skip_env_features_filter_and_command_mutations_fail(self) -> None:
+        mutations = ("missing", "duplicate", "skip", "masked", "env", "job-env", "wrong-feature",
+                     "no-exact", "no-lib", "missing-loop-filter", "swallow-command", "missing-default")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), RustSuiteRegistryFixture() as fx:
+                fx.write_cargo()
+                path = fx.root / ".github/workflows/rust.yml"
+                data, error = SEL._load_yaml_mapping(path)
+                self.assertIsNone(error)
+                fast = data["jobs"]["fast"]
+                steps = fast["steps"]
+                step = next(x for x in steps if x.get("name") == SEL.RUST_SELECTED_LIBRARY_STEP)
+                if mutation == "missing":
+                    steps.remove(step)
+                elif mutation == "duplicate":
+                    steps.append(dict(step))
+                elif mutation == "skip":
+                    step["if"] = "false"
+                elif mutation == "masked":
+                    step["continue-on-error"] = True
+                elif mutation == "env":
+                    step["env"] = {"RUST_TEST_THREADS": "0"}
+                elif mutation == "job-env":
+                    fast["env"] = {"FVOCI_DATABASE_BACKEND": "libsql-remote"}
+                elif mutation == "wrong-feature":
+                    step["run"] = step["run"].replace('"db-tests"', '"api-schema"')
+                elif mutation == "no-exact":
+                    step["run"] = step["run"].replace(', "--exact"', '')
+                elif mutation == "no-lib":
+                    step["run"] = step["run"].replace('"--lib", ', '')
+                elif mutation == "missing-loop-filter":
+                    step["run"] = step["run"].replace('in RUST_SELECTED_LIBRARY_FILTERS:', 'in RUST_SELECTED_LIBRARY_FILTERS[:-1]:')
+                elif mutation == "swallow-command":
+                    step["run"] += "true\n"
+                else:
+                    steps.remove({"run": "cargo test --locked --offline --lib --bin fvoci-server"})
+                fx.mutate_rust_workflow(lambda original: original.update(data))
+                errors = SEL.verify_workflow_registry(fx.root)
+                self.assertTrue(any("selected library" in e for e in errors), errors)
+        with RustSuiteRegistryFixture() as fx, mock.patch.object(
+            SEL, "RUST_SELECTED_LIBRARY_FILTERS", SEL.RUST_SELECTED_LIBRARY_FILTERS[:-1]
+        ):
+            fx.write_cargo()
+            errors = SEL.verify_rust_suite_registry(fx.root)
+            self.assertTrue(any("all18 exact filters" in e for e in errors), errors)
+
+    def test_zero_ignored_wrong_extra_and_failed_results_are_not_pass(self) -> None:
+        name = SEL.RUST_SELECTED_LIBRARY_FILTERS[0]
+        good = self.success(name)
+        cases = [
+            (0, ""),
+            (1, good),
+            (0, good.replace("running 1 test", "running 0 tests").replace("1 passed", "0 passed")),
+            (0, good.replace("... ok", "... ignored").replace("1 passed", "0 passed").replace("0 ignored", "1 ignored")),
+            (0, good.replace(name, "different::test")),
+            (0, good.replace("running 1 test", "running 2 tests").replace("1 passed", "2 passed")),
+            (0, good + f"test different::test ... ok\n"),
+            (0, good + good),
+            (0, good.replace("0 measured", "1 measured")),
+            (0, good.replace("0 failed", "1 failed")),
+        ]
+        for exit_code, output in cases:
+            with self.subTest(exit=exit_code, output=output):
+                self.assertIsNotNone(SEL.selected_library_result_error(name, exit_code, output))
+        self.assertIsNotNone(SEL.selected_library_result_error("missing::filter", 0, self.success("missing::filter")))
+
+    def run_workflow_fixture(self, output_kind: str):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/rust.yml")
+        self.assertIsNone(error)
+        step = next(x for x in data["jobs"]["fast"]["steps"] if x.get("name") == SEL.RUST_SELECTED_LIBRARY_STEP)
+        run = step["run"]
+        prefix = "set -euo pipefail\npython3 - <<'PYLIB'\n"
+        self.assertTrue(run.startswith(prefix))
+        self.assertTrue(run.endswith("\nPYLIB\n"))
+        code = run[len(prefix):-len("\nPYLIB\n")]
+        calls = []
+        def fake_run(argv, **kwargs):
+            expected_filter = SEL.RUST_SELECTED_LIBRARY_FILTERS[len(calls)]
+            self.assertEqual(argv, ["cargo", "test", "--locked", "--offline", "--features", "db-tests",
+                                    "--lib", expected_filter, "--", "--exact"])
+            self.assertEqual(kwargs, {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True})
+            calls.append(argv)
+            output = self.success(expected_filter)
+            if output_kind == "zero":
+                output = output.replace("running 1 test", "running 0 tests").replace("1 passed", "0 passed")
+            elif output_kind == "ignored":
+                output = output.replace("... ok", "... ignored").replace("1 passed", "0 passed").replace("0 ignored", "1 ignored")
+            elif output_kind == "wrong":
+                output = output.replace(expected_filter, "wrong::test")
+            return SimpleNamespace(returncode=1 if output_kind == "command-failed" else 0, stdout=output)
+        with mock.patch("subprocess.run", side_effect=fake_run), contextlib.redirect_stdout(io.StringIO()):
+            if output_kind == "ok":
+                exec(compile(code, "maintained-rust-selected-library-step", "exec"), {})
+            else:
+                with self.assertRaises(SystemExit):
+                    exec(compile(code, "maintained-rust-selected-library-step", "exec"), {})
+        return calls
+
+    def test_actual_workflow_script_executes18_canonical_commands_without_env_override(self) -> None:
+        self.assertEqual(len(self.run_workflow_fixture("ok")), 18)
+
+    def test_actual_workflow_script_fails_first_refusal_without_retry_or_later_execution(self) -> None:
+        for kind in ("zero", "ignored", "wrong", "command-failed"):
+            with self.subTest(kind=kind):
+                self.assertEqual(len(self.run_workflow_fixture(kind)), 1)
+
+
 class RegistryMutationCliTest(unittest.TestCase):
     def test_postgres_budget_mutations_rejected_before_plan_outputs(self) -> None:
         for mutation in ("missing-c", "missing-gate", "wrong-selection", "longer-budget", "cache-fallback"):

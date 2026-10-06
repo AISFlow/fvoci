@@ -751,6 +751,90 @@ RUST_INTEGRATION_MANUAL_TARGETS: frozenset[str] = frozenset({"collab_capacity_pr
 RUST_NATIVE_ARM64_STEP = "Native server build and policy tests (ARM64)"
 RUST_NATIVE_ARM64_RUN = "cargo build --locked --offline --bins\ncargo test --locked --offline --lib"
 RUST_DB_TESTS_FEATURE = "db-tests"
+# Exact accepted local SQLite/library cohort; a successful zero-match Cargo
+# invocation or ignored test is not execution. The default plain run stays.
+RUST_SELECTED_LIBRARY_STEP = "Selected SQLite library controls (18 exact tests)"
+RUST_SELECTED_LIBRARY_FILTERS: tuple[str, ...] = (
+    'db::stars::selected_star_read_finish_tests::star_read_cleanup_retains_refusal_and_driver_without_returning_rows',
+    'db::groups::selected_group_read_finish_tests::group_read_cleanup_retains_refusal_and_driver_without_returning_rows',
+    'streams::events::selected_access_read_tests::sqlite_access_role_change_targets_and_wrong_workspace',
+    'streams::events::selected_access_read_tests::sqlite_access_counter_retention_rollback_and_inflight_writer',
+    'streams::events::selected_access_read_tests::sqlite_access_current_credential_membership_workspace_and_cursor_denials',
+    'streams::events::selected_access_read_tests::access_cleanup_uncertainty_withholds_observation_and_retains_driver_cause',
+    'http::routes::stars::selected_list_access_http_tests::sqlite_http_stars_nonempty_dtos_order_current_acl_and_pat_kinds',
+    'http::routes::stars::selected_list_access_http_tests::sqlite_http_groups_order_member_authority_pat_and_cross_tenant',
+    'http::routes::stars::selected_list_access_http_tests::sqlite_http_lists_recheck_current_credential_and_propagate_sql_fault',
+    'http::routes::stars::selected_list_access_http_tests::sqlite_http_access_role_change_bystander_and_read_error_end_real_body',
+    'http::routes::stars::selected_list_access_http_tests::sqlite_http_access_stream_current_revocation_close_drop_and_guard',
+    'db::project_documents::selected_create_finish_tests::project_create_rollback_retains_domain_and_driver_causes',
+    'db::project_documents::selected_create_backend_tests::sqlite_project_create_current_authority_and_parent_denials',
+    'db::project_documents::selected_create_backend_tests::sqlite_project_create_queued_writer_rechecks_credential_and_permission',
+    'db::project_documents::selected_create_backend_tests::sqlite_project_create_fk_publication_and_commit_failures_then_healthy_create',
+    'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_create_literal_request_metadata_number_order_and_publication',
+    'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_create_input_origin_current_authority_and_pat_scope_denials',
+    'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_create_real_fk_refusal_is_500_without_partial_effects',
+)
+RUST_SELECTED_LIBRARY_FILTERS_SHA256 = 'f9221b4d6b32402a3e125643d3fc67dfb600df8ef27b8e76013bb8b46ade7c80'
+RUST_SELECTED_LIBRARY_RUN = """set -euo pipefail
+python3 - <<'PYLIB'
+import subprocess
+from scripts.ci_selection import RUST_SELECTED_LIBRARY_FILTERS, selected_library_result_error
+
+for test_filter in RUST_SELECTED_LIBRARY_FILTERS:
+    result = subprocess.run(
+        ["cargo", "test", "--locked", "--offline", "--features", "db-tests", "--lib", test_filter, "--", "--exact"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    print(result.stdout, end="", flush=True)
+    error = selected_library_result_error(test_filter, result.returncode, result.stdout)
+    if error:
+        raise SystemExit(error)
+PYLIB"""
+
+
+def selected_library_result_error(test_filter: str, returncode: int, output: str) -> str | None:
+    """Accept exactly the requested, nonignored library test, never compilation."""
+    if test_filter not in RUST_SELECTED_LIBRARY_FILTERS:
+        return "rust: unregistered selected library filter"
+    if returncode != 0:
+        return "rust: selected library test command failed"
+    if re.findall(r"^running ([0-9]+) tests?$", output, re.MULTILINE) != ["1"]:
+        return "rust: selected library command must run exactly one test"
+    executed = re.findall(r"^test (\S+) \.\.\. (\S+).*$", output, re.MULTILINE)
+    if executed != [(test_filter, "ok")]:
+        return "rust: selected library result must be the exact requested test and ok"
+    summaries = re.findall(r"^test result: (.*)$", output, re.MULTILINE)
+    if len(summaries) != 1 or not re.fullmatch(
+        r"ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+(?:\.[0-9]+)?s",
+        summaries[0],
+    ):
+        return "rust: selected library result must pass one test without failure or ignore"
+    return None
+
+
+def verify_selected_library_execution(jobs: dict) -> list[str]:
+    """Bind the maintained step, features and complete exact18 filter cohort."""
+    errors: list[str] = []
+    if len(RUST_SELECTED_LIBRARY_FILTERS) != 18 or hashlib.sha256(
+        "\n".join(RUST_SELECTED_LIBRARY_FILTERS).encode()
+    ).hexdigest() != RUST_SELECTED_LIBRARY_FILTERS_SHA256:
+        errors.append("rust: selected library registry must retain all18 exact filters")
+    fast = jobs.get("fast", {})
+    steps = fast.get("steps", [])
+    matches = [s for s in steps if isinstance(s, dict) and s.get("name") == RUST_SELECTED_LIBRARY_STEP]
+    if len(matches) != 1:
+        errors.append("rust: selected library step must appear exactly once in fast")
+        return errors
+    if matches[0] != {"name": RUST_SELECTED_LIBRARY_STEP, "run": RUST_SELECTED_LIBRARY_RUN + "\n"}:
+        errors.append("rust: selected library step must keep exact unconditional command without extra env or flags")
+    plain = {"run": "cargo test --locked --offline --lib --bin fvoci-server"}
+    plain_indices = [i for i, s in enumerate(steps) if s == plain]
+    if len(plain_indices) != 1 or plain_indices[0] >= steps.index(matches[0]):
+        errors.append("rust: selected library step must preserve preceding default plain library command")
+    if "env" in fast:
+        errors.append("rust: selected library fast job must not add an environment override")
+    return errors
+
 RUST_SELECTED_INSTALL_STEP = "Selected SQLite install lifetime controls"
 RUST_SELECTED_INSTALL_TARGET = "selected_install_lifetime"
 RUST_SELECTED_INSTALL_IF = "matrix.shard == 'b' && matrix.pg_major == '18'"
@@ -1470,6 +1554,7 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
         return errors
     assert jobs is not None
 
+    errors.extend(verify_selected_library_execution(jobs))
     errors.extend(verify_native_arm64_execution(jobs))
     errors.extend(verify_postgres_budget_matrix(jobs))
     errors.extend(verify_postgres_integration_execution(jobs))

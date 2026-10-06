@@ -95,6 +95,23 @@ jobs:
       - run: python3 scripts/encryption_keys.py self-test
       - run: cargo clippy --locked --offline --all-targets --features db-tests -- -D warnings
       - run: cargo test --locked --offline --lib --bin fvoci-server
+      - name: Selected SQLite library controls (18 exact tests)
+        run: |
+          set -euo pipefail
+          python3 - <<'PYLIB'
+          import subprocess
+          from scripts.ci_selection import RUST_SELECTED_LIBRARY_FILTERS, selected_library_result_error
+
+          for test_filter in RUST_SELECTED_LIBRARY_FILTERS:
+              result = subprocess.run(
+                  ["cargo", "test", "--locked", "--offline", "--features", "db-tests", "--lib", test_filter, "--", "--exact"],
+                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+              )
+              print(result.stdout, end="", flush=True)
+              error = selected_library_result_error(test_filter, result.returncode, result.stdout)
+              if error:
+                  raise SystemExit(error)
+          PYLIB
       - run: cargo test --locked --offline --test collab_wire
       - run: cargo test --locked --offline --test markdown_process
       - run: cargo test --locked --offline --test docx_export_process
