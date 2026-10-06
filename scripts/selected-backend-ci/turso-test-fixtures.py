@@ -654,5 +654,256 @@ class MigrationDiagnosticSeparatorTests(unittest.TestCase):
             self.assertNotIn("TURSO_MIGRATION_DIAGNOSTIC", output.getvalue())
 
 
+class InventoryTests(unittest.TestCase):
+    hash = "a" * 64
+    inputs = {"phase": "inventory", "destructive": True}
+
+    def success(self, classification="CURRENT", prefix=12):
+        return ("\nrunning 1 test\ntest " + guard.INVENTORY_TEST_NAME
+                + " ... FVOCI_TURSO_INVENTORY_RECEIPT classification=" + classification
+                + " prefix=" + str(prefix) + " schema_sha256=" + self.hash
+                + " rollback=OK close=OK leases=ZERO\nok\n\n"
+                "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out; finished in 0.00s\n\n")
+
+    def denied_result(self, text, status=0):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(guard.AdmissionError) as error:
+                guard.inventory_result(subprocess.CompletedProcess([], status, b""), text)
+        self.assertEqual(str(error.exception), "TURSO_INVENTORY_FAILED")
+        self.assertEqual(output.getvalue(), "")
+
+    @contextlib.contextmanager
+    def frozen(self):
+        # Reuse the existing file-only freeze fixture. No native producer or
+        # ELF/SDK is executed; the sole runtime invocation is always mocked.
+        with DiagnosticUnitRegistrationTests().frozen() as (root, manifest, run):
+            env = {
+                "FVOCI_DATABASE_BACKEND": "libsql-remote",
+                "FVOCI_LIBSQL_URL": "libsql://isolated-owner.aws-us-east-1.turso.io",
+                "FVOCI_LIBSQL_AUTH_TOKEN": "FAKE_PRIVATE_TOKEN",
+                "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true",
+                "LD_LIBRARY_PATH": "/fixture/lib",
+                "SSL_CERT_FILE": "/fixture/cert",
+                "SSL_CERT_DIR": "/fixture/certs",
+                "TZ": "UTC",
+                "FVOCI_TEST_TURSO_CONNECTION_SELECTED": "1",
+                "FVOCI_DATABASE_APP_URL": "FAKE_PRIVATE_TOKEN",
+                "UNRELATED_FAKE_CREDENTIAL": "FAKE_PRIVATE_TOKEN",
+            }
+            with mock.patch.dict(os.environ, env):
+                run.side_effect = None
+                run.return_value = subprocess.CompletedProcess([], 0, self.success().encode())
+                yield root, manifest, run
+
+    def denied_run(self, code, inputs=None):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(guard.AdmissionError) as error:
+                guard.run_inventory("a" * 40, self.inputs if inputs is None else inputs)
+        self.assertEqual(str(error.exception), code)
+        self.assertNotIn("FAKE_PRIVATE_TOKEN", output.getvalue())
+        self.assertNotIn("TURSO_INVENTORY_PASS", output.getvalue())
+
+    def test_exact_class_prefix_receipt_and_nocapture_framing(self):
+        for prefix in range(13):
+            classification = "BLANK" if prefix == 0 else "CURRENT" if prefix == 12 else "PREFIX"
+            for ending in ("\n", "\r\n"):
+                with self.subTest(prefix=prefix, ending=ending), contextlib.redirect_stdout(io.StringIO()) as output:
+                    guard.inventory_result(subprocess.CompletedProcess([], 0, b""), self.success(classification, prefix).replace("\n", ending))
+                self.assertEqual(output.getvalue(),
+                                 "TURSO_INVENTORY_RECEIPT classification=" + classification
+                                 + " prefix=" + str(prefix) + " schema_sha256=" + self.hash
+                                 + " rollback=OK close=OK leases=ZERO\nTURSO_INVENTORY_PASS tests=1 ignored=0\n")
+
+    def test_missing_duplicate_extra_wrong_test_count_or_partial_summary_refuses(self):
+        valid = self.success()
+        receipt = valid.split(" ... ", 1)[1].split("\n", 1)[0]
+        for changed in (
+            "", receipt + "\n", valid[valid.index("test result:"):],
+            valid.replace(receipt, ""), valid.replace(receipt, receipt + "\n" + receipt),
+            valid + valid, valid.replace(guard.INVENTORY_TEST_NAME, guard.MIGRATION_TEST_NAME),
+            valid.replace("running 1 test", "running 0 tests"),
+            valid.replace("running 1 test", "running 2 tests"),
+            valid.replace("1 passed", "0 passed"), valid.replace("1 passed", "2 passed"),
+            valid.replace("0 failed", "1 failed"), valid.replace("0 ignored", "1 ignored"),
+            valid.replace("0 measured", "1 measured"), valid.replace("100 filtered out", "100 filtered"),
+            valid.replace(" finished in 0.00s", ""), valid.replace("\nok\n", "\nignored\n"),
+            valid.replace("\nok\n", "\nFAILED\n"), valid.replace("running 1 test\n", ""),
+            valid.replace("\nok\n", "\ntest other::case ... ok\nok\n"),
+            valid + "test other::case ... ignored\n",
+            valid.replace("test result: ok.", "test result: FAILED."),
+            valid + "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+            "FAKE_PRIVATE_TOKEN " + valid, valid + "SDK FAKE_PRIVATE_TOKEN\n",
+            valid.replace(" ... ", " ... FAKE_PRIVATE_TOKEN "),
+            valid.replace("\nok\n", "\nSDK FAKE_PRIVATE_TOKEN\nok\n"),
+            valid.replace("\n", "\r"), valid.replace("\n", "\u2028"),
+        ):
+            with self.subTest(changed=changed):
+                self.denied_result(changed)
+
+    def test_class_prefix_hash_and_each_cleanup_field_are_not_summary_oracles(self):
+        valid = self.success()
+        for changed in (
+            valid.replace("CURRENT", "UNKNOWN"), valid.replace("CURRENT", "current"),
+            valid.replace("CURRENT", "BLANK"), valid.replace("CURRENT", "PREFIX"),
+            valid.replace("prefix=12", "prefix=0"), valid.replace("prefix=12", "prefix=11"),
+            valid.replace("prefix=12", "prefix=13"), valid.replace("prefix=12", "prefix=012"),
+            valid.replace("prefix=12", "prefix=-1"), valid.replace("prefix=12", "prefix=NONE"),
+            valid.replace(self.hash, "a" * 63), valid.replace(self.hash, "a" * 65),
+            valid.replace(self.hash, "A" * 64), valid.replace(self.hash, "g" * 64),
+            valid.replace(self.hash, "libsql://FAKE_PRIVATE_TOKEN"),
+            valid.replace(self.hash, "FAKE_PRIVATE_TOKEN\n" + self.hash),
+            valid.replace("rollback=OK", "rollback=FAILED"),
+            valid.replace("rollback=OK", "rollback=NOT_STARTED"),
+            valid.replace("close=OK", "close=FAILED"), valid.replace("close=OK", "close=NOT_STARTED"),
+            valid.replace("leases=ZERO", "leases=FAILED"), valid.replace("leases=ZERO", "leases=NOT_OBSERVED"),
+            valid.replace("FVOCI_TURSO_INVENTORY_RECEIPT", "FVOCI_TURSO_MIGRATION_RECEIPT"),
+            valid.replace("leases=ZERO", "leases=ZERO FAKE_PRIVATE_TOKEN"),
+            valid.replace(" schema_sha256=", "\tschema_sha256="),
+            valid.replace("CURRENT prefix=12 schema_sha256=" + self.hash, "REFUSED prefix=NONE schema_sha256=NONE"),
+            self.success("BLANK", 1), self.success("PREFIX", 0), self.success("PREFIX", 12),
+        ):
+            with self.subTest(changed=changed):
+                self.denied_result(changed)
+        self.denied_result(valid, 1)
+        self.denied_result(valid, -9)
+        for separator in ("\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            self.denied_result(valid.replace("leases=ZERO\n", "leases=ZERO" + separator + "FAKE_PRIVATE_TOKEN\n"))
+
+    def test_single_exact_inventory_child_has_only_maintained_environment(self):
+        with self.frozen() as (root, _, run), contextlib.redirect_stdout(io.StringIO()) as output:
+            guard.run_inventory("a" * 40, self.inputs)
+            self.assertIn("TURSO_INVENTORY_PASS tests=1 ignored=0", output.getvalue())
+            run.assert_called_once()
+            self.assertEqual(run.call_args.args[0], [str(root / "turso-connection-libtest"), guard.INVENTORY_TEST_NAME,
+                                                     "--ignored", "--exact", "--test-threads=1", "--nocapture"])
+            expected = {key: os.environ[key] for key in ("PATH", "LD_LIBRARY_PATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "TZ")}
+            expected.update({"FVOCI_DATABASE_BACKEND": "libsql-remote", "FVOCI_LIBSQL_URL": os.environ["FVOCI_LIBSQL_URL"],
+                             "FVOCI_LIBSQL_AUTH_TOKEN": "FAKE_PRIVATE_TOKEN", "FVOCI_TEST_TURSO_MIGRATION_SELECTED": "1",
+                             "FVOCI_TEST_TURSO_PHASE": "migration", "FVOCI_TEST_TURSO_DESTRUCTIVE": "true",
+                             "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true"})
+            self.assertEqual(run.call_args.kwargs, {"env": expected, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "check": False})
+            self.assertNotIn("FAKE_PRIVATE_TOKEN", output.getvalue())
+
+    def test_false_flags_backend_and_wrong_phase_refuse_before_child(self):
+        with self.frozen() as (_, _, run):
+            for value in ("false", "TRUE", "", "FAKE_PRIVATE_TOKEN"):
+                with mock.patch.dict(os.environ, {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": value}):
+                    self.denied_run("DESTRUCTIVE_NOT_ALLOWED")
+                run.assert_not_called()
+            self.denied_run("DESTRUCTIVE_NOT_ALLOWED", dict(self.inputs, destructive=False))
+            for value in ("true", 1, None):
+                self.denied_run("INVALID_BOOLEAN", dict(self.inputs, destructive=value))
+            with mock.patch.dict(os.environ, {"FVOCI_DATABASE_BACKEND": "sqlite"}):
+                self.denied_run("BACKEND_SELECTOR_REQUIRED")
+            for phase in ("migration", "connection", "unknown"):
+                self.denied_run("WRONG_CONSUMER_PHASE", dict(self.inputs, phase=phase))
+            run.assert_not_called()
+
+    def test_complete_frozen_binding_and_elf_controls_before_inventory(self):
+        for key in ("sha", "source_digest", "binary_sha256", "native_input_sha256", "cargo_output_sha256"):
+            with self.subTest(key=key), self.frozen() as (root, manifest, run):
+                manifest[key] = "FAKE_PRIVATE_TOKEN"
+                (root / "turso-connection-build.json").write_text(json.dumps(manifest))
+                self.denied_run("COMPILED_TEST_BINDING_FAILED")
+                run.assert_not_called()
+        for mutation in ("elf", "symlink"):
+            with self.subTest(mutation=mutation), self.frozen() as (root, manifest, run):
+                binary = root / "turso-connection-libtest"
+                if mutation == "elf":
+                    binary.write_bytes(b"not ELF FAKE_PRIVATE_TOKEN")
+                    manifest["binary_sha256"] = guard.file_digest(binary)
+                    (root / "turso-connection-build.json").write_text(json.dumps(manifest))
+                else:
+                    original = root / "fixture-original"
+                    binary.rename(original)
+                    binary.symlink_to(original)
+                self.denied_run("COMPILED_TEST_BINDING_FAILED")
+                run.assert_not_called()
+
+    def test_binding_mutation_or_failed_execution_never_emits_inventory_pass(self):
+        for mutation in ("source", "binary", "native", "cargo", "manifest"):
+            with self.subTest(mutation=mutation), self.frozen() as (root, _, run):
+                def change(*args, **kwargs):
+                    if mutation == "source":
+                        guard.source_digest.return_value = "changed"
+                    elif mutation == "binary":
+                        (root / "turso-connection-libtest").write_bytes(b"\x7fELFchanged")
+                    elif mutation == "native":
+                        (root / "fvoci-sqlite/consumer-inputs.json").write_text("changed")
+                    elif mutation == "cargo":
+                        (root / "turso-compile.json").write_text("changed")
+                    else:
+                        with (root / "turso-connection-build.json").open("a") as stream:
+                            stream.write(" ")  # semantic JSON unchanged, exact receipt changed
+                    return subprocess.CompletedProcess([], 0, self.success().encode())
+                run.side_effect = change
+                self.denied_run("COMPILED_TEST_BINDING_FAILED")
+                run.assert_called_once()
+        with self.frozen() as (_, _, run):
+            run.return_value = subprocess.CompletedProcess([], 1, self.success().encode() + b"FAKE_PRIVATE_TOKEN")
+            self.denied_run("TURSO_INVENTORY_FAILED")
+            run.assert_called_once()
+
+    def test_inventory_manual_dispatch_routes_without_untrusted_or_false_escape(self):
+        context = {"event_name": "workflow_dispatch", "repository": guard.REPOSITORY, "ref": "refs/heads/main", "sha": "a" * 40}
+        self.assertIsNone(guard.require_implemented("inventory"))
+        for ref in ("refs/heads/main", guard.REVIEWED_REF):
+            self.assertEqual(guard.validate_dispatch(dict(context, ref=ref), self.inputs, "a" * 40), "inventory")
+        for changed, inputs, code in (
+            (dict(context, repository="attacker/fvoci"), self.inputs, "UNTRUSTED_DISPATCH"),
+            (dict(context, event_name="pull_request"), self.inputs, "UNTRUSTED_DISPATCH"),
+            (dict(context, event_name="pull_request_target"), self.inputs, "UNTRUSTED_DISPATCH"),
+            (dict(context, ref="refs/heads/topic"), self.inputs, "UNTRUSTED_DISPATCH"),
+            (dict(context, event_name="push", ref=guard.REVIEWED_REF), self.inputs, "SECRET_MODE_REQUIRES_MANUAL"),
+            (dict(context, sha="b" * 40), self.inputs, "CHECKOUT_MISMATCH"),
+            (context, dict(self.inputs, destructive=False), "DESTRUCTIVE_CONFIRMATION_REQUIRED"),
+        ):
+            with self.assertRaises(guard.AdmissionError) as error:
+                guard.validate_dispatch(changed, inputs, "a" * 40)
+            self.assertEqual(str(error.exception), code)
+        for event, repository, ref, sha, destructive, expected in (
+            ("workflow_dispatch", guard.REPOSITORY, "refs/heads/main", "a" * 40, "true", 0),
+            ("workflow_dispatch", guard.REPOSITORY, guard.REVIEWED_REF, "a" * 40, "true", 0),
+            ("push", guard.REPOSITORY, guard.REVIEWED_REF, "a" * 40, "true", 78),
+            ("pull_request", guard.REPOSITORY, "refs/heads/main", "a" * 40, "true", 78),
+            ("workflow_dispatch", "attacker/fvoci", "refs/heads/main", "a" * 40, "true", 78),
+            ("workflow_dispatch", guard.REPOSITORY, "refs/heads/topic", "a" * 40, "true", 78),
+            ("workflow_dispatch", guard.REPOSITORY, "refs/heads/main", "b" * 40, "true", 78),
+            ("workflow_dispatch", guard.REPOSITORY, "refs/heads/main", "a" * 40, "false", 78),
+        ):
+            with tempfile.TemporaryDirectory(prefix="fvoci-inventory-route-pure-") as directory:
+                event_path = Path(directory) / "event.json"
+                event_path.write_text(json.dumps({"inputs": {"phase": "inventory", "destructive": destructive}}))
+                env = {"GITHUB_EVENT_PATH": str(event_path), "GITHUB_EVENT_NAME": event,
+                       "GITHUB_REPOSITORY": repository, "GITHUB_REF": ref, "GITHUB_SHA": sha}
+                with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(guard.sys, "argv", ["guard", "--consume"]), mock.patch.object(guard.subprocess, "check_output", return_value="a" * 40), mock.patch.object(guard, "run_inventory") as inventory, mock.patch.object(guard, "run_migration") as migration, mock.patch.object(guard, "run_connection") as connection, mock.patch.object(guard, "environment_metadata") as metadata, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(guard.main(), expected)
+                metadata.assert_not_called()
+                migration.assert_not_called()
+                connection.assert_not_called()
+                if expected == 0:
+                    inventory.assert_called_once_with("a" * 40, self.inputs)
+                else:
+                    inventory.assert_not_called()
+
+    def test_workflow_retains_false_default_trust_serialization_and_presecret_pipeline(self):
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/turso-test.yml").read_text()
+        self.assertIn("options: [connection, crud, transactions, migration, inventory, persistence, restore, ui-ack]", workflow)
+        self.assertIn("        default: connection\n", workflow)
+        self.assertIn("        type: boolean\n        default: false\n", workflow)
+        self.assertIn("  group: fvoci-turso-test-database\n  cancel-in-progress: false\n", workflow)
+        self.assertIn("permissions:\n  contents: read\n", workflow)
+        self.assertEqual(workflow.count("persist-credentials: false"), 2)
+        self.assertEqual(workflow.count("ref: ${{ github.sha }}"), 2)
+        self.assertEqual(workflow.count("github.repository == 'AISFlow/fvoci'"), 2)
+        self.assertEqual(workflow.count("refs/heads/fvoci/v060-turso-verified-connection"), 3)
+        self.assertEqual(workflow.count("timeout-minutes: 5"), 1)
+        self.assertEqual(workflow.count("timeout-minutes: 15"), 1)
+        self.assertEqual(workflow.count("environment: fvoci-turso-test"), 1)
+        self.assertLess(workflow.index("--freeze"), workflow.index("--diagnostic-unit"))
+        self.assertLess(workflow.index("--diagnostic-unit"), workflow.index("      - name: Real primary selected phase"))
+        self.assertNotIn("secrets.", workflow[:workflow.index("      - name: Real primary selected phase")])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

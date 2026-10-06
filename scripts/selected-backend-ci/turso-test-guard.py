@@ -22,6 +22,7 @@ PHASES = (
     "crud",
     "transactions",
     "migration",
+    "inventory",
     "persistence",
     "restore",
     "ui-ack",
@@ -31,6 +32,7 @@ ENVIRONMENT = "fvoci-turso-test"
 REVIEWED_REF = "refs/heads/fvoci/v060-turso-verified-connection"
 TEST_NAME = "db::turso_test::turso_primary_connection"
 MIGRATION_TEST_NAME = "db::turso_test::turso_primary_current12_install_resume"
+INVENTORY_TEST_NAME = "db::turso_test::turso_primary_migration_target_inventory"
 API_ROOT = "https://api.github.com/repos/AISFlow/fvoci/environments/fvoci-turso-test"
 
 
@@ -122,7 +124,7 @@ def validate_target(inputs, settings, secrets):
 def require_implemented(phase):
     if phase not in PHASES:
         reject("UNKNOWN_PHASE")
-    if phase not in ("connection", "migration"):
+    if phase not in ("connection", "migration", "inventory"):
         reject("NOT_IMPLEMENTED")
 
 
@@ -300,6 +302,38 @@ def run_migration(checkout_sha, inputs):
     run_primary(checkout_sha, inputs)
 
 
+def run_inventory(checkout_sha, inputs):
+    if inputs.get("phase") != "inventory":
+        reject("WRONG_CONSUMER_PHASE")
+    run_primary(checkout_sha, inputs)
+
+
+def inventory_result(result, output):
+    # Recognize the maintained serial libtest --nocapture framing literally:
+    # test NAME ... RECEIPT\nok, plus one complete PASS summary. No stripping
+    # arbitrary lines, summary-only admission or raw failure reflection.
+    match = re.fullmatch(
+        r"(?:\r?\n)*running 1 test\r?\n"
+        r"test " + re.escape(INVENTORY_TEST_NAME) + r" \.\.\. "
+        r"FVOCI_TURSO_INVENTORY_RECEIPT classification=(BLANK|PREFIX|CURRENT) "
+        r"prefix=(0|[1-9]|1[0-2]) schema_sha256=([0-9a-f]{64}) "
+        r"rollback=OK close=OK leases=ZERO\r?\nok\r?\n"
+        r"(?:\r?\n)*test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; "
+        r"[0-9]+ filtered out; finished in [0-9]+\.[0-9]+s\r?\n(?:\r?\n)*",
+        output,
+    )
+    if result.returncode != 0 or match is None:
+        reject("TURSO_INVENTORY_FAILED")
+    classification, prefix, schema_hash = match.groups()
+    if not ((classification == "BLANK" and prefix == "0")
+            or (classification == "PREFIX" and 1 <= int(prefix) <= 11)
+            or (classification == "CURRENT" and prefix == "12")):
+        reject("TURSO_INVENTORY_FAILED")
+    print("TURSO_INVENTORY_RECEIPT classification=" + classification + " prefix=" + prefix
+          + " schema_sha256=" + schema_hash + " rollback=OK close=OK leases=ZERO")
+    print("TURSO_INVENTORY_PASS tests=1 ignored=0")
+
+
 # Literal consumer codes only: no arbitrary SDK/test output may be echoed.
 MIGRATION_PRIMARY_CODES = frozenset({
     "BEGIN_FAILED",
@@ -395,6 +429,9 @@ def run_primary(checkout_sha, inputs):
     settings = {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": os.environ.get("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "")}
     credentials = {"FVOCI_TEST_TURSO_DATABASE_URL": os.environ.get("FVOCI_LIBSQL_URL", ""), "FVOCI_TEST_TURSO_AUTH_TOKEN": os.environ.get("FVOCI_LIBSQL_AUTH_TOKEN", "")}
     validate_target(inputs, settings, credentials)
+    # Inventory also binds the full maintained freeze receipt before/after its
+    # one child. Original connection/migration binding and parsers stay intact.
+    inventory_binding = diagnostic_unit_binding(checkout_sha) if phase == "inventory" else None
     root = Path(os.environ["RUNNER_TEMP"]).resolve()
     manifest = json.loads((root / "turso-connection-build.json").read_text())
     executable = root / "turso-connection-libtest"
@@ -421,13 +458,18 @@ def run_primary(checkout_sha, inputs):
             "FVOCI_TEST_TURSO_DESTRUCTIVE": "true",
             "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true",
         })
-        test_name = MIGRATION_TEST_NAME
+        test_name = INVENTORY_TEST_NAME if phase == "inventory" else MIGRATION_TEST_NAME
     # Raw SDK/test errors can contain endpoint/query/token values. Capture only
     # in memory; never write/upload/reflect them. Do not retry a failed probe.
     result = subprocess.run(
         [str(executable), test_name, "--ignored", "--exact", "--test-threads=1", "--nocapture"],
         env=child_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
     )
+    if phase == "inventory":
+        if diagnostic_unit_binding(checkout_sha) != inventory_binding:
+            reject("COMPILED_TEST_BINDING_FAILED")
+        inventory_result(result, result.stdout.decode("utf-8", errors="replace"))
+        return
     output = result.stdout.decode("utf-8", errors="replace")
     if phase == "migration":
         migration_result(result, output)
@@ -492,6 +534,8 @@ def main():
         else:
             if phase == "connection":
                 run_connection(checkout_sha, inputs)
+            elif phase == "inventory":
+                run_inventory(checkout_sha, inputs)
             else:
                 run_migration(checkout_sha, inputs)
         return 0

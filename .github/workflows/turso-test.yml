@@ -6,10 +6,10 @@ on:
   workflow_dispatch:
     inputs:
       phase:
-        description: Connection read-only; migration requires both destructive gates; others NOT IMPLEMENTED
+        description: Connection read-only; migration and inventory require both destructive gates; others NOT IMPLEMENTED
         type: choice
         default: connection
-        options: [connection, crud, transactions, migration, persistence, restore, ui-ack]
+        options: [connection, crud, transactions, migration, inventory, persistence, restore, ui-ack]
       destructive:
         description: Explicit isolated test DB mutation confirmation (connection must be false)
         type: boolean
