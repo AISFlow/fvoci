@@ -1021,7 +1021,8 @@ class OptInSelectionTest(unittest.TestCase):
             self.assertTrue(plan["plan_ok"])
             self.assertEqual(
                 {job: meta["selected"] for job, meta in plan["jobs"].items()},
-                {"install-smoke": True, "backup-restore-smoke": True, "upgrade-smoke-arm64": True},
+                {"install-smoke": True, "backup-restore-smoke": True, "upgrade-smoke-arm64": True,
+                 "shipping-image-producer": False},
             )
 
     def test_opt_in_input_ignored_by_other_workflows_and_fatal_plans(self) -> None:
@@ -1081,6 +1082,110 @@ class OptInSelectionTest(unittest.TestCase):
                 self.assertIn(f"select_upgrade_smoke_arm64={expected}", lines, inputs)
                 self.assertIn(f"plan_ok={plan_ok}", lines, inputs)
                 self.assertIn("select_install_smoke=true", lines)
+
+
+class ShippingProducerSelectionTest(unittest.TestCase):
+    """The separate producer is explicit opt-in; its gate remains fail closed."""
+
+    _install_plan = OptInSelectionTest._install_plan
+    _plan = GateSchemaTest._plan
+    _needs = GateSchemaTest._needs
+    _gate = GateSchemaTest._gate
+
+    def test_existing_event_and_upgrade_selections_unchanged(self) -> None:
+        old_jobs = tuple(j for j in SEL.WORKFLOW_JOBS["install"] if j != "shipping-image-producer")
+        old_opt_ins = {"upgrade-smoke-arm64": "run_upgrade_smoke_arm"}
+        for event_name in ("pull_request", "push", "merge_group", "workflow_dispatch"):
+            for paths in (["docs/rewrite.md"], ["apps/web/src/x.ts"], ["src/main.rs"],
+                          ["scripts/selected-backend-ci/shipping-image-producer.py"]):
+                for event in ({}, {"inputs": {"run_upgrade_smoke_arm": "true"}}):
+                    actual = self._install_plan(event_name, event=event, paths=paths)
+                    with mock.patch.dict(SEL.WORKFLOW_JOBS, {"install": old_jobs}), \
+                            mock.patch.dict(SEL.OPT_IN_JOBS, {"install": old_opt_ins}):
+                        before = self._install_plan(event_name, event=event, paths=paths)
+                    self.assertEqual({j: actual["jobs"][j] for j in old_jobs}, before["jobs"])
+                    for key in ("mode", "reason_code", "plan_ok"):
+                        self.assertEqual(actual[key], before[key])
+                    self.assertFalse(actual["jobs"]["shipping-image-producer"]["selected"])
+            if event_name != "workflow_dispatch":
+                plan = self._install_plan(event_name, event={"inputs": {"run_shipping_producer": "true"}})
+                self.assertFalse(plan["jobs"]["shipping-image-producer"]["selected"])
+
+    def test_manual_boolean_and_upgrade_independence(self) -> None:
+        for shipping in (None, False, "false", True, "true"):
+            for upgrade in (False, "false", True, "true"):
+                inputs = {"run_upgrade_smoke_arm": upgrade}
+                if shipping is not None:
+                    inputs["run_shipping_producer"] = shipping
+                plan = self._install_plan("workflow_dispatch", event={"inputs": inputs})
+                self.assertTrue(plan["plan_ok"])
+                self.assertEqual({j: m["selected"] for j, m in plan["jobs"].items()}, {
+                    "install-smoke": True, "backup-restore-smoke": True,
+                    "upgrade-smoke-arm64": upgrade in (True, "true"),
+                    "shipping-image-producer": shipping in (True, "true"),
+                })
+
+    def test_invalid_unknown_and_fatal_inputs_never_select_producer(self) -> None:
+        for value in ("TRUE", "yes", 1, None, {}, []):
+            plan = self._install_plan("workflow_dispatch", event={"inputs": {"run_shipping_producer": value}})
+            self.assertFalse(plan["plan_ok"])
+            self.assertEqual(plan["reason_code"], "DISPATCH_INPUT_VALUE_INVALID")
+            self.assertFalse(plan["jobs"]["shipping-image-producer"]["selected"])
+        plan = self._install_plan("workflow_dispatch", event={"inputs": {"run_shipping_producer": "true", "other": "true"}})
+        self.assertFalse(plan["plan_ok"])
+        self.assertEqual(plan["reason_code"], "DISPATCH_INPUTS_UNKNOWN")
+        self.assertFalse(plan["jobs"]["shipping-image-producer"]["selected"])
+        plan = self._install_plan("workflow_dispatch", event={"inputs": {"run_shipping_producer": "true"}},
+                                  fatal_error="TESTED_SHA_MISMATCH")
+        self.assertFalse(plan["plan_ok"])
+        self.assertFalse(plan["jobs"]["shipping-image-producer"]["selected"])
+        self.assertEqual(SEL.dispatch_opt_ins("web", "workflow_dispatch", {"inputs": {"run_shipping_producer": "true"}}),
+                         (frozenset(), "DISPATCH_INPUTS_UNKNOWN"))
+
+    def test_actual_plan_cli_producer_outputs(self) -> None:
+        with GitRepoFixture() as fx:
+            copy_workflows(fx.repo)
+            write_minimal_rust_registry_stub(fx.repo)
+            sha = fx.commit_file("README.md")
+            for inputs, selected, plan_ok in (({}, "false", "true"),
+                    ({"run_shipping_producer": "false"}, "false", "true"),
+                    ({"run_shipping_producer": "true"}, "true", "true"),
+                    ({"run_shipping_producer": "invalid"}, "false", "false"),
+                    ({"run_shipping_producer": "true", "other": "true"}, "false", "false")):
+                event = fx.repo / "event.json"
+                event.write_text(json.dumps({"inputs": inputs}), encoding="utf-8")
+                gh_out = fx.repo / "gh-out.txt"
+                gh_out.unlink(missing_ok=True)
+                proc = run_cli(["plan", "--workflow", "install", "--repo-root", str(fx.repo),
+                    "--event-json", str(event), "--output-plan", str(fx.repo / "plan.json"),
+                    "--github-output", str(gh_out)],
+                    env={"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_SHA": sha})
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                lines = gh_out.read_text(encoding="utf-8").splitlines()
+                self.assertIn(f"select_shipping_image_producer={selected}", lines)
+                self.assertIn(f"plan_ok={plan_ok}", lines)
+                self.assertIn("select_upgrade_smoke_arm64=false", lines)
+                self.assertIn("select_install_smoke=true", lines)
+
+    def test_gate_producer_selected_success_unselected_skip_and_missing(self) -> None:
+        for selected in (False, True):
+            plan = self._plan("install", {"shipping-image-producer": selected})
+            for result in ("success", "failure", "cancelled", "skipped"):
+                expected = 0 if result == ("success" if selected else "skipped") else 1
+                self.assertEqual(self._gate(plan, "install", {"shipping-image-producer": result}), expected)
+            self.assertEqual(self._gate(plan, "install", omit_jobs=frozenset({"shipping-image-producer"})), 1)
+
+    def test_gate_producer_event_overrides_refused(self) -> None:
+        forced = self._plan("install", {"shipping-image-producer": True})
+        for name, event in (("pull_request", {"inputs": {"run_shipping_producer": "true"}}),
+                            ("push", {}), ("merge_group", {}),
+                            ("workflow_dispatch", {}),
+                            ("workflow_dispatch", {"inputs": {"run_shipping_producer": "false"}})):
+            self.assertEqual(self._gate(forced, "install", {"shipping-image-producer": "success"},
+                                       event_name=name, event=event), 1)
+        dropped = self._plan("install", {})
+        self.assertEqual(self._gate(dropped, "install", event_name="workflow_dispatch",
+            event={"inputs": {"run_shipping_producer": "true"}}), 1)
 
 
 class WorkflowRegistryTest(unittest.TestCase):
@@ -2326,10 +2431,58 @@ class RegistryMutationCliTest(unittest.TestCase):
         self.assertEqual(text.count(old), 1, old)
         path.write_text(text.replace(old, new), encoding="utf-8")
 
+    def test_shipping_producer_wiring_mutations_rejected_before_outputs(self) -> None:
+        import yaml
+        for mutation in ("missing-job", "missing-gate-need", "missing-output", "wrong-runner",
+                         "wrong-if", "default-true", "wrong-type", "unknown-input", "matrix"):
+            with self.subTest(mutation=mutation):
+                root = self._mutated_root()
+                path = root / ".github/workflows/install.yml"
+                data, err = SEL._load_yaml_mapping(path)
+                self.assertIsNone(err)
+                job = data["jobs"]["shipping-image-producer"]
+                inputs = data.get("on", data.get(True))["workflow_dispatch"]["inputs"]
+                if mutation == "missing-job":
+                    del data["jobs"]["shipping-image-producer"]
+                    needle = "missing registered job id shipping-image-producer"
+                elif mutation == "missing-gate-need":
+                    data["jobs"]["install-ci-gate"]["needs"].remove("shipping-image-producer")
+                    needle = "install-ci-gate needs must be"
+                elif mutation == "missing-output":
+                    del data["jobs"]["ci-plan"]["outputs"]["select_shipping_image_producer"]
+                    needle = "missing selector output select_shipping_image_producer"
+                elif mutation == "wrong-runner":
+                    job["runs-on"] = "ubuntu-26.04-arm"
+                    needle = "shipping-image-producer runs-on must be ubuntu-26.04"
+                elif mutation == "wrong-if":
+                    job["if"] = "github.event_name == 'workflow_dispatch'"
+                    needle = "shipping-image-producer if must be"
+                elif mutation in {"default-true", "wrong-type"}:
+                    spec = inputs["run_shipping_producer"]
+                    spec["default" if mutation == "default-true" else "type"] = True if mutation == "default-true" else "string"
+                    needle = "input run_shipping_producer must be"
+                elif mutation == "unknown-input":
+                    inputs["other"] = {"type": "boolean", "default": False}
+                    needle = "workflow_dispatch inputs must be exactly"
+                else:
+                    job["strategy"] = {"matrix": {"runner": ["ubuntu-26.04"]}}
+                    needle = "shipping-image-producer must be a single job without a matrix"
+                path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, needle)
+
     def test_install_opt_in_wiring_mutations_rejected_before_outputs(self) -> None:
         cases = (
-            ("        default: false\n", "        default: true\n", "input run_upgrade_smoke_arm must be"),
-            ("        type: boolean\n", "        type: string\n", "input run_upgrade_smoke_arm must be"),
+            (
+                "      run_upgrade_smoke_arm:\n        description: Also run the image-to-image upgrade smoke on native ubuntu-26.04-arm (two cold image builds)\n        type: boolean\n        default: false\n",
+                "      run_upgrade_smoke_arm:\n        description: Also run the image-to-image upgrade smoke on native ubuntu-26.04-arm (two cold image builds)\n        type: boolean\n        default: true\n",
+                "input run_upgrade_smoke_arm must be",
+            ),
+            (
+                "      run_upgrade_smoke_arm:\n        description: Also run the image-to-image upgrade smoke on native ubuntu-26.04-arm (two cold image builds)\n        type: boolean\n        default: false\n",
+                "      run_upgrade_smoke_arm:\n        description: Also run the image-to-image upgrade smoke on native ubuntu-26.04-arm (two cold image builds)\n        type: string\n        default: false\n",
+                "input run_upgrade_smoke_arm must be",
+            ),
             (
                 "      run_upgrade_smoke_arm:\n",
                 "      upgrade_old:\n        type: string\n      run_upgrade_smoke_arm:\n",
@@ -2346,8 +2499,8 @@ class RegistryMutationCliTest(unittest.TestCase):
                 "upgrade-smoke-arm64 if must be",
             ),
             (
-                "    needs: [ci-plan, install-smoke, backup-restore-smoke, upgrade-smoke-arm64]\n",
-                "    needs: [ci-plan, install-smoke, backup-restore-smoke]\n",
+                "    needs: [ci-plan, install-smoke, backup-restore-smoke, upgrade-smoke-arm64, shipping-image-producer]\n",
+                "    needs: [ci-plan, install-smoke, backup-restore-smoke, shipping-image-producer]\n",
                 "install-ci-gate needs must be",
             ),
             (

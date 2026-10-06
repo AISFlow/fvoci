@@ -27,16 +27,16 @@ WORKFLOW_JOBS: dict[str, tuple[str, ...]] = {
     "rust": ("fast", "native-arm64", "postgres", "collaboration"),
     "documents": ("native-extraction",),
     "collab-engine": ("native-collab-engine",),
-    "install": ("install-smoke", "backup-restore-smoke", "upgrade-smoke-arm64"),
+    "install": ("install-smoke", "backup-restore-smoke", "upgrade-smoke-arm64", "shipping-image-producer"),
 }
 
 # Manual opt-in jobs: no path or event policy selects them (not even full mode or
 # a fatal plan). Only a workflow_dispatch whose boolean input of the same name is
 # exactly true selects the job; the gate re-derives that from the event file.
 OPT_IN_JOBS: dict[str, dict[str, str]] = {
-    "install": {"upgrade-smoke-arm64": "run_upgrade_smoke_arm"},
+    "install": {"upgrade-smoke-arm64": "run_upgrade_smoke_arm", "shipping-image-producer": "run_shipping_producer"},
 }
-OPT_IN_RUNNER: dict[str, str] = {"upgrade-smoke-arm64": "ubuntu-26.04-arm"}
+OPT_IN_RUNNER: dict[str, str] = {"upgrade-smoke-arm64": "ubuntu-26.04-arm", "shipping-image-producer": "ubuntu-26.04"}
 
 WORKFLOW_YAML: dict[str, str] = {
     "web": "web.yml",

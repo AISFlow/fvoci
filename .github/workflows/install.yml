@@ -7,6 +7,10 @@ on:
   merge_group:
   workflow_dispatch:
     inputs:
+      run_shipping_producer:
+        description: Producer-only exact joint551 image export; no application runtime (requires measured 32 GiB disk and 16 GiB available memory)
+        type: boolean
+        default: false
       run_upgrade_smoke_arm:
         description: Also run the image-to-image upgrade smoke on native ubuntu-26.04-arm (two cold image builds)
         type: boolean
@@ -31,6 +35,7 @@ jobs:
       select_install_smoke: ${{ steps.plan.outputs.select_install_smoke }}
       select_backup_restore_smoke: ${{ steps.plan.outputs.select_backup_restore_smoke }}
       select_upgrade_smoke_arm64: ${{ steps.plan.outputs.select_upgrade_smoke_arm64 }}
+      select_shipping_image_producer: ${{ steps.plan.outputs.select_shipping_image_producer }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -154,9 +159,50 @@ jobs:
             echo "::$token::"
           done
 
+  # Manual producer handback on a separate VM; ordinary smoke jobs are intact.
+  # Tooling changes are NOT physical inputs of the fixed product snapshot.
+  shipping-image-producer:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_shipping_image_producer == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 551583237a4cc31828d69fb1d3160c2e0f9179d6
+          path: product
+          persist-credentials: false
+      - name: Produce one source-stamped image and closed public receipts
+        env:
+          TOOLING_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 -B tooling/scripts/selected-backend-ci/shipping-image-producer.py \
+            --product-root "$GITHUB_WORKSPACE/product" \
+            --tooling-root "$GITHUB_WORKSPACE/tooling" --tooling-sha "$TOOLING_SHA" \
+            --work-dir "$RUNNER_TEMP/shipping-producer" \
+            --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+      # Public repository: NEVER upload the private work/log directory, env,
+      # native capture traces, browser/DB/HTTP evidence, or runtime credentials.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: shipping-image-551-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/shipping-producer/public/shipping-image.tar
+            ${{ runner.temp }}/shipping-producer/public/producer-receipt.json
+            ${{ runner.temp }}/shipping-producer/public/tracked-inputs.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
   install-ci-gate:
     name: install-ci-gate
-    needs: [ci-plan, install-smoke, backup-restore-smoke, upgrade-smoke-arm64]
+    needs: [ci-plan, install-smoke, backup-restore-smoke, upgrade-smoke-arm64, shipping-image-producer]
     if: always()
     runs-on: ubuntu-26.04
     timeout-minutes: 5
