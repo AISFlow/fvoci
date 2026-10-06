@@ -7,8 +7,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import * as Y from "yjs";
-import { yDocToTiptapJson } from "../../../packages/editor/src/collab-tiptap";
+import { getSchema } from "@tiptap/core";
+import {
+  isTiptapDoc,
+  tiptapJsonToYDoc,
+  yDocToTiptapJson,
+} from "../../../packages/editor/src/collab-tiptap";
 import { extractText, walkTiptap } from "../../../packages/editor/src/extract";
+import { createFvociExtensions } from "../../../packages/editor/src/tiptap-schema";
 import type { components } from "../src/generated/api";
 import {
   admin,
@@ -18,7 +24,7 @@ import {
   newCollabContext,
   editorShape,
 } from "./collab-helpers";
-import { UUID_RE } from "./collab-wire";
+import { SESSION_COOKIE, UUID_RE } from "./collab-wire";
 import { installSelectedMember, requiredFixtureInput } from "./selected-backend-fixture";
 
 type Schema = components["schemas"];
@@ -34,13 +40,66 @@ type ActorPage = {
   sockets: string[];
   accessStreams: { status: number; contentType: string }[];
 };
+type ActorSession = {
+  user: Schema["SessionUserOutput"];
+  cookies: Awaited<ReturnType<BrowserContext["cookies"]>>;
+};
 
 let workspaceId: string;
 let selected: string;
 let baseUrl: string;
 let memberId: string;
+// Only this worker's actual setup sessions are reused. No draft/browser origin
+// storage or credential file survives a replacement worker. Its beforeAll still
+// spends real logins; that failure-path budget is a reported runtime limitation.
+const actorSessions = new Map<string, ActorSession>();
 
-async function actor(browser: Browser, who: typeof admin | typeof member): Promise<ActorPage> {
+function expectActorIdentity(
+  user: Schema["SessionUserOutput"],
+  original: Schema["SessionUserOutput"],
+  fresh: boolean,
+): void {
+  expect(user.userId).toMatch(UUID_RE);
+  expect(user.sessionId).toMatch(UUID_RE);
+  expect(user.userId).toBe(original.userId);
+  expect(user.email.toLowerCase()).toBe(original.email.toLowerCase());
+  if (fresh) expect(user.sessionId).not.toBe(original.sessionId);
+  else expect(user.sessionId).toBe(original.sessionId);
+}
+
+function expectActorControls(original: Schema["SessionUserOutput"]): void {
+  expectActorIdentity(original, original, false);
+  const fresh = { ...original, sessionId: randomUUID() };
+  expectActorIdentity(fresh, original, true);
+  for (const wrong of [
+    { ...original, userId: randomUUID() },
+    { ...original, email: "wrong-actor@example.invalid" },
+    fresh,
+  ]) {
+    expect(() => expectActorIdentity(wrong, original, false)).toThrow();
+  }
+  expect(() => expectActorIdentity(original, original, true)).toThrow();
+}
+
+async function captureActorSession(
+  context: BrowserContext,
+  user: Schema["SessionUserOutput"],
+): Promise<ActorSession> {
+  const cookies = (await context.cookies(baseUrl)).filter(
+    (cookie) => cookie.name === SESSION_COOKIE,
+  );
+  // A refused check must not print credential contents in an assertion diff.
+  expect(cookies.length === 1 && cookies.every((cookie) => cookie.value.length > 0)).toBe(true);
+  return { user, cookies };
+}
+
+async function actor(
+  browser: Browser,
+  who: typeof admin | typeof member,
+  fresh = false,
+): Promise<ActorPage> {
+  const original = actorSessions.get(who.email.toLowerCase());
+  if (!original) throw new Error("confirmed setup actor session missing");
   const context = await newCollabContext(browser, baseUrl);
   const page = await context.newPage();
   const sockets: string[] = [];
@@ -53,13 +112,24 @@ async function actor(browser: Browser, who: typeof admin | typeof member): Promi
       });
   });
   page.on("websocket", (socket) => sockets.push(socket.url()));
-  await login(page, who.email, who.password);
-  const identity = await page.request.get("/api/v1/auth/me");
-  expect(identity.status()).toBe(200);
-  const user = (await identity.json()) as Schema["SessionUserOutput"];
-  expect(user.userId).toMatch(UUID_RE);
-  expect(user.sessionId).toMatch(UUID_RE);
-  return { context, page, sockets, accessStreams };
+  try {
+    if (fresh) await login(page, who.email, who.password);
+    else await context.addCookies(original.cookies);
+    const identity = await page.request.get("/api/v1/auth/me");
+    expect(identity.status()).toBe(200);
+    const user = (await identity.json()) as Schema["SessionUserOutput"];
+    expectActorIdentity(user, original.user, fresh);
+    const memberships = await page.request.get("/api/v1/me/workspaces");
+    expect(memberships.status()).toBe(200);
+    const workspaces = (await memberships.json()) as Schema["WorkspaceListResponse"];
+    expect(workspaces.items.find((item) => item.id === workspaceId)?.role).toBe(
+      who === admin ? "owner" : "member",
+    );
+    return { context, page, sockets, accessStreams };
+  } catch (error) {
+    await context.close();
+    throw error;
+  }
 }
 
 async function openOff(page: Page, target: Target): Promise<void> {
@@ -304,6 +374,90 @@ function expectComparisonBodies(
   expect(values).toEqual([start, mine, current]);
 }
 
+const comparisonSchema = getSchema(createFvociExtensions());
+
+function canonicalEditorMine(value: unknown) {
+  if (!isTiptapDoc(value)) throw new Error("actual edited mine must be a document");
+  const expected = structuredClone(value);
+  walkTiptap(expected, (node) => {
+    // This closed allowance covers the observed editor defaults, not arbitrary
+    // stored attrs. Any other SDK projection loss must still fail full equality.
+    if (node.type === "paragraph" || node.type === "heading") {
+      for (const key of ["textAlign", "ychange"] as const) {
+        if (node.attrs?.[key] !== null) continue;
+        expect(comparisonSchema.nodes[node.type]?.spec.attrs?.[key]?.default).toBeNull();
+        delete node.attrs[key];
+      }
+    }
+    // y-tiptap's native observer emits an empty attrs object for attrless
+    // marks; ProseMirror editor JSON omits it. No mark or set attr is removed.
+    if (Array.isArray(node.marks)) {
+      for (const mark of node.marks) {
+        if (!mark || typeof mark !== "object" || Object.hasOwn(mark, "attrs")) continue;
+        const type: unknown = Reflect.get(mark, "type");
+        if (typeof type !== "string") continue;
+        const definition = comparisonSchema.marks[type];
+        if (definition && Object.keys(definition.spec.attrs ?? {}).length === 0)
+          Reflect.set(mark, "attrs", {});
+      }
+    }
+  });
+  const doc = tiptapJsonToYDoc(value);
+  try {
+    const native = yDocToTiptapJson(doc);
+    expect(native).toEqual(expected);
+    return native;
+  } finally {
+    doc.destroy();
+  }
+}
+
+function expectComparisonControls(): void {
+  // Independent literal semantics: SDK encoder/decoder agreement by itself is
+  // insufficient to prove that the conflict panel retained an owned draft.
+  const expected = {
+    type: "doc",
+    content: [
+      {
+        type: "paragraph",
+        attrs: { id: "12345678-1234-4234-8234-123456789abc", textAlign: "center" },
+        content: [{ type: "text", text: "owned 한글 中 😀", marks: [{ type: "bold", attrs: {} }] }],
+      },
+    ],
+  };
+  const editor = structuredClone(expected);
+  Reflect.deleteProperty(editor.content[0]!.content[0]!.marks[0]!, "attrs");
+  Object.assign(editor.content[0]!.attrs, { ychange: null });
+  expect(canonicalEditorMine(editor)).toEqual(expected);
+  const defaults = structuredClone(editor);
+  Object.assign(defaults.content[0]!.attrs, { textAlign: null });
+  const defaultExpected = structuredClone(expected);
+  Reflect.deleteProperty(defaultExpected.content[0]!.attrs, "textAlign");
+  expect(canonicalEditorMine(defaults)).toEqual(defaultExpected);
+  const start = structuredClone(expected);
+  start.content[0]!.content[0]!.text = "start 한글";
+  const current = structuredClone(expected);
+  current.content[0]!.content[0]!.text = "winner 中 😀";
+  expectComparisonBodies([start, expected, current], start, expected, current);
+  expect(() =>
+    expectComparisonBodies([current, expected, start], start, expected, current),
+  ).toThrow();
+  for (let index = 0; index < 3; index++) {
+    for (const mutation of ["id", "text", "marks", "alignment"] as const) {
+      const values = [structuredClone(start), structuredClone(expected), structuredClone(current)];
+      const paragraph = values[index]!.content[0]!;
+      if (mutation === "id") paragraph.attrs.id = "87654321-4321-4321-8321-cba987654321";
+      if (mutation === "text") paragraph.content[0]!.text = "lost private text";
+      if (mutation === "marks") paragraph.content[0]!.marks = [];
+      if (mutation === "alignment") Reflect.deleteProperty(paragraph.attrs, "textAlign");
+      expect(() => expectComparisonBodies(values, start, expected, current)).toThrow();
+    }
+  }
+  const unsupported = structuredClone(editor);
+  Object.assign(unsupported.content[0]!.attrs, { futureAttribute: null });
+  expect(() => canonicalEditorMine(unsupported)).toThrow();
+}
+
 function expectSetupState(initial: unknown, prior: unknown): void {
   expect(initial).toMatchObject({ needed: prior === undefined, realtimeMode: "off" });
 }
@@ -369,7 +523,7 @@ async function twoWriters(a: ActorPage, b: ActorPage, target: Target) {
   await a.page.keyboard.press("ControlOrMeta+End");
   expect((await editorShape(a.page)).bold).toEqual([winner]);
   await replaceText(b.page, loser);
-  const mine = (await editorShape(b.page)).document;
+  const mine = canonicalEditorMine((await editorShape(b.page)).document);
   expect(extractText(mine)).toBe(loser);
   const committed = await save(a.page, target);
   expect(committed.command.expectedTailSeq).toBe(start.tailSeq);
@@ -407,6 +561,7 @@ async function twoWriters(a: ActorPage, b: ActorPage, target: Target) {
 
 test.describe("selected normal main OFF", () => {
   test.beforeAll(async ({ browser, baseURL }, testInfo) => {
+    expectComparisonControls();
     selected = requiredFixtureInput("FVOCI_E2E_SELECTED_BACKEND");
     expect(selected).toMatch(/^(postgres|sqlite)$/);
     baseUrl = requiredFixtureInput("PLAYWRIGHT_BASE_URL");
@@ -447,8 +602,12 @@ test.describe("selected normal main OFF", () => {
       await login(page, admin.email, admin.password);
       const adminMe = await page.request.get("/api/v1/auth/me");
       expect(adminMe.status()).toBe(200);
-      const adminId = ((await adminMe.json()) as Schema["SessionUserOutput"]).userId;
+      const adminUser = (await adminMe.json()) as Schema["SessionUserOutput"];
+      expect(adminUser.email.toLowerCase()).toBe(admin.email.toLowerCase());
+      const adminId = adminUser.userId;
       expect(adminId).toMatch(UUID_RE);
+      expect(adminUser.sessionId).toMatch(UUID_RE);
+      const adminSession = await captureActorSession(context, adminUser);
       const response = await page.request.get("/api/v1/me/workspaces");
       expect(response.status()).toBe(200);
       const workspaces = (await response.json()) as Schema["WorkspaceListResponse"];
@@ -463,8 +622,15 @@ test.describe("selected normal main OFF", () => {
       await login(page, member.email, member.password);
       const me = await page.request.get("/api/v1/auth/me");
       expect(me.status()).toBe(200);
-      memberId = ((await me.json()) as Schema["SessionUserOutput"]).userId;
+      const memberUser = (await me.json()) as Schema["SessionUserOutput"];
+      expect(memberUser.email.toLowerCase()).toBe(member.email.toLowerCase());
+      memberId = memberUser.userId;
       expect(memberId).toMatch(UUID_RE);
+      expect(memberId).not.toBe(adminId);
+      expect(memberUser.sessionId).toMatch(UUID_RE);
+      const memberSession = await captureActorSession(context, memberUser);
+      expectActorControls(adminUser);
+      expectActorControls(memberUser);
       const witness = { baseUrl, selected, allocation, adminId, workspaceId, memberId };
       expectSetupWitness(prior, witness);
       const collab = await page.request.get("/collab");
@@ -486,6 +652,8 @@ test.describe("selected normal main OFF", () => {
       });
       expect(upgrade.status()).toBe(503);
       expect(await upgrade.json()).toMatchObject({ code: "collab_unavailable", status: 503 });
+      actorSessions.set(admin.email.toLowerCase(), adminSession);
+      actorSessions.set(member.email.toLowerCase(), memberSession);
       if (prior === undefined) {
         mkdirSync(testInfo.project.outputDir, { recursive: true });
         writeFileSync(receiptPath, JSON.stringify(witness), { flag: "wx", mode: 0o600 });
@@ -500,7 +668,7 @@ test.describe("selected normal main OFF", () => {
   }) => {
     const a = await actor(browser, admin);
     const b = await actor(browser, member);
-    const fresh = await actor(browser, member);
+    const fresh = await actor(browser, member, true);
     try {
       const target = await wiki(a.page);
       const conflict = await twoWriters(a, b, target);
@@ -579,7 +747,7 @@ test.describe("selected normal main OFF", () => {
   }) => {
     const a = await actor(browser, admin);
     const b = await actor(browser, member);
-    const fresh = await actor(browser, member);
+    const fresh = await actor(browser, member, true);
     try {
       const target = await wiki(a.page);
       const conflict = await twoWriters(a, b, target);
@@ -693,7 +861,7 @@ test.describe("selected normal main OFF", () => {
   }) => {
     const a = await actor(browser, admin);
     const b = await actor(browser, member);
-    const fresh = await actor(browser, member);
+    const fresh = await actor(browser, member, true);
     try {
       const source = await wiki(a.page);
       await openOff(a.page, source);
@@ -797,7 +965,7 @@ test.describe("selected normal main OFF", () => {
     browser,
   }) => {
     const a = await actor(browser, admin);
-    const fresh = await actor(browser, admin);
+    const fresh = await actor(browser, admin, true);
     const other = await actor(browser, member);
     try {
       await a.page.goto(`/w/${admin.workspaceSlug}/wiki`);
@@ -894,7 +1062,7 @@ test.describe("selected normal main OFF", () => {
     browser,
   }) => {
     const a = await actor(browser, admin);
-    const fresh = await actor(browser, member);
+    const fresh = await actor(browser, member, true);
     try {
       const target = await wiki(a.page);
       await openOff(a.page, target);
@@ -946,6 +1114,15 @@ test.describe("selected normal main OFF", () => {
       // Real login changes actor and credential in this tab. The old draft may
       // remain private in storage but cannot mount under the other actor.
       await login(a.page, member.email, member.password);
+      const identity = await a.page.request.get("/api/v1/auth/me");
+      expect(identity.status()).toBe(200);
+      const original = actorSessions.get(member.email.toLowerCase());
+      if (!original) throw new Error("confirmed transition actor missing");
+      expectActorIdentity(
+        (await identity.json()) as Schema["SessionUserOutput"],
+        original.user,
+        true,
+      );
       await openOff(a.page, target);
       expect((await editorShape(a.page)).text).toBe(extractText(current.contentJson));
       expect((await editorShape(a.page)).text).not.toContain("private retired account draft");
