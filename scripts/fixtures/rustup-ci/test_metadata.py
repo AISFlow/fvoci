@@ -217,6 +217,30 @@ class MetadataControls(unittest.TestCase):
         self.assertTrue((self.output/'before.json').exists())
         self.assertFalse((self.output/'after.json').exists())
 
+    def test_late_public_inspection_compiled_bytes_refuse_final_receipt(self):
+        calls = [0]
+        def installed(rustup):
+            calls[0] += 1
+            if calls[0] == 2:
+                self.compiler.write_bytes(b'owned late public-inspection compiled byte drift')
+            return sorted(metadata.ROWS)
+        with patch.object(metadata, 'installed', installed), self.assertRaisesRegex(ValueError, 'compiled-toolchain-input-drift'):
+            self.prepare()
+        self.assertTrue((self.output/'before.json').exists())
+        self.assertFalse((self.output/'after.json').exists())
+
+    def test_late_public_inspection_compiled_mode_refuses_final_receipt(self):
+        calls = [0]
+        def installed(rustup):
+            calls[0] += 1
+            if calls[0] == 2:
+                self.compiler.chmod(0o644)
+            return sorted(metadata.ROWS)
+        with patch.object(metadata, 'installed', installed), self.assertRaisesRegex(ValueError, 'compiled-toolchain-input-drift'):
+            self.prepare()
+        self.assertTrue((self.output/'before.json').exists())
+        self.assertFalse((self.output/'after.json').exists())
+
     def test_rustup_identity_drift_before_write(self):
         self.rustup.write_bytes(b'owned changed manager bytes'); self.refuses()
 

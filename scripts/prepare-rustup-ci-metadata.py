@@ -204,10 +204,10 @@ def prepare(root, output, rustup, context):
         require(current.read() == CANONICAL, 'components-write-verification')
         require(file_identity(os.fstat(current.fileno())) == file_identity(original_info)
                 and file_identity(component.lstat()) == file_identity(original_info), 'components-identity-drift')
-    after_closure = closure(root)
-    require(after_closure == before_closure, 'compiled-toolchain-input-drift')
     require(installed(rustup) == before_set, 'public-installed-set-drift')
     require((sha(rustup.read_bytes()), file_identity(rustup.lstat())) == before_rustup, 'rustup-identity-drift')
+    after_closure = closure(root)
+    require(after_closure == before_closure, 'compiled-toolchain-input-drift')
     with open(component, 'rb', opener=lambda path, flags: os.open(path, flags | os.O_NOFOLLOW)) as final:
         require(file_identity(os.fstat(final.fileno())) == file_identity(original_info)
                 and file_identity(component.lstat()) == file_identity(original_info), 'components-final-identity-drift')
