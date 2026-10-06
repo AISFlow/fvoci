@@ -2,7 +2,9 @@
  * selected backend, current native producer, fresh Vue dist and port-zero URL.
  * No PG-only server fixture, business-row seed, mocked ACK or fallback backend.
  * Registration and stopped-server restart driver remain root owned. */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import * as Y from "yjs";
 import { yDocToTiptapJson } from "../../../packages/editor/src/collab-tiptap";
@@ -293,17 +295,65 @@ async function wiki(page: Page): Promise<Target> {
   };
 }
 
-async function compare(page: Page, start: Body, mine: string, current: Body): Promise<void> {
+function expectComparisonBodies(
+  values: unknown[],
+  start: unknown,
+  mine: unknown,
+  current: unknown,
+): void {
+  expect(values).toEqual([start, mine, current]);
+}
+
+function expectSetupState(initial: unknown, prior: unknown): void {
+  expect(initial).toMatchObject({ needed: prior === undefined, realtimeMode: "off" });
+}
+
+function expectSetupWitness(prior: unknown, witness: unknown): void {
+  if (prior !== undefined) expect(prior).toEqual(witness);
+}
+
+function offAllocationIdentity(
+  runRoot: string,
+  mode: string,
+  baseUrl: string,
+  ready: Record<string, unknown>,
+  binding: Record<string, unknown>,
+  bindingSha256: string,
+) {
+  expect(isAbsolute(runRoot)).toBe(true);
+  expect(mode).toBe("off");
+  expect(ready).toMatchObject({ baseURL: baseUrl, selected_flow: "off" });
+  expect(ready.source).toMatch(/^[0-9a-f]{40}$/);
+  expect(ready.tree).toMatch(/^[0-9a-f]{40}$/);
+  expect(ready.compiled_source).toBe(ready.source);
+  expect(ready.current_binding_sha256).toMatch(/^[0-9a-f]{64}$/);
+  expect(bindingSha256).toBe(ready.current_binding_sha256);
+  expect(binding).toMatchObject({
+    schema: 1,
+    ready: true,
+    flow: "off",
+    source: ready.source,
+    tree: ready.tree,
+    compiledSource: ready.source,
+  });
+  return { runRoot, source: ready.source, tree: ready.tree, mode, bindingSha256 };
+}
+
+async function compare(page: Page, start: Body, mine: unknown, current: Body): Promise<void> {
   const panel = page.getByTestId("off-body-conflict");
   await expect(panel).toBeVisible();
-  const expected = [start.contentJson, null, current.contentJson];
   const details = panel.locator("details");
   await expect(details).toHaveCount(3);
+  const values: unknown[] = [];
   for (let index = 0; index < 3; index++) {
-    const value: unknown = JSON.parse(await details.nth(index).locator("pre").innerText());
-    if (index === 1) expect(extractText(value)).toBe(mine);
-    else expect(value).toEqual(expected[index]);
+    const detail = details.nth(index);
+    if ((await detail.getAttribute("open")) === null) await detail.locator("summary").click();
+    await expect(detail).toHaveAttribute("open", "");
+    const pre = detail.locator("pre");
+    await expect(pre).toBeVisible();
+    values.push(JSON.parse(await pre.innerText()));
   }
+  expectComparisonBodies(values, start.contentJson, mine, current.contentJson);
 }
 
 async function twoWriters(a: ActorPage, b: ActorPage, target: Target) {
@@ -319,6 +369,8 @@ async function twoWriters(a: ActorPage, b: ActorPage, target: Target) {
   await a.page.keyboard.press("ControlOrMeta+End");
   expect((await editorShape(a.page)).bold).toEqual([winner]);
   await replaceText(b.page, loser);
+  const mine = (await editorShape(b.page)).document;
+  expect(extractText(mine)).toBe(loser);
   const committed = await save(a.page, target);
   expect(committed.command.expectedTailSeq).toBe(start.tailSeq);
   const current = await readBody(a.page, target);
@@ -346,7 +398,7 @@ async function twoWriters(a: ActorPage, b: ActorPage, target: Target) {
   expect(rejected.command.expectedTailSeq).toBe(start.tailSeq);
   expect(rejected.command.commandId).not.toBe(committed.command.commandId);
   expect(await readBody(a.page, target)).toEqual(current);
-  await compare(b.page, start, loser, current);
+  await compare(b.page, start, mine, current);
   expect((await editorShape(b.page)).text).toBe(loser);
   expect(a.sockets).toEqual([]);
   expect(b.sockets).toEqual([]);
@@ -354,19 +406,49 @@ async function twoWriters(a: ActorPage, b: ActorPage, target: Target) {
 }
 
 test.describe("selected normal main OFF", () => {
-  test.beforeAll(async ({ browser, baseURL }) => {
+  test.beforeAll(async ({ browser, baseURL }, testInfo) => {
     selected = requiredFixtureInput("FVOCI_E2E_SELECTED_BACKEND");
     expect(selected).toMatch(/^(postgres|sqlite)$/);
     baseUrl = requiredFixtureInput("PLAYWRIGHT_BASE_URL");
     expect(baseURL).toBe(baseUrl);
+    // Both maintained drivers expose this public identity after load_current
+    // validates the unique grant, current source/tree and selected OFF flow.
+    const runRoot = requiredFixtureInput("FVOCI_E2E_RESULT_DIR");
+    expect(isAbsolute(runRoot)).toBe(true);
+    expect(testInfo.project.outputDir).toBe(join(runRoot, "playwright-output"));
+    const ready = JSON.parse(readFileSync(join(runRoot, "normal-main-ready.json"), "utf8"));
+    expect(typeof ready.current_binding).toBe("string");
+    expect(isAbsolute(ready.current_binding)).toBe(true);
+    const bindingBytes = readFileSync(ready.current_binding);
+    const allocation = offAllocationIdentity(
+      runRoot,
+      requiredFixtureInput("FVOCI_E2E_SELECTED_FLOW"),
+      baseUrl,
+      ready,
+      JSON.parse(bindingBytes.toString("utf8")),
+      createHash("sha256").update(bindingBytes).digest("hex"),
+    );
+    // Project output is shared by replacement workers in THIS allocated run,
+    // then cleared by the runner for a new invocation. It is not a DB bypass.
+    const receiptPath = join(testInfo.project.outputDir, "off-owned-setup.json");
+    const prior: unknown = existsSync(receiptPath)
+      ? JSON.parse(readFileSync(receiptPath, "utf8"))
+      : undefined;
+    if (prior !== undefined) expect(prior).toMatchObject({ baseUrl, selected, allocation });
     const context = await newCollabContext(browser, baseUrl);
     const page = await context.newPage();
     try {
       const initial = await page.request.get("/api/v1/setup");
       expect(initial.status()).toBe(200);
-      expect(await initial.json()).toMatchObject({ needed: true, realtimeMode: "off" });
-      await ensureInstanceSetup(page);
+      // First worker still requires a clean DB; only our confirmed setup can
+      // authorize a replacement worker's initialized state.
+      expectSetupState(await initial.json(), prior);
+      if (prior === undefined) await ensureInstanceSetup(page);
       await login(page, admin.email, admin.password);
+      const adminMe = await page.request.get("/api/v1/auth/me");
+      expect(adminMe.status()).toBe(200);
+      const adminId = ((await adminMe.json()) as Schema["SessionUserOutput"]).userId;
+      expect(adminId).toMatch(UUID_RE);
       const response = await page.request.get("/api/v1/me/workspaces");
       expect(response.status()).toBe(200);
       const workspaces = (await response.json()) as Schema["WorkspaceListResponse"];
@@ -374,12 +456,17 @@ test.describe("selected normal main OFF", () => {
       if (!workspace) throw new Error("real Vue setup workspace missing");
       expect(workspace.role).toBe("owner");
       workspaceId = workspace.id;
-      installSelectedMember(selected);
+      expect(workspaceId).toMatch(UUID_RE);
+      // SQLite's fixture is an actual INSERT, not an idempotent ensure call.
+      // Replacements must prove the same existing actor instead of reseeding.
+      if (prior === undefined) installSelectedMember(selected);
       await login(page, member.email, member.password);
       const me = await page.request.get("/api/v1/auth/me");
       expect(me.status()).toBe(200);
       memberId = ((await me.json()) as Schema["SessionUserOutput"]).userId;
       expect(memberId).toMatch(UUID_RE);
+      const witness = { baseUrl, selected, allocation, adminId, workspaceId, memberId };
+      expectSetupWitness(prior, witness);
       const collab = await page.request.get("/collab");
       expect(collab.status()).toBe(503);
       expect(await collab.json()).toEqual({
@@ -399,6 +486,10 @@ test.describe("selected normal main OFF", () => {
       });
       expect(upgrade.status()).toBe(503);
       expect(await upgrade.json()).toMatchObject({ code: "collab_unavailable", status: 503 });
+      if (prior === undefined) {
+        mkdirSync(testInfo.project.outputDir, { recursive: true });
+        writeFileSync(receiptPath, JSON.stringify(witness), { flag: "wx", mode: 0o600 });
+      }
     } finally {
       await context.close();
     }

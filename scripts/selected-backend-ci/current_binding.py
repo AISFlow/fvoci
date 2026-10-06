@@ -44,7 +44,7 @@ def referenced(record):
 
 def validate_off_report(report, backend):
     spec = W / 'apps/web/e2e-pending/workspace-off-selected-backend.spec.ts'
-    assert sha(spec) == '75a28985f6f7081c525ac9280e7fd7b1a80671a21b2ed31942a8091804814547'
+    assert sha(spec) == '992598cd5cbab6a4b7738ecec6574d9ae8f7b7497baa410341e58d08587994be'
     expected = re.findall(r'  test\("([^"\n]+)"', spec.read_text())
     assert len(expected) == len(set(expected)) == 7
     assert report['config']['workers'] == 1 and report['errors'] == []
@@ -162,7 +162,7 @@ def load_current(lane, driver):
     assert os.environ.get('FVOCI_E2E_SELECTED_FLOW', 'on') == flow
     if lane == 'install': assert flow == 'on'
     if flow == 'off':
-        assert before['tracked']['apps/web/e2e-pending/workspace-off-selected-backend.spec.ts'] == '75a28985f6f7081c525ac9280e7fd7b1a80671a21b2ed31942a8091804814547'
+        assert before['tracked']['apps/web/e2e-pending/workspace-off-selected-backend.spec.ts'] == '992598cd5cbab6a4b7738ecec6574d9ae8f7b7497baa410341e58d08587994be'
     if lane == 'postgres':
         assert before['tracked']['apps/web/e2e-pending/workspace-wiki-selected-auxiliary.ts'] == 'c38b23f590e08f68f4a7abf64d71976e9b088f66631982e73e8f26aa8d606f57'
     assert subprocess.check_output(['git','-c','safe.directory='+str(W),'-C',str(W),'status','--short'], text=True) == before['status']
