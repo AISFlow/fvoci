@@ -20,6 +20,8 @@ import sys
 sys.dont_write_bytecode = True
 TOOLCHAIN = '1.98.1-x86_64-unknown-linux-gnu'
 ROWS = tuple(name + '-x86_64-unknown-linux-gnu' for name in ('cargo', 'clippy-preview', 'rust-std', 'rustc'))
+# Rustup's public component list reverses the manifest's clippy -> clippy-preview rename.
+PUBLIC_ROWS = tuple(name + '-x86_64-unknown-linux-gnu' for name in ('cargo', 'clippy', 'rust-std', 'rustc'))
 CANONICAL = ('\n'.join(ROWS) + '\n').encode('ascii')
 RELATIVE = 'lib/rustlib/components'
 
@@ -70,12 +72,13 @@ def exact_rows(raw):
     return rows
 
 
-def command(argv, cwd=None):
+def command(argv, cwd=None, strip=True):
     result = subprocess.run(argv, cwd=cwd, env={**os.environ, 'RUSTUP_AUTO_INSTALL': '0'},
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     require(result.returncode == 0, 'inspection-command-failed')
     require(len(result.stdout) <= 1024 * 1024, 'inspection-output-bound')
-    return result.stdout.decode('ascii').strip()
+    text = result.stdout.decode('ascii')
+    return text.strip() if strip else text
 
 
 def scope(output):
@@ -114,9 +117,14 @@ def scope(output):
 
 
 def installed(rustup):
-    text = command([str(rustup), 'component', 'list', '--installed', '--toolchain', TOOLCHAIN])
-    rows = text.split('\n')
-    require(len(rows) == 4 and len(set(rows)) == 4 and set(rows) == set(ROWS), 'public-installed-set')
+    text = command([str(rustup), 'component', 'list', '--installed', '--toolchain', TOOLCHAIN], strip=False)
+    rows = text.removesuffix('\n').split('\n')
+    # Never echo unknown CLI output: only fixed public labels, counts and its raw hash.
+    print(json.dumps({'rustup_installed': {'recognized': sorted(set(rows) & set(PUBLIC_ROWS)),
+                                         'row_count': len(rows),
+                                         'unknown_count': sum(row not in PUBLIC_ROWS for row in rows),
+                                         'raw_sha256': sha(text.encode('ascii'))}}))
+    require(len(rows) == 4 and len(set(rows)) == 4 and set(rows) == set(PUBLIC_ROWS), 'public-installed-set')
     return sorted(rows)
 
 
