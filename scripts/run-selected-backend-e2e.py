@@ -319,40 +319,80 @@ def runtime_ownership_return(output):
                             location['spec_sha256'] == sha(spec) == before.get('tracked', {}).get(str(spec.relative_to(ROOT))) and
                             type(location['line']) is int and 1 <= location['line'] <= len(spec.read_text().splitlines())):
                         browser = {**browser, 'assertion_location': None}
-                observed = facts.get('browser_failure_diagnostic')
-                observation_keys = {'schema', 'driver_sha256', 'line', 'exit', 'error_kind', 'source_location',
-                                    'report_exists', 'report_state', 'report_sha256', 'log_sha256', 'input_observation'}
-                input_keys = {'explicit_cache_path_present', 'cache_owned_by_runtime', 'cache_matches_preflight',
-                              'chromium_file_exists', 'chromium_owned_by_runtime', 'bun_sha256', 'chromium_sha256'}
-                if not (bound_driver and type(observed) is dict and set(observed) == observation_keys and
-                        type(observed['schema']) is int and observed['schema'] == 1 and
-                        observed['driver_sha256'] == sha(driver) and
-                        type(observed['line']) is int and 1 <= observed['line'] <= len(driver.read_text().splitlines()) and
-                        type(observed['exit']) is int and -255 <= observed['exit'] <= 255 and observed['exit'] != 0 and
-                        observed['exit'] == facts.get('browser_exit') and type(facts.get('browser_exit')) is int and
-                        observed['error_kind'] in ('UNKNOWN', 'BUN_CI_CONFIG_GUARD', 'BROWSER_EXECUTABLE_MISSING',
-                                                   'SELECTED_SPEC_FAILURE', 'SELECTED_SPEC_TIMEOUT') and
-                        type(observed['report_exists']) is bool and
-                        observed['report_state'] in ('MISSING', 'UNREADABLE', 'MALFORMED', 'AVAILABLE') and
-                        observed['report_exists'] == (observed['report_state'] != 'MISSING') and
-                        all(observed[key] is None or type(observed[key]) is str and re.fullmatch('[0-9a-f]{64}', observed[key])
-                            for key in ('report_sha256', 'log_sha256')) and
-                        type(observed['input_observation']) is dict and set(observed['input_observation']) == input_keys and
-                        all(type(observed['input_observation'][key]) is bool for key in ('explicit_cache_path_present', 'chromium_file_exists')) and
-                        all(observed['input_observation'][key] is None or type(observed['input_observation'][key]) is bool
-                            for key in ('cache_owned_by_runtime', 'cache_matches_preflight', 'chromium_owned_by_runtime')) and
-                        all(observed['input_observation'][key] is None or type(observed['input_observation'][key]) is str and
-                            re.fullmatch('[0-9a-f]{64}', observed['input_observation'][key]) for key in ('bun_sha256', 'chromium_sha256'))):
-                    observed = None
-                if observed is not None:
-                    location = observed['source_location']
-                    spec = ROOT / 'apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'
-                    if not (type(location) is dict and set(location) == {'spec_sha256', 'line'} and
-                            location['spec_sha256'] == sha(spec) == before.get('tracked', {}).get(str(spec.relative_to(ROOT))) and
-                            type(location['line']) is int and 1 <= location['line'] <= len(spec.read_text().splitlines())):
-                        observed = {**observed, 'source_location': None,
-                                    'error_kind': 'UNKNOWN' if observed['error_kind'] in
-                                        ('SELECTED_SPEC_FAILURE', 'SELECTED_SPEC_TIMEOUT') else observed['error_kind']}
+                def qualified_browser_diagnostic(observed, expected_exit, restart=False):
+                    observation_keys = {'schema', 'driver_sha256', 'line', 'exit', 'error_kind', 'source_location',
+                                        'report_exists', 'report_state', 'report_sha256', 'log_sha256', 'input_observation'}
+                    if restart:
+                        observation_keys = observation_keys | {'restart_verdict'}
+                    input_keys = {'explicit_cache_path_present', 'cache_owned_by_runtime', 'cache_matches_preflight',
+                                  'chromium_file_exists', 'chromium_owned_by_runtime', 'bun_sha256', 'chromium_sha256'}
+                    if not (bound_driver and type(observed) is dict and set(observed) == observation_keys and
+                            type(observed['schema']) is int and observed['schema'] == 1 and
+                            observed['driver_sha256'] == sha(driver) and
+                            type(observed['line']) is int and 1 <= observed['line'] <= len(driver.read_text().splitlines()) and
+                            type(observed['exit']) is int and -255 <= observed['exit'] <= 255 and (restart or observed['exit'] != 0) and
+                            observed['exit'] == expected_exit and type(expected_exit) is int and
+                            observed['error_kind'] in ('UNKNOWN', 'BUN_CI_CONFIG_GUARD', 'BROWSER_EXECUTABLE_MISSING',
+                                                       'SELECTED_SPEC_FAILURE', 'SELECTED_SPEC_TIMEOUT') and
+                            type(observed['report_exists']) is bool and
+                            observed['report_state'] in ('MISSING', 'UNREADABLE', 'MALFORMED', 'AVAILABLE') and
+                            observed['report_exists'] == (observed['report_state'] != 'MISSING') and
+                            all(observed[key] is None or type(observed[key]) is str and re.fullmatch('[0-9a-f]{64}', observed[key])
+                                for key in ('report_sha256', 'log_sha256')) and
+                            type(observed['input_observation']) is dict and set(observed['input_observation']) == input_keys and
+                            all(type(observed['input_observation'][key]) is bool for key in ('explicit_cache_path_present', 'chromium_file_exists')) and
+                            all(observed['input_observation'][key] is None or type(observed['input_observation'][key]) is bool
+                                for key in ('cache_owned_by_runtime', 'cache_matches_preflight', 'chromium_owned_by_runtime')) and
+                            all(observed['input_observation'][key] is None or type(observed['input_observation'][key]) is str and
+                                re.fullmatch('[0-9a-f]{64}', observed['input_observation'][key]) for key in ('bun_sha256', 'chromium_sha256'))):
+                        observed = None
+                    if observed is not None:
+                        location = observed['source_location']
+                        spec = ROOT / 'apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'
+                        if not (type(location) is dict and set(location) == {'spec_sha256', 'line'} and
+                                location['spec_sha256'] == sha(spec) == before.get('tracked', {}).get(str(spec.relative_to(ROOT))) and
+                                type(location['line']) is int and 1 <= location['line'] <= len(spec.read_text().splitlines())):
+                            observed = {**observed, 'source_location': None,
+                                        'error_kind': 'UNKNOWN' if observed['error_kind'] in
+                                            ('SELECTED_SPEC_FAILURE', 'SELECTED_SPEC_TIMEOUT') else observed['error_kind']}
+                    if observed is not None and restart:
+                        producer_lines = [index + 1 for index, text in enumerate(driver.read_text().splitlines())
+                                          if "'line': sys._getframe().f_lineno, 'exit': code," in text]
+                        if producer_lines != [observed['line']]:
+                            return None
+                        verdict = observed['restart_verdict']
+                        spec = ROOT / 'apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'
+                        title = 'selected normal main restart: fresh actor reads persisted native history and manual revision'
+                        registration = [index + 1 for index, text in enumerate(spec.read_text().splitlines())
+                                        if ('test("' + title + '"') in text]
+                        status_count = {'passed': 'expected', 'failed': 'unexpected', 'timedOut': 'unexpected',
+                                        'skipped': 'skipped', 'interrupted': 'unexpected'}
+                        if not (type(verdict) is dict and
+                                set(verdict) == {'registered_test', 'spec_sha256', 'registration_line', 'status', 'counts'} and
+                                verdict['registered_test'] == 'SELECTED_NORMAL_RESTART' and
+                                verdict['spec_sha256'] == sha(spec) == before.get('tracked', {}).get(str(spec.relative_to(ROOT))) and
+                                len(registration) == 1 and type(verdict['registration_line']) is int and
+                                verdict['registration_line'] == registration[0] and type(verdict['status']) is str and
+                                verdict['status'] in status_count and type(verdict['counts']) is dict and
+                                set(verdict['counts']) == {'expected', 'unexpected', 'flaky', 'skipped'} and
+                                all(type(value) is int and 0 <= value <= 1 for value in verdict['counts'].values()) and
+                                sum(verdict['counts'].values()) == 1 and verdict['counts'][status_count[verdict['status']]] == 1):
+                            observed = {**observed, 'restart_verdict': None}
+                    return observed
+                observed = qualified_browser_diagnostic(facts.get('browser_failure_diagnostic'), facts.get('browser_exit'))
+                restart = facts.get('restart_browser_diagnostic')
+                helper = TEMPLATES / 'restart_checkpoint.py'
+                if (bound_driver and type(restart) is dict and
+                        set(restart) == {'helper_sha256', 'helper_line', 'observation'} and
+                        helper.is_file() and not helper.is_symlink() and
+                        restart['helper_sha256'] == sha(helper) == before.get('tracked', {}).get('scripts/selected-backend-ci/restart_checkpoint.py') and
+                        type(restart['helper_line']) is int and
+                        [index + 1 for index, text in enumerate(helper.read_text().splitlines())
+                         if "'helper_line': g['sys']._getframe().f_lineno," in text] == [restart['helper_line']]):
+                    restart_observed = qualified_browser_diagnostic(restart['observation'], facts.get('restart_browser_exit'), restart=True)
+                    restart = {**restart, 'observation': restart_observed} if restart_observed is not None else None
+                else:
+                    restart = None
                 secondary = {}
                 for key, phase in (('native_evidence_preservation_origin', 'native-preservation'),
                                    ('post_input_failure_origin', 'post-input-check')):
@@ -372,6 +412,7 @@ def runtime_ownership_return(output):
                     'network_mode_observation':network,
                     'original_browser_failure':browser,
                     'browser_failure_diagnostic':observed,
+                    'restart_browser_diagnostic':restart,
                     'secondary_failure_origins':secondary,
                     'native_preservation_error_sha256':hashlib.sha256(json.dumps(facts['native_evidence_preservation_error'],sort_keys=True).encode()).hexdigest()
                         if 'native_evidence_preservation_error' in facts else None,

@@ -54,10 +54,10 @@ def write(path, value):
     path.write_text(json.dumps(value, indent=2) + '\n')
 
 
-def browser_failure_diagnostic(run, code, browser_env, browser_inputs):
+def browser_failure_diagnostic(run, code, browser_env, browser_inputs, *, restart=False):
     """Optional scalar-only evidence; never replace browser exit or retirement proof."""
-    report = run / 'playwright-result.private.json'
-    log = run / 'browser.log'
+    report = run / ('restart-playwright-result.private.json' if restart else 'playwright-result.private.json')
+    log = run / ('restart-browser.log' if restart else 'browser.log')
     observation = {'schema': 1, 'driver_sha256': sha(__file__),
                    'line': sys._getframe().f_lineno, 'exit': code,
                    'error_kind': 'UNKNOWN', 'source_location': None,
@@ -69,6 +69,8 @@ def browser_failure_diagnostic(run, code, browser_env, browser_inputs):
                        'chromium_file_exists': False, 'chromium_owned_by_runtime': None,
                        'bun_sha256': browser_inputs.get('bun', {}).get('sha256'),
                        'chromium_sha256': browser_inputs.get('chromium', {}).get('sha256')}}
+    if restart:
+        observation['restart_verdict'] = None
     for key in ('bun_sha256', 'chromium_sha256'):
         digest = observation['input_observation'][key]
         if not (type(digest) is str and re.fullmatch('[0-9a-f]{64}', digest)):
@@ -107,6 +109,32 @@ def browser_failure_diagnostic(run, code, browser_env, browser_inputs):
                         errors = failed.get('errors', [])
                         first = errors[0] if errors else failed.get('error')
                 observation['report_state'] = 'AVAILABLE'
+                if restart:
+                    try:
+                        title = 'selected normal main restart: fresh actor reads persisted native history and manual revision'
+                        spec = W / 'apps/web/e2e-pending' / SPEC
+                        registration = [index + 1 for index, text in enumerate(spec.read_text().splitlines())
+                                        if ('test("' + title + '"') in text]
+                        suites = body['suites']
+                        entry = suites[0]['specs'][0]
+                        tests = entry['tests']
+                        actual = tests[0]['results'][0]
+                        counts = {key: body['stats'][key] for key in ('expected', 'unexpected', 'flaky', 'skipped')}
+                        status_count = {'passed': 'expected', 'failed': 'unexpected', 'timedOut': 'unexpected',
+                                        'skipped': 'skipped', 'interrupted': 'unexpected'}
+                        if (len(suites) == len(suites[0]['specs']) == len(tests) == len(tests[0]['results']) == 1 and
+                                body['config']['workers'] == 1 and type(body['config']['workers']) is int and
+                                entry.get('title') == title and entry.get('file') in (SPEC, str(spec)) and
+                                len(registration) == 1 and type(entry.get('line')) is int and entry['line'] == registration[0] and
+                                sha(spec) == before['tracked'].get('apps/web/e2e-pending/' + SPEC) and
+                                actual.get('status') in status_count and type(actual.get('retry')) is int and actual['retry'] == 0 and
+                                all(type(value) is int and 0 <= value <= 1 for value in counts.values()) and
+                                sum(counts.values()) == 1 and counts[status_count[actual['status']]] == 1):
+                            observation['restart_verdict'] = {'registered_test': 'SELECTED_NORMAL_RESTART',
+                                'spec_sha256': sha(spec), 'registration_line': registration[0],
+                                'status': actual['status'], 'counts': counts}
+                    except (KeyError, IndexError, TypeError, AttributeError, ValueError, OSError):
+                        pass  # Partial verdict never blocks the existing bounded first-error diagnostic.
         if type(first) is dict:
             message = first.get('message')
             if message == 'Playwright must run under Bun in CI (bun --bun x playwright)':

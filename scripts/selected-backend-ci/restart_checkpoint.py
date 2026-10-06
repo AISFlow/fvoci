@@ -64,6 +64,18 @@ def port_closed(base):
         return probe.connect_ex(('127.0.0.1', int(base.rsplit(':', 1)[1]))) != 0
 
 
+def record_restart_browser_diagnostic(g, run, code, env):
+    """Optional evidence cannot replace the original assert, re-raise or teardown."""
+    try:
+        g['receipt']['restart_browser_exit'] = code
+        observed = g['browser_failure_diagnostic'](run, code, env, g['browser_inputs'], restart=True)
+        g['receipt']['restart_browser_diagnostic'] = {
+            'helper_sha256': digest(__file__), 'helper_line': g['sys']._getframe().f_lineno,
+            'observation': observed}
+    except BaseException:
+        pass  # Missing diagnostics stay missing; the original returncode/assert remains authoritative.
+
+
 def restart_same_app(g):
     # Names are the concrete state of the two accepted drivers, not a product DI.
     run, name, selected = g['run'], g['name'], g['browser_env']['FVOCI_E2E_SELECTED_BACKEND']
@@ -228,6 +240,7 @@ def restart_same_app(g):
         receipt['restartBrowserSeconds'] = time.monotonic() - started
         report_path = run / 'restart-playwright-result.private.json'
         if report_path.exists(): os.chmod(report_path, 0o600)
+        record_restart_browser_diagnostic(g, run, result.returncode, env)
         assert result.returncode == 0, 'preserve original restart browser failure'
         readback = single_attachment(report_path, 'selected-vue-restart-readback.json')
         assert readback['source'] == g['HEAD'] and readback['tree'] == g['TREE'] and readback['selected'] == selected

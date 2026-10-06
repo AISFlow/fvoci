@@ -1432,4 +1432,161 @@ class SelectedBrowserLauncherTest(unittest.TestCase):
                                 'e2e-pending/collab-playwright.config.ts', '--reporter=line,json', '--grep',
                                 'selected normal main restart:', 'workspace-wiki-selected-backend.spec.ts'])
 
+class RestartBrowserDiagnosticTest(unittest.TestCase):
+    driver = FailureOriginTest.driver
+    project = FailureOriginTest.project
+
+    def report(self, status='failed'):
+        spec = ROOT / 'apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'
+        return {'config': {'workers': 1}, 'errors': [],
+                'stats': {'expected': int(status == 'passed'), 'unexpected': int(status != 'passed'), 'flaky': 0, 'skipped': 0},
+                'suites': [{'specs': [{'title': 'selected normal main restart: fresh actor reads persisted native history and manual revision',
+                    'file': spec.name, 'line': 690, 'tests': [{'results': [{'status': status, 'retry': 0,
+                    'errors': [{'message': 'PRIVATE_CANARY_ASSERTION', 'location': {'file': str(spec), 'line': 715}}]}]}]}]}]}
+
+    def observed(self, lane, report, log='PRIVATE_CANARY_LOG?token=PRIVATE_CANARY_TOKEN'):
+        driver = ROOT / f'scripts/selected-backend-ci/current-{lane}-driver.py'
+        function = next(n for n in ast.parse(driver.read_text()).body
+                        if isinstance(n, ast.FunctionDef) and n.name == 'browser_failure_diagnostic')
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp); cache = run / 'cache'; chromium = cache / 'chromium-fixture/chrome-linux/chrome'
+            chromium.parent.mkdir(parents=True); chromium.write_bytes(b'NOT BROWSER fixture')
+            (run / 'restart-browser.log').write_text(log)
+            if report is not None:
+                (run / 'restart-playwright-result.private.json').write_text(report if type(report) is str else json.dumps(report))
+            spec = ROOT / 'apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'
+            env = {'sha': H.CI.sha, '__file__': str(driver), 'sys': sys, 'json': json, 'Path': Path, 'W': ROOT,
+                   'SPEC': spec.name, 're': __import__('re'), 'before': {'tracked': {str(spec.relative_to(ROOT)): H.CI.sha(spec)}}}
+            exec(compile(ast.Module(body=[copy.deepcopy(function)], type_ignores=[]), str(driver), 'exec'), env)
+            return env['browser_failure_diagnostic'](run, 7, {}, {'bun': {'sha256': 'c' * 64},
+                'chromium': {'path': str(chromium), 'sha256': H.CI.sha(chromium)}}, restart=True)
+
+    def envelope(self, observation):
+        helper = ROOT / 'scripts/selected-backend-ci/restart_checkpoint.py'
+        return {'helper_sha256': H.CI.sha(helper), 'helper_line': 73, 'observation': observation}
+
+    def projected(self, lane, record, *, port=True, exit=7, helper_binding=True):
+        original_read = H.CI.read
+        helper = ROOT / 'scripts/selected-backend-ci/restart_checkpoint.py'
+        def read(path):
+            value = original_read(path)
+            if Path(path).name == 'before.json' and helper_binding:
+                value['tracked'][str(helper.relative_to(ROOT))] = H.CI.sha(helper)
+            return value
+        with patch.object(self, 'driver', ROOT / f'scripts/selected-backend-ci/current-{lane}-driver.py'), \
+                patch.object(H.CI, 'read', side_effect=read):
+            return self.project({'browser_exit': 0, 'restart_browser_exit': exit,
+                                 'restart_browser_diagnostic': record}, port=port, target_lane=lane)
+
+    def test_both_restart_verdicts_project_without_replacing_first_failure_or_close_states(self):
+        for lane in ('postgres', 'sqlite'):
+            observed = self.observed(lane, self.report())
+            self.assertEqual(observed['error_kind'], 'SELECTED_SPEC_FAILURE')
+            self.assertEqual(observed['restart_verdict'], {
+                'registered_test': 'SELECTED_NORMAL_RESTART',
+                'spec_sha256': H.CI.sha(ROOT / 'apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'),
+                'registration_line': 690, 'status': 'failed',
+                'counts': {'expected': 0, 'unexpected': 1, 'flaky': 0, 'skipped': 0}})
+            record = self.envelope(observed)
+            for port in (True, False, None, 'true', 1):
+                summary, error, closed = self.projected(lane, record, port=port)
+                row = next(r for r in summary['lanes'] if r['lane'] == lane)
+                self.assertEqual(row['restart_browser_diagnostic'], record)
+                self.assertEqual(row['receipt_final_exit'], 7)
+                self.assertEqual(closed, port is True); self.assertEqual(error is None, port is True)
+                self.assertNotIn('PRIVATE_CANARY', json.dumps(summary))
+
+    def test_missing_partial_restart_reports_preserve_known_guard_and_unknown_without_disclosure(self):
+        for lane in ('postgres', 'sqlite'):
+            for report in (None, 'PRIVATE_CANARY_BAD_JSON', [], {'secret': 'PRIVATE_CANARY_PASSWORD'}):
+                observed = self.observed(lane, report)
+                self.assertIsNone(observed['restart_verdict']); self.assertEqual(observed['error_kind'], 'UNKNOWN')
+                self.assertNotIn('PRIVATE_CANARY', json.dumps(observed)); self.assertEqual(observed['exit'], 7)
+            observed = self.observed(lane, {'errors': [{'message': 'Playwright must run under Bun in CI (bun --bun x playwright)'}]})
+            self.assertEqual(observed['error_kind'], 'BUN_CI_CONFIG_GUARD'); self.assertIsNone(observed['restart_verdict'])
+            observed = self.observed(lane, None, 'Error: Playwright must run under Bun in CI (bun --bun x playwright)\n')
+            self.assertEqual(observed['error_kind'], 'BUN_CI_CONFIG_GUARD'); self.assertIsNone(observed['restart_verdict'])
+
+    def test_restart_registration_status_count_and_first_error_mutations_are_not_invented_verdicts(self):
+        for lane in ('postgres', 'sqlite'):
+            changes = [lambda d: d['suites'][0]['specs'][0].update(title='PRIVATE_CANARY_TITLE'),
+                       lambda d: d['suites'][0]['specs'][0].update(file='PRIVATE_CANARY_PATH'),
+                       lambda d: d['suites'][0]['specs'][0].update(line=True),
+                       lambda d: d['suites'][0]['specs'][0].update(line=691),
+                       lambda d: d['stats'].update(unexpected=True),
+                       lambda d: d['stats'].update(unexpected=-1),
+                       lambda d: d['stats'].update(unexpected=2),
+                       lambda d: d['stats'].update(expected=1),
+                       lambda d: d['suites'][0]['specs'][0]['tests'][0]['results'][0].update(status='PRIVATE_CANARY_STATUS'),
+                       lambda d: d['suites'][0]['specs'][0]['tests'][0]['results'][0].update(retry=1)]
+            for change in changes:
+                report = self.report(); change(report); observed = self.observed(lane, report)
+                self.assertIsNone(observed['restart_verdict']); self.assertNotIn('PRIVATE_CANARY', json.dumps(observed))
+            report = self.report(); report['suites'][0]['specs'][0]['tests'][0]['results'][0]['errors'] = [
+                {'message': 'PRIVATE_CANARY_FIRST', 'location': {'file': 'PRIVATE_CANARY_FOREIGN', 'line': 715}},
+                {'location': {'file': str(ROOT / 'apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'), 'line': 715}}]
+            observed = self.observed(lane, report)
+            self.assertIsNone(observed['source_location']); self.assertEqual(observed['error_kind'], 'UNKNOWN')
+
+    def test_restart_projector_refuses_foreign_helper_parent_exit_and_unknown_fields(self):
+        for lane in ('postgres', 'sqlite'):
+            valid = self.envelope(self.observed(lane, self.report()))
+            mutations = [lambda d: d.update(helper_sha256='f' * 64), lambda d: d.update(helper_line=True),
+                         lambda d: d.update(helper_line=10**6), lambda d: d.update(helper_line=1),
+                         lambda d: d.update(extra='PRIVATE_CANARY_TOKEN'),
+                         lambda d: d['observation'].update(driver_sha256='f' * 64),
+                         lambda d: d['observation'].update(exit=True), lambda d: d['observation'].update(exit=8),
+                         lambda d: d['observation'].update(line=1),
+                         lambda d: d['observation'].update(schema=True),
+                         lambda d: d['observation'].update(error_kind='PRIVATE_CANARY_MESSAGE'),
+                         lambda d: d['observation'].update(extra='PRIVATE_CANARY_URL')]
+            for mutation in mutations:
+                record = copy.deepcopy(valid); mutation(record)
+                summary, error, closed = self.projected(lane, record)
+                row = next(r for r in summary['lanes'] if r['lane'] == lane)
+                self.assertIsNone(row['restart_browser_diagnostic']); self.assertEqual(row['receipt_final_exit'], 7)
+                self.assertTrue(closed); self.assertIsNone(error); self.assertNotIn('PRIVATE_CANARY', json.dumps(summary))
+            for options in ({'exit': 8}, {'exit': True}, {'helper_binding': False}):
+                summary, error, closed = self.projected(lane, valid, **options)
+                self.assertIsNone(next(r for r in summary['lanes'] if r['lane'] == lane)['restart_browser_diagnostic'])
+            record = copy.deepcopy(valid); record['observation']['restart_verdict']['registered_test'] = 'PRIVATE_CANARY_TITLE'
+            summary, error, closed = self.projected(lane, record)
+            self.assertIsNone(next(r for r in summary['lanes'] if r['lane'] == lane)['restart_browser_diagnostic']['observation']['restart_verdict'])
+            self.assertNotIn('PRIVATE_CANARY', json.dumps(summary))
+
+    def test_restart_optional_capture_runs_before_original_assert_and_cannot_mask_it(self):
+        helper = ROOT / 'scripts/selected-backend-ci/restart_checkpoint.py'
+        tree = ast.parse(helper.read_text())
+        record = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'record_restart_browser_diagnostic')
+        restart = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'restart_same_app')
+        body = next(n for n in restart.body if isinstance(n, ast.Try)).body
+        index = next(i for i, n in enumerate(body) if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+                     and isinstance(n.value.func, ast.Name) and n.value.func.id == 'record_restart_browser_diagnostic')
+        self.assertIsInstance(body[index + 1], ast.Assert)
+        self.assertEqual(ast.unparse(body[index + 1].test), 'result.returncode == 0')
+        for broken in (False, True):
+            receipt = {}
+            def diagnostic(*args, **kwargs):
+                self.assertIs(kwargs['restart'], True)
+                if broken: raise PermissionError('PRIVATE_CANARY_DIAGNOSTIC_ERROR')
+                return {'bounded': True}
+            g = {'receipt': receipt, 'browser_failure_diagnostic': diagnostic, 'browser_inputs': {}, 'sys': sys}
+            env = {'g': g, 'run': Path('/not-executed'), 'env': {}, '__file__': str(helper),
+                   'digest': H.CI.sha, 'result': type('ObservedOriginalExit', (), {'returncode': 7})()}
+            module = ast.Module(body=[copy.deepcopy(record), *copy.deepcopy(body[index:index + 2])], type_ignores=[])
+            with self.assertRaisesRegex(AssertionError, '^preserve original restart browser failure$'):
+                exec(compile(module, str(helper), 'exec'), env)
+            self.assertEqual(receipt['restart_browser_exit'], 7)
+            self.assertEqual('restart_browser_diagnostic' in receipt, not broken)
+            self.assertNotIn('PRIVATE_CANARY', json.dumps(receipt))
+
+    def test_passed_restart_metadata_cannot_convert_later_driver_failure_to_pass(self):
+        for lane in ('postgres', 'sqlite'):
+            observed = self.observed(lane, self.report('passed')); observed['exit'] = 0
+            record = self.envelope(observed)
+            summary, error, closed = self.projected(lane, record, exit=0)
+            row = next(r for r in summary['lanes'] if r['lane'] == lane)
+            self.assertEqual(row['restart_browser_diagnostic']['observation']['restart_verdict']['status'], 'passed')
+            self.assertEqual(row['receipt_final_exit'], 7); self.assertTrue(closed); self.assertIsNone(error)
+
 if __name__=='__main__':unittest.main()
