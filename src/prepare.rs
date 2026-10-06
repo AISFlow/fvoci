@@ -377,17 +377,74 @@ pub fn remote_startup_refusal(error: &migrate::RemoteMigrationError) -> String {
     )
 }
 
+/// What the signal owner observed around one awaited original future.
+///
+/// `selected` is the signal arm the owner took before the future completed
+/// (the future was then cancelled and awaited to settlement).
+/// `pending_after_completion` is a signal that was already ready when the
+/// completion arm won: `tokio::select!` picks a ready branch at random unless
+/// biased, so a SIGTERM/SIGINT that arrives together with the completion can
+/// lose the race. The owner therefore probes the signal streams once more
+/// after a completion and records the result here; a pending signal is as
+/// decisive as a selected one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SignalObservation {
+    pub selected: Option<i32>,
+    pub pending_after_completion: Option<i32>,
+}
+
+impl SignalObservation {
+    /// No signal selected or pending: the settled result alone decides.
+    pub const NONE: Self = Self {
+        selected: None,
+        pending_after_completion: None,
+    };
+    /// The exit code that must decide, if any signal was selected or found
+    /// pending after the completion; `None` means a plain completion.
+    pub fn decisive(self) -> Option<i32> {
+        self.selected.or(self.pending_after_completion)
+    }
+}
+
+/// Probes the SIGTERM and SIGINT streams once, without waiting, after an
+/// original future completed: `Some(143)` or `Some(130)` when that signal
+/// was already delivered. The owner calls this before deciding on exit `0`
+/// or a server exec; the probe never consumes a signal that did not arrive.
+pub fn pending_signal_code(
+    term: &mut tokio::signal::unix::Signal,
+    int: &mut tokio::signal::unix::Signal,
+) -> Option<i32> {
+    use std::task::{Context, Poll, Waker};
+    let mut context = Context::from_waker(Waker::noop());
+    if matches!(term.poll_recv(&mut context), Poll::Ready(Some(()))) {
+        return Some(143);
+    }
+    if matches!(int.poll_recv(&mut context), Poll::Ready(Some(()))) {
+        return Some(130);
+    }
+    None
+}
+
+/// The preparation launcher decision after the preparation future settled:
+/// `Some(code)` means a signal was selected or found pending, the settled
+/// result is reported and the server is NOT executed; `None` means a plain
+/// completion that may continue to the server exec.
+pub fn preparation_signal_decision(observation: SignalObservation) -> Option<i32> {
+    observation.decisive()
+}
+
 /// Exit code and operator text of the bare remote migrator. `0` only for a
-/// settled `Current`, `Installed` or `Resumed` without a signal (the helper
-/// has already drained its stream, otherwise it returns `Drain`); a signal
-/// exits with its own code after the original future settled and keeps the
-/// settled result in the text; every error is non-zero with the bounded
-/// display (an unknown commit already carries the same-command rerun
-/// guidance). Nothing is retried here.
+/// settled `Current`, `Installed` or `Resumed` with no signal selected and
+/// none pending after the completion (the helper has already drained its
+/// stream, otherwise it returns `Drain`); a signal exits with its own code
+/// after the original future settled and keeps the settled result in the
+/// text; every error is non-zero with the bounded display (an unknown commit
+/// already carries the same-command rerun guidance). Nothing is retried here.
 pub fn remote_migrator_exit(
-    signal_code: Option<i32>,
+    observation: SignalObservation,
     result: &Result<migrate::RemoteMigrationOutcome, migrate::RemoteMigrationError>,
 ) -> (i32, String) {
+    let signal_code = observation.decisive();
     let settled = match result {
         Ok(outcome) => format!("remote migration settled: {outcome:?}"),
         Err(error) => format!(
@@ -924,6 +981,104 @@ mod remote_caller_tests {
             assert!(!text.contains(needle), "{needle} leaked: {text}");
         }
     }
+    fn selected(code: i32) -> SignalObservation {
+        SignalObservation {
+            selected: Some(code),
+            pending_after_completion: None,
+        }
+    }
+    fn pending(code: i32) -> SignalObservation {
+        SignalObservation {
+            selected: None,
+            pending_after_completion: Some(code),
+        }
+    }
+
+    /// Deterministic control of the race the unbiased select allows: the
+    /// completion arm won although SIGTERM was already ready. The old policy
+    /// (signal code taken only from the selected arm) returned 0 and let the
+    /// launcher continue to the server exec; both must now be refused.
+    #[test]
+    fn simultaneously_ready_signal_decides_over_a_completed_run() {
+        let observation = pending(143);
+        assert_eq!(observation.decisive(), Some(143));
+        assert_eq!(preparation_signal_decision(observation), Some(143));
+        let (code, text) = remote_migrator_exit(
+            observation,
+            &Ok(RemoteMigrationOutcome::Installed { steps: 12 }),
+        );
+        assert_eq!(code, 143);
+        assert!(
+            text.contains("no server start") && text.contains("Installed { steps: 12 }"),
+            "{text}"
+        );
+        let (code, _) = remote_migrator_exit(pending(130), &Ok(RemoteMigrationOutcome::Current));
+        assert_eq!(code, 130);
+        // A pending signal over a failed run keeps the failure text under the signal code.
+        let (code, text) = remote_migrator_exit(
+            pending(130),
+            &Err(RemoteMigrationError::Drain {
+                source: driver_secret(),
+            }),
+        );
+        assert_eq!(code, 130);
+        assert_secret_free(&text);
+        assert!(text.contains("REMOTE_DRAIN_FAILED"), "{text}");
+    }
+
+    /// Completion-triggered late cancellation: the signal arrived only once
+    /// the future had completed (observed by the post-completion probe). The
+    /// settled result is kept and reported, the signal code still exits and
+    /// the server is not started.
+    #[test]
+    fn late_signal_after_completion_keeps_the_settled_result_and_refuses_exec() {
+        let observation = SignalObservation {
+            selected: None,
+            pending_after_completion: Some(143),
+        };
+        assert_eq!(preparation_signal_decision(observation), Some(143));
+        let (code, text) = remote_migrator_exit(
+            observation,
+            &Ok(RemoteMigrationOutcome::Resumed { from: 11, to: 12 }),
+        );
+        assert_eq!(code, 143);
+        assert!(
+            text.contains("original result kept") && text.contains("Resumed { from: 11, to: 12 }"),
+            "{text}"
+        );
+        // A selected signal keeps precedence over a later pending one.
+        let both = SignalObservation {
+            selected: Some(130),
+            pending_after_completion: Some(143),
+        };
+        assert_eq!(both.decisive(), Some(130));
+    }
+
+    /// Positive control: a plain completion with no signal selected and none
+    /// pending exits 0 and lets the launcher continue; a fresh run is never
+    /// treated as cancelled by the absence of a signal.
+    #[test]
+    fn plain_completion_without_any_signal_is_not_over_cancelled() {
+        assert_eq!(SignalObservation::NONE.decisive(), None);
+        assert_eq!(preparation_signal_decision(SignalObservation::NONE), None);
+        let (code, text) = remote_migrator_exit(
+            SignalObservation::NONE,
+            &Ok(RemoteMigrationOutcome::Current),
+        );
+        assert_eq!(
+            (code, text.as_str()),
+            (0, "remote migration settled: Current")
+        );
+        // A plain failure is 1, never a signal code.
+        let (code, _) = remote_migrator_exit(
+            SignalObservation::NONE,
+            &Err(RemoteMigrationError::Cancelled {
+                last_settled: 0,
+                drain: None,
+            }),
+        );
+        assert_eq!(code, 1);
+    }
 
     #[test]
     fn startup_refusal_repeats_only_closed_codes_and_bounded_text() {
@@ -952,7 +1107,10 @@ mod remote_caller_tests {
 
     #[test]
     fn migrator_exit_is_zero_only_for_a_settled_outcome_without_a_signal() {
-        let (code, text) = remote_migrator_exit(None, &Ok(RemoteMigrationOutcome::Current));
+        let (code, text) = remote_migrator_exit(
+            SignalObservation::NONE,
+            &Ok(RemoteMigrationOutcome::Current),
+        );
         assert_eq!(code, 0);
         assert_eq!(text, "remote migration settled: Current");
         let (code, text) = remote_migrator_exit(
@@ -979,7 +1137,7 @@ mod remote_caller_tests {
             source: driver_secret(),
             drain: None,
         };
-        let (code, text) = remote_migrator_exit(None, &Err(unknown));
+        let (code, text) = remote_migrator_exit(SignalObservation::NONE, &Err(unknown));
         assert_eq!(code, 1);
         assert_secret_free(&text);
         assert!(
@@ -993,7 +1151,7 @@ mod remote_caller_tests {
             last_settled: 2,
             drain: Some(protocol_secret()),
         };
-        let (code, text) = remote_migrator_exit(Some(130), &Err(cancelled));
+        let (code, text) = remote_migrator_exit(selected(130), &Err(cancelled));
         assert_eq!(code, 130);
         assert_secret_free(&text);
         assert!(

@@ -80,11 +80,12 @@ fn start(server_args: &[String]) -> ! {
                 let cancel = tokio_util::sync::CancellationToken::new();
                 let preparation = prepare::prepare_with_cancel(&cancel);
                 tokio::pin!(preparation);
+                // Signal arms first and biased: a signal that is ready together
+                // with the completion wins; after a completion the streams are
+                // probed once more so a simultaneously delivered signal never
+                // lets the server start.
                 tokio::select! {
-                    result = &mut preparation => {
-                        result?;
-                        Ok(PreparationOutcome::Prepared)
-                    },
+                    biased;
                     _ = term.recv() => {
                         eprintln!("fvoci: preparation SIGTERM cancellation requested; awaiting original owner before exit");
                         cancel.cancel();
@@ -94,6 +95,22 @@ fn start(server_args: &[String]) -> ! {
                         eprintln!("fvoci: preparation SIGINT cancellation requested; awaiting original owner before exit");
                         cancel.cancel();
                         Ok(PreparationOutcome::Signalled { code: 130, result: preparation.await })
+                    },
+                    result = &mut preparation => {
+                        let observation = prepare::SignalObservation {
+                            selected: None,
+                            pending_after_completion: prepare::pending_signal_code(&mut term, &mut int),
+                        };
+                        match prepare::preparation_signal_decision(observation) {
+                            Some(code) => {
+                                eprintln!("fvoci: signal delivered while preparation completed; settled result kept, no server exec");
+                                Ok(PreparationOutcome::Signalled { code, result })
+                            }
+                            None => {
+                                result?;
+                                Ok(PreparationOutcome::Prepared)
+                            }
+                        }
                     },
                 }
             });
@@ -173,21 +190,31 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let cancel = tokio_util::sync::CancellationToken::new();
                 let migration = migrate::run_remote_migrations(&settings, &cancel);
                 tokio::pin!(migration);
-                let (signal_code, result) = tokio::select! {
-                    result = &mut migration => (None, result),
+                // Signal arms first and biased; after a completion the streams
+                // are probed once more so a simultaneously delivered signal is
+                // never reported as a clean exit 0.
+                let (observation, result) = tokio::select! {
+                    biased;
                     _ = term.recv() => {
                         eprintln!("fvoci-migrate: SIGTERM cancellation requested; awaiting the remote migration settlement before exit");
                         cancel.cancel();
-                        (Some(143), migration.await)
+                        (fvoci_server::prepare::SignalObservation { selected: Some(143), pending_after_completion: None }, migration.await)
                     },
                     _ = int.recv() => {
                         eprintln!("fvoci-migrate: SIGINT cancellation requested; awaiting the remote migration settlement before exit");
                         cancel.cancel();
-                        (Some(130), migration.await)
+                        (fvoci_server::prepare::SignalObservation { selected: Some(130), pending_after_completion: None }, migration.await)
                     },
+                    result = &mut migration => (
+                        fvoci_server::prepare::SignalObservation {
+                            selected: None,
+                            pending_after_completion: fvoci_server::prepare::pending_signal_code(&mut term, &mut int),
+                        },
+                        result,
+                    ),
                 };
                 let (code, text) =
-                    fvoci_server::prepare::remote_migrator_exit(signal_code, &result);
+                    fvoci_server::prepare::remote_migrator_exit(observation, &result);
                 eprintln!("fvoci-migrate: {text}");
                 std::process::exit(code);
             }
