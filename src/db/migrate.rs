@@ -3514,14 +3514,29 @@ mod remote_primary_helper_tests {
         let gate = f.driver.arm_commit_response_loss();
         let cancel = CancellationToken::new();
         let backend = f.backend().await;
-        let mut run = tokio::spawn(async move { remote_migrate_backend(backend, &cancel).await });
+        // The real helper future is pinned on this test task and driven
+        // concurrently with the fixture gate; no thread spawn, so no Send +
+        // 'static bound is imposed on the product future (the intended
+        // callers await it inline as well).
+        let run = remote_migrate_backend(backend, &cancel);
+        tokio::pin!(run);
         tokio::select! {
             response = gate.wait_upstream_response() => response.unwrap(),
             early = &mut run => panic!("helper finished before the upstream COMMIT fault gate: {early:?}"),
         }
-        assert!(!run.is_finished());
+        // Explicit pre-release check: one actual poll of the pinned real
+        // future must still be Pending while the COMMIT reply is withheld.
+        {
+            use std::future::Future;
+            use std::task::{Context, Poll, Waker};
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(
+                matches!(run.as_mut().poll(&mut context), Poll::Pending),
+                "helper settled before the withheld COMMIT reply was released"
+            );
+        }
         gate.release_lost_reply();
-        let error = run.await.unwrap().unwrap_err();
+        let error = run.await.unwrap_err();
         let RemoteMigrationError::CommitUnknown { version, .. } = &error else {
             panic!("expected CommitUnknown, got {error:?}");
         };
