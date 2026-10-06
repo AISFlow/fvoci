@@ -4,7 +4,7 @@ import * as Y from "yjs";
 import { decodeHocuspocusFrame, frameBytes, persistParts } from "../e2e-pending/collab-wire";
 import { execFileSync } from "node:child_process";
 import { z } from "zod";
-import { expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { expect, test, type BrowserContext, type Page, type TestInfo } from "@playwright/test";
 import { createE2eUser } from "./helpers";
 import { admin, newSignedInPage, setupInstance, workspaceId } from "./workspace-wiki-vue-editor";
 
@@ -1440,6 +1440,184 @@ test("a dirty detail date retains its original conflict baseline after a peer st
   }
 });
 
+const taskAdmissionEventKinds = [
+  "transport-open",
+  "auth-received",
+  "frame-hold",
+  "frame-release",
+  "frame-delivery",
+  "persist-request",
+  "persist-ack",
+  "browser-open",
+  "browser-close",
+  "browser-authenticated",
+  "browser-state",
+  "http-archive",
+  "http-unarchive",
+  "http-denied",
+  "cleanup-start",
+] as const;
+type TaskAdmissionEventKind = (typeof taskAdmissionEventKinds)[number];
+
+// Artifact projection only: never serialize raw frames, routing keys, IDs or error text.
+function taskAdmissionFields(value: unknown): Record<string, string | number | boolean> {
+  const output: Record<string, string | number | boolean> = {};
+  if (typeof value !== "object" || value === null) return output;
+  const input = value as Record<string, unknown>;
+  for (const key of [
+    "order",
+    "socket",
+    "activeSocket",
+    "frame",
+    "authenticationEpoch",
+    "initialAuthenticationEpoch",
+    "updates",
+    "localUpdates",
+    "unauthorizedLocalWrites",
+    "violations",
+    "dropped",
+    "requestCount",
+    "ackCount",
+  ]) {
+    const number = input[key];
+    output[key] =
+      typeof number === "number" &&
+      Number.isSafeInteger(number) &&
+      number >= 0 &&
+      number <= 1_000_000
+        ? number
+        : "unknown";
+  }
+  for (const key of ["elapsedMs", "code"]) {
+    const number = input[key];
+    output[key] =
+      typeof number === "number" &&
+      Number.isSafeInteger(number) &&
+      number >= 0 &&
+      number <= (key === "code" ? 4999 : 3_600_000)
+        ? number
+        : "unknown";
+  }
+  for (const key of [
+    "authenticated",
+    "editable",
+    "canPersistAffordance",
+    "saveEnabled",
+    "ownerBroken",
+    "sameRoot",
+    "sameEditor",
+    "sameElement",
+    "sameDoc",
+    "sameProvider",
+    "sameClientId",
+    "sameSocket",
+    "archived",
+    "canEdit",
+    "completed",
+  ]) {
+    output[key] = typeof input[key] === "boolean" ? input[key] : "unknown";
+  }
+  for (const key of ["scope", "authenticatedScope"]) {
+    output[key] = input[key] === "readonly" || input[key] === "read-write" ? input[key] : "unknown";
+  }
+  output.status = ["connected", "connecting", "disconnected", "unauthorized"].includes(
+    typeof input.status === "string" ? input.status : "",
+  )
+    ? (input.status as string)
+    : "unknown";
+  output.dom = input.dom === "true" || input.dom === "false" ? input.dom : "unknown";
+  return output;
+}
+
+function createTaskAdmissionDiagnostic(clock: () => number = () => performance.now()) {
+  let start = 0;
+  try {
+    start = clock();
+  } catch {
+    /* diagnostic clock unavailable */
+  }
+  const events: Record<string, string | number | boolean>[] = [];
+  let order = 0;
+  let dropped = 0;
+  const record = (kind: TaskAdmissionEventKind, value: unknown = {}) => {
+    try {
+      if (!taskAdmissionEventKinds.includes(kind)) return;
+      const elapsedMs = Math.floor(clock() - start);
+      const event = { ...taskAdmissionFields(value), kind, order: ++order, elapsedMs };
+      if (events.length === 256) {
+        events.splice(16, 1); // Keep the initial admissions plus the most recent events.
+        dropped = Math.min(1_000_000, dropped + 1);
+      }
+      events.push(event);
+    } catch {
+      // Diagnostics cannot interrupt forwarding, held-frame release or an assertion.
+    }
+  };
+  return { record, snapshot: () => ({ events: events.map((event) => ({ ...event })), dropped }) };
+}
+
+function taskAdmissionPacket(value: unknown) {
+  const input =
+    typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  const project = (lane: unknown) => {
+    const object =
+      typeof lane === "object" && lane !== null ? (lane as Record<string, unknown>) : {};
+    const events = Array.isArray(object.events) ? (object.events as unknown[]) : [];
+    return {
+      dropped: taskAdmissionFields(object).dropped,
+      events: events.slice(-256).flatMap((event) => {
+        if (typeof event !== "object" || event === null) return [];
+        const kind = (event as Record<string, unknown>).kind;
+        if (!taskAdmissionEventKinds.some((allowed) => allowed === kind)) return [];
+        return [{ ...taskAdmissionFields(event), kind }];
+      }),
+    };
+  };
+  return {
+    schema: "w3-task-fresh-admission-v1",
+    routeDeliveryMeaning: "route-send-returned",
+    routeToProviderSocketBinding: "unknown",
+    crossLaneClockOrder: "unknown",
+    route: project(input.route),
+    browser: project(input.browser),
+    state: taskAdmissionFields(input.state),
+    completed: input.completed === true,
+  };
+}
+
+async function attachTaskAdmissionDiagnostic(
+  testInfo: Pick<TestInfo, "attach">,
+  schedule: "natural" | "server-readonly" | "retired-grant",
+  read: () => Promise<unknown>,
+) {
+  if (!["natural", "server-readonly", "retired-grant"].includes(schedule)) return;
+  const capture = { active: true };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      (async () => {
+        let value: unknown;
+        try {
+          value = await read();
+        } catch {
+          /* unavailable observation */
+        }
+        if (!capture.active) return;
+        await testInfo.attach(`w3-task-${schedule}-wire-coherence.json`, {
+          body: JSON.stringify(taskAdmissionPacket(value)),
+          contentType: "application/json",
+        });
+      })().catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, 500);
+      }),
+    ]);
+  } finally {
+    capture.active = false;
+    clearTimeout(timer);
+  }
+}
+
 for (const schedule of ["natural", "server-readonly", "retired-grant"] as const) {
   test(`actual task fresh admission ${schedule} preserves coherent editor and Save authority on the same Y.Doc`, async ({
     browser,
@@ -1449,6 +1627,9 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
     const context = await browser.newContext({ baseURL, storageState: adminAuth });
     const page = await context.newPage();
     let releaseFrame = () => {};
+    const diagnostic = createTaskAdmissionDiagnostic();
+    let completed = false;
+    let frameOrdinal = 0;
     try {
       const f = await fixture(
         page,
@@ -1457,6 +1638,7 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
       );
       const initial = await page.request.patch(f.endpoint, { data: { archived: true } });
       expect(initial.status()).toBe(200);
+      diagnostic.record("http-archive", { archived: true });
       const originalBody = z
         .object({ contentJson: z.unknown(), version: z.number() })
         .parse(await (await page.request.get(f.endpoint)).json());
@@ -1471,6 +1653,7 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
       await page.routeWebSocket(/\/collab(?:\?|$)/, (socket) => {
         const current = ++generation;
         const server = socket.connectToServer();
+        diagnostic.record("transport-open", { socket: current });
         socket.onMessage((message) => {
           const frame = decodeHocuspocusFrame(frameBytes(message));
           if (
@@ -1479,10 +1662,14 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
             frame?.kind === "auth-token" &&
             frame.routingKey === routingKey
           ) {
+            const ordinal = ++frameOrdinal;
+            diagnostic.record("frame-hold", { socket: current, frame: ordinal });
             held = true;
             releaseFrame = () => {
               held = false;
+              diagnostic.record("frame-release", { socket: current, frame: ordinal });
               server.send(message);
+              diagnostic.record("frame-delivery", { socket: current, frame: ordinal });
             };
             return;
           }
@@ -1492,26 +1679,54 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
             "routingKey" in frame &&
             frame.routingKey === routingKey &&
             parts?.kind === "request"
-          )
+          ) {
             requests.push({ generation: current, id: parts.id });
+            diagnostic.record("persist-request", {
+              socket: current,
+              requestCount: requests.length,
+            });
+          }
           server.send(message);
         });
         server.onMessage((message) => {
           const frame = decodeHocuspocusFrame(frameBytes(message));
+          let forwardedAdmission: { frame: number; scope: string } | undefined;
           if (frame?.kind === "auth-scope" && frame.routingKey === routingKey) {
+            const ordinal = ++frameOrdinal;
+            diagnostic.record("auth-received", {
+              socket: current,
+              frame: ordinal,
+              scope: frame.scope,
+            });
             const admission = { generation: current, scope: frame.scope, delivered: false };
             admissions.push(admission);
             if (schedule === "retired-grant" && frame.scope === "read-write") {
+              diagnostic.record("frame-hold", {
+                socket: current,
+                frame: ordinal,
+                scope: frame.scope,
+              });
               held = true;
               releaseFrame = () => {
                 if (!held) return;
                 held = false;
                 admission.delivered = true;
+                diagnostic.record("frame-release", {
+                  socket: current,
+                  frame: ordinal,
+                  scope: frame.scope,
+                });
                 socket.send(message);
+                diagnostic.record("frame-delivery", {
+                  socket: current,
+                  frame: ordinal,
+                  scope: frame.scope,
+                });
               };
               return;
             }
             admission.delivered = true;
+            forwardedAdmission = { frame: ordinal, scope: frame.scope };
           }
           const parts = frame?.kind === "stateless" ? persistParts(frame.payload) : null;
           if (
@@ -1519,9 +1734,13 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
             "routingKey" in frame &&
             frame.routingKey === routingKey &&
             parts?.kind === "done"
-          )
+          ) {
             acks.push({ generation: current, id: parts.id });
+            diagnostic.record("persist-ack", { socket: current, ackCount: acks.length });
+          }
           socket.send(message);
+          if (forwardedAdmission)
+            diagnostic.record("frame-delivery", { socket: current, ...forwardedAdmission });
         });
       });
       const path = `/w/${admin.workspaceSlug}/${f.displayId}`;
@@ -1597,10 +1816,85 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
           }[],
         };
         owner.taskFreshAdmission = witness;
+        let append: (kind: string, value?: Record<string, unknown>) => void = () => {};
+        try {
+          const diagnosticOwner = window as Window & {
+            taskFreshAdmissionDiagnostic?: {
+              events: Record<string, unknown>[];
+              dropped: number;
+            };
+          };
+          const observed = { events: [] as Record<string, unknown>[], dropped: 0 };
+          diagnosticOwner.taskFreshAdmissionDiagnostic = observed;
+          const start = performance.now();
+          const sockets = new WeakMap<object, number>();
+          let socketOrdinal = 0;
+          let order = 0;
+          const socketNumber = (socket: object | null | undefined) => {
+            if (!socket) return "unknown";
+            let ordinal = sockets.get(socket);
+            if (ordinal === undefined) {
+              ordinal = ++socketOrdinal;
+              sockets.set(socket, ordinal);
+            }
+            return ordinal;
+          };
+          append = (kind: string, value: Record<string, unknown> = {}) => {
+            try {
+              if (observed.events.length === 256) {
+                observed.events.splice(16, 1);
+                observed.dropped = Math.min(1_000_000, observed.dropped + 1);
+              }
+              observed.events.push({
+                ...value,
+                kind,
+                order: ++order,
+                elapsedMs: Math.floor(performance.now() - start),
+                activeSocket: socketNumber(provider.configuration.websocketProvider.webSocket),
+                authenticationEpoch: witness.authenticationEpoch,
+                authenticatedScope: witness.authenticatedScope,
+                scope: provider.authorizedScope,
+                authenticated: provider.isAuthenticated,
+              });
+            } catch {
+              /* no diagnostic failure may escape a provider callback */
+            }
+          };
+          // Public events observe closure without overriding route close forwarding.
+          provider.on("open", (payload: { event: Event }) => {
+            try {
+              const current = provider.configuration.websocketProvider.webSocket;
+              append("browser-open", {
+                socket: socketNumber(payload.event.target),
+                sameSocket:
+                  !payload.event.target || !current ? "unknown" : payload.event.target === current,
+              });
+            } catch {
+              /* unavailable event target */
+            }
+          });
+          provider.on("close", (payload: { event: CloseEvent }) => {
+            try {
+              const current = provider.configuration.websocketProvider.webSocket;
+              append("browser-close", {
+                socket: socketNumber(payload.event.target),
+                code: payload.event.code,
+                sameSocket:
+                  !payload.event.target || !current ? "unknown" : payload.event.target === current,
+              });
+            } catch {
+              /* unavailable close witness */
+            }
+          });
+        } catch {
+          /* diagnostics unavailable; original witness still operates */
+        }
         provider.on("authenticated", ({ scope }: { scope: typeof provider.authorizedScope }) => {
           witness.authenticationEpoch++;
           witness.authenticatedScope = scope;
+          append("browser-authenticated");
         });
+        let previousDiagnosticState: Record<string, unknown> | undefined;
         let previous = doc.getXmlFragment("prosemirror").toJSON();
         doc.on(
           "update",
@@ -1625,6 +1919,7 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
           const current = root.querySelector(".ProseMirror") as HTMLElement & { editor: Editor };
           if (current !== witness.element || current.editor !== witness.editor) {
             witness.ownerBroken = true;
+            append("browser-state", { ownerBroken: true });
             return;
           }
           if (witness.states.length >= 256) witness.states.splice(1, 1);
@@ -1651,6 +1946,30 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
           )
             witness.violations++;
           witness.states.push(state);
+          try {
+            const diagnosticState = {
+              ...state,
+              status: state.status,
+              editable: state.editable,
+              dom: state.dom,
+              saveEnabled: state.saveEnabled,
+              updates: witness.updates,
+              localUpdates: witness.localUpdates,
+              unauthorizedLocalWrites: witness.unauthorizedLocalWrites,
+              ownerBroken: witness.ownerBroken,
+              violations: witness.violations,
+            };
+            if (
+              !previousDiagnosticState ||
+              Object.entries(diagnosticState).some(
+                ([key, value]) => previousDiagnosticState?.[key] !== value,
+              )
+            )
+              append("browser-state", diagnosticState);
+            previousDiagnosticState = diagnosticState;
+          } catch {
+            /* diagnostics cannot stop the original sampling loop */
+          }
           requestAnimationFrame(sample);
         };
         sample();
@@ -1721,6 +2040,7 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
       expect((await page.request.patch(f.endpoint, { data: { archived: false } })).status()).toBe(
         200,
       );
+      diagnostic.record("http-unarchive", { archived: false });
       if (schedule !== "natural") {
         await expect.poll(() => held).toBe(true);
         expect(await observe()).toMatchObject({
@@ -1730,16 +2050,19 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
           updates: 0,
         });
         const collection = `${f.endpoint}/collection-item`;
-        const retired = page.waitForResponse(
-          async (response) =>
+        const retired = page.waitForResponse(async (response) => {
+          const denied =
             response.url().endsWith(collection) &&
             response.status() === 200 &&
             response.request().method() === "GET" &&
-            !z.object({ canEdit: z.boolean() }).parse(await response.json()).canEdit,
-        );
+            !z.object({ canEdit: z.boolean() }).parse(await response.json()).canEdit;
+          if (denied) diagnostic.record("http-denied", { canEdit: false });
+          return denied;
+        });
         expect((await page.request.patch(f.endpoint, { data: { archived: true } })).status()).toBe(
           200,
         );
+        diagnostic.record("http-archive", { archived: true });
         await retired;
         releaseFrame();
       }
@@ -1929,11 +2252,79 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
           z.object({ contentJson: z.unknown(), version: z.number() }).parse(await response.json()),
         ).toEqual(originalBody);
       }
-      await testInfo.attach(`w3-task-${schedule}-wire-coherence.json`, {
-        body: JSON.stringify({ admissions, frames, state: await observe(), requests, acks }),
-        contentType: "application/json",
-      });
+      completed = true;
     } finally {
+      diagnostic.record("cleanup-start", { completed });
+      // Capture on success AND failure, before the original release/stop/close sequence.
+      await attachTaskAdmissionDiagnostic(testInfo, schedule, async () => {
+        let browserState: unknown;
+        try {
+          browserState = await page.evaluate(() => {
+            const owner = window as Window & {
+              taskFreshAdmissionDiagnostic?: { events: Record<string, unknown>[]; dropped: number };
+              taskFreshAdmission?: AdmissionOwner & {
+                root: Element;
+                ownerBroken: boolean;
+                violations: number;
+                authenticationEpoch: number;
+                initialAuthenticationEpoch: number;
+                authenticatedScope: string | undefined;
+              };
+            };
+            const witness = owner.taskFreshAdmission;
+            if (!witness) return { browser: owner.taskFreshAdmissionDiagnostic };
+            const root = document.querySelector('[data-testid="task-body"]');
+            const element = root?.querySelector(".ProseMirror") as
+              (HTMLElement & { editor: Editor }) | null;
+            const options = (name: string) =>
+              element?.editor.extensionManager.extensions.find(
+                (extension) => extension.name === name,
+              )?.options as Record<string, unknown> | undefined;
+            const save = Array.from(root?.querySelectorAll("button") ?? []).find(
+              (button) => button.textContent.trim() === "저장",
+            );
+            return {
+              browser: owner.taskFreshAdmissionDiagnostic,
+              state: {
+                authenticationEpoch: witness.authenticationEpoch,
+                initialAuthenticationEpoch: witness.initialAuthenticationEpoch,
+                authenticatedScope: witness.authenticatedScope,
+                authenticated: witness.provider.isAuthenticated,
+                scope: witness.provider.authorizedScope,
+                status: root
+                  ?.querySelector("[data-collab-status]")
+                  ?.getAttribute("data-collab-status"),
+                editable: element?.editor.isEditable,
+                dom: element?.getAttribute("contenteditable"),
+                canPersistAffordance: save !== undefined && !save.disabled,
+                ownerBroken: witness.ownerBroken,
+                violations: witness.violations,
+                sameRoot: root === witness.root,
+                sameElement: element === witness.element,
+                sameEditor: element?.editor === witness.editor,
+                sameDoc: options("collaboration")?.document === witness.doc,
+                sameProvider: options("collaborationCaret")?.provider === witness.provider,
+                sameClientId: witness.doc.clientID === witness.clientId,
+                updates: witness.updates,
+                localUpdates: witness.localUpdates,
+                unauthorizedLocalWrites: witness.unauthorizedLocalWrites,
+              },
+            };
+          });
+        } catch {
+          /* original assertion/cleanup must survive unavailable page evaluation */
+        }
+        const captured =
+          typeof browserState === "object" && browserState !== null
+            ? (browserState as Record<string, unknown>)
+            : {};
+        return {
+          route: diagnostic.snapshot(),
+          browser: captured.browser,
+          state: captured.state,
+          completed,
+        };
+      });
       releaseFrame();
       await page
         .evaluate(() => {
