@@ -1087,6 +1087,181 @@ pub async fn create_workspace_as_instance_admin(
     Ok(Ok(WorkspaceMeta { id, name, slug }))
 }
 
+/// Bootstrap under the selected backend's actual admission writer. A failed
+/// finish retains its original receipt and never authorizes an observer/retry.
+pub async fn ensure_personal_workspace_backend(
+    backend: &Backend,
+    license: &crate::license::Entitlements,
+    user_id: Uuid,
+    session_id: Uuid,
+    client_ip: Option<&str>,
+) -> Result<Result<WorkspaceMeta, WorkspaceDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return ensure_personal_workspace(pool, license, user_id, session_id, client_ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = ensure_personal_workspace_operation(
+        &mut tx.operation(),
+        license,
+        user_id,
+        session_id,
+        client_ip,
+    )
+    .await;
+    if let Ok(Ok(meta)) = result {
+        tx.commit_with_cleanup()
+            .await
+            .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+        Ok(Ok(meta))
+    } else {
+        personal_workspace_after_rollback(result, tx.rollback().await)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("personal workspace bootstrap refused: {0:?}")]
+struct PersonalWorkspaceRefusal(WorkspaceDbError);
+
+fn personal_workspace_after_rollback(
+    result: Result<Result<WorkspaceMeta, WorkspaceDbError>, sqlx::Error>,
+    cleanup: Result<(), sqlx::Error>,
+) -> Result<Result<WorkspaceMeta, WorkspaceDbError>, sqlx::Error> {
+    match cleanup {
+        Ok(()) => result,
+        Err(cleanup) => {
+            let original: Option<Box<dyn std::error::Error + Send + Sync>> = match result {
+                Err(driver) => Some(Box::new(driver)),
+                Ok(Err(refusal)) => Some(Box::new(PersonalWorkspaceRefusal(refusal))),
+                Ok(Ok(_)) => None,
+            };
+            Err(super::backend::rollback_cleanup_unknown(original, cleanup))
+        }
+    }
+}
+
+async fn ensure_personal_workspace_operation(
+    op: &mut OperationTx<'_, '_>,
+    license: &crate::license::Entitlements,
+    user: Uuid,
+    credential: Uuid,
+    ip: Option<&str>,
+) -> Result<Result<WorkspaceMeta, WorkspaceDbError>, sqlx::Error> {
+    op.acquire_admission_lock().await?;
+    let candidate = {
+        let OperationTx::SqliteFamily(family) = op else {
+            return Err(sqlx::Error::Protocol(
+                "personal bootstrap operation requires family writer".into(),
+            ));
+        };
+        family.require_writer()?;
+        // Choose the one immutable tenant from this actor's private mapping.
+        // No metadata is returned until the credential is proved below. The
+        // family system marker is local, and restoration is infallible even
+        // when the awaited lookup returns a driver error.
+        let previous = family.replace_system_context(true);
+        let result = family.query(
+            "SELECT w.id FROM users u JOIN workspaces w ON w.id=u.personal_workspace_id WHERE u.id=?1 AND u.deleted_at IS NULL AND w.kind='personal' AND w.deleted_at IS NULL",
+            &[Cell::uuid(user)],
+        ).await;
+        family.replace_system_context(previous);
+        result?.first().map(|row| row.cell(0)?.id()).transpose()?
+    };
+    let workspace = candidate.unwrap_or_else(Uuid::now_v7);
+    op.set_tenant(workspace).await?;
+    op.lock_membership_users(&[user]).await?;
+    if !op.recheck_session(user, credential).await? {
+        return Ok(Err(WorkspaceDbError::Forbidden));
+    }
+    if candidate.is_some() {
+        let OperationTx::SqliteFamily(family) = op else {
+            return Err(sqlx::Error::Protocol(
+                "personal bootstrap operation requires family writer".into(),
+            ));
+        };
+        family.require_tenant(workspace)?;
+        let rows = family.query(
+            "SELECT id,name,slug FROM workspaces WHERE id=?1 AND kind='personal' AND deleted_at IS NULL",
+            &[Cell::uuid(workspace)],
+        ).await?;
+        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        return Ok(Ok(WorkspaceMeta {
+            id: row.cell(0)?.id()?,
+            name: row.cell(1)?.string()?,
+            slug: row.cell(2)?.string()?,
+        }));
+    }
+    if let Err(error) = op
+        .require_new_instance_billable_user(Some(user), license)
+        .await?
+    {
+        return Ok(Err(quota_error(error)));
+    }
+    let mut slug = personal_workspace_slug(user);
+    {
+        let OperationTx::SqliteFamily(family) = op else {
+            return Err(sqlx::Error::Protocol(
+                "personal bootstrap operation requires family writer".into(),
+            ));
+        };
+        family.require_writer()?;
+        family.require_tenant(workspace)?;
+        let mut inserted = false;
+        for attempt in 0..4 {
+            if attempt > 0 {
+                let alternate = Uuid::now_v7().simple().to_string();
+                slug = format!("u-{}", &alternate[4..]);
+            }
+            let rows = family.query(
+                "INSERT INTO workspaces(id,slug,name,kind) VALUES(?1,?2,'Personal','personal') ON CONFLICT(slug) DO NOTHING RETURNING id",
+                &[Cell::uuid(workspace), Cell::text(&slug)],
+            ).await?;
+            if !rows.is_empty() {
+                inserted = true;
+                break;
+            }
+        }
+        if !inserted {
+            return Ok(Err(WorkspaceDbError::SlugTaken));
+        }
+        family
+            .execute(
+                "INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')",
+                &[Cell::uuid(workspace), Cell::uuid(user)],
+            )
+            .await?;
+        if family.execute("UPDATE users SET personal_workspace_id=?2,updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE id=?1 AND deleted_at IS NULL", &[Cell::uuid(user), Cell::uuid(workspace)]).await? != 1 {
+            return Err(sqlx::Error::RowNotFound);
+        }
+    }
+    let payload = json!({"workspaceId":workspace.to_string(),"ownerId":user.to_string(),"kind":"personal","slug":slug});
+    op.append_event(EventAppend {
+        id: Uuid::now_v7(),
+        workspace_id: Some(workspace),
+        actor_user_id: Some(user),
+        verb: "workspace.personal_created".into(),
+        target_type: Some("workspace".into()),
+        target_id: Some(workspace),
+        payload: payload.clone(),
+    })
+    .await?;
+    op.append_audit(AuditAppend {
+        id: Uuid::now_v7(),
+        workspace_id: Some(workspace),
+        actor_user_id: Some(user),
+        verb: "workspace.personal_created".into(),
+        target_type: Some("workspace".into()),
+        target_id: Some(workspace),
+        payload,
+        ip: ip.map(str::to_string),
+    })
+    .await?;
+    Ok(Ok(WorkspaceMeta {
+        id: workspace,
+        name: "Personal".into(),
+        slug,
+    }))
+}
+
 pub async fn ensure_personal_workspace(
     pool: &PgPool,
     license: &crate::license::Entitlements,
@@ -2010,4 +2185,373 @@ pub async fn lock_sign_in_user(
     user_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     crate::db::identity::lock_sign_in(tx, user_id).await
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+pub(crate) mod selected_personal_workspace_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+    use std::future::Future;
+
+    type PublicationRow = (Vec<u8>, Vec<u8>, String, String);
+
+    pub(crate) async fn fixture() -> (Fixture, Uuid) {
+        let f = Fixture::new().await;
+        let credential = Uuid::now_v7();
+        let expiry = crate::db::identity::stored_now()
+            + chrono::Duration::seconds(crate::auth::token::SESSION_TTL_SECS);
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,?4)")
+            .bind(credential.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .bind(credential.to_string())
+            .bind(expiry.timestamp_micros())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        (f, credential)
+    }
+
+    pub(crate) async fn snapshot(f: &Fixture) -> Vec<Vec<String>> {
+        let mut rows = Vec::new();
+        for sql in [
+            "SELECT json_array(hex(id),slug,name,settings,kind,created_at,updated_at,deleted_at,next_document_number,auto_join_domains) FROM workspaces ORDER BY id",
+            "SELECT json_array(hex(workspace_id),hex(user_id),role,created_at,updated_at) FROM memberships ORDER BY workspace_id,user_id",
+            "SELECT json_array(hex(id),hex(personal_workspace_id),updated_at,deleted_at,suspended_at,anonymized_at,is_instance_admin) FROM users ORDER BY id",
+            "SELECT json_array(hex(id),seq,hex(workspace_id),hex(actor_user_id),verb,target_type,hex(target_id),payload,channel,created_at) FROM events ORDER BY id",
+            "SELECT json_array(hex(id),hex(workspace_id),hex(actor_user_id),verb,target_type,hex(target_id),payload,ip,created_at) FROM audit_log ORDER BY id",
+            "SELECT json_array(id,last_seq) FROM event_sequence ORDER BY id",
+        ] { rows.push(sqlx::query_scalar(sql).fetch_all(&f.pool).await.unwrap()); }
+        rows
+    }
+
+    pub(crate) async fn foreign_keys(f: &Fixture) {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&f.pool)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    async fn ensure(
+        f: &Fixture,
+        credential: Uuid,
+    ) -> Result<Result<WorkspaceMeta, WorkspaceDbError>, sqlx::Error> {
+        ensure_personal_workspace_backend(
+            &f.backend,
+            &crate::license::absent(),
+            f.user,
+            credential,
+            Some("203.0.113.70"),
+        )
+        .await
+    }
+
+    pub(crate) async fn assert_publication(f: &Fixture, meta: &WorkspaceMeta, ip: Option<&str>) {
+        assert!(!meta.id.is_nil());
+        assert_ne!(meta.id, f.workspace);
+        assert_eq!(meta.name, "Personal");
+        assert_eq!(
+            crate::validate::normalize_slug(&meta.slug).unwrap(),
+            meta.slug
+        );
+        let mapping: Vec<u8> =
+            sqlx::query_scalar("SELECT personal_workspace_id FROM users WHERE id=?1")
+                .bind(f.user.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(mapping, meta.id.as_bytes());
+        let stored: (String, String, String) =
+            sqlx::query_as("SELECT kind,name,slug FROM workspaces WHERE id=?1")
+                .bind(meta.id.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stored,
+            ("personal".into(), "Personal".into(), meta.slug.clone())
+        );
+        let owners: Vec<(Vec<u8>, String)> =
+            sqlx::query_as("SELECT user_id,role FROM memberships WHERE workspace_id=?1")
+                .bind(meta.id.as_bytes().as_slice())
+                .fetch_all(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(owners, vec![(f.user.as_bytes().to_vec(), "owner".into())]);
+        let payload = json!({"workspaceId":meta.id.to_string(),"ownerId":f.user.to_string(),"kind":"personal","slug":meta.slug});
+        for table in ["events", "audit_log"] {
+            let rows:Vec<PublicationRow> = sqlx::query_as(&format!("SELECT workspace_id,actor_user_id,target_type,payload FROM {table} WHERE verb='workspace.personal_created' AND target_id=?1"))
+                .bind(meta.id.as_bytes().as_slice()).fetch_all(&f.pool).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0, meta.id.as_bytes());
+            assert_eq!(rows[0].1, f.user.as_bytes());
+            assert_eq!(rows[0].2, "workspace");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&rows[0].3).unwrap(),
+                payload
+            );
+        }
+        let actual: Option<String> = sqlx::query_scalar(
+            "SELECT ip FROM audit_log WHERE verb='workspace.personal_created' AND target_id=?1",
+        )
+        .bind(meta.id.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(actual.as_deref(), ip);
+    }
+
+    #[tokio::test]
+    async fn sqlite_personal_bootstrap_stable_concurrent_mapping_and_private_slug_collision() {
+        let (f, credential) = fixture().await;
+        let canonical = personal_workspace_slug(f.user);
+        sqlx::query("UPDATE workspaces SET slug=?1,name='Supported ordinary team' WHERE id=?2")
+            .bind(&canonical)
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let team: String = sqlx::query_scalar(
+            "SELECT json_array(hex(id),slug,name,kind,settings) FROM workspaces WHERE id=?1",
+        )
+        .bind(f.workspace.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        let before_create = snapshot(&f).await;
+        let (a, b) = tokio::join!(ensure(&f, credential), ensure(&f, credential));
+        let a = a.unwrap().unwrap();
+        let b = b.unwrap().unwrap();
+        assert_eq!((a.id, &a.name, &a.slug), (b.id, &b.name, &b.slug));
+        assert_ne!(a.slug, canonical);
+        assert_publication(&f, &a, Some("203.0.113.70")).await;
+        let before = snapshot(&f).await;
+        for index in [0, 1, 3, 4] {
+            assert_eq!(before[index].len(), before_create[index].len() + 1);
+        }
+        assert_eq!(before[2].len(), before_create[2].len());
+        let replay = ensure(&f, credential).await.unwrap().unwrap();
+        assert_eq!(
+            (replay.id, replay.name, replay.slug),
+            (a.id, a.name, a.slug)
+        );
+        assert_eq!(snapshot(&f).await, before);
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT json_array(hex(id),slug,name,kind,settings) FROM workspaces WHERE id=?1"
+            )
+            .bind(f.workspace.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+            team
+        );
+        foreign_keys(&f).await;
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_personal_bootstrap_current_credentials_mapping_and_queued_writer_denials() {
+        let (f, credential) = fixture().await;
+        // A wrong-kind private mapping is replaced, never converted or returned.
+        sqlx::query("UPDATE users SET personal_workspace_id=?1 WHERE id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let before = snapshot(&f).await;
+        assert!(matches!(
+            ensure_personal_workspace_backend(
+                &f.backend,
+                &crate::license::absent(),
+                Uuid::now_v7(),
+                credential,
+                None
+            )
+            .await
+            .unwrap(),
+            Err(WorkspaceDbError::Forbidden)
+        ));
+        assert_eq!(snapshot(&f).await, before);
+        let meta = ensure(&f, credential).await.unwrap().unwrap();
+        assert_eq!(meta.slug, personal_workspace_slug(f.user));
+        assert_publication(&f, &meta, Some("203.0.113.70")).await;
+        for (deny, restore, id) in [
+            (
+                "UPDATE users SET suspended_at=1 WHERE id=?1",
+                "UPDATE users SET suspended_at=NULL WHERE id=?1",
+                f.user,
+            ),
+            (
+                "UPDATE users SET deleted_at=1 WHERE id=?1",
+                "UPDATE users SET deleted_at=NULL WHERE id=?1",
+                f.user,
+            ),
+            (
+                "UPDATE sessions SET revoked_at=1 WHERE id=?1",
+                "UPDATE sessions SET revoked_at=NULL WHERE id=?1",
+                credential,
+            ),
+        ] {
+            sqlx::query(deny)
+                .bind(id.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let before = snapshot(&f).await;
+            assert!(matches!(
+                ensure(&f, credential).await.unwrap(),
+                Err(WorkspaceDbError::Forbidden)
+            ));
+            assert_eq!(snapshot(&f).await, before);
+            sqlx::query(restore)
+                .bind(id.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            assert_eq!(ensure(&f, credential).await.unwrap().unwrap().id, meta.id);
+        }
+        let mut blocker = f.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let mut pending = Box::pin(ensure(&f, credential));
+        std::future::poll_fn(|cx| {
+            assert!(
+                pending.as_mut().poll(cx).is_pending(),
+                "must await the held one-connection writer"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        sqlx::query("UPDATE sessions SET expires_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        blocker.commit().await.unwrap();
+        let before = snapshot(&f).await;
+        assert!(matches!(
+            pending.await.unwrap(),
+            Err(WorkspaceDbError::Forbidden)
+        ));
+        assert_eq!(snapshot(&f).await, before);
+        let expiry = crate::db::identity::stored_now()
+            + chrono::Duration::seconds(crate::auth::token::SESSION_TTL_SECS);
+        sqlx::query("UPDATE sessions SET expires_at=?1 WHERE id=?2")
+            .bind(expiry.timestamp_micros())
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        // A deleted mapped workspace is not resurrected; its slug stays reserved.
+        sqlx::query("UPDATE workspaces SET deleted_at=1 WHERE id=?1")
+            .bind(meta.id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let fresh = ensure(&f, credential).await.unwrap().unwrap();
+        assert_ne!(fresh.id, meta.id);
+        assert_ne!(fresh.slug, meta.slug);
+        assert_publication(&f, &fresh, Some("203.0.113.70")).await;
+        foreign_keys(&f).await;
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_personal_bootstrap_event_audit_and_commit_fk_failures_then_healthy_retry() {
+        let (f, credential) = fixture().await;
+        let before = snapshot(&f).await;
+        for table in ["events", "audit_log"] {
+            sqlx::query(&format!("CREATE TRIGGER personal_refuse BEFORE INSERT ON {table} WHEN NEW.verb='workspace.personal_created' BEGIN SELECT RAISE(ABORT,'personal publication refused'); END"))
+                .execute(&f.pool).await.unwrap();
+            let error = ensure(&f, credential).await.err().unwrap();
+            assert!(
+                matches!(&error,sqlx::Error::Database(e) if e.message().contains("personal publication refused"))
+            );
+            assert_eq!(snapshot(&f).await, before);
+            sqlx::query("DROP TRIGGER personal_refuse")
+                .execute(&f.pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("CREATE TABLE personal_commit_fk_probe(workspace_id BLOB REFERENCES workspaces(id) DEFERRABLE INITIALLY DEFERRED) STRICT")
+            .execute(&f.pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER personal_commit_refuse AFTER INSERT ON audit_log WHEN NEW.verb='workspace.personal_created' BEGIN INSERT INTO personal_commit_fk_probe VALUES(zeroblob(16)); END")
+            .execute(&f.pool).await.unwrap();
+        let error = ensure(&f, credential).await.err().unwrap();
+        let sqlx::Error::AnyDriverError(source) = error else {
+            panic!("typed original commit receipt required")
+        };
+        let receipt = source
+            .downcast_ref::<super::super::backend::CommitCleanupUnknown>()
+            .unwrap();
+        assert_eq!(
+            receipt.settlement,
+            super::super::backend::CommitSettlement::LocalWriterReconcile
+        );
+        assert!(
+            matches!(&receipt.source.source,sqlx::Error::Database(e) if e.message().contains("FOREIGN KEY"))
+        );
+        assert_eq!(snapshot(&f).await, before);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM personal_commit_fk_probe")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        sqlx::query("DROP TRIGGER personal_commit_refuse")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let healthy = ensure(&f, credential).await.unwrap().unwrap();
+        assert_publication(&f, &healthy, Some("203.0.113.70")).await;
+        foreign_keys(&f).await;
+        f.close().await;
+    }
+
+    #[test]
+    fn personal_bootstrap_rollback_cleanup_retains_domain_and_driver_causes() {
+        for (index, result) in [
+            Ok(Err(WorkspaceDbError::Forbidden)),
+            Err(sqlx::Error::Protocol("original bootstrap driver".into())),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // Returned-error propagation only, not an actual provider rollback failure.
+            let error = personal_workspace_after_rollback(
+                result,
+                Err(sqlx::Error::Protocol("synthetic cleanup failure".into())),
+            )
+            .err()
+            .unwrap();
+            assert!(super::super::backend::is_rollback_cleanup_unknown(&error));
+            let sqlx::Error::AnyDriverError(source) = error else {
+                panic!("typed canonical receipt required")
+            };
+            let receipt = source
+                .downcast_ref::<super::super::backend::RollbackCleanupUnknown>()
+                .unwrap();
+            let original = receipt.original.as_ref().unwrap();
+            if index == 0 {
+                assert!(original
+                    .downcast_ref::<PersonalWorkspaceRefusal>()
+                    .is_some_and(|r| matches!(&r.0, WorkspaceDbError::Forbidden)));
+            } else {
+                assert!(original.downcast_ref::<sqlx::Error>().is_some_and(
+                    |e| matches!(e,sqlx::Error::Protocol(s) if s=="original bootstrap driver")
+                ));
+            }
+            assert!(
+                matches!(&receipt.cleanup,sqlx::Error::Protocol(s) if s=="synthetic cleanup failure")
+            );
+        }
+    }
 }

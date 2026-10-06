@@ -260,13 +260,8 @@ async fn personal_workspace(
     )
     .await?;
     let ip = peer_ip(peer.ip());
-    let result = crate::db::workspace::ensure_personal_workspace(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/workspaces.rs")
-            .map_err(internal)?,
+    let result = crate::db::workspace::ensure_personal_workspace_backend(
+        &state.auth.db.pool,
         &state.auth.db.license,
         user_id,
         session_id,
@@ -458,4 +453,202 @@ fn parse_user_id(value: &str) -> Result<Uuid, AppError> {
 fn internal(err: sqlx::Error) -> AppError {
     tracing::error!("database error: {}", err);
     AppError::internal()
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod selected_personal_bootstrap_http_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+    use crate::db::workspace::selected_personal_workspace_tests::{
+        assert_publication, fixture, foreign_keys, snapshot,
+    };
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn app(f: &Fixture) -> Router {
+        router().with_state(AppState {
+            realtime_mode:crate::config::RealtimeMode::Off,native_engine:None,
+            auth:Arc::new(crate::auth::AuthService{db:crate::db::Db::from_backend(f.backend.clone()),password_keys:crate::auth::password::Keyring::parse(r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,"test").unwrap()}),
+            branding_name:"FVOCI".into(),public_origin:"http://localhost".into(),cookie_secure:false,
+            rate_limiter:crate::http::rate_limit::RateLimiter::new(),storage:crate::attachments::ObjectStorage::local(f.root.join("storage")),
+            upload:crate::attachments::UploadLimits{part_size_bytes:24,max_file_size_bytes:1024,create_rate_per_5min:20,part_put_slots:crate::attachments::PartPutSlots::new(2)},
+            collab:None,meili:None,search_embedder:None,markdown:None,import_wake:None,
+            import_extractor_available:false,preview_extract:None,quota:Default::default(),
+            mailer:Arc::new(crate::mail::Mailer::disabled()),streams:AppState::fresh_streams(),
+        })
+    }
+    async fn cookie(f: &Fixture, credential: Uuid) -> String {
+        let token = crate::auth::token::new_token();
+        sqlx::query("UPDATE sessions SET token_hash=?1 WHERE id=?2")
+            .bind(token.hash)
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        token.token
+    }
+    async fn post(
+        app: Router,
+        token: Option<&str>,
+        bearer: bool,
+        origin: &str,
+    ) -> (StatusCode, Value) {
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/me/personal-workspace")
+            .extension(ConnectInfo(
+                "203.0.113.70:42424".parse::<SocketAddr>().unwrap(),
+            ))
+            .header("origin", origin);
+        if let Some(token) = token {
+            request = if bearer {
+                request.header("authorization", format!("Bearer {token}"))
+            } else {
+                request.header("cookie", format!("fvoci_session={token}"))
+            };
+        }
+        let response = app
+            .oneshot(request.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 16384)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn sqlite_http_personal_bootstrap_cookie_origin_session_only_and_stable_replay() {
+        let (f, credential) = fixture().await;
+        let token = cookie(&f, credential).await;
+        let app = app(&f);
+        let pat = crate::auth::token::new_token();
+        sqlx::query("INSERT INTO api_tokens(id,workspace_id,user_id,token_hash,name,scopes) VALUES(?1,?2,?3,?4,'Bootstrap test','[\"workspace.manage\"]')")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(&pat.hash).execute(&f.pool).await.unwrap();
+        for (auth, bearer, origin, expected) in [
+            (None, false, "http://localhost", StatusCode::UNAUTHORIZED),
+            (
+                Some(token.as_str()),
+                false,
+                "http://foreign.test",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Some(pat.token.as_str()),
+                true,
+                "http://localhost",
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            let before = snapshot(&f).await;
+            let (status, body) = post(app.clone(), auth, bearer, origin).await;
+            assert_eq!(status, expected, "{body}");
+            assert!(body.get("id").is_none());
+            assert!(body.get("slug").is_none());
+            assert_eq!(snapshot(&f).await, before);
+        }
+        let (status, body) = post(app.clone(), Some(&token), false, "http://localhost").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let id = Uuid::parse_str(body["id"].as_str().unwrap()).unwrap();
+        let expected_slug = crate::db::workspace::personal_workspace_slug(f.user);
+        assert_eq!(
+            body,
+            json!({"id":id.to_string(),"name":"Personal","slug":expected_slug})
+        );
+        assert_publication(
+            &f,
+            &crate::db::workspace::WorkspaceMeta {
+                id,
+                name: "Personal".into(),
+                slug: expected_slug,
+            },
+            Some("203.0.113.70"),
+        )
+        .await;
+        let before = snapshot(&f).await;
+        let (a, b) = tokio::join!(
+            post(app.clone(), Some(&token), false, "http://localhost"),
+            post(app.clone(), Some(&token), false, "http://localhost")
+        );
+        assert_eq!(a, (StatusCode::OK, body.clone()));
+        assert_eq!(b, (StatusCode::OK, body));
+        assert_eq!(snapshot(&f).await, before);
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let before = snapshot(&f).await;
+        assert_eq!(
+            post(app.clone(), Some(&token), false, "http://localhost")
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(snapshot(&f).await, before);
+        foreign_keys(&f).await;
+        drop(app);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_http_personal_bootstrap_seat_limit_and_publication_failure_then_healthy_retry()
+    {
+        let (f, credential) = fixture().await;
+        let token = cookie(&f, credential).await;
+        let app = app(&f);
+        sqlx::query("UPDATE memberships SET role='guest' WHERE user_id=?1")
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let mut seats = Vec::new();
+        for n in 0..10 {
+            let id = Uuid::now_v7();
+            seats.push(id);
+            sqlx::query(
+                "INSERT INTO users(id,email,given_name,is_instance_admin) VALUES(?1,?2,'Seat',1)",
+            )
+            .bind(id.as_bytes().as_slice())
+            .bind(format!("httpseat{n}@quota.test"))
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        }
+        let before = snapshot(&f).await;
+        let (status, body) = post(app.clone(), Some(&token), false, "http://localhost").await;
+        assert_eq!(status, StatusCode::PAYMENT_REQUIRED, "{body}");
+        assert_eq!(body["code"], "limit.seats");
+        assert!(body.get("id").is_none());
+        assert_eq!(snapshot(&f).await, before);
+        sqlx::query("UPDATE users SET anonymized_at=1 WHERE id=?1")
+            .bind(seats[0].as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let before = snapshot(&f).await;
+        sqlx::query("CREATE TRIGGER personal_http_refuse BEFORE INSERT ON audit_log WHEN NEW.verb='workspace.personal_created' BEGIN SELECT RAISE(ABORT,'personal HTTP audit refused'); END")
+            .execute(&f.pool).await.unwrap();
+        let (status, body) = post(app.clone(), Some(&token), false, "http://localhost").await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert!(body.get("id").is_none());
+        assert_eq!(snapshot(&f).await, before);
+        sqlx::query("DROP TRIGGER personal_http_refuse")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let (status, body) = post(app.clone(), Some(&token), false, "http://localhost").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let meta = crate::db::workspace::WorkspaceMeta {
+            id: Uuid::parse_str(body["id"].as_str().unwrap()).unwrap(),
+            name: body["name"].as_str().unwrap().into(),
+            slug: body["slug"].as_str().unwrap().into(),
+        };
+        assert_publication(&f, &meta, Some("203.0.113.70")).await;
+        foreign_keys(&f).await;
+        drop(app);
+        f.close().await;
+    }
 }
