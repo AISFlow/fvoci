@@ -879,103 +879,169 @@ pub async fn create_project_backend(
         .await;
     }
     let mut tx = backend.begin_write().await?;
-    let result = async {
-        let mut op = tx.operation();
-        op.set_tenant(workspace_id).await?;
-        let mut users = vec![actor_user_id];
-        if let Some(lead) = input.lead_user_id {
-            if lead != actor_user_id { users.push(lead); }
-        }
-        users.sort_unstable();
-        op.lock_membership_users(&users).await?;
-        if !op.recheck_session(actor_user_id, session_id).await? {
-            return Ok(Err(ProjectDbError::Forbidden));
-        }
-        if !op.workspace_is_live(workspace_id).await? {
-            return Ok(Err(ProjectDbError::NotFound));
-        }
-        if !op.membership_role(workspace_id, actor_user_id, true).await?
-            .is_some_and(|role| role.at_least(WorkspaceRole::Member)) {
-            return Ok(Err(ProjectDbError::NotFound));
-        }
-        op.lock_tree(workspace_id).await?;
-        let project = Uuid::now_v7();
-        let root = Uuid::now_v7();
-        let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
-        family.require_writer()?;
-        family.require_tenant(workspace_id)?;
-        let inserted = family.query(
-            "INSERT INTO projects(id,workspace_id,key,name,description,icon,visibility,status,next_number,created_by)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,'active',1,?8)
-             ON CONFLICT(workspace_id,key) DO NOTHING RETURNING id",
-            &[Cell::uuid(project),Cell::uuid(workspace_id),Cell::text(input.key),Cell::text(input.name.trim()),
-              Cell::optional_text(optional_text_to_db(input.description).as_deref()),
-              Cell::optional_text(optional_text_to_db(input.icon).as_deref()),
-              Cell::text(input.visibility),Cell::uuid(actor_user_id)],
-        ).await?;
-        if inserted.is_empty() { return Ok(Err(ProjectDbError::Conflict)); }
-        family.execute(
-            "INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')",
-            &[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace_id),Cell::uuid(project),Cell::uuid(actor_user_id)],
-        ).await?;
-        if let Some(lead) = input.lead_user_id.filter(|lead| *lead != actor_user_id) {
-            // Retain the PG ordering: duplicate key precedes a refused lead.
-            if !op.membership_role(workspace_id,lead,false).await?
-                .is_some_and(|role| role.at_least(WorkspaceRole::Member)) {
-                return Ok(Err(ProjectDbError::NotFound));
-            }
-            let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
-            family.execute(
-                "INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')
-                 ON CONFLICT(workspace_id,project_id,user_id) DO UPDATE SET role='lead',updated_at=(unixepoch()*1000000 + CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)",
-                &[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace_id),Cell::uuid(project),Cell::uuid(lead)],
-            ).await?;
-            family.execute(
-                "UPDATE project_members SET role='member',updated_at=(unixepoch()*1000000 + CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)
-                 WHERE workspace_id=?1 AND project_id=?2 AND user_id=?3",
-                &[Cell::uuid(workspace_id),Cell::uuid(project),Cell::uuid(actor_user_id)],
-            ).await?;
-        }
-        let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
-        let numbers = family.query(
-            "UPDATE projects SET next_number=next_number+1,updated_at=(unixepoch()*1000000 + CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)
-             WHERE workspace_id=?1 AND id=?2 RETURNING next_number-1",
-            &[Cell::uuid(workspace_id),Cell::uuid(project)],
-        ).await?;
-        let number = numbers.first().ok_or(sqlx::Error::RowNotFound)?.cell(0)?.int32()?;
-        family.execute(
-            "INSERT INTO documents(id,workspace_id,title,path,parent_id,sort_key,project_id,number,status,schema_version,content_json,created_by)
-             VALUES(?1,?2,?3,?4,NULL,'V',?5,?6,'published',?7,?8,?9)",
-            &[Cell::uuid(root),Cell::uuid(workspace_id),Cell::text(input.name.trim()),Cell::text(to_path_label(root)),
-              Cell::uuid(project),Cell::Integer(i64::from(number)),Cell::Integer(i64::from(DOCUMENT_SCHEMA_VERSION)),
-              Cell::json(&empty_document_json())?,Cell::uuid(actor_user_id)],
-        ).await?;
-        family.execute(
-            "UPDATE projects SET root_document_id=?3,updated_at=(unixepoch()*1000000 + CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)
-             WHERE workspace_id=?1 AND id=?2",
-            &[Cell::uuid(workspace_id),Cell::uuid(project),Cell::uuid(root)],
-        ).await?;
-        seed_project_workflow_family(family,workspace_id,project).await?;
-        let payload = json!({"projectId":project.to_string(),"key":input.key,"name":input.name.trim(),
-                             "visibility":input.visibility,"rootDocumentId":root.to_string()});
-        op.append_event(EventAppend {
-            id:Uuid::now_v7(),workspace_id:Some(workspace_id),actor_user_id:Some(actor_user_id),
-            verb:"project.created".into(),target_type:Some("project".into()),target_id:Some(project),payload:payload.clone(),
-        }).await?;
-        op.append_audit(AuditAppend {
-            id:Uuid::now_v7(),workspace_id:Some(workspace_id),actor_user_id:Some(actor_user_id),
-            verb:"project.created".into(),target_type:Some("project".into()),target_id:Some(project),payload,
-            ip:client_ip.map(str::to_string),
-        }).await?;
-        let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
-        let rows = family.query(
-            "SELECT id,key,name,description,icon,visibility,root_document_id,status,created_by,created_at,updated_at
-             FROM projects WHERE workspace_id=?1 AND id=?2",
-            &[Cell::uuid(workspace_id),Cell::uuid(project)],
-        ).await?;
-        Ok(Ok(project_created_family_row(rows.first().ok_or(sqlx::Error::RowNotFound)?, workspace_id)?))
-    }.await;
+    let result = create_project_operation(
+        &mut tx.operation(),
+        workspace_id,
+        actor_user_id,
+        session_id,
+        input,
+        client_ip,
+    )
+    .await;
     finish_project_create(tx, result).await
+}
+
+/// Borrow the caller's current transaction; creation never owns BEGIN/finish.
+/// The caller keeps tenant/current authority and commits all composed effects.
+pub(crate) async fn create_project_operation(
+    op: &mut OperationTx<'_, '_>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    input: CreateProjectInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<ProjectRow, ProjectDbError>, sqlx::Error> {
+    if let OperationTx::Postgres(tx) = op {
+        return create_project_tx(
+            tx,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            input,
+            client_ip,
+        )
+        .await;
+    }
+    op.set_tenant(workspace_id).await?;
+    let mut users = vec![actor_user_id];
+    if let Some(lead) = input.lead_user_id {
+        if lead != actor_user_id {
+            users.push(lead);
+        }
+    }
+    users.sort_unstable();
+    op.lock_membership_users(&users).await?;
+    if !op.recheck_session(actor_user_id, session_id).await? {
+        return Ok(Err(ProjectDbError::Forbidden));
+    }
+    if !op.workspace_is_live(workspace_id).await? {
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    if !op
+        .membership_role(workspace_id, actor_user_id, true)
+        .await?
+        .is_some_and(|role| role.at_least(WorkspaceRole::Member))
+    {
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    op.lock_tree(workspace_id).await?;
+    let project = Uuid::now_v7();
+    let root = Uuid::now_v7();
+    let OperationTx::SqliteFamily(family) = &mut *op else {
+        unreachable!()
+    };
+    family.require_writer()?;
+    family.require_tenant(workspace_id)?;
+    let inserted = family.query(
+        "INSERT INTO projects(id,workspace_id,key,name,description,icon,visibility,status,next_number,created_by)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,'active',1,?8)
+         ON CONFLICT(workspace_id,key) DO NOTHING RETURNING id",
+        &[Cell::uuid(project),Cell::uuid(workspace_id),Cell::text(input.key),Cell::text(input.name.trim()),
+          Cell::optional_text(optional_text_to_db(input.description).as_deref()),
+          Cell::optional_text(optional_text_to_db(input.icon).as_deref()),
+          Cell::text(input.visibility),Cell::uuid(actor_user_id)],
+    ).await?;
+    if inserted.is_empty() {
+        return Ok(Err(ProjectDbError::Conflict));
+    }
+    family.execute(
+        "INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')",
+        &[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace_id),Cell::uuid(project),Cell::uuid(actor_user_id)],
+    ).await?;
+    if let Some(lead) = input.lead_user_id.filter(|lead| *lead != actor_user_id) {
+        // Retain the PG ordering: duplicate key precedes a refused lead.
+        if !op
+            .membership_role(workspace_id, lead, false)
+            .await?
+            .is_some_and(|role| role.at_least(WorkspaceRole::Member))
+        {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        let OperationTx::SqliteFamily(family) = &mut *op else {
+            unreachable!()
+        };
+        family.execute(
+            "INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')
+             ON CONFLICT(workspace_id,project_id,user_id) DO UPDATE SET role='lead',updated_at=(unixepoch()*1000000 + CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)",
+            &[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace_id),Cell::uuid(project),Cell::uuid(lead)],
+        ).await?;
+        family.execute(
+            "UPDATE project_members SET role='member',updated_at=(unixepoch()*1000000 + CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)
+             WHERE workspace_id=?1 AND project_id=?2 AND user_id=?3",
+            &[Cell::uuid(workspace_id),Cell::uuid(project),Cell::uuid(actor_user_id)],
+        ).await?;
+    }
+    let OperationTx::SqliteFamily(family) = &mut *op else {
+        unreachable!()
+    };
+    let numbers = family.query(
+        "UPDATE projects SET next_number=next_number+1,updated_at=(unixepoch()*1000000 + CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)
+         WHERE workspace_id=?1 AND id=?2 RETURNING next_number-1",
+        &[Cell::uuid(workspace_id),Cell::uuid(project)],
+    ).await?;
+    let number = numbers
+        .first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .cell(0)?
+        .int32()?;
+    family.execute(
+        "INSERT INTO documents(id,workspace_id,title,path,parent_id,sort_key,project_id,number,status,schema_version,content_json,created_by)
+         VALUES(?1,?2,?3,?4,NULL,'V',?5,?6,'published',?7,?8,?9)",
+        &[Cell::uuid(root),Cell::uuid(workspace_id),Cell::text(input.name.trim()),Cell::text(to_path_label(root)),
+          Cell::uuid(project),Cell::Integer(i64::from(number)),Cell::Integer(i64::from(DOCUMENT_SCHEMA_VERSION)),
+          Cell::json(&empty_document_json())?,Cell::uuid(actor_user_id)],
+    ).await?;
+    family.execute(
+        "UPDATE projects SET root_document_id=?3,updated_at=(unixepoch()*1000000 + CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)
+         WHERE workspace_id=?1 AND id=?2",
+        &[Cell::uuid(workspace_id),Cell::uuid(project),Cell::uuid(root)],
+    ).await?;
+    seed_project_workflow_family(family, workspace_id, project).await?;
+    let payload = json!({"projectId":project.to_string(),"key":input.key,"name":input.name.trim(),
+                         "visibility":input.visibility,"rootDocumentId":root.to_string()});
+    op.append_event(EventAppend {
+        id: Uuid::now_v7(),
+        workspace_id: Some(workspace_id),
+        actor_user_id: Some(actor_user_id),
+        verb: "project.created".into(),
+        target_type: Some("project".into()),
+        target_id: Some(project),
+        payload: payload.clone(),
+    })
+    .await?;
+    op.append_audit(AuditAppend {
+        id: Uuid::now_v7(),
+        workspace_id: Some(workspace_id),
+        actor_user_id: Some(actor_user_id),
+        verb: "project.created".into(),
+        target_type: Some("project".into()),
+        target_id: Some(project),
+        payload,
+        ip: client_ip.map(str::to_string),
+    })
+    .await?;
+    let OperationTx::SqliteFamily(family) = &mut *op else {
+        unreachable!()
+    };
+    let rows = family.query(
+        "SELECT id,key,name,description,icon,visibility,root_document_id,status,created_by,created_at,updated_at
+         FROM projects WHERE workspace_id=?1 AND id=?2",
+        &[Cell::uuid(workspace_id),Cell::uuid(project)],
+    ).await?;
+    Ok(Ok(project_created_family_row(
+        rows.first().ok_or(sqlx::Error::RowNotFound)?,
+        workspace_id,
+    )?))
 }
 
 async fn seed_project_workflow_family(

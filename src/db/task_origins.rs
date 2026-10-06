@@ -478,79 +478,157 @@ pub async fn create_document_task_backend(
     // A failed finish retains the original stream's typed unknown outcome;
     // do not observe through a fresh pool or allocate a replacement command.
     let mut tx = backend.begin_write().await?;
-    let result=async {
-        let mut op=tx.operation();
-        op.set_tenant(workspace_id).await?;
-        op.lock_membership_users(&[actor_user_id]).await?;
-        if !op.recheck_session(actor_user_id,session_id).await? {
-            return Ok(Err(TaskOriginDbError::Forbidden));
-        }
-        if !op.workspace_is_live(workspace_id).await? {
-            return Ok(Err(TaskOriginDbError::NotFound));
-        }
-        op.lock_tree(workspace_id).await?;
-        // The family reserved writer serializes source commands, affiliation,
-        // project and group-grant changes; the native receipt key still decides
-        // replay. Keep the PG source View/destination Edit admission ordering.
-        let Some(source_project)=origin_write_source(&mut op,workspace_id,actor_user_id,request.document_id).await? else {
-            return Ok(Err(TaskOriginDbError::NotFound));
-        };
-        let mut projects=vec![request.project_id];
-        if let Some(source)=source_project { projects.push(source); }
-        projects.sort_unstable();projects.dedup();
-        for project in projects {
-            if op.share_lock_project_permission(workspace_id,actor_user_id,project).await?.is_none() {
-                return Ok(Err(TaskOriginDbError::NotFound));
-            }
-        }
-        if origin_write_source(&mut op,workspace_id,actor_user_id,request.document_id).await? != Some(source_project) {
-            return Ok(Err(TaskOriginDbError::NotFound));
-        }
-        let Some((permission,archived))=op.share_lock_project_permission(workspace_id,actor_user_id,request.project_id).await? else {
-            return Ok(Err(TaskOriginDbError::NotFound));
-        };
-        if !permission.at_least(ProjectPermission::Edit) {
-            return Ok(Err(TaskOriginDbError::NotFound));
-        }
-        if request.self_assign && !op.origin_personal_workspace_owner(workspace_id,actor_user_id).await? {
-            return Ok(Err(TaskOriginDbError::NotFound));
-        }
-        let OperationTx::SqliteFamily(family)=&mut op else {unreachable!("family origin")};
-        let rows=family.query("SELECT task_id,request_hash FROM task_origins WHERE workspace_id=?1 AND document_id=?2 AND request_id=?3",
-            &[Cell::uuid(workspace_id),Cell::uuid(request.document_id),Cell::uuid(request.request_id)]).await?;
-        if let Some(row)=rows.first() {
-            let task_id=row.cell(0)?.id()?;
-            if row.cell(1)?.string()?!=request.request_hash {
-                return Ok(Err(TaskOriginDbError::RequestMismatch));
-            }
-            if !op.origin_task_view_permission(workspace_id,actor_user_id,task_id).await?.at_least(ProjectPermission::View) {
-                return Ok(Err(TaskOriginDbError::NotFound));
-            }
-            return Ok(Ok(DocumentTaskOutcome::Replayed(task_id)));
-        }
-        // Existing authorized same-ID archived replay is admitted above;
-        // fresh creates retain create_task_tx's archived-project refusal.
-        if archived { return Ok(Err(TaskOriginDbError::Task(ProjectDbError::Archived))); }
-        let task_id=Uuid::now_v7();
-        if let Err(error)=op.create_origin_task_family(OriginTaskCreate {
-            workspace_id,project_id:request.project_id,actor_user_id,task_id,input:&request.task,client_ip,channel,
-        }).await? {
-            return Ok(Err(TaskOriginDbError::Task(error)));
-        }
-        if request.self_assign {
-            if let Err(error)=op.assign_origin_task_creator_family(workspace_id,request.project_id,actor_user_id,task_id,client_ip).await? {
-                return Ok(Err(TaskOriginDbError::Task(error)));
-            }
-        }
-        let OperationTx::SqliteFamily(family)=&mut op else {unreachable!("family origin receipt")};
-        family.execute("INSERT INTO task_origins(workspace_id,task_id,document_id,request_id,request_hash,anchor) VALUES(?1,?2,?3,?4,?5,?6)",
-            &[Cell::uuid(workspace_id),Cell::uuid(task_id),Cell::uuid(request.document_id),Cell::uuid(request.request_id),Cell::text(request.request_hash),Cell::optional_text(request.anchor)]).await?;
-        Ok(Ok(DocumentTaskOutcome::Created(task_id)))
-    }.await;
+    let result = create_document_task_operation(
+        &mut tx.operation(),
+        workspace_id,
+        actor_user_id,
+        session_id,
+        request,
+        client_ip,
+        channel,
+    )
+    .await;
     finish_origin_operation(tx, result).await
 }
 
-async fn origin_write_source(
+/// Borrow the caller's current transaction; creation never owns BEGIN/finish.
+/// The caller keeps tenant/current authority and commits all composed effects.
+pub(crate) async fn create_document_task_operation(
+    op: &mut OperationTx<'_, '_>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    request: DocumentTaskRequest<'_>,
+    client_ip: Option<&str>,
+    channel: &str,
+) -> Result<Result<DocumentTaskOutcome, TaskOriginDbError>, sqlx::Error> {
+    if let OperationTx::Postgres(tx) = op {
+        return create_document_task_tx(
+            tx,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            request,
+            client_ip,
+            channel,
+        )
+        .await;
+    }
+    op.set_tenant(workspace_id).await?;
+    op.lock_membership_users(&[actor_user_id]).await?;
+    if !op.recheck_session(actor_user_id, session_id).await? {
+        return Ok(Err(TaskOriginDbError::Forbidden));
+    }
+    if !op.workspace_is_live(workspace_id).await? {
+        return Ok(Err(TaskOriginDbError::NotFound));
+    }
+    op.lock_tree(workspace_id).await?;
+    // The family reserved writer serializes source commands, affiliation,
+    // project and group-grant changes; the native receipt key still decides
+    // replay. Keep the PG source View/destination Edit admission ordering.
+    let Some(source_project) =
+        origin_write_source(op, workspace_id, actor_user_id, request.document_id).await?
+    else {
+        return Ok(Err(TaskOriginDbError::NotFound));
+    };
+    let mut projects = vec![request.project_id];
+    if let Some(source) = source_project {
+        projects.push(source);
+    }
+    projects.sort_unstable();
+    projects.dedup();
+    for project in projects {
+        if op
+            .share_lock_project_permission(workspace_id, actor_user_id, project)
+            .await?
+            .is_none()
+        {
+            return Ok(Err(TaskOriginDbError::NotFound));
+        }
+    }
+    if origin_write_source(op, workspace_id, actor_user_id, request.document_id).await?
+        != Some(source_project)
+    {
+        return Ok(Err(TaskOriginDbError::NotFound));
+    }
+    let Some((permission, archived)) = op
+        .share_lock_project_permission(workspace_id, actor_user_id, request.project_id)
+        .await?
+    else {
+        return Ok(Err(TaskOriginDbError::NotFound));
+    };
+    if !permission.at_least(ProjectPermission::Edit) {
+        return Ok(Err(TaskOriginDbError::NotFound));
+    }
+    if request.self_assign
+        && !op
+            .origin_personal_workspace_owner(workspace_id, actor_user_id)
+            .await?
+    {
+        return Ok(Err(TaskOriginDbError::NotFound));
+    }
+    let OperationTx::SqliteFamily(family) = &mut *op else {
+        unreachable!("family origin")
+    };
+    let rows=family.query("SELECT task_id,request_hash FROM task_origins WHERE workspace_id=?1 AND document_id=?2 AND request_id=?3",
+        &[Cell::uuid(workspace_id),Cell::uuid(request.document_id),Cell::uuid(request.request_id)]).await?;
+    if let Some(row) = rows.first() {
+        let task_id = row.cell(0)?.id()?;
+        if row.cell(1)?.string()? != request.request_hash {
+            return Ok(Err(TaskOriginDbError::RequestMismatch));
+        }
+        if !op
+            .origin_task_view_permission(workspace_id, actor_user_id, task_id)
+            .await?
+            .at_least(ProjectPermission::View)
+        {
+            return Ok(Err(TaskOriginDbError::NotFound));
+        }
+        return Ok(Ok(DocumentTaskOutcome::Replayed(task_id)));
+    }
+    // Existing authorized same-ID archived replay is admitted above;
+    // fresh creates retain create_task_tx's archived-project refusal.
+    if archived {
+        return Ok(Err(TaskOriginDbError::Task(ProjectDbError::Archived)));
+    }
+    let task_id = Uuid::now_v7();
+    if let Err(error) = op
+        .create_origin_task_family(OriginTaskCreate {
+            workspace_id,
+            project_id: request.project_id,
+            actor_user_id,
+            task_id,
+            input: &request.task,
+            client_ip,
+            channel,
+        })
+        .await?
+    {
+        return Ok(Err(TaskOriginDbError::Task(error)));
+    }
+    if request.self_assign {
+        if let Err(error) = op
+            .assign_origin_task_creator_family(
+                workspace_id,
+                request.project_id,
+                actor_user_id,
+                task_id,
+                client_ip,
+            )
+            .await?
+        {
+            return Ok(Err(TaskOriginDbError::Task(error)));
+        }
+    }
+    let OperationTx::SqliteFamily(family) = &mut *op else {
+        unreachable!("family origin receipt")
+    };
+    family.execute("INSERT INTO task_origins(workspace_id,task_id,document_id,request_id,request_hash,anchor) VALUES(?1,?2,?3,?4,?5,?6)",
+        &[Cell::uuid(workspace_id),Cell::uuid(task_id),Cell::uuid(request.document_id),Cell::uuid(request.request_id),Cell::text(request.request_hash),Cell::optional_text(request.anchor)]).await?;
+    Ok(Ok(DocumentTaskOutcome::Created(task_id)))
+}
+
+pub(crate) async fn origin_write_source(
     op: &mut OperationTx<'_, '_>,
     workspace: Uuid,
     actor: Uuid,
@@ -574,7 +652,7 @@ async fn origin_write_source(
 }
 
 impl OperationTx<'_, '_> {
-    async fn origin_personal_workspace_owner(
+    pub(crate) async fn origin_personal_workspace_owner(
         &mut self,
         workspace: Uuid,
         actor: Uuid,
@@ -595,7 +673,7 @@ impl OperationTx<'_, '_> {
             }
         }
     }
-    async fn origin_task_view_permission(
+    pub(crate) async fn origin_task_view_permission(
         &mut self,
         workspace: Uuid,
         actor: Uuid,
