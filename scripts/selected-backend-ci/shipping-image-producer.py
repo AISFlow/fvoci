@@ -32,6 +32,9 @@ BUILDKIT_IMAGE = "moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b
 DISK_FLOOR = 32 * 1024**3
 MEMORY_FLOOR = 16 * 1024**3
 BUILDER_MEMORY = 12 * 1024**3
+LEGACY_PROFILE = "legacy-16g"
+HOSTED_PROFILE = "hosted-exclusive-12g-plus-2g-experimental"
+HOST_RESERVE = 2 * 1024**3
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 PUBLIC_FILES = frozenset({"shipping-image.tar", "producer-receipt.json", "tracked-inputs.json"})
@@ -153,8 +156,48 @@ def resources(paths: list[Path]) -> dict:
             "cgroup_memory_available": remaining, "effective_mem_available": min(mem, remaining) if remaining is not None else mem}
 
 
-def admit(measured: dict) -> None:
-    require(measured["free_bytes"] >= DISK_FLOOR and measured["effective_mem_available"] >= MEMORY_FLOOR, "RESOURCE_NOTADMITTED")
+def admit(measured: dict, profile: str = LEGACY_PROFILE, *, running: bool = False) -> None:
+    require(profile in {LEGACY_PROFILE, HOSTED_PROFILE}, "RESOURCE_PROFILE_INVALID")
+    floor = MEMORY_FLOOR if profile == LEGACY_PROFILE else HOST_RESERVE + (0 if running else BUILDER_MEMORY)
+    require(measured["free_bytes"] >= DISK_FLOOR and measured["effective_mem_available"] >= floor, "RESOURCE_NOTADMITTED")
+
+
+def cgroup_chain(pid: str = "self", root: Path = Path("/sys/fs/cgroup"), proc: Path = Path("/proc")) -> list[dict]:
+    """Host-view v2 chain; refuse hidden ancestors or incomplete counters."""
+    try:
+        mounts = [line.split(" - ", 1) for line in (proc / "self/mountinfo").read_text().splitlines()]
+        mounts = [left.split() for left, right in mounts if right.split()[0] == "cgroup2"]
+        require(len(mounts) == 1 and mounts[0][3:5] == ["/", str(root)] and
+                os.readlink(proc / "self/ns/cgroup") == os.readlink(proc / "1/ns/cgroup"), "CGROUP_ANCESTORS_HIDDEN")
+        require({"cpu", "memory"} <= set((root / "cgroup.controllers").read_text().split()) and
+                not (root / "memory.max").exists(), "CGROUP_HOST_ROOT_INVALID")
+        lines = (proc / pid / "cgroup").read_text().splitlines()
+        require(len(lines) == 1 and lines[0].startswith("0::/"), "CGROUP_METADATA_UNKNOWN")
+        relative = lines[0][4:]
+        require(not relative or safe_path(relative), "CGROUP_PATH_INVALID")
+        rows = []
+        for index in range(1, len(PurePosixPath(relative).parts) + 1):
+            name = "/".join(PurePosixPath(relative).parts[:index]); path = root / name
+            require(path.resolve() == path and path.is_dir(), "CGROUP_PATH_INVALID")
+            maximum = (path / "memory.max").read_text().strip()
+            maximum = None if maximum == "max" else int(maximum)
+            current = int((path / "memory.current").read_text().strip())
+            peak = int((path / "memory.peak").read_text().strip())
+            pairs = [line.split() for line in (path / "memory.events").read_text().splitlines()]
+            require(all(len(p) == 2 for p in pairs) and len({p[0] for p in pairs}) == len(pairs), "CGROUP_METADATA_UNKNOWN")
+            events = {k: int(v) for k, v in pairs}
+            require({"oom", "oom_kill", "oom_group_kill"} <= set(events) and all(v >= 0 for v in events.values()) and
+                    current >= 0 and peak >= current and (maximum is None or maximum > 0), "CGROUP_METADATA_UNKNOWN")
+            cpu = (path / "cpu.max").read_text().split()
+            require(len(cpu) == 2 and (cpu[0] == "max" or int(cpu[0]) > 0) and int(cpu[1]) > 0, "CGROUP_METADATA_UNKNOWN")
+            s = path.stat()
+            container = re.fullmatch(r"(?:docker-)?([0-9a-f]{64})(?:\.scope)?", path.name)
+            rows.append({"identity": digest(encoded([name, s.st_dev, s.st_ino])), "memory_max": maximum,
+                         "current": current, "peak": peak, "events": events, "cpu_max": cpu,
+                         "container_id": container[1] if container else None})
+        return rows
+    except (OSError, ValueError, IndexError) as e:
+        raise Refusal("CGROUP_METADATA_UNKNOWN") from e
 
 
 def image_config(config: dict) -> None:
@@ -168,10 +211,11 @@ def image_config(config: dict) -> None:
             cfg.get("Entrypoint") == ["/opt/fvoci/bin/fvoci-migrate", "--start"] and not cfg.get("Cmd"), "IMAGE_ENTRYPOINT_INVALID")
 
 
-def hash_stream(stream, require_stamp: bool = False, scan_canary: bool = False) -> tuple[str, int, bytes]:
+def hash_stream(stream, require_stamp: bool = False, scan_canary: bool = False, *, guard=None) -> tuple[str, int, bytes]:
     h = hashlib.sha256(); size = 0; header = b""; tail = b""; stamp_seen = False
     canary_tail = b""
     while part := stream.read(1024 * 1024):
+        if guard is not None: guard()
         if scan_canary:
             combined = canary_tail + part
             require(CANARY not in combined, "ARTIFACT_CANARY")
@@ -183,6 +227,7 @@ def hash_stream(stream, require_stamp: bool = False, scan_canary: bool = False) 
             tail = part[-len(PRODUCT_SHA):]
         h.update(part); size += len(part)
     require(not require_stamp or stamp_seen, "IMAGE_SOURCE_STAMP_MISSING")
+    if guard is not None: guard()
     return h.hexdigest(), size, header
 
 
@@ -199,12 +244,14 @@ def protected_whiteout(name: str) -> bool:
     return not target or any(target == p or p.startswith(target + "/") or target.startswith(p + "/") for p in protected)
 
 
-def inspect_saved_image(path: Path, image_id: str, *, scan_canary: bool = False) -> dict:
+def inspect_saved_image(path: Path, image_id: str, *, scan_canary: bool = False, guard=None) -> dict:
     """Read the Docker save archive without extracting any untrusted tar paths."""
     require(bool(re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)), "IMAGE_ID_INVALID")
+    if guard is not None: guard()
     binaries = {}; static_files = {}; os_release = None; oci_layers = None
     with tarfile.open(path, "r:") as outer:
         members = outer.getmembers()
+        if guard is not None: guard()
         require(len({m.name for m in members}) == len(members) and all(safe_path(m.name.rstrip("/")) and
                 (m.isfile() or m.isdir()) for m in members), "IMAGE_ARCHIVE_PATH_INVALID")
         manifest = json.load(outer.extractfile("manifest.json"))
@@ -232,9 +279,10 @@ def inspect_saved_image(path: Path, image_id: str, *, scan_canary: bool = False)
         require(config.get("rootfs", {}).get("type") == "layers" and len(diff_ids) == len(item["Layers"]) and
                 all(re.fullmatch(r"sha256:[0-9a-f]{64}", x) for x in diff_ids), "IMAGE_LAYER_IDENTITIES_INVALID")
         for index, (name, diff_id) in enumerate(zip(item["Layers"], diff_ids, strict=True)):
+            if guard is not None: guard()
             if oci_layers is not None:
                 with outer.extractfile(name) as source:
-                    compressed_sha, compressed_bytes, _ = hash_stream(source)
+                    compressed_sha, compressed_bytes, _ = hash_stream(source, guard=guard)
                 descriptor = oci_layers[index]
                 require(descriptor.get("digest") == "sha256:" + compressed_sha and descriptor.get("size") == compressed_bytes,
                         "IMAGE_LAYER_DESCRIPTOR_MISMATCH")
@@ -244,10 +292,11 @@ def inspect_saved_image(path: Path, image_id: str, *, scan_canary: bool = False)
                 stream = gzip.GzipFile(fileobj=source) if compressed else source
                 # Public validation scans the entire decoded stream, including
                 # unrelated members and bytes beyond the tar end marker.
-                layer_sha, _, _ = hash_stream(stream, scan_canary=scan_canary)
+                layer_sha, _, _ = hash_stream(stream, scan_canary=scan_canary, guard=guard)
                 require("sha256:" + layer_sha == diff_id, "IMAGE_LAYER_ID_MISMATCH")
             with tarfile.open(fileobj=outer.extractfile(name), mode="r|*") as layer:
                 for member in layer:
+                    if guard is not None: guard()
                     n = member.name.removeprefix("./").rstrip("/")
                     require(not protected_whiteout(n), "IMAGE_OUTPUT_WHITEOUT")
                     relevant = n.startswith("opt/fvoci/bin/") or n.startswith("opt/fvoci/static/") or n in {"etc/os-release", "usr/lib/os-release"}
@@ -266,7 +315,7 @@ def inspect_saved_image(path: Path, image_id: str, *, scan_canary: bool = False)
                         require(fields.get("ID", "").strip('"') == "ubuntu" and fields.get("VERSION_ID", "").strip('"') == "26.04", "IMAGE_UBUNTU_INVALID")
                         os_release = digest(text)
                         continue
-                    sha, size, header = hash_stream(source, require_stamp=n == "opt/fvoci/bin/fvoci-server")
+                    sha, size, header = hash_stream(source, require_stamp=n == "opt/fvoci/bin/fvoci-server", guard=guard)
                     row = {"sha256": sha, "bytes": size, "mode": f"{member.mode:04o}", "uid": member.uid, "gid": member.gid}
                     require(member.uid == member.gid == 0 and member.mode & 0o022 == 0, "IMAGE_OUTPUT_OWNERSHIP_INVALID")
                     if n.startswith("opt/fvoci/bin/"):
@@ -281,7 +330,8 @@ def inspect_saved_image(path: Path, image_id: str, *, scan_canary: bool = False)
             "binaries": binaries, "static_files": static_files, "os_release_sha256": os_release}
 
 
-def validate_public(directory: Path, receipt: dict, inputs: dict) -> None:
+def validate_public(directory: Path, receipt: dict, inputs: dict, *, guard=None) -> None:
+    if guard is not None: guard()
     require(directory.is_dir() and not directory.is_symlink(), "ARTIFACT_ROOT_INVALID")
     require({p.name for p in directory.iterdir()} == PUBLIC_FILES, "ARTIFACT_ALLOWLIST_INVALID")
     for file in directory.iterdir():
@@ -293,18 +343,95 @@ def validate_public(directory: Path, receipt: dict, inputs: dict) -> None:
     with (directory / "shipping-image.tar").open("rb") as stream:
         tail = b""
         while part := stream.read(1024 * 1024):
+            if guard is not None: guard()
             require(CANARY not in tail + part, "ARTIFACT_CANARY")
             tail = part[-len(CANARY):]
     with (directory / "shipping-image.tar").open("rb") as stream:
-        sha, size, _ = hash_stream(stream)
+        sha, size, _ = hash_stream(stream, guard=guard)
     require(receipt["saved_image"] == {"sha256": sha, "bytes": size}, "ARTIFACT_IMAGE_DRIFT")
-    require(inspect_saved_image(directory / "shipping-image.tar", receipt["image"]["image_id"], scan_canary=True) == receipt["image"], "ARTIFACT_IMAGE_RECEIPT_DRIFT")
+    require(inspect_saved_image(directory / "shipping-image.tar", receipt["image"]["image_id"], scan_canary=True, guard=guard) == receipt["image"], "ARTIFACT_IMAGE_RECEIPT_DRIFT")
+    if guard is not None: guard()
 
 
 class Producer:
-    def __init__(self, work: Path, builder: str):
+    def __init__(self, work: Path, builder: str, profile: str = LEGACY_PROFILE):
+        require(profile in {LEGACY_PROFILE, HOSTED_PROFILE}, "RESOURCE_PROFILE_INVALID")
         self.work = work; self.builder = builder; self.cid = None; self.stages = []; self.paths = []
         self.builder_created = False; self.minimum = None; self.host = None
+        self.profile = profile; self.builder_closed = False; self.cgroups = {}; self.chains = {}; self.phases = {}
+        self.memory_floor = MEMORY_FLOOR if profile == LEGACY_PROFILE else BUILDER_MEMORY + HOST_RESERVE
+
+    def check_resources(self, stage: str, *, running: bool = False) -> dict:
+        measured = resources(self.paths)
+        if self.profile == HOSTED_PROFILE:
+            chains = {"launcher": cgroup_chain()}
+            live = None
+            if self.builder_created and not self.builder_closed:
+                if self.cid is None:
+                    ids = self.command("builder-discovery-" + str(len(self.stages)), ["docker", "ps", "-aq", "--no-trunc",
+                        "--filter", "name=^/buildx_buildkit_" + self.builder + "0$"]).decode().splitlines()
+                    require(len(ids) <= 1 and all(re.fullmatch(r"[0-9a-f]{64}", cid) for cid in ids), "BUILDER_IDENTITY_DRIFT")
+                    if ids: self.cid = ids[0]
+                if self.cid is not None:
+                    live = self.owned_builder()
+                    require(type(live["State"].get("Running")) is bool and type(live["State"].get("OOMKilled")) is bool,
+                            "BUILDER_METADATA_UNKNOWN")
+                    require(not live["State"].get("OOMKilled"), "BUILDER_OOM")
+                    if live["State"]["Running"]:
+                        require(type(live["State"]["Pid"]) is int and live["State"]["Pid"] > 0, "BUILDER_PID_INVALID")
+                        chains["builder"] = cgroup_chain(str(live["State"]["Pid"]))
+                        require(bool(chains["builder"]), "BUILDER_CGROUPS_INVALID")
+                        leaf = chains["builder"][-1]
+                        require(leaf["container_id"] == self.cid and leaf["memory_max"] == BUILDER_MEMORY and leaf["cpu_max"] == ["200000", "100000"] and
+                                leaf["current"] <= BUILDER_MEMORY and leaf["peak"] <= BUILDER_MEMORY, "BUILDER_CGROUPS_INVALID")
+                    else:
+                        require(stage in {"before-bootstrap", "builder-bootstrap"} and live["State"]["Pid"] == 0, "BUILDER_NOT_RUNNING")
+                require(stage in {"before-bootstrap", "builder-bootstrap"} or "builder" in chains, "BUILDER_METADATA_UNKNOWN")
+                # Until the verified container is live, retain the full starting
+                # commitment. Absence during bootstrap never proves a live cap.
+                running = "builder" in chains
+            available = measured["effective_mem_available"]
+            for role, rows in chains.items():
+                ids = [r["identity"] for r in rows]
+                require(role not in self.chains or self.chains[role] == ids, "CGROUP_IDENTITY_DRIFT")
+                self.chains[role] = ids
+                for index, row in enumerate(rows):
+                    key = row["identity"]; old = self.cgroups.get(key)
+                    fixed = {k: row[k] for k in ["memory_max", "cpu_max"]}
+                    if old is None:
+                        if role == "builder" and index == len(rows)-1:
+                            require(all(row["events"][k] == 0 for k in ["oom", "oom_kill", "oom_group_kill"]), "BUILDER_OOM")
+                        old = {**fixed, "initial_events": row["events"].copy(), "last_events": row["events"].copy(), "peak": row["peak"]}
+                        self.cgroups[key] = old
+                    require(all(old[k] == v for k, v in fixed.items()) and row["peak"] >= old["peak"] and
+                            set(row["events"]) == set(old["last_events"]) and
+                            all(row["events"][k] >= v for k, v in old["last_events"].items()), "CGROUP_COUNTERS_DRIFT")
+                    require(all(row["events"][k] == old["initial_events"][k] for k in ["oom", "oom_kill", "oom_group_kill"]), "CGROUP_OOM_INCREMENT")
+                    old.update(last_events=row["events"].copy(), peak=row["peak"], current=row["current"])
+                    if row["memory_max"] is not None and not (role == "builder" and index == len(rows)-1):
+                        require(role != "builder" or row["memory_max"] >= BUILDER_MEMORY + HOST_RESERVE, "BUILDER_ANCESTOR_BUDGET_INVALID")
+                        available = min(available, max(0, row["memory_max"] - row["current"]))
+            measured["effective_mem_available"] = available
+        if self.minimum is None:
+            self.minimum = measured.copy()
+        else:
+            for key, value in measured.items():
+                if value is not None:
+                    old = self.minimum[key]; self.minimum[key] = min(old, value) if old is not None else value
+        phase = self.phases.setdefault(stage, {"minimum_available": measured["effective_mem_available"], "minimum_disk": measured["free_bytes"], "samples": 0})
+        phase["minimum_available"] = min(phase["minimum_available"], measured["effective_mem_available"])
+        phase["minimum_disk"] = min(phase["minimum_disk"], measured["free_bytes"]); phase["samples"] += 1
+        self.memory_floor = MEMORY_FLOOR if self.profile == LEGACY_PROFILE else HOST_RESERVE + (0 if running else BUILDER_MEMORY)
+        phase["memory_floor"] = self.memory_floor
+        admit(measured, self.profile, running=running)
+        return measured
+
+    def profile_receipt(self) -> dict:
+        return json.loads(encoded({"name": self.profile, "experimental_sufficiency": "NOT_PROVEN" if self.profile == HOSTED_PROFILE else None,
+            "start_memory_floor": MEMORY_FLOOR if self.profile == LEGACY_PROFILE else BUILDER_MEMORY + HOST_RESERVE,
+            "running_memory_floor": MEMORY_FLOOR if self.profile == LEGACY_PROFILE else HOST_RESERVE,
+            "builder_budget": BUILDER_MEMORY, "host_reserve": HOST_RESERVE if self.profile == HOSTED_PROFILE else None,
+            "phases": self.phases, "chains": self.chains, "cgroups": self.cgroups}))
 
     def command(self, stage: str, argv: list[str], monitored: bool = False) -> bytes:
         start = utc()
@@ -313,19 +440,13 @@ class Producer:
             try:
                 while p.poll() is None:
                     if monitored:
-                        now = resources(self.paths)
-                        if self.minimum is None:
-                            self.minimum = now.copy()
-                        else:
-                            for key, value in now.items():
-                                if value is not None:
-                                    old = self.minimum[key]
-                                    self.minimum[key] = min(old, value) if old is not None else value
-                        admit(now)
+                        self.check_resources(stage, running=True)
                     try:
                         p.wait(timeout=1)
                     except subprocess.TimeoutExpired:
                         pass
+                if monitored and p.returncode == 0:
+                    self.check_resources(stage, running=True)
             except BaseException:
                 if p.poll() is None:
                     try:
@@ -368,6 +489,7 @@ class Producer:
             self.command("builder-stop-" + str(len(self.stages)), ["docker", "stop", self.cid])
         r = self.owned_builder()
         require(not r["State"]["Running"] and r["State"]["Pid"] == 0 and not r["NetworkSettings"].get("Ports"), "BUILDER_CLOSURE_FAILED")
+        self.builder_closed = True
 
     def build(self, product: Path, tooling: Path, tooling_sha: str) -> dict:
         require(platform.system() == "Linux" and platform.machine() == "x86_64", "HOST_OS_ARCH_INVALID")
@@ -382,7 +504,7 @@ class Producer:
         require(bool(re.fullmatch(r"/[A-Za-z0-9_./-]+", docker_root)) and ".." not in docker_root.split("/"), "DOCKER_ROOT_INVALID")
         self.paths = [self.work, product, Path(docker_root)]
         self.host = {"os": "ubuntu", "version": "26.04", "arch": "amd64", "docker_root": docker_root}
-        before = resources(self.paths); self.minimum = before.copy(); admit(before)
+        before = self.check_resources("preflight")
         context = self.work / "context"; snapshot(product, context, inputs); verify_snapshot(context, inputs)
         (self.work / "buildkitd.toml").write_text("[worker.oci]\n  max-parallelism = 2\n")
         require(not self.command("builder-absence", ["docker", "ps", "-aq", "--no-trunc", "--filter", "name=^/buildx_buildkit_" + self.builder + "0$"]).strip(), "BUILDER_ALREADY_EXISTS")
@@ -390,9 +512,10 @@ class Producer:
             "--driver-opt", "image=" + BUILDKIT_IMAGE, "--driver-opt", "memory=12g", "--driver-opt", "cpu-period=100000",
             "--driver-opt", "cpu-quota=200000", "--buildkitd-config", str(self.work / "buildkitd.toml"), "--platform", "linux/amd64"])
         self.builder_created = True
-        admit(resources(self.paths))
+        self.check_resources("before-bootstrap")
         self.command("builder-bootstrap", ["docker", "buildx", "inspect", self.builder, "--bootstrap"], monitored=True)
-        self.cid = self.command("builder-id", ["docker", "inspect", "--format", "{{.Id}}", "buildx_buildkit_" + self.builder + "0"]).decode().strip()
+        cid = self.command("builder-id", ["docker", "inspect", "--format", "{{.Id}}", "buildx_buildkit_" + self.builder + "0"]).decode().strip()
+        require(self.cid is None or self.cid == cid, "BUILDER_IDENTITY_DRIFT"); self.cid = cid
         require(bool(re.fullmatch(r"[0-9a-f]{64}", self.cid)), "BUILDER_ID_INVALID")
         self.owned_builder()
         actual_caps = self.command("builder-cgroups", ["docker", "exec", self.cid, "cat", "/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/cpu.max"]).decode().splitlines()
@@ -404,26 +527,35 @@ class Producer:
             "--provenance=false", "--build-arg", "FVOCI_BUILD_SHA=" + PRODUCT_SHA, "-f", str(context / "infra/rust/Dockerfile"), "-t", tag, str(context)], monitored=True)
         verify_snapshot(context, inputs)
         require(checkout(product, PRODUCT_SHA, PRODUCT_TREE) == inputs and checkout(tooling, tooling_sha, tooling_tree) == tools, "SOURCE_AFTER_DRIFT")
+        if self.profile == HOSTED_PROFILE: self.check_resources("before-builder-stop", running=True)
         self.stop_builder()
         image_id = self.command("image-id", ["docker", "image", "inspect", "--format", "{{.Id}}", tag]).decode().strip()
         public = self.work / "public"; public.mkdir(mode=0o700)
         image = public / "shipping-image.tar"
         self.command("image-save", ["docker", "save", "--output", str(image), image_id], monitored=True)
         image.chmod(0o600)
-        outputs = inspect_saved_image(image, image_id)
+        guard = (lambda: self.check_resources("python-validation", running=True)) if self.profile == HOSTED_PROFILE else None
+        outputs = inspect_saved_image(image, image_id, guard=guard)
         with image.open("rb") as stream:
-            saved_sha, saved_bytes, _ = hash_stream(stream)
+            saved_sha, saved_bytes, _ = hash_stream(stream, guard=guard)
         receipt = {"version": 1, "scope": "PRODUCER_ONLY_NOT_RUNTIME_QUALIFIED", "product_sha": PRODUCT_SHA, "product_tree": PRODUCT_TREE,
             "tooling_sha": tooling_sha, "tooling_tree": tooling_tree, "tracked_inputs_sha256": digest(encoded(inputs)),
             "host": self.host,
-            "resource_before": before, "resource_after": resources(self.paths), "minimum_sampled_resources": self.minimum,
-            "disk_floor": DISK_FLOOR, "memory_floor": MEMORY_FLOOR,
+            "resource_before": before, "resource_after": resources(self.paths), "minimum_sampled_resources": self.minimum.copy(),
+            "disk_floor": DISK_FLOOR, "memory_floor": self.memory_floor, "resource_profile": self.profile_receipt(),
             "builder": {"id": self.cid, "memory": BUILDER_MEMORY, "cpu_quota": 200000, "cpu_period": 100000, "cgroups": actual_caps,
                 "image": BUILDKIT_IMAGE, "stopped": True}, "stages": self.stages, "image": outputs,
             "saved_image": {"sha256": saved_sha, "bytes": saved_bytes}}
         for name, value in [("producer-receipt.json", receipt), ("tracked-inputs.json", inputs)]:
             (public / name).write_bytes(encoded(value)); (public / name).chmod(0o600)
-        validate_public(public, receipt, inputs)
+        validate_public(public, receipt, inputs, guard=guard)
+        if guard is not None:
+            after = self.check_resources("complete", running=True)
+            require(checkout(product, PRODUCT_SHA, PRODUCT_TREE) == inputs and checkout(tooling, tooling_sha, tooling_tree) == tools, "SOURCE_AFTER_DRIFT")
+            receipt.update(resource_after=after, minimum_sampled_resources=self.minimum.copy(), resource_profile=self.profile_receipt())
+            file = public / "producer-receipt.json"; file.write_bytes(encoded(receipt))
+            require(file.read_bytes() == encoded(receipt) and not file.is_symlink() and file.stat().st_nlink == 1 and
+                    stat.S_IMODE(file.stat().st_mode) == 0o600 and {p.name for p in public.iterdir()} == PUBLIC_FILES, "ARTIFACT_RECEIPT_INVALID")
         return receipt
 
 
@@ -434,6 +566,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tooling-sha", required=True)
     parser.add_argument("--work-dir", required=True, type=Path)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--resource-profile", choices=[LEGACY_PROFILE, HOSTED_PROFILE], default=LEGACY_PROFILE)
     args = parser.parse_args(argv)
     producer = None
     os.umask(0o077)
@@ -452,15 +585,16 @@ def main(argv: list[str] | None = None) -> int:
                 closure = "OWN_BUILDER_CLOSURE_UNVERIFIED"
         print(encoded({"result": code, "closure": closure,
             "host": producer.host if producer else None,
-            "disk_floor": DISK_FLOOR, "memory_floor": MEMORY_FLOOR,
-            "minimum_sampled_resources": producer.minimum if producer else None}).decode().strip(), file=sys.stderr)
+            "disk_floor": DISK_FLOOR, "memory_floor": producer.memory_floor if producer else MEMORY_FLOOR,
+            "minimum_sampled_resources": producer.minimum if producer else None,
+            "resource_profile": producer.profile_receipt() if producer else {"name": args.resource_profile}}).decode().strip(), file=sys.stderr)
         return 1
     try:
         require(bool(re.fullmatch(r"[0-9]+-[0-9]+", args.run_id)) and bool(SHA.fullmatch(args.tooling_sha)), "ARGUMENT_INVALID")
         roots = [p.resolve() for p in [args.product_root, args.tooling_root, args.work_dir]]
         require(all(a != b and a not in b.parents and b not in a.parents for i, a in enumerate(roots) for b in roots[i+1:]), "ROOTS_NOT_ISOLATED")
         args.work_dir.mkdir(mode=0o700)
-        producer = Producer(args.work_dir, "fvoci-shipping-" + args.run_id)
+        producer = Producer(args.work_dir, "fvoci-shipping-" + args.run_id, args.resource_profile)
         producer.build(args.product_root, args.tooling_root, args.tooling_sha)
         print("PRODUCER_ONLY_PASS_NOT_RUNTIME_QUALIFIED")
         return 0

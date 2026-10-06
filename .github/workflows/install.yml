@@ -183,6 +183,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -B tooling/scripts/selected-backend-ci/shipping-image-producer.py \
+            --resource-profile hosted-exclusive-12g-plus-2g-experimental \
             --product-root "$GITHUB_WORKSPACE/product" \
             --tooling-root "$GITHUB_WORKSPACE/tooling" --tooling-sha "$TOOLING_SHA" \
             --work-dir "$RUNNER_TEMP/shipping-producer" \
