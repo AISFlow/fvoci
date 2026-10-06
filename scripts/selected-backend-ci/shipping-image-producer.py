@@ -8,12 +8,14 @@ image and closed receipts are a producer handback, not runtime qualification.
 from __future__ import annotations
 
 import argparse
+import errno
 import gzip
 import hashlib
 import json
 import os
 import platform
 import re
+import select
 import shutil
 import signal
 import stat
@@ -23,6 +25,7 @@ import sys
 import tarfile
 import time
 from datetime import datetime, timezone
+from contextlib import ExitStack
 from pathlib import Path, PurePosixPath
 
 PRODUCT_SHA = "551583237a4cc31828d69fb1d3160c2e0f9179d6"
@@ -162,42 +165,188 @@ def admit(measured: dict, profile: str = LEGACY_PROFILE, *, running: bool = Fals
     require(measured["free_bytes"] >= DISK_FLOOR and measured["effective_mem_available"] >= floor, "RESOURCE_NOTADMITTED")
 
 
-def cgroup_chain(pid: str = "self", root: Path = Path("/sys/fs/cgroup"), proc: Path = Path("/proc"), *, relative: str | None = None) -> list[dict]:
-    """Host-view v2 chain; refuse hidden ancestors or incomplete counters."""
+def cgroup_open_directory(stack: ExitStack, path, *, parent: int | None = None) -> int:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+    stack.callback(os.close, fd)
+    return fd
+
+
+def cgroup_open_absolute(stack: ExitStack, path: Path) -> int:
+    require(path.is_absolute() and ".." not in path.parts, "CGROUP_PATH_INVALID")
+    fd = cgroup_open_directory(stack, "/")
+    for part in path.parts[1:]:
+        fd = cgroup_open_directory(stack, part, parent=fd)
+    return fd
+
+
+def cgroup_text(fd: int, name: str) -> str:
+    """Bounded, non-symlink lookup relative to a held kernel directory."""
+    child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
     try:
-        mounts = [line.split(" - ", 1) for line in (proc / "self/mountinfo").read_text().splitlines()]
-        mounts = [left.split() for left, right in mounts if right.split()[0] == "cgroup2"]
-        require(len(mounts) == 1 and mounts[0][3:5] == ["/", str(root)] and
-                os.readlink(proc / "self/ns/cgroup") == os.readlink(proc / "1/ns/cgroup"), "CGROUP_ANCESTORS_HIDDEN")
-        require({"cpu", "memory"} <= set((root / "cgroup.controllers").read_text().split()) and
-                not (root / "memory.max").exists(), "CGROUP_HOST_ROOT_INVALID")
-        if relative is None:
-            lines = (proc / pid / "cgroup").read_text().splitlines()
-            require(len(lines) == 1 and lines[0].startswith("0::/"), "CGROUP_METADATA_UNKNOWN")
-            relative = lines[0][4:]
-        require(not relative or safe_path(relative), "CGROUP_PATH_INVALID")
-        rows = []
-        for index in range(1, len(PurePosixPath(relative).parts) + 1):
-            name = "/".join(PurePosixPath(relative).parts[:index]); path = root / name
-            require(path.resolve() == path and path.is_dir(), "CGROUP_PATH_INVALID")
-            maximum = (path / "memory.max").read_text().strip()
-            maximum = None if maximum == "max" else int(maximum)
-            current = int((path / "memory.current").read_text().strip())
-            peak = int((path / "memory.peak").read_text().strip())
-            pairs = [line.split() for line in (path / "memory.events").read_text().splitlines()]
-            require(all(len(p) == 2 for p in pairs) and len({p[0] for p in pairs}) == len(pairs), "CGROUP_METADATA_UNKNOWN")
-            events = {k: int(v) for k, v in pairs}
-            require({"oom", "oom_kill", "oom_group_kill"} <= set(events) and all(v >= 0 for v in events.values()) and
-                    current >= 0 and peak >= current and (maximum is None or maximum > 0), "CGROUP_METADATA_UNKNOWN")
-            cpu = (path / "cpu.max").read_text().split()
-            require(len(cpu) == 2 and (cpu[0] == "max" or int(cpu[0]) > 0) and int(cpu[1]) > 0, "CGROUP_METADATA_UNKNOWN")
-            s = path.stat()
-            container = re.fullmatch(r"(?:docker-)?([0-9a-f]{64})(?:\.scope)?", path.name)
-            rows.append({"path": name, "identity": digest(encoded([name, s.st_dev, s.st_ino])), "memory_max": maximum,
-                         "current": current, "peak": peak, "events": events, "cpu_max": cpu,
-                         "container_id": container[1] if container else None})
-        return rows
-    except (OSError, ValueError, IndexError) as e:
+        info = os.fstat(child)
+        require(stat.S_ISREG(info.st_mode) and info.st_dev == os.fstat(fd).st_dev, "CGROUP_PATH_INVALID")
+        data = bytearray()
+        while part := os.read(child, min(4096, 65537 - len(data))):
+            data.extend(part)
+            require(len(data) <= 65536, "CGROUP_METADATA_UNKNOWN")
+        return data.decode("utf-8")
+    finally:
+        os.close(child)
+
+
+def cgroup_filesystem(fd: int, expected: bytes) -> str:
+    """Fixed maintained stat primitive; no shell, privilege or ABI structure."""
+    tool = Path("/usr/bin/stat")
+    for parent in tool.parents:
+        info = parent.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022, "CGROUP_METADATA_UNKNOWN")
+    before = tool.lstat()
+    require(stat.S_ISREG(before.st_mode) and before.st_uid == 0 and not before.st_mode & 0o022 and 0 < before.st_size <= 1024**2,
+            "CGROUP_METADATA_UNKNOWN")
+    tool_hash = digest(tool.read_bytes())
+    child = subprocess.Popen([str(tool), "--file-system", "--format=%t", "--", f"/proc/self/fd/{fd}"],
+        pass_fds=(fd,), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"})
+    try:
+        deadline = time.monotonic() + 5; output = bytearray()
+        while True:
+            remaining = deadline - time.monotonic()
+            require(remaining > 0 and bool(select.select([child.stdout], [], [], remaining)[0]), "CGROUP_METADATA_UNKNOWN")
+            part = os.read(child.stdout.fileno(), 33 - len(output))
+            if not part: break
+            output.extend(part)
+            require(len(output) <= 32, "CGROUP_METADATA_UNKNOWN")
+        child.wait(timeout=max(0.001, deadline - time.monotonic()))
+        require(child.returncode == 0 and bytes(output) == expected + b"\n", "CGROUP_HOST_ROOT_INVALID")
+        after = tool.lstat()
+        require((before.st_dev, before.st_ino, before.st_mode, before.st_uid) ==
+                (after.st_dev, after.st_ino, after.st_mode, after.st_uid) and digest(tool.read_bytes()) == tool_hash,
+                "CGROUP_METADATA_UNKNOWN")
+        return tool_hash
+    finally:
+        if child.poll() is None: child.kill()
+        child.wait(timeout=5)
+        child.stdout.close()
+
+
+def cgroup_mounts(text: str, root: Path, proc: Path, pid: str) -> list:
+    """Only mountinfo's fixed kernel fields/escapes; refuse ambiguous masks."""
+    rows = []; ids = set()
+    escapes = {"040": " ", "011": "\t", "012": "\n", "134": "\\"}
+    for line in text.splitlines():
+        left, separator, right = line.partition(" - "); fields = left.split(); tail = right.split()
+        require(separator and len(fields) >= 6 and len(tail) == 3 and fields[0].isdigit() and fields[1].isdigit() and
+                bool(re.fullmatch(r"[0-9]+:[0-9]+", fields[2])) and fields[0] not in ids, "CGROUP_METADATA_UNKNOWN")
+        ids.add(fields[0])
+        decoded = []
+        for value in fields[3:5]:
+            require(not re.search(r"\\(?!040|011|012|134)", value), "CGROUP_METADATA_UNKNOWN")
+            decoded.append(re.sub(r"\\(040|011|012|134)", lambda m: escapes[m[1]], value))
+        rows.append([fields[0], fields[1], fields[2], *decoded, tail[0]])
+    mounts = [r for r in rows if r[4] == str(root)]
+    procs = [r for r in rows if r[4] == str(proc)]
+    require(len(mounts) == len(procs) == 1 and mounts[0][3] == procs[0][3] == "/" and
+            mounts[0][5] == "cgroup2" and procs[0][5] == "proc", "CGROUP_ANCESTORS_HIDDEN")
+    targets = [proc / str(os.getpid()), proc / pid, proc / "self"]
+    for row in rows:
+        point = Path(row[4])
+        require(point.is_absolute(), "CGROUP_METADATA_UNKNOWN")
+        require(not (point != root and root in point.parents), "CGROUP_ANCESTORS_HIDDEN")
+        require(not any(point == p or p in point.parents or (point != proc and proc in point.parents and point in p.parents)
+                        for p in targets), "CGROUP_ANCESTORS_HIDDEN")
+    return rows
+
+
+def cgroup_pid(stack: ExitStack, proc_fd: int, pid: str) -> tuple[int, int, str]:
+    fd = cgroup_open_directory(stack, pid, parent=proc_fd)
+    raw = cgroup_text(fd, "stat"); first, separator, rest = raw.rpartition(") "); fields = rest.split()
+    require(separator and first.split(" (", 1)[0] == pid and len(fields) >= 20 and fields[0] not in {"Z", "X", "x"},
+            "CGROUP_METADATA_UNKNOWN")
+    tick = int(fields[19]); require(tick > 0, "CGROUP_METADATA_UNKNOWN")
+    lines = cgroup_text(fd, "cgroup").splitlines()
+    require(len(lines) == 1 and lines[0].startswith("0::/"), "CGROUP_METADATA_UNKNOWN")
+    relative = lines[0][4:]
+    require((not relative or safe_path(relative)) and not relative.endswith(" (deleted)"), "CGROUP_PATH_INVALID")
+    return fd, tick, relative
+
+
+def cgroup_chain(pid: str = "self", root: Path = Path("/sys/fs/cgroup"), proc: Path = Path("/proc"), *,
+                 relative: str | None = None, proof: dict | None = None) -> list[dict]:
+    """Authenticate global root and live direct membership on every sample."""
+    try:
+        pid = str(os.getpid()) if pid == "self" else pid
+        require(bool(re.fullmatch(r"[1-9][0-9]*", pid)), "CGROUP_METADATA_UNKNOWN")
+        with ExitStack() as stack:
+            root_fd = cgroup_open_absolute(stack, root); proc_fd = cgroup_open_absolute(stack, proc)
+            root_tool = cgroup_filesystem(root_fd, b"63677270"); proc_tool = cgroup_filesystem(proc_fd, b"9fa0")
+            self_fd = cgroup_open_directory(stack, str(os.getpid()), parent=proc_fd)
+            mounts = cgroup_mounts(cgroup_text(self_fd, "mountinfo"), root, proc, pid)
+            for path, fd in [(root, root_fd), (proc, proc_fd)]:
+                record = next(r for r in mounts if r[4] == str(path)); major, minor = map(int, record[2].split(":"))
+                require(os.fstat(fd).st_dev == os.makedev(major, minor), "CGROUP_HOST_ROOT_INVALID")
+            for marker in ["cgroup.type", "memory.max"]:
+                try:
+                    cgroup_text(root_fd, marker)
+                except OSError as e:
+                    if e.errno != errno.ENOENT: raise
+                else: raise Refusal("CGROUP_HOST_ROOT_INVALID")
+            require({"cpu", "memory"} <= set(cgroup_text(root_fd, "cgroup.controllers").split()), "CGROUP_HOST_ROOT_INVALID")
+            identity = lambda fd: (os.fstat(fd).st_dev, os.fstat(fd).st_ino)
+            root_identity = digest(encoded([identity(root_fd), identity(proc_fd), mounts, root_tool, proc_tool]))
+            require(proof is None or not proof or proof.get("root") == root_identity, "CGROUP_METADATA_UNKNOWN")
+            if relative is None:
+                pid_fd, tick, relative = cgroup_pid(stack, proc_fd, pid)
+                live_identity = [pid, tick, relative]
+                require(proof is None or "pid" not in proof or proof["pid"] == live_identity, "CGROUP_METADATA_UNKNOWN")
+            else:
+                require(proof is not None and proof.get("root") == root_identity, "CGROUP_METADATA_UNKNOWN")
+                live_identity = None
+            require(not relative or safe_path(relative), "CGROUP_PATH_INVALID")
+            rows = []; directories = [("", root_fd)]; fd = root_fd
+            for index, part in enumerate(PurePosixPath(relative).parts):
+                fd = cgroup_open_directory(stack, part, parent=fd)
+                name = "/".join(PurePosixPath(relative).parts[:index+1])
+                require(cgroup_text(fd, "cgroup.type").strip() == "domain", "CGROUP_METADATA_UNKNOWN")
+                directories.append((name, fd))
+            def membership():
+                values = cgroup_text(directories[-1][1], "cgroup.procs").splitlines()
+                require(all(re.fullmatch(r"[1-9][0-9]*", value) for value in values) and pid in values,
+                        "CGROUP_METADATA_UNKNOWN")
+            if live_identity is not None: membership()
+            for name, fd in directories[1:]:
+                maximum = cgroup_text(fd, "memory.max").strip()
+                maximum = None if maximum == "max" else int(maximum)
+                current = int(cgroup_text(fd, "memory.current").strip())
+                peak = int(cgroup_text(fd, "memory.peak").strip())
+                pairs = [line.split() for line in cgroup_text(fd, "memory.events").splitlines()]
+                require(all(len(p) == 2 for p in pairs) and len({p[0] for p in pairs}) == len(pairs), "CGROUP_METADATA_UNKNOWN")
+                events = {k: int(v) for k, v in pairs}
+                require({"oom", "oom_kill", "oom_group_kill"} <= set(events) and all(v >= 0 for v in events.values()) and
+                        current >= 0 and peak >= current and (maximum is None or maximum > 0), "CGROUP_METADATA_UNKNOWN")
+                cpu = cgroup_text(fd, "cpu.max").split()
+                require(len(cpu) == 2 and (cpu[0] == "max" or int(cpu[0]) > 0) and int(cpu[1]) > 0, "CGROUP_METADATA_UNKNOWN")
+                s = os.fstat(fd)
+                container = re.fullmatch(r"(?:docker-)?([0-9a-f]{64})(?:\.scope)?", PurePosixPath(name).name)
+                rows.append({"path": name, "identity": digest(encoded([name, s.st_dev, s.st_ino])), "memory_max": maximum,
+                             "current": current, "peak": peak, "events": events, "cpu_max": cpu,
+                             "container_id": container[1] if container else None})
+            if live_identity is not None:
+                after_fd, after_tick, after_relative = cgroup_pid(stack, proc_fd, pid)
+                require(identity(after_fd) == identity(pid_fd) and [pid, after_tick, after_relative] == live_identity,
+                        "CGROUP_METADATA_UNKNOWN")
+                membership()
+            require(cgroup_mounts(cgroup_text(self_fd, "mountinfo"), root, proc, pid) == mounts, "CGROUP_METADATA_UNKNOWN")
+            reopened = cgroup_open_absolute(stack, root)
+            require(identity(reopened) == identity(root_fd) and
+                    identity(cgroup_open_absolute(stack, proc)) == identity(proc_fd), "CGROUP_METADATA_UNKNOWN")
+            for part, (_, original) in zip(PurePosixPath(relative).parts, directories[1:]):
+                reopened = cgroup_open_directory(stack, part, parent=reopened)
+                require(identity(reopened) == identity(original), "CGROUP_METADATA_UNKNOWN")
+            if proof is not None:
+                proof["root"] = root_identity
+                if live_identity is not None: proof["pid"] = live_identity
+            return rows
+    except (OSError, ValueError, IndexError, subprocess.TimeoutExpired) as e:
         raise Refusal("CGROUP_METADATA_UNKNOWN") from e
 
 
@@ -361,12 +510,13 @@ class Producer:
         self.builder_created = False; self.minimum = None; self.host = None
         self.builder_closing = False; self.builder_parent = None; self.builder_terminal = None
         self.profile = profile; self.builder_closed = False; self.cgroups = {}; self.chains = {}; self.phases = {}
+        self.cgroup_proofs = {}
         self.memory_floor = MEMORY_FLOOR if profile == LEGACY_PROFILE else BUILDER_MEMORY + HOST_RESERVE
 
     def check_resources(self, stage: str, *, running: bool = False) -> dict:
         measured = resources(self.paths)
         if self.profile == HOSTED_PROFILE:
-            chains = {"launcher": cgroup_chain()}
+            chains = {"launcher": cgroup_chain(proof=self.cgroup_proofs.setdefault("launcher", {}))}
             live = None
             if self.builder_created and not self.builder_closed:
                 if self.cid is None:
@@ -381,7 +531,15 @@ class Producer:
                     require(not live["State"].get("OOMKilled"), "BUILDER_OOM")
                     if live["State"]["Running"]:
                         require(type(live["State"]["Pid"]) is int and live["State"]["Pid"] > 0, "BUILDER_PID_INVALID")
-                        chains["builder"] = cgroup_chain(str(live["State"]["Pid"]))
+                        chains["builder"] = cgroup_chain(str(live["State"]["Pid"]), proof=self.cgroup_proofs.setdefault("builder", {}))
+                        require(self.cgroup_proofs["builder"].get("root") == self.cgroup_proofs["launcher"].get("root"),
+                                "CGROUP_IDENTITY_DRIFT")
+                        after = self.owned_builder()
+                        require(type(after["State"].get("OOMKilled")) is bool and type(after["State"].get("Pid")) is int,
+                                "BUILDER_METADATA_UNKNOWN")
+                        require(not after["State"].get("OOMKilled"), "BUILDER_OOM")
+                        require(after["State"].get("Running") is True and after["State"].get("Pid") == live["State"]["Pid"],
+                                "BUILDER_IDENTITY_DRIFT")
                         require(bool(chains["builder"]), "BUILDER_CGROUPS_INVALID")
                         leaf = chains["builder"][-1]
                         require(leaf["container_id"] == self.cid and leaf["memory_max"] == BUILDER_MEMORY and leaf["cpu_max"] == ["200000", "100000"] and
@@ -393,7 +551,10 @@ class Producer:
                         if self.builder_closing and self.builder_parent is not None:
                             # PID0 cannot supply final leaf counters. Re-read the
                             # recorded parent chain; never substitute stale usage.
-                            chains["builder-ancestors"] = cgroup_chain(relative=self.builder_parent)
+                            chains["builder-ancestors"] = cgroup_chain(relative=self.builder_parent,
+                                proof=self.cgroup_proofs.setdefault("builder", {}))
+                            require(self.cgroup_proofs["builder"].get("root") == self.cgroup_proofs["launcher"].get("root"),
+                                    "CGROUP_IDENTITY_DRIFT")
                             require([r["identity"] for r in chains["builder-ancestors"]] == self.chains["builder"][:-1],
                                     "CGROUP_IDENTITY_DRIFT")
                 require(self.builder_closing or stage in {"before-bootstrap", "builder-bootstrap"} or "builder" in chains,

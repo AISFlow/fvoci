@@ -426,16 +426,26 @@ class HostedExperimentalResourceControls(unittest.TestCase):
 
     def make_chain(self):
         proc = self.root / "proc"; mount = self.root / "cg"
-        (proc / "self/ns").mkdir(parents=True); (proc / "1/ns").mkdir(parents=True)
+        number = str(P.os.getpid()); (proc / number / "ns").mkdir(parents=True)
+        (proc / "self").symlink_to(number); (proc / "1/ns").mkdir(parents=True)
         for pid in ["self", "1"]: (proc / pid / "ns/cgroup").symlink_to("cgroup:[1]")
-        (proc / "self/mountinfo").write_text(f"1 0 0:1 / {mount} rw - cgroup2 cgroup rw\n")
-        (proc / "self/cgroup").write_text("0::/parent/child\n")
         (mount / "parent/child").mkdir(parents=True)
+        dev = mount.stat().st_dev; device = f"{P.os.major(dev)}:{P.os.minor(dev)}"
+        (proc / "self/mountinfo").write_text(f"1 0 {device} / {mount} rw - cgroup2 cgroup rw\n2 0 {device} / {proc} rw - proc proc rw\n")
+        (proc / "self/stat").write_text(number + " (fixture ) comm) S " + "0 "*18 + "100 0\n")
+        (proc / "self/cgroup").write_text("0::/parent/child\n")
         (mount / "cgroup.controllers").write_text("cpu memory io\n")
+        (mount / "cgroup.procs").write_text(number + "\n")
         for path in [mount / "parent", mount / "parent/child"]:
-            for name, value in {"memory.max": "max", "memory.current": "100", "memory.peak": "200",
+            for name, value in {"cgroup.type": "domain", "cgroup.procs": number + "\n" + number + "\n",
+                                "memory.max": "max", "memory.current": "100", "memory.peak": "200",
                                 "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n",
                                 "cpu.max": "max 100000"}.items(): (path / name).write_text(value)
+        # Synthetic filesystem seam only: no installed stat or host reader runs.
+        def filesystem(fd, expected):
+            self.assertEqual(expected, b"63677270" if P.os.fstat(fd).st_ino == mount.stat().st_ino else b"9fa0")
+            return "synthetic-tool-hash"
+        mock = patch.object(P, "cgroup_filesystem", side_effect=filesystem); mock.start(); self.addCleanup(mock.stop)
         return proc, mount
 
     def test_start_running_and_disk_exact_plus_minus_one(self):
@@ -488,13 +498,15 @@ class HostedExperimentalResourceControls(unittest.TestCase):
         with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_chain(root=mount, proc=proc)
         file.write_bytes(data)
         (proc / "1/ns/cgroup").unlink(); (proc / "1/ns/cgroup").symlink_to("cgroup:[2]")
-        with self.assertRaisesRegex(P.Refusal, "CGROUP_ANCESTORS_HIDDEN"): P.cgroup_chain(root=mount, proc=proc)
+        # ROOT-approved old namespace-equality negative maps to a hidden subtree.
+        (mount / "cgroup.type").write_text("domain")
+        with self.assertRaisesRegex(P.Refusal, "CGROUP_HOST_ROOT_INVALID"): P.cgroup_chain(root=mount, proc=proc)
 
     def test_verified_builder_counters_ancestors_and_no_available_credit(self):
         self.producer.cid = self.cid; self.producer.builder_created = True
         parent = self.row("ancestor", P.MEMORY_FLOOR, P.MEMORY_FLOOR-P.HOST_RESERVE)
         leaf = self.row("builder", P.BUILDER_MEMORY, P.BUILDER_MEMORY-1)
-        def chain(pid="self"): return [self.row("launcher")] if pid == "self" else [parent, leaf]
+        def chain(pid="self", **kw): return [self.row("launcher")] if pid == "self" else [parent, leaf]
         with patch.object(P, "cgroup_chain", side_effect=chain), patch.object(self.producer, "owned_builder", return_value=self.live), \
                 patch.object(P, "resources", return_value=self.measured(P.HOST_RESERVE)):
             measured = self.producer.check_resources("shipping-build", running=True)
@@ -517,7 +529,7 @@ class HostedExperimentalResourceControls(unittest.TestCase):
             self.producer = P.Producer(self.root, "fixture", P.HOSTED_PROFILE)
             self.producer.cid = self.cid; self.producer.builder_created = True
             leaf = self.row("builder", P.BUILDER_MEMORY); change(leaf)
-            with patch.object(P, "cgroup_chain", side_effect=lambda pid="self": [] if pid == "self" else [leaf]), \
+            with patch.object(P, "cgroup_chain", side_effect=lambda pid="self", **kw: [] if pid == "self" else [leaf]), \
                     patch.object(self.producer, "owned_builder", return_value=self.live), patch.object(P, "resources", return_value=self.measured(P.MEMORY_FLOOR)):
                 with self.assertRaises(P.Refusal): self.producer.check_resources("shipping-build", running=True)
         for field, value in [("Pid", 0), ("OOMKilled", True), ("Running", False)]:
@@ -533,7 +545,7 @@ class HostedExperimentalResourceControls(unittest.TestCase):
     def test_no_builder_usage_added_to_available_memory(self):
         self.producer.cid = self.cid; self.producer.builder_created = True
         leaf = self.row("builder", P.BUILDER_MEMORY, P.BUILDER_MEMORY-1)
-        with patch.object(P, "cgroup_chain", side_effect=lambda pid="self": [] if pid == "self" else [leaf]), \
+        with patch.object(P, "cgroup_chain", side_effect=lambda pid="self", **kw: [] if pid == "self" else [leaf]), \
                 patch.object(self.producer, "owned_builder", return_value=self.live), patch.object(P, "resources", return_value=self.measured(P.HOST_RESERVE-1)):
             with self.assertRaisesRegex(P.Refusal, "RESOURCE_NOTADMITTED"): self.producer.check_resources("shipping-build", running=True)
 
@@ -565,7 +577,7 @@ class HostedExperimentalResourceControls(unittest.TestCase):
                 producer.builder_created = True; producer.cid = self.cid
                 producer.builder_closed = phase in {"image-save", "python-validation"}
                 leaf = self.row("builder", P.BUILDER_MEMORY)
-                with patch.object(P, "cgroup_chain", side_effect=lambda pid="self": [] if pid == "self" else [leaf]), \
+                with patch.object(P, "cgroup_chain", side_effect=lambda pid="self", **kw: [] if pid == "self" else [leaf]), \
                         patch.object(producer, "owned_builder", return_value=self.live), patch.object(P, "resources", return_value=self.measured(P.HOST_RESERVE-1)):
                     with self.assertRaisesRegex(P.Refusal, "RESOURCE_NOTADMITTED"): producer.check_resources(phase, running=True)
         producer = P.Producer(self.root, "fixture", P.HOSTED_PROFILE)
@@ -646,7 +658,7 @@ class HostedExperimentalResourceControls(unittest.TestCase):
                 patch.object(P, "git", return_value=b"a"*40), patch.object(P, "checkout", side_effect=lambda root, *args: inputs if root == product else {"tool": {}}), \
                 patch.object(P, "snapshot", side_effect=lambda root, context, rows: context.mkdir()), patch.object(P, "verify_snapshot"), \
                 patch.object(P, "__file__", str(tooling / "scripts/selected-backend-ci/shipping-image-producer.py")), \
-                patch.object(P, "cgroup_chain", side_effect=lambda pid="self", **kw: [] if pid == "self" or kw else [leaf]), \
+                patch.object(P, "cgroup_chain", side_effect=lambda pid="self", **kw: [] if pid == "self" or kw.get("relative") is not None else [leaf]), \
                 patch.object(P, "resources", side_effect=measured), patch.object(producer, "owned_builder", return_value=live), \
                 patch.object(producer, "command", side_effect=command):
             receipt = producer.build(product, tooling, "a"*40)
@@ -661,6 +673,197 @@ class HostedExperimentalResourceControls(unittest.TestCase):
         self.assertIn("--load", build); self.assertIn("FVOCI_BUILD_SHA=" + P.PRODUCT_SHA, build)
 
 
+class GlobalRootVisibilityControls(unittest.TestCase):
+    setUp = HostedExperimentalResourceControls.setUp
+    make_chain = HostedExperimentalResourceControls.make_chain
+    measured = HostedExperimentalResourceControls.measured
+    row = HostedExperimentalResourceControls.row
+
+    def test_genuine_root_independent_of_unavailable_or_different_init_namespace(self):
+        proc, root = self.make_chain()
+        (proc / "1/ns/cgroup").unlink(); (proc / "1/ns/cgroup").symlink_to("different:[2]")
+        with patch.object(P.os, "readlink", side_effect=AssertionError("NO_INIT_READLINK_OR_FALLBACK")):
+            proof = {}; rows = P.cgroup_chain(root=root, proc=proc, proof=proof)
+        self.assertEqual([r["path"] for r in rows], ["parent", "parent/child"])
+        self.assertEqual(proof["pid"], [str(P.os.getpid()), 100, "parent/child"])
+        self.assertEqual(len(proof["root"]), 64)
+
+    def test_present_markers_and_disabled_controller_subtrees_refused(self):
+        proc, root = self.make_chain()
+        for marker in ["cgroup.type", "memory.max"]:
+            (root / marker).write_text("domain" if marker == "cgroup.type" else "max")
+            with self.assertRaisesRegex(P.Refusal, "CGROUP_HOST_ROOT_INVALID"): P.cgroup_chain(root=root, proc=proc)
+            (root / marker).unlink()
+        (root / "cgroup.controllers").write_text("cpu")
+        with self.assertRaisesRegex(P.Refusal, "CGROUP_HOST_ROOT_INVALID"): P.cgroup_chain(root=root, proc=proc)
+
+    def test_marker_permission_and_unknown_errors_never_become_absence(self):
+        proc, root = self.make_chain(); original = P.os.open
+        for marker in ["cgroup.type", "memory.max"]:
+            for number in [13, 1, 20, 5, 116]:
+                def denied(name, *a, **kw):
+                    if name == marker and kw.get("dir_fd") is not None and P.os.fstat(kw["dir_fd"]).st_ino == root.stat().st_ino:
+                        raise OSError(number, "PRIVATE_HOST_VALUE", marker)
+                    return original(name, *a, **kw)
+                with self.subTest(marker=marker, errno=number), patch.object(P.os, "open", side_effect=denied):
+                    with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_chain(root=root, proc=proc)
+
+    def test_wrong_filesystem_and_foreign_leaf_refused_without_search(self):
+        proc, root = self.make_chain()
+        with patch.object(P, "cgroup_filesystem", side_effect=P.Refusal("CGROUP_HOST_ROOT_INVALID")):
+            with self.assertRaisesRegex(P.Refusal, "CGROUP_HOST_ROOT_INVALID"): P.cgroup_chain(root=root, proc=proc)
+        (root / "parent/child/cgroup.procs").write_text("42\n")
+        with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_chain(root=root, proc=proc)
+
+    def test_mount_masks_stack_and_malformed_records_refused(self):
+        proc, root = self.make_chain(); file = proc / "self/mountinfo"; original = file.read_text()
+        for point in [root, root / "cgroup.type", root / "parent", root / "parent/child/memory.peak", proc / str(P.os.getpid()) / "stat"]:
+            file.write_text(original + f"3 1 0:9 / {point} rw - tmpfs tmpfs rw\n")
+            with self.subTest(point=point), self.assertRaisesRegex(P.Refusal, "CGROUP_ANCESTORS_HIDDEN"):
+                P.cgroup_chain(root=root, proc=proc)
+        for extra in ["malformed\n", "3 0 invalid / /unrelated rw - tmpfs tmpfs rw\n", "3 0 0:9 / /bad\\999 rw - tmpfs tmpfs rw\n"]:
+            file.write_text(original + extra)
+            with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_chain(root=root, proc=proc)
+        file.write_text(original + "3 0 0:9 / /unrelated\\040name rw - tmpfs tmpfs rw\n")
+        self.assertEqual(len(P.cgroup_chain(root=root, proc=proc)), 2)
+
+    def test_pid_start_path_or_membership_drift_during_sample_refused(self):
+        proc, root = self.make_chain(); read = P.cgroup_text
+        for target, replacement in [(proc / "self/stat", str(P.os.getpid()) + " (fixture) S " + "0 "*18 + "101 0\n"),
+                                    (proc / "self/cgroup", "0::/parent\n"), (root / "parent/child/cgroup.procs", "42\n")]:
+            old = target.read_bytes(); changed = False
+            def changing(fd, name):
+                nonlocal changed
+                value = read(fd, name)
+                if name == "memory.current" and not changed: target.write_text(replacement); changed = True
+                return value
+            with self.subTest(target=target.name), patch.object(P, "cgroup_text", side_effect=changing):
+                with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_chain(root=root, proc=proc)
+            target.write_bytes(old)
+
+    def test_stored_pid_root_and_directory_identity_refused(self):
+        proc, root = self.make_chain(); proof = {}; P.cgroup_chain(root=root, proc=proc, proof=proof)
+        original = proof.copy()
+        for key, wrong in [("root", "foreign"), ("pid", [str(P.os.getpid()), 101, "parent/child"])]:
+            proof.update(original); proof[key] = wrong
+            with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_chain(root=root, proc=proc, proof=proof)
+        chain = P.cgroup_chain
+        def sample(pid="self", **kw): return chain(pid, root=root, proc=proc, **kw)
+        with patch.object(P, "cgroup_chain", side_effect=sample), patch.object(P, "resources", return_value=self.measured(P.MEMORY_FLOOR)):
+            self.producer.check_resources("preflight")
+            child = root / "parent/child"; child.rename(root / "parent/old-child"); child.mkdir()
+            for f in (root / "parent/old-child").iterdir(): (child / f.name).write_bytes(f.read_bytes())
+            with self.assertRaisesRegex(P.Refusal, "CGROUP_IDENTITY_DRIFT"): self.producer.check_resources("preflight")
+
+    def test_symlink_threaded_deleted_and_bounded_membership_refused(self):
+        proc, root = self.make_chain()
+        for f in [root / "parent/child/memory.peak", root / "parent/child/cgroup.type"]:
+            data = f.read_bytes(); f.unlink(); f.symlink_to(root / "parent" / f.name)
+            with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_chain(root=root, proc=proc)
+            f.unlink(); f.write_bytes(data)
+        child = root / "parent/child"; child.rename(root / "parent/held-child"); child.symlink_to(root / "parent/held-child")
+        with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_chain(root=root, proc=proc)
+        child.unlink(); (root / "parent/held-child").rename(child)
+        for value in ["threaded", "domain threaded", "domain invalid"]:
+            (child / "cgroup.type").write_text(value)
+            with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_chain(root=root, proc=proc)
+        (child / "cgroup.type").write_text("domain")
+        for value in ["0::/parent/child (deleted)\n", "0::/parent/../child\n"]:
+            (proc / "self/cgroup").write_text(value)
+            with self.assertRaisesRegex(P.Refusal, "CGROUP_PATH_INVALID"): P.cgroup_chain(root=root, proc=proc)
+        (proc / "self/cgroup").write_text("0::/parent/child\n")
+        for value in ["42", "42\n"*32769]:
+            (child / "cgroup.procs").write_text(value)
+            with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_chain(root=root, proc=proc)
+
+    def test_closing_requires_bound_root_never_reads_stopped_leaf_or_pid(self):
+        proc, root = self.make_chain(); proof = {}; before = P.cgroup_chain(root=root, proc=proc, proof=proof)
+        with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_chain(root=root, proc=proc, relative="parent")
+        (proc / "self/cgroup").unlink(); (proc / "self/stat").unlink()
+        for f in (root / "parent/child").iterdir(): f.unlink()
+        after = P.cgroup_chain(root=root, proc=proc, relative="parent", proof=proof)
+        self.assertEqual(after, before[:-1]); self.assertEqual(proof["pid"], [str(P.os.getpid()), 100, "parent/child"])
+
+    def test_builder_reinspection_pid_oom_and_root_mismatch_refuse(self):
+        for delta, code in [("pid", "BUILDER_IDENTITY_DRIFT"), ("oom", "BUILDER_OOM"), ("root", "CGROUP_IDENTITY_DRIFT")]:
+            producer = P.Producer(self.root, "fixture", P.HOSTED_PROFILE); producer.cid = self.cid; producer.builder_created = True
+            after = copy.deepcopy(self.live)
+            if delta == "pid": after["State"]["Pid"] += 1
+            if delta == "oom": after["State"]["OOMKilled"] = True
+            def sample(pid="self", *, proof):
+                proof["root"] = "launcher" if pid == "self" or delta != "root" else "foreign"
+                return [] if pid == "self" else [self.row("builder", P.BUILDER_MEMORY)]
+            with patch.object(P, "cgroup_chain", side_effect=sample), patch.object(P, "resources", return_value=self.measured(P.MEMORY_FLOOR)), \
+                    patch.object(producer, "owned_builder", side_effect=[self.live, after]):
+                with self.assertRaisesRegex(P.Refusal, code): producer.check_resources("shipping-build", running=True)
+
+    def test_fixed_stat_argv_bounded_output_wait_and_error_closure(self):
+        from types import SimpleNamespace
+        info = SimpleNamespace(st_mode=0o100755, st_uid=0, st_dev=1, st_ino=2, st_size=100)
+        def tool_stat(path): return info if path == Path("/usr/bin/stat") else SimpleNamespace(st_mode=0o40755, st_uid=0)
+        for output, status, error in [(b"63677270\n", 0, None), (b"9fa0\n", 0, "CGROUP_HOST_ROOT_INVALID"),
+                                      (b"63677270\n", 1, "CGROUP_HOST_ROOT_INVALID"), (b"x"*33, 0, "CGROUP_METADATA_UNKNOWN")]:
+            child = unittest.mock.Mock(returncode=status); child.stdout.fileno.return_value = 987
+            with patch.object(Path, "lstat", autospec=True, side_effect=tool_stat), patch.object(Path, "read_bytes", return_value=b"synthetic tool"), \
+                    patch.object(P.subprocess, "Popen", return_value=child) as spawn, patch.object(P.select, "select", return_value=([child.stdout], [], [])), \
+                    patch.object(P.os, "read", side_effect=[output, b""]):
+                if error:
+                    with self.assertRaisesRegex(P.Refusal, error): P.cgroup_filesystem(123, b"63677270")
+                else: self.assertEqual(P.cgroup_filesystem(123, b"63677270"), P.digest(b"synthetic tool"))
+            self.assertEqual(spawn.call_args.args[0], ["/usr/bin/stat", "--file-system", "--format=%t", "--", "/proc/self/fd/123"])
+            self.assertEqual(spawn.call_args.kwargs["pass_fds"], (123,)); self.assertEqual(spawn.call_args.kwargs["env"], {"LC_ALL": "C", "PATH": "/usr/bin:/bin"})
+            child.wait.assert_called(); child.stdout.close.assert_called_once()
+        child = unittest.mock.Mock(returncode=None); child.poll.return_value = None
+        with patch.object(Path, "lstat", autospec=True, side_effect=tool_stat), patch.object(Path, "read_bytes", return_value=b"synthetic tool"), \
+                patch.object(P.subprocess, "Popen", return_value=child), patch.object(P.select, "select", return_value=([], [], [])):
+            with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_filesystem(123, b"63677270")
+        child.kill.assert_called_once(); child.wait.assert_called_once_with(timeout=5); child.stdout.close.assert_called_once()
+
+    def test_mount_and_root_replacement_drift_and_all_owned_fds_closed(self):
+        proc, root = self.make_chain(); file = proc / "self/mountinfo"; original = file.read_text(); read = P.cgroup_text
+        opened = []; os_open = P.os.open; changed = False
+        def recording(*a, **kw):
+            fd = os_open(*a, **kw); opened.append(fd); return fd
+        def changing(fd, name):
+            nonlocal changed
+            value = read(fd, name)
+            if name == "memory.current" and not changed:
+                file.write_text(original + "3 0 0:9 / /unrelated rw - tmpfs tmpfs rw\n"); changed = True
+            return value
+        with patch.object(P.os, "open", side_effect=recording), patch.object(P, "cgroup_text", side_effect=changing):
+            with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_chain(root=root, proc=proc)
+        for fd in opened:
+            with self.assertRaises(OSError): P.os.fstat(fd)
+        file.write_text(original); proof = {}; P.cgroup_chain(root=root, proc=proc, proof=proof)
+        root.rename(self.root / "held-root"); root.mkdir()
+        for source in (self.root / "held-root").rglob("*"):
+            destination = root / source.relative_to(self.root / "held-root")
+            if source.is_dir(): destination.mkdir()
+            else: destination.write_bytes(source.read_bytes())
+        # Filesystem evidence remains synthetic and inode-authentication changes.
+        with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_chain(root=root, proc=proc, proof=proof)
+
+    def test_stat_untrusted_tool_or_parent_and_changed_bytes_refused(self):
+        from types import SimpleNamespace
+        base = dict(st_mode=0o100755, st_uid=0, st_dev=1, st_ino=2, st_size=100)
+        for delta in [dict(st_uid=1000), dict(st_mode=0o100777), dict(st_mode=0o120777), dict(st_size=1024**2+1)]:
+            info = SimpleNamespace(**{**base, **delta})
+            def metadata(path): return info if path == Path("/usr/bin/stat") else SimpleNamespace(st_mode=0o40755, st_uid=0)
+            with patch.object(Path, "lstat", autospec=True, side_effect=metadata), patch.object(P.subprocess, "Popen") as spawn:
+                with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_filesystem(123, b"63677270")
+            spawn.assert_not_called()
+        with patch.object(Path, "lstat", return_value=SimpleNamespace(st_mode=0o40777, st_uid=0)), patch.object(P.subprocess, "Popen") as spawn:
+            with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_filesystem(123, b"63677270")
+        spawn.assert_not_called()
+        def metadata(path): return SimpleNamespace(**base) if path == Path("/usr/bin/stat") else SimpleNamespace(st_mode=0o40755, st_uid=0)
+        child = unittest.mock.Mock(returncode=0)
+        with patch.object(Path, "lstat", autospec=True, side_effect=metadata), patch.object(Path, "read_bytes", side_effect=[b"original", b"changed"]), \
+                patch.object(P.subprocess, "Popen", return_value=child), patch.object(P.select, "select", return_value=([child.stdout], [], [])), \
+                patch.object(P.os, "read", side_effect=[b"63677270\n", b""]):
+            with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_filesystem(123, b"63677270")
+        child.wait.assert_called(); child.stdout.close.assert_called_once()
+
+
 class ClosingPhaseControls(unittest.TestCase):
     setUp = HostedExperimentalResourceControls.setUp
     row = HostedExperimentalResourceControls.row
@@ -670,7 +873,7 @@ class ClosingPhaseControls(unittest.TestCase):
         producer = self.producer; producer.builder_created = True; producer.cid = self.cid
         live = copy.deepcopy(self.live); parent = self.row("parent", P.MEMORY_FLOOR, 100)
         leaf = self.row("builder", P.BUILDER_MEMORY, 100); commands = []; stopping = False
-        def chain(pid="self", *, relative=None):
+        def chain(pid="self", *, relative=None, **kw):
             if relative is not None:
                 self.assertEqual(relative, "parent"); return [parent]
             return [] if pid == "self" else [parent, leaf]
@@ -731,20 +934,20 @@ class ClosingPhaseControls(unittest.TestCase):
     def test_recorded_parent_reread_without_leaf_pid_and_identity_refusal(self):
         proc, root = HostedExperimentalResourceControls.make_chain(self)
         with patch.object(P.os, "readlink", side_effect=lambda p: "cgroup:[1]"):
-            before = P.cgroup_chain(root=root, proc=proc)
+            proof = {}; before = P.cgroup_chain(root=root, proc=proc, proof=proof)
             (proc / "self/cgroup").unlink()
             parent = root / "parent"
             (parent / "memory.current").write_text("150")
-            after = P.cgroup_chain(root=root, proc=proc, relative="parent")
+            after = P.cgroup_chain(root=root, proc=proc, relative="parent", proof=proof)
             self.assertEqual(after[0]["identity"], before[0]["identity"])
             self.assertEqual(after[0]["current"], 150)
             self.assertEqual(after[0]["path"], "parent")
-            with self.assertRaisesRegex(P.Refusal, "CGROUP_PATH_INVALID"): P.cgroup_chain(root=root, proc=proc, relative="../parent")
+            with self.assertRaisesRegex(P.Refusal, "CGROUP_PATH_INVALID"): P.cgroup_chain(root=root, proc=proc, relative="../parent", proof=proof)
         producer = self.producer; producer.builder_created = True; producer.cid = self.cid
         producer.builder_closing = True; producer.builder_parent = "parent"; producer.chains["builder"] = ["original", "builder"]
         stopped = copy.deepcopy(self.live); stopped["State"].update(Running=False, Pid=0)
         with patch.object(producer, "owned_builder", return_value=stopped), patch.object(P, "resources", return_value=self.measured(P.HOST_RESERVE)), \
-                patch.object(P, "cgroup_chain", side_effect=lambda pid="self", **kw: [self.row("foreign")] if kw else []):
+                patch.object(P, "cgroup_chain", side_effect=lambda pid="self", **kw: [self.row("foreign")] if kw.get("relative") is not None else []):
             with self.assertRaisesRegex(P.Refusal, "CGROUP_IDENTITY_DRIFT"): producer.check_resources("builder-closing", running=True)
 
     def test_actual_stop_command_wait_and_failure_terminate_reap(self):
