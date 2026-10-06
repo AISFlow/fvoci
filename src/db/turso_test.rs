@@ -311,6 +311,9 @@ fn migration_fk_classification_never_uses_arbitrary_error_or_private_message() {
     );
 }
 
+// One canonical statement for the original consumer and allocated local control.
+const MIGRATION_UNKNOWN_TASK_FENCE_SQL: &str = "INSERT INTO task_collab_room_fences(workspace_id,task_id,owner_token,fence,expires_at) VALUES(?1,?2,?3,17,1)";
+
 async fn migration_fk_rollback(
     backend: &Backend,
     workspace: uuid::Uuid,
@@ -330,7 +333,7 @@ async fn migration_fk_rollback(
         // Use the actual immutable registry SQL; no copied DDL or fake failure.
         family.apply_migration_batch(steps[11].sql).await.map_err(|_| "DDL_FAILED")?;
         original_fk_error = family.execute(
-            "INSERT INTO task_collab_room_fences(workspace_id,task_id,owner_token,fence,expires_at) VALUES(?1,?2,?3,17,1)",
+            MIGRATION_UNKNOWN_TASK_FENCE_SQL,
             &[Cell::uuid(workspace), Cell::uuid(uuid::Uuid::now_v7()), Cell::uuid(uuid::Uuid::now_v7())],
         ).await.err();
         let error = original_fk_error.as_ref().ok_or("FK_FAILURE_MISSING")?;
@@ -2193,5 +2196,300 @@ mod reset_policy_tests {
             assert!(!request.contains("SELECT") && !request.contains("ROLLBACK"));
         }
         finish_fixture(driver, root).await;
+    }
+
+    // Diagnostic categories never participate in the original FK acceptance.
+    // Unknown numeric/code values are not reflected, nor are SDK messages.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct FkControlObservation {
+        kind: &'static str,
+        primary: &'static str,
+        extended: &'static str,
+        hrana: &'static str,
+    }
+
+    impl FkControlObservation {
+        const NOT_OBSERVED: Self = Self {
+            kind: "NOT_OBSERVED",
+            primary: "NOT_PRESENT",
+            extended: "NOT_PRESENT",
+            hrana: "NOT_PRESENT",
+        };
+    }
+
+    fn fk_control_numeric(code: i32) -> &'static str {
+        match code {
+            19 => "19",
+            787 => "787",
+            _ => "UNKNOWN",
+        }
+    }
+
+    fn fk_control_hrana(code: Option<&str>) -> &'static str {
+        match code {
+            None => "NOT_PRESENT",
+            Some("SQLITE_CONSTRAINT_FOREIGNKEY") => "SQLITE_CONSTRAINT_FOREIGNKEY",
+            Some("SQLITE_CONSTRAINT") => "SQLITE_CONSTRAINT",
+            Some("SQLITE_CONSTRAINT_CHECK") => "SQLITE_CONSTRAINT_CHECK",
+            Some("SQLITE_CONSTRAINT_DATATYPE") => "SQLITE_CONSTRAINT_DATATYPE",
+            Some("SQLITE_CONSTRAINT_UNIQUE") => "SQLITE_CONSTRAINT_UNIQUE",
+            Some("SQLITE_MISMATCH") => "SQLITE_MISMATCH",
+            Some("SQLITE_ERROR") => "SQLITE_ERROR",
+            Some(_) => "UNKNOWN",
+        }
+    }
+
+    fn fk_control_observe(error: &sqlx::Error) -> FkControlObservation {
+        let mut observation = FkControlObservation::NOT_OBSERVED;
+        let sqlx::Error::AnyDriverError(original) = error else {
+            observation.kind = "SQLX_OTHER";
+            return observation;
+        };
+        match original.downcast_ref::<libsql::Error>() {
+            None => observation.kind = "NON_LIBSQL",
+            Some(libsql::Error::SqliteFailure(code, _)) => {
+                observation.kind = "SQLITE";
+                observation.primary = fk_control_numeric(*code);
+            }
+            Some(libsql::Error::RemoteSqliteFailure(primary, extended, _)) => {
+                observation.kind = "REMOTE_SQLITE";
+                observation.primary = fk_control_numeric(*primary);
+                observation.extended = fk_control_numeric(*extended);
+            }
+            Some(error @ libsql::Error::Hrana(_)) => {
+                observation.kind = "HRANA";
+                observation.hrana = fk_control_hrana(error.hrana_error_code());
+            }
+            Some(_) => observation.kind = "LIBSQL_OTHER",
+        }
+        observation
+    }
+
+    #[test]
+    fn fk_control_observation_refuses_unknown_codes_and_private_message_decoys() {
+        assert_eq!(fk_control_numeric(19), "19");
+        assert_eq!(fk_control_numeric(787), "787");
+        for code in [i32::MIN, -1, 0, 1, 275, 788, i32::MAX] {
+            assert_eq!(fk_control_numeric(code), "UNKNOWN");
+        }
+        for code in [
+            "",
+            "SQLITE_CONSTRAINT_FOREIGNKEY private suffix",
+            "sqlite_constraint_foreignkey",
+            "private-token https://private.invalid/秘密",
+        ] {
+            assert_eq!(fk_control_hrana(Some(code)), "UNKNOWN");
+        }
+        assert_eq!(fk_control_hrana(None), "NOT_PRESENT");
+        for code in [
+            "SQLITE_CONSTRAINT_FOREIGNKEY",
+            "SQLITE_CONSTRAINT",
+            "SQLITE_CONSTRAINT_CHECK",
+            "SQLITE_CONSTRAINT_DATATYPE",
+            "SQLITE_CONSTRAINT_UNIQUE",
+            "SQLITE_MISMATCH",
+            "SQLITE_ERROR",
+        ] {
+            assert_eq!(fk_control_hrana(Some(code)), code);
+        }
+        let generic = sqlx::Error::AnyDriverError(Box::new(libsql::Error::SqliteFailure(
+            19,
+            "SQLITE_CONSTRAINT_FOREIGNKEY private-token".into(),
+        )));
+        assert_eq!(genuine_remote_fk_failure(&generic), Ok(false));
+        assert_eq!(fk_control_observe(&generic).primary, "19");
+        assert_eq!(fk_control_observe(&generic).hrana, "NOT_PRESENT");
+        for error in [
+            sqlx::Error::AnyDriverError(Box::new(libsql::Error::Hrana(Box::new(
+                std::io::Error::other("SQLITE_CONSTRAINT_FOREIGNKEY private-token"),
+            )))),
+            sqlx::Error::AnyDriverError(Box::new(libsql::Error::Hrana(Box::new(
+                libsql::Error::SqliteFailure(787, "nested private-token".into()),
+            )))),
+        ] {
+            assert_eq!(genuine_remote_fk_failure(&error), Ok(false));
+            assert_eq!(fk_control_observe(&error).kind, "HRANA");
+            assert_eq!(fk_control_observe(&error).primary, "NOT_PRESENT");
+            assert_eq!(fk_control_observe(&error).hrana, "NOT_PRESENT");
+        }
+        let arbitrary = sqlx::Error::AnyDriverError(Box::new(std::io::Error::other(
+            "SQLITE_CONSTRAINT_FOREIGNKEY private-token",
+        )));
+        assert_eq!(genuine_remote_fk_failure(&arbitrary), Ok(false));
+        assert_eq!(fk_control_observe(&arbitrary).kind, "NON_LIBSQL");
+        assert_eq!(
+            fk_control_observe(&sqlx::Error::PoolTimedOut).kind,
+            "SQLX_OTHER"
+        );
+        let remote = sqlx::Error::AnyDriverError(Box::new(libsql::Error::RemoteSqliteFailure(
+            19,
+            787,
+            "private-token".into(),
+        )));
+        assert_eq!(genuine_remote_fk_failure(&remote), Ok(true));
+        assert_eq!(
+            fk_control_observe(&remote),
+            FkControlObservation {
+                kind: "REMOTE_SQLITE",
+                primary: "19",
+                extended: "787",
+                hrana: "NOT_PRESENT",
+            }
+        );
+        let unknown = sqlx::Error::AnyDriverError(Box::new(libsql::Error::RemoteSqliteFailure(
+            i32::MAX,
+            275,
+            "SQLITE_CONSTRAINT_FOREIGNKEY private-token".into(),
+        )));
+        assert_eq!(genuine_remote_fk_failure(&unknown), Ok(false));
+        assert_eq!(fk_control_observe(&unknown).primary, "UNKNOWN");
+        assert_eq!(fk_control_observe(&unknown).extended, "UNKNOWN");
+        assert!(!format!("{:?}", fk_control_observe(&unknown)).contains("private-token"));
+    }
+
+    #[tokio::test]
+    #[ignore = "ROOT allocated pinned official sqld and explicit migration helper gates required"]
+    async fn migration_fk_rollback_real_sqld_prefix11_control() -> Result<(), &'static str> {
+        const NAME: &str =
+            "db::turso_test::reset_policy_tests::migration_fk_rollback_real_sqld_prefix11_control";
+        let args: Vec<String> = std::env::args().collect();
+        if ![NAME, "--exact", "--ignored", "--test-threads=1"]
+            .iter()
+            .all(|required| args.iter().filter(|arg| arg.as_str() == *required).count() == 1)
+        {
+            return Err("EXPLICIT_LOCAL_FK_CONTROL_SELECTION_REQUIRED");
+        }
+        for (name, expected) in [
+            ("FVOCI_TEST_TURSO_MIGRATION_SELECTED", "1"),
+            ("FVOCI_TEST_TURSO_PHASE", "migration"),
+            ("FVOCI_TEST_TURSO_DESTRUCTIVE", "true"),
+            ("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "true"),
+        ] {
+            if std::env::var(name).as_deref() != Ok(expected) {
+                return Err("EXPLICIT_LOCAL_FK_CONTROL_SELECTION_REQUIRED");
+            }
+        }
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").ok_or("PINNED_SQLD_REQUIRED")?,
+        );
+        let root = std::env::temp_dir().join(format!("fvoci-fk-control-{}", uuid::Uuid::now_v7()));
+        let driver = crate::db::libsql_finish_fixture::LibsqlFinishFixture::start(&sqld, &root)
+            .await
+            .map_err(|_| "FIXTURE_START_FAILED")?;
+        let database = match driver.database().await {
+            Ok(database) => database,
+            Err(_) => {
+                driver
+                    .finish()
+                    .await
+                    .map_err(|_| "FIXTURE_FINISH_UNCONFIRMED")?;
+                return Err("FIXTURE_DATABASE_FAILED");
+            }
+        };
+        let backend = Backend::LibsqlRemote(std::sync::Arc::new(RemoteDatabase::from_test_driver(
+            database,
+            std::num::NonZeroU32::MIN,
+        )));
+        let mut observation = FkControlObservation::NOT_OBSERVED;
+        let mut strict_fk = "NOT_OBSERVED";
+        let mut rollback = "NOT_STARTED";
+        let mut preserved = "NOT_RUN";
+        let mut healthy = "NOT_RUN";
+        let primary = async {
+            super::super::migrate::turso_test_apply_prefix(&backend, 11)
+                .await.map_err(|_| "PREFIX_APPLY_FAILED")?;
+            let workspace = uuid::Uuid::now_v7();
+            migration_populate(&backend, workspace).await?;
+            let before = migration_snapshot(&backend, 11).await?;
+            let steps = super::super::migrate::compiled_sqlite_steps();
+            if steps.len() != 12 || steps[11].version != 12 {
+                return Err("CURRENT_LINEAGE_CHANGED");
+            }
+            let mut tx = backend.begin_write().await.map_err(|_| "BEGIN_FAILED")?;
+            let mut original_fk_error = None;
+            let statement = async {
+                same_stream_readback(&mut tx).await?;
+                let family = remote_family(&mut tx)?;
+                super::super::migrate::turso_test_schema_in_writer(family, 11)
+                    .await.map_err(|_| "PREFIX_VALIDATION_FAILED")?;
+                family.apply_migration_batch(steps[11].sql).await.map_err(|_| "DDL_FAILED")?;
+                original_fk_error = family.execute(MIGRATION_UNKNOWN_TASK_FENCE_SQL, &[
+                    Cell::uuid(workspace), Cell::uuid(uuid::Uuid::now_v7()), Cell::uuid(uuid::Uuid::now_v7()),
+                ]).await.err();
+                let error = original_fk_error.as_ref().ok_or("FK_FAILURE_MISSING")?;
+                observation = fk_control_observe(error);
+                let genuine = genuine_remote_fk_failure(error)?;
+                strict_fk = if genuine { "EXPECTED" } else { "REFUSED" };
+                if !genuine { return Err("WRONG_FK_FAILURE"); }
+                Ok(())
+            }.await;
+            // Keep the exact typed statement error alive through original finish.
+            let original_rollback = tx.rollback().await;
+            drop(original_fk_error);
+            rollback = if original_rollback.is_ok() { "RETURNED_OK" } else { "UNCONFIRMED" };
+            original_rollback.map_err(|_| "ROLLBACK_UNCONFIRMED")?;
+
+            // A rejected classification remains failure even when all preservation
+            // and healthy writer controls pass. No observer follows uncertain finish.
+            let preservation = async {
+                if migration_snapshot(&backend, 11).await? != before {
+                    return Err("FK_ROLLBACK_PREFIX_CHANGED");
+                }
+                migration_preserved_data(&backend, workspace, 11, 0).await
+            }.await;
+            preserved = if preservation.is_ok() { "OK" } else { "FAILED" };
+            preservation?;
+            let mut tx = backend.begin_write().await.map_err(|_| "BEGIN_FAILED")?;
+            healthy = "FAILED";
+            let progress = async {
+                same_stream_readback(&mut tx).await?;
+                let family = remote_family(&mut tx)?;
+                super::super::migrate::turso_test_schema_in_writer(family, 11)
+                    .await.map_err(|_| "PREFIX_VALIDATION_FAILED")?;
+                if family.execute("UPDATE collab_fence_counter SET next_fence=18 WHERE id=1 AND next_fence=17", &[])
+                    .await.map_err(|_| "HEALTHY_WRITE_FAILED")? != 1 {
+                    return Err("HEALTHY_WRITE_MISMATCH");
+                }
+                let rows = family.query("SELECT next_fence FROM collab_fence_counter WHERE id=1", &[])
+                    .await.map_err(|_| "HEALTHY_READ_FAILED")?;
+                if rows.len() != 1 || rows[0].cell(0).map_err(|_| "HEALTHY_DECODE_FAILED")? != Cell::Integer(18) {
+                    return Err("HEALTHY_READ_MISMATCH");
+                }
+                Ok(())
+            }.await;
+            let finish = tx.rollback().await;
+            finish.map_err(|_| "ROLLBACK_UNCONFIRMED")?;
+            progress?;
+            migration_preserved_data(&backend, workspace, 11, 0).await?;
+            if migration_snapshot(&backend, 11).await? != before {
+                return Err("HEALTHY_ROLLBACK_PREFIX_CHANGED");
+            }
+            healthy = "OK";
+            statement
+        }.await;
+        let close = backend.close().await;
+        let leases_zero = backend
+            .connection_stats()
+            .is_ok_and(|stats| stats.size == 0);
+        let fixture = driver.finish().await;
+        let fixture_confirmed = fixture.as_ref().is_ok_and(|receipt| {
+            receipt.sqld_reaped
+                && receipt.proxy_joined
+                && receipt.upstream_closed
+                && receipt.proxy_closed
+        });
+        // Only closed categories are printed, after cleanup. Keep own fixture
+        // files for ROOT evidence; never print raw exchanges or SDK error text.
+        println!("FVOCI_LOCAL_MIGRATION_FK_CONTROL kind={} primary_code={} extended_code={} hrana_code={} strict_fk={} rollback={} preserved={} healthy={} close={} leases={} fixture={}",
+            observation.kind, observation.primary, observation.extended, observation.hrana,
+            strict_fk, rollback, preserved, healthy,
+            if close.is_ok() { "OK" } else { "UNCONFIRMED" },
+            if leases_zero { "ZERO" } else { "FAILED" },
+            if fixture_confirmed { "OK" } else { "UNCONFIRMED" });
+        primary?;
+        if close.is_err() || !leases_zero || !fixture_confirmed {
+            return Err("LOCAL_CONTROL_CLEANUP_UNCONFIRMED");
+        }
+        Ok(())
     }
 }
