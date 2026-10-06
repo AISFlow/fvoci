@@ -486,5 +486,173 @@ class MigrationDiagnosticTests(unittest.TestCase):
         self.assertNotIn("FAKE_PRIVATE_TOKEN", output.getvalue())
 
 
+class DiagnosticUnitRegistrationTests(unittest.TestCase):
+    listing = (guard.DIAGNOSTIC_UNIT_NAME + ": test\n\n1 test, 0 benchmarks\n").encode()
+    success = ("running 1 test\ntest " + guard.DIAGNOSTIC_UNIT_NAME + " ... ok\n\n"
+               "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out; finished in 0.00s\n").encode()
+
+    @contextlib.contextmanager
+    def frozen(self):
+        with tempfile.TemporaryDirectory(prefix="fvoci-diagnostic-unit-pure-") as directory:
+            root = Path(directory)
+            binary = root / "turso-connection-libtest"
+            binary.write_bytes(b"\x7fELFpure fixture, never executed")
+            native = root / "fvoci-sqlite" / "consumer-inputs.json"
+            native.parent.mkdir()
+            native.write_text("pure native-input binding, not a native producer")
+            cargo = root / "turso-compile.json"
+            cargo.write_text("pure retained compile-output binding")
+            manifest = {"sha": "a" * 40, "source_digest": "fixture",
+                        "binary_sha256": guard.file_digest(binary),
+                        "native_input_sha256": guard.file_digest(native),
+                        "cargo_output_sha256": guard.file_digest(cargo)}
+            (root / "turso-connection-build.json").write_text(json.dumps(manifest))
+            env = {"PATH": os.environ["PATH"], "RUNNER_TEMP": directory,
+                   "FVOCI_LIBSQL_URL": "FAKE_PRIVATE_TOKEN", "FVOCI_LIBSQL_AUTH_TOKEN": "FAKE_PRIVATE_TOKEN",
+                   "GITHUB_TOKEN": "FAKE_PRIVATE_TOKEN", "FVOCI_TEST_TURSO_MIGRATION_SELECTED": "1"}
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(guard, "source_digest", return_value="fixture"), mock.patch.object(guard.subprocess, "run") as run:
+                run.side_effect = [subprocess.CompletedProcess([], 0, self.listing), subprocess.CompletedProcess([], 0, self.success)]
+                yield root, manifest, run
+
+    def denied(self, code, run):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(guard.AdmissionError) as caught:
+                guard.run_diagnostic_unit("a" * 40)
+        self.assertEqual(str(caught.exception), code)
+        self.assertNotIn("FAKE_PRIVATE_TOKEN", output.getvalue())
+        self.assertNotIn("TURSO_DIAGNOSTIC_UNIT_PASS", output.getvalue())
+
+    def test_exact_current_unit_runs_without_credentials_before_secret_step(self):
+        with self.frozen() as (root, manifest, run):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                guard.run_diagnostic_unit("a" * 40)
+            self.assertEqual(output.getvalue(), "TURSO_DIAGNOSTIC_UNIT_PASS tests=1 ignored=0 consumer=NOTRUN\n")
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(run.call_args_list[0].args[0], [str(root / "turso-connection-libtest"), guard.DIAGNOSTIC_UNIT_NAME, "--list", "--exact"])
+            self.assertEqual(run.call_args_list[1].args[0], [str(root / "turso-connection-libtest"), guard.DIAGNOSTIC_UNIT_NAME, "--exact", "--test-threads=1"])
+            for call in run.call_args_list:
+                self.assertEqual(call.kwargs["env"], {"PATH": os.environ["PATH"]})
+                self.assertEqual(call.kwargs["stdout"], subprocess.PIPE)
+                self.assertEqual(call.kwargs["stderr"], subprocess.STDOUT)
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/turso-test.yml").read_text()
+        freeze = workflow.index("turso-test-guard.py --freeze")
+        unit = workflow.index("turso-test-guard.py --diagnostic-unit")
+        secret = workflow.index("      - name: Real primary selected phase")
+        self.assertLess(freeze, unit)
+        self.assertLess(unit, secret)
+        self.assertEqual(workflow.count("turso-test-guard.py --diagnostic-unit"), 1)
+        self.assertNotIn("secrets.", workflow[freeze:secret])
+
+    def test_explicit_unit_mode_routes_before_any_secret_consumer(self):
+        for event, sha, expected in (("workflow_dispatch", "a" * 40, 0),
+                                     ("push", "a" * 40, 78),
+                                     ("workflow_dispatch", "b" * 40, 78)):
+            with self.subTest(event=event, sha=sha), tempfile.TemporaryDirectory(prefix="fvoci-unit-mode-pure-") as directory:
+                event_path = Path(directory) / "event.json"
+                event_path.write_text(json.dumps({"inputs": {"phase": "connection", "destructive": "false"}}))
+                env = {"GITHUB_EVENT_PATH": str(event_path), "GITHUB_EVENT_NAME": event,
+                       "GITHUB_REPOSITORY": guard.REPOSITORY, "GITHUB_REF": guard.REVIEWED_REF,
+                       "GITHUB_SHA": sha}
+                with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(guard.sys, "argv", ["guard", "--diagnostic-unit"]), mock.patch.object(guard.subprocess, "check_output", return_value="a" * 40), mock.patch.object(guard, "run_diagnostic_unit") as unit, mock.patch.object(guard, "run_primary") as consumer, mock.patch.object(guard, "freeze_compiled_test") as freeze, mock.patch.object(guard, "environment_metadata") as metadata, contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as error:
+                    self.assertEqual(guard.main(), expected)
+                consumer.assert_not_called()
+                freeze.assert_not_called()
+                metadata.assert_not_called()
+                if expected == 0:
+                    unit.assert_called_once_with("a" * 40)
+                else:
+                    unit.assert_not_called()
+                self.assertNotIn("FAKE_PRIVATE_TOKEN", output.getvalue() + error.getvalue())
+
+    def test_no_match_duplicate_wrong_unit_benchmark_or_list_failure_refuses(self):
+        for listing, status in ((b"0 tests, 0 benchmarks\n", 0), (self.listing + self.listing, 0),
+                                (self.listing.replace(guard.DIAGNOSTIC_UNIT_NAME.encode(), guard.TEST_NAME.encode()), 0),
+                                (self.listing.replace(b": test", b": benchmark"), 0),
+                                (self.listing + b"other::test: test\n", 0), (self.listing, 1)):
+            with self.subTest(listing=listing, status=status), self.frozen() as (_, _, run):
+                run.side_effect = [subprocess.CompletedProcess([], status, listing + b"FAKE_PRIVATE_TOKEN\n")]
+                self.denied("TURSO_DIAGNOSTIC_UNIT_SELECTION_FAILED", run)
+                self.assertEqual(run.call_count, 1)
+
+    def test_wrong_source_binary_native_cargo_binding_refuses_before_run(self):
+        for changed in ("sha", "source_digest", "binary_sha256", "native_input_sha256", "cargo_output_sha256"):
+            with self.subTest(field=changed), self.frozen() as (root, manifest, run):
+                manifest[changed] = "wrong"
+                (root / "turso-connection-build.json").write_text(json.dumps(manifest))
+                self.denied("COMPILED_TEST_BINDING_FAILED", run)
+                run.assert_not_called()
+        with self.frozen() as (root, manifest, run):
+            binary = root / "turso-connection-libtest"
+            binary.write_bytes(b"not ELF")
+            manifest["binary_sha256"] = guard.file_digest(binary)
+            (root / "turso-connection-build.json").write_text(json.dumps(manifest))
+            self.denied("COMPILED_TEST_BINDING_FAILED", run)
+            run.assert_not_called()
+        with self.frozen() as (root, manifest, run):
+            binary = root / "turso-connection-libtest"
+            original = root / "fixture-original"
+            binary.rename(original)
+            binary.symlink_to(original)
+            self.denied("COMPILED_TEST_BINDING_FAILED", run)
+            run.assert_not_called()
+
+    def test_source_and_binary_changes_during_children_cannot_make_pass(self):
+        for stage in (1, 2):
+            with self.subTest(stage=stage), self.frozen() as (root, _, run):
+                def mutate(*args, **kwargs):
+                    if run.call_count == stage:
+                        (root / "turso-connection-libtest").write_bytes(b"\x7fELFchanged after start")
+                    return subprocess.CompletedProcess([], 0, self.listing if run.call_count == 1 else self.success)
+                run.side_effect = mutate
+                self.denied("COMPILED_TEST_BINDING_FAILED", run)
+                self.assertEqual(run.call_count, stage)
+        with self.frozen() as (_, _, run), mock.patch.object(guard, "source_digest", side_effect=["fixture", "changed"]):
+            self.denied("COMPILED_TEST_BINDING_FAILED", run)
+            self.assertEqual(run.call_count, 1)
+
+    def test_exact_one_real_result_and_status_required_without_raw_echo(self):
+        for output, status in (
+            (self.success, 1), (self.success.replace(b"1 passed", b"0 passed"), 0),
+            (self.success.replace(b"0 failed", b"1 failed"), 0),
+            (self.success.replace(b"0 ignored", b"1 ignored"), 0),
+            (self.success.replace(guard.DIAGNOSTIC_UNIT_NAME.encode(), guard.TEST_NAME.encode()), 0),
+            (self.success.replace(b" ... ok", b" ... ignored"), 0),
+            (self.success + self.success, 0), (b"SDK FAKE_PRIVATE_TOKEN\n", 0),
+        ):
+            with self.subTest(output=output, status=status), self.frozen() as (_, _, run):
+                run.side_effect = [subprocess.CompletedProcess([], 0, self.listing), subprocess.CompletedProcess([], status, output + b"FAKE_PRIVATE_TOKEN\n")]
+                self.denied("TURSO_DIAGNOSTIC_UNIT_FAILED", run)
+                self.assertEqual(run.call_count, 2)
+        with self.frozen() as (_, _, run):
+            run.side_effect = [subprocess.CompletedProcess([], 0, self.listing + b"FAKE_PRIVATE_TOKEN\n"), subprocess.CompletedProcess([], 0, self.success + b"FAKE_PRIVATE_TOKEN\n")]
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                guard.run_diagnostic_unit("a" * 40)
+            self.assertEqual(output.getvalue(), "TURSO_DIAGNOSTIC_UNIT_PASS tests=1 ignored=0 consumer=NOTRUN\n")
+
+
+class MigrationDiagnosticSeparatorTests(unittest.TestCase):
+    def test_only_lf_and_single_crlf_delimit_diagnostic_lines(self):
+        receipt = MigrationDiagnosticTests.failure
+        diagnostic = "FVOCI_TURSO_MIGRATION_DIAGNOSTIC primary=SCHEMA_VALIDATION_FAILED close=OK"
+        for separator in ("\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            with self.subTest(separator=hex(ord(separator))):
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    with self.assertRaises(guard.AdmissionError) as caught:
+                        guard.migration_result(subprocess.CompletedProcess([], 1, b""), receipt + diagnostic + separator + "FAKE_PRIVATE_TOKEN\n")
+                self.assertEqual(str(caught.exception), "TURSO_MIGRATION_FAILED")
+                self.assertNotIn("TURSO_MIGRATION_DIAGNOSTIC", output.getvalue())
+                self.assertNotIn("FAKE_PRIVATE_TOKEN", output.getvalue())
+        for ending in ("\n", "\r\n"):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                with self.assertRaises(guard.AdmissionError):
+                    guard.migration_result(subprocess.CompletedProcess([], 1, b""), receipt + diagnostic + ending)
+            self.assertIn("TURSO_MIGRATION_DIAGNOSTIC primary=SCHEMA_VALIDATION_FAILED close=OK\n", output.getvalue())
+        for ending in ("\r", "\r\r\n"):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                with self.assertRaises(guard.AdmissionError):
+                    guard.migration_result(subprocess.CompletedProcess([], 1, b""), receipt + diagnostic + ending)
+            self.assertNotIn("TURSO_MIGRATION_DIAGNOSTIC", output.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

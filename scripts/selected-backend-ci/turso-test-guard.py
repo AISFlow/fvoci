@@ -230,6 +230,64 @@ def freeze_compiled_test(checkout_sha):
     (root / "turso-connection-build.json").write_text(json.dumps(manifest))
 
 
+DIAGNOSTIC_UNIT_NAME = "db::turso_test::migration_diagnostics_disclose_only_known_static_failures"
+
+
+def diagnostic_unit_binding(checkout_sha):
+    # Revalidate the existing current frozen-lib receipt before/after each child.
+    root = Path(os.environ["RUNNER_TEMP"]).resolve()
+    manifest_path = root / "turso-connection-build.json"
+    manifest = json.loads(manifest_path.read_text())
+    executable = root / "turso-connection-libtest"
+    source = source_digest()
+    binary = file_digest(executable)
+    native = file_digest(root / "fvoci-sqlite" / "consumer-inputs.json")
+    cargo_output = file_digest(root / "turso-compile.json")
+    if (manifest.get("sha") != checkout_sha or manifest.get("source_digest") != source
+            or executable.is_symlink() or manifest.get("binary_sha256") != binary
+            or manifest.get("native_input_sha256") != native
+            or manifest.get("cargo_output_sha256") != cargo_output):
+        reject("COMPILED_TEST_BINDING_FAILED")
+    with executable.open("rb") as frozen:
+        if frozen.read(4) != b"\x7fELF":
+            reject("COMPILED_TEST_BINDING_FAILED")
+    return executable, (source, binary, native, cargo_output, file_digest(manifest_path))
+
+
+def run_diagnostic_unit(checkout_sha):
+    executable, binding = diagnostic_unit_binding(checkout_sha)
+    # This exact pure unit receives no DB/provider/GitHub credential or selector.
+    child_env = {key: os.environ[key] for key in ("PATH", "LD_LIBRARY_PATH", "TZ")
+                 if key in os.environ}
+    listed = subprocess.run(
+        [str(executable), DIAGNOSTIC_UNIT_NAME, "--list", "--exact"],
+        env=child_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+    )
+    listing = listed.stdout.decode("utf-8", errors="replace")
+    matches = re.findall(r"^([^\r\n]+): (test|benchmark)\r?$", listing, re.MULTILINE)
+    if listed.returncode != 0 or matches != [(DIAGNOSTIC_UNIT_NAME, "test")]:
+        reject("TURSO_DIAGNOSTIC_UNIT_SELECTION_FAILED")
+    if diagnostic_unit_binding(checkout_sha) != (executable, binding):
+        reject("COMPILED_TEST_BINDING_FAILED")
+    result = subprocess.run(
+        [str(executable), DIAGNOSTIC_UNIT_NAME, "--exact", "--test-threads=1"],
+        env=child_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+    )
+    if diagnostic_unit_binding(checkout_sha) != (executable, binding):
+        reject("COMPILED_TEST_BINDING_FAILED")
+    output = result.stdout.decode("utf-8", errors="replace")
+    cases = re.findall(r"^test (\S+) \.\.\. (ok|FAILED|ignored)\r?$", output, re.MULTILINE)
+    summaries = [line for line in output.splitlines() if line.startswith("test result:")]
+    if (result.returncode != 0 or cases != [(DIAGNOSTIC_UNIT_NAME, "ok")]
+            or len(summaries) != 1 or re.fullmatch(
+                r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out;[^\r\n]*",
+                summaries[0],
+            ) is None):
+        reject("TURSO_DIAGNOSTIC_UNIT_FAILED")
+    # Raw listing/test/panic output is discarded, even on success.
+    print("TURSO_DIAGNOSTIC_UNIT_PASS tests=1 ignored=0 consumer=NOTRUN")
+
+
 def run_connection(checkout_sha, inputs):
     if inputs.get("phase", "connection") != "connection":
         reject("WRONG_CONSUMER_PHASE")
@@ -301,7 +359,9 @@ def migration_result(result, output):
     print("TURSO_MIGRATION_RECEIPT " + " ".join(receipt[0]))
     # Inspect every occurrence, including malformed/private injected lines.
     # A diagnostic is never a success receipt and never authorizes a retry.
-    diagnostics = [line for line in output.splitlines()
+    lines = output.split("\n")
+    diagnostics = [line[:-1] if index < len(lines) - 1 and line.endswith("\r") else line
+                   for index, line in enumerate(lines)
                    if "FVOCI_TURSO_MIGRATION_DIAGNOSTIC" in line]
     if diagnostics:
         if len(diagnostics) != 1 or receipt[0][0] != "FAILED":
@@ -390,7 +450,7 @@ def run_primary(checkout_sha, inputs):
 
 def main():
     try:
-        if sys.argv[1:] not in (["--admit"], ["--freeze"], ["--consume"]):
+        if sys.argv[1:] not in (["--admit"], ["--freeze"], ["--diagnostic-unit"], ["--consume"]):
             reject("EXPLICIT_MODE_REQUIRED")
         with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as stream:
             event = json.load(stream)
@@ -427,6 +487,8 @@ def main():
         elif sys.argv[1] == "--freeze":
             freeze_compiled_test(checkout_sha)
             print("COMPILED_TEST_FROZEN_RUNTIME_NOT_RUN")
+        elif sys.argv[1] == "--diagnostic-unit":
+            run_diagnostic_unit(checkout_sha)
         else:
             if phase == "connection":
                 run_connection(checkout_sha, inputs)

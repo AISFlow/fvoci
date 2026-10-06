@@ -2192,6 +2192,49 @@ class RegistryMutationCliTest(unittest.TestCase):
                 proc, output = self._plan_against(root)
                 self._assert_no_green_outputs(proc, output, needle)
 
+    def test_turso_diagnostic_unit_registration_is_exact_and_before_secrets(self) -> None:
+        unit = ("      - name: Credential-free frozen diagnostic unit (exactly one test)\n"
+                "        run: python3 scripts/selected-backend-ci/turso-test-guard.py --diagnostic-unit\n")
+        needle = "credential-free exact frozen diagnostic unit before secret consumption"
+        cases = [
+            (unit, "", "fixed credential-free build then single consuming step"),
+            (unit, unit + unit, "fixed credential-free build then single consuming step"),
+            (unit, unit.replace("--diagnostic-unit", "--consume"), needle),
+            (unit, unit.replace("--diagnostic-unit", "--diagnostic-unit --ignored"), needle),
+            (unit, unit.replace("--diagnostic-unit", "--diagnostic-unit || true"), needle),
+            (unit, unit.replace("frozen diagnostic unit", "arbitrary unit"), needle),
+            (unit, unit.replace("        run:", "        env:\n          TOKEN: ${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}\n        run:"), needle),
+            (unit, unit.replace("        run:", "        env:\n          EXTRA: value\n        run:"), needle),
+            (unit, unit.replace("        run:", "        if: false\n        run:"), needle),
+        ]
+        for old, new, expected in cases:
+            with self.subTest(boundary=expected, mutation=new):
+                root = self._mutated_root()
+                path = root / ".github" / "workflows" / "turso-test.yml"
+                text = path.read_text(encoding="utf-8")
+                self.assertEqual(text.count(old), 1)
+                path.write_text(text.replace(old, new, 1), encoding="utf-8")
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, expected)
+        for placement in ("before_compile", "after_secret"):
+            with self.subTest(placement=placement):
+                root = self._mutated_root()
+                path = root / ".github" / "workflows" / "turso-test.yml"
+                text = path.read_text(encoding="utf-8")
+                self.assertEqual(text.count(unit), 1)
+                text = text.replace(unit, "", 1)
+                if placement == "before_compile":
+                    marker = "      - name: Credential-free current library test compilation\n"
+                    self.assertIn(marker, text)
+                    text = text.replace(marker, unit + marker, 1)
+                else:
+                    marker = "        run: python3 scripts/selected-backend-ci/turso-test-guard.py --consume\n"
+                    self.assertIn(marker, text)
+                    text = text.replace(marker, marker + unit, 1)
+                path.write_text(text, encoding="utf-8")
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, needle)
+
     def test_turso_target_initialization_moved_to_compile_rejected_before_outputs(self) -> None:
         root = self._mutated_root()
         path = root / ".github" / "workflows" / "turso-test.yml"
