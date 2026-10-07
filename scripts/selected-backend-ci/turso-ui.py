@@ -193,9 +193,28 @@ def fixture(manifest, mode, environment, input=None):
     process = _PROCESSES.spawn([manifest['binaries']['fvoci-e2e-fixture']['path'], mode], 'fixture-' + mode,
                 env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     original = None
+    failures = []
     try:
         stdout, _ = process.communicate(input=canonical(input) if input else b'', timeout=120)
         result = subprocess.CompletedProcess([], process.returncode, stdout)
+        # Observe the bounded native outcome before process finalization can
+        # fail. Missing/malformed output never supplies an invented cause.
+        require(len(result.stdout) < 64 * 1024 * 1024, 'UI_NATIVE_FIXTURE_OUTPUT_REFUSED')
+        value = json.loads(result.stdout)
+        require(isinstance(value, dict), 'UI_NATIVE_FIXTURE_OUTPUT_REFUSED')
+        if result.returncode != 0:
+            code = value.get('originalFailure', 'UI_NATIVE_FIXTURE_FAILED')
+            require(isinstance(code, str) and re.fullmatch('TURSO_UI_[A-Z_]+|UI_NATIVE_FIXTURE_FAILED', code), 'UI_NATIVE_FAILURE_CODE_REFUSED')
+            original = UiError(code)
+            try:
+                write(root() / ('fixture-failure-' + secrets.token_hex(6) + '.private.json'),
+                      {'mode': mode, 'exit': result.returncode, 'receipt': value})
+            except BaseException:
+                failures.append('UI_NATIVE_FAILURE_RECEIPT_WRITE_FAILED')
+            raise original
+        require(value['lifecycleDrain'] == 'confirmed' and value['leases'] == 0
+                and value['serverCloseReceipt'] == 'not-exposed-by-sdk', 'UI_NATIVE_DRAIN_FAILED')
+        return value
     except BaseException as error:
         original = error
         raise
@@ -203,24 +222,15 @@ def fixture(manifest, mode, environment, input=None):
         try:
             _PROCESSES.finish(process)
         except BaseException as cleanup:
-            print(json.dumps({'originalFailure': failure_code(original) if original else None,
-                              'nativeProcessClosure': failure_code(cleanup)}), file=sys.stderr)
+            failures.append(failure_code(cleanup))
+        if failures:
+            try:
+                print(json.dumps({'originalFailure': failure_code(original) if original else None,
+                                  'nativeCleanupErrors': failures}), file=sys.stderr)
+            except BaseException:
+                pass
             if original is None:
-                raise
-    # Never reflect returned SDK errors or malformed output into hosted logs.
-    require(len(result.stdout) < 64 * 1024 * 1024, 'UI_NATIVE_FIXTURE_OUTPUT_REFUSED')
-    value = json.loads(result.stdout)
-    if result.returncode != 0:
-        # The helper exposes only fixed classifications. Keep the independent
-        # original/rollback/commit/drain outcomes without publishing SDK text.
-        code = value.get('originalFailure', 'UI_NATIVE_FIXTURE_FAILED')
-        require(re.fullmatch('TURSO_UI_[A-Z_]+|UI_NATIVE_FIXTURE_FAILED', code), 'UI_NATIVE_FAILURE_CODE_REFUSED')
-        write(root() / ('fixture-failure-' + secrets.token_hex(6) + '.private.json'),
-              {'mode': mode, 'exit': result.returncode, 'receipt': value})
-        raise UiError(code)
-    require(value['lifecycleDrain'] == 'confirmed' and value['leases'] == 0
-            and value['serverCloseReceipt'] == 'not-exposed-by-sdk', 'UI_NATIVE_DRAIN_FAILED')
-    return value
+                raise UiError('UI_PROCESS_CLOSURE_FAILED')
 
 
 AUDITED_COUNTERS = {'event_sequence', 'collab_fence_counter', 'maintenance_job_claims'}
@@ -677,6 +687,7 @@ class UiProcesses:
     def __exit__(self, kind, original, trace):
         global _PROCESSES
         failures = []
+        closed = False
         try:
             for allocation in self.allocations:
                 if not allocation['closed']:
@@ -684,15 +695,10 @@ class UiProcesses:
                         self.finish(allocation['process'], True)
                     except BaseException:
                         failures.append('UI_PROCESS_FINAL_CLOSURE_FAILED')
-            closed = self.closure()
             try:
-                write(root() / ('process-closure-' + secrets.token_hex(6) + '.private.json'), {
-                    'confirmed': closed, 'normalClosure': closed and not any(a['forced'] for a in self.allocations),
-                    'errors': self.errors + failures,
-                    'allocations': [{k: v for k, v in a.items() if k not in ('process', 'key')} for a in self.allocations],
-                    'identities': [{'identity': e['identity'], 'allocation': e['allocation'], 'reaped': e['reaped']} for e in self.entries.values()]})
+                closed = self.closure()
             except BaseException:
-                failures.append('UI_PROCESS_RECEIPT_WRITE_FAILED')
+                failures.append('UI_PROCESS_FINAL_OBSERVATION_FAILED')
             if closed:
                 try:
                     self.prctl(36, self.prior.value)
@@ -702,10 +708,19 @@ class UiProcesses:
                 except BaseException:
                     failures.append('UI_SUBREAPER_RESTORE_FAILED')
         finally:
-            self.halt.set()
-            self.thread.join(timeout=1)
-            if self.thread.is_alive():
-                failures.append('UI_PROCESS_OBSERVER_NOT_STOPPED')
+            try:
+                self.halt.set()
+            except BaseException:
+                failures.append('UI_PROCESS_OBSERVER_STOP_FAILED')
+            try:
+                self.thread.join(timeout=1)
+            except BaseException:
+                failures.append('UI_PROCESS_OBSERVER_JOIN_FAILED')
+            try:
+                if self.thread.is_alive():
+                    failures.append('UI_PROCESS_OBSERVER_NOT_STOPPED')
+            except BaseException:
+                failures.append('UI_PROCESS_OBSERVER_STATE_FAILED')
             for entry in self.entries.values():
                 if entry['pidfd'] is not None:
                     try:
@@ -713,9 +728,20 @@ class UiProcesses:
                     except BaseException:
                         failures.append('UI_PIDFD_CLOSE_FAILED')
             _PROCESSES = None
+        try:
+            write(root() / ('process-closure-' + secrets.token_hex(6) + '.private.json'), {
+                'confirmed': closed, 'normalClosure': closed and not any(a['forced'] for a in self.allocations),
+                'errors': self.errors + failures,
+                'allocations': [{k: v for k, v in a.items() if k not in ('process', 'key')} for a in self.allocations],
+                'identities': [{'identity': e['identity'], 'allocation': e['allocation'], 'reaped': e['reaped']} for e in self.entries.values()]})
+        except BaseException:
+            failures.append('UI_PROCESS_RECEIPT_WRITE_FAILED')
         if failures:
-            print(json.dumps({'originalFailure': failure_code(original) if original else None,
-                              'processCleanupErrors': failures}), file=sys.stderr)
+            try:
+                print(json.dumps({'originalFailure': failure_code(original) if original else None,
+                                  'processCleanupErrors': failures}), file=sys.stderr)
+            except BaseException:
+                pass
         if original is None:
             require(closed and not failures, 'UI_PROCESS_CLOSURE_FAILED')
 

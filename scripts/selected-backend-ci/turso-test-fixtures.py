@@ -1640,6 +1640,80 @@ class UiAdapterTests(unittest.TestCase):
         self.assertIn('UI_PROCESS_RECEIPT_WRITE_FAILED', diagnostics.getvalue())
         self.assertNotIn('PRIVATE_FAKE', diagnostics.getvalue())
 
+    def test_native_nonzero_precedes_finish_and_packet_write_failures(self):
+        import types
+        packet = {'originalFailure': 'TURSO_UI_ACTOR_FAILED',
+            'nativeOutcome': {'operation': 'failed', 'rollback': 'unknown', 'commit': 'not-attempted'},
+            'lifecycleDrain': 'unconfirmed', 'leases': 1}
+        for fault in ('none', 'finish', 'write', 'both', 'malformed', 'invalid-code'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                payload = dict(packet, originalFailure='PRIVATE_SDK_DETAIL') if fault == 'invalid-code' else packet
+                process = types.SimpleNamespace(returncode=7,
+                    communicate=lambda **kw: (b'not-json' if fault == 'malformed' else json.dumps(payload).encode(), b'PRIVATE_STDERR'))
+                scope = types.SimpleNamespace(spawn=mock.Mock(return_value=process), finish=mock.Mock())
+                if fault in ('finish', 'both'):
+                    scope.finish.side_effect = self.ui.UiError('UI_PROCESS_CLOSURE_FAILED')
+                original_write = self.ui.write
+                def write(path, value):
+                    if fault in ('write', 'both'): raise OSError('PRIVATE_WRITE_DETAIL')
+                    original_write(path, value)
+                with mock.patch.object(self.ui, '_PROCESSES', scope), mock.patch.object(self.ui, 'clean_env', return_value={}), mock.patch.object(self.ui, 'root', return_value=Path(directory)), mock.patch.object(self.ui, 'write', side_effect=write), contextlib.redirect_stderr(io.StringIO()) as diagnostics:
+                    try:
+                        self.ui.fixture({'binaries': {'fvoci-e2e-fixture': {'path': '/never/executed'}}}, 'owner', {})
+                    except BaseException as error:
+                        actual = self.ui.failure_code(error)
+                    else:
+                        self.fail('nonzero native helper was accepted')
+                self.assertEqual(actual, 'UI_CONSUMER_FAILED' if fault == 'malformed' else 'UI_NATIVE_FAILURE_CODE_REFUSED' if fault == 'invalid-code' else 'TURSO_UI_ACTOR_FAILED')
+                scope.finish.assert_called_once_with(process)
+                receipts = list(Path(directory).glob('fixture-failure-*.private.json'))
+                self.assertEqual(len(receipts), 1 if fault in ('none', 'finish') else 0)
+                if receipts:
+                    self.assertEqual(json.loads(receipts[0].read_text())['receipt'], packet)
+                if fault in ('finish', 'write', 'both'):
+                    diagnostic = json.loads(diagnostics.getvalue())
+                    self.assertEqual(diagnostic['originalFailure'], 'TURSO_UI_ACTOR_FAILED')
+                    self.assertEqual('UI_NATIVE_FAILURE_RECEIPT_WRITE_FAILED' in diagnostic['nativeCleanupErrors'], fault in ('write', 'both'))
+                for private in ('PRIVATE_STDERR', 'PRIVATE_WRITE_DETAIL', 'PRIVATE_SDK_DETAIL'):
+                    self.assertNotIn(private, diagnostics.getvalue())
+
+    def test_final_scope_observation_and_cleanup_faults_keep_original_and_unknown_closure(self):
+        import threading
+        import types
+        for fault in ('snapshot', 'stop', 'join', 'state', 'descriptor', 'receipt'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                scope = self.ui.UiProcesses.__new__(self.ui.UiProcesses)
+                scope.pid, scope.lock = 999, threading.RLock()
+                scope.allocations = [{'process': types.SimpleNamespace(pid=10), 'closed': False, 'forced': False}]
+                scope.entries = {'synthetic': {'pidfd': 123, 'identity': {'pid': 10, 'startTicks': '1'}, 'allocation': 0, 'reaped': False}}
+                scope.errors = []
+                scope.finish = mock.Mock(side_effect=self.ui.UiError('UI_PROCESS_CLOSURE_FAILED'))
+                scope.proc_rows = mock.Mock(side_effect=self.ui.UiError('UI_PROCESS_SNAPSHOT_CAP_REFUSED'))
+                scope.halt, scope.thread, scope.prctl = mock.Mock(), mock.Mock(), mock.Mock()
+                scope.thread.is_alive.return_value = False
+                if fault != 'snapshot': scope.closure = lambda: False
+                if fault == 'stop': scope.halt.set.side_effect = OSError('PRIVATE_STOP')
+                if fault == 'join': scope.thread.join.side_effect = OSError('PRIVATE_JOIN')
+                if fault == 'state': scope.thread.is_alive.side_effect = OSError('PRIVATE_STATE')
+                original_write, attempted = self.ui.write, []
+                def write(path, value):
+                    attempted.append(value)
+                    if fault == 'receipt': raise OSError('PRIVATE_RECEIPT')
+                    original_write(path, value)
+                with mock.patch.object(self.ui, 'root', return_value=Path(directory)), mock.patch.object(self.ui, 'write', side_effect=write), mock.patch.object(self.ui.os, 'close', side_effect=OSError('PRIVATE_FD') if fault == 'descriptor' else None) as close, contextlib.redirect_stderr(io.StringIO()) as diagnostics:
+                    self.assertIsNone(scope.__exit__(self.ui.UiError, self.ui.UiError('UI_ACTUAL_BROWSER_FAILED'), None))
+                scope.halt.set.assert_called_once()
+                scope.thread.join.assert_called_once_with(timeout=1)
+                scope.thread.is_alive.assert_called_once()
+                close.assert_called_once_with(123)
+                scope.prctl.assert_not_called()
+                self.assertEqual(len(attempted), 1)
+                self.assertFalse(attempted[0]['confirmed'])
+                self.assertIn('UI_ACTUAL_BROWSER_FAILED', diagnostics.getvalue())
+                self.assertNotIn('PRIVATE_', diagnostics.getvalue())
+                expected = {'snapshot': 'UI_PROCESS_FINAL_OBSERVATION_FAILED', 'stop': 'UI_PROCESS_OBSERVER_STOP_FAILED', 'join': 'UI_PROCESS_OBSERVER_JOIN_FAILED', 'state': 'UI_PROCESS_OBSERVER_STATE_FAILED', 'descriptor': 'UI_PIDFD_CLOSE_FAILED', 'receipt': 'UI_PROCESS_RECEIPT_WRITE_FAILED'}[fault]
+                self.assertIn(expected, diagnostics.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
