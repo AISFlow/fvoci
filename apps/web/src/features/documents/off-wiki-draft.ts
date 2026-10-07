@@ -352,7 +352,7 @@ export class OffWikiDraft {
         snapshotV1: pending.snapshot,
         tailV1: [],
         contentJson,
-        writable: true,
+        writable: this.start.writable,
       };
       this.acknowledged = pending.snapshot;
       this.frozen = null;

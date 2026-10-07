@@ -543,4 +543,82 @@ describe("OFF wiki native draft owner", () => {
     expect(JSON.stringify(draft.mine)).not.toContain("conflict head");
     draft.retire();
   });
+  test("a matching save with no authority observation stays writable", async () => {
+    const draft = new OffWikiDraft(
+      owner,
+      source("initial", "1"),
+      storage(),
+      () => {},
+      () => commandId,
+    );
+    edit(draft.doc, " mine");
+    expect(
+      await draft.save(
+        (command) =>
+          new Promise<BodySaveResult>((resolve) => {
+            resolve(result(command));
+            return;
+          }),
+      ),
+    ).toBe(true);
+    expect(draft.start.writable).toBe(true);
+    expect(draft.start.tailSeq).toBe("2");
+    expect(draft.latest).toBeNull();
+    expect(draft.durable).toBe(true);
+    draft.retire();
+  });
+  test("equal-head read-only observation during await stays read-only after the matching receipt", async () => {
+    const draft = new OffWikiDraft(
+      owner,
+      source("initial", "1"),
+      storage(),
+      () => {},
+      () => commandId,
+    );
+    edit(draft.doc, " client A");
+    const pending = deferred<BodySaveResult>();
+    let command!: BodySaveCommand;
+    const save = draft.save((input) => {
+      command = input;
+      return pending.promise;
+    });
+    const prefix = draft.frozen;
+    expect(typeof prefix?.snapshot).toBe("string");
+    const observed = {
+      targetId,
+      tailSeq: "2",
+      snapshotV1: prefix!.snapshot,
+      tailV1: [],
+      contentJson: draft.mine,
+      writable: false,
+    };
+    draft.observeAuthorizedBody(observed);
+    const receipt = result(command);
+    expect(receipt.tailSeq).toBe("2");
+    expect(command.expectedTailSeq).toBe("1");
+    pending.resolve(receipt);
+    expect(await save).toBe(true);
+    expect(draft.start.tailSeq).toBe("2");
+    expect(draft.latest).toBeNull();
+    expect(draft.frozen).toBeNull();
+    expect(draft.durable).toBe(true);
+    expect(JSON.stringify(draft.mine)).toContain("client A");
+    expect(draft.start.writable).toBe(false);
+    edit(draft.doc, " after");
+    expect(JSON.stringify(draft.mine)).toContain(" after");
+    let sent = 0;
+    expect(
+      await draft.save(
+        () =>
+          new Promise<BodySaveResult>(() => {
+            sent += 1;
+            throw new Error("read-only authority must not send");
+          }),
+      ),
+    ).toBe(false);
+    expect(sent).toBe(0);
+    expect(JSON.stringify(draft.mine)).toContain(" after");
+    expect(draft.start.tailSeq).toBe("2");
+    draft.retire();
+  });
 });
