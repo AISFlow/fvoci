@@ -115,7 +115,7 @@ pub async fn run() -> Result<(), &'static str> {
     let close = backend.close().await;
     let stats = backend.connection_stats();
     let original = result.as_ref().err().copied();
-    let drained = close.is_ok() && stats.as_ref().is_some_and(|s| s.size == 0);
+    let drained = close.is_ok() && stats.as_ref().is_ok_and(|s| s.size == 0);
     let mut value = result
         .unwrap_or_else(|code| json!({"originalFailure":code,"nativeOutcome":native_outcome}));
     if original.is_none() {
@@ -123,7 +123,7 @@ pub async fn run() -> Result<(), &'static str> {
             "commit": if matches!(mode.as_str(), "owner" | "member") { "confirmed" } else { "not-attempted" }});
     }
     value["lifecycleDrain"] = json!(if drained { "confirmed" } else { "unconfirmed" });
-    value["leases"] = json!(stats.map(|s| s.size));
+    value["leases"] = json!(stats.as_ref().ok().map(|s| s.size));
     value["drainOutcome"] = json!(if close.is_ok() { "confirmed" } else { "failed" });
     // SDK does not expose a server Close receipt. Local drain and confirmed
     // transaction finish are reported exactly, without inventing that proof.
