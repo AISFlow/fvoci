@@ -509,9 +509,8 @@ class Producer:
         require(profile in {LEGACY_PROFILE, HOSTED_PROFILE}, "RESOURCE_PROFILE_INVALID")
         self.work = work; self.builder = builder; self.cid = None; self.stages = []; self.paths = []
         self.builder_created = False; self.minimum = None; self.host = None
-        self.builder_closing = False; self.builder_parent = None; self.builder_terminal = None
-        self.profile = profile; self.builder_closed = False; self.cgroups = {}; self.chains = {}; self.phases = {}
-        self.cgroup_proofs = {}
+        self.builder_pid = None; self.builder_terminal = None
+        self.profile = profile; self.builder_closed = False; self.phases = {}
         self.diagnostic_context = None
         self.memory_floor = MEMORY_FLOOR if profile == LEGACY_PROFILE else BUILDER_MEMORY + HOST_RESERVE
 
@@ -519,8 +518,6 @@ class Producer:
         measured = resources(self.paths)
         if self.profile == HOSTED_PROFILE:
             self.diagnostic_context = {"phase": stage, "role": "launcher"}
-            chains = {"launcher": cgroup_chain(proof=self.cgroup_proofs.setdefault("launcher", {}))}
-            live = None
             if self.builder_created and not self.builder_closed:
                 if self.cid is None:
                     ids = self.command("builder-discovery-" + str(len(self.stages)), ["docker", "ps", "-aq", "--no-trunc",
@@ -534,61 +531,16 @@ class Producer:
                     require(not live["State"].get("OOMKilled"), "BUILDER_OOM")
                     if live["State"]["Running"]:
                         require(type(live["State"]["Pid"]) is int and live["State"]["Pid"] > 0, "BUILDER_PID_INVALID")
-                        self.diagnostic_context["role"] = "builder"
-                        chains["builder"] = cgroup_chain(str(live["State"]["Pid"]), proof=self.cgroup_proofs.setdefault("builder", {}))
-                        require(self.cgroup_proofs["builder"].get("root") == self.cgroup_proofs["launcher"].get("root"),
-                                "CGROUP_IDENTITY_DRIFT")
-                        after = self.owned_builder()
-                        require(type(after["State"].get("OOMKilled")) is bool and type(after["State"].get("Pid")) is int,
-                                "BUILDER_METADATA_UNKNOWN")
-                        require(not after["State"].get("OOMKilled"), "BUILDER_OOM")
-                        require(after["State"].get("Running") is True and after["State"].get("Pid") == live["State"]["Pid"],
+                        require(self.builder_pid is None or live["State"]["Pid"] == self.builder_pid,
                                 "BUILDER_IDENTITY_DRIFT")
-                        require(bool(chains["builder"]), "BUILDER_CGROUPS_INVALID")
-                        leaf = chains["builder"][-1]
-                        require(leaf["container_id"] == self.cid and leaf["memory_max"] == BUILDER_MEMORY and leaf["cpu_max"] == ["200000", "100000"] and
-                                leaf["current"] <= BUILDER_MEMORY and leaf["peak"] <= BUILDER_MEMORY, "BUILDER_CGROUPS_INVALID")
-                        self.builder_parent = chains["builder"][-2]["path"] if len(chains["builder"]) > 1 else ""
                     else:
-                        require((self.builder_closing or stage in {"before-bootstrap", "builder-bootstrap"}) and
+                        require(self.builder_pid is None and stage in {"before-bootstrap", "builder-bootstrap"} and
                                 type(live["State"].get("Pid")) is int and live["State"]["Pid"] == 0, "BUILDER_NOT_RUNNING")
-                        if self.builder_closing and self.builder_parent is not None:
-                            # PID0 cannot supply final leaf counters. Re-read the
-                            # recorded parent chain; never substitute stale usage.
-                            self.diagnostic_context["role"] = "builder-ancestors"
-                            chains["builder-ancestors"] = cgroup_chain(relative=self.builder_parent,
-                                proof=self.cgroup_proofs.setdefault("builder", {}))
-                            require(self.cgroup_proofs["builder"].get("root") == self.cgroup_proofs["launcher"].get("root"),
-                                    "CGROUP_IDENTITY_DRIFT")
-                            require([r["identity"] for r in chains["builder-ancestors"]] == self.chains["builder"][:-1],
-                                    "CGROUP_IDENTITY_DRIFT")
-                require(self.builder_closing or stage in {"before-bootstrap", "builder-bootstrap"} or "builder" in chains,
+                require(stage in {"before-bootstrap", "builder-bootstrap"} or self.cid is not None,
                         "BUILDER_METADATA_UNKNOWN")
-                # Until the verified container is live, retain the full starting
-                # commitment. Absence during bootstrap never proves a live cap.
-                running = "builder" in chains or (self.builder_closing and "builder" in self.chains)
-            available = measured["effective_mem_available"]
-            for role, rows in chains.items():
-                ids = [r["identity"] for r in rows]
-                require(role not in self.chains or self.chains[role] == ids, "CGROUP_IDENTITY_DRIFT")
-                self.chains[role] = ids
-                for index, row in enumerate(rows):
-                    key = row["identity"]; old = self.cgroups.get(key)
-                    fixed = {k: row[k] for k in ["memory_max", "cpu_max"]}
-                    if old is None:
-                        if role == "builder" and index == len(rows)-1:
-                            require(all(row["events"][k] == 0 for k in ["oom", "oom_kill", "oom_group_kill"]), "BUILDER_OOM")
-                        old = {**fixed, "initial_events": row["events"].copy(), "last_events": row["events"].copy(), "peak": row["peak"]}
-                        self.cgroups[key] = old
-                    require(all(old[k] == v for k, v in fixed.items()) and row["peak"] >= old["peak"] and
-                            set(row["events"]) == set(old["last_events"]) and
-                            all(row["events"][k] >= v for k, v in old["last_events"].items()), "CGROUP_COUNTERS_DRIFT")
-                    require(all(row["events"][k] == old["initial_events"][k] for k in ["oom", "oom_kill", "oom_group_kill"]), "CGROUP_OOM_INCREMENT")
-                    old.update(last_events=row["events"].copy(), peak=row["peak"], current=row["current"])
-                    if row["memory_max"] is not None and not (role == "builder" and index == len(rows)-1):
-                        require(role not in {"builder", "builder-ancestors"} or row["memory_max"] >= BUILDER_MEMORY + HOST_RESERVE, "BUILDER_ANCESTOR_BUDGET_INVALID")
-                        available = min(available, max(0, row["memory_max"] - row["current"]))
-            measured["effective_mem_available"] = available
+                # Kernel limits are read back inside the exact owned container
+                # after bootstrap. A host cgroup name is not Docker authority.
+                running = self.builder_pid is not None
         if self.minimum is None:
             self.minimum = measured.copy()
         else:
@@ -609,7 +561,7 @@ class Producer:
             "start_memory_floor": MEMORY_FLOOR if self.profile == LEGACY_PROFILE else BUILDER_MEMORY + HOST_RESERVE,
             "running_memory_floor": MEMORY_FLOOR if self.profile == LEGACY_PROFILE else HOST_RESERVE,
             "builder_budget": BUILDER_MEMORY, "host_reserve": HOST_RESERVE if self.profile == HOSTED_PROFILE else None,
-            "phases": self.phases, "chains": self.chains, "cgroups": self.cgroups,
+            "phases": self.phases,
             **({"builder_terminal": self.builder_terminal} if self.profile == HOSTED_PROFILE else {})}))
 
     def command(self, stage: str, argv: list[str], monitored: bool = False) -> bytes:
@@ -649,7 +601,8 @@ class Producer:
         require(len(rows) == 1 and rows[0]["Id"] == self.cid and rows[0]["Name"] == "/buildx_buildkit_" + self.builder + "0", "BUILDER_IDENTITY_DRIFT")
         r = rows[0]; h = r["HostConfig"]
         require(r["Image"] == BUILDKIT_IMAGE.split("@", 1)[1] and h["Memory"] == BUILDER_MEMORY and
-                h["CpuPeriod"] == 100000 and h["CpuQuota"] == 200000 and not h.get("PortBindings"), "BUILDER_CAPS_INVALID")
+                h["CpuPeriod"] == 100000 and h["CpuQuota"] == 200000 and not h.get("PortBindings") and
+                not r["NetworkSettings"].get("Ports"), "BUILDER_CAPS_INVALID")
         return r
 
     def stop_builder(self) -> None:
@@ -665,27 +618,21 @@ class Producer:
             return
         r = self.owned_builder()
         experimental = self.profile == HOSTED_PROFILE
-        self.builder_closing = experimental
-        try:
-            if experimental: self.check_resources("builder-closing", running=True)
-            if r["State"]["Running"]:
-                if experimental:
-                    self.command("builder-stop-" + str(len(self.stages)), ["docker", "stop", self.cid], monitored=True)
-                else:
-                    self.command("builder-stop-" + str(len(self.stages)), ["docker", "stop", self.cid])
-            r = self.owned_builder()
-            if experimental:
-                require(type(r["State"].get("Running")) is bool and type(r["State"].get("OOMKilled")) is bool,
-                        "BUILDER_METADATA_UNKNOWN")
-                require(not r["State"]["OOMKilled"], "BUILDER_OOM")
-                require(type(r["State"].get("Pid")) is int, "BUILDER_PID_INVALID")
-            require(not r["State"]["Running"] and r["State"]["Pid"] == 0 and not r["NetworkSettings"].get("Ports"), "BUILDER_CLOSURE_FAILED")
-            if experimental:
-                self.check_resources("builder-closing", running=True)
-                self.builder_terminal = {"oom_killed": False, "cgroup_counters": "UNKNOWN"}
-            self.builder_closed = True
-        finally:
-            self.builder_closing = False
+        # Stopping the owned builder must remain possible under low resources
+        # or after an OOM. Verify the terminal state before accepting closure.
+        require(type(r["State"].get("Running")) is bool, "BUILDER_METADATA_UNKNOWN")
+        if r["State"]["Running"]:
+            self.command("builder-stop-" + str(len(self.stages)), ["docker", "stop", self.cid])
+        r = self.owned_builder()
+        if experimental:
+            require(type(r["State"].get("Running")) is bool and type(r["State"].get("OOMKilled")) is bool,
+                    "BUILDER_METADATA_UNKNOWN")
+            require(not r["State"]["OOMKilled"], "BUILDER_OOM")
+            require(type(r["State"].get("Pid")) is int, "BUILDER_PID_INVALID")
+        require(not r["State"]["Running"] and r["State"]["Pid"] == 0 and not r["NetworkSettings"].get("Ports"), "BUILDER_CLOSURE_FAILED")
+        if experimental:
+            self.builder_terminal = {"oom_killed": False, "cgroup_counters": "UNKNOWN"}
+        self.builder_closed = True
 
     def build(self, product: Path, tooling: Path, tooling_sha: str) -> dict:
         require(platform.system() == "Linux" and platform.machine() == "x86_64", "HOST_OS_ARCH_INVALID")
@@ -713,9 +660,13 @@ class Producer:
         cid = self.command("builder-id", ["docker", "inspect", "--format", "{{.Id}}", "buildx_buildkit_" + self.builder + "0"]).decode().strip()
         require(self.cid is None or self.cid == cid, "BUILDER_IDENTITY_DRIFT"); self.cid = cid
         require(bool(re.fullmatch(r"[0-9a-f]{64}", self.cid)), "BUILDER_ID_INVALID")
-        self.owned_builder()
+        live = self.owned_builder()
+        require(live["State"].get("Running") is True and type(live["State"].get("Pid")) is int and live["State"]["Pid"] > 0,
+                "BUILDER_PID_INVALID")
         actual_caps = self.command("builder-cgroups", ["docker", "exec", self.cid, "cat", "/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/cpu.max"]).decode().splitlines()
         require(actual_caps == [str(BUILDER_MEMORY), "200000 100000"], "BUILDER_CGROUPS_INVALID")
+        self.builder_pid = live["State"]["Pid"]
+        if self.profile == HOSTED_PROFILE: self.check_resources("builder-bootstrap", running=True)
         version = self.command("builder-version", ["docker", "exec", self.cid, "buildkitd", "--version"]).decode()
         require(bool(re.search(r"\bv0\.26\.[0-9]+\b", version)), "BUILDER_VERSION_INVALID")
         tag = "fvoci-shipping-producer:" + PRODUCT_SHA + "-" + self.builder

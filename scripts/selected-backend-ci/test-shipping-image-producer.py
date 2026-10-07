@@ -473,10 +473,8 @@ class HostedExperimentalResourceControls(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["memory_max"] - rows[0]["current"], P.BUILDER_MEMORY + P.HOST_RESERVE)
         self.assertIsNone(rows[1]["memory_max"])
-        with patch.object(P, "cgroup_chain", return_value=rows), patch.object(P, "resources", return_value=self.measured(P.MEMORY_FLOOR)):
-            self.producer.check_resources("preflight")
-            rows[0]["current"] += 1
-            with self.assertRaisesRegex(P.Refusal, "RESOURCE_NOTADMITTED"): self.producer.check_resources("preflight")
+        # Ancestors remain standalone reader evidence, not producer admission authority.
+        self.assertEqual(rows[0]["current"], 100)
         (proc / "self/cgroup").write_text("0::/\n")
         self.assertEqual(P.cgroup_chain(root=mount, proc=proc), [])
 
@@ -502,62 +500,38 @@ class HostedExperimentalResourceControls(unittest.TestCase):
         (mount / "cgroup.type").write_text("domain")
         with self.assertRaisesRegex(P.Refusal, "CGROUP_HOST_ROOT_INVALID"): P.cgroup_chain(root=mount, proc=proc)
 
-    def test_verified_builder_counters_ancestors_and_no_available_credit(self):
-        self.producer.cid = self.cid; self.producer.builder_created = True
-        parent = self.row("ancestor", P.MEMORY_FLOOR, P.MEMORY_FLOOR-P.HOST_RESERVE)
-        leaf = self.row("builder", P.BUILDER_MEMORY, P.BUILDER_MEMORY-1)
-        def chain(pid="self", **kw): return [self.row("launcher")] if pid == "self" else [parent, leaf]
-        with patch.object(P, "cgroup_chain", side_effect=chain), patch.object(self.producer, "owned_builder", return_value=self.live), \
-                patch.object(P, "resources", return_value=self.measured(P.HOST_RESERVE)):
-            measured = self.producer.check_resources("shipping-build", running=True)
-            self.assertEqual(measured["effective_mem_available"], P.HOST_RESERVE)
-            self.assertEqual(self.producer.profile_receipt()["cgroups"]["builder"]["peak"], P.BUILDER_MEMORY-1)
-            parent["current"] += 1
-            with self.assertRaisesRegex(P.Refusal, "RESOURCE_NOTADMITTED"): self.producer.check_resources("shipping-build", running=True)
-        producer = P.Producer(self.root, "fixture", P.HOSTED_PROFILE); producer.cid = self.cid; producer.builder_created = True
-        parent["memory_max"] = 8*1024**3; parent["current"] = 100; parent["peak"] = 100
-        with patch.object(P, "cgroup_chain", side_effect=chain), patch.object(producer, "owned_builder", return_value=self.live), \
-                patch.object(P, "resources", return_value=self.measured(P.MEMORY_FLOOR)):
-            with self.assertRaisesRegex(P.Refusal, "BUILDER_ANCESTOR_BUDGET_INVALID"): producer.check_resources("shipping-build", running=True)
+    def test_verified_builder_uses_measured_reserve_without_host_observer(self):
+        self.producer.cid = self.cid; self.producer.builder_created = True; self.producer.builder_pid = 123
+        with patch.object(P, "cgroup_chain", side_effect=AssertionError("observer is standalone")) as chain, patch.object(self.producer, "owned_builder", return_value=self.live), patch.object(P, "resources", return_value=self.measured(P.HOST_RESERVE)):
+            self.assertEqual(self.producer.check_resources("shipping-build", running=True)["effective_mem_available"], P.HOST_RESERVE)
+            chain.assert_not_called(); self.assertNotIn("cgroups", self.producer.profile_receipt())
 
-    def test_builder_unknown_cap_cpu_pid_identity_or_counter_refused(self):
-        mutations = [lambda r: r.update(memory_max=None), lambda r: r.update(memory_max=P.BUILDER_MEMORY+1),
-            lambda r: r.update(cpu_max=["400000", "100000"]), lambda r: r.update(current=P.BUILDER_MEMORY+1, peak=P.BUILDER_MEMORY+1),
-            lambda r: r.update(container_id="b"*64), lambda r: r["events"].update(oom=1),
-            lambda r: r["events"].update(oom_kill=1), lambda r: r["events"].update(oom_group_kill=1)]
-        for change in mutations:
-            self.producer = P.Producer(self.root, "fixture", P.HOSTED_PROFILE)
-            self.producer.cid = self.cid; self.producer.builder_created = True
-            leaf = self.row("builder", P.BUILDER_MEMORY); change(leaf)
-            with patch.object(P, "cgroup_chain", side_effect=lambda pid="self", **kw: [] if pid == "self" else [leaf]), \
-                    patch.object(self.producer, "owned_builder", return_value=self.live), patch.object(P, "resources", return_value=self.measured(P.MEMORY_FLOOR)):
-                with self.assertRaises(P.Refusal): self.producer.check_resources("shipping-build", running=True)
-        for field, value in [("Pid", 0), ("OOMKilled", True), ("Running", False)]:
-            live = copy.deepcopy(self.live); live["State"][field] = value
-            with patch.object(P, "cgroup_chain", return_value=[]), patch.object(self.producer, "owned_builder", return_value=live), \
-                    patch.object(P, "resources", return_value=self.measured(P.MEMORY_FLOOR)):
-                with self.assertRaises(P.Refusal): self.producer.check_resources("shipping-build", running=True)
-        self.producer.cid = None
-        with patch.object(P, "cgroup_chain", return_value=[]), patch.object(self.producer, "command", return_value=b""), \
-                patch.object(P, "resources", return_value=self.measured(P.MEMORY_FLOOR)):
+    def test_owned_docker_identity_caps_state_and_ports_refused(self):
+        for scope, field, value in [(None, "Id", "b"*64), (None, "Name", "/foreign"), (None, "Image", "sha256:"+"b"*64), ("HostConfig", "Memory", P.BUILDER_MEMORY+1), ("HostConfig", "CpuQuota", 400000), ("HostConfig", "CpuPeriod", 50000), ("HostConfig", "PortBindings", {"8080/tcp": []}), ("NetworkSettings", "Ports", {"8080/tcp": []}), ("State", "Pid", 0), ("State", "Pid", 124), ("State", "Pid", True), ("State", "OOMKilled", True), ("State", "OOMKilled", None), ("State", "Running", False)]:
+            producer = P.Producer(self.root, "fixture", P.HOSTED_PROFILE); producer.cid = self.cid; producer.builder_created = True; producer.builder_pid = 123
+            live = copy.deepcopy(self.live); (live if scope is None else live[scope])[field] = value
+            with self.subTest(field=field, value=value), patch.object(producer, "command", return_value=P.encoded([live])), patch.object(P, "resources", return_value=self.measured(P.MEMORY_FLOOR)):
+                with self.assertRaises(P.Refusal): producer.check_resources("shipping-build", running=True)
+        self.producer.builder_created = True
+        with patch.object(self.producer, "command", return_value=b""), patch.object(P, "resources", return_value=self.measured(P.MEMORY_FLOOR)):
             with self.assertRaisesRegex(P.Refusal, "BUILDER_METADATA_UNKNOWN"): self.producer.check_resources("shipping-build", running=True)
 
     def test_no_builder_usage_added_to_available_memory(self):
-        self.producer.cid = self.cid; self.producer.builder_created = True
+        self.producer.cid = self.cid; self.producer.builder_created = True; self.producer.builder_pid = 123
         leaf = self.row("builder", P.BUILDER_MEMORY, P.BUILDER_MEMORY-1)
         with patch.object(P, "cgroup_chain", side_effect=lambda pid="self", **kw: [] if pid == "self" else [leaf]), \
                 patch.object(self.producer, "owned_builder", return_value=self.live), patch.object(P, "resources", return_value=self.measured(P.HOST_RESERVE-1)):
             with self.assertRaisesRegex(P.Refusal, "RESOURCE_NOTADMITTED"): self.producer.check_resources("shipping-build", running=True)
 
-    def test_oom_increment_identity_limit_and_counter_reset_refused(self):
-        for change in [lambda r: r["events"].update(oom=1), lambda r: r["events"].update(oom_kill=1),
-                       lambda r: r["events"].update(oom_group_kill=1), lambda r: r.update(identity="foreign"),
-                       lambda r: r.update(memory_max=P.MEMORY_FLOOR), lambda r: r.update(peak=99),
-                       lambda r: r["events"].update(low=-1)]:
-            producer = P.Producer(self.root, "fixture", P.HOSTED_PROFILE); row = self.row("launcher")
-            with patch.object(P, "cgroup_chain", return_value=[row]), patch.object(P, "resources", return_value=self.measured(P.MEMORY_FLOOR)):
-                producer.check_resources("preflight"); change(row)
-                with self.assertRaises(P.Refusal): producer.check_resources("python-validation", running=True)
+    def test_measured_memory_disk_and_owned_oom_remain_blocking(self):
+        self.producer.cid = self.cid; self.producer.builder_created = True; self.producer.builder_pid = 123
+        for key, value in [("effective_mem_available", P.HOST_RESERVE-1), ("free_bytes", P.DISK_FLOOR-1)]:
+            measured = self.measured(P.MEMORY_FLOOR); measured[key] = value
+            with self.subTest(key=key), patch.object(self.producer, "owned_builder", return_value=self.live), patch.object(P, "resources", return_value=measured):
+                with self.assertRaisesRegex(P.Refusal, "RESOURCE_NOTADMITTED"): self.producer.check_resources("shipping-build", running=True)
+        oom = copy.deepcopy(self.live); oom["State"]["OOMKilled"] = True
+        with patch.object(self.producer, "owned_builder", return_value=oom), patch.object(P, "resources", return_value=self.measured(P.MEMORY_FLOOR)):
+            with self.assertRaisesRegex(P.Refusal, "BUILDER_OOM"): self.producer.check_resources("shipping-build", running=True)
 
     def test_bootstrap_absence_retains_full_commitment_not_live_cap_proof(self):
         self.producer.builder_created = True
@@ -565,7 +539,8 @@ class HostedExperimentalResourceControls(unittest.TestCase):
                 patch.object(P, "resources", return_value=self.measured(P.BUILDER_MEMORY + P.HOST_RESERVE)):
             self.producer.check_resources("before-bootstrap")
             self.producer.check_resources("builder-bootstrap", running=True)
-            self.assertNotIn("builder", self.producer.chains)
+            self.assertIsNone(self.producer.builder_pid)
+            self.assertEqual(self.producer.phases["builder-bootstrap"]["memory_floor"], P.BUILDER_MEMORY + P.HOST_RESERVE)
         with patch.object(P, "cgroup_chain", return_value=[]), patch.object(self.producer, "command", return_value=b""), \
                 patch.object(P, "resources", return_value=self.measured(P.BUILDER_MEMORY + P.HOST_RESERVE-1)):
             with self.assertRaisesRegex(P.Refusal, "RESOURCE_NOTADMITTED"): self.producer.check_resources("builder-bootstrap", running=True)
@@ -575,7 +550,7 @@ class HostedExperimentalResourceControls(unittest.TestCase):
             with self.subTest(phase=phase):
                 producer = P.Producer(self.root, "fixture", P.HOSTED_PROFILE)
                 producer.builder_created = True; producer.cid = self.cid
-                producer.builder_closed = phase in {"image-save", "python-validation"}
+                producer.builder_closed = phase in {"image-save", "python-validation"}; producer.builder_pid = 123
                 leaf = self.row("builder", P.BUILDER_MEMORY)
                 with patch.object(P, "cgroup_chain", side_effect=lambda pid="self", **kw: [] if pid == "self" else [leaf]), \
                         patch.object(producer, "owned_builder", return_value=self.live), patch.object(P, "resources", return_value=self.measured(P.HOST_RESERVE-1)):
@@ -597,7 +572,7 @@ class HostedExperimentalResourceControls(unittest.TestCase):
             producer.stop_builder()
             self.assertTrue(producer.builder_closed)
             self.assertEqual(command.call_args.args[1], ["docker", "stop", self.cid])
-            self.assertTrue(command.call_args.kwargs["monitored"]); self.assertEqual(closing_guard.call_count, 2)
+            self.assertFalse(command.call_args.kwargs.get("monitored", False)); closing_guard.assert_not_called()
 
     def test_guarded_plain_compressed_multilayer_validation_and_crossing(self):
         for compressed in [False, True]:
@@ -634,11 +609,34 @@ class HostedExperimentalResourceControls(unittest.TestCase):
         prior["jobs"]["shipping-image-producer"]["steps"][3]["with"]["name"] = "shipping-image-9202f823-amd64-${{ github.run_id }}-${{ github.run_attempt }}"
         self.assertEqual(current, prior)
 
+    def test_kernel_readback_required_before_standard_build(self):
+        for caps, error in [(b"", None), (b"max\n200000 100000\n", None),
+                ((str(P.BUILDER_MEMORY+1) + "\n200000 100000\n").encode(), None),
+                ((str(P.BUILDER_MEMORY) + "\n400000 100000\n").encode(), None),
+                (None, "PRODUCER_COMMAND_FAILED")]:
+            case = type(self)("test_recipe_wires_all_guards_and_seals_latest_measurements"); case.setUp()
+            try:
+                case.kernel_caps = caps; case.kernel_error = error
+                with self.subTest(caps=caps, error=error), self.assertRaisesRegex(P.Refusal, error or "BUILDER_CGROUPS_INVALID"):
+                    case.test_recipe_wires_all_guards_and_seals_latest_measurements()
+                self.assertNotIn("shipping-build", [stage for stage, _, _ in case.recipe_commands])
+            finally: case.doCleanups()
+
+    def test_running_reserve_credit_requires_kernel_readback_binding(self):
+        self.producer.cid = self.cid; self.producer.builder_created = True
+        with patch.object(self.producer, "owned_builder", return_value=self.live), patch.object(P, "resources", return_value=self.measured(P.HOST_RESERVE)):
+            with self.assertRaisesRegex(P.Refusal, "RESOURCE_NOTADMITTED"):
+                self.producer.check_resources("builder-bootstrap", running=True)
+            self.producer.builder_pid = self.live["State"]["Pid"]
+            self.producer.check_resources("shipping-build", running=True)
+            self.assertEqual(self.producer.phases["shipping-build"]["memory_floor"], P.HOST_RESERVE)
+
     def test_recipe_wires_all_guards_and_seals_latest_measurements(self):
         fixture = self.root / "fixture"; fixture.mkdir(); archive, image_id = image_fixture(fixture)
         work = self.root / "work"; work.mkdir(); producer = P.Producer(work, "fixture", P.HOSTED_PROFILE)
         product = self.root / "product"; tooling = self.root / "tooling"; commands = []
         inputs = {str(n): {} for n in range(2134)}; leaf = self.row("builder", P.BUILDER_MEMORY)
+        self.recipe_commands = commands
         live = copy.deepcopy(self.live)
         def command(stage, argv, monitored=False):
             commands.append((stage, argv, monitored))
@@ -646,7 +644,9 @@ class HostedExperimentalResourceControls(unittest.TestCase):
             if stage == "docker-root": return str(work).encode()
             if stage.startswith("builder-discovery-"): return (self.cid + "\n").encode()
             if stage == "builder-id": return self.cid.encode()
-            if stage == "builder-cgroups": return (str(P.BUILDER_MEMORY) + "\n200000 100000\n").encode()
+            if stage == "builder-cgroups":
+                if getattr(self, "kernel_error", None): raise P.Refusal(self.kernel_error)
+                return getattr(self, "kernel_caps", (str(P.BUILDER_MEMORY) + "\n200000 100000\n").encode())
             if stage == "builder-version": return b"buildkitd v0.26.0"
             if stage == "image-id": return image_id.encode()
             if stage == "image-save": Path(argv[3]).write_bytes(archive.read_bytes())
@@ -666,7 +666,7 @@ class HostedExperimentalResourceControls(unittest.TestCase):
                 patch.object(producer, "command", side_effect=command):
             receipt = producer.build(product, tooling, "a"*40)
         self.assertEqual(set(receipt["resource_profile"]["phases"]), {"preflight", "before-bootstrap", "builder-bootstrap", "shipping-build",
-            "before-builder-stop", "builder-closing", "builder-stop-0", "image-save", "python-validation", "complete"})
+            "before-builder-stop", "image-save", "python-validation", "complete"})
         self.assertEqual(receipt["minimum_sampled_resources"]["effective_mem_available"], P.HOST_RESERVE+10)
         self.assertEqual(receipt["resource_profile"]["name"], P.HOSTED_PROFILE)
         self.assertTrue(receipt["builder"]["stopped"])
@@ -758,13 +758,11 @@ class GlobalRootVisibilityControls(unittest.TestCase):
         for key, wrong in [("root", "foreign"), ("pid", [str(P.os.getpid()), 101, "parent/child"])]:
             proof.update(original); proof[key] = wrong
             with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"): P.cgroup_chain(root=root, proc=proc, proof=proof)
-        chain = P.cgroup_chain
-        def sample(pid="self", **kw): return chain(pid, root=root, proc=proc, **kw)
-        with patch.object(P, "cgroup_chain", side_effect=sample), patch.object(P, "resources", return_value=self.measured(P.MEMORY_FLOOR)):
-            self.producer.check_resources("preflight")
-            child = root / "parent/child"; child.rename(root / "parent/old-child"); child.mkdir()
-            for f in (root / "parent/old-child").iterdir(): (child / f.name).write_bytes(f.read_bytes())
-            with self.assertRaisesRegex(P.Refusal, "CGROUP_IDENTITY_DRIFT"): self.producer.check_resources("preflight")
+        child = root / "parent/child"; before = P.cgroup_chain(root=root, proc=proc, proof=original)
+        child.rename(root / "parent/old-child"); child.mkdir()
+        for f in (root / "parent/old-child").iterdir(): (child / f.name).write_bytes(f.read_bytes())
+        after = P.cgroup_chain(root=root, proc=proc, proof=original)
+        self.assertNotEqual(before[-1]["identity"], after[-1]["identity"])
 
     def test_symlink_threaded_deleted_and_bounded_membership_refused(self):
         proc, root = self.make_chain()
@@ -795,18 +793,16 @@ class GlobalRootVisibilityControls(unittest.TestCase):
         after = P.cgroup_chain(root=root, proc=proc, relative="parent", proof=proof)
         self.assertEqual(after, before[:-1]); self.assertEqual(proof["pid"], [str(P.os.getpid()), 100, "parent/child"])
 
-    def test_builder_reinspection_pid_oom_and_root_mismatch_refuse(self):
-        for delta, code in [("pid", "BUILDER_IDENTITY_DRIFT"), ("oom", "BUILDER_OOM"), ("root", "CGROUP_IDENTITY_DRIFT")]:
-            producer = P.Producer(self.root, "fixture", P.HOSTED_PROFILE); producer.cid = self.cid; producer.builder_created = True
+    def test_execution_reinspection_pid_and_oom_refuse_without_root_invariance(self):
+        for delta, code in [("pid", "BUILDER_IDENTITY_DRIFT"), ("oom", "BUILDER_OOM")]:
+            producer = P.Producer(self.root, "fixture", P.HOSTED_PROFILE); producer.cid = self.cid; producer.builder_created = True; producer.builder_pid = 123
             after = copy.deepcopy(self.live)
             if delta == "pid": after["State"]["Pid"] += 1
-            if delta == "oom": after["State"]["OOMKilled"] = True
-            def sample(pid="self", *, proof):
-                proof["root"] = "launcher" if pid == "self" or delta != "root" else "foreign"
-                return [] if pid == "self" else [self.row("builder", P.BUILDER_MEMORY)]
-            with patch.object(P, "cgroup_chain", side_effect=sample), patch.object(P, "resources", return_value=self.measured(P.MEMORY_FLOOR)), \
-                    patch.object(producer, "owned_builder", side_effect=[self.live, after]):
+            else: after["State"]["OOMKilled"] = True
+            with patch.object(P, "cgroup_chain", side_effect=AssertionError("observer is standalone")) as chain, patch.object(P, "resources", return_value=self.measured(P.MEMORY_FLOOR)), patch.object(producer, "owned_builder", side_effect=[self.live, after]):
+                producer.check_resources("shipping-build", running=True)
                 with self.assertRaisesRegex(P.Refusal, code): producer.check_resources("shipping-build", running=True)
+                chain.assert_not_called()
 
     def test_fixed_stat_argv_bounded_output_wait_and_error_closure(self):
         from types import SimpleNamespace
@@ -910,7 +906,7 @@ class ClosingPhaseControls(unittest.TestCase):
     measured = HostedExperimentalResourceControls.measured
 
     def closure(self, terminal=False, crossing=None, *, run_export=True):
-        producer = self.producer; producer.builder_created = True; producer.cid = self.cid
+        producer = self.producer; producer.builder_created = True; producer.cid = self.cid; producer.builder_pid = 123
         live = copy.deepcopy(self.live); parent = self.row("parent", P.MEMORY_FLOOR, 100)
         leaf = self.row("builder", P.BUILDER_MEMORY, 100); commands = []; stopping = False
         def chain(pid="self", *, relative=None, **kw):
@@ -954,22 +950,18 @@ class ClosingPhaseControls(unittest.TestCase):
                 with self.assertRaisesRegex(P.Refusal, "BUILDER_METADATA_UNKNOWN"): self.closure(terminal)
                 self.assertFalse(self.producer.builder_closed)
 
-    def test_closing_host_and_ancestor_reserve_or_oom_failure_refused(self):
-        for crossing, error in [("host", "RESOURCE_NOTADMITTED"), ("ancestor", "RESOURCE_NOTADMITTED"), ("ancestor-oom", "CGROUP_OOM_INCREMENT"), ("terminal-host", "RESOURCE_NOTADMITTED"), ("terminal-ancestor", "RESOURCE_NOTADMITTED")]:
+    def test_stop_is_not_blocked_by_headroom_but_export_still_refuses(self):
+        for crossing in ["host", "terminal-host"]:
             with self.subTest(crossing=crossing):
                 self.producer = P.Producer(self.root, "fixture", P.HOSTED_PROFILE)
-                with self.assertRaisesRegex(P.Refusal, error): self.closure(crossing=crossing)
-                self.assertFalse(self.producer.builder_closed)
+                with self.assertRaisesRegex(P.Refusal, "RESOURCE_NOTADMITTED"): self.closure(crossing=crossing)
+                self.assertTrue(self.producer.builder_closed)
 
-    def test_healthy_terminal_closure_preserves_last_counters_final_unknown(self):
-        commands = self.closure()
-        self.assertTrue(self.producer.builder_closed); self.assertFalse(self.producer.builder_closing)
-        self.assertTrue(next(monitored for stage, _, monitored in commands if stage.startswith("builder-stop-")))
-        receipt = self.producer.profile_receipt()
-        self.assertEqual(receipt["builder_terminal"], {"oom_killed": False, "cgroup_counters": "UNKNOWN"})
-        self.assertEqual(receipt["cgroups"]["builder"]["current"], 100)
-        self.assertEqual(receipt["chains"]["builder-ancestors"], ["parent"])
-        self.assertEqual(receipt["phases"]["builder-closing"]["memory_floor"], P.HOST_RESERVE)
+    def test_healthy_terminal_closure_is_docker_verified_and_counters_unknown(self):
+        commands = self.closure(); self.assertTrue(self.producer.builder_closed)
+        self.assertFalse(next(monitored for stage, _, monitored in commands if stage.startswith("builder-stop-")))
+        self.assertEqual(self.producer.profile_receipt()["builder_terminal"], {"oom_killed": False, "cgroup_counters": "UNKNOWN"})
+        self.assertNotIn("cgroups", self.producer.profile_receipt()); self.assertNotIn("chains", self.producer.profile_receipt())
 
     def test_recorded_parent_reread_without_leaf_pid_and_identity_refusal(self):
         proc, root = HostedExperimentalResourceControls.make_chain(self)
@@ -982,34 +974,28 @@ class ClosingPhaseControls(unittest.TestCase):
         self.assertEqual(after[0]["current"], 150)
         self.assertEqual(after[0]["path"], "parent")
         with self.assertRaisesRegex(P.Refusal, "CGROUP_PATH_INVALID"): P.cgroup_chain(root=root, proc=proc, relative="../parent", proof=proof)
-        producer = self.producer; producer.builder_created = True; producer.cid = self.cid
-        producer.builder_closing = True; producer.builder_parent = "parent"; producer.chains["builder"] = ["original", "builder"]
-        stopped = copy.deepcopy(self.live); stopped["State"].update(Running=False, Pid=0)
-        with patch.object(producer, "owned_builder", return_value=stopped), patch.object(P, "resources", return_value=self.measured(P.HOST_RESERVE)), \
-                patch.object(P, "cgroup_chain", side_effect=lambda pid="self", **kw: [self.row("foreign")] if kw.get("relative") is not None else []):
-            with self.assertRaisesRegex(P.Refusal, "CGROUP_IDENTITY_DRIFT"): producer.check_resources("builder-closing", running=True)
+        # Stopped ancestors remain reader-only observations; Docker owns terminal closure.
+        self.producer.builder_closed = True
+        with patch.object(P, "resources", return_value=self.measured(P.HOST_RESERVE)), patch.object(P, "cgroup_chain", side_effect=AssertionError("observer is standalone")) as chain:
+            self.producer.check_resources("image-save", running=True); chain.assert_not_called()
 
-    def test_actual_stop_command_wait_and_failure_terminate_reap(self):
+    def test_actual_stop_command_wait_and_cancel_terminate_reap(self):
         producer = self.producer; producer.builder_created = True; producer.cid = self.cid
         stopped = copy.deepcopy(self.live); stopped["State"].update(Running=False, Pid=0)
         for fails in [False, True]:
-            producer.builder_closed = False
-            process = unittest.mock.Mock(pid=987, returncode=None)
+            producer.builder_closed = False; process = unittest.mock.Mock(pid=987, returncode=None)
             process.poll.side_effect = [None, None] if fails else [None, 0]
-            def reap(*args, **kwargs): process.returncode = -15 if fails else 0; return process.returncode
+            def reap(*args, **kwargs):
+                if fails and kwargs.get("timeout") == 1: raise P.Refusal("PRODUCER_CANCELLED")
+                process.returncode = -15 if fails else 0; return process.returncode
             process.wait.side_effect = reap
-            with patch.object(producer, "owned_builder", side_effect=[self.live, stopped] if not fails else [self.live]), \
-                    patch.object(producer, "check_resources", side_effect=[None, P.Refusal("RESOURCE_NOTADMITTED")] if fails else None), \
-                    patch.object(P.subprocess, "Popen", return_value=process) as popen, patch.object(P.os, "killpg") as kill:
+            with patch.object(producer, "owned_builder", side_effect=[self.live, stopped] if not fails else [self.live]), patch.object(producer, "check_resources", side_effect=AssertionError("cleanup cannot depend on headroom")) as guard, patch.object(P.subprocess, "Popen", return_value=process) as popen, patch.object(P.os, "killpg") as kill:
                 if fails:
-                    with self.assertRaisesRegex(P.Refusal, "RESOURCE_NOTADMITTED"): producer.stop_builder()
-                    kill.assert_called_once_with(987, P.signal.SIGTERM); process.wait.assert_called_once_with(timeout=30)
-                    self.assertFalse(producer.builder_closed)
+                    with self.assertRaisesRegex(P.Refusal, "PRODUCER_CANCELLED"): producer.stop_builder()
+                    kill.assert_called_once_with(987, P.signal.SIGTERM); self.assertEqual(process.wait.call_args_list[-1], unittest.mock.call(timeout=30)); self.assertFalse(producer.builder_closed)
                 else:
-                    producer.stop_builder(); self.assertTrue(producer.builder_closed); kill.assert_not_called()
-                    process.wait.assert_called_once_with(timeout=1)
-                self.assertEqual(popen.call_args.args[0], ["docker", "stop", self.cid])
-                self.assertTrue(popen.call_args.kwargs["start_new_session"])
+                    producer.stop_builder(); self.assertTrue(producer.builder_closed); kill.assert_not_called(); process.wait.assert_called_once_with(timeout=1)
+                guard.assert_not_called(); self.assertEqual(popen.call_args.args[0], ["docker", "stop", self.cid]); self.assertTrue(popen.call_args.kwargs["start_new_session"])
 
     def test_first_failure_priority_survives_closure_oom(self):
         # main owns its process umask; restore it in this in-process fixture.
@@ -1024,6 +1010,15 @@ class ClosingPhaseControls(unittest.TestCase):
                 "--tooling-sha", "a"*40, "--work-dir", str(self.root / "work"), "--run-id", "1-1", "--resource-profile", P.HOSTED_PROFILE])
         receipt = json.loads(stderr.getvalue())
         self.assertEqual(result, 1); self.assertEqual(receipt["result"], "ORIGINAL_FAILURE"); self.assertEqual(receipt["closure"], "BUILDER_OOM")
+
+    def test_owned_oom_still_stops_but_never_claims_clean_closure(self):
+        self.producer.cid = self.cid; self.producer.builder_created = True
+        live = copy.deepcopy(self.live); live["State"]["OOMKilled"] = True
+        stopped = copy.deepcopy(live); stopped["State"].update(Running=False, Pid=0)
+        with patch.object(self.producer, "owned_builder", side_effect=[live, stopped]), patch.object(self.producer, "command") as command, patch.object(P, "resources", side_effect=AssertionError("cleanup cannot depend on headroom")) as measured:
+            with self.assertRaisesRegex(P.Refusal, "BUILDER_OOM"): self.producer.stop_builder()
+            self.assertEqual(command.call_args.args[1], ["docker", "stop", self.cid]); measured.assert_not_called()
+            self.assertFalse(self.producer.builder_closed); self.assertIsNone(self.producer.builder_terminal)
 
 
 class ErrorProjectionControls(unittest.TestCase):
@@ -1043,23 +1038,10 @@ class ErrorProjectionControls(unittest.TestCase):
                 return wrapped
         raise AssertionError("synthetic read must refuse")
 
-    def test_bootstrap_launcher_and_builder_original_cause_projection(self):
+    def test_standalone_reader_original_cause_projection_preserves_privacy(self):
         for role in ["launcher", "builder"]:
-            with self.subTest(role=role):
-                producer = P.Producer(self.root, "fixture", P.HOSTED_PROFILE)
-                producer.builder_created = role == "builder"; producer.cid = self.cid
-                error = self.read_error(OSError(13, "PRIVATE_TOKEN", "memory.peak"))
-                def chain(pid="self", **kw):
-                    if (role == "launcher" and pid == "self") or (role == "builder" and pid == "123"):
-                        raise error
-                    return []
-                with patch.object(P, "cgroup_chain", side_effect=chain), patch.object(P, "resources", return_value=self.measured(P.MEMORY_FLOOR)), \
-                        patch.object(producer, "owned_builder", return_value=self.live), patch.object(producer, "command") as command:
-                    with self.assertRaises(P.Refusal) as caught: producer.check_resources("builder-bootstrap", running=True)
-                command.assert_not_called()
-                self.assertEqual(P.failure_diagnostic(caught.exception, producer.diagnostic_context), {
-                    "phase": "builder-bootstrap", "role": role, "primitive": "MEMORY_PEAK_READ_PARSE",
-                    "exception_class": "OSError", "errno": 13, "source_line": 184})
+            error = self.read_error(OSError(13, "PRIVATE_TOKEN", "memory.peak"))
+            self.assertEqual(P.failure_diagnostic(error, {"phase": "builder-bootstrap", "role": role}), {"phase": "builder-bootstrap", "role": role, "primitive": "MEMORY_PEAK_READ_PARSE", "exception_class": "OSError", "errno": 13, "source_line": 184})
 
     def test_main_preserves_primary_and_distinct_closure_diagnostic(self):
         old_umask = P.os.umask(0o022); P.os.umask(old_umask); self.addCleanup(P.os.umask, old_umask)
