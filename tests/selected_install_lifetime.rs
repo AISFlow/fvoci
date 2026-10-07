@@ -478,6 +478,28 @@ async fn selected_install_sigterm_waits_actual_commit_and_close() {
     for (phase, entered) in [("commit", b'C'), ("close", b'L')] {
         let run = inputs.run_directory(phase);
         let db = run.join("data/app.sqlite");
+        // The close barrier also exercises a current installation with data.
+        // Keep the COMMIT barrier fresh so it still pauses real DDL/receipt COMMIT.
+        let user_id = Uuid::now_v7();
+        let seed = if phase == "close" {
+            migrate::run_sqlite_migrations(&db).await.unwrap();
+            std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let pool = pool::connect_sqlite_app(&db, 1).await.unwrap();
+            sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,'signal@fixture.invalid','Preserved signal user')")
+                .bind(user_id.as_bytes().as_slice())
+                .execute(&pool).await.unwrap();
+            let ledger: Vec<(i64, String, String, i64)> = sqlx::query_as(
+                "SELECT version,lineage,sql_sha256,applied_at FROM schema_migrations ORDER BY version",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+            let meta = std::fs::metadata(&db).unwrap();
+            Some(((meta.dev(), meta.ino()), ledger))
+        } else {
+            None
+        };
         let gates = run.join("gates");
         std::fs::create_dir(&gates).unwrap();
         std::fs::set_permissions(&gates, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -502,10 +524,13 @@ async fn selected_install_sigterm_waits_actual_commit_and_close() {
             [entered],
             "actual worker did not reach its named gate"
         );
+        let meta = std::fs::metadata(&db).unwrap();
+        let held_inode = (meta.dev(), meta.ino());
         process.signal();
-        process
-            .line("preparation SIGTERM cancellation requested; awaiting original owner before exit")
-            .await;
+        // Signal arbitration now logs only AFTER awaiting the original owner.
+        // Waiting for that line here would deadlock against our unreleased gate.
+        // Prove cancellation from the original settled result below instead.
+        let executable = std::fs::metadata(&inputs.migrate).unwrap();
         // The original caller's unchanged runtime shutdown budget is five
         // seconds. Cross it with the same COMMIT/close still held, rather
         // than mistaking buffered SIGTERM or a brief scheduling delay for join.
@@ -516,6 +541,13 @@ async fn selected_install_sigterm_waits_actual_commit_and_close() {
                 "process exited before original gate release: {}",
                 process.text()
             );
+            let actual_executable =
+                std::fs::metadata(format!("/proc/{}/exe", process.child.id())).unwrap();
+            assert_eq!(
+                (actual_executable.dev(), actual_executable.ino()),
+                (executable.dev(), executable.ino()),
+                "entrypoint execed before original gate release"
+            );
             assert!(migrate::SqliteAdmission::server(&db).is_err());
             assert!(!process.text().contains("fvoci-server listening"));
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -523,14 +555,56 @@ async fn selected_install_sigterm_waits_actual_commit_and_close() {
         gate.write_all(b"R").await.unwrap();
         let status = process.finish().await;
         assert_eq!(status.code(), Some(143));
+        let text = process.text();
         assert!(
-            process.text().contains("Closed"),
-            "original owned cleanup/join disposition missing"
+            text.contains("original result and owned drain: Err(Sqlite {")
+                && text.contains("SQLite migration cancelled")
+                && text.contains("drain: Some(Ok(Closed))")
+                && text.contains("control: None"),
+            "original cancelled migration and confirmed close/join missing: {text}"
+        );
+        let mut eof = [0];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), gate.read(&mut eof))
+                .await
+                .unwrap()
+                .unwrap(),
+            0,
+            "original worker gate remained open after process settlement"
         );
         assert!(process.text().contains("no server exec"));
         assert!(!process.text().contains("fvoci-server listening"));
         let admission = migrate::SqliteAdmission::installation_handoff(&db).unwrap();
         drop(admission);
+        let meta = std::fs::metadata(&db).unwrap();
+        let inode = (meta.dev(), meta.ino());
+        assert_eq!(inode, held_inode, "signal path recreated the held DB");
+        if let Some((seed_inode, _)) = &seed {
+            assert_eq!(inode, *seed_inode, "signal path recreated the seeded DB");
+        }
+        let pool = pool::connect_sqlite_app(&db, 1).await.unwrap();
+        let ledger: Vec<(i64, String, String, i64)> = sqlx::query_as(
+            "SELECT version,lineage,sql_sha256,applied_at FROM schema_migrations ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+        if let Some((_, seed_ledger)) = &seed {
+            assert_eq!(
+                &ledger, seed_ledger,
+                "signal path rewrote current migration receipts"
+            );
+        }
+        assert_eq!(
+            ledger.len(),
+            if phase == "commit" {
+                1
+            } else {
+                migrate::compiled_sqlite_steps().len()
+            },
+            "cancellation must retain the committed prefix and stop before another step"
+        );
         // Restart uses actual current migration receipts and schema; a first
         // COMMIT may have completed despite cancellation. No reset is allowed.
         let mut restart =
@@ -547,11 +621,44 @@ async fn selected_install_sigterm_waits_actual_commit_and_close() {
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(
             response.json::<serde_json::Value>().await.unwrap()["needed"],
-            true
+            phase == "commit"
         );
+        let meta = std::fs::metadata(&db).unwrap();
+        assert_eq!((meta.dev(), meta.ino()), inode, "restart recreated the DB");
+        let pool = pool::connect_sqlite_app(&db, 1).await.unwrap();
+        migrate::assert_sqlite_schema_current(&Backend::Sqlite(pool.clone()))
+            .await
+            .unwrap();
+        let current: Vec<(i64, String, String, i64)> = sqlx::query_as(
+            "SELECT version,lineage,sql_sha256,applied_at FROM schema_migrations ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            &current[..ledger.len()],
+            ledger.as_slice(),
+            "restart rewrote committed migration receipts"
+        );
+        if phase == "close" {
+            let preserved: (Vec<u8>, String) = sqlx::query_as(
+                "SELECT id,given_name FROM users WHERE email='signal@fixture.invalid'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                preserved,
+                (
+                    user_id.as_bytes().to_vec(),
+                    "Preserved signal user".to_string()
+                )
+            );
+        }
+        pool.close().await;
         restart.signal();
         assert!(restart.finish().await.success());
-        std::fs::write(run.report("signal-gate-readback.json"), json!({"phase":phase,"signalExit":143,"heldBeyondOriginalFiveSecondShutdown":true,"originalDrain":"Closed","serverExecDuringSignal":false,"restartExit":0,"restartSetupNeeded":true}).to_string()).unwrap();
+        std::fs::write(run.report("signal-gate-readback.json"), json!({"phase":phase,"signalExit":143,"heldBeyondOriginalFiveSecondShutdown":true,"originalDrain":"Closed","serverExecDuringSignal":false,"restartExit":0,"restartSetupNeeded":phase == "commit","gateEof":true,"databaseInodePreserved":true,"migrationReceiptsPreserved":true,"seededUserPreserved":phase == "close"}).to_string()).unwrap();
         drop(restart);
         drop(process);
         drop(gate);
