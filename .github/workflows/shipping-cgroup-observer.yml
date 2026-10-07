@@ -39,7 +39,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: b949b21cba8cf562487ec7cc80a9d2cf40f9975f
+          ref: f7c0c2003619b18a64c93a05188043e84f2bf975
           path: reader
           persist-credentials: false
       - name: Pure observer controls
