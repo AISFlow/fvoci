@@ -2232,6 +2232,43 @@ class SelectedLibraryExecutionTest(unittest.TestCase):
                     self.assertEqual(len(self.run_workflow_fixture(kind, fail_index)), fail_index + 1)
 
 class RegistryMutationCliTest(unittest.TestCase):
+    def test_fast_cache_retains_restore_only_pin_and_complete_inputs(self) -> None:
+        for mutation in ("combined-post", "wrong-pin", "path", "architecture", "toolchain", "sqlite", "source", "fallback", "skip"):
+            with self.subTest(mutation=mutation):
+                root = self._mutated_root()
+                path = root / ".github/workflows/rust.yml"
+                data, err = SEL._load_yaml_mapping(path)
+                self.assertIsNone(err)
+                cache = next(step for step in data["jobs"]["fast"]["steps"] if step.get("name") == "Restore server build outputs")
+                if mutation == "combined-post":cache["uses"] = cache["uses"].replace("cache/restore@", "cache@")
+                elif mutation == "wrong-pin":cache["uses"] = "actions/cache/restore@v4"
+                elif mutation == "path":cache["with"]["path"] = "/foreign/target"
+                elif mutation == "architecture":cache["with"]["key"] = cache["with"]["key"].replace("${{ runner.arch }}", "fixed")
+                elif mutation == "toolchain":cache["with"]["key"] = cache["with"]["key"].replace("1.98.1", "old")
+                elif mutation == "sqlite":cache["with"]["key"] = cache["with"]["key"].replace("${{ steps.sqlite.outputs.cache_identity }}", "")
+                elif mutation == "source":cache["with"]["key"] = cache["with"]["key"].replace("'src/**', ", "")
+                elif mutation == "fallback":cache["with"]["restore-keys"] = "v2-server-"
+                else:cache["if"] = "false"
+                import yaml
+                path.write_text(yaml.safe_dump(data, sort_keys=False))
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, "fast server cache must retain exact pinned restore-only")
+
+    def test_official_separate_cache_families_keep_architecture_and_toolchain_qualification(self) -> None:
+        for family in ("restore", "save"):
+            with self.subTest(family=family):
+                root = self._mutated_root()
+                path = root / ".github/workflows/rust.yml"
+                data, err = SEL._load_yaml_mapping(path)
+                self.assertIsNone(err)
+                cache = next(step for step in data["jobs"]["fast"]["steps"] if step.get("name") == "Restore Cargo downloads")
+                cache["uses"] = cache["uses"].replace("cache@", "cache/" + family + "@")
+                cache["with"]["key"] = "unqualified-downloads"
+                import yaml
+                path.write_text(yaml.safe_dump(data, sort_keys=False))
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, "cache key must bind Ubuntu 26.04, architecture and toolchain")
+
     def test_postgres_budget_mutations_rejected_before_plan_outputs(self) -> None:
         for mutation in ("missing-c", "missing-gate", "wrong-selection", "longer-budget", "cache-fallback"):
             with self.subTest(mutation=mutation):

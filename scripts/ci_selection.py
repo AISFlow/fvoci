@@ -1789,7 +1789,8 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
                 if not runners or any(not isinstance(label, str) or label not in RUST_POSTGRES_RUNNER_ARCH for label in runners):
                     errors.append(f"{path.name}: {job_id} requires explicit Ubuntu 26.04 runners")
                 for step in job.get("steps", []):
-                    if not isinstance(step, dict) or not str(step.get("uses", "")).startswith("actions/cache@"):
+                    if not isinstance(step, dict) or not str(step.get("uses", "")).startswith((
+                            "actions/cache@", "actions/cache/restore@", "actions/cache/save@")):
                         continue
                     cache = step.get("with", {})
                     # This source-only cache is revalidated by fetch-rhwp.sh.
@@ -1820,6 +1821,18 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
         if any(not isinstance(job_id, str) or not JOB_ID_RE.match(job_id) for job_id in jobs):
             errors.append(f"{workflow}: invalid job id")
             continue
+
+        if workflow == "rust":
+            cache = [step for step in jobs.get("fast", {}).get("steps", [])
+                     if isinstance(step, dict) and step.get("name") == "Restore server build outputs"]
+            expected_cache = {
+                "name": "Restore server build outputs",
+                "uses": "actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830",
+                "with": {"path": "target", "key": RUST_POSTGRES_BUILD_CACHE_KEY.replace(
+                    "-db-db-tests-nodebug-", "-fast-db-tests-nodebug-", 1)},
+            }
+            if cache != [expected_cache]:
+                errors.append("rust: fast server cache must retain exact pinned restore-only complete-input key without post save")
 
         reserved_gate = gate_job_id(workflow)
         if PLAN_JOB_ID not in jobs:
