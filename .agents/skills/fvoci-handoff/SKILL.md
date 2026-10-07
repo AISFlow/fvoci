@@ -24,6 +24,23 @@ description: 모든 변경의 제출·독립 검토·통합·재개·자원 정�
 
 사용하는 경로의 완료 전달 절차(workflow 결과·journal, Orca의 완료 전송·ack·release)를 따른다. idle이나 종료된 터미널은 기능 완료의 증거가 아니다. 전체 대화·시크릿은 저장하지 않는다.
 
+## 영속 evidence root와 명시적 전달
+
+현재 환경값은 [환경 기록§5.1](../../environment.md#51-현재-run의-영속-evidence-root)만 정본으로 두고 task마다 절대 경로를 명시한다. 코디네이터가 한 번 해결한 run root와 작성 가능한 task/시도 하위 경로를 task 명세에 넣어 전달하고, 워커는 받은 값·실제 경로·owner/쓰기 가능 여부와 명령의 기존 인자를 대조한다. 다른 사용자/클라우드/CI도 자신의 명시적 영속 보관 위치를 사용한다. 필수 root가 없거나 불가하면 실행 전에 실패를 보고하고 기본 `/tmp`·cache로 fallback하지 않는다; 환경만 지정하고 전달/수락이 자동 완료됐다고 하지 않는다.
+
+기존 경로 옵션을 재사용하며 공통 자동 전파 기능이나 새 변수를 만들지 않는다. 아래는 호출 형태이며 실행 권한/준비 완료가 아니다. `task_evidence_dir`는 task에서 받은 새 시도의 경로이고, 각 명령의 생성/존재·권한 조건과 실제 allocation을 먼저 만족해야 한다.
+
+```sh
+: "${task_evidence_dir:?task evidence directory must be explicitly supplied}"
+FVOCI_EVIDENCE_DIR="$task_evidence_dir" bash scripts/collab-capacity-probe.sh
+python3 scripts/run-selected-backend-e2e.py record-before --output "$task_evidence_dir"
+```
+
+- Capacity probe만 기존 `FVOCI_EVIDENCE_DIR`를 로그 디렉터리로 읽는다. selected 명령은 필수 `--output`을 사용하고 shell caller가 `FVOCI_SELECTED_CI_OUTPUT`을 명시 전달한다; local allocation의 `outputRoot`와 runtime 하위 경로 `FVOCI_CI_SELECTED_RUNS`/`runRoot`가 일치해야 한다. 일반 Python entry는 output을 resolve하지만 Web handoff는 실제 절대 경로·실행 계정 소유·0700을 거부 조건으로 확인하므로 처음부터 명시 절대 경로를 준다.
+- `FVOCI_WEB_BUILD_HANDOFF`/digest·source/feature/ABI·owner/allocation·uid/gid·CI/local 실행 gate를 그대로 유지한다. 이미 바인딩한 output/packet/native/input 경로를 새 root 규칙 때문에 이동·치환하지 않는다. explicit CI staging은 기존 handoff/artifact 보관으로 영속 근거를 연결하며 cache hit나 임시 output을 최종 보존 증거로 대신하지 않는다.
+- 역사적 upgrade-smoke의 기존 `--evidence-dir "$task_evidence_dir"`는 해당 명령이 승인될 때만 사용한다. tmp 기본값은 현재0.6 신규 설치/현재 archive 복원 gate에 적용되지 않는다. 다른 명령의 기존 `--output`·run 경로·`FVOCI_PERF_OUT`·`FVOCI_NATIVE_IME_EVIDENCE`도 각자의 의미를 유지하며 통째로 새 변수로 대체하지 않는다.
+- 최초 결과·실패·missing log·seal을 보존하고 retry에는 별도 시도 경로/ID를 준다. archive evidence와 재생성 가능한 cache를 구분하되 유일한 qualified binary/input·원 근거는 cache 정리 대상으로 간주하지 않는다. 원 실행과 결과·후속 명령을 연결하고, 필요한 관측 외 token/cookie/접속 URL/host·전체 환경·불필요한 session/transcript를 저장하지 않는다.
+
 ## 검토와 통합
 
 코디네이터가 고정된 제출 SHA의 diff/계약/검사 결과를 확인한다. AGENTS.md 역할표의 독립 검토자는 필요한 설계·보안·협업 위험을 검토하며 차단 결함·근거·최소 수정안을 반환한다. 검토 문구가 실제 검사 결과를 대신하지 않는다.

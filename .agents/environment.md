@@ -172,6 +172,16 @@ full-web emit TS2742·잘못 설치된 TS 버전 등을 any shim·rule 완화로
 복구는 별도 사건이다. 현재 run/worker receipt 성공을 화면 focus나 매 순간 OS UI가 정상이라는 주장으로 확대하지 않는다.
 실패와 support recovery·실제 runtime 모델 증거는 보고서에 남긴다.
 
+### 5.1 현재 Run의 영속 evidence root
+
+현재 WSL 실행에서 코디네이터가 정한 root `E`는 `/home/kinesis/orca/fvoci-evidence/v060-20261004/coherent-final-ci-root/`다. 2026-10-07 관측: 실제 절대 경로·uid1000 소유·쓰기/탐색 가능, root mode0755이며 비공개 task/output 하위 경로의0700·파일0600 계약은 별도로 적용한다. 기존 root/실행 경로·봉인·Grok 배치 바인딩을 변경하거나 공통 권한을 조정하지 않는다.
+
+이는 현재 환경의 값이며 모든 사용자/호스트/CI의 고정 설치 경로가 아니다. 다른 환경은 코디네이터가 명시한 접근 가능한 영속 절대 경로를 사용하고 task의 root·허용 하위 경로·기존 출력 인자를 대조한다. 필수 root 누락·불가에는 실행을 시작하지 않고 보고하며 `/tmp`나 cache로 자동 대체하지 않는다. 경로와 보존 위치가 명시된 기존 CI staging/artifact handoff는 원래 literal 경로·수락/영속 보관 계약을 유지한다; 임시 output 존재만으로 근거 보존을 완료했다고 하지 않는다.
+
+전달 절차·기존 인자 의미는 [handoff의 evidence root 절차](skills/fvoci-handoff/SKILL.md#영속-evidence-root와-명시적-전달)를 따른다. task 명세의 root/허용 하위 경로와 실제 프로세스에 전달한 값이 근거이며, 부모 shell 환경이 워커에 자동 전달됐다고 가정하지 않는다. `FVOCI_EVIDENCE_DIR`는 capacity probe의 기존 로그 옵션이고 selected는 `FVOCI_SELECTED_CI_OUTPUT`/필수 `--output`, allocation의 `outputRoot`/`runRoot` 및 handoff 절대 경로·소유자·0700을 유지한다. 새 공통 환경변수나 evidence framework는 추가하지 않는다.
+
+`target/collab-probe-logs`의 capacity 기본값과 upgrade-smoke의 임시 기본값은 개발/역사 명령의 configurable default이며 실제 로그를 재생성 가능한 cache로 분류하지 않는다. 이번0.6 활성 실행에 자동 사용하지 않고 실제 필요 시 기존 명시 옵션으로 연결한다. 과거 개발 upgrade-smoke는 현재0.6 gate가 아니며 기본값 개선은 별도 후속이다. 과거 고정 evidence 절대 경로는 §6·고정 보고서에 보존하고 일괄 치환하지 않는다.
+
 ## 6. 과거 기록과 재개 포인터
 
 #272 전환 당시에는 Vue 후보 URL 연결 → Rust/API/DB·production 브라우저 검증 → 독립 검토·CI → main 수락

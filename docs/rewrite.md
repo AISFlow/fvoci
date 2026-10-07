@@ -26,7 +26,7 @@
 
 현재 근거는 [#331](https://github.com/AISFlow/fvoci/issues/331), [OFF #335](https://github.com/AISFlow/fvoci/issues/335),
 [설치·현재 데이터 #342](https://github.com/AISFlow/fvoci/issues/342)다.
-영속 root `E` = `/home/kinesis/orca/fvoci-evidence/v060-20261004/coherent-final-ci-root/`.
+영속 root `E`의 현재 환경값과 전달 규칙은 [환경 기록§5.1](../.agents/environment.md#51-현재-run의-영속-evidence-root)을 따른다.
 현재 main/head/소유권 관측은 `E/docs-alignment-20261007/current-basis.json`과 같은 디렉터리의 issue snapshots,
 재개·WIP 보존은 [종료 전 인계](https://github.com/AISFlow/fvoci/issues/331#issuecomment-6030957827)와
 `E/current-ownership-ledger.json`을 따른다. 이전162개 worktree·11개 dirty WIP·실패·Run을 보존했으며 옛 PID는 현재 실행 권한이 아니다.
