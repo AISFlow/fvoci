@@ -88,6 +88,7 @@ receipt = {
     'free_before': shutil.disk_usage(P).free, 'retry': 0,
 }
 write(P / 'start.json', receipt)
+receipt.update(phase='container-prepare', owned_container_absent=None)
 created = False
 code = 1
 try:
@@ -132,6 +133,7 @@ try:
             '--env', 'FVOCI_SELECTED_INSTALL_MIGRATE_SHA256=' + bins[migrate]['sha256'],
             '--env', 'FVOCI_SELECTED_INSTALL_SERVER_SHA256=' + bins[server]['sha256'],
             NAME, '/fvoci/bin/install-test', '--test-threads=1', '--nocapture']
+    receipt['phase'] = 'install-body'
     receipt.update(command=args, body_start_utc=now())
     write(P / 'progress.json', receipt)
     started = time.monotonic()
@@ -149,6 +151,8 @@ try:
         assert all(json.loads(f.read_text())['status'] is not None for f in processes)
         receipt.update(actual_tests=4, ignored=0, actual_owned_process_receipts=15)
 except BaseException as error:
+    receipt['failed_phase'] = receipt['phase']
+    receipt['original_driver_failure'] = {'type':type(error).__name__,'message':str(error)}
     receipt['driver_error'] = str(error)
     code = code or 1
 finally:
@@ -159,7 +163,8 @@ finally:
         cleanup = command(['docker', 'rm', '-f', '-v', NAME], check=False)
         receipt['owned_container_cleanup_exit'] = cleanup.returncode
         absence = command(['docker', 'inspect', NAME], check=False)
-        receipt['owned_container_absent'] = absence.returncode != 0
+        receipt['owned_container_absent'] = absence.returncode != 0 and any(
+            marker in absence.stderr.lower() for marker in ('no such object','no such container'))
         if cleanup.returncode or not receipt['owned_container_absent']:
             code = code or 1
     changed_inputs = [n for n, h in before['tracked'].items() if sha(W/n) != h] + [n for n, h in before['external'].items() if sha(n) != h]
@@ -169,6 +174,11 @@ finally:
     receipt.update(end_utc=now(), final_exit_code=code, free_after=shutil.disk_usage(P).free,
                    final_source=subprocess.check_output(['git', '-c', 'safe.directory=' + str(W), '-C', str(W), 'rev-parse', 'HEAD'], text=True).strip())
     write(P / 'receipt.json', receipt)
-    print(json.dumps({k: receipt.get(k) for k in ['source', 'final_exit_code', 'actual_tests',
-          'actual_owned_process_receipts', 'driver_error', 'owned_container_absent', 'body_seconds']}), flush=True)
+    summary={k:receipt.get(k) for k in ('source','final_exit_code','actual_tests','actual_owned_process_receipts',
+             'owned_container_absent','body_seconds','failed_phase')}
+    original=receipt.get('original_driver_failure')
+    summary.update(failure_code='SELECTED_INSTALL_DRIVER_FAILED' if code else None,
+        original_driver_failure_sha256=hashlib.sha256(json.dumps(original,sort_keys=True).encode()).hexdigest() if original is not None else None)
+    print(json.dumps(summary),flush=True)
+
 sys.exit(code)

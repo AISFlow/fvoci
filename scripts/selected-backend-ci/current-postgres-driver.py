@@ -235,7 +235,10 @@ if len(sys.argv) == 1:
                'ended_utc': now(), 'retained_private_evidence': str(run),
                'scope': 'one normal restricted PG18/current Vue tracer; no full0.6/Turso/restore/CI/shipping acceptance'}
     write(run / 'parent-receipt.json', summary)
-    print(json.dumps(summary), flush=True)
+    print(json.dumps({'source':HEAD,'final_exit_code':code,'actual_child_receipt_present':child is not None,
+          'all_owned_fixtures_closed':complete,'exact_source_artifact_inputs_unchanged':inputs_equal,
+          'parent_receipt_sha256':sha(run/'parent-receipt.json'),
+          'failure_code':'SELECTED_PG_PARENT_FAILED' if code else None}),flush=True)
     sys.exit(code)
 
 assert len(sys.argv) == 3 and sys.argv[1] in ('--pg-ready', '--inside')
@@ -323,6 +326,9 @@ receipt = {'source': HEAD, 'tree': TREE, 'compiled_source': COMPILED_HEAD,
            'browser_retries': 0, 'workers': 1, 'application_role': role,
            'credential_separation': 'normal prepare creates NOSUPERUSER/NOBYPASSRLS role; existing exec_server removes preparation-only credentials, app role pool is independently observed; owner URL only in private provisioning fixture process',
            'original_failure_policy': 'retain raw logs/traces and bounded native/ID/receipt diagnostic without auth secret values; no reset/relaxed assertions'}
+receipt.update(phase='container-prepare', owned_container_absent=None,
+               owned_loopback_port_closed=None, loopback_port_observation='not-observed',
+               recorded_process_identities_retired=None)
 write(run / 'start.json', receipt)
 created = False
 server_process = None
@@ -357,6 +363,7 @@ try:
     hashes = command(['docker', 'exec', name, 'sha256sum', *[dest for _, dest in copies[:-1]]]).stdout
     assert [line.split()[0] for line in hashes.splitlines()] == [binaries[path]['sha256'] for path in (server, migrate, engine)]
     (run / 'copied-executable-hashes.log').write_text(hashes)
+    receipt['phase'] = 'server-startup'
     server_log = (run / 'normal-server.log').open('w')
     server_process = subprocess.Popen(['docker', 'exec', name, '/bin/sh', '-ec',
                                       '. /fvoci/inputs/environment.sh; exec /fvoci/bin/fvoci-migrate --start'],
@@ -371,6 +378,7 @@ try:
         assert server_process.poll() is None, 'normal entrypoint exited before listen; see actual raw log'
         assert time.monotonic() < deadline, 'normal entrypoint did not listen within unchanged10s process observation'
         time.sleep(0.02)
+    receipt.update(phase='server-ready', loopback_port_observation='observed')
     rows = owned_rows(name)
     candidates = [row for row in rows if row['args'] == '/fvoci/bin/fvoci-server' and not row.get('already_retired_at_observation')]
     assert len(candidates) == 1
@@ -431,6 +439,7 @@ try:
     write(run / 'actual-browser-inputs.json', browser_inputs)
     args = [str(BUN), '--bun', 'x', 'playwright', 'test', '--config', 'e2e-pending/collab-playwright.config.ts',
             '--reporter=line,json', SPEC]
+    receipt['phase'] = 'browser'
     receipt.update(browser_command=args, browser_environment_names=sorted(browser_env), browser_start_utc=now())
     write(run / 'browser-start.json', receipt)
     started = time.monotonic()
@@ -513,6 +522,7 @@ try:
                        actual_wrong_tenant_hidden=hidden, actual_restricted_role_durable_commit=durable,
                        tested_product_flow='identical actual currentVue setup/login/stable wiki create/nonempty nativeON/matching durableACK/manual DSSV reconstruction/fresh cookie actor and new connection native-body-ID-permission-history readback')
     if code == 0 and FLOW == 'on':
+        receipt['phase'] = 'restart'
         receipt['current_schema_server_restart'] = restart_same_app(globals())
     if code == 0 and FLOW == 'off':
         titles = validate_off_report(json.loads((run / 'playwright-result.private.json').read_text()), 'postgres')
@@ -520,6 +530,7 @@ try:
                        tested_product_flow='immutable OFF7 actual Vue CAS/replay/native history/task/note/owner-transition/current revoke')
 
 except BaseException as error:
+    receipt['failed_phase'] = receipt['phase']
     receipt['original_driver_failure'] = {'type': type(error).__name__, 'message': str(error)}
     code = code or 1
 finally:
@@ -559,7 +570,7 @@ finally:
             receipt['owned_container_absent'] = owned_object_absent(['docker', 'inspect', name])
             if removed.returncode or not receipt['owned_container_absent']:
                 cleanup_errors.append('owned app container cleanup/absence failed')
-            receipt['recorded_process_identities_retired'] = all(identity_gone(row) for row in rows)
+            receipt['recorded_process_identities_retired'] = bool(rows) and all(identity_gone(row) for row in rows)
             if not receipt['recorded_process_identities_retired']:
                 cleanup_errors.append('owned recorded app PID identity remains')
         except BaseException as error:
@@ -585,6 +596,8 @@ finally:
             receipt['owned_loopback_port_closed'] = probe.connect_ex(('127.0.0.1', int(base.rsplit(':',1)[1]))) != 0
         if not receipt['owned_loopback_port_closed']:
             cleanup_errors.append('owned app loopback port remains open')
+    if base is None:
+        cleanup_errors.append('owned loopback port never observed; retirement remains unqualified')
     try:
         after = post_inputs()
         write(run / 'source-inputs-after.json', after)
@@ -602,7 +615,12 @@ finally:
     receipt.update(cleanup_errors=cleanup_errors, final_exit_code=code, ended_utc=now(),
                    retained_private_evidence=str(run), retained_storage=str(storage))
     write(run / 'receipt.json', receipt)
-    print(json.dumps({key: receipt.get(key) for key in ['source','final_exit_code','actual_browser_tests',
-          'browser_exit','original_driver_failure','owned_container_absent','owned_loopback_port_closed',
-          'exact_source_artifact_inputs_unchanged','retained_private_evidence']}), flush=True)
+    summary={key:receipt.get(key) for key in ('source','final_exit_code','actual_browser_tests','browser_exit',
+             'owned_container_absent','owned_loopback_port_closed','recorded_process_identities_retired',
+             'loopback_port_observation','failed_phase','exact_source_artifact_inputs_unchanged')}
+    original=receipt.get('original_driver_failure')
+    summary.update(failure_code='SELECTED_DRIVER_FAILED' if code else None,
+        original_driver_failure_sha256=hashlib.sha256(json.dumps(original,sort_keys=True).encode()).hexdigest() if original is not None else None)
+    print(json.dumps(summary),flush=True)
+
 sys.exit(code)

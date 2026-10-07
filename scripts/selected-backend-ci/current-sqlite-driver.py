@@ -173,6 +173,9 @@ receipt = {'source': HEAD, 'tree': TREE, 'compiled_source': COMPILED_HEAD, 'curr
            'host_uid': os.getuid(), 'host_gid': os.getgid(), 'browser_retries': 0, 'workers': 1,
            'original_failure_policy': 'retain raw/traces/database/actor receipts; no reset or relaxed assertions',
            'restart_constraint': 'exact67c checkpoint preserves actor receipt privately and restarts SAME DB/storage; no reset/reseed'}
+receipt.update(phase='container-prepare', owned_container_absent=None,
+               owned_loopback_port_closed=None, loopback_port_observation='not-observed',
+               recorded_process_identities_retired=None)
 write(run / 'start.json', receipt)
 created = False
 server_process = None
@@ -211,6 +214,7 @@ try:
     assert [line.split()[0] for line in hashes.splitlines()] == [binaries[path]['sha256'] for path in (server, migrate, engine)]
     command(['docker', 'inspect', '--format', '{{.HostConfig.NetworkMode}}', name], run / 'actual-network-mode.log')
     assert (run / 'actual-network-mode.log').read_text().strip() == 'host'
+    receipt['phase'] = 'server-startup'
     server_log = (run / 'normal-server.log').open('w')
     server_process = subprocess.Popen(['docker', 'exec', name, '/bin/sh', '-ec',
                                       '. /fvoci/inputs/environment.sh; exec /fvoci/bin/fvoci-migrate --start'],
@@ -225,6 +229,7 @@ try:
         assert server_process.poll() is None, 'normal entrypoint exited before listen; see actual raw log'
         assert time.monotonic() < deadline, 'normal entrypoint did not listen within unchanged10s process observation'
         time.sleep(0.02)
+    receipt.update(phase='server-ready', loopback_port_observation='observed')
     rows = owned_rows(name)
     candidates = [row for row in rows if row['args'] == '/fvoci/bin/fvoci-server' and not row.get('already_retired_at_observation')]
     assert len(candidates) == 1, 'one actual normal server required'
@@ -274,6 +279,7 @@ try:
                       'chromium_directory_files': tree_hashes(Path(chromium).parent)}
     write(run / 'actual-browser-inputs.json', browser_inputs)
     args = [str(BUN), '--bun', 'x', 'playwright', 'test', '--config', 'e2e-pending/collab-playwright.config.ts', '--reporter=line,json', SPEC]
+    receipt['phase'] = 'browser'
     receipt.update(browser_command=args, browser_environment_names=sorted(browser_env), browser_start_utc=now())
     write(run / 'browser-start.json', receipt)
     started = time.monotonic()
@@ -300,8 +306,10 @@ try:
                        actual_fixture_pin_checks_completed=True,
                        tested_product_flow=('immutable OFF7 actual Vue CAS/replay/native history/task/note/owner-transition/current revoke' if FLOW == 'off' else 'actual currentVue setup/login/stable wiki create/nonempty nativeON/matching durableACK/manualrevision/fresh cookie actor body-native-ID-permission-history readback'))
     if code == 0 and FLOW == 'on':
+        receipt['phase'] = 'restart'
         receipt['current_schema_server_restart'] = restart_same_app(globals())
 except BaseException as error:
+    receipt['failed_phase'] = receipt['phase']
     receipt['original_driver_failure'] = {'type': type(error).__name__, 'message': str(error)}
     code = code or 1
 finally:
@@ -325,10 +333,12 @@ finally:
                     cleanup_errors.append('owned server did not finish within unchanged10s process observation; forced container cleanup is not graceful PASS')
             removed = command(['docker', 'rm', '-f', '-v', name], required=False)
             receipt['owned_container_cleanup_exit'] = removed.returncode
-            receipt['owned_container_absent'] = command(['docker', 'inspect', name], required=False).returncode != 0
+            absent = command(['docker', 'inspect', name], required=False)
+            receipt['owned_container_absent'] = absent.returncode != 0 and any(
+                marker in absent.stderr.lower() for marker in ('no such object', 'no such container'))
             if removed.returncode or not receipt['owned_container_absent']:
                 cleanup_errors.append('owned container cleanup/absence failed')
-            receipt['recorded_process_identities_retired'] = all(identity_gone(row) for row in rows)
+            receipt['recorded_process_identities_retired'] = bool(rows) and all(identity_gone(row) for row in rows)
             if not receipt['recorded_process_identities_retired']:
                 cleanup_errors.append('owned recorded process identity remains')
         except BaseException as error:
@@ -336,7 +346,9 @@ finally:
             # Even if inspection failed, do not leak the uniquely owned container.
             removed = command(['docker', 'rm', '-f', '-v', name], required=False)
             receipt['exceptional_force_container_cleanup_exit'] = removed.returncode
-            receipt['owned_container_absent'] = command(['docker', 'inspect', name], required=False).returncode != 0
+            absent = command(['docker', 'inspect', name], required=False)
+            receipt['owned_container_absent'] = absent.returncode != 0 and any(
+                marker in absent.stderr.lower() for marker in ('no such object', 'no such container'))
             if removed.returncode or not receipt['owned_container_absent']:
                 cleanup_errors.append('exceptional owned container cleanup/absence failed')
     if server_process is not None and server_process.poll() is None:
@@ -356,6 +368,8 @@ finally:
             receipt['owned_loopback_port_closed'] = probe.connect_ex(('127.0.0.1', port)) != 0
         if not receipt['owned_loopback_port_closed']:
             cleanup_errors.append('owned loopback port remains open')
+    if base is None:
+        cleanup_errors.append('owned loopback port never observed; retirement remains unqualified')
     try:
         source_after = input_check(before)
         write(run / 'source-inputs-after.json', source_after)
@@ -378,7 +392,12 @@ finally:
     receipt.update(cleanup_errors=cleanup_errors, final_exit_code=code, ended_utc=now(),
                    retained_private_evidence=str(run), retained_dbroot=str(dbroot), retained_storage=str(storage))
     write(run / 'receipt.json', receipt)
-    print(json.dumps({key: receipt.get(key) for key in ['source', 'final_exit_code', 'actual_browser_tests',
-          'browser_exit', 'original_driver_failure', 'owned_container_absent', 'owned_loopback_port_closed',
-          'exact_source_artifact_inputs_unchanged', 'retained_private_evidence']}), flush=True)
+    summary={key:receipt.get(key) for key in ('source','final_exit_code','actual_browser_tests','browser_exit',
+             'owned_container_absent','owned_loopback_port_closed','recorded_process_identities_retired',
+             'loopback_port_observation','failed_phase','exact_source_artifact_inputs_unchanged')}
+    original=receipt.get('original_driver_failure')
+    summary.update(failure_code='SELECTED_DRIVER_FAILED' if code else None,
+        original_driver_failure_sha256=hashlib.sha256(json.dumps(original,sort_keys=True).encode()).hexdigest() if original is not None else None)
+    print(json.dumps(summary),flush=True)
+
 sys.exit(code)

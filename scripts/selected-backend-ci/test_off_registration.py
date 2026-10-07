@@ -125,17 +125,20 @@ class CompanionExecutionPlan(unittest.TestCase):
                 run=Path(allocation['runRoot']);run.mkdir()
                 receipt={'actual_browser_tests':7 if flow=='off' else 1,'retries':0,
                          'owned_container_absent':key!=cleanup_failed,'owned_loopback_port_closed':True,'recorded_process_identities_retired':True}
+                receipt.update(source=source['head'],tree=source['tree'],root_owner='pure-fixture-owner',
+                               selected_flow=flow,final_exit_code=23 if key==failed else 0,cleanup_errors=[])
                 if lane=='install':receipt.update(actual_tests=4,actual_owned_process_receipts=15)
                 elif flow=='on':receipt['current_schema_server_restart']={'restartBrowserExit':0}
                 (run/'receipt.json').write_text(json.dumps(receipt))
-                if lane=='postgres':(run/'parent-receipt.json').write_text(json.dumps({'all_owned_fixtures_closed':True}))
+                if lane=='postgres':(run/'parent-receipt.json').write_text(json.dumps({'all_owned_fixtures_closed':True,'source':source['head'],'tree':source['tree'],
+                     'root_owner':'pure-fixture-owner','selected_flow':flow}))
                 return subprocess.CompletedProcess(args,23 if key==failed else 0)
             environment={'GITHUB_RUN_ID':'123','GITHUB_RUN_ATTEMPT':'1'}
             with patch.dict(os.environ,environment,clear=True), patch.object(os,'getuid',return_value=1000),patch.object(os,'getgid',return_value=1000),patch.object(os,'access',return_value=True),patch.object(runner,'identity',return_value='pure-fixture-owner'),patch.object(runner,'runtime_access'),patch.object(runner,'call',return_value=str(output/'chromium')),patch.object(runner,'admitted_browser',return_value=str(output/'chromium') if admitted is None else admitted) as admission,patch.object(runner,'sha',return_value='0'*64),patch.object(runner.shutil,'which',return_value='/pure-fixture/bun'),patch.object(runner.subprocess,'run',side_effect=child):
                 # Only the admitted-browser boundary is modeled here: the real staging,
                 # admission and rejection controls live in scripts/fixtures/web-e2e/test-build-handoff.py.
                 # The product guard itself still runs and is exercised by the mismatch control below.
-                if cleanup_failed or admitted is not None:
+                if admitted is not None:
                     with self.assertRaises(AssertionError):runner.run(output)
                     self.admission_calls=admission.call_count
                     return seen,bindings,None
@@ -154,15 +157,17 @@ class CompanionExecutionPlan(unittest.TestCase):
             self.assertEqual('restartAllocation' in manifest, allocation['lane']!='install' and allocation['flow']=='on')
             self.assertTrue(allocation['exclusiveCIJob'] and allocation['currentCIJobConfirmed'])
 
-    def test_each_off_failure_remains_nonzero_without_omitting_other_backend(self):
+    def test_each_off_failure_remains_nonzero_and_stops_next_allocation(self):
         for key in [('postgres','off'),('sqlite','off')]:
             with self.subTest(key=key):
                 seen,bindings,(code,receipt)=self.run_plan(failed=key)
                 self.assertEqual(code,23);self.assertEqual(receipt['exit'],23)
-                self.assertEqual(seen[-2:],[('postgres','off'),('sqlite','off')])
+                expected=[('install','on'),('postgres','on'),('sqlite','on'),('postgres','off'),('sqlite','off')]
+                self.assertEqual(seen,expected[:expected.index(key)+1])
 
     def test_unclosed_sqlite_on_blocks_next_pg_off_allocation(self):
-        seen,_,_=self.run_plan(cleanup_failed=('sqlite','on'))
+        seen,_,(code,receipt)=self.run_plan(cleanup_failed=('sqlite','on'))
+        self.assertNotEqual(code,0);self.assertEqual(receipt['exit'],code)
         self.assertEqual(seen,[('install','on'),('postgres','on'),('sqlite','on')])
         self.assertEqual(self.admission_calls,1)
 

@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Pure receipt/control faults; never import or execute a runtime driver."""
+import ast
+import contextlib
+import copy
+import hashlib
+import importlib.util
+import io
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[2]
+HERE = Path(__file__).resolve().parent
+spec = importlib.util.spec_from_file_location('selected_failure_control', ROOT/'scripts/run-selected-backend-e2e.py')
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
+SOURCE, TREE, OWNER = 'a'*40, 'b'*40, 'pure-owned-control'
+PRIVATE = {'type':'AssertionError', 'message':'SYNTHETIC_PRIVATE_SECRET'}
+
+
+class EarlyDriverFailure(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.run = Path(self.tmp.name)
+        self.receipt = {'source':SOURCE,'tree':TREE,'root_owner':OWNER,'final_exit_code':7,
+            'selected_flow':'on','owned_container_absent':True,'owned_loopback_port_closed':True,
+            'recorded_process_identities_retired':True,'cleanup_errors':[],
+            'failed_phase':'server-startup','original_driver_failure':PRIVATE}
+        self.parent = {'source':SOURCE,'tree':TREE,'root_owner':OWNER,'selected_flow':'on',
+                       'all_owned_fixtures_closed':True}
+
+    def admit(self, receipt=None, parent=None, code=7):
+        (self.run/'receipt.json').write_text(json.dumps(self.receipt if receipt is None else receipt))
+        (self.run/'parent-receipt.json').write_text(json.dumps(self.parent if parent is None else parent))
+        return runner.lane_retirement(self.run,'postgres','on',SOURCE,TREE,OWNER,code)
+
+    def test_known_positive_retirement_can_preserve_a_failed_product_exit(self):
+        facts = self.admit()
+        self.assertTrue(facts['qualified'])
+        self.assertEqual(facts['failedPhase'],'server-startup')
+        self.assertEqual(facts['originalFailureSha256'],hashlib.sha256(json.dumps(PRIVATE,sort_keys=True).encode()).hexdigest())
+        self.assertNotIn(PRIVATE['message'],json.dumps(facts))
+
+    def test_missing_unobserved_or_false_port_never_becomes_a_positive_fact(self):
+        for value in ('missing',None,False,1,'true'):
+            with self.subTest(value=value):
+                receipt = copy.deepcopy(self.receipt)
+                if value == 'missing':receipt.pop('owned_loopback_port_closed')
+                else:receipt['owned_loopback_port_closed']=value
+                facts = self.admit(receipt)
+                self.assertFalse(facts['qualified'])
+                self.assertEqual(facts['refusalCodes'],['SELECTED_DRIVER_RETIREMENT_UNCONFIRMED'])
+                self.assertIsNotNone(facts['originalFailureSha256'])
+
+    def test_missing_changed_source_owner_exit_pid_fixture_and_cleanup_refuse(self):
+        for field in ('source','tree','root_owner','final_exit_code','recorded_process_identities_retired',
+                      'owned_container_absent','selected_flow','cleanup_errors'):
+            receipt = copy.deepcopy(self.receipt)
+            receipt.pop(field)
+            with self.subTest(field=field):self.assertFalse(self.admit(receipt)['qualified'])
+        for field in ('source','tree','root_owner','selected_flow','all_owned_fixtures_closed'):
+            parent = copy.deepcopy(self.parent)
+            parent[field]=False
+            with self.subTest(parent=field):self.assertFalse(self.admit(parent=parent)['qualified'])
+        self.assertFalse(self.admit(code=0)['qualified'])
+
+    def test_unreadable_malformed_or_nonobject_receipt_does_not_escape_as_keyerror(self):
+        for raw in ('not-json','[]','null','{}'):
+            (self.run/'receipt.json').write_text(raw)
+            facts=runner.lane_retirement(self.run,'postgres','on',SOURCE,TREE,OWNER,7)
+            self.assertFalse(facts['qualified'])
+            self.assertEqual(facts['receiptSha256'],hashlib.sha256(raw.encode()).hexdigest())
+        (self.run/'receipt.json').unlink()
+        self.assertFalse(runner.lane_retirement(self.run,'postgres','on',SOURCE,TREE,OWNER,7)['qualified'])
+
+    def test_partial_actual_failure_has_diagnostic_but_cannot_return_ownership(self):
+        output=self.run/'output';output.mkdir()
+        runtime=output/'runtime';runtime.mkdir()
+        runroot=runtime/'root-current-postgres-0123456789ab';runroot.mkdir()
+        receipt=dict(self.receipt,owned_loopback_port_closed=None)
+        (runroot/'receipt.json').write_text(json.dumps(receipt))
+        (output/'before.json').write_text(json.dumps({'head':SOURCE,'tree':TREE}))
+        (output/'postgres-on-allocation.json').write_text('{}')
+        (output/'selected-ci-receipt.json').write_text(json.dumps({'owner':OWNER,'source':SOURCE,'tree':TREE,
+            'exit':7,'allRequestedRunsExecuted':False,'runs':[{'lane':'postgres','flow':'on','exit':7,
+                'actualSource':SOURCE,'runRoot':str(runroot)}]}))
+        stdout=io.StringIO()
+        with patch.dict(runner.os.environ,{'GITHUB_SHA':SOURCE,'GITHUB_JOB':'collaboration-flow'},clear=True), \
+             patch.object(runner,'identity',return_value=OWNER),patch.object(runner.os,'getuid',return_value=1000), \
+             patch.object(runner.os,'getgid',return_value=1000),contextlib.redirect_stdout(stdout):
+            with self.assertRaises(AssertionError):runner.runtime_ownership_return(output)
+        diagnostic=json.loads(stdout.getvalue())
+        self.assertFalse(diagnostic['ownership_return_qualified'])
+        self.assertEqual(diagnostic['selected_exit'],7)
+        self.assertEqual(diagnostic['lanes'][0]['invalid_required_fields'],['owned_loopback_port_closed'])
+        self.assertIsNotNone(diagnostic['lanes'][0]['original_driver_failure_sha256'])
+        self.assertNotIn(PRIVATE['message'],stdout.getvalue())
+        self.assertFalse((output/'runtime-close-stage.json').exists())
+
+
+class ActualDriverSourceControls(unittest.TestCase):
+    def test_actual_container_absence_requires_positive_docker_absence(self):
+        for name in ('sqlite','install'):
+            tree=ast.parse((HERE/('current-'+name+'-driver.py')).read_text())
+            assignment=next(n for n in ast.walk(tree) if isinstance(n,ast.Assign)
+                and any(isinstance(t,ast.Subscript) and ast.unparse(t)=="receipt['owned_container_absent']" for t in n.targets)
+                and isinstance(n.value,ast.BoolOp))
+            for status,message,expected in ((1,'No such container: owned',True),(1,'permission denied',False),
+                                             (1,'daemon unreachable',False),(0,'No such container: owned',False)):
+                result=type('PureDockerResult',(),{'returncode':status,'stderr':message})()
+                state={'receipt':{},'absence':result,'absent':result}
+                exec(compile(ast.fix_missing_locations(ast.Module(body=[assignment],type_ignores=[])),name,'exec'),state)
+                self.assertIs(state['receipt']['owned_container_absent'],expected)
+
+    def test_empty_process_observation_cannot_claim_retired_identities(self):
+        for name in ('postgres','sqlite'):
+            tree=ast.parse((HERE/('current-'+name+'-driver.py')).read_text())
+            assignment=next(n for n in ast.walk(tree) if isinstance(n,ast.Assign)
+                and any(isinstance(t,ast.Subscript) and ast.unparse(t)=="receipt['recorded_process_identities_retired']" for t in n.targets))
+            for rows,gone,expected in (([],True,False),([{}],False,False),([{}],True,True)):
+                state={'receipt':{},'rows':rows,'identity_gone':lambda _:gone}
+                exec(compile(ast.fix_missing_locations(ast.Module(body=[assignment],type_ignores=[])),name,'exec'),state)
+                self.assertIs(state['receipt']['recorded_process_identities_retired'],expected)
+
+    def test_actual_unknown_port_and_original_phase_records_without_runtime_import(self):
+        for name in ('postgres','sqlite'):
+            with self.subTest(backend=name):
+                tree=ast.parse((HERE/('current-'+name+'-driver.py')).read_text())
+                initial=next(n for n in tree.body if isinstance(n,ast.Expr) and isinstance(n.value,ast.Call)
+                    and isinstance(n.value.func,ast.Attribute) and n.value.func.attr=='update'
+                    and any(k.arg=='owned_loopback_port_closed' for k in n.value.keywords))
+                main=next(n for n in tree.body if isinstance(n,ast.Try) and n.finalbody)
+                unknown=next(n for n in main.finalbody if isinstance(n,ast.If)
+                    and ast.unparse(n.test)=='base is None')
+                state={'receipt':{},'cleanup_errors':[],'base':None,'code':7,'error':AssertionError(PRIVATE['message'])}
+                body=[initial,*main.handlers[0].body,unknown]
+                exec(compile(ast.fix_missing_locations(ast.Module(body=body,type_ignores=[])),str(HERE/name),'exec'),state)
+                self.assertIsNone(state['receipt']['owned_loopback_port_closed'])
+                self.assertEqual(state['receipt']['failed_phase'],'container-prepare')
+                self.assertEqual(state['receipt']['original_driver_failure'],PRIVATE)
+                self.assertEqual(state['code'],7)
+                self.assertEqual(len(state['cleanup_errors']),1)
+
+    def test_actual_driver_public_failure_summaries_disclose_hashes_only(self):
+        for name in ('postgres','sqlite','install'):
+            with self.subTest(backend=name):
+                tree=ast.parse((HERE/('current-'+name+'-driver.py')).read_text())
+                main=next(n for n in tree.body if isinstance(n,ast.Try) and n.finalbody)
+                start=next(i for i,n in enumerate(main.finalbody) if isinstance(n,ast.Assign)
+                           and any(isinstance(t,ast.Name) and t.id=='summary' for t in n.targets))
+                receipt={'source':SOURCE,'original_driver_failure':PRIVATE,'driver_error':PRIVATE['message'],
+                         'final_exit_code':7,'failed_phase':'server-startup','retained_private_evidence':PRIVATE['message']}
+                stdout=io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    exec(compile(ast.fix_missing_locations(ast.Module(body=main.finalbody[start:],type_ignores=[])),str(HERE/name),'exec'),
+                         {'receipt':receipt,'code':7,'json':json,'hashlib':hashlib})
+                summary=json.loads(stdout.getvalue())
+                self.assertNotIn(PRIVATE['message'],stdout.getvalue())
+                self.assertEqual(len(summary['original_driver_failure_sha256']),64)
+                self.assertEqual(summary['final_exit_code'],7)
+
+
+if __name__=='__main__':unittest.main()

@@ -278,7 +278,8 @@ def runtime_ownership_return(output):
             diagnostic['phase'] = 'selected-receipt'
             result = read(output/'selected-ci-receipt.json')
             assert result['owner'] == owner and result['source'] == before['head'] and result['tree'] == before['tree']
-            assert [(r['lane'],r['flow']) for r in result['runs']] == list(selected_runs())
+            diagnostic['selected_exit']=result['exit'] if type(result.get('exit')) is int else None
+            diagnostic['all_requested_runs_executed']=result.get('allRequestedRunsExecuted') is True
             assert len({r['runRoot'] for r in result['runs']}) == len(result['runs'])
             for run in result['runs']:
                 diagnostic['phase'] = run['lane']
@@ -322,6 +323,7 @@ def runtime_ownership_return(output):
                         parent = read(root/'parent-receipt.json')
                         assert parent['source'] == before['head'] and parent['tree'] == before['tree'] and parent['root_owner'] == owner
                         assert parent['selected_flow'] == run['flow'] and parent['all_owned_fixtures_closed'] is True
+            assert [(r['lane'],r['flow']) for r in result['runs']] == list(selected_runs()), 'all mandatory lanes remain required'
             proof = {'closed_current_runs':[{'lane':lane,'flow':flow} for lane,flow in selected_runs()],
                      'installation_process_receipts':15}
         write(output/'runtime-close-stage.json', {'source':before['head'],'tree':before['tree'],
@@ -424,6 +426,44 @@ def selected_runs():
     return (('install','on'),('postgres','on'),('sqlite','on'),('postgres','off'),('sqlite','off'))
 
 
+def lane_retirement(runroot, lane, flow, source, tree, owner, driver_exit):
+    """Concrete current-driver receipt admission; never manufacture missing closure."""
+    facts = {'qualified':False, 'receiptPresent':False, 'refusalCodes':[],
+             'receiptSha256':None, 'originalFailureSha256':None, 'failedPhase':None}
+    path = runroot/'receipt.json'
+    try:
+        facts['receiptSha256'] = sha(path)
+        receipt = read(path)
+        assert isinstance(receipt,dict)
+        facts['receiptPresent'] = True
+        original = receipt.get('original_driver_failure', receipt.get('driver_error'))
+        if original is not None:
+            facts['originalFailureSha256'] = hashlib.sha256(json.dumps(original,sort_keys=True).encode()).hexdigest()
+        phase = receipt.get('failed_phase')
+        if phase in ('container-prepare','server-startup','server-ready','browser','restart','install-body'):
+            facts['failedPhase'] = phase
+        assert receipt['source'] == source and receipt['tree'] == tree and receipt['root_owner'] == owner
+        assert type(receipt['final_exit_code']) is int and receipt['final_exit_code'] == driver_exit
+        assert receipt['owned_container_absent'] is True
+        if lane == 'install':
+            assert receipt.get('actual_tests') == 4 and receipt.get('actual_owned_process_receipts') == 15
+        else:
+            assert receipt['selected_flow'] == flow and receipt.get('cleanup_errors') == []
+            assert receipt.get('owned_loopback_port_closed') is True
+            assert receipt.get('recorded_process_identities_retired') is True
+            if lane == 'postgres':
+                parent = read(runroot/'parent-receipt.json')
+                assert parent['source'] == source and parent['tree'] == tree and parent['root_owner'] == owner
+                assert parent['selected_flow'] == flow and parent['all_owned_fixtures_closed'] is True
+            if driver_exit == 0:
+                if flow == 'on': assert receipt['current_schema_server_restart']['restartBrowserExit'] == 0
+                assert receipt['actual_browser_tests'] == (7 if flow == 'off' else 1) and receipt['retries'] == 0
+        facts['qualified'] = True
+    except (OSError, ValueError, KeyError, TypeError, AssertionError):
+        facts['refusalCodes'].append('SELECTED_DRIVER_RETIREMENT_UNCONFIRMED')
+    return facts
+
+
 def run(output):
     assert os.environ.get("GITHUB_JOB") != "collaboration-build", "build producer cannot start runtime"
     assert os.getuid()==os.getgid()==1000, 'normal SQLite browser/fixture/app file ownership must be1000:1000'
@@ -445,50 +485,58 @@ def run(output):
     authority = ({'executionMode':'orca-local','localAuthorizationSha256':os.environ['FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256'],
                   'runId':os.environ['FVOCI_LOCAL_RUN_ID'],'runAttempt':os.environ['FVOCI_LOCAL_DISPATCH_ID']} if local else
                  {'exclusiveCIJob':True,'currentCIJobConfirmed':True,'runId':env['GITHUB_RUN_ID'],'runAttempt':env['GITHUB_RUN_ATTEMPT']})
-    for lane, flow in selected_runs():
-        runroot=runtime/('root-current-'+lane+'-'+secrets.token_hex(6));driver=TEMPLATES/('current-'+lane+'-driver.py')
-        m={'schema':1,'ready':True,'flow':flow,'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],
-           'sourceInputsBefore':reference(output/'before.json'),'sourceInputsAfter':reference(output/'after.json'),
-           'bundle':reference(output/'bundle.json'),'compileReceipt':reference(output/'compile-receipt.json'),
-           'webReceipt':reference(output/'web-receipt.json'),'abiReceipt':reference(output/'abi-receipt.json'),
-           'nativeQualification':None,'browserInputs':browser,'closedInstallReceipt':closed}
-        if lane!='install':
-            assert closed, 'mandatory actual current installation4 failed; cannot qualify normal main'
-        if lane!='install' and flow=='on':
-            binding={'runId':authority['runId'],'runAttempt':authority['runAttempt'],'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],'backend':lane,'runRoot':str(runroot),
-                     'parentDriverSha256':sha(driver),'restartHelperSha256':sha(TEMPLATES/'restart_checkpoint.py'),
-                     'sourceInputsSha256':hashlib.sha256((json.dumps(source_written,indent=2)+'\n').encode()).hexdigest(),
-                     'artifactHashes':{p:r['sha256'] for p,r in bundle['binaries'].items()},'assetHashes':web['dist_files'],'browserInputs':browser,'abiHashes':abi['host_runtime_files']}
-            restart=output/(lane+'-'+flow+'-restart-allocation.json');write(restart,{'schema':1,'status':'GRANTED','owner':owner,**authority,
-                       'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],'backend':lane,'binding':binding})
-            m['restartAllocation']=reference(restart);env['FVOCI_ROOT_RESTART_GRANT']=str(restart)
-        else:
-            env.pop('FVOCI_ROOT_RESTART_GRANT', None)
-        manifest=output/(lane+'-'+flow+'-binding.json');write(manifest,m)
-        allocation=output/(lane+'-'+flow+'-allocation.json');write(allocation,{'schema':1,'status':'GRANTED','owner':owner,**authority,'flow':flow,
-                   'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],'lane':lane,'backend':None if lane=='install' else lane,
-                   'runRoot':str(runroot),'driverSha256':sha(driver),'bindingSha256':sha(manifest),'bindingModuleSha256':sha(TEMPLATES/'current_binding.py')})
-        env.update(FVOCI_ROOT_CURRENT_BINDING=str(manifest),FVOCI_ROOT_CURRENT_ALLOCATION=str(allocation))
-        env['FVOCI_E2E_SELECTED_FLOW']=flow
-        if lane=='postgres' and flow=='on':env['FVOCI_E2E_SELECTED_AUXILIARY']='normal-api'
-        else:env.pop('FVOCI_E2E_SELECTED_AUXILIARY',None)
-        with (output/(lane+'-'+flow+'-driver.log')).open('x') as log:r=subprocess.run([sys.executable,str(driver)],env=env,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)
-        results.append({'lane':lane,'flow':flow,'exit':r.returncode,'actualSource':before['head'],'runRoot':str(runroot)})
-        code=code or r.returncode
-        if lane=='postgres':
-            parent=read(runroot/'parent-receipt.json')
-            assert parent['all_owned_fixtures_closed'], 'PG/Meili closure failed: preserve failure, no overlapping SQLite start'
-        if lane!='install':
-            app=read(runroot/'receipt.json')
-            assert app['owned_container_absent'] and app['owned_loopback_port_closed'] and app['recorded_process_identities_retired']
-        if lane=='install':
-            assert r.returncode==0,'current installation4 failed; preserve original log/15process receipts'
-            closed=reference(runroot/'receipt.json')
-        elif r.returncode==0:
-            record=read(runroot/'receipt.json')
-            if flow=='on': assert record['current_schema_server_restart']['restartBrowserExit']==0
-            assert record['actual_browser_tests']==(7 if flow=='off' else 1) and record['retries']==0
-    write(output/'selected-ci-receipt.json',{'source':before['head'],'tree':before['tree'],'owner':owner,'runs':results,'exit':code,'normalBothAndRestartRequired':True,'offBothRequired':True,'offTestsPerBackend':7,'sqliteAuxiliary':'BLOCKED: normal writers unported','whole060Complete':False})
+    launcher_failure=None
+    try:
+        for lane, flow in selected_runs():
+            runroot=runtime/('root-current-'+lane+'-'+secrets.token_hex(6));driver=TEMPLATES/('current-'+lane+'-driver.py')
+            m={'schema':1,'ready':True,'flow':flow,'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],
+               'sourceInputsBefore':reference(output/'before.json'),'sourceInputsAfter':reference(output/'after.json'),
+               'bundle':reference(output/'bundle.json'),'compileReceipt':reference(output/'compile-receipt.json'),
+               'webReceipt':reference(output/'web-receipt.json'),'abiReceipt':reference(output/'abi-receipt.json'),
+               'nativeQualification':None,'browserInputs':browser,'closedInstallReceipt':closed}
+            if lane!='install':
+                assert closed, 'mandatory actual current installation4 failed; cannot qualify normal main'
+            if lane!='install' and flow=='on':
+                binding={'runId':authority['runId'],'runAttempt':authority['runAttempt'],'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],'backend':lane,'runRoot':str(runroot),
+                         'parentDriverSha256':sha(driver),'restartHelperSha256':sha(TEMPLATES/'restart_checkpoint.py'),
+                         'sourceInputsSha256':hashlib.sha256((json.dumps(source_written,indent=2)+'\n').encode()).hexdigest(),
+                         'artifactHashes':{p:r['sha256'] for p,r in bundle['binaries'].items()},'assetHashes':web['dist_files'],'browserInputs':browser,'abiHashes':abi['host_runtime_files']}
+                restart=output/(lane+'-'+flow+'-restart-allocation.json');write(restart,{'schema':1,'status':'GRANTED','owner':owner,**authority,
+                           'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],'backend':lane,'binding':binding})
+                m['restartAllocation']=reference(restart);env['FVOCI_ROOT_RESTART_GRANT']=str(restart)
+            else:
+                env.pop('FVOCI_ROOT_RESTART_GRANT', None)
+            manifest=output/(lane+'-'+flow+'-binding.json');write(manifest,m)
+            allocation=output/(lane+'-'+flow+'-allocation.json');write(allocation,{'schema':1,'status':'GRANTED','owner':owner,**authority,'flow':flow,
+                       'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],'lane':lane,'backend':None if lane=='install' else lane,
+                       'runRoot':str(runroot),'driverSha256':sha(driver),'bindingSha256':sha(manifest),'bindingModuleSha256':sha(TEMPLATES/'current_binding.py')})
+            env.update(FVOCI_ROOT_CURRENT_BINDING=str(manifest),FVOCI_ROOT_CURRENT_ALLOCATION=str(allocation))
+            env['FVOCI_E2E_SELECTED_FLOW']=flow
+            if lane=='postgres' and flow=='on':env['FVOCI_E2E_SELECTED_AUXILIARY']='normal-api'
+            else:env.pop('FVOCI_E2E_SELECTED_AUXILIARY',None)
+            with (output/(lane+'-'+flow+'-driver.log')).open('x') as log:r=subprocess.run([sys.executable,str(driver)],env=env,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)
+            results.append({'lane':lane,'flow':flow,'exit':r.returncode,'actualSource':before['head'],'runRoot':str(runroot)})
+            code=code or r.returncode
+            retirement=lane_retirement(runroot,lane,flow,before['head'],before['tree'],owner,r.returncode)
+            results[-1]['retirement']=retirement
+            if not retirement['qualified']:code=code or 1
+            # A failed driver or absent retirement proof stops the serial allocation.
+            # Preserve its actual exit and raw private receipt/log; never start a lane
+            # just to fill the expected count or turn a partial run into PASS.
+            if r.returncode != 0 or not retirement['qualified']:break
+            if lane=='install':closed=reference(runroot/'receipt.json')
+    except BaseException as error:
+        original=output/'selected-launcher-failure.private.json'
+        write(original,{'type':type(error).__name__,'message':str(error)})
+        launcher_failure={'code':'SELECTED_LAUNCHER_FAILED','sha256':sha(original)}
+        code=code or (130 if isinstance(error,KeyboardInterrupt) else 1)
+    finally:
+        complete=[(r['lane'],r['flow']) for r in results] == list(selected_runs())
+        if not complete:code=code or 1
+        write(output/'selected-ci-receipt.json',{'source':before['head'],'tree':before['tree'],'owner':owner,'runs':results,'exit':code,
+              'allRequestedRunsExecuted':complete,'launcherFailure':launcher_failure,
+              'normalBothAndRestartRequired':True,'offBothRequired':True,'offTestsPerBackend':7,
+              'sqliteAuxiliary':'BLOCKED: normal writers unported','whole060Complete':False})
     return code
 
 
