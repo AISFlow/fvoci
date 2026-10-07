@@ -1,6 +1,6 @@
 //! Test-only post-setup actor fixture for an explicitly owned SQLite run.
 //! This never creates/migrates/resets a DB or supplies a product auth route.
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use fvoci_server::auth::password::{hash_password, Keyring};
@@ -186,6 +186,7 @@ pub async fn create_user() -> Result<(), FixtureError> {
         let mut receipt_file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(0o644)
             .open(receipt_path)?;
         receipt_file.write_all(receipt.to_string().as_bytes())?;
         receipt_file.sync_all()
