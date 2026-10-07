@@ -2486,6 +2486,19 @@ mod reset_policy_tests {
         }
     }
 
+    /// Filesystem lifetime of the local control run directory. The fixture only
+    /// closes its process and ports; the caller owns the directory. It is removed
+    /// only after a fully confirmed control (every receipt OK and the fixture
+    /// transport reaped and closed); any failure or a live transport keeps it as
+    /// evidence, so a residue after success is itself a failure.
+    fn local_control_residue_policy(control_ok: bool, fixture_confirmed: bool) -> &'static str {
+        if control_ok && fixture_confirmed {
+            "REMOVE"
+        } else {
+            "KEEP"
+        }
+    }
+
     fn fk_control_observe(error: &sqlx::Error) -> FkControlObservation {
         let mut observation = FkControlObservation::NOT_OBSERVED;
         let sqlx::Error::AnyDriverError(original) = error else {
@@ -2612,6 +2625,16 @@ mod reset_policy_tests {
             sqlx::Error::PoolTimedOut,
         ] {
             assert!(!primary_only_hrana_constraint(&error));
+        }
+
+        // Run-directory lifetime: removal only after a fully confirmed control; a
+        // failed control or a live/unconfirmed transport always keeps the evidence.
+        assert_eq!(local_control_residue_policy(true, true), "REMOVE");
+        for (control_ok, fixture_confirmed) in [(false, true), (true, false), (false, false)] {
+            assert_eq!(
+                local_control_residue_policy(control_ok, fixture_confirmed),
+                "KEEP"
+            );
         }
 
         // The pure witness mapping: exactly one fence row against the composite
@@ -2890,17 +2913,32 @@ mod reset_policy_tests {
                 && receipt.upstream_closed
                 && receipt.proxy_closed
         });
-        // Only closed categories are printed, after cleanup. Keep own fixture
-        // files for ROOT evidence; never print raw exchanges or SDK error text.
-        println!("FVOCI_LOCAL_MIGRATION_FK_CONTROL kind={} primary_code={} extended_code={} hrana_code={} strict_fk={} causal_witness={} check_negative={} pk_negative={} rollback={} preserved={} healthy={} close={} leases={} fixture={}",
+        // Run-directory lifetime: a fully confirmed control removes its own
+        // directory (the fixture finish is process/port closure, not filesystem
+        // cleanup); any failure or an unconfirmed transport keeps it as evidence.
+        let control_ok = primary.is_ok() && close.is_ok() && leases_zero;
+        let residue = match local_control_residue_policy(control_ok, fixture_confirmed) {
+            "REMOVE" => match std::fs::remove_dir_all(&root) {
+                Ok(()) if !root.exists() => "REMOVED",
+                _ => "REMOVAL_FAILED",
+            },
+            _ => "KEPT",
+        };
+        // Only closed categories are printed, after cleanup; never print raw
+        // exchanges or SDK error text.
+        println!("FVOCI_LOCAL_MIGRATION_FK_CONTROL kind={} primary_code={} extended_code={} hrana_code={} strict_fk={} causal_witness={} check_negative={} pk_negative={} rollback={} preserved={} healthy={} close={} leases={} fixture={} residue={}",
             observation.kind, observation.primary, observation.extended, observation.hrana,
             strict_fk, causal_witness, check_negative, pk_negative, rollback, preserved, healthy,
             if close.is_ok() { "OK" } else { "UNCONFIRMED" },
             if leases_zero { "ZERO" } else { "FAILED" },
-            if fixture_confirmed { "OK" } else { "UNCONFIRMED" });
+            if fixture_confirmed { "OK" } else { "UNCONFIRMED" },
+            residue);
         primary?;
         if close.is_err() || !leases_zero || !fixture_confirmed {
             return Err("LOCAL_CONTROL_CLEANUP_UNCONFIRMED");
+        }
+        if residue != "REMOVED" {
+            return Err("LOCAL_CONTROL_RESIDUE_NOT_REMOVED");
         }
         Ok(())
     }
