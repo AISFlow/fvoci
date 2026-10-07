@@ -38,7 +38,11 @@ import {
 } from "./collab-helpers";
 import { decodeHocuspocusFrame, frameBytes, SESSION_COOKIE, UUID_RE } from "./collab-wire";
 import { expectSelectedWikiAuxiliary } from "./workspace-wiki-selected-auxiliary";
-import { requiredFixtureInput, installSelectedMember } from "./selected-backend-fixture";
+import {
+  requiredFixtureInput,
+  installSelectedMember,
+  selectedSetupNeeded,
+} from "./selected-backend-fixture";
 
 type DocumentMeta = components["schemas"]["DocumentMetaResponse"];
 type RevisionDetail = components["schemas"]["RevisionDetailResponse"];
@@ -322,7 +326,7 @@ test("selected normal main: Vue setup, stable wiki create, native persist, manua
 }, testInfo) => {
   const selected = process.env.FVOCI_E2E_SELECTED_BACKEND;
   expect(selected, "root must identify the actual isolated selected-backend run").toMatch(
-    /^(postgres|sqlite)$/,
+    /^(postgres|sqlite|libsql-remote)$/,
   );
   if (!baseURL) throw new Error("root-provided selected normal-main baseURL is required");
   testInfo.annotations.push({ type: "selected-backend", description: selected ?? "missing" });
@@ -340,8 +344,8 @@ test("selected normal main: Vue setup, stable wiki create, native persist, manua
   try {
     const initialSetup = await pageA.request.get("/api/v1/setup");
     expect(initialSetup.status()).toBe(200);
-    expect(await initialSetup.json()).toMatchObject({ needed: true });
-    await ensureInstanceSetup(pageA);
+    expect(await initialSetup.json()).toMatchObject({ needed: selectedSetupNeeded() });
+    if (selectedSetupNeeded()) await ensureInstanceSetup(pageA);
     await expect(pageA.locator("#root[data-v-app]")).toHaveCount(1);
     await login(pageA, admin.email, admin.password);
     const creator = await currentUser(pageA);
@@ -559,7 +563,7 @@ type RestartCheckpoint = {
   source: string;
   tree: string;
   compiledSource: string;
-  selected: "postgres" | "sqlite";
+  selected: "postgres" | "sqlite" | "libsql-remote";
   stopped: { serverExit: 0; portClosed: true; recordedIdentitiesRetired: true };
   seed: {
     selected: string;
@@ -650,7 +654,7 @@ if (process.env.FVOCI_E2E_SELECTED_RESTART_CHECKPOINT !== undefined) {
     baseURL,
   }, testInfo) => {
     const selected = requiredFixtureInput("FVOCI_E2E_SELECTED_BACKEND");
-    expect(selected).toMatch(/^(postgres|sqlite)$/);
+    expect(selected).toMatch(/^(postgres|sqlite|libsql-remote)$/);
     const source = requiredFixtureInput("FVOCI_E2E_SELECTED_RESTART_SOURCE");
     const checkpoint = readRestartCheckpoint(
       requiredFixtureInput("FVOCI_E2E_SELECTED_RESTART_CHECKPOINT"),

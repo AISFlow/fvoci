@@ -6,14 +6,22 @@ on:
   workflow_dispatch:
     inputs:
       phase:
-        description: Connection and inventory read-only; migration and reset require both destructive gates; others NOT IMPLEMENTED
+        description: Connection, inventory and ui-baseline read-only; migration, reset and ui-ack require both destructive gates; others NOT IMPLEMENTED
         type: choice
         default: connection
-        options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack]
+        options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline]
       destructive:
-        description: Explicit isolated test DB mutation confirmation (connection and inventory must be false)
+        description: Explicit isolated test DB mutation confirmation (connection, inventory and ui-baseline must be false)
         type: boolean
         default: false
+      ui_source_sha:
+        description: ROOT reviewed exact UI source SHA (ui-baseline and ui-ack only)
+        type: string
+        default: ''
+      ui_baseline_sha256:
+        description: ROOT verified just-observed current dataset digest (ui-ack only)
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -44,7 +52,7 @@ jobs:
 
   turso-connection:
     needs: admission
-    if: github.event_name == 'workflow_dispatch' && github.repository == 'AISFlow/fvoci' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection') && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.phase != 'ui-baseline' && github.event.inputs.phase != 'ui-ack' && github.repository == 'AISFlow/fvoci' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection') && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''
     environment: fvoci-turso-test
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -79,6 +87,63 @@ jobs:
       - name: Credential-free frozen diagnostic unit (exactly one test)
         run: python3 scripts/selected-backend-ci/turso-test-guard.py --diagnostic-unit
       - name: Real primary selected phase (exactly one test)
+        env:
+          FVOCI_DATABASE_BACKEND: libsql-remote
+          FVOCI_LIBSQL_URL: ${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}
+          FVOCI_LIBSQL_AUTH_TOKEN: ${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}
+          FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: ${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}
+        run: python3 scripts/selected-backend-ci/turso-test-guard.py --consume
+
+  turso-ui:
+    needs: admission
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.phase == 'ui-baseline' || github.event.inputs.phase == 'ui-ack') && github.repository == 'AISFlow/fvoci' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection') && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''
+    environment: fvoci-turso-test
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    env:
+      FVOCI_BUILD_SHA: ${{ github.sha }}
+      LIBCLANG_PATH: /usr/lib/llvm-18/lib
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/turso-bun-cache
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/turso-browsers
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Credential-free current UI input preparation
+        run: |
+          set -euo pipefail
+          printf 'CARGO_TARGET_DIR=%s/turso-ui-target\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          rustup toolchain install 1.98.1 --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          mkdir "$RUNNER_TEMP/fvoci-sqlite"
+          dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
+          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+            --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+          cargo fetch --locked
+      # Setup action is pinned to the same maintained Web CI revision.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.2
+      - name: Credential-free fixed dependencies and fresh browser assets
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bun --bun x playwright install --with-deps chromium
+          python3 scripts/selected-backend-ci/turso-ui.py --record-before
+          bun run --cwd apps/web build
+      - name: Credential-free current native UI cohort and freeze
+        run: |
+          set -euo pipefail
+          cargo build --locked --offline --features api-schema,db-tests --jobs 2 --bin fvoci-server --bin fvoci-migrate --bin fvoci-e2e-fixture --message-format=json > "$RUNNER_TEMP/ui-compile.json"
+          cargo build --locked --offline --manifest-path crates/collab-engine/Cargo.toml --features worker --jobs 2 --bin collab-engine --message-format=json > "$RUNNER_TEMP/ui-engine-compile.json"
+          python3 scripts/selected-backend-ci/turso-ui.py --freeze
+      - name: Actual current primary UI baseline or guarded ON restart OFF consumer
         env:
           FVOCI_DATABASE_BACKEND: libsql-remote
           FVOCI_LIBSQL_URL: ${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}

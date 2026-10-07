@@ -61,17 +61,32 @@ export async function newCollabContext(browser: Browser, baseUrl: string): Promi
   });
 }
 
+// Hosted remote runs allocate a new namespace before any fixture write. The
+// existing local fixtures retain their literal actors and setup expectations.
+const remoteNamespace =
+  process.env.FVOCI_E2E_SELECTED_BACKEND === "libsql-remote"
+    ? process.env.FVOCI_E2E_TURSO_NAMESPACE
+    : undefined;
+if (
+  process.env.FVOCI_E2E_SELECTED_BACKEND === "libsql-remote" &&
+  !/^tui-[a-f0-9]{20}$/.test(remoteNamespace ?? "")
+) {
+  throw new Error("remote selected actors require an allocated synthetic namespace");
+}
+
 export const admin = {
-  email: "Admin@Example.COM",
+  email: remoteNamespace ? `${remoteNamespace}-owner@example.invalid` : "Admin@Example.COM",
   password: "supersecret1",
   familyName: "김",
   givenName: "관리자",
   workspaceName: "Acme 워크스페이스",
-  workspaceSlug: "acme",
+  workspaceSlug: remoteNamespace ?? "acme",
 };
 
 export const member = {
-  email: "collab-member@example.com",
+  email: remoteNamespace
+    ? `${remoteNamespace}-member@example.invalid`
+    : "collab-member@example.com",
   password: "memberpass1",
   givenName: "협업",
   familyName: "멤버",

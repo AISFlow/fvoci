@@ -18,8 +18,8 @@ if (selectedBackend === undefined && process.env.FVOCI_E2E_SELECTED_FLOW !== und
   throw new Error("selected flow requires its allocated backend startup driver");
 }
 if (selectedBackend !== undefined) {
-  if (!/^(postgres|sqlite)$/.test(selectedBackend)) {
-    throw new Error("selected normal-server backend must be postgres or sqlite");
+  if (!/^(postgres|sqlite|libsql-remote)$/.test(selectedBackend)) {
+    throw new Error("selected normal-server backend must be postgres, sqlite or libsql-remote");
   }
   if (process.env.FVOCI_E2E_PENDING === "1") {
     throw new Error("selected normal-server spec requires its allocated startup driver");
@@ -50,6 +50,6 @@ export default defineConfig({
   use: {
     ...devices["Desktop Chrome"],
     baseURL,
-    trace: "retain-on-failure",
+    trace: selectedBackend === "libsql-remote" ? "off" : "retain-on-failure",
   },
 });

@@ -27,6 +27,7 @@ PHASES = (
     "persistence",
     "restore",
     "ui-ack",
+    "ui-baseline",
 )
 REPOSITORY = "AISFlow/fvoci"
 ENVIRONMENT = "fvoci-turso-test"
@@ -68,9 +69,9 @@ def validate_dispatch(context, inputs, checkout_sha):
         reject("SECRET_MODE_REQUIRES_MANUAL")
     if phase == "connection" and destructive:
         reject("CONNECTION_MUST_BE_READ_ONLY")
-    if phase == "inventory" and destructive:
+    if phase in ("inventory", "ui-baseline") and destructive:
         reject("INVENTORY_MUST_BE_READ_ONLY")
-    if phase not in ("connection", "inventory") and not destructive:
+    if phase not in ("connection", "inventory", "ui-baseline") and not destructive:
         reject("DESTRUCTIVE_CONFIRMATION_REQUIRED")
     return phase
 
@@ -88,11 +89,11 @@ def validate_target(inputs, settings, secrets):
     destructive = boolean(inputs.get("destructive", False))
     if phase == "connection" and destructive:
         reject("CONNECTION_MUST_BE_READ_ONLY")
-    if phase == "inventory" and (
+    if phase in ("inventory", "ui-baseline") and (
         destructive or settings.get("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE") != "false"
     ):
         reject("INVENTORY_MUST_BE_READ_ONLY")
-    if phase not in ("connection", "inventory") and (
+    if phase not in ("connection", "inventory", "ui-baseline") and (
         not destructive or settings.get("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE") != "true"
     ):
         reject("DESTRUCTIVE_NOT_ALLOWED")
@@ -132,7 +133,7 @@ def validate_target(inputs, settings, secrets):
 def require_implemented(phase):
     if phase not in PHASES:
         reject("UNKNOWN_PHASE")
-    if phase not in ("connection", "migration", "inventory", "reset"):
+    if phase not in ("connection", "migration", "inventory", "reset", "ui-baseline", "ui-ack"):
         reject("NOT_IMPLEMENTED")
 
 
@@ -661,6 +662,28 @@ def run_primary(checkout_sha, inputs):
     print("TURSO_CONNECTION_PASS tests=1 ignored=0")
 
 
+def run_ui(checkout_sha, inputs):
+    phase = inputs["phase"]
+    if os.environ.get("FVOCI_DATABASE_BACKEND") != "libsql-remote":
+        reject("BACKEND_SELECTOR_REQUIRED")
+    settings = {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": os.environ.get("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "")}
+    credentials = {"FVOCI_TEST_TURSO_DATABASE_URL": os.environ.get("FVOCI_LIBSQL_URL", ""),
+                   "FVOCI_TEST_TURSO_AUTH_TOKEN": os.environ.get("FVOCI_LIBSQL_AUTH_TOKEN", "")}
+    validate_target(inputs, settings, credentials)
+    if inputs.get("ui_source_sha") != checkout_sha:
+        reject("UI_REVIEWED_SOURCE_REQUIRED")
+    if phase == "ui-ack" and not re.fullmatch("[0-9a-f]{64}", inputs.get("ui_baseline_sha256", "")):
+        reject("UI_CURRENT_DATASET_BINDING_REQUIRED")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("turso_ui", Path(__file__).with_name("turso-ui.py"))
+    ui = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ui)
+    try:
+        ui.consume(phase, inputs)
+    except ui.UiError as error:
+        reject(str(error))
+
+
 def main():
     try:
         if sys.argv[1:] not in (["--admit"], ["--freeze"], ["--diagnostic-unit"], ["--consume"]):
@@ -709,6 +732,8 @@ def main():
                 run_inventory(checkout_sha, inputs)
             elif phase == "reset":
                 run_reset(checkout_sha, inputs)
+            elif phase in ("ui-baseline", "ui-ack"):
+                run_ui(checkout_sha, inputs)
             else:
                 run_migration(checkout_sha, inputs)
         return 0

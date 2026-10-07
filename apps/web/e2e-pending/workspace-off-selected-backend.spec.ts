@@ -26,7 +26,11 @@ import {
   editorShape,
 } from "./collab-helpers";
 import { SESSION_COOKIE, UUID_RE } from "./collab-wire";
-import { installSelectedMember, requiredFixtureInput } from "./selected-backend-fixture";
+import {
+  installSelectedMember,
+  requiredFixtureInput,
+  selectedSetupNeeded,
+} from "./selected-backend-fixture";
 
 type Schema = components["schemas"];
 type Body = Schema["VersionedBodyResponse"];
@@ -490,7 +494,10 @@ function expectComparisonControls(): void {
 }
 
 function expectSetupState(initial: unknown, prior: unknown): void {
-  expect(initial).toMatchObject({ needed: prior === undefined, realtimeMode: "off" });
+  expect(initial).toMatchObject({
+    needed: prior === undefined && selectedSetupNeeded(),
+    realtimeMode: "off",
+  });
 }
 
 function expectSetupWitness(prior: unknown, witness: unknown): void {
@@ -594,7 +601,7 @@ test.describe("selected normal main OFF", () => {
   test.beforeAll(async ({ browser, baseURL }, testInfo) => {
     expectComparisonControls();
     selected = requiredFixtureInput("FVOCI_E2E_SELECTED_BACKEND");
-    expect(selected).toMatch(/^(postgres|sqlite)$/);
+    expect(selected).toMatch(/^(postgres|sqlite|libsql-remote)$/);
     baseUrl = requiredFixtureInput("PLAYWRIGHT_BASE_URL");
     expect(baseURL).toBe(baseUrl);
     // Both maintained drivers expose this public identity after load_current
@@ -633,7 +640,7 @@ test.describe("selected normal main OFF", () => {
       // First worker still requires a clean DB; only our confirmed setup can
       // authorize a replacement worker's initialized state.
       expectSetupState(await initial.json(), prior);
-      if (prior === undefined) await ensureInstanceSetup(page);
+      if (prior === undefined && selectedSetupNeeded()) await ensureInstanceSetup(page);
       await login(page, admin.email, admin.password);
       const adminMe = await page.request.get("/api/v1/auth/me");
       expect(adminMe.status()).toBe(200);

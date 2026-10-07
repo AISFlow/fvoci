@@ -114,7 +114,7 @@ class AdmissionTests(unittest.TestCase):
         self.denied("CONNECTION_MUST_BE_READ_ONLY", guard.validate_target, dict(self.inputs, destructive=True), self.settings, self.secrets)
 
     def test_future_phase_requires_explicit_dispatch_confirmation(self):
-        for phase in (phase for phase in guard.PHASES if phase not in ("connection", "inventory")):
+        for phase in (phase for phase in guard.PHASES if phase not in ("connection", "inventory", "ui-baseline")):
             self.denied("DESTRUCTIVE_CONFIRMATION_REQUIRED", guard.validate_dispatch, self.context, dict(self.inputs, phase=phase), "a" * 40)
 
     def test_inventory_readonly_admission_is_exact_and_other_phases_stay_destructive(self):
@@ -129,7 +129,7 @@ class AdmissionTests(unittest.TestCase):
             self.denied("INVALID_BOOLEAN", guard.validate_target,
                         dict(inventory, destructive=value), self.settings, self.secrets)
         for phase in guard.PHASES:
-            if phase in ("connection", "inventory"):
+            if phase in ("connection", "inventory", "ui-baseline"):
                 continue
             inputs = {"phase": phase, "destructive": False}
             self.denied("DESTRUCTIVE_CONFIRMATION_REQUIRED", guard.validate_dispatch,
@@ -142,7 +142,7 @@ class AdmissionTests(unittest.TestCase):
             self.assertEqual(guard.validate_dispatch(self.context, confirmed, "a" * 40), phase)
             self.assertEqual(guard.validate_target(confirmed,
                              {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true"}, self.secrets), phase)
-            if phase not in ("migration", "reset"):
+            if phase not in ("migration", "reset", "ui-ack"):
                 self.denied("NOT_IMPLEMENTED", guard.require_implemented, phase)
 
     def test_tls_primary_configuration_and_input_unchanged(self):
@@ -188,7 +188,7 @@ class AdmissionTests(unittest.TestCase):
         self.denied("UNKNOWN_PHASE", guard.require_implemented, "echo FAKE")
 
     def test_every_fixed_phase_refuses_successful_noop(self):
-        for phase in ("crud", "transactions", "persistence", "restore", "ui-ack"):
+        for phase in ("crud", "transactions", "persistence", "restore"):
             self.denied("NOT_IMPLEMENTED", guard.require_implemented, phase)
         # Permission to select a real fixture is not its execution or PASS.
         self.assertIsNone(guard.require_implemented("connection"))
@@ -985,18 +985,18 @@ class InventoryTests(unittest.TestCase):
 
     def test_workflow_retains_false_default_trust_serialization_and_presecret_pipeline(self):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/turso-test.yml").read_text()
-        self.assertIn("options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack]", workflow)
+        self.assertIn("options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline]", workflow)
         self.assertIn("        default: connection\n", workflow)
         self.assertIn("        type: boolean\n        default: false\n", workflow)
         self.assertIn("  group: fvoci-turso-test-database\n  cancel-in-progress: false\n", workflow)
         self.assertIn("permissions:\n  contents: read\n", workflow)
-        self.assertEqual(workflow.count("persist-credentials: false"), 2)
-        self.assertEqual(workflow.count("ref: ${{ github.sha }}"), 2)
-        self.assertEqual(workflow.count("github.repository == 'AISFlow/fvoci'"), 2)
-        self.assertEqual(workflow.count("refs/heads/fvoci/v060-turso-verified-connection"), 3)
+        self.assertEqual(workflow.count("persist-credentials: false"), 3)
+        self.assertEqual(workflow.count("ref: ${{ github.sha }}"), 3)
+        self.assertEqual(workflow.count("github.repository == 'AISFlow/fvoci'"), 3)
+        self.assertEqual(workflow.count("refs/heads/fvoci/v060-turso-verified-connection"), 4)
         self.assertEqual(workflow.count("timeout-minutes: 5"), 1)
         self.assertEqual(workflow.count("timeout-minutes: 15"), 1)
-        self.assertEqual(workflow.count("environment: fvoci-turso-test"), 1)
+        self.assertEqual(workflow.count("environment: fvoci-turso-test"), 2)
         self.assertLess(workflow.index("--freeze"), workflow.index("--diagnostic-unit"))
         self.assertLess(workflow.index("--diagnostic-unit"), workflow.index("      - name: Real primary selected phase"))
         self.assertNotIn("secrets.", workflow[:workflow.index("      - name: Real primary selected phase")])
@@ -1281,6 +1281,141 @@ class ResetTests(unittest.TestCase):
             for parent in parents:
                 self.assertLess(drop_tables.index(child), drop_tables.index(parent))
         self.assertNotIn("PRAGMA", "".join(statements))
+
+
+class UiAdapterTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location('turso_ui', GUARD_PATH.with_name('turso-ui.py'))
+        cls.ui = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.ui)
+
+    def test_remote_baseline_keeps_both_readonly_gates_and_exact_source_binding(self):
+        fixture = AdmissionTests()
+        fixture.setUp()
+        inputs = {'phase': 'ui-baseline', 'destructive': False}
+        self.assertEqual(guard.validate_dispatch(fixture.context, inputs, 'a' * 40), 'ui-baseline')
+        self.assertEqual(guard.validate_target(inputs, fixture.settings, fixture.secrets), 'ui-baseline')
+        for flag, allow in ((True, 'false'), (False, 'true'), (True, 'true')):
+            with self.assertRaises(guard.AdmissionError):
+                guard.validate_target(dict(inputs, destructive=flag),
+                    {'FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE': allow}, fixture.secrets)
+        with mock.patch.dict(os.environ, {'FVOCI_DATABASE_BACKEND': 'libsql-remote',
+                'FVOCI_LIBSQL_URL': fixture.secrets['FVOCI_TEST_TURSO_DATABASE_URL'],
+                'FVOCI_LIBSQL_AUTH_TOKEN': fixture.secrets['FVOCI_TEST_TURSO_AUTH_TOKEN'],
+                'FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE': 'false'}, clear=True):
+            fixture.denied('UI_REVIEWED_SOURCE_REQUIRED', guard.run_ui, 'a' * 40, inputs)
+
+    def test_preexisting_exact_rows_and_ledger_cannot_be_relaxed_to_counts(self):
+        original = {'ledger': [['integer', '9007199254740993']], 'schemaSha256': 'a' * 64,
+                    'lineage': 'fvoci-sqlite-060', 'fingerprints': {'users': {'b' * 64: 1}}}
+        added = copy.deepcopy(original)
+        added['fingerprints']['users']['c' * 64] = 1
+        self.ui.assert_preserved(original, added)
+        for mutated in (dict(added, ledger=[['integer', '9007199254740992']]),
+                        dict(added, schemaSha256='d' * 64),
+                        dict(added, fingerprints={'users': {'c' * 64: 2}}),
+                        dict(added, fingerprints={'users': {'b' * 64: 1}, 'extra': {}})):
+            with self.assertRaises(self.ui.UiError):
+                self.ui.assert_preserved(original, mutated)
+
+    def counter_records(self):
+        number = lambda n: ['integer', str(n)]
+        namespace = 'tui-' + 'a' * 20
+        workspace, actor = ['blob', 'b' * 32], ['blob', 'c' * 32]
+        original = {'ledger': [], 'schemaSha256': 'a' * 64, 'lineage': 'fvoci-sqlite-060',
+            'startupHazards': 0, 'liveOutboxLeases': 0,
+            'fingerprints': {table: {} for table in self.ui.BACKGROUND_TABLES},
+            'operations': {'event_sequence': [[number(1), number(0)]],
+                'collab_fence_counter': [[number(1), number(1)]],
+                'maintenance_job_claims': [[number(k), ['null'], number(0), ['null']] for k in range(1, 10)],
+                'events': [], 'users': [], 'workspaces': [], 'collab_room_fences': [],
+                'task_collab_room_fences': [], 'outbox_consumers': []}}
+        original['fingerprints'].update({t: {'d' * 64: 1} for t in self.ui.AUDITED_COUNTERS})
+        original['fingerprints']['users'] = {'e' * 64: 1}
+        after = copy.deepcopy(original)
+        after['fingerprints'].update({t: {'f' * 64: 1} for t in self.ui.AUDITED_COUNTERS})
+        op = after['operations']
+        op['event_sequence'][0][1] = number(1)
+        op['events'] = [[number(1), workspace, actor]]
+        op['users'] = [[actor, ['text', namespace + '-owner@example.invalid']]]
+        op['workspaces'] = [[workspace, ['text', namespace]]]
+        op['collab_fence_counter'][0][1] = number(3)
+        fence = [workspace, ['blob', '1' * 32], ['blob', '2' * 32], number(2), number(1000)]
+        op['collab_room_fences'] = [fence]
+        for row in op['maintenance_job_claims']:
+            if int(row[0][1]) in (1, 8, 9): row[2] = number(2)
+        op['outbox_consumers'] = [[['text', name], number(1), ['null'], ['null']]
+                                for name in ('notifications', 'mail', 'push', 'webhooks', 'github')]
+        first_fence = copy.deepcopy(fence)
+        first_fence[3] = number(1)
+        audit = {'namespaces': [namespace], 'serverStarts': 2, 'observedFences': [first_fence]}
+        return original, after, audit
+
+    def test_only_correlated_counter_deltas_preserve_existing_business_rows(self):
+        original, after, audit = self.counter_records()
+        self.ui.assert_preserved(original, after, audit)
+        mutations = (
+            lambda a: a['fingerprints']['users'].clear(),
+            lambda a: a['operations']['event_sequence'][0].__setitem__(1, ['integer', '2']),
+            lambda a: a['operations']['events'][0].__setitem__(2, ['null']),
+            lambda a: a['operations']['events'][0].__setitem__(1, ['blob', '9' * 32]),
+            lambda a: a['operations']['collab_fence_counter'][0].__setitem__(1, ['integer', '4']),
+            lambda a: a['operations']['collab_fence_counter'][0].__setitem__(1, ['integer', '9223372036854775807']),
+            lambda a: a['operations']['maintenance_job_claims'][0].__setitem__(2, ['integer', '3']),
+            lambda a: a['operations']['maintenance_job_claims'][1].__setitem__(2, ['integer', '1']),
+            lambda a: a['operations']['maintenance_job_claims'][0].__setitem__(1, ['blob', '3' * 32]),
+            lambda a: a['operations']['maintenance_job_claims'].pop(),
+            lambda a: a['operations']['outbox_consumers'][0].__setitem__(2, ['blob', '3' * 32]),
+            lambda a: a.__setitem__('startupHazards', 1),
+        )
+        for mutate in mutations:
+            wrong = copy.deepcopy(after)
+            mutate(wrong)
+            with self.assertRaises(self.ui.UiError): self.ui.assert_preserved(original, wrong, audit)
+        with self.assertRaises(self.ui.UiError): self.ui.assert_preserved(original, after)
+        missing = dict(audit, observedFences=[])
+        with self.assertRaises(self.ui.UiError): self.ui.assert_preserved(original, after, missing)
+
+    def test_background_preflight_keeps_populated_users_but_refuses_old_work(self):
+        original, _, _ = self.counter_records()
+        self.assertEqual(self.ui.startup_blockers(original), [])
+        for table in self.ui.BACKGROUND_TABLES:
+            wrong = copy.deepcopy(original)
+            wrong['fingerprints'][table]['f' * 64] = 1
+            self.assertEqual(self.ui.startup_blockers(wrong), [table])
+        for key in ('startupHazards', 'liveOutboxLeases'):
+            wrong = dict(original, **{key: 1})
+            self.assertIn('existing-owner-or-deletion', self.ui.startup_blockers(wrong))
+
+    def test_private_actor_capsule_rejects_symlink_permissions_and_oversize(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'capsule'
+            self.ui.write(path, {'synthetic': True})
+            self.assertEqual(self.ui.private_read(path), {'synthetic': True})
+            alias = Path(tmp) / 'alias'
+            alias.symlink_to(path)
+            with self.assertRaises(self.ui.UiError): self.ui.private_read(alias)
+            path.chmod(0o644)
+            with self.assertRaises(self.ui.UiError): self.ui.private_read(path)
+            path.chmod(0o600)
+            with self.assertRaises(self.ui.UiError): self.ui.private_read(path, cap=1)
+
+    def test_browser_receipts_require_every_actual_case_once_without_skips_or_retries(self):
+        titles = ['case ' + str(i) for i in range(7)]
+        report = {'config': {'workers': 1, 'metadata': {'selectedBackend': 'libsql-remote'}},
+                  'errors': [], 'stats': {'expected': 7, 'unexpected': 0, 'flaky': 0, 'skipped': 0},
+                  'suites': [{'specs': [{'file': self.ui.OFF, 'ok': True, 'title': title,
+                    'tests': [{'expectedStatus': 'passed', 'results': [{'status': 'passed',
+                        'retry': 0, 'errors': [], 'attachments': []}]}]} for title in titles]}]}
+        self.assertEqual(len(self.ui.report_cases(report, self.ui.OFF, titles)), 7)
+        for mutate in ('retry', 'skip', 'missing', 'duplicate'):
+            wrong = copy.deepcopy(report)
+            if mutate == 'retry': wrong['suites'][0]['specs'][0]['tests'][0]['results'][0]['retry'] = 1
+            if mutate == 'skip': wrong['stats']['skipped'] = 1
+            if mutate == 'missing': wrong['suites'][0]['specs'].pop()
+            if mutate == 'duplicate': wrong['suites'][0]['specs'][1] = wrong['suites'][0]['specs'][0]
+            with self.assertRaises(self.ui.UiError): self.ui.report_cases(wrong, self.ui.OFF, titles)
 
 
 if __name__ == "__main__":

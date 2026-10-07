@@ -18,6 +18,8 @@ pub mod document_ops;
 pub mod document_purge;
 pub mod document_tags;
 pub mod documents;
+#[cfg(feature = "db-tests")]
+pub mod e2e_fixture;
 pub mod group_grants;
 pub mod groups;
 pub mod holidays;
