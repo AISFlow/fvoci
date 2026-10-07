@@ -629,6 +629,9 @@ class HostedExperimentalResourceControls(unittest.TestCase):
         line = "  --resource-profile " + P.HOSTED_PROFILE + " \\\n"
         self.assertEqual(command.count(line), 1)
         current["jobs"]["shipping-image-producer"]["steps"][2]["run"] = command.replace(line, "")
+        prior[True]["workflow_dispatch"]["inputs"]["run_shipping_producer"]["description"] = prior[True]["workflow_dispatch"]["inputs"]["run_shipping_producer"]["description"].replace("joint551", "product5b1a78ee")
+        prior["jobs"]["shipping-image-producer"]["steps"][1]["with"]["ref"] = "5b1a78ee77648444fe56654f57e1129d20ebb684"
+        prior["jobs"]["shipping-image-producer"]["steps"][3]["with"]["name"] = "shipping-image-5b1a78ee-amd64-${{ github.run_id }}-${{ github.run_attempt }}"
         self.assertEqual(current, prior)
 
     def test_recipe_wires_all_guards_and_seals_latest_measurements(self):

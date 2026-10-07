@@ -2356,6 +2356,8 @@ class RegistryMutationCliTest(unittest.TestCase):
         self.assertEqual(set(SEL.WORKFLOW_YAML), set(SEL.WORKFLOW_JOBS))
         self.assertNotIn("observe", {job for jobs in SEL.WORKFLOW_JOBS.values() for job in jobs})
         prior = git(ROOT, "show", "288dacdcdbe1f76a7f885e6a13c17014dc4bb95d:.github/workflows/install.yml").stdout
+        prior = prior.replace("551583237a4cc31828d69fb1d3160c2e0f9179d6", "5b1a78ee77648444fe56654f57e1129d20ebb684")
+        prior = prior.replace("shipping-image-551-amd64-", "shipping-image-5b1a78ee-amd64-").replace("joint551", "product5b1a78ee")
         self.assertEqual((ROOT / ".github/workflows/install.yml").read_text(), prior)
 
     def test_shipping_observer_missing_registry_file_refuses_before_outputs(self) -> None:

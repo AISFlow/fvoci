@@ -28,8 +28,8 @@ from datetime import datetime, timezone
 from contextlib import ExitStack
 from pathlib import Path, PurePosixPath
 
-PRODUCT_SHA = "551583237a4cc31828d69fb1d3160c2e0f9179d6"
-PRODUCT_TREE = "5c053668264efb053b7d7c5d6fd2ddd0461ba92c"
+PRODUCT_SHA = "5b1a78ee77648444fe56654f57e1129d20ebb684"
+PRODUCT_TREE = "739ea2312f5f3ec59363f86f966503cef1401bc2"
 # The admitted local amd64 builder's actual immutable RepoDigest, not its tag.
 BUILDKIT_IMAGE = "moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea"
 DISK_FLOOR = 32 * 1024**3
