@@ -1150,7 +1150,7 @@ def execute_ui(manifest, baseline, environment):
                 titles = re.findall(r'^(?:  )?test\("([^"\n]+)"', (W / 'apps/web/e2e-pending' / spec).read_text(), re.M)
                 if flow == 'on':
                     titles = [title for title in titles if not title.startswith('selected normal main restart:')]
-                require(len(titles) == (1 if flow == 'on' else 7), 'UI_EXPECTED_REGISTRATION_CHANGED')
+                require(len(titles) == (1 if flow == 'on' else 8), 'UI_EXPECTED_REGISTRATION_CHANGED')
                 cases = report_cases(browser(manifest, directory, b_env, spec,
                                      '^selected normal main:' if flow == 'on' else None), spec, titles)
                 receipt['counts'][flow] = len(cases)
@@ -1217,7 +1217,7 @@ def execute_ui(manifest, baseline, environment):
                     except BaseException:
                         receipt['cleanupErrors'].append('UI_SERVER_LOG_CLOSE_FAILED')
             require(receipt['cleanupErrors'] == [], 'UI_RESOURCE_CLOSURE_FAILED')
-        require(receipt['counts'] == {'on': 1, 'restart': 1, 'off': 7}, 'UI_ACTUAL_COUNTS_FAILED')
+        require(receipt['counts'] == {'on': 1, 'restart': 1, 'off': 8}, 'UI_ACTUAL_COUNTS_FAILED')
         receipt['uiResult'] = 'PASS'
     except BaseException as error:
         receipt['uiResult'] = 'FAIL'
@@ -1294,7 +1294,7 @@ def _consume(phase, inputs):
         FVOCI_TEST_TURSO_DESTRUCTIVE='true', PASSWORD_PEPPER_KEYS=json.dumps({'fixture': secrets.token_hex(32)}),
         PASSWORD_PEPPER_ACTIVE_KEY_ID='fixture')
     result = execute_ui(manifest, baseline, environment)
-    print('TURSO_UI_ACK_PASS on=1 restart=1 off=7 retries=0 ignored=0 restore=NOTRUN precision=NOTRUN cost=NOTRUN')
+    print('TURSO_UI_ACK_PASS on=1 restart=1 off=8 retries=0 ignored=0 restore=NOTRUN precision=NOTRUN cost=NOTRUN')
     require(result['cleanupErrors'] == [], 'UI_RESOURCE_CLOSURE_FAILED')
 
 

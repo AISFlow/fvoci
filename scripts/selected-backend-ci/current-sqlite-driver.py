@@ -340,9 +340,9 @@ try:
         else:
             receipt['actual_off_titles'] = validate_off_report(json.loads((run / 'playwright-result.private.json').read_text()), 'sqlite')
         assert (db.stat().st_dev, db.stat().st_ino) == (meta.st_dev, meta.st_ino), 'no replacement/reset DB'
-        receipt.update(actual_browser_tests=7 if FLOW == 'off' else 1, retries=0, ignored=0,
+        receipt.update(actual_browser_tests=8 if FLOW == 'off' else 1, retries=0, ignored=0,
                        actual_fixture_pin_checks_completed=True,
-                       tested_product_flow=('immutable OFF7 actual Vue CAS/replay/native history/task/note/owner-transition/current revoke' if FLOW == 'off' else 'actual currentVue setup/login/stable wiki create/nonempty nativeON/matching durableACK/manualrevision/fresh cookie actor body-native-ID-permission-history readback'))
+                       tested_product_flow=('immutable OFF8 actual Vue CAS/replay/native history/task/note/owner-transition/current revoke/lost-response newer head' if FLOW == 'off' else 'actual currentVue setup/login/stable wiki create/nonempty nativeON/matching durableACK/manualrevision/fresh cookie actor body-native-ID-permission-history readback'))
     if code == 0 and FLOW == 'on':
         receipt['phase'] = 'restart'
         receipt['current_schema_server_restart'] = restart_same_app(globals())

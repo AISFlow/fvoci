@@ -64,7 +64,7 @@ class OffReports(unittest.TestCase):
     def setUp(self):
         self.names = re.findall(r'  test\("([^"\n]+)"', (ROOT / 'apps/web/e2e-pending/workspace-off-selected-backend.spec.ts').read_text())
         self.report = {'config': {'workers': 1, 'metadata': {'selectedBackend': 'sqlite', 'selectedFlow': 'off'}},
-                       'errors': [], 'stats': {'expected': 7, 'unexpected': 0, 'flaky': 0, 'skipped': 0},
+                       'errors': [], 'stats': {'expected': 8, 'unexpected': 0, 'flaky': 0, 'skipped': 0},
                        'suites': [{'suites': [{'specs': [
                            {'title': name, 'file': 'workspace-off-selected-backend.spec.ts', 'ok': True,
                             'tests': [{'expectedStatus': 'passed', 'results': [
@@ -73,8 +73,8 @@ class OffReports(unittest.TestCase):
     def validate(self, report, backend):
         return functions(HERE / 'current_binding.py', {'validate_off_report'})['validate_off_report'](report, backend)
 
-    def test_exact_immutable_seven_both_backends(self):
-        self.assertEqual(len(self.names), 7)
+    def test_exact_immutable_eight_both_backends(self):
+        self.assertEqual(len(self.names), 8)
         for backend in ('sqlite', 'postgres'):
             self.report['config']['metadata']['selectedBackend'] = backend
             self.assertEqual(self.validate(self.report, backend), self.names)
@@ -123,7 +123,7 @@ class CompanionExecutionPlan(unittest.TestCase):
                 manifest=json.loads(Path(env['FVOCI_ROOT_CURRENT_BINDING']).read_text())
                 lane,flow=allocation['lane'],manifest['flow'];key=(lane,flow);seen.append(key);bindings.append((allocation,manifest))
                 run=Path(allocation['runRoot']);run.mkdir()
-                receipt={'actual_browser_tests':7 if flow=='off' else 1,'retries':0,
+                receipt={'actual_browser_tests':8 if flow=='off' else 1,'retries':0,
                          'owned_container_absent':key!=cleanup_failed,'owned_loopback_port_closed':True,'recorded_process_identities_retired':True}
                 receipt.update(source=source['head'],tree=source['tree'],root_owner='pure-fixture-owner',
                                selected_flow=flow,final_exit_code=23 if key==failed else 0,cleanup_errors=[])
@@ -151,7 +151,7 @@ class CompanionExecutionPlan(unittest.TestCase):
         self.assertEqual(seen,[('install','on'),('postgres','on'),('sqlite','on'),('postgres','off'),('sqlite','off')])
         code,receipt=result;self.assertEqual(code,0)
         self.assertTrue(receipt['normalBothAndRestartRequired'] and receipt['offBothRequired'])
-        self.assertEqual(receipt['offTestsPerBackend'],7)
+        self.assertEqual(receipt['offTestsPerBackend'],8)
         for allocation,manifest in bindings:
             self.assertEqual(allocation['flow'],manifest['flow'])
             self.assertEqual('restartAllocation' in manifest, allocation['lane']!='install' and allocation['flow']=='on')

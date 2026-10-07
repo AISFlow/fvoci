@@ -1424,13 +1424,13 @@ class UiAdapterTests(unittest.TestCase):
             with self.assertRaises(self.ui.UiError): self.ui.private_read(path, cap=1)
 
     def test_browser_receipts_require_every_actual_case_once_without_skips_or_retries(self):
-        titles = ['case ' + str(i) for i in range(7)]
+        titles = ['case ' + str(i) for i in range(8)]
         report = {'config': {'workers': 1, 'metadata': {'selectedBackend': 'libsql-remote'}},
-                  'errors': [], 'stats': {'expected': 7, 'unexpected': 0, 'flaky': 0, 'skipped': 0},
+                  'errors': [], 'stats': {'expected': 8, 'unexpected': 0, 'flaky': 0, 'skipped': 0},
                   'suites': [{'specs': [{'file': self.ui.OFF, 'ok': True, 'title': title,
                     'tests': [{'expectedStatus': 'passed', 'results': [{'status': 'passed',
                         'retry': 0, 'errors': [], 'attachments': []}]}]} for title in titles]}]}
-        self.assertEqual(len(self.ui.report_cases(report, self.ui.OFF, titles)), 7)
+        self.assertEqual(len(self.ui.report_cases(report, self.ui.OFF, titles)), 8)
         for mutate in ('retry', 'skip', 'missing', 'duplicate'):
             wrong = copy.deepcopy(report)
             if mutate == 'retry': wrong['suites'][0]['specs'][0]['tests'][0]['results'][0]['retry'] = 1

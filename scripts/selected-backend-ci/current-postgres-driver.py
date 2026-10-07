@@ -669,8 +669,8 @@ try:
         receipt['current_schema_server_restart'] = restart_same_app(globals())
     if code == 0 and FLOW == 'off':
         titles = validate_off_report(json.loads((run / 'playwright-result.private.json').read_text()), 'postgres')
-        receipt.update(actual_browser_tests=7, retries=0, ignored=0, actual_off_titles=titles,
-                       tested_product_flow='immutable OFF7 actual Vue CAS/replay/native history/task/note/owner-transition/current revoke')
+        receipt.update(actual_browser_tests=8, retries=0, ignored=0, actual_off_titles=titles,
+                       tested_product_flow='immutable OFF8 actual Vue CAS/replay/native history/task/note/owner-transition/current revoke/lost-response newer head')
 
 except BaseException as error:
     failure_checkpoint(receipt, run, receipt.get('browser_exit'), error)

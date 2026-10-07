@@ -1309,4 +1309,70 @@ test.describe("selected normal main OFF", () => {
       await Promise.all([owner.context.close(), peer.context.close()]);
     }
   });
+
+  test("wiki: lost save response then a newer real head keeps the conflict when the old command is retried", async ({
+    browser,
+  }) => {
+    const a = await actor(browser, admin);
+    const b = await actor(browser, member, true);
+    try {
+      const target = await wiki(a.page);
+      await openOff(a.page, target);
+      await replaceText(a.page, "lost prefix 한글😀");
+      const path = `${target.path}/body/versioned`;
+      const commands: SaveCommand[] = [];
+      let lost: SaveResult | undefined;
+      await a.page.route(`**${path}`, async (route) => {
+        if (route.request().method() !== "PUT") return route.continue();
+        commands.push(route.request().postDataJSON() as SaveCommand);
+        const response = await route.fetch();
+        expect(response.status()).toBe(200);
+        lost = (await response.json()) as SaveResult;
+        await route.abort("failed");
+      });
+      await a.page.getByRole("button", { name: "저장", exact: true }).click();
+      await expect.poll(() => lost?.revisionId).toMatch(UUID_RE);
+      await expect(a.page.locator('[data-body-mode="off"]')).toHaveAttribute(
+        "data-body-persisted",
+        "false",
+      );
+      await a.page.unroute(`**${path}`);
+      await openOff(b.page, target);
+      await replaceText(b.page, "newer client head");
+      const newerSave = await save(b.page, target);
+      const newer = await readBody(b.page, target);
+      expect(newer.tailSeq).toBe(newerSave.result?.tailSeq);
+      expect(BigInt(newer.tailSeq)).toBeGreaterThan(BigInt(confirmed(lost ?? null).tailSeq));
+      await a.page.reload();
+      await mountedOff(a.page);
+      const panel = a.page.getByTestId("off-body-conflict");
+      await expect(panel).toBeVisible();
+      await expect(a.page.locator('[data-body-mode="off"]')).toHaveAttribute(
+        "data-body-persisted",
+        "false",
+      );
+      expect((await editorShape(a.page)).text).toBe("lost prefix 한글😀");
+      const request = a.page.waitForRequest(
+        (value) => value.method() === "PUT" && new URL(value.url()).pathname === path,
+      );
+      const response = a.page.waitForResponse(
+        (value) => value.request().method() === "PUT" && new URL(value.url()).pathname === path,
+      );
+      await a.page.getByRole("button", { name: "저장", exact: true }).click();
+      expect((await request).postDataJSON()).toEqual(commands[0]);
+      const replay = await response;
+      expect(replay.status()).toBe(200);
+      expect(await replay.json()).toEqual(lost);
+      await expect(panel).toBeVisible();
+      await expect(a.page.locator('[data-body-mode="off"]')).toHaveAttribute(
+        "data-body-persisted",
+        "false",
+      );
+      expect((await editorShape(a.page)).text).toBe("lost prefix 한글😀");
+      expect(await readBody(a.page, target)).toEqual(newer);
+      expect([...a.sockets, ...b.sockets]).toEqual([]);
+    } finally {
+      await Promise.all([a.context.close(), b.context.close()]);
+    }
+  });
 });

@@ -495,7 +495,7 @@ def lane_retirement(runroot, lane, flow, source, tree, owner, driver_exit):
                 assert parent['selected_flow'] == flow and parent['all_owned_fixtures_closed'] is True
             if driver_exit == 0:
                 if flow == 'on': assert receipt['current_schema_server_restart']['restartBrowserExit'] == 0
-                assert receipt['actual_browser_tests'] == (7 if flow == 'off' else 1) and receipt['retries'] == 0
+                assert receipt['actual_browser_tests'] == (8 if flow == 'off' else 1) and receipt['retries'] == 0
         facts['qualified'] = True
     except (OSError, ValueError, KeyError, TypeError, AssertionError):
         facts['refusalCodes'].append('SELECTED_DRIVER_RETIREMENT_UNCONFIRMED')
@@ -580,7 +580,7 @@ def run(output):
         if not complete:code=code or 1
         aggregate={'source':before['head'],'tree':before['tree'],'owner':owner,'runs':results,'exit':code,
               'allRequestedRunsExecuted':complete,'launcherFailure':launcher_failure,
-              'normalBothAndRestartRequired':True,'offBothRequired':True,'offTestsPerBackend':7,
+              'normalBothAndRestartRequired':True,'offBothRequired':True,'offTestsPerBackend':8,
               'sqliteAuxiliary':'BLOCKED: normal writers unported','whole060Complete':False}
         try:
             write(output/'selected-ci-receipt.json',aggregate)

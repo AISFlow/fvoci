@@ -47,13 +47,13 @@ def referenced(record):
 
 def validate_off_report(report, backend):
     spec = W / 'apps/web/e2e-pending/workspace-off-selected-backend.spec.ts'
-    assert sha(spec) == '611e9499c4a4e8406c706831ffe2a100ede9643933a3ffec748f3143d8cd8475'
+    assert sha(spec) == 'c544d30041a294bf1a2788022740a018f622bdc32c62c3fb71b090a0c99c446f'
     expected = re.findall(r'  test\("([^"\n]+)"', spec.read_text())
-    assert len(expected) == len(set(expected)) == 7
+    assert len(expected) == len(set(expected)) == 8
     assert report['config']['workers'] == 1 and report['errors'] == []
     assert report['config']['metadata']['selectedBackend'] == backend
     assert report['config']['metadata']['selectedFlow'] == 'off'
-    assert report['stats']['expected'] == 7
+    assert report['stats']['expected'] == 8
     assert all(report['stats'][k] == 0 for k in ('unexpected', 'flaky', 'skipped'))
     cases = []
     def visit(suites):
@@ -68,7 +68,7 @@ def validate_off_report(report, backend):
                 cases.append(case['title'])
             visit(suite.get('suites', []))
     visit(report['suites'])
-    assert cases == expected, 'all seven original cases must pass once in declared order'
+    assert cases == expected, 'all eight registered cases must pass once in declared order'
     return cases
 
 
@@ -173,7 +173,7 @@ def load_current(lane, driver):
     assert os.environ.get('FVOCI_E2E_SELECTED_FLOW', 'on') == flow
     if lane == 'install': assert flow == 'on'
     if flow == 'off':
-        assert before['tracked']['apps/web/e2e-pending/workspace-off-selected-backend.spec.ts'] == '611e9499c4a4e8406c706831ffe2a100ede9643933a3ffec748f3143d8cd8475'
+        assert before['tracked']['apps/web/e2e-pending/workspace-off-selected-backend.spec.ts'] == 'c544d30041a294bf1a2788022740a018f622bdc32c62c3fb71b090a0c99c446f'
     if lane == 'postgres':
         assert before['tracked']['apps/web/e2e-pending/workspace-wiki-selected-auxiliary.ts'] == 'c38b23f590e08f68f4a7abf64d71976e9b088f66631982e73e8f26aa8d606f57'
     assert subprocess.check_output(['git','-c','safe.directory='+str(W),'-C',str(W),'status','--short'], text=True) == before['status']
