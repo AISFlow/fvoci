@@ -101,8 +101,73 @@ class EarlyDriverFailure(unittest.TestCase):
         self.assertEqual(diagnostic['selected_exit'],7)
         self.assertEqual(diagnostic['lanes'][0]['invalid_required_fields'],['owned_loopback_port_closed'])
         self.assertIsNotNone(diagnostic['lanes'][0]['original_driver_failure_sha256'])
+        self.assertEqual(diagnostic['lanes'][0]['failed_phase'],'server-startup')
+        self.assertEqual(diagnostic['lanes'][0]['original_driver_failure_type'],'AssertionError')
+        self.assertIsNone(diagnostic['lanes'][0]['original_driver_failure_code'])
         self.assertNotIn(PRIVATE['message'],stdout.getvalue())
         self.assertFalse((output/'runtime-close-stage.json').exists())
+
+    def _refused_ownership(self, receipt, message, parent=False):
+        output = self.run / ('own-' + hashlib.sha256(json.dumps(receipt,sort_keys=True).encode()).hexdigest()[:12])
+        output.mkdir()
+        runtime = output/'runtime'; runtime.mkdir()
+        runroot = runtime/'root-current-postgres-0123456789ab'; runroot.mkdir()
+        (runroot/'receipt.json').write_text(json.dumps(receipt))
+        if parent:(runroot/'parent-receipt.json').write_text(json.dumps(self.parent))
+        (output/'before.json').write_text(json.dumps({'head':SOURCE,'tree':TREE}))
+        (output/'postgres-on-allocation.json').write_text('{}')
+        (output/'selected-ci-receipt.json').write_text(json.dumps({'owner':OWNER,'source':SOURCE,'tree':TREE,
+            'exit':receipt['final_exit_code'],'allRequestedRunsExecuted':False,'runs':[{'lane':'postgres','flow':'on',
+                'exit':receipt['final_exit_code'],'actualSource':SOURCE,'runRoot':str(runroot)}]}))
+        stdout=io.StringIO()
+        with patch.dict(runner.os.environ,{'GITHUB_SHA':SOURCE,'GITHUB_JOB':'collaboration-flow'},clear=True), \
+             patch.object(runner,'identity',return_value=OWNER),patch.object(runner.os,'getuid',return_value=1000), \
+             patch.object(runner.os,'getgid',return_value=1000),contextlib.redirect_stdout(stdout):
+            with self.assertRaisesRegex(AssertionError, message):
+                runner.runtime_ownership_return(output)
+        raw=stdout.getvalue()
+        self.assertFalse((output/'runtime-close-stage.json').exists())
+        return json.loads(raw), raw
+
+    def test_public_lane_publishes_whitelisted_phase_type_and_code_only(self):
+        secret='http://secret.example/a cookie=PRIVATE_LANE_SECRET argv=/tmp/owned'
+        self.assertEqual(runner.public_failure_fields({
+            'failed_phase':'browser','failure_code':secret,'original_driver_failure':secret}),
+            {'failed_phase':'browser','original_driver_failure_type':None,'original_driver_failure_code':None})
+        cases=(
+            ('server-ready','AssertionError','SELECTED_DRIVER_EXCEPTION','server-ready','AssertionError','SELECTED_DRIVER_EXCEPTION'),
+            ('browser','ReturnedNonzero','SELECTED_BODY_NONZERO','browser','ReturnedNonzero','SELECTED_BODY_NONZERO'),
+            ('install-body','RuntimeError','SELECTED_DRIVER_EXCEPTION','install-body','RuntimeError','SELECTED_DRIVER_EXCEPTION'),
+            ('owned-fixture-wrapper','OSError','SELECTED_DRIVER_FAILED',None,None,None),
+            (secret,secret,secret,None,None,None),
+        )
+        for phase, kind, code, expect_phase, expect_kind, expect_code in cases:
+            with self.subTest(phase=phase, kind=kind, code=code):
+                failure={'type':kind,'message':secret,'phase':phase,'observedExit':7,'code':code}
+                receipt=dict(self.receipt, owned_loopback_port_closed=None, failed_phase=phase,
+                             failure_code=code, original_driver_failure=failure)
+                diagnostic, raw=self._refused_ownership(receipt, 'missing or invalid current retirement proof')
+                lane=diagnostic['lanes'][0]
+                self.assertFalse(diagnostic['ownership_return_qualified'])
+                self.assertEqual(lane['failed_phase'], expect_phase)
+                self.assertEqual(lane['original_driver_failure_type'], expect_kind)
+                self.assertEqual(lane['original_driver_failure_code'], expect_code)
+                self.assertEqual(lane['original_driver_failure_sha256'],
+                    hashlib.sha256(json.dumps(failure,sort_keys=True).encode()).hexdigest())
+                self.assertNotIn(secret, raw)
+                self.assertNotIn('original_driver_failure', lane)
+        complete=dict(self.receipt, failed_phase='server-ready', failure_code='SELECTED_DRIVER_EXCEPTION',
+                      original_driver_failure={'type':'AssertionError','message':secret})
+        diagnostic, raw=self._refused_ownership(complete, 'all mandatory lanes remain required', parent=True)
+        lane=diagnostic['lanes'][0]
+        self.assertEqual([(item['lane'], item['flow']) for item in diagnostic['lanes']], [('postgres','on')])
+        self.assertEqual(lane['failed_phase'],'server-ready')
+        self.assertEqual(lane['original_driver_failure_type'],'AssertionError')
+        self.assertEqual(lane['original_driver_failure_code'],'SELECTED_DRIVER_EXCEPTION')
+        self.assertEqual(lane['closure_facts']['owned_loopback_port_closed'], True)
+        self.assertEqual(lane['cleanup_error_count'], 0)
+        self.assertNotIn(secret, raw)
+
 
 
 class ActualDriverSourceControls(unittest.TestCase):

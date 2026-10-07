@@ -256,6 +256,27 @@ sys.exit(bool(missing))
     print(','.join(map(str,groups)))
 
 
+# Same child phases lane_retirement already admits. Parent-only
+# 'owned-fixture-wrapper' is not a child failed_phase.
+PUBLIC_FAILURE_PHASES = ('container-prepare','server-startup','server-ready','browser','restart','install-body')
+# failure_checkpoint writes ReturnedNonzero, or type(error).__name__ when the
+# drivers raise AssertionError or RuntimeError by name. The code is the sibling
+# receipt field failure_code, not a key inside original_driver_failure.
+PUBLIC_FAILURE_TYPES = ('ReturnedNonzero','AssertionError','RuntimeError')
+PUBLIC_FAILURE_CODES = ('SELECTED_DRIVER_EXCEPTION','SELECTED_BODY_NONZERO')
+
+
+def public_failure_fields(facts):
+    """Whitelisted phase, type, and code only. Never the failure object or its message."""
+    phase = facts.get('failed_phase')
+    failure = facts.get('original_driver_failure')
+    kind = failure.get('type') if isinstance(failure, dict) else None
+    code = facts.get('failure_code')
+    return {'failed_phase': phase if phase in PUBLIC_FAILURE_PHASES else None,
+            'original_driver_failure_type': kind if kind in PUBLIC_FAILURE_TYPES else None,
+            'original_driver_failure_code': code if code in PUBLIC_FAILURE_CODES else None}
+
+
 def runtime_ownership_return(output):
     """A waited launcher alone does not prove its product resources retired."""
     diagnostic = {'schema':1, 'phase':'identity', 'source':None, 'tree':None,
@@ -305,7 +326,8 @@ def runtime_ownership_return(output):
                         for key in ('owned_container_absent','owned_loopback_port_closed','recorded_process_identities_retired')},
                     'cleanup_error_count':len(facts['cleanup_errors']) if type(facts.get('cleanup_errors')) is list else None,
                     'original_driver_failure_sha256':hashlib.sha256(json.dumps(facts['original_driver_failure'],sort_keys=True).encode()).hexdigest()
-                        if 'original_driver_failure' in facts else None})
+                        if 'original_driver_failure' in facts else None,
+                    **public_failure_fields(facts)})
                 assert all(key in facts and type(facts[key]) is expected[key] for key in required), 'missing or invalid current retirement proof'
                 assert run['actualSource'] == before['head']
                 assert facts['source'] == before['head'] and facts['tree'] == before['tree'] and facts['root_owner'] == owner
@@ -440,7 +462,7 @@ def lane_retirement(runroot, lane, flow, source, tree, owner, driver_exit):
         if original is not None:
             facts['originalFailureSha256'] = hashlib.sha256(json.dumps(original,sort_keys=True).encode()).hexdigest()
         phase = receipt.get('failed_phase')
-        if phase in ('container-prepare','server-startup','server-ready','browser','restart','install-body'):
+        if phase in PUBLIC_FAILURE_PHASES:
             facts['failedPhase'] = phase
         assert receipt['source'] == source and receipt['tree'] == tree and receipt['root_owner'] == owner
         assert type(receipt['final_exit_code']) is int and receipt['final_exit_code'] == driver_exit
