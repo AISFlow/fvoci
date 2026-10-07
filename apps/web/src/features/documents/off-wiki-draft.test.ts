@@ -387,7 +387,7 @@ describe("OFF wiki native draft owner", () => {
     );
     edit(draft.doc, " client A");
     let first!: BodySaveCommand;
-    await expect(
+    expect(
       draft.save(
         (command) =>
           new Promise<BodySaveResult>(() => {
@@ -584,10 +584,13 @@ describe("OFF wiki native draft owner", () => {
     });
     const prefix = draft.frozen;
     expect(typeof prefix?.snapshot).toBe("string");
+    if (prefix === null) {
+      throw new Error("frozen prefix missing");
+    }
     const observed = {
       targetId,
       tailSeq: "2",
-      snapshotV1: prefix!.snapshot,
+      snapshotV1: prefix.snapshot,
       tailV1: [],
       contentJson: draft.mine,
       writable: false,
