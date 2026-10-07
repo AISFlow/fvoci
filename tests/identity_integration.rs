@@ -5369,3 +5369,306 @@ async fn keycloak_workspace_sso_with_a_test_entitlement() {
     assert_eq!(kc.token_events(realm_b).await, tokens.1 + 1);
     h.finish().await;
 }
+
+// This fixture is also extracted verbatim by the isolated author verification driver.
+mod sqlite_logout_regression {
+    use axum::body::Body;
+    use axum::http::header::{COOKIE, SET_COOKIE};
+    use axum::http::{HeaderMap, Request, StatusCode};
+    use fvoci_server::auth::password::Keyring;
+    use fvoci_server::auth::service::SetupInstanceInput;
+    use fvoci_server::auth::AuthService;
+    use fvoci_server::db::backend::Backend;
+    use fvoci_server::db::{migrate, pool, Db};
+    use fvoci_server::error::SESSION_COOKIE;
+    use fvoci_server::http::rate_limit::RateLimiter;
+    use fvoci_server::http::state::AppState;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+    fn state(auth: Arc<AuthService>, storage_root: PathBuf) -> AppState {
+        AppState {
+            realtime_mode: fvoci_server::config::RealtimeMode::Off,
+            native_engine: None,
+            auth,
+            branding_name: "FVOCI isolated auth proof".into(),
+            public_origin: "http://localhost".into(),
+            cookie_secure: false,
+            rate_limiter: RateLimiter::new(),
+            storage: fvoci_server::attachments::LocalStorage::new(storage_root).into(),
+            upload: fvoci_server::attachments::UploadLimits {
+                part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+                max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+                create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+                part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                    fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+                ),
+            },
+            collab: None,
+            meili: None,
+            search_embedder: None,
+            markdown: None,
+            import_wake: None,
+            import_extractor_available: false,
+            preview_extract: None,
+            quota: Default::default(),
+            mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
+            streams: AppState::fresh_streams(),
+        }
+    }
+
+    fn clears(headers: &HeaderMap) -> bool {
+        headers.get_all(SET_COOKIE).iter().any(|value| {
+            let Ok(text) = value.to_str() else {
+                return false;
+            };
+            text.contains(&format!("{SESSION_COOKIE}=")) && text.contains("Max-Age=0")
+        })
+    }
+
+    fn request(
+        method: &str,
+        uri: &str,
+        token: Option<&str>,
+        endpoint: Option<&str>,
+    ) -> Request<Body> {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(token) = token {
+            builder = builder.header(COOKIE, format!("{SESSION_COOKIE}={token}"));
+        }
+        let body = endpoint
+            .map(|e| format!(r#"{{"pushEndpoint":"{e}"}}"#))
+            .unwrap_or_default();
+        builder.body(Body::from(body)).unwrap()
+    }
+
+    async fn logout_count(sqlite: &sqlx::SqlitePool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM events WHERE verb='auth.logout'")
+            .fetch_one(sqlite)
+            .await
+            .unwrap()
+    }
+    async fn subscriptions(sqlite: &sqlx::SqlitePool) -> Vec<String> {
+        sqlx::query_scalar("SELECT endpoint || ':' || hex(user_id) FROM push_subscriptions ORDER BY endpoint,user_id").fetch_all(sqlite).await.unwrap()
+    }
+    pub async fn run(root: &Path) {
+        let dbpath = root.join("auth.sqlite");
+        migrate::run_sqlite_migrations(&dbpath).await.unwrap();
+        let sqlite = pool::connect_sqlite_app(&dbpath, 1).await.unwrap();
+        let auth = Arc::new(AuthService {
+            db: Db::from_backend(Backend::Sqlite(sqlite.clone())),
+            password_keys: Keyring::parse(
+                r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                "test",
+            )
+            .unwrap(),
+        });
+        let (actor, _, token) = auth
+            .setup_instance(
+                "Synthetic-Logout-2026!".into(),
+                SetupInstanceInput {
+                    email: "logout@example.invalid".into(),
+                    given_name: "Synthetic".into(),
+                    family_name: None,
+                    workspace_slug: "logout-fixture".into(),
+                    workspace_name: "Logout fixture".into(),
+                    client_ip: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let live = auth.session_user(&token).await.unwrap().unwrap();
+        let session = Uuid::parse_str(&live.session_id).unwrap();
+        let other_session = Uuid::now_v7();
+        let other_actor = Uuid::now_v7();
+        let foreign_session = Uuid::now_v7();
+        let other_token = fvoci_server::auth::token::new_token();
+        let foreign_token = fvoci_server::auth::token::new_token();
+        sqlx::query(
+            "INSERT INTO users(id,email,given_name) VALUES(?1,'other@example.invalid','Other')",
+        )
+        .bind(other_actor.as_bytes().as_slice())
+        .execute(&sqlite)
+        .await
+        .unwrap();
+        for (id, user, hash) in [
+            (other_session, actor, &other_token.hash),
+            (foreign_session, other_actor, &foreign_token.hash),
+        ] {
+            sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) SELECT ?1,?2,?3,expires_at FROM sessions WHERE id=?4")
+            .bind(id.as_bytes().as_slice()).bind(user.as_bytes().as_slice()).bind(hash).bind(session.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+        }
+        // Own ending session; same actor's reported endpoint on another session;
+        // unrelated same-actor device; other actor sharing the reported endpoint.
+        for (user, id, endpoint) in [
+            (actor, session, "https://push.invalid/bound"),
+            (actor, other_session, "https://push.invalid/reported"),
+            (actor, other_session, "https://push.invalid/keep"),
+            (
+                other_actor,
+                foreign_session,
+                "https://push.invalid/reported",
+            ),
+        ] {
+            sqlx::query("INSERT INTO push_subscriptions(id,user_id,session_id,endpoint,p256dh,auth) VALUES(?1,?2,?3,?4,?5,?6)")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(user.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).bind(endpoint).bind("a".repeat(87)).bind("b".repeat(22)).execute(&sqlite).await.unwrap();
+        }
+        let app = fvoci_server::http::routes::auth::router()
+            .with_state(state(auth.clone(), root.join("storage")));
+        assert_eq!(
+            app.clone()
+                .oneshot(request("GET", "/api/v1/auth/me", Some(&token), None))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        let before = subscriptions(&sqlite).await;
+        let seq_before: i64 = sqlx::query_scalar("SELECT last_seq FROM event_sequence WHERE id=1")
+            .fetch_one(&sqlite)
+            .await
+            .unwrap();
+        // Failure after revoke and push deletion must roll back both and the event sequence.
+        sqlx::query("CREATE TRIGGER reject_logout BEFORE INSERT ON events WHEN NEW.verb='auth.logout' BEGIN SELECT RAISE(ABORT,'fixture logout failure'); END").execute(&sqlite).await.unwrap();
+        let failure = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/auth/logout",
+                Some(&token),
+                Some("https://push.invalid/reported"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(failure.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!clears(failure.headers()));
+        assert!(auth.session_user(&token).await.unwrap().is_some());
+        assert_eq!(subscriptions(&sqlite).await, before);
+        assert_eq!(logout_count(&sqlite).await, 0);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT last_seq FROM event_sequence WHERE id=1")
+                .fetch_one(&sqlite)
+                .await
+                .unwrap(),
+            seq_before
+        );
+        sqlx::query("DROP TRIGGER reject_logout")
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/auth/logout",
+                Some(&token),
+                Some("https://push.invalid/reported"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(clears(response.headers()));
+        assert!(auth.session_user(&token).await.unwrap().is_none());
+        assert!(sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT revoked_at FROM sessions WHERE id=?1"
+        )
+        .bind(session.as_bytes().as_slice())
+        .fetch_one(&sqlite)
+        .await
+        .unwrap()
+        .is_some());
+        assert_eq!(
+            app.clone()
+                .oneshot(request("GET", "/api/v1/auth/me", Some(&token), None))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(auth
+            .session_user(&other_token.token)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(auth
+            .session_user(&foreign_token.token)
+            .await
+            .unwrap()
+            .is_some());
+        let expected = vec![
+            format!(
+                "https://push.invalid/keep:{}",
+                actor.simple().to_string().to_uppercase()
+            ),
+            format!(
+                "https://push.invalid/reported:{}",
+                other_actor.simple().to_string().to_uppercase()
+            ),
+        ];
+        assert_eq!(subscriptions(&sqlite).await, expected);
+        assert_eq!(logout_count(&sqlite).await, 1);
+        let event: (Vec<u8>, String, String) = sqlx::query_as(
+            "SELECT actor_user_id,channel,payload FROM events WHERE verb='auth.logout'",
+        )
+        .fetch_one(&sqlite)
+        .await
+        .unwrap();
+        assert_eq!(
+            event,
+            (actor.as_bytes().to_vec(), "web".into(), "{}".into())
+        );
+        // Already revoked and absent cookies remain idempotent 204/clearing cookie,
+        // and an endpoint supplied with the revoked token grants no deletion authority.
+        for cookie in [Some(token.as_str()), None, Some("unknown-token")] {
+            let repeat = app
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/auth/logout",
+                    cookie,
+                    Some("https://push.invalid/keep"),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(repeat.status(), StatusCode::NO_CONTENT);
+            assert!(clears(repeat.headers()));
+        }
+        assert_eq!(subscriptions(&sqlite).await, expected);
+        assert_eq!(logout_count(&sqlite).await, 1);
+        // The public service uses the same adapter when no endpoint is reported.
+        auth.logout(&other_token.token, Some(actor), None)
+            .await
+            .unwrap();
+        assert!(auth
+            .session_user(&other_token.token)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(auth
+            .session_user(&foreign_token.token)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            subscriptions(&sqlite).await,
+            vec![format!(
+                "https://push.invalid/reported:{}",
+                other_actor.simple().to_string().to_uppercase()
+            )]
+        );
+        assert_eq!(logout_count(&sqlite).await, 2);
+        drop(app);
+        drop(auth);
+        sqlite.close().await;
+    }
+    #[tokio::test]
+    async fn sqlite_logout_revokes_only_ending_session_and_browser_atomically() {
+        let root = std::env::temp_dir().join(format!("fvoci-sqlite-logout-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        run(&root).await;
+        // Keep the private fixture on assertion failure for diagnosis.
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

@@ -523,6 +523,66 @@ pub async fn revoke_session_with_push(
     Ok(())
 }
 
+/// Preserve the PostgreSQL sign-in lock/RLS path; SQLite-family writers use
+/// the existing exclusive writer reservation for the entire logout operation.
+pub async fn revoke_session_with_push_backend(
+    backend: &Backend,
+    token_hash: &str,
+    actor_user_id: Option<Uuid>,
+    push_endpoint: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return revoke_session_with_push(pool, token_hash, actor_user_id, push_endpoint).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let mut operation = tx.operation();
+    let session = match &mut operation {
+        OperationTx::SqliteFamily(family) => {
+            family.require_writer()?;
+            let rows = family.query(
+                "SELECT id,user_id FROM sessions WHERE token_hash=?1 AND revoked_at IS NULL AND expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)",
+                &[Cell::text(token_hash)],
+            ).await?;
+            rows.first()
+                .map(|row| Ok::<_, sqlx::Error>((row.cell(0)?.id()?, row.cell(1)?.id()?)))
+                .transpose()?
+        }
+        OperationTx::Postgres(_) => {
+            return Err(sqlx::Error::Protocol(
+                "family session revoke has unexpected transaction kind".into(),
+            ));
+        }
+    };
+    if let Some((session_id, user_id)) = session {
+        if let OperationTx::SqliteFamily(family) = &mut operation {
+            family
+                .execute(
+                    "UPDATE sessions SET revoked_at=?2 WHERE id=?1",
+                    &[Cell::uuid(session_id), Cell::instant(stored_now())?],
+                )
+                .await?;
+            family.execute(
+                "DELETE FROM push_subscriptions WHERE user_id=?1 AND (session_id=?2 OR endpoint=?3)",
+                &[Cell::uuid(user_id), Cell::uuid(session_id), Cell::optional_text(push_endpoint)],
+            ).await?;
+            family.replace_system_context(true);
+        }
+        operation
+            .append_event(EventAppend {
+                id: Uuid::now_v7(),
+                workspace_id: None,
+                actor_user_id,
+                verb: "auth.logout".to_string(),
+                target_type: None,
+                target_id: None,
+                payload: json!({}),
+            })
+            .await?;
+    }
+    tx.commit().await.map_err(|unknown| unknown.source)?;
+    Ok(())
+}
+
 pub enum FamilyNamePatch {
     Preserve,
     Clear,
