@@ -1994,7 +1994,7 @@ def verify_shipping_observer_workflow(path: Path) -> list[str]:
             "runs-on": "ubuntu-26.04", "timeout-minutes": 5,
             "steps": [
                 {"uses": checkout, "with": {"ref": "${{ github.sha }}", "path": "tooling", "persist-credentials": False}},
-                {"uses": checkout, "with": {"ref": "d15ad53b5877cf97748812d2d3733e80b8a3dbe6", "path": "reader", "persist-credentials": False}},
+                {"uses": checkout, "with": {"ref": "14c48782228a96755e6d754a54a586bb69bbf5d6", "path": "reader", "persist-credentials": False}},
                 {"name": "Pure observer controls", "run": "python3 -B tooling/scripts/selected-backend-ci/test-shipping-cgroup-observer.py"},
                 {"name": "One pinned installed stat metadata observation", "run": "python3 -B tooling/scripts/selected-backend-ci/shipping-cgroup-observer.py --installed-stat-metadata"},
             ],
