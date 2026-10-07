@@ -18,10 +18,10 @@ use crate::api::dto::{
 };
 use crate::auth::session::SessionUser;
 use crate::db::projects::{
-    add_project_member, clone_project, create_project_backend as create_project, get_project,
-    get_project_workflow_backend as get_project_workflow, list_deleted_projects,
-    list_project_members, list_projects_backend as list_projects, remove_project_member,
-    restore_project, set_project_archived, trash_project, update_project,
+    add_project_member, clone_project, create_project_backend as create_project,
+    get_project_backend as get_project, get_project_workflow_backend as get_project_workflow,
+    list_deleted_projects, list_project_members, list_projects_backend as list_projects,
+    remove_project_member, restore_project, set_project_archived, trash_project, update_project,
     update_project_member_role, CloneProjectInput, CreateProjectInput, ProjectDbError,
     UpdateProjectInput,
 };
@@ -328,12 +328,7 @@ async fn get_project_route(
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = get_project(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/projects.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         project_id,
         actor_user_id,
@@ -1604,6 +1599,147 @@ mod selected_pending_get_http_tests {
                 StatusCode::UNAUTHORIZED
             );
         }
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_http_project_detail_metadata_denials_fault_and_healthy_read() {
+        let (f, credential, token, project, _) = setup().await;
+        let app = app(&f);
+        let path = format!("/api/v1/workspaces/{}/projects/{project}", f.workspace);
+        let (status, body) = get(app.clone(), &path, Some(&token), false).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["id"], project.to_string());
+        assert_eq!(body["workspaceId"], f.workspace.to_string());
+        assert_eq!(body["key"], "GET");
+        assert_eq!(body["name"], "Pending GET 中");
+        assert_eq!(body["description"], "Literal read");
+        assert_eq!(body["icon"], "📄");
+        assert_eq!(body["visibility"], "workspace");
+        assert_eq!(body["status"], "active");
+        assert_eq!(body["createdBy"], f.user.to_string());
+        assert!(body["createdAt"].as_str().is_some());
+        assert!(body["updatedAt"].as_str().is_some());
+        assert!(body.get("documentCount").is_none());
+        assert!(body.get("taskCount").is_none());
+        let root = Uuid::parse_str(body["rootDocumentId"].as_str().unwrap()).unwrap();
+        let stored: Vec<u8> =
+            sqlx::query_scalar("SELECT root_document_id FROM projects WHERE id=?1")
+                .bind(project.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, root.as_bytes());
+        let private = create_project(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            CreateProjectInput {
+                key: "PRIV",
+                name: "비공개 案",
+                visibility: "private",
+                description: None,
+                icon: None,
+                lead_user_id: None,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let private_path = format!("/api/v1/workspaces/{}/projects/{}", f.workspace, private.id);
+        let (status, body) = get(app.clone(), &private_path, Some(&token), false).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["name"], "비공개 案");
+        assert_eq!(body["visibility"], "private");
+        assert!(body["description"].is_null());
+        assert!(body["icon"].is_null());
+        assert!(body["rootDocumentId"].as_str().is_some());
+        let read = pat(&f, &["projects.read"]).await;
+        assert_eq!(
+            get(app.clone(), &path, Some(&read), true).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            get(
+                app.clone(),
+                &path,
+                Some(&pat(&f, &["documents.read"]).await),
+                true
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            get(app.clone(), &path, None, false).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get(
+                app.clone(),
+                &format!("/api/v1/workspaces/{}/projects/{project}", Uuid::now_v7()),
+                Some(&token),
+                false
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            get(
+                app.clone(),
+                &format!(
+                    "/api/v1/workspaces/{}/projects/{}",
+                    f.workspace,
+                    Uuid::now_v7()
+                ),
+                Some(&token),
+                false
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        sqlx::query("ALTER TABLE projects RENAME COLUMN key TO broken_key")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            get(app.clone(), &path, Some(&token), false).await.0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        sqlx::query("ALTER TABLE projects RENAME COLUMN broken_key TO key")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let (status, body) = get(app.clone(), &path, Some(&token), false).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["key"], "GET");
+        sqlx::query("DELETE FROM project_members WHERE project_id=?1 AND user_id=?2")
+            .bind(private.id.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            get(app.clone(), &private_path, Some(&token), false).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            get(app.clone(), &path, Some(&token), false).await.0,
+            StatusCode::OK
+        );
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            get(app.clone(), &path, Some(&token), false).await.0,
+            StatusCode::UNAUTHORIZED
+        );
         f.close().await;
     }
 }

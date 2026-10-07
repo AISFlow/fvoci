@@ -1971,6 +1971,57 @@ pub async fn get_project(
     }
 }
 
+/// Same snapshot as [`get_project`]. Postgres delegates unchanged. The family
+/// reader rechecks the live session, workspace, and this project's permission
+/// in one read transaction, then returns that one row.
+pub async fn get_project_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<ProjectRow, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return get_project(pool, workspace_id, project_id, actor_user_id, session_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        if !op.session_is_live(actor_user_id, session_id).await? {
+            return Ok(Err(ProjectDbError::Forbidden));
+        }
+        if !op.workspace_is_live(workspace_id).await? {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        if !op
+            .project_permission_by_id(workspace_id, actor_user_id, project_id)
+            .await?
+            .is_some_and(|permission| permission.at_least(ProjectPermission::View))
+        {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        let OperationTx::SqliteFamily(family) = op else {
+            unreachable!()
+        };
+        family.require_tenant(workspace_id)?;
+        let rows = family
+            .query(
+                "SELECT id,key,name,description,icon,visibility,root_document_id,status,created_by,created_at,updated_at
+                 FROM projects WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",
+                &[Cell::uuid(workspace_id), Cell::uuid(project_id)],
+            )
+            .await?;
+        let Some(row) = rows.first() else {
+            return Ok(Err(ProjectDbError::NotFound));
+        };
+        Ok(Ok(project_created_family_row(row, workspace_id)?))
+    }
+    .await;
+    let cleanup = tx.rollback().await;
+    project_read_after_rollback(result, cleanup)
+}
+
 pub async fn update_project(
     pool: &PgPool,
     workspace_id: Uuid,
