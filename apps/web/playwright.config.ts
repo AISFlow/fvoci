@@ -14,6 +14,8 @@ export default defineConfig({
   testDir: "./e2e",
   workers: 1,
   retries: 0,
+  // A committed test.only would silently shrink a CI group to one test.
+  forbidOnly: !!process.env.CI,
   use: {
     ...devices["Desktop Chrome"],
     baseURL,
