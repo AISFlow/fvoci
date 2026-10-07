@@ -1085,6 +1085,33 @@ class OptInSelectionTest(unittest.TestCase):
 
 
 class WorkflowRegistryTest(unittest.TestCase):
+    def test_turso_ui_cache_paths_are_exported_from_the_runner(self) -> None:
+        path = ROOT / ".github" / "workflows" / "turso-test.yml"
+        self.assertEqual(SEL.verify_turso_workflow(path), [])
+        data, error = SEL._load_yaml_mapping(path)
+        self.assertIsNone(error)
+        ui = data["jobs"]["turso-ui"]
+        # runner is unavailable in job.env; these values must reach subsequent
+        # Bun/browser steps through the runner's environment file instead.
+        for name in ("BUN_INSTALL_CACHE_DIR", "PLAYWRIGHT_BROWSERS_PATH"):
+            self.assertNotIn(name, ui["env"])
+        preparation = ui["steps"][1]["run"].split("rustup toolchain install", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            runner_temp = Path(directory) / "runner temp with spaces"
+            env_file = Path(directory) / "environment file with spaces"
+            proc = subprocess.run(
+                ["bash", "-euo", "pipefail"], input=preparation, text=True,
+                capture_output=True, check=False,
+                env={"PATH": "/usr/bin:/bin", "RUNNER_TEMP": str(runner_temp),
+                     "GITHUB_ENV": str(env_file)},
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(env_file.read_text().splitlines(), [
+                f"CARGO_TARGET_DIR={runner_temp}/turso-ui-target",
+                f"BUN_INSTALL_CACHE_DIR={runner_temp}/turso-bun-cache",
+                f"PLAYWRIGHT_BROWSERS_PATH={runner_temp}/turso-browsers",
+            ])
+
     def test_normal_browser_job_budget_is_measured_and_fail_closed(self) -> None:
         import copy
         data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/web.yml")
@@ -2601,6 +2628,8 @@ class RegistryMutationCliTest(unittest.TestCase):
                 self._assert_no_green_outputs(proc, output, needle)
 
     def test_turso_ui_allocation_cannot_expand_credentials_or_bypass_current_binding(self) -> None:
+        bun_cache_export = "          printf 'BUN_INSTALL_CACHE_DIR=%s/turso-bun-cache\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"\n"
+        browser_cache_export = "          printf 'PLAYWRIGHT_BROWSERS_PATH=%s/turso-browsers\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"\n"
         cases = [
             ("    needs: admission\n", "    needs: []\n"),
             ("github.event.inputs.phase == 'ui-ack'", "github.event.inputs.phase != 'ui-ack'"),
@@ -2611,6 +2640,12 @@ class RegistryMutationCliTest(unittest.TestCase):
             ("      FVOCI_BUILD_SHA: ${{ github.sha }}\n", "      FVOCI_BUILD_SHA: stale9202\n"),
             ("      CARGO_BUILD_JOBS: 2\n", "      CARGO_BUILD_JOBS: 12\n"),
             ("      CARGO_INCREMENTAL: 0\n", "      TOKEN: ${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}\n"),
+            ("      PYTHONDONTWRITEBYTECODE: '1'\n", "      BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/turso-bun-cache\n      PYTHONDONTWRITEBYTECODE: '1'\n"),
+            ("      PYTHONDONTWRITEBYTECODE: '1'\n", "      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/turso-browsers\n      PYTHONDONTWRITEBYTECODE: '1'\n"),
+            (bun_cache_export, ""),
+            (browser_cache_export, ""),
+            (bun_cache_export, bun_cache_export.replace("$RUNNER_TEMP", "/foreign")),
+            (browser_cache_export, browser_cache_export.replace("$GITHUB_ENV", "$GITHUB_OUTPUT")),
             ("          ref: ${{ github.sha }}\n", "          ref: main\n"),
             ("          persist-credentials: false\n", "          persist-credentials: true\n"),
             ("          cargo fetch --locked\n", "          cargo fetch\n"),

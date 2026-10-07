@@ -2084,14 +2084,14 @@ def verify_turso_workflow(path: Path) -> list[str]:
              'CARGO_INCREMENTAL': 0,
              'CARGO_PROFILE_DEV_DEBUG': 0,
              'CARGO_PROFILE_TEST_DEBUG': 0,
-             'BUN_INSTALL_CACHE_DIR': '${{ runner.temp }}/turso-bun-cache',
-             'PLAYWRIGHT_BROWSERS_PATH': '${{ runner.temp }}/turso-browsers',
              'PYTHONDONTWRITEBYTECODE': '1'},
      'steps': [{'uses': 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
                 'with': {'ref': '${{ github.sha }}', 'persist-credentials': False}},
                {'name': 'Credential-free current UI input preparation',
                 'run': 'set -euo pipefail\n'
                        'printf \'CARGO_TARGET_DIR=%s/turso-ui-target\\n\' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n'
+                       'printf \'BUN_INSTALL_CACHE_DIR=%s/turso-bun-cache\\n\' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n'
+                       'printf \'PLAYWRIGHT_BROWSERS_PATH=%s/turso-browsers\\n\' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n'
                        'rustup toolchain install 1.98.1 --profile minimal\n'
                        'sudo apt-get update\n'
                        'sudo apt-get install -y --no-install-recommends python3 gcc binutils curl '
