@@ -2233,6 +2233,28 @@ class SelectedLibraryExecutionTest(unittest.TestCase):
                     self.assertEqual(len(self.run_workflow_fixture(kind, fail_index)), fail_index + 1)
 
 class RegistryMutationCliTest(unittest.TestCase):
+    def test_extra_cache_steps_require_exact_safe_download_shape(self) -> None:
+        cases = [(family, path) for family in ("save", "restore", "combined")
+                 for path in ("tar?et/**", "tar*/**", "**/target", "${{ github.workspace }}/**", "~/.cargo/registry\n~/.cargo/git\n../target")]
+        cases.append(("restore", "target"))
+        for family, target in cases:
+            with self.subTest(family=family, target=target):
+                root = self._mutated_root()
+                path = root / ".github/workflows/rust.yml"
+                data, err = SEL._load_yaml_mapping(path)
+                self.assertIsNone(err)
+                step = copy.deepcopy(next(step for step in data["jobs"]["fast"]["steps"] if step.get("name") == "Restore server build outputs"))
+                step["name"] = "Extra cache with uncertain qualification"
+                step["uses"] = step["uses"].replace("cache/restore@", "cache@" if family == "combined" else "cache/" + family + "@")
+                step["with"]["path"] = target
+                if target == "target":
+                    step["with"]["key"] = "v2-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-unqualified"
+                data["jobs"]["fast"]["steps"].append(step)
+                import yaml
+                path.write_text(yaml.safe_dump(data, sort_keys=False))
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, "only the exact qualified target restore and safe Cargo downloads")
+
     def test_differently_named_fast_target_writers_cannot_bypass_restore_only(self) -> None:
         for family in ("save", "combined"):
             for target in ("target", "./target", "target/debug", "${{ github.workspace }}/target", ".", "~/.cargo/registry\ntarget"):

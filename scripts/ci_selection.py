@@ -1833,15 +1833,26 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
             }
             if cache != [expected_cache]:
                 errors.append("rust: fast server cache must retain exact pinned restore-only complete-input key without post save")
+            download_cache = {
+                "path": "~/.cargo/registry\n~/.cargo/git\n",
+                "key": "v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}",
+            }
             for step in jobs.get("fast", {}).get("steps", []):
                 if not isinstance(step, dict) or not str(step.get("uses", "")).startswith((
-                        "actions/cache@", "actions/cache/save@")):
+                        "actions/cache@", "actions/cache/restore@", "actions/cache/save@")):
                     continue
-                paths = str(step.get("with", {}).get("path", "")).splitlines()
-                if any("target" in Path(p.strip()).parts or p.strip() in (
-                        ".", "./", "**", "${{ github.workspace }}", "${{ github.workspace }}/",
-                        "${{ env.CARGO_TARGET_DIR }}") for p in paths):
-                    errors.append("rust: fast target output cache writers are prohibited regardless of step name")
+                if step == expected_cache:
+                    continue
+                # Only this literal download shape is known to exclude build
+                # outputs. Do not interpret arbitrary globs or expressions.
+                safe_download = (set(step) <= {"name", "uses", "with"}
+                    and step.get("with") == download_cache
+                    and step.get("uses") in {
+                        "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830",
+                        "actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830",
+                        "actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830"})
+                if not safe_download:
+                    errors.append("rust: fast target output cache writers are prohibited; only the exact qualified target restore and safe Cargo downloads are allowed regardless of step name")
 
         reserved_gate = gate_job_id(workflow)
         if PLAN_JOB_ID not in jobs:
