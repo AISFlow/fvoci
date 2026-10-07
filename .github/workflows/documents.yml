@@ -136,6 +136,20 @@ jobs:
         working-directory: .
         run: |
           set -euo pipefail
+          # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
+          . /etc/os-release
+          [[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
+          case "$(dpkg --print-architecture)" in
+            amd64)
+              test -f /etc/apt/apt-mirrors.txt
+              grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
+              grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
+              test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
+              printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+              ;;
+            arm64) ;;
+            *) exit 1 ;;
+          esac
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"

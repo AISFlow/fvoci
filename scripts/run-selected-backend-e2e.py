@@ -305,6 +305,7 @@ def runtime_ownership_return(output):
                     'cleanup_error_count':len(facts['cleanup_errors']) if type(facts.get('cleanup_errors')) is list else None,
                     'original_driver_failure_sha256':hashlib.sha256(json.dumps(facts['original_driver_failure'],sort_keys=True).encode()).hexdigest()
                         if 'original_driver_failure' in facts else None})
+                assert all(key in facts and type(facts[key]) is expected[key] for key in required), 'missing or invalid current retirement proof'
                 assert run['actualSource'] == before['head']
                 assert facts['source'] == before['head'] and facts['tree'] == before['tree'] and facts['root_owner'] == owner
                 assert facts['final_exit_code'] == run['exit']

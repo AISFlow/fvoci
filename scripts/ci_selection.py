@@ -1692,6 +1692,17 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
     return errors
 
 
+def _verify_web_browser_budget(jobs: dict) -> list[str]:
+    """Bound the measured cold-build budget without changing testcase limits."""
+    job = jobs.get("workspace-browser-shard")
+    if not isinstance(job, dict):
+        return ["web: normal browser shard must be a mapping"]
+    budget = job.get("timeout-minutes")
+    if type(budget) is not int or budget != 20:
+        return ["web: normal browser shard requires the measured 20 minute job budget"]
+    return []
+
+
 def _verify_web_build_handoff(jobs: dict) -> list[str]:
     """The only admitted cross-job native consumer, bound to this run's producer."""
     errors = []
@@ -1950,6 +1961,7 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
 
         errors.extend(_verify_opt_in_wiring(workflow, data, jobs))
         if workflow == "web":
+            errors.extend(_verify_web_browser_budget(jobs))
             errors.extend(_verify_web_build_handoff(jobs))
 
     release_path = workflows_dir / RELEASE_WORKFLOW_FILE

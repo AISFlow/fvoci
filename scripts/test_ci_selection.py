@@ -1084,6 +1084,33 @@ class OptInSelectionTest(unittest.TestCase):
 
 
 class WorkflowRegistryTest(unittest.TestCase):
+    def test_normal_browser_job_budget_is_measured_and_fail_closed(self) -> None:
+        import copy
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/web.yml")
+        self.assertIsNone(error)
+        jobs = data["jobs"]
+        self.assertEqual(SEL._verify_web_browser_budget(jobs), [])
+        self.assertEqual(jobs["workspace-browser-shard"]["strategy"], {
+            "fail-fast": False, "matrix": {"shard": list(range(8))},
+        })
+        self.assertIn("workspace-browser-shard", jobs["web-ci-gate"]["needs"])
+        for job in ("web-static", "web-checks", "web-native-checks",
+                    "collaboration-build", "collaboration-flow"):
+            self.assertEqual(jobs[job]["timeout-minutes"], 15)
+        for value in (None, 0, 15, 16, 19, 21, 30, "20", 20.0, True):
+            bad = copy.deepcopy(jobs)
+            bad["workspace-browser-shard"]["timeout-minutes"] = value
+            with self.subTest(budget=value):
+                self.assertTrue(SEL._verify_web_browser_budget(bad))
+        for value in (None, [], "20"):
+            bad = copy.deepcopy(jobs)
+            bad["workspace-browser-shard"] = value
+            with self.subTest(job=value):
+                self.assertTrue(SEL._verify_web_browser_budget(bad))
+        missing = copy.deepcopy(jobs)
+        del missing["workspace-browser-shard"]
+        self.assertTrue(SEL._verify_web_browser_budget(missing))
+
     def test_web_current_build_handoff_positive_and_fail_closed(self) -> None:
         import copy
         data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/web.yml")
@@ -1228,10 +1255,27 @@ class WorkflowRegistryTest(unittest.TestCase):
             "name": "Native server build and policy tests (ARM64)",
             "run": "cargo build --locked --offline --bins\ncargo test --locked --offline --lib\n",
         })
-        # Preserve the existing build inputs and cache qualification verbatim.
+        # Preserve every build input/cache step, with only the exact ARM mirror
+        # override needed for the stalled Azure download. Signing stays intact.
         pg_steps = jobs["postgres"]["steps"]
-        expected_setup = [step for step in pg_steps
+        expected_setup = [dict(step) for step in pg_steps
                           if step.get("name") != "PostgreSQL service major matches matrix"][:6]
+        mirror_setup = (
+            "# This runner's Azure mirror stalled the pinned ARM libclang download.\n"
+            "# Change only its mirror list; keep the Ubuntu archive Signed-By policy.\n"
+            ". /etc/os-release\n"
+            '[[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]\n'
+            '[[ "$(dpkg --print-architecture)" == arm64 ]]\n'
+            "test -f /etc/apt/apt-mirrors.txt\n"
+            "grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources\n"
+            "grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources\n"
+            "test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
+            "printf '%s\\n' 'https://ports.ubuntu.com/ubuntu-ports/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null\n"
+        )
+        prepare = next(step for step in expected_setup if step.get("id") == "sqlite")
+        self.assertIn(X64_APT_MIRROR_SETUP, prepare["run"])
+        prepare["run"] = prepare["run"].replace(X64_APT_MIRROR_SETUP, "", 1)
+        prepare["run"] = prepare["run"].replace("set -euo pipefail\n", "set -euo pipefail\n" + mirror_setup, 1)
         self.assertEqual(steps[:-1], expected_setup)
         cache = next(step for step in steps if step.get("name") == "Restore server build outputs")
         self.assertEqual(cache["with"]["path"], "target")
