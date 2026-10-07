@@ -11,6 +11,52 @@ fn refused() -> sqlx::Error {
     sqlx::Error::Protocol("allocated Turso UI fixture contract refused".into())
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("Turso UI fixture operation failed; finish outcomes retained")]
+struct ObservationFailure {
+    #[source]
+    original: Option<sqlx::Error>,
+    rollback_error: Option<sqlx::Error>,
+    rollback_attempted: bool,
+    commit: &'static str,
+}
+
+fn finished<T>(
+    result: Result<T, sqlx::Error>,
+    rollback: Result<(), sqlx::Error>,
+    commit: &'static str,
+) -> Result<T, sqlx::Error> {
+    match (result, rollback) {
+        (Ok(value), Ok(())) => Ok(value),
+        (original, cleanup) => Err(sqlx::Error::AnyDriverError(Box::new(ObservationFailure {
+            original: original.err(),
+            rollback_error: cleanup.err(),
+            rollback_attempted: true,
+            commit,
+        }))),
+    }
+}
+
+/// Fixed classifications only. Original typed driver failures stay in memory;
+/// no error strings or ownership capabilities enter the diagnostic receipt.
+pub fn failure_receipt(error: &sqlx::Error) -> Value {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(error) = source {
+        if let Some(failure) = error.downcast_ref::<ObservationFailure>() {
+            return json!({"operation": if failure.original.is_some() { "failed" } else { "confirmed" },
+                "rollback": if !failure.rollback_attempted { "not-attempted" } else if failure.rollback_error.is_some() { "unknown" } else { "confirmed" }, "commit": failure.commit});
+        }
+        if error
+            .downcast_ref::<super::backend::CommitUnknown>()
+            .is_some()
+        {
+            return json!({"operation":"failed","rollback":"not-attempted","commit":"unknown"});
+        }
+        source = error.source();
+    }
+    json!({"operation":"failed","rollback":"not-attempted","commit":"not-attempted"})
+}
+
 pub fn validate_namespace(namespace: &str) -> Result<(), sqlx::Error> {
     if namespace.len() != 24
         || !namespace.starts_with("tui-")
@@ -53,6 +99,49 @@ fn row_hash(row: &FamilyRow) -> Result<String, sqlx::Error> {
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
+fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
+    let FamilyRow::Remote(remote) = row else {
+        return Err(refused());
+    };
+    let mut workspaces = Vec::new();
+    let mut actors = Vec::new();
+    let mut events = Vec::new();
+    let mut own_id = None;
+    let mut consumer = None;
+    for i in 0..remote.column_count() {
+        let name = remote.column_name(i).ok_or_else(refused)?;
+        let cell = row.cell(i as usize)?;
+        let destination = match name {
+            "workspace_id"
+            | "personal_workspace_id"
+            | "source_workspace_id"
+            | "target_workspace_id" => Some(&mut workspaces),
+            "user_id" | "actor_user_id" | "owner_user_id" | "created_by" | "invited_by"
+            | "uploader_id" => Some(&mut actors),
+            "event_id" => Some(&mut events),
+            _ => None,
+        };
+        if let Some(ids) = destination {
+            match cell {
+                Cell::Null => {}
+                Cell::Blob(bytes) if bytes.len() == 16 => ids.push(hex::encode(bytes)),
+                _ => return Err(refused()),
+            }
+        } else if name == "id" && matches!(table, "users" | "workspaces" | "events") {
+            let bytes = cell.bytes()?;
+            if bytes.len() != 16 {
+                return Err(refused());
+            }
+            own_id = Some(hex::encode(bytes));
+        } else if name == "consumer" {
+            consumer = Some(cell.string()?);
+        }
+    }
+    Ok(
+        json!({"workspaces":workspaces,"actors":actors,"events":events,"self":own_id,"consumer":consumer}),
+    )
+}
+
 // Private, typed projections for the three audited global counters and their
 // concrete allocation witnesses. These are observation records, not SQL input.
 const UI_OPERATION_READS: &[(&str, &str)] = &[
@@ -60,8 +149,8 @@ const UI_OPERATION_READS: &[(&str, &str)] = &[
     ("collab_fence_counter", "SELECT id,next_fence FROM collab_fence_counter ORDER BY id"),
     ("maintenance_job_claims", "SELECT job_key,owner_token,generation,expires_at FROM maintenance_job_claims ORDER BY job_key"),
     ("events", "SELECT seq,workspace_id,actor_user_id FROM events ORDER BY seq LIMIT 10001"),
-    ("users", "SELECT id,email FROM users ORDER BY id LIMIT 10001"),
-    ("workspaces", "SELECT id,slug FROM workspaces ORDER BY id LIMIT 10001"),
+    ("users", "SELECT id,email,personal_workspace_id FROM users ORDER BY id LIMIT 10001"),
+    ("workspaces", "SELECT id,slug,kind FROM workspaces ORDER BY id LIMIT 10001"),
     ("collab_room_fences", "SELECT workspace_id,document_id,owner_token,fence,expires_at FROM collab_room_fences ORDER BY workspace_id,document_id LIMIT 10001"),
     ("task_collab_room_fences", "SELECT workspace_id,task_id,owner_token,fence,expires_at FROM task_collab_room_fences ORDER BY workspace_id,task_id LIMIT 10001"),
     ("outbox_consumers", "SELECT consumer,last_seq,lease_owner,lease_until FROM outbox_consumers ORDER BY consumer LIMIT 10001"),
@@ -350,14 +439,21 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
         expected.sort();
         if names != expected { return Err(refused()) }
         let mut fingerprints = BTreeMap::new();
+        let mut allocations = BTreeMap::new();
         let mut total = 0usize;
         for (name, sql) in PRESERVATION_READS {
             let rows = f.query(sql, &[]).await?;
             total += rows.len();
             if rows.len() > 10000 || total > 100000 { return Err(refused()) }
             let mut hashes = BTreeMap::<String, usize>::new();
-            for row in &rows { *hashes.entry(row_hash(row)?).or_default() += 1; }
+            let mut owners = BTreeMap::new();
+            for row in &rows {
+                let hash = row_hash(row)?;
+                owners.insert(hash.clone(), row_allocation(name, row)?);
+                *hashes.entry(hash).or_default() += 1;
+            }
             fingerprints.insert(*name, hashes);
+            allocations.insert(*name, owners);
         }
         let users = f.query("SELECT count(*) FROM users WHERE deleted_at IS NULL", &[]).await?;
         let mut operations = BTreeMap::new();
@@ -380,20 +476,11 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
         Ok(json!({"schema":1,"backend":"libsql-remote","schemaCurrent":true,
             "schemaSha256":current.schema_sha256,"lineage":current.lineage,
             "ledger":ledger,"setupNeeded":users[0].cell(0)?.integer()? == 0,
-            "fingerprints":fingerprints,"rows":total,"operations":operations,
+            "fingerprints":fingerprints,"allocations":allocations,"rows":total,"operations":operations,
             "startupHazards":hazards[0].cell(0)?.integer()?,"liveOutboxLeases":live_outbox[0].cell(0)?.integer()?}))
     }.await;
     let rollback = tx.rollback().await;
-    // Keep both failures: never treat an unconfirmed finish as an observation.
-    match (result, rollback) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), Ok(())) => Err(error),
-        (Err(original), Err(cleanup)) => Err(super::backend::rollback_cleanup_unknown(
-            Some(Box::new(original)),
-            cleanup,
-        )),
-        (Ok(_), Err(cleanup)) => Err(cleanup),
-    }
+    finished(result, rollback, "not-attempted")
 }
 
 pub struct ActorInput<'a> {
@@ -452,23 +539,30 @@ async fn create_actor(
     }.await;
     let mut value = match result {
         Ok(value) => {
-            tx.commit().await.map_err(|unknown| unknown.source)?;
+            tx.commit()
+                .await
+                .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
             value
         }
         Err(error) => {
-            tx.rollback().await?;
-            return Err(error);
+            return finished(Err(error), tx.rollback().await, "not-attempted");
         }
     };
     // Independent current primary stream; never reconcile an uncertain commit.
-    let mut read = backend.begin_read().await?;
+    let mut read = backend.begin_read().await.map_err(|error| {
+        sqlx::Error::AnyDriverError(Box::new(ObservationFailure {
+            original: Some(error),
+            rollback_error: None,
+            rollback_attempted: false,
+            commit: "confirmed",
+        }))
+    })?;
     let found = async {
         let rows = family(&mut read)?.query("SELECT u.email,m.role FROM users u JOIN memberships m ON m.user_id=u.id WHERE u.id=?1 AND m.workspace_id=?2", &[Cell::uuid(user),Cell::uuid(Uuid::parse_str(value["workspaceId"].as_str().ok_or_else(refused)?).map_err(|_| refused())?)]).await?;
         if rows.len() != 1 || rows[0].cell(0)?.string()? != value["email"].as_str().ok_or_else(refused)? || rows[0].cell(1)?.string()? != if owner { "owner" } else { "member" } { return Err(refused()) }
         Ok(())
     }.await;
-    read.rollback().await?;
-    found?;
+    finished(found, read.rollback().await, "confirmed")?;
     value["commit"] = json!("confirmed");
     value["freshPrimaryReadback"] = json!(true);
     Ok(value)
@@ -519,8 +613,7 @@ pub async fn observe_native(
         Ok(json!({"backend":"libsql-remote","workspace_id":workspace,"rows":rows}))
     }.await;
     let rollback = tx.rollback().await;
-    rollback?;
-    result
+    finished(result, rollback, "not-attempted")
 }
 
 #[cfg(test)]
@@ -543,5 +636,24 @@ mod tests {
         );
         assert_ne!(exact(Cell::Blob(vec![0, 255])), exact(Cell::text("00ff")));
         assert_ne!(exact(Cell::Null), exact(Cell::text("null")));
+    }
+
+    #[test]
+    fn observation_retains_original_and_independent_finish_outcomes() {
+        let error = finished::<()>(Err(refused()), Err(refused()), "confirmed").unwrap_err();
+        assert_eq!(
+            failure_receipt(&error),
+            json!({"operation":"failed","rollback":"unknown","commit":"confirmed"})
+        );
+        let sqlx::Error::AnyDriverError(source) = error else {
+            panic!("missing typed failure")
+        };
+        let failure = source.downcast_ref::<ObservationFailure>().unwrap();
+        assert!(failure.original.is_some());
+        assert!(failure.rollback_error.is_some());
+        let error = finished::<()>(Err(refused()), Ok(()), "not-attempted").unwrap_err();
+        assert_eq!(failure_receipt(&error)["rollback"], "confirmed");
+        let error = finished::<()>(Ok(()), Err(refused()), "not-attempted").unwrap_err();
+        assert_eq!(failure_receipt(&error)["operation"], "confirmed");
     }
 }

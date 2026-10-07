@@ -2008,6 +2008,7 @@ def verify_turso_workflow(path: Path) -> list[str]:
         "destructive": {"description": "Explicit isolated test DB mutation confirmation (connection, inventory and ui-baseline must be false)", "type": "boolean", "default": False},
         "ui_source_sha": {"description": "ROOT reviewed exact UI source SHA (ui-baseline and ui-ack only)", "type": "string", "default": ""},
         "ui_baseline_sha256": {"description": "ROOT verified just-observed current dataset digest (ui-ack only)", "type": "string", "default": ""},
+        "ui_target_sha256": {"description": "ROOT verified just-observed primary target digest (ui-ack only)", "type": "string", "default": ""},
     } if isinstance(dispatch, dict) else False, "fixed phase inputs and non-destructive default")
     require(data.get("permissions") == {"contents": "read"}, "contents read only")
     require("env" not in data, "no global credential environment")
@@ -2064,7 +2065,8 @@ def verify_turso_workflow(path: Path) -> list[str]:
              'CARGO_PROFILE_DEV_DEBUG': 0,
              'CARGO_PROFILE_TEST_DEBUG': 0,
              'BUN_INSTALL_CACHE_DIR': '${{ runner.temp }}/turso-bun-cache',
-             'PLAYWRIGHT_BROWSERS_PATH': '${{ runner.temp }}/turso-browsers'},
+             'PLAYWRIGHT_BROWSERS_PATH': '${{ runner.temp }}/turso-browsers',
+             'PYTHONDONTWRITEBYTECODE': '1'},
      'steps': [{'uses': 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
                 'with': {'ref': '${{ github.sha }}', 'persist-credentials': False}},
                {'name': 'Credential-free current UI input preparation',

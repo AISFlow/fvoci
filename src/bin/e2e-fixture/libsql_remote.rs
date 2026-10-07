@@ -38,11 +38,16 @@ pub async fn run() -> Result<(), &'static str> {
     .await
     .map_err(|_| "TURSO_UI_CONNECT_FAILED")?;
     let backend = Backend::LibsqlRemote(remote);
+    let mut native_outcome =
+        json!({"operation":"failed","rollback":"not-attempted","commit":"not-attempted"});
     let result = async {
         let value = match mode.as_str() {
             "baseline" => e2e_fixture::capture_baseline(&backend)
                 .await
-                .map_err(|_| "TURSO_UI_BASELINE_FAILED")?,
+                .map_err(|error| {
+                    native_outcome = e2e_fixture::failure_receipt(&error);
+                    "TURSO_UI_BASELINE_FAILED"
+                })?,
             "observe" => {
                 let mut bytes = Vec::new();
                 std::io::stdin()
@@ -70,7 +75,10 @@ pub async fn run() -> Result<(), &'static str> {
                     .collect::<Result<Vec<_>, _>>()?;
                 e2e_fixture::observe_native(&backend, workspace, &ids)
                     .await
-                    .map_err(|_| "TURSO_UI_NATIVE_OBSERVATION_FAILED")?
+                    .map_err(|error| {
+                        native_outcome = e2e_fixture::failure_receipt(&error);
+                        "TURSO_UI_NATIVE_OBSERVATION_FAILED"
+                    })?
             }
             _ => {
                 let namespace = required("FVOCI_E2E_TURSO_NAMESPACE")?;
@@ -95,7 +103,10 @@ pub async fn run() -> Result<(), &'static str> {
                 } else {
                     e2e_fixture::add_member(&backend, input).await
                 }
-                .map_err(|_| "TURSO_UI_ACTOR_FAILED")?
+                .map_err(|error| {
+                    native_outcome = e2e_fixture::failure_receipt(&error);
+                    "TURSO_UI_ACTOR_FAILED"
+                })?
             }
         };
         Ok::<_, &'static str>(value)
@@ -103,15 +114,26 @@ pub async fn run() -> Result<(), &'static str> {
     .await;
     let close = backend.close().await;
     let stats = backend.connection_stats();
-    if close.is_err() || stats.map(|s| s.size != 0).unwrap_or(true) {
-        return Err("TURSO_UI_DRAIN_FAILED");
+    let original = result.as_ref().err().copied();
+    let drained = close.is_ok() && stats.as_ref().is_some_and(|s| s.size == 0);
+    let mut value = result
+        .unwrap_or_else(|code| json!({"originalFailure":code,"nativeOutcome":native_outcome}));
+    if original.is_none() {
+        value["nativeOutcome"] = json!({"operation":"confirmed","rollback":"confirmed",
+            "commit": if matches!(mode.as_str(), "owner" | "member") { "confirmed" } else { "not-attempted" }});
     }
-    let mut value = result?;
-    value["lifecycleDrain"] = json!("confirmed");
-    value["leases"] = json!(0);
+    value["lifecycleDrain"] = json!(if drained { "confirmed" } else { "unconfirmed" });
+    value["leases"] = json!(stats.map(|s| s.size));
+    value["drainOutcome"] = json!(if close.is_ok() { "confirmed" } else { "failed" });
     // SDK does not expose a server Close receipt. Local drain and confirmed
     // transaction finish are reported exactly, without inventing that proof.
     value["serverCloseReceipt"] = json!("not-exposed-by-sdk");
     println!("{value}");
+    if let Some(code) = original {
+        return Err(code);
+    }
+    if !drained {
+        return Err("TURSO_UI_DRAIN_FAILED");
+    }
     Ok(())
 }

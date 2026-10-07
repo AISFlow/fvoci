@@ -2605,6 +2605,7 @@ class RegistryMutationCliTest(unittest.TestCase):
     def test_turso_ui_inputs_cannot_accept_an_unreviewed_source_or_dataset(self) -> None:
         for old, new in (("      ui_source_sha:\n", "      arbitrary_source:\n"),
                          ("      ui_baseline_sha256:\n", "      arbitrary_dataset:\n"),
+                         ("      ui_target_sha256:\n", "      arbitrary_target:\n"),
                          ("options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline]",
                           "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack]")):
             with self.subTest(mutation=new):

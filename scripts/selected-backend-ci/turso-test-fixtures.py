@@ -1338,8 +1338,8 @@ class UiAdapterTests(unittest.TestCase):
         op = after['operations']
         op['event_sequence'][0][1] = number(1)
         op['events'] = [[number(1), workspace, actor]]
-        op['users'] = [[actor, ['text', namespace + '-owner@example.invalid']]]
-        op['workspaces'] = [[workspace, ['text', namespace]]]
+        op['users'] = [[actor, ['text', namespace + '-owner@example.invalid'], ['null']]]
+        op['workspaces'] = [[workspace, ['text', namespace], ['text', 'team']]]
         op['collab_fence_counter'][0][1] = number(3)
         fence = [workspace, ['blob', '1' * 32], ['blob', '2' * 32], number(2), number(1000)]
         op['collab_room_fences'] = [fence]
@@ -1349,7 +1349,29 @@ class UiAdapterTests(unittest.TestCase):
                                 for name in ('notifications', 'mail', 'push', 'webhooks', 'github')]
         first_fence = copy.deepcopy(fence)
         first_fence[3] = number(1)
-        audit = {'namespaces': [namespace], 'serverStarts': 2, 'observedFences': [first_fence]}
+        original['fingerprints']['workspaces'] = {}
+        after['fingerprints']['workspaces'] = {'1' * 64: 1}
+        after['fingerprints']['users']['2' * 64] = 1
+        after['fingerprints']['events']['3' * 64] = 1
+        original['allocations'] = {t: {} for t in original['fingerprints']}
+        after['allocations'] = {t: {} for t in after['fingerprints']}
+        refs = lambda own=None, spaces=None, actors=None: {'workspaces': spaces or [], 'actors': actors or [], 'events': [], 'self': own, 'consumer': None}
+        after['allocations']['users']['2' * 64] = refs(actor[1])
+        after['allocations']['workspaces']['1' * 64] = refs(workspace[1])
+        after['allocations']['events']['3' * 64] = refs('4' * 32, [workspace[1]], [actor[1]])
+        servers = []
+        for generation in (1, 2):
+            process = {'pid': 100 + generation, 'startTicks': str(200 + generation)}
+            records = []
+            for key in (8, 9, 1):
+                owner = str(generation) + str(key) + 'a' * 62
+                for outcome in ('prepared', 'acquired', 'released'):
+                    records.append({'schema': 1, 'pid': process['pid'], 'key': key, 'ownerSha256': owner,
+                                    'generation': None if outcome == 'prepared' else str(generation), 'outcome': outcome})
+            servers.append({'identity': process, 'targetSha256': 'a' * 64, 'receipts': records})
+        audit = {'namespaces': [namespace], 'actors': {actor[1]: namespace + '-owner@example.invalid'},
+                 'workspaces': {workspace[1]: namespace}, 'targetSha256': 'a' * 64, 'servers': servers,
+                 'serverStarts': 2, 'observedFences': [first_fence, fence]}
         return original, after, audit
 
     def test_only_correlated_counter_deltas_preserve_existing_business_rows(self):
@@ -1416,6 +1438,207 @@ class UiAdapterTests(unittest.TestCase):
             if mutate == 'missing': wrong['suites'][0]['specs'].pop()
             if mutate == 'duplicate': wrong['suites'][0]['specs'][1] = wrong['suites'][0]['specs'][0]
             with self.assertRaises(self.ui.UiError): self.ui.report_cases(wrong, self.ui.OFF, titles)
+
+    def test_each_foreign_new_actor_workspace_unobserved_room_and_process_claim_is_refused(self):
+        before, after, audit = self.counter_records()
+        self.ui.assert_preserved(before, after, audit)
+        for defect in ('user', 'workspace', 'room-owner', 'owner-hash', 'process', 'target', 'missing', 'generation', 'key', 'finish'):
+            a, proof = copy.deepcopy(after), copy.deepcopy(audit)
+            if defect == 'user': a['operations']['users'].append([['blob', '9' * 32], ['text', 'foreign@example.invalid'], ['null']])
+            elif defect == 'workspace': a['operations']['workspaces'].append([['blob', '9' * 32], ['text', 'foreign'], ['text', 'team']])
+            elif defect == 'room-owner': a['operations']['collab_room_fences'][0][2] = ['blob', '9' * 32]
+            elif defect == 'owner-hash': proof['servers'][0]['receipts'][1]['ownerSha256'] = '9' * 64
+            elif defect == 'process': proof['servers'][0]['receipts'][1]['pid'] = 999
+            elif defect == 'target': proof['servers'][0]['targetSha256'] = '9' * 64
+            elif defect == 'missing': proof['servers'][0]['receipts'].pop()
+            elif defect == 'generation': proof['servers'][0]['receipts'][1]['generation'] = '9'
+            elif defect == 'key': proof['servers'][0]['receipts'][1]['key'] = 2
+            elif defect == 'finish': proof['servers'][0]['receipts'][2]['outcome'] = 'release-error'
+            with self.subTest(defect=defect), self.assertRaises(self.ui.UiError): self.ui.assert_preserved(before, a, proof)
+
+    def test_identical_dataset_on_changed_target_is_refused_before_mutation_and_vapid_keyring_absent(self):
+        import hashlib
+        baseline = {'rows': 1, 'setupNeeded': False}
+        manifest = {'sourceInputs': {'source': 'a' * 40}}
+        target = 'libsql://pure-original.invalid'
+        inputs = {'ui_source_sha': 'a' * 40, 'ui_baseline_sha256': self.ui.value_digest(baseline),
+                  'ui_target_sha256': hashlib.sha256(target.encode()).hexdigest()}
+        for endpoint, accepted in ((target, True), ('libsql://pure-changed.invalid', False)):
+            with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {'FVOCI_LIBSQL_URL': endpoint, 'FVOCI_LIBSQL_AUTH_TOKEN': 'invented'}, clear=True), mock.patch.object(self.ui, 'root', return_value=Path(directory)), mock.patch.object(self.ui, 'current_build', return_value=manifest), mock.patch.object(self.ui, 'fixture', return_value=baseline), mock.patch.object(self.ui, 'execute_ui', return_value={'cleanupErrors': []}) as body, contextlib.redirect_stdout(io.StringIO()):
+                if accepted:
+                    self.ui._consume('ui-ack', inputs)
+                    env = body.call_args.args[2]
+                    self.assertNotIn('ENCRYPTION_KEYS', env)
+                    self.assertNotIn('ENCRYPTION_ACTIVE_KEY_ID', env)
+                else:
+                    with self.assertRaisesRegex(self.ui.UiError, 'UI_CURRENT_TARGET_BINDING_REQUIRED'): self.ui._consume('ui-ack', inputs)
+                    body.assert_not_called()
+
+    def test_physical_file_mutation_refuses_even_when_metadata_is_identical(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = [root / name for name in ('libsqlite3.a', 'sqlite3.h', 'rustc', 'sysroot', 'registry', 'config', 'libclang', 'cc', 'ar')]
+            for path in paths: path.write_bytes(b'original physical bytes')
+            def collect(): return {'files': {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}, 'buildEnvironment': {}}
+            before = collect()
+            with mock.patch.object(self.ui, 'physical_inputs', side_effect=collect):
+                self.ui.recheck_physical(before)
+                for path in paths:
+                    path.write_bytes(b'changed physical bytes')
+                    with self.subTest(path=path.name), self.assertRaisesRegex(self.ui.UiError, 'UI_PHYSICAL_BUILD_INPUTS_CHANGED'): self.ui.recheck_physical(before)
+                    path.write_bytes(b'original physical bytes')
+
+
+    def test_failed_browser_still_observes_primary_and_retains_original_when_receipt_or_log_fails(self):
+        import hashlib
+        import types
+        before, _, _ = self.counter_records()
+        before['setupNeeded'] = False
+        owner = {'namespace': 'tui-' + 'a' * 20, 'userId': 'cccccccc-cccc-cccc-cccc-cccccccccccc',
+                 'workspaceId': 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'email': 'tui-' + 'a' * 20 + '-owner@example.invalid',
+                 'commit': 'confirmed', 'freshPrimaryReadback': True, 'lifecycleDrain': 'confirmed', 'leases': 0}
+        manifest = {'sourceInputs': {'source': 'a' * 40, 'tree': 'b' * 40},
+                    'binaries': {'collab-engine': {'path': '/never-executed/engine'}}}
+        for fault in ('none', 'receipt', 'log', 'closure'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); (root / 'current-build.json').write_text('pure pinned metadata')
+                server = types.SimpleNamespace(pid=123, poll=lambda: 0)
+                log = mock.Mock()
+                if fault == 'log': log.close.side_effect = OSError('PRIVATE_INVENTED_TOKEN')
+                scope = types.SimpleNamespace(closure=lambda: fault != 'closure', finish=lambda *args: 0)
+                modes = []
+                def fixture(manifest, mode, environment, input=None):
+                    modes.append(mode)
+                    return owner if mode == 'owner' else before
+                original_write = self.ui.write
+                def write(path, value):
+                    if fault == 'receipt' and path.name == 'ui-result.private.json': raise OSError('PRIVATE_INVENTED_TOKEN')
+                    return original_write(path, value)
+                with mock.patch.object(self.ui, '_PROCESSES', scope), mock.patch.object(self.ui, 'root', return_value=root), mock.patch.object(self.ui.secrets, 'token_hex', return_value='a' * 20), mock.patch.object(self.ui, 'fixture', side_effect=fixture), mock.patch.object(self.ui, 'write', side_effect=write), mock.patch.object(self.ui, 'start', return_value=(server, 'http://127.0.0.1:12345', log)), mock.patch.object(self.ui, 'stop', return_value={'serverExit': 0, 'portClosed': True, 'recordedIdentitiesRetired': True}), mock.patch.object(self.ui, 'identity', return_value={'pid': 123, 'startTicks': '200'}), mock.patch.object(self.ui, 'maintenance_receipts', return_value={'identity': {'pid':123,'startTicks':'200'}, 'targetSha256':'a'*64, 'receipts':[]}), mock.patch.object(self.ui, 'browser', side_effect=self.ui.UiError('UI_ACTUAL_BROWSER_FAILED')), mock.patch.object(self.ui, 'current_build', return_value=manifest), contextlib.redirect_stderr(io.StringIO()) as diagnostic:
+                    with self.assertRaisesRegex(self.ui.UiError, '^UI_ACTUAL_BROWSER_FAILED$'):
+                        self.ui.execute_ui(manifest, before, {'FVOCI_LIBSQL_URL': 'libsql://invented.invalid'})
+                self.assertEqual(modes, ['owner'] if fault == 'closure' else ['owner', 'baseline'])
+                self.assertEqual((root / 'preservation.private.json').exists(), fault != 'closure')
+                if fault == 'receipt':
+                    self.assertIn('UI_ACTUAL_BROWSER_FAILED', diagnostic.getvalue())
+                    self.assertIn('"receiptWrite": "failed"', diagnostic.getvalue())
+                else:
+                    result = json.loads((root / 'ui-result.private.json').read_text())
+                    self.assertEqual(result['originalFailure'], 'UI_ACTUAL_BROWSER_FAILED')
+                    self.assertEqual(result['uiResult'], 'FAIL')
+                    if fault == 'closure': self.assertEqual(result['preservation']['result'], 'NOTRUN')
+                self.assertNotIn('PRIVATE_INVENTED_TOKEN', diagnostic.getvalue())
+
+    def test_process_history_covers_detach_adoption_and_pid_reuse_excludes_foreign_pids(self):
+        import threading
+        import types
+        tracker = self.ui.UiProcesses.__new__(self.ui.UiProcesses)
+        tracker.pid = 999
+        tracker.entries, tracker.errors = {}, []
+        tracker.lock = threading.RLock()
+        process = types.SimpleNamespace(pid=10)
+        tracker.allocations = [{'process': process, 'label': 'server', 'closed': False, 'forced': False, 'key': (10, '100')}]
+        rows = {10: {'pid':10,'parentPid':999,'startTicks':'100','state':'S'},
+                11: {'pid':11,'parentPid':10,'startTicks':'101','state':'S'},
+                12: {'pid':12,'parentPid':11,'startTicks':'102','state':'S'},
+                77: {'pid':77,'parentPid':88,'startTicks':'777','state':'S'}}
+        def current(pid):
+            if pid not in rows: raise FileNotFoundError()
+            return dict(rows[pid])
+        tracker.proc_rows = lambda: list(rows.values())
+        with mock.patch.object(self.ui, 'proc_identity', side_effect=current), mock.patch.object(self.ui.os, 'pidfd_open', side_effect=lambda pid, flags: pid + 1000), mock.patch.object(self.ui.signal, 'pidfd_send_signal') as signal, mock.patch.object(self.ui.os, 'close'):
+            tracker.capture(rows[10], 'server', 0)
+            tracker.snapshot()
+            self.assertEqual({pid for pid, ticks in tracker.entries}, {10, 11, 12})
+            rows[12]['parentPid'] = 999  # detached grandchild reparented to the actual subreaper
+            rows[13] = {'pid':13,'parentPid':999,'startTicks':'103','state':'S'}  # previously unobserved adopted descendant
+            tracker.snapshot()
+            self.assertEqual(tracker.entries[(12,'102')]['allocation'], 0)
+            self.assertIsNone(tracker.entries[(13,'103')]['allocation'])
+            old = tracker.entries[(11,'101')]
+            rows[11] = {'pid':11,'parentPid':88,'startTicks':'500','state':'S'}  # unrelated reuse
+            tracker.send(old, 15)
+            signal.assert_not_called()
+            tracker.send(tracker.entries[(12,'102')], 15)
+            signal.assert_called_once_with(1012, 15, None, 0)
+            self.assertNotIn((77,'777'), tracker.entries)
+            self.assertFalse(tracker.closure())
+            tracker.allocations[0]['closed'] = True
+            rows.clear()
+            self.assertTrue(tracker.closure())
+
+    def test_pidfd_capture_race_and_signal_fault_cannot_qualify_retirement(self):
+        import threading
+        import types
+        tracker = self.ui.UiProcesses.__new__(self.ui.UiProcesses)
+        tracker.pid, tracker.entries, tracker.errors = 999, {}, []
+        tracker.lock = threading.RLock()
+        tracker.allocations = [{'process': types.SimpleNamespace(pid=10), 'closed':False, 'forced':False}]
+        row = {'pid':10,'parentPid':999,'startTicks':'100','state':'S'}
+        tracker.proc_rows = lambda: [row]
+        with mock.patch.object(self.ui.os, 'pidfd_open', return_value=1010), mock.patch.object(self.ui.os, 'close') as close, mock.patch.object(self.ui, 'proc_identity', return_value=dict(row, startTicks='200')):
+            with self.assertRaisesRegex(self.ui.UiError, 'UI_PROCESS_IDENTITY_RACE'): tracker.capture(row, 'server', 0)
+            close.assert_called_once_with(1010)
+        with mock.patch.object(self.ui.os, 'pidfd_open', return_value=1010), mock.patch.object(self.ui, 'proc_identity', return_value=row), mock.patch.object(self.ui.signal, 'pidfd_send_signal', side_effect=OSError('private control')):
+            tracker.capture(row, 'server', 0)
+            with self.assertRaises(OSError): tracker.send(tracker.entries[(10,'100')], 15)
+            self.assertFalse(tracker.closure())
+
+
+    def test_canonical_restart_projection_keeps_detailed_identities_private(self):
+        import types
+        with tempfile.TemporaryDirectory() as directory:
+            process = types.SimpleNamespace(pid=10)
+            row = {'pid':10, 'startTicks':'100'}
+            scope = types.SimpleNamespace(allocations=[{'process':process}], entries={(10,'100'):{'identity':row,'allocation':0}}, finish=lambda server, normal: 0)
+            with mock.patch.object(self.ui, '_PROCESSES', scope), mock.patch.object(self.ui, 'retired', return_value=True), mock.patch.object(self.ui, 'port_closed', return_value=True):
+                result = self.ui.stop(process, 'http://127.0.0.1:12345', Path(directory))
+            self.assertEqual(result, {'serverExit':0, 'portClosed':True, 'recordedIdentitiesRetired':True})
+            packet = json.loads(next(Path(directory).glob('server-identities-*.private.json')).read_text())
+            self.assertEqual(packet['identities'], [row])
+            self.assertNotIn('identities', result)
+
+    def test_subreaper_capability_verify_restore_and_failure_preserve_original_without_real_prctl(self):
+        import ctypes
+        import threading
+        import types
+        for prior in (0, 1):
+            with self.subTest(prior=prior), tempfile.TemporaryDirectory() as directory:
+                state = {'flag':prior, 'calls':[]}
+                def prctl(option, value, zero1, zero2, zero3):
+                    state['calls'].append(option)
+                    self.assertEqual((zero1,zero2,zero3), (0,0,0))
+                    if option == 37: ctypes.c_int.from_address(value).value = state['flag']
+                    elif option == 36: state['flag'] = value
+                    return 0
+                function = mock.Mock(side_effect=prctl)
+                thread = mock.Mock(); thread.is_alive.return_value = False
+                with mock.patch.object(self.ui.ctypes, 'CDLL', return_value=types.SimpleNamespace(prctl=function)), mock.patch.object(self.ui.threading, 'Thread', return_value=thread), mock.patch.object(self.ui.UiProcesses, 'proc_rows', return_value=[]), mock.patch.object(self.ui, 'root', return_value=Path(directory)), mock.patch.object(self.ui, '_PROCESSES', None):
+                    scope = self.ui.UiProcesses()
+                    scope.__enter__()
+                    self.assertEqual(state['flag'], 1)
+                    scope.__exit__(None, None, None)
+                    self.assertEqual(state['flag'], prior)
+                    self.assertEqual(state['calls'], [37,36,37,36,37])
+                    self.assertEqual(function.argtypes, [ctypes.c_int,ctypes.c_ulong,ctypes.c_ulong,ctypes.c_ulong,ctypes.c_ulong])
+                    thread.start.assert_called_once()
+                    thread.join.assert_called_once_with(timeout=1)
+                    self.assertIsNone(self.ui._PROCESSES)
+        with mock.patch.object(self.ui.os, 'pidfd_open', None), mock.patch.object(self.ui, '_PROCESSES', None):
+            with self.assertRaisesRegex(self.ui.UiError, 'UI_PROCESS_CAPABILITY_REQUIRED'): self.ui.UiProcesses().__enter__()
+        scope = self.ui.UiProcesses.__new__(self.ui.UiProcesses)
+        scope.allocations, scope.entries, scope.errors = [], {}, ['UI_PROCESS_OBSERVATION_FAILED']
+        scope.halt, scope.thread = threading.Event(), mock.Mock()
+        scope.thread.is_alive.return_value = False
+        scope.closure = lambda: False
+        scope.prctl = mock.Mock()
+        with mock.patch.object(self.ui, 'write', side_effect=OSError('PRIVATE_FAKE')), contextlib.redirect_stderr(io.StringIO()) as diagnostics:
+            scope.__exit__(self.ui.UiError, self.ui.UiError('UI_ACTUAL_BROWSER_FAILED'), None)
+        scope.prctl.assert_not_called()  # unknown child closure cannot restore the flag
+        self.assertIn('UI_ACTUAL_BROWSER_FAILED', diagnostics.getvalue())
+        self.assertIn('UI_PROCESS_RECEIPT_WRITE_FAILED', diagnostics.getvalue())
+        self.assertNotIn('PRIVATE_FAKE', diagnostics.getvalue())
 
 
 if __name__ == "__main__":

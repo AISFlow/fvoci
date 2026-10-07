@@ -674,6 +674,8 @@ def run_ui(checkout_sha, inputs):
         reject("UI_REVIEWED_SOURCE_REQUIRED")
     if phase == "ui-ack" and not re.fullmatch("[0-9a-f]{64}", inputs.get("ui_baseline_sha256", "")):
         reject("UI_CURRENT_DATASET_BINDING_REQUIRED")
+    if phase == "ui-ack" and not re.fullmatch("[0-9a-f]{64}", inputs.get("ui_target_sha256", "")):
+        reject("UI_CURRENT_TARGET_BINDING_REQUIRED")
     import importlib.util
     spec = importlib.util.spec_from_file_location("turso_ui", Path(__file__).with_name("turso-ui.py"))
     ui = importlib.util.module_from_spec(spec)
