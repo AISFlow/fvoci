@@ -668,7 +668,7 @@ class Producer:
         self.builder_pid = live["State"]["Pid"]
         if self.profile == HOSTED_PROFILE: self.check_resources("builder-bootstrap", running=True)
         version = self.command("builder-version", ["docker", "exec", self.cid, "buildkitd", "--version"]).decode()
-        require(bool(re.search(r"\bv0\.26\.[0-9]+\b", version)), "BUILDER_VERSION_INVALID")
+        require(bool(re.search(r"(?:^|\s)v0\.33\.1(?:\s|$)", version)), "BUILDER_VERSION_INVALID")
         tag = "fvoci-shipping-producer:" + PRODUCT_SHA + "-" + self.builder
         self.command("shipping-build", ["docker", "buildx", "build", "--builder", self.builder, "--platform", "linux/amd64", "--load",
             "--provenance=false", "--build-arg", "FVOCI_BUILD_SHA=" + PRODUCT_SHA, "-f", str(context / "infra/rust/Dockerfile"), "-t", tag, str(context)], monitored=True)

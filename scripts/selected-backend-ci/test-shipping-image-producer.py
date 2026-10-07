@@ -631,6 +631,17 @@ class HostedExperimentalResourceControls(unittest.TestCase):
             self.producer.check_resources("shipping-build", running=True)
             self.assertEqual(self.producer.phases["shipping-build"]["memory_floor"], P.HOST_RESERVE)
 
+    def test_pinned_builder_version_refuses_unsupported_versions_before_build(self):
+        for version in [b"buildkitd v0.26.0", b"buildkitd v0.33.0", b"buildkitd v0.33.2",
+                        b"buildkitd v0.33.10", b"buildkitd v0.33.1-rc1", b"buildkitd v0.33.1+dev", b""]:
+            case = type(self)("test_recipe_wires_all_guards_and_seals_latest_measurements"); case.setUp()
+            try:
+                case.builder_version = version
+                with self.subTest(version=version), self.assertRaisesRegex(P.Refusal, "BUILDER_VERSION_INVALID"):
+                    case.test_recipe_wires_all_guards_and_seals_latest_measurements()
+                self.assertNotIn("shipping-build", [stage for stage, _, _ in case.recipe_commands])
+            finally: case.doCleanups()
+
     def test_recipe_wires_all_guards_and_seals_latest_measurements(self):
         fixture = self.root / "fixture"; fixture.mkdir(); archive, image_id = image_fixture(fixture)
         work = self.root / "work"; work.mkdir(); producer = P.Producer(work, "fixture", P.HOSTED_PROFILE)
@@ -647,7 +658,7 @@ class HostedExperimentalResourceControls(unittest.TestCase):
             if stage == "builder-cgroups":
                 if getattr(self, "kernel_error", None): raise P.Refusal(self.kernel_error)
                 return getattr(self, "kernel_caps", (str(P.BUILDER_MEMORY) + "\n200000 100000\n").encode())
-            if stage == "builder-version": return b"buildkitd v0.26.0"
+            if stage == "builder-version": return getattr(self, "builder_version", b"buildkitd github.com/moby/buildkit v0.33.1 8c91502cf280bd70a0c50912ce251c46a8881d9f\n")
             if stage == "image-id": return image_id.encode()
             if stage == "image-save": Path(argv[3]).write_bytes(archive.read_bytes())
             if stage.startswith("builder-stop-"): live["State"].update(Running=False, Pid=0)
