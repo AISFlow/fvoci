@@ -197,6 +197,7 @@ def current_build():
 
 QUALIFIED_CANONICAL_IMAGE = 'sha256:396a5f8e43e8de4b2e1567f2c8a8e841bf45037a4e4ff7cb76dc384951025f35'
 QUALIFIED_SHELL = '/bin/sh'
+# 12GiB is the hosted fixture allocation, not a project minimum.
 DAEMON_CAPS = {'memory.max': '12884901888', 'cpu.max': 'max 100000',
                'pids.max': '128', 'memory.swap.max': '0'}
 SECRET_ENV_KEYS = ('FVOCI_LIBSQL_URL', 'FVOCI_LIBSQL_AUTH_TOKEN')
@@ -248,6 +249,19 @@ def execution_mode():
     mode = os.environ.get('FVOCI_SELECTED_EXECUTION_MODE', 'github-ci')
     require(mode in ('github-ci', 'orca-local'), 'UI_EXECUTION_MODE_REFUSED')
     return mode
+
+
+def allocation_caps(grant=None):
+    if execution_mode() == 'github-ci':
+        return DAEMON_CAPS
+    require(isinstance(grant, dict), 'UI_LOCAL_ALLOCATION_REFUSED')
+    runtime = grant.get('canonicalRuntime')
+    require(isinstance(runtime, dict) and runtime.get('networkAuthorized') is True,
+            'UI_LOCAL_ALLOCATION_REFUSED')
+    selected = dict(DAEMON_CAPS)
+    selected['memory.max'] = 'max'
+    selected['memory.swap.max'] = 'max'
+    return selected
 
 
 def load_existing_local_lease(mode):
@@ -328,12 +342,14 @@ def write_launcher(directory):
     return path
 
 
-def container_argv(name, launcher, capsule, binary, mount_args, command):
+def container_argv(name, launcher, capsule, binary, mount_args, command, grant=None):
     require(str(launcher).startswith('/') and str(capsule).startswith('/'), 'UI_CURRENT_ARTIFACT_MISSING')
+    caps = allocation_caps(grant)
+    memory = [] if caps['memory.max'] == 'max' else [
+        '--memory', caps['memory.max'], '--memory-swap', caps['memory.max']]
     argv = ['docker', 'create', '--name', name, '--read-only', '--cap-drop', 'ALL',
             '--security-opt', 'no-new-privileges', '--user', '1000:1000',
-            '--memory', DAEMON_CAPS['memory.max'], '--memory-swap', DAEMON_CAPS['memory.max'],
-            '--pids-limit', DAEMON_CAPS['pids.max'],
+            *memory, '--pids-limit', caps['pids.max'],
             '--tmpfs', '/tmp:rw,noexec,nosuid,size=67108864,uid=1000,gid=1000',
             '--network', 'host', '--entrypoint', QUALIFIED_SHELL, *mount_args,
             QUALIFIED_CANONICAL_IMAGE, LAUNCHER_DST, CAPSULE_DST, binary, *command]
@@ -388,7 +404,7 @@ def finished_one_shot(creation, returncode):
     return {'productExit': returncode, 'liveDaemon': ONE_SHOT_LIVE, 'qualification': BLOCKED}
 
 
-def running_daemon_sample(inspect, caps, proc_row, nspid, client_pid, binary, waited):
+def running_daemon_sample(inspect, caps, proc_row, nspid, client_pid, binary, waited, grant=None):
     require(waited is True, 'UI_DAEMON_WAIT_MISSING')
     state = inspect['State']
     pid = state.get('Pid')
@@ -396,8 +412,9 @@ def running_daemon_sample(inspect, caps, proc_row, nspid, client_pid, binary, wa
     require(isinstance(nspid, int) and 0 < nspid != pid, 'UI_NAMESPACE_PID_REFUSED')
     require(state.get('Running') is True and state.get('OOMKilled') is False, 'UI_DAEMON_STATE_REFUSED')
     require('HostConfig' not in caps and 'CapDrop' not in caps, 'UI_DAEMON_CAP_REFUSED')
-    for key, expected in DAEMON_CAPS.items():
-        require(caps.get(key) == expected, 'UI_DAEMON_CAP_REFUSED')
+    expected = allocation_caps(grant)
+    for key, required in expected.items():
+        require(caps.get(key) == required, 'UI_DAEMON_CAP_REFUSED')
     require(proc_row.get('comm') == 'fvoci-server', 'UI_NORMAL_MAIN_IDENTITY_FAILED')
     require(re.fullmatch('[0-9]+', str(proc_row.get('startTicks') or '')), 'UI_DAEMON_PID_REFUSED')
     if proc_row.get('exeInspection') == 'observed':
@@ -405,7 +422,7 @@ def running_daemon_sample(inspect, caps, proc_row, nspid, client_pid, binary, wa
     else:
         require(proc_row.get('exeInspection') == 'UNAVAILABLE', 'UI_NORMAL_MAIN_IDENTITY_FAILED')
     return {'daemonPid': pid, 'pid': nspid, 'startTicks': proc_row['startTicks'], 'waited': True,
-            'qualification': 'daemon-observed', 'caps': {key: caps[key] for key in DAEMON_CAPS}}
+            'qualification': 'daemon-observed', 'caps': {key: caps[key] for key in expected}}
 
 
 def fixture(manifest, mode, environment, input=None):
@@ -1328,7 +1345,7 @@ def main():
 def local_fixture(manifest, mode, environment, input):
     directory = root() / ('local-fixture-' + mode)
     directory.mkdir(mode=0o700)
-    container_id, creation = publish_container(directory, environment, manifest, 'fvoci-e2e-fixture', [mode], 'fixture')
+    container_id, creation, grant = publish_container(directory, environment, manifest, 'fvoci-e2e-fixture', [mode], 'fixture')
     process = None
     go_fd = None
     original = None
@@ -1340,7 +1357,7 @@ def local_fixture(manifest, mode, environment, input):
         process = _PROCESSES.spawn(
             ['docker', 'start', '--attach', '--interactive', container_id], 'fixture-' + mode,
             env=clean_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        sample, go_fd = release_attached(directory, container_id, process, deadline)
+        sample, go_fd = release_attached(directory, container_id, process, deadline, grant)
         stdout, _stderr = communicate_within_budget(process, canonical(input) if input else b'', deadline)
         state = read_daemon_exit(container_id, 10)
         require(len(stdout) < 64 * 1024 * 1024, 'UI_NATIVE_FIXTURE_OUTPUT_REFUSED')
@@ -1489,7 +1506,7 @@ def read_daemon_caps(pid):
     return {key: (cgroup / key).read_text().strip() for key in DAEMON_CAPS}
 
 
-def bind_paused_shell(stat_text, inspect, proc_row, nspid_fields, caps, client_pid, credentials):
+def bind_paused_shell(stat_text, inspect, proc_row, nspid_fields, caps, client_pid, credentials, grant=None):
     token, ticks = stat_fields(stat_text)
     state = inspect['State']
     pid = state.get('Pid')
@@ -1503,13 +1520,14 @@ def bind_paused_shell(stat_text, inspect, proc_row, nspid_fields, caps, client_p
     require(proc_row.get('comm') == 'sh', 'UI_NORMAL_MAIN_IDENTITY_FAILED')
     require(state.get('Running') is True and state.get('OOMKilled') is False, 'UI_DAEMON_STATE_REFUSED')
     require(isinstance(caps, dict) and 'HostConfig' not in caps and 'CapDrop' not in caps, 'UI_DAEMON_CAP_REFUSED')
-    for key, expected in DAEMON_CAPS.items():
-        require(caps.get(key) == expected, 'UI_DAEMON_CAP_REFUSED')
+    expected = allocation_caps(grant)
+    for key, required in expected.items():
+        require(caps.get(key) == required, 'UI_DAEMON_CAP_REFUSED')
     uid, gid = credentials.get('uid'), credentials.get('gid')
     require(uid == [1000, 1000, 1000, 1000] and gid == [1000, 1000, 1000, 1000], 'UI_DAEMON_PID_REFUSED')
     return {'maintenance': {'pid': namespace, 'startTicks': ticks},
             'retirement': {'pid': pid, 'startTicks': ticks}, 'clientPid': client_pid, 'comm': 'sh',
-            'caps': {key: caps[key] for key in DAEMON_CAPS}, 'uid': list(uid), 'gid': list(gid)}
+            'caps': {key: caps[key] for key in expected}, 'uid': list(uid), 'gid': list(gid)}
 
 
 def allocation_identity(server):
@@ -1535,24 +1553,24 @@ def capture_owned_daemon(client, row):
     return index
 
 
-def sample_paused_daemon(container_id, stat_text, client, deadline):
+def sample_paused_daemon(container_id, stat_text, client, deadline, grant=None):
     raw = docker_client(['docker', 'inspect', container_id], bounded_client_timeout(deadline))
     inspected = json.loads(raw.decode())[0]
     pid = inspected['State']['Pid']
     status = read_proc_status(pid)
     bound = bind_paused_shell(stat_text, inspected, identity(pid), parse_nspid(status), read_daemon_caps(pid),
                                client.pid, {'uid': parse_status_fields(status, 'Uid:'),
-                                            'gid': parse_status_fields(status, 'Gid:')})
+                                            'gid': parse_status_fields(status, 'Gid:')}, grant)
     bound['allocation'] = capture_owned_daemon(client, proc_identity(pid))
     return bound
 
 
-def release_attached(directory, container_id, client, deadline):
+def release_attached(directory, container_id, client, deadline, grant=None):
     stat_fd = open_stat_reader(Path(directory) / STAT_FIFO_NAME)
     go_fd = None
     try:
         go_fd = open_go_holder(Path(directory) / GO_FIFO_NAME)
-        sample = sample_paused_daemon(container_id, read_stat_once(stat_fd, deadline), client, deadline)
+        sample = sample_paused_daemon(container_id, read_stat_once(stat_fd, deadline), client, deadline, grant)
         write_go_once(go_fd)
         return sample, go_fd
     except BaseException:
@@ -1751,7 +1769,7 @@ def stop_attached_daemon(server, base, directory):
 
 
 def local_server_start(manifest, environment, directory, expected_setup=False):
-    container_id, creation = publish_container(directory, environment, manifest, 'fvoci-migrate', ['--start'], 'server')
+    container_id, creation, grant = publish_container(directory, environment, manifest, 'fvoci-migrate', ['--start'], 'server')
     log = None
     server = None
     go_fd = None
@@ -1765,7 +1783,7 @@ def local_server_start(manifest, environment, directory, expected_setup=False):
         server = _PROCESSES.spawn(['docker', 'start', '--attach', container_id], 'server',
                                   env=clean_env(), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         server.container_id = container_id
-        sample, go_fd = release_attached(directory, container_id, server, deadline)
+        sample, go_fd = release_attached(directory, container_id, server, deadline, grant)
         server.go_fd = go_fd
         go_fd = None
         server.daemon_sample = sample
@@ -1819,7 +1837,7 @@ def publish_container(directory, environment, manifest, binary_name, command, ki
                   mount_spec(parent, BINARY_DST, True), mount_spec(W / 'apps/web/dist', DIST_DST, True),
                   mount_spec(storage, storage, False)]
         argv = container_argv('fvoci-tui-' + secrets.token_hex(6), str(launcher), str(capsule),
-                              BINARY_DST + '/' + binary_name, mounts, command)
+                              BINARY_DST + '/' + binary_name, mounts, command, grant)
         admit_published_config(argv, [], secret_values)
         require(_PROCESSES is not None, 'UI_OWNED_PROCESS_SCOPE_REQUIRED')
         container_id = docker_client(argv, 10).decode().strip()
@@ -1829,7 +1847,7 @@ def publish_container(directory, environment, manifest, binary_name, command, ki
         require(creation['qualification'] == BLOCKED and grant['canonicalRuntime']['imageId'] == creation['image'],
                 'UI_DAEMON_OBSERVATION_UNSUPPORTED')
         write(directory / 'creation-identity.private.json', creation)
-        return container_id, creation
+        return container_id, creation, grant
     except BaseException as original:
         release_failed_publish(directory, container_id, original)
         raise

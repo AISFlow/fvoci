@@ -1764,6 +1764,37 @@ class UiAdapterTests(unittest.TestCase):
                 self.ui.read_shell_proof({'imageId': self.ui.QUALIFIED_CANONICAL_IMAGE,
                                           'shellProof': {'path': str(proof), 'sha256': '0' * 64}})
 
+    def test_local_profile_removes_only_the_hosted_memory_flags(self):
+        grant = {'canonicalRuntime': {'networkAuthorized': True}}
+        argv_args = ('fvoci-tui-aa', '/host/launcher.sh', '/host/native-env.sh',
+                     '/fvoci-current/bin/fvoci-migrate', [], ['--start'])
+        with mock.patch.dict(os.environ, {'FVOCI_SELECTED_EXECUTION_MODE': 'orca-local'}):
+            with self.assertRaisesRegex(self.ui.UiError, 'UI_LOCAL_ALLOCATION_REFUSED'):
+                self.ui.container_argv(*argv_args)
+            argv = self.ui.container_argv(*argv_args, grant)
+        self.assertNotIn('--memory', argv)
+        self.assertNotIn('--memory-swap', argv)
+        self.assertEqual(argv[argv.index('--pids-limit') + 1], '128')
+        self.assertIn('--read-only', argv)
+        self.assertIn('no-new-privileges', argv)
+        self.assertIn('--cap-drop', argv)
+        self.assertIn('1000:1000', argv)
+        for flag in ('--cpus', '--cpu-quota', '--cpu-period', '--cpuset-cpus'):
+            self.assertNotIn(flag, argv)
+        proc = {'pid': 50, 'startTicks': '100', 'comm': 'fvoci-server', 'exeInspection': 'UNAVAILABLE'}
+        running = {'State': {'Pid': 50, 'Running': True, 'OOMKilled': False}}
+        local_caps = dict(self.ui.DAEMON_CAPS, **{'memory.max': 'max', 'memory.swap.max': 'max'})
+        with mock.patch.dict(os.environ, {'FVOCI_SELECTED_EXECUTION_MODE': 'orca-local'}):
+            sample = self.ui.running_daemon_sample(running, local_caps, proc, 1, 77,
+                                                   '/fvoci-current/bin/fvoci-server', True, grant)
+            self.assertEqual(sample['caps'], local_caps)
+            with self.assertRaisesRegex(self.ui.UiError, 'UI_DAEMON_CAP_REFUSED'):
+                self.ui.running_daemon_sample(running, dict(self.ui.DAEMON_CAPS), proc, 1, 77,
+                                              '/fvoci-current/bin/fvoci-server', True, grant)
+        with mock.patch.dict(os.environ, {'FVOCI_SELECTED_EXECUTION_MODE': 'other'}):
+            with self.assertRaisesRegex(self.ui.UiError, 'UI_EXECUTION_MODE_REFUSED'):
+                self.ui.container_argv(*argv_args, grant)
+
     def test_one_shot_without_cgroup_sample_stays_blocked(self):
         created = {'State': {'Pid': 0, 'Running': False},
                    'Config': {'Image': self.ui.QUALIFIED_CANONICAL_IMAGE, 'Entrypoint': ['/bin/sh'],
