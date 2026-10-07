@@ -77,6 +77,12 @@ pub struct FamilyMaintenanceProof {
     generation: i64,
 }
 impl FamilyMaintenanceProof {
+    /// Test-build observation only; never expose the ownership capability.
+    #[cfg(feature = "db-tests")]
+    pub fn e2e_owner_sha256(&self) -> String {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(self.owner.as_bytes()))
+    }
     pub fn key(&self) -> MaintenanceJobKey {
         self.key
     }
@@ -92,6 +98,12 @@ pub struct FamilyMaintenanceClaimRequest {
     owner: Uuid,
 }
 impl FamilyMaintenanceClaimRequest {
+    /// Hash the exact sixteen stored UUID bytes, not its display form.
+    #[cfg(feature = "db-tests")]
+    pub fn e2e_owner_sha256(&self) -> String {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(self.owner.as_bytes()))
+    }
     pub fn new(key: MaintenanceJobKey) -> Self {
         Self {
             key,
@@ -556,6 +568,30 @@ mod policy_tests {
 #[cfg(all(test, feature = "db-tests"))]
 mod tests {
     use super::*;
+    #[cfg(feature = "db-tests")]
+    #[test]
+    fn e2e_observation_hashes_exact_capability_bytes() {
+        use sha2::Digest;
+        let owner = Uuid::from_bytes([17; 16]);
+        let request = FamilyMaintenanceClaimRequest {
+            key: MaintenanceJobKey::Daily,
+            owner,
+        };
+        let proof = FamilyMaintenanceProof {
+            key: request.key,
+            owner,
+            generation: 42,
+        };
+        assert_eq!(
+            request.e2e_owner_sha256(),
+            hex::encode(sha2::Sha256::digest([17; 16]))
+        );
+        assert_eq!(request.e2e_owner_sha256(), proof.e2e_owner_sha256());
+        assert_ne!(
+            request.e2e_owner_sha256(),
+            hex::encode(sha2::Sha256::digest(owner.to_string().as_bytes()))
+        );
+    }
     use sqlx::SqlitePool;
     use std::path::PathBuf;
     struct Fixture {

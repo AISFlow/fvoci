@@ -783,6 +783,24 @@ struct FamilyMaintenanceRequests {
     daily: claim::FamilyMaintenanceClaimRequest,
 }
 
+// Observations belong to the existing private server log. No environment knob,
+// file writer, lease mutation or failure handling is added to the scheduler.
+#[cfg(feature = "db-tests")]
+fn e2e_maintenance_receipt(
+    key: MaintenanceJobKey,
+    owner: String,
+    generation: Option<i64>,
+    outcome: &str,
+) {
+    info!(
+        "FVOCI_E2E_MAINTENANCE_RECEIPT {}",
+        serde_json::json!({
+            "schema": 1, "pid": std::process::id(), "key": key as i32,
+            "ownerSha256": owner, "generation": generation.map(|n| n.to_string()), "outcome": outcome
+        })
+    );
+}
+
 impl MaintenanceHandle {
     /// Observation only. The existing owned join consumes the actual result;
     /// completion is not a successful settlement or a remote stream receipt.
@@ -837,6 +855,10 @@ pub fn spawn_maintenance_backend(
         revisions: claim::FamilyMaintenanceClaimRequest::new(MaintenanceJobKey::Revisions),
         daily: claim::FamilyMaintenanceClaimRequest::new(MaintenanceJobKey::Daily),
     });
+    #[cfg(feature = "db-tests")]
+    for request in [&requests.uploads, &requests.revisions, &requests.daily] {
+        e2e_maintenance_receipt(request.key(), request.e2e_owner_sha256(), None, "prepared");
+    }
     let retained = requests.clone();
     let cancel = CancellationToken::new();
     let child = cancel.clone();
@@ -1008,16 +1030,41 @@ async fn acquire_family_claim(
     if request.key() != expected || matches!(backend, crate::db::backend::Backend::Postgres(_)) {
         return Err(MaintenanceConsumerError::OwnershipLost);
     }
-    match claim::GlobalJobClaim::try_claim(backend, request, policy, cancel).await? {
+    let acquisition = claim::GlobalJobClaim::try_claim(backend, request, policy, cancel).await;
+    #[cfg(feature = "db-tests")]
+    if acquisition.is_err() {
+        e2e_maintenance_receipt(
+            request.key(),
+            request.e2e_owner_sha256(),
+            None,
+            "acquire-error",
+        );
+    }
+    match acquisition? {
         claim::GlobalClaimAcquisition::Acquired(claim::GlobalJobClaim::Family(owner)) => {
+            #[cfg(feature = "db-tests")]
+            e2e_maintenance_receipt(
+                owner.proof().key(),
+                owner.proof().e2e_owner_sha256(),
+                Some(owner.proof().generation()),
+                "acquired",
+            );
             Ok(Some(owner))
         }
         claim::GlobalClaimAcquisition::Acquired(claim::GlobalJobClaim::Postgres(owner)) => {
             owner.release().await;
             Err(MaintenanceConsumerError::OwnershipLost)
         }
-        claim::GlobalClaimAcquisition::Busy => Ok(None),
-        claim::GlobalClaimAcquisition::Cancelled => Err(MaintenanceConsumerError::Cancelled),
+        claim::GlobalClaimAcquisition::Busy => {
+            #[cfg(feature = "db-tests")]
+            e2e_maintenance_receipt(request.key(), request.e2e_owner_sha256(), None, "busy");
+            Ok(None)
+        }
+        claim::GlobalClaimAcquisition::Cancelled => {
+            #[cfg(feature = "db-tests")]
+            e2e_maintenance_receipt(request.key(), request.e2e_owner_sha256(), None, "cancelled");
+            Err(MaintenanceConsumerError::Cancelled)
+        }
     }
 }
 
@@ -1029,12 +1076,33 @@ async fn finish_family_claim(
     owner: claim::FamilyMaintenanceClaim,
     failure: Option<&MaintenanceConsumerError>,
 ) -> Result<(), MaintenanceConsumerError> {
+    #[cfg(feature = "db-tests")]
+    let receipt = (
+        owner.proof().key(),
+        owner.proof().e2e_owner_sha256(),
+        owner.proof().generation(),
+    );
     if let Some(error) = failure {
         if error.abandon_claim(backend) {
+            #[cfg(feature = "db-tests")]
+            e2e_maintenance_receipt(receipt.0, receipt.1, Some(receipt.2), "abandoned");
             return Ok(());
         }
     }
-    match owner.release().await? {
+    let release = owner.release().await;
+    #[cfg(feature = "db-tests")]
+    e2e_maintenance_receipt(
+        receipt.0,
+        receipt.1,
+        Some(receipt.2),
+        match &release {
+            Ok(claim::FamilyLeaseAction::Confirmed) => "released",
+            Ok(claim::FamilyLeaseAction::Lost) => "lost",
+            Ok(claim::FamilyLeaseAction::Cancelled) => "release-cancelled",
+            Err(_) => "release-error",
+        },
+    );
+    match release? {
         claim::FamilyLeaseAction::Confirmed => Ok(()),
         claim::FamilyLeaseAction::Lost => Err(MaintenanceConsumerError::OwnershipLost),
         claim::FamilyLeaseAction::Cancelled => Err(MaintenanceConsumerError::Cancelled),
