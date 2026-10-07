@@ -1122,7 +1122,8 @@ class WorkflowRegistryTest(unittest.TestCase):
             "fail-fast": False, "matrix": {"shard": list(range(8))},
         })
         self.assertIn("workspace-browser-shard", jobs["web-ci-gate"]["needs"])
-        for job in ("web-static", "web-checks", "web-native-checks",
+        self.assertEqual(jobs["web-checks"]["timeout-minutes"], 23)
+        for job in ("web-static", "web-native-checks",
                     "collaboration-build", "collaboration-flow"):
             self.assertEqual(jobs[job]["timeout-minutes"], 15)
         for value in (None, 0, 15, 16, 19, 21, 30, "20", 20.0, True):
@@ -1212,7 +1213,7 @@ class WorkflowRegistryTest(unittest.TestCase):
                 self.assertEqual(spec["needs"], "ci-plan")
                 self.assertEqual(spec["if"], "needs.ci-plan.outputs.select_web_checks == 'true'")
                 self.assertEqual(spec["runs-on"], "ubuntu-26.04")
-                self.assertEqual(spec["timeout-minutes"], 15)
+                self.assertEqual(spec["timeout-minutes"], 23 if job == "web-checks" else 15)
                 self.assertIn(job, jobs["web-ci-gate"]["needs"])
                 lines = [line for step in SEL._run_steps(spec) for line in step["run"].splitlines()]
                 actual = [line for line in lines if line in sum(commands.values(), [])]

@@ -77,12 +77,16 @@ jobs:
           (cd packages/editor && bun --bun run typecheck)
 
   # API contract/schema and unit regressions run once per SHA. Native checks
-  # have a separate mandatory 15-minute budget with the same selection condition.
+  # keep a separate mandatory 15-minute budget with the same selection condition.
   web-checks:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_web_checks == 'true'
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    # Cold target miss 113019000421 filled 913s, including 133s of an unfinished
+    # test-profile compile. 23m is 780s before that compile, a measured 269s
+    # test-profile envelope, a 112s larger-suite body analogue, 120s for the
+    # unmeasured bun/plan steps, and 60s.
+    timeout-minutes: 23
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

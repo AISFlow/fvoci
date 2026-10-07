@@ -56,7 +56,10 @@ jobs:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_fast == 'true'
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    # Cold target miss 113019589871 filled 911s through the 54 SQLite filters.
+    # Seven later cargo test commands were not started. 19m is that wall,
+    # plus one measured 165s profile compile for the unrun tail, plus 60s.
+    timeout-minutes: 19
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
@@ -529,7 +532,10 @@ jobs:
           - runner: ubuntu-26.04-arm
             check: collaboration-arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    # x64 cold miss 113019589982 filled 913s at 13/75 of the serial binary.
+    # 62 tests at the observed 20s/13 pace is 95s; that pace is doubled, plus 60s.
+    # ARM is not in that cancelled log and keeps 15m.
+    timeout-minutes: ${{ matrix.check == 'collaboration' && 20 || 15 }}
     services:
       postgres:
         image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
