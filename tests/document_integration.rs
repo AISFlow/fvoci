@@ -5046,61 +5046,66 @@ async fn selected_backend_wiki_fixture(
             fvoci_server::db::documents::empty_document_json()
         );
         assert_eq!(body["version"], created["version"]);
-        let workspace_id = Uuid::parse_str(workspace).unwrap();
-        let project =
-            create_project_via_api(&app, &fresh_cookie, workspace_id, "UB26", "private").await;
-        let project_id = project["id"].as_str().unwrap();
-        let root_id = project["rootDocumentId"].as_str().unwrap();
-        let project_body = format!(
-            "/api/v1/workspaces/{workspace}/projects/{project_id}/documents/{root_id}/body"
-        );
-        let (status, project_read, _, _) = json_request(
-            app.clone(),
-            "GET",
-            &project_body,
-            None,
-            Some(&fresh_cookie),
-            &[],
-        )
-        .await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "{} project body readback: {project_read}",
-            backend.kind()
-        );
-        assert_eq!(
-            project_read["contentJson"],
-            fvoci_server::db::documents::empty_document_json()
-        );
-        assert!(project_read["version"].as_i64().is_some());
-        let foreign_project = format!(
-            "/api/v1/workspaces/{workspace}/projects/{}/documents/{root_id}/body",
-            Uuid::now_v7()
-        );
-        let (status, foreign, _, _) = json_request(
-            app.clone(),
-            "GET",
-            &foreign_project,
-            None,
-            Some(&fresh_cookie),
-            &[],
-        )
-        .await;
-        assert_eq!(
-            status,
-            StatusCode::NOT_FOUND,
-            "{} foreign project body: {foreign}",
-            backend.kind()
-        );
-        let (status, anonymous, _, _) =
-            json_request(app.clone(), "GET", &project_body, None, None, &[]).await;
-        assert_eq!(
-            status,
-            StatusCode::UNAUTHORIZED,
-            "{} project body session: {anonymous}",
-            backend.kind()
-        );
+        // The room path later deletes this owner's membership. A private project
+        // created here would lose its only lead through that cascade and trip
+        // assert_private_project_has_lead. Keep the HTTP check on the non-room path.
+        if room_hub.is_none() {
+            let workspace_id = Uuid::parse_str(workspace).unwrap();
+            let project =
+                create_project_via_api(&app, &fresh_cookie, workspace_id, "UB26", "private").await;
+            let project_id = project["id"].as_str().unwrap();
+            let root_id = project["rootDocumentId"].as_str().unwrap();
+            let project_body = format!(
+                "/api/v1/workspaces/{workspace}/projects/{project_id}/documents/{root_id}/body"
+            );
+            let (status, project_read, _, _) = json_request(
+                app.clone(),
+                "GET",
+                &project_body,
+                None,
+                Some(&fresh_cookie),
+                &[],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{} project body readback: {project_read}",
+                backend.kind()
+            );
+            assert_eq!(
+                project_read["contentJson"],
+                fvoci_server::db::documents::empty_document_json()
+            );
+            assert!(project_read["version"].as_i64().is_some());
+            let foreign_project = format!(
+                "/api/v1/workspaces/{workspace}/projects/{}/documents/{root_id}/body",
+                Uuid::now_v7()
+            );
+            let (status, foreign, _, _) = json_request(
+                app.clone(),
+                "GET",
+                &foreign_project,
+                None,
+                Some(&fresh_cookie),
+                &[],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "{} foreign project body: {foreign}",
+                backend.kind()
+            );
+            let (status, anonymous, _, _) =
+                json_request(app.clone(), "GET", &project_body, None, None, &[]).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{} project body session: {anonymous}",
+                backend.kind()
+            );
+        }
         let scope_actor = fvoci_server::db::identity::find_live_session_backend(
             &backend,
             &hash_token(&fresh_cookie),
