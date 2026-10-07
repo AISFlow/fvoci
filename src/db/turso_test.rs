@@ -358,8 +358,18 @@ async fn migration_fk_witness(family: &mut FamilyTx, cells: &[Cell]) -> Result<(
     )
     .await
     .map_err(|_| "FENCE_ROW_UNBOUND")?;
-    let check = witness_rows(family, "PRAGMA foreign_key_check(task_collab_room_fences)", 4).await?;
-    let list = witness_rows(family, "PRAGMA foreign_key_list(task_collab_room_fences)", 5).await?;
+    let check = witness_rows(
+        family,
+        "PRAGMA foreign_key_check(task_collab_room_fences)",
+        4,
+    )
+    .await?;
+    let list = witness_rows(
+        family,
+        "PRAGMA foreign_key_list(task_collab_room_fences)",
+        5,
+    )
+    .await?;
     fk_witness_mapping(rowid, &check, &list)
 }
 
@@ -368,7 +378,10 @@ async fn migration_fk_witness(family: &mut FamilyTx, cells: &[Cell]) -> Result<(
 /// the primary-only Hrana code, and the same-writer witness must refuse it as
 /// NOT_FK_ONLY. Any other outcome is reported by its closed category.
 async fn migration_fk_negative(family: &mut FamilyTx, cells: &[Cell]) -> &'static str {
-    let Err(error) = family.execute(MIGRATION_UNKNOWN_TASK_FENCE_SQL, cells).await else {
+    let Err(error) = family
+        .execute(MIGRATION_UNKNOWN_TASK_FENCE_SQL, cells)
+        .await
+    else {
         return "ACCEPTED";
     };
     if genuine_remote_fk_failure(&error) != Ok(false) || !primary_only_hrana_constraint(&error) {
@@ -418,7 +431,11 @@ async fn witness_rows(
 /// back by the exact tuple, against the parent `tasks` through foreign key 0, and that
 /// key is exactly the composite (workspace_id,task_id) -> tasks(workspace_id,id)
 /// mapping with no other foreign key; anything else fails.
-fn fk_witness_mapping(rowid: i64, check: &[Vec<Cell>], list: &[Vec<Cell>]) -> Result<(), &'static str> {
+fn fk_witness_mapping(
+    rowid: i64,
+    check: &[Vec<Cell>],
+    list: &[Vec<Cell>],
+) -> Result<(), &'static str> {
     let [row] = check else {
         return Err("WITNESS_MISMATCH");
     };
@@ -518,20 +535,33 @@ async fn migration_fk_rollback(
             .await
             .map_err(|_| "PREFIX_VALIDATION_FAILED")?;
         // Use the actual immutable registry SQL; no copied DDL or fake failure.
-        family.apply_migration_batch(steps[11].sql).await.map_err(|_| "DDL_FAILED")?;
-        let cells = [Cell::uuid(workspace), Cell::uuid(uuid::Uuid::now_v7()), Cell::uuid(uuid::Uuid::now_v7())];
+        family
+            .apply_migration_batch(steps[11].sql)
+            .await
+            .map_err(|_| "DDL_FAILED")?;
+        let cells = [
+            Cell::uuid(workspace),
+            Cell::uuid(uuid::Uuid::now_v7()),
+            Cell::uuid(uuid::Uuid::now_v7()),
+        ];
         migration_fk_baseline(family, &cells).await?;
-        original_fk_error = family.execute(MIGRATION_UNKNOWN_TASK_FENCE_SQL, &cells).await.err();
+        original_fk_error = family
+            .execute(MIGRATION_UNKNOWN_TASK_FENCE_SQL, &cells)
+            .await
+            .err();
         let error = original_fk_error.as_ref().ok_or("FK_FAILURE_MISSING")?;
         if genuine_remote_fk_failure(error)? {
             return Ok(FK_PROOF_EXTENDED);
         }
         // Only the primary-only Hrana code is admitted, and only through the
         // same-writer causal witness; any other kind or code stays refused.
-        if !primary_only_hrana_constraint(error) { return Err("WRONG_FK_FAILURE"); }
+        if !primary_only_hrana_constraint(error) {
+            return Err("WRONG_FK_FAILURE");
+        }
         migration_fk_witness(family, &cells).await?;
         Ok(FK_PROOF_SAME_WRITER_PRIMARY_HRANA)
-    }.await;
+    }
+    .await;
     // Always finish the SAME writer after the real FK statement, including an
     // unexpected statement/DDL failure. Drop/Close is never a rollback receipt.
     let rollback = tx.rollback().await;
@@ -2587,7 +2617,12 @@ mod reset_policy_tests {
         // The pure witness mapping: exactly one fence row against the composite
         // tasks key through foreign key 0, and exactly that key mapping.
         fn check(table: &str, rowid: Cell, parent: &str, fkid: i64) -> Vec<Cell> {
-            vec![Cell::text(table), rowid, Cell::text(parent), Cell::Integer(fkid)]
+            vec![
+                Cell::text(table),
+                rowid,
+                Cell::text(parent),
+                Cell::Integer(fkid),
+            ]
         }
         fn key(id: i64, seq: i64, table: &str, from: &str, to: &str) -> Vec<Cell> {
             vec![
@@ -2607,7 +2642,10 @@ mod reset_policy_tests {
             key(0, 1, "tasks", "task_id", "id"),
         ];
         assert_eq!(fk_witness_mapping(9, &good_check, &good_list), Ok(()));
-        assert_eq!(fk_witness_mapping(8, &good_check, &good_list), Err("WITNESS_MISMATCH"));
+        assert_eq!(
+            fk_witness_mapping(8, &good_check, &good_list),
+            Err("WITNESS_MISMATCH")
+        );
         for bad_check in [
             vec![],
             vec![
@@ -2619,9 +2657,16 @@ mod reset_policy_tests {
             vec![check(FENCE_TABLE, Cell::Integer(9), "tasks", 1)],
             vec![check(FENCE_TABLE, Cell::text("9"), "tasks", 0)],
             vec![check(FENCE_TABLE, Cell::Null, "tasks", 0)],
-            vec![vec![Cell::text(FENCE_TABLE), Cell::Integer(9), Cell::text("tasks")]],
+            vec![vec![
+                Cell::text(FENCE_TABLE),
+                Cell::Integer(9),
+                Cell::text("tasks"),
+            ]],
         ] {
-            assert_eq!(fk_witness_mapping(9, &bad_check, &good_list), Err("WITNESS_MISMATCH"));
+            assert_eq!(
+                fk_witness_mapping(9, &bad_check, &good_list),
+                Err("WITNESS_MISMATCH")
+            );
         }
         for bad_list in [
             vec![],
@@ -2647,9 +2692,15 @@ mod reset_policy_tests {
                 key(0, 1, "tasks", "task_id", "id"),
                 key(1, 0, "projects", "workspace_id", "workspace_id"),
             ],
-            vec![vec![Cell::Integer(0), Cell::Integer(0), Cell::text("tasks")], good_list[1].clone()],
+            vec![
+                vec![Cell::Integer(0), Cell::Integer(0), Cell::text("tasks")],
+                good_list[1].clone(),
+            ],
         ] {
-            assert_eq!(fk_witness_mapping(9, &good_check, &bad_list), Err("WITNESS_MISMATCH"));
+            assert_eq!(
+                fk_witness_mapping(9, &good_check, &bad_list),
+                Err("WITNESS_MISMATCH")
+            );
         }
     }
 
