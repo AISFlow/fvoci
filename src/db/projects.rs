@@ -1007,6 +1007,7 @@ pub(crate) async fn create_project_operation(
         &[Cell::uuid(workspace_id),Cell::uuid(project),Cell::uuid(root)],
     ).await?;
     seed_project_workflow_family(family, workspace_id, project).await?;
+    seed_project_task_collection_family(family, workspace_id, project, input.name.trim()).await?;
     let payload = json!({"projectId":project.to_string(),"key":input.key,"name":input.name.trim(),
                          "visibility":input.visibility,"rootDocumentId":root.to_string()});
     op.append_event(EventAppend {
@@ -1085,6 +1086,30 @@ async fn seed_project_workflow_family(
             &[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace),Cell::uuid(project),Cell::uuid(workflow),
               Cell::text(name),Cell::text(category),Cell::text(sort_key)]).await?;
     }
+    Ok(())
+}
+
+/// The SQLite-family stand-in for `projects_task_collection`: one task
+/// collection named with the stored project name, in the caller's transaction.
+async fn seed_project_task_collection_family(
+    family: &mut FamilyTx,
+    workspace: Uuid,
+    project: Uuid,
+    name: &str,
+) -> Result<(), sqlx::Error> {
+    family.require_writer()?;
+    family.require_tenant(workspace)?;
+    family
+        .execute(
+            "INSERT INTO collections(id,workspace_id,project_id,kind,name) VALUES(?1,?2,?3,'task',?4)",
+            &[
+                Cell::uuid(Uuid::now_v7()),
+                Cell::uuid(workspace),
+                Cell::uuid(project),
+                Cell::text(name),
+            ],
+        )
+        .await?;
     Ok(())
 }
 
@@ -3152,8 +3177,8 @@ mod selected_project_create_tests {
         )
         .await
     }
-    async fn counts(f: &Fixture) -> (i64, i64, i64, i64, i64, i64, i64) {
-        sqlx::query_as("SELECT (SELECT count(*) FROM projects),(SELECT count(*) FROM project_members),(SELECT count(*) FROM documents),(SELECT count(*) FROM workflows),(SELECT count(*) FROM statuses),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log)")
+    async fn counts(f: &Fixture) -> (i64, i64, i64, i64, i64, i64, i64, i64) {
+        sqlx::query_as("SELECT (SELECT count(*) FROM projects),(SELECT count(*) FROM project_members),(SELECT count(*) FROM documents),(SELECT count(*) FROM workflows),(SELECT count(*) FROM statuses),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT count(*) FROM collections)")
             .fetch_one(&f.pool).await.unwrap()
     }
     async fn member(f: &Fixture, role: &str) -> Uuid {
@@ -3297,6 +3322,17 @@ mod selected_project_create_tests {
         assert_eq!(audit.2, "project.created");
         assert_eq!(serde_json::from_str::<Value>(&audit.3).unwrap(), expected);
         assert_eq!(audit.4, "127.0.0.1");
+        let collection: (String, String, i64) = sqlx::query_as(
+            "SELECT c.kind,c.name,(SELECT count(*) FROM collection_items i WHERE i.collection_id=c.id) FROM collections c WHERE c.workspace_id=?1 AND c.project_id=?2",
+        )
+        .bind(f.workspace.as_bytes().as_slice())
+        .bind(project.id.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(collection.0, "task");
+        assert_eq!(collection.1, project.name);
+        assert_eq!(collection.2, 0);
         // An invalid stored override map uses the existing whole-row fallback.
         sqlx::query("UPDATE instance_settings SET value='{\"overrides\":{\"unknown\":\"bad\"}}' WHERE key='i18n'")
             .execute(&f.pool).await.unwrap();
@@ -3462,6 +3498,14 @@ mod selected_project_create_tests {
             Err(ProjectDbError::Conflict)
         ));
         assert_eq!(counts(&f).await, after);
+        let task_collections: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM collections WHERE project_id=?1 AND kind='task'",
+        )
+        .bind(good.id.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(task_collections, 1);
         assert_eq!(good.created_by, f.user);
         f.close().await;
     }
@@ -3505,7 +3549,8 @@ mod selected_project_create_tests {
                     before.3 + 1,
                     before.4 + 6,
                     before.5 + 1,
-                    before.6 + 1
+                    before.6 + 1,
+                    before.7 + 1
                 )
             );
         }
@@ -3544,7 +3589,8 @@ mod selected_project_create_tests {
                 before.3 + 1,
                 before.4 + 6,
                 before.5 + 1,
-                before.6 + 1
+                before.6 + 1,
+                before.7 + 1
             )
         );
         let after = counts(&f).await;
