@@ -1715,5 +1715,259 @@ class UiAdapterTests(unittest.TestCase):
                 self.assertIn(expected, diagnostics.getvalue())
 
 
+    def test_shell_proof_comes_only_from_the_grant_and_config_env_stays_clean(self):
+        environment = {'FVOCI_LIBSQL_URL': 'libsql://invented.invalid', 'FVOCI_LIBSQL_AUTH_TOKEN': "invented'token"}
+        text = self.ui.capsule_text(environment)
+        self.assertIn('FVOCI_LIBSQL_AUTH_TOKEN=' + __import__('shlex').quote("invented'token"), text)
+        argv = self.ui.container_argv('fvoci-tui-aa', '/host/launcher.sh', '/host/native-env.sh',
+                                      '/fvoci-current/bin/fvoci-migrate', [], ['--start'])
+        self.ui.admit_published_config(argv, ['PATH=/usr/bin:/bin', 'FVOCI_COLLAB_ENGINE=/opt/fvoci/bin/collab-engine'],
+                                       ["invented'token", 'libsql://invented.invalid'])
+        self.assertNotIn('--env-file', argv)
+        self.assertNotIn("invented'token", '\n'.join(argv))
+        with self.assertRaisesRegex(self.ui.UiError, 'UI_DOCKER_ENV_SECRET_REFUSED'):
+            self.ui.admit_published_config(argv, ['FVOCI_LIBSQL_AUTH_TOKEN=invented'], ['invented'])
+        with self.assertRaisesRegex(self.ui.UiError, 'UI_CANONICAL_SHELL_UNAVAILABLE'):
+            self.ui.read_shell_proof({'imageId': self.ui.QUALIFIED_CANONICAL_IMAGE})
+        with tempfile.TemporaryDirectory() as directory:
+            proof = Path(directory) / 'shell-proof.json'
+            proof.write_text(json.dumps({'Config': {'Image': self.ui.QUALIFIED_CANONICAL_IMAGE,
+                                                    'Cmd': ['/bin/sh', '/acceptance/run.sh'],
+                                                    'Env': ['PATH=/usr/bin:/bin']}}))
+            digest = self.ui.digest(proof)
+            self.assertEqual(self.ui.read_shell_proof({'imageId': self.ui.QUALIFIED_CANONICAL_IMAGE,
+                                                       'shellProof': {'path': str(proof), 'sha256': digest}}), '/bin/sh')
+            with self.assertRaisesRegex(self.ui.UiError, 'UI_CANONICAL_SHELL_UNAVAILABLE'):
+                self.ui.read_shell_proof({'imageId': self.ui.QUALIFIED_CANONICAL_IMAGE,
+                                          'shellProof': {'path': str(proof), 'sha256': '0' * 64}})
+
+    def test_one_shot_without_cgroup_sample_stays_blocked(self):
+        created = {'State': {'Pid': 0, 'Running': False},
+                   'Config': {'Image': self.ui.QUALIFIED_CANONICAL_IMAGE, 'Entrypoint': ['/bin/sh'],
+                              'Cmd': ['/fvoci-current/launcher.sh'], 'Env': ['PATH=/usr/bin:/bin'], 'User': '1000:1000'},
+                   'HostConfig': {'ReadonlyRootfs': True, 'CapDrop': ['ALL'], 'Privileged': False, 'Memory': 12884901888}}
+        argv = ['docker', 'create', '--entrypoint', '/bin/sh', self.ui.QUALIFIED_CANONICAL_IMAGE, '/fvoci-current/launcher.sh']
+        creation = self.ui.creation_identity(created, argv, ['invented-token'], 'fixture')
+        self.assertEqual(creation['qualification'], 'BLOCKED')
+        self.assertEqual(creation['cgroupCaps'], 'not-observed')
+        self.assertNotIn('caps', creation)
+        done = self.ui.finished_one_shot(creation, 0)
+        self.assertEqual(done, {'productExit': 0, 'liveDaemon': 'unsupported-before-execution', 'qualification': 'BLOCKED'})
+        self.assertNotIn('accepted', json.dumps(done))
+        proc = {'pid': 50, 'startTicks': '100', 'comm': 'fvoci-server', 'exeInspection': 'UNAVAILABLE'}
+        running = {'State': {'Pid': 50, 'Running': True, 'OOMKilled': False}}
+        with self.assertRaisesRegex(self.ui.UiError, 'UI_DAEMON_CAP_REFUSED'):
+            self.ui.running_daemon_sample(running, created['HostConfig'], proc, 1, 77, '/fvoci-current/bin/fvoci-server', True)
+        sample = self.ui.running_daemon_sample(running, dict(self.ui.DAEMON_CAPS), proc, 1, 77,
+                                               '/fvoci-current/bin/fvoci-server', True)
+        self.assertEqual(sample['qualification'], 'daemon-observed')
+        self.assertEqual(sample['startTicks'], '100')
+        with self.assertRaisesRegex(self.ui.UiError, 'UI_DAEMON_WAIT_MISSING'):
+            self.ui.running_daemon_sample(running, dict(self.ui.DAEMON_CAPS), proc, 1, 77,
+                                          '/fvoci-current/bin/fvoci-server', False)
+
+    def test_open_grant_keeps_local_guard_and_does_not_borrow_run(self):
+        with mock.patch.object(self.ui, 'load_existing_local_lease') as lease:
+            with self.assertRaisesRegex(self.ui.UiError, 'UI_EXECUTION_MODE_REFUSED'):
+                self.ui.open_referenced_grant('fixture')
+            lease.assert_not_called()
+        with mock.patch.dict(os.environ, {'FVOCI_SELECTED_EXECUTION_MODE': 'orca-local'}), mock.patch.object(self.ui, 'load_existing_local_lease', return_value={'canonicalRuntime': {}}) as lease:
+            with self.assertRaisesRegex(self.ui.UiError, 'UI_LOCAL_NETWORK_NOT_GRANTED'):
+                self.ui.open_referenced_grant('fixture')
+            lease.assert_called_once_with('fixture')
+
+    def test_publish_without_grant_does_not_call_docker_and_mocked_create_hides_token(self):
+        token = "invented'token"
+        with mock.patch.dict(os.environ, {'FVOCI_SELECTED_EXECUTION_MODE': 'github-ci'}, clear=True), mock.patch.object(self.ui, 'docker_client', side_effect=AssertionError('docker')):
+            with self.assertRaisesRegex(self.ui.UiError, 'UI_EXECUTION_MODE_REFUSED'):
+                self.ui.publish_container(Path('/unused'), {'FVOCI_LIBSQL_URL': 'libsql://invented.invalid',
+                    'FVOCI_LIBSQL_AUTH_TOKEN': token, 'FVOCI_STORAGE_DIR': '/work/storage'},
+                    {'binaries': {'fvoci-e2e-fixture': {'path': '/host/bin/fvoci-e2e-fixture'}}},
+                    'fvoci-e2e-fixture', ['baseline'], 'fixture')
+        calls = []
+        created = {'State': {'Pid': 0, 'Running': False, 'OOMKilled': False},
+                   'Config': {'Image': self.ui.QUALIFIED_CANONICAL_IMAGE, 'Entrypoint': ['/bin/sh'],
+                              'Cmd': ['/fvoci-current/launcher.sh'], 'Env': ['PATH=/usr/bin:/bin'], 'User': '1000:1000'},
+                   'HostConfig': {'ReadonlyRootfs': True, 'CapDrop': ['ALL'], 'Privileged': False}}
+        def fake_docker(args, timeout):
+            calls.append(list(args))
+            if args[1] == 'create':
+                return b'a' * 64 + b'\n'
+            return json.dumps([created]).encode()
+        environment = {'FVOCI_LIBSQL_URL': 'libsql://invented.invalid', 'FVOCI_LIBSQL_AUTH_TOKEN': token,
+                       'FVOCI_STORAGE_DIR': '/work/storage'}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {'FVOCI_SELECTED_EXECUTION_MODE': 'orca-local'}), mock.patch.object(self.ui, 'load_existing_local_lease', return_value={'source': 'a'*40, 'tree': 'b'*40, 'runId': 'run_a1', 'dispatchId': 'ctx_b2', 'canonicalRuntime': {'imageId': self.ui.QUALIFIED_CANONICAL_IMAGE, 'networkAuthorized': True, 'shellProof': {'path': '/granted/proof.json', 'sha256': 'ab'*32}}}), mock.patch.object(self.ui, 'read_shell_proof', return_value='/bin/sh'), mock.patch.object(self.ui, 'docker_client', side_effect=fake_docker), mock.patch.object(self.ui, '_PROCESSES', object()):
+            self.ui.publish_container(Path(directory), environment, {'binaries': {'fvoci-e2e-fixture': {'path': '/host/bin/fvoci-e2e-fixture'}}},
+                                      'fvoci-e2e-fixture', ['baseline'], 'fixture')
+        blob = '\n'.join(str(part) for args in calls for part in args)
+        self.assertNotIn(token, blob)
+        self.assertNotIn(token, json.dumps(created['Config']['Env']))
+        self.assertIn('type=bind,src=/work/storage,dst=/work/storage\n', blob + '\n')
+        self.assertNotIn('--env-file', blob)
+
+    def ids(self):
+        return [1000, 1000, 1000, 1000]
+
+    def paused(self, client_pid=77):
+        stat = '1 (sh) S 0 0 0 0 -1 0 0 0 0 0 0 0 0 0 0 20 0 1 999'
+        proc = {'pid': 50, 'startTicks': '999', 'comm': 'sh'}
+        inspected = {'State': {'Pid': 50, 'Running': True, 'OOMKilled': False}}
+        return self.ui.bind_paused_shell(stat, inspected, proc, [50, 1], dict(self.ui.DAEMON_CAPS), client_pid,
+                                          {'uid': self.ids(), 'gid': self.ids()})
+
+    def test_launcher_bounds_and_exact_go(self):
+        text = self.ui.FIXED_LAUNCHER
+        self.assertLess(text.index('. "$1"'), text.index('/proc/$$/stat'))
+        self.assertLess(text.index('/fvoci-private/stat.ready'), text.index('/fvoci-private/exec.go'))
+        self.assertIn('[ "${#fvoci_stat}" -le 511 ]', text)
+        self.assertIn('[ "$fvoci_go" = GO ]', text)
+        self.assertNotIn('/proc/self', text)
+        self.assertEqual(self.ui.GO_MARKER, b'GO\n')
+        self.assertEqual((self.ui.STAT_BODY_MAX, self.ui.STAT_READ_BOUND, self.ui.FIXTURE_BUDGET, self.ui.SERVER_BUDGET), (511, 512, 120, 10))
+        self.ui.accept_stat_payload(b'a' * 511 + b'\n')
+        for refused in (b'', b'\n', b'a' * 512 + b'\n', b'GO\nextra\n'):
+            with self.assertRaisesRegex(self.ui.UiError, 'UI_DAEMON_PID_REFUSED'):
+                self.ui.accept_stat_payload(refused)
+        self.assertEqual(self.ui.stat_open_flags() & (os.O_WRONLY | os.O_RDWR), 0)
+        self.assertEqual(self.ui.go_open_flags() & os.O_RDWR, os.O_RDWR)
+        with mock.patch.object(self.ui.os, 'write', return_value=3) as write, mock.patch.object(self.ui.os, 'read', side_effect=AssertionError('read')):
+            self.ui.write_go_once(4)
+        write.assert_called_once_with(4, b'GO\n')
+
+    def test_owned_capture_index_is_per_client_and_sample_keeps_caps_and_ids(self):
+        first, second = mock.Mock(), mock.Mock()
+        recorded = []
+        processes = mock.Mock()
+        processes.allocations = [{'process': first}, {'process': second}]
+        processes.capture.side_effect = lambda row, label, allocation=None: recorded.append(allocation)
+        with mock.patch.object(self.ui, '_PROCESSES', processes):
+            self.assertEqual(self.ui.capture_owned_daemon(first, {'pid': 50, 'startTicks': '9'}), 0)
+            self.assertEqual(self.ui.capture_owned_daemon(second, {'pid': 60, 'startTicks': '8'}), 1)
+        self.assertEqual(recorded, [0, 1])
+        bound = self.paused()
+        self.assertEqual(bound['caps'], dict(self.ui.DAEMON_CAPS))
+        self.assertEqual(bound['uid'], self.ids())
+        self.assertEqual(bound['gid'], self.ids())
+        self.assertEqual(bound['maintenance']['pid'], 1)
+        self.assertEqual(bound['retirement']['pid'], 50)
+        with self.assertRaisesRegex(self.ui.UiError, 'UI_DAEMON_PID_REFUSED'):
+            self.ui.bind_paused_shell('1 (sh) S 0 0 0 0 -1 0 0 0 0 0 0 0 0 0 0 20 0 1 999',
+                                      {'State': {'Pid': 50, 'Running': True, 'OOMKilled': False}},
+                                      {'pid': 50, 'startTicks': '999', 'comm': 'sh'}, [50, 1], dict(self.ui.DAEMON_CAPS), 77,
+                                      {'uid': self.ids(), 'gid': [0, 0, 0, 0]})
+        status = 'NSpid:\t50\t1\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\n'
+        self.assertEqual(self.ui.parse_status_fields(status, 'Uid:'), self.ids())
+        self.assertEqual(self.ui.parse_nspid(status), [50, 1])
+        self.assertIn('retired', self.ui.prove_normal_daemon.__code__.co_consts)
+        self.assertNotIn('BLOCKED', self.ui.prove_normal_daemon.__code__.co_consts)
+        self.assertIn('daemon-completion.private.json', self.ui.local_fixture.__code__.co_consts)
+        self.assertNotIn('one-shot-blocked.private.json', self.ui.local_fixture.__code__.co_consts)
+        self.assertIn('cleanup_owned', self.ui.local_server_start.__code__.co_names)
+        self.assertNotIn('running_daemon_sample', self.ui.local_server_start.__code__.co_names)
+
+    def test_normal_proof_needs_client_exit_retirement_and_is_not_blocked(self):
+        import types
+        client = types.SimpleNamespace(pid=77)
+        sample = self.paused()
+        sample['allocation'] = 0
+        allocation = {'process': client, 'closed': False, 'forced': False}
+        daemon = {'allocation': 0, 'identity': {'pid': 50, 'startTicks': '999'}}
+        client_row = {'allocation': 0, 'identity': {'pid': 77, 'startTicks': '3'}}
+        other = {'process': mock.Mock(), 'closed': False, 'forced': False}
+        processes = mock.Mock()
+        processes.allocations = [allocation, other]
+        processes.entries = {(50, '999'): daemon, (77, '3'): client_row}
+        def finish(process):
+            allocation['closed'] = True
+            return finish.code
+        finish.code = 0
+        state = {'Pid': 0, 'ExitCode': 0, 'OOMKilled': False}
+        with mock.patch.object(self.ui, '_PROCESSES', processes), mock.patch.object(self.ui, 'retired', return_value=True), mock.patch.object(self.ui, '_PROCESSES', processes):
+            processes.finish.side_effect = finish
+            record = self.ui.prove_normal_daemon(client, sample, state, False)
+        self.assertEqual(record['qualification'], 'retired')
+        self.assertEqual(record['clientExit'], 0)
+        self.assertEqual(record['productExit'], 0)
+        self.assertNotEqual(record['qualification'], 'BLOCKED')
+        self.assertEqual(record['caps'], dict(self.ui.DAEMON_CAPS))
+        self.assertFalse(other['closed'])
+        finish.code = 9
+        allocation['closed'] = False
+        with mock.patch.object(self.ui, '_PROCESSES', processes), mock.patch.object(self.ui, 'retired', return_value=True):
+            with self.assertRaisesRegex(self.ui.UiError, 'UI_PROCESS_CLOSURE_FAILED'):
+                self.ui.prove_normal_daemon(client, sample, state, False)
+        with mock.patch.object(self.ui, '_PROCESSES', processes), mock.patch.object(self.ui, 'retired', return_value=False):
+            with self.assertRaisesRegex(self.ui.UiError, 'UI_PROCESS_CLOSURE_FAILED'):
+                self.ui.prove_normal_daemon(client, sample, state, False)
+        processes.finish.reset_mock()
+        with mock.patch.object(self.ui, '_PROCESSES', processes):
+            with self.assertRaisesRegex(self.ui.UiError, 'UI_DAEMON_OBSERVATION_UNSUPPORTED'):
+                self.ui.prove_normal_daemon(client, sample, state, True)
+        processes.finish.assert_not_called()
+        self.assertEqual(self.ui.qualify_daemon_exit(state, True), (False, 0))
+        self.assertEqual(self.ui.qualify_daemon_exit({'Pid': 0, 'ExitCode': 137, 'OOMKilled': False}, False), (False, 137))
+
+    def test_cleanup_removes_only_the_owned_container_and_keeps_the_original(self):
+        import io
+        import types
+        process = types.SimpleNamespace(pid=77, poll=lambda: None)
+        owned = {'process': process, 'closed': True, 'forced': False}
+        other = {'process': mock.Mock(), 'closed': False, 'forced': False}
+        processes = mock.Mock()
+        processes.allocations = [owned, other]
+        processes.entries = {(50, '1'): {'allocation': 0, 'identity': {'pid': 50, 'startTicks': '1'}}}
+        calls = []
+        def finish(target):
+            self.assertIs(target, process)
+            owned['closed'] = True
+            process.poll = lambda: 0
+        processes.finish.side_effect = finish
+        def client(args, timeout):
+            calls.append(list(args))
+            return b''
+        err = self.ui.UiError('UI_SERVER_START_FAILED')
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(self.ui, '_PROCESSES', processes), mock.patch.object(self.ui, 'docker_client', side_effect=client), mock.patch.object(self.ui, 'retired', return_value=True):
+            errors = self.ui.cleanup_owned('a' * 64, process, directory, [])
+            buffer = io.StringIO()
+            with contextlib.redirect_stderr(buffer):
+                self.assertIs(self.ui.report_cleanup(err, ['UI_DOCKER_CLIENT_FAILED']), err)
+            self.assertIn('UI_SERVER_START_FAILED', buffer.getvalue())
+        self.assertEqual(errors, [])
+        self.assertEqual([item[1] for item in calls], ['stop', 'rm'])
+        self.assertFalse(other['closed'])
+        self.assertIn('cleanup_owned', self.ui.local_server_start.__code__.co_names)
+
+    def test_nonzero_native_exit_keeps_the_allowlisted_cause(self):
+        import inspect
+        import io
+        self.assertEqual(self.ui.native_failure_code({'originalFailure': 'TURSO_UI_ROWS'}, 3), 'TURSO_UI_ROWS')
+        self.assertEqual(self.ui.native_failure_code({}, 2), 'UI_NATIVE_FIXTURE_FAILED')
+        self.assertIsNone(self.ui.native_failure_code({'originalFailure': 'TURSO_UI_ROWS'}, 0))
+        with self.assertRaisesRegex(self.ui.UiError, 'UI_NATIVE_FAILURE_CODE_REFUSED'):
+            self.ui.native_failure_code({'originalFailure': 'not-a-code'}, 4)
+        names = self.ui.local_fixture.__code__.co_names
+        self.assertLess(names.index('native_failure_code'), names.index('prove_normal_daemon'))
+        cause = self.ui.UiError('TURSO_UI_ROWS')
+        with contextlib.redirect_stderr(io.StringIO()) as buffer:
+            self.assertIs(self.ui.report_cleanup(cause, ['UI_PROCESS_CLOSURE_FAILED']), cause)
+        self.assertIn('TURSO_UI_ROWS', buffer.getvalue())
+        self.assertIn('UI_PROCESS_CLOSURE_FAILED', buffer.getvalue())
+        server_source = inspect.getsource(self.ui.local_server_start)
+        self.assertLess(server_source.index('try:'), server_source.index('logpath.open'))
+        publish_source = inspect.getsource(self.ui.publish_container)
+        self.assertLess(publish_source.index('try:'), publish_source.index('docker_client'))
+        self.assertIn('release_failed_publish', publish_source)
+
+    def test_failed_publish_removes_its_container_and_fifos(self):
+        cause = self.ui.UiError('UI_DAEMON_OBSERVATION_UNSUPPORTED')
+        calls = []
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(self.ui, 'docker_client', side_effect=lambda args, timeout: calls.append(list(args)) or b''), contextlib.redirect_stderr(io.StringIO()):
+            self.ui.prepare_private_fifos(directory)
+            self.assertIs(self.ui.release_failed_publish(directory, 'ab' * 32, cause), cause)
+        self.assertEqual(calls, [['docker', 'rm', 'ab' * 32]])
+        self.assertFalse((Path(directory) / 'stat.ready').exists())
+        self.assertFalse((Path(directory) / 'exec.go').exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

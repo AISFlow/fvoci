@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import select
 import shlex
 import signal
 import socket
@@ -95,6 +96,17 @@ def hosted_identity():
     return source
 
 
+def source_identity(mode):
+    if execution_mode() == 'github-ci':
+        return hosted_identity()
+    require(execution_mode() == 'orca-local', 'UI_EXECUTION_MODE_REFUSED')
+    grant = load_existing_local_lease(mode)
+    base = source_inputs()
+    require(base['source'] == grant['source'] and base['tree'] == grant['tree'], 'UI_LOCAL_SOURCE_REFUSED')
+    return {'executionMode': 'orca-local', 'runId': grant['runId'], 'dispatchId': grant['dispatchId'],
+            'source': base['source'], 'tree': base['tree'], 'files': base['files']}
+
+
 def clean_env():
     return {key: os.environ[key] for key in ('PATH', 'LANG', 'LD_LIBRARY_PATH', 'SSL_CERT_FILE',
                 'SSL_CERT_DIR', 'TZ', 'RUNNER_TEMP', 'PYTHONDONTWRITEBYTECODE',
@@ -117,7 +129,7 @@ def recheck_physical(record):
 
 def freeze():
     before = private_read(root() / 'source-before.json', 4 * 1024 * 1024)
-    require(before == hosted_identity(), 'UI_BUILD_INPUTS_CHANGED')
+    require(before == source_identity('freeze'), 'UI_BUILD_INPUTS_CHANGED')
     physical = private_read(root() / 'physical-before.private.json', 64 * 1024 * 1024)
     recheck_physical(physical)
     artifacts = []
@@ -166,7 +178,7 @@ def freeze():
 
 def current_build():
     manifest = private_read(root() / 'current-build.json', 8 * 1024 * 1024)
-    require(manifest['sourceInputs'] == hosted_identity(), 'UI_SOURCE_CHANGED')
+    require(manifest['sourceInputs'] == source_identity('current-build'), 'UI_SOURCE_CHANGED')
     physical = manifest['physicalInputs']
     require(digest(physical['path']) == physical['sha256'], 'UI_PHYSICAL_RECEIPT_CHANGED')
     recheck_physical(private_read(physical['path'], 64 * 1024 * 1024))
@@ -183,7 +195,211 @@ def current_build():
     return manifest
 
 
+QUALIFIED_CANONICAL_IMAGE = 'sha256:396a5f8e43e8de4b2e1567f2c8a8e841bf45037a4e4ff7cb76dc384951025f35'
+QUALIFIED_SHELL = '/bin/sh'
+DAEMON_CAPS = {'memory.max': '12884901888', 'cpu.max': '200000 100000',
+               'pids.max': '128', 'memory.swap.max': '0'}
+SECRET_ENV_KEYS = ('FVOCI_LIBSQL_URL', 'FVOCI_LIBSQL_AUTH_TOKEN')
+NATIVE_CAPSULE_KEYS = SECRET_ENV_KEYS + (
+    'PASSWORD_PEPPER_KEYS', 'PASSWORD_PEPPER_ACTIVE_KEY_ID', 'FVOCI_E2E_TURSO_NAMESPACE',
+    'FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE', 'FVOCI_TEST_TURSO_DESTRUCTIVE', 'E2E_DATABASE_BACKEND',
+    'FVOCI_E2E_TURSO_UI_SELECTED', 'FVOCI_DATABASE_BACKEND', 'FVOCI_REALTIME_MODE', 'FVOCI_BIND',
+    'FVOCI_PUBLIC_ORIGIN', 'FVOCI_COOKIE_SECURE', 'STORAGE_DRIVER', 'FVOCI_STORAGE_DIR',
+    'FVOCI_STATIC_DIR', 'FVOCI_COLLAB_ENGINE', 'FVOCI_COLLAB_FAMILY_LEASE_MS',
+    'FVOCI_COLLAB_FAMILY_RENEW_MS', 'FVOCI_COLLAB_MAX_ROOMS', 'RUST_LOG',
+    'FVOCI_MAINTENANCE_TICK_SECS', 'FVOCI_MAINTENANCE_INTERVAL_SECS',
+    'FVOCI_UPLOAD_GC_INTERVAL_SECS', 'FVOCI_REVISION_SWEEP_INTERVAL_SECS')
+FIXED_LAUNCHER = (
+    '#!/bin/sh\n'
+    'set -eu\n'
+    'set -a\n'
+    '. "$1"\n'
+    'set +a\n'
+    'shift\n'
+    "newline='\n'\n"
+    'read -r fvoci_stat < /proc/$$/stat || exit 78\n'
+    'exec 3>/fvoci-private/stat.ready\n'
+    '[ "${#fvoci_stat}" -le 511 ] && case $fvoci_stat in *"$newline"*) false ;; *) true ;; esac || exit 78\n'
+    "printf '%s\\n' \"$fvoci_stat\" >&3\n"
+    'exec 3>&-\n'
+    'exec 3</fvoci-private/exec.go\n'
+    'read -r fvoci_go <&3 || exit 78\n'
+    'exec 3<&-\n'
+    '[ "$fvoci_go" = GO ] || exit 78\n'
+    'exec "$@"\n')
+LAUNCHER_DST = '/fvoci-current/launcher.sh'
+CAPSULE_DST = '/fvoci-private/native-env.sh'
+BINARY_DST = '/fvoci-current/bin'
+DIST_DST = '/fvoci-current/dist'
+ONE_SHOT_LIVE = 'unsupported-before-execution'
+BLOCKED = 'BLOCKED'
+FIXTURE_BUDGET = 120
+SERVER_BUDGET = 10
+STAT_READ_BOUND = 512
+STAT_BODY_MAX = 511
+STAT_FIFO_NAME = 'stat.ready'
+GO_FIFO_NAME = 'exec.go'
+STAT_FIFO_DST = '/fvoci-private/stat.ready'
+GO_FIFO_DST = '/fvoci-private/exec.go'
+GO_MARKER = b'GO\n'
+
+
+def execution_mode():
+    mode = os.environ.get('FVOCI_SELECTED_EXECUTION_MODE', 'github-ci')
+    require(mode in ('github-ci', 'orca-local'), 'UI_EXECUTION_MODE_REFUSED')
+    return mode
+
+
+def load_existing_local_lease(mode):
+    # current_binding.load_local_allocation keeps GRANTED, currentDispatchConfirmed,
+    # exclusiveLocalBatch, expiresUtc, clean git, and source/tree. Do not re-code them.
+    spec = importlib.util.spec_from_file_location(
+        'ui_current_binding', W / 'scripts/selected-backend-ci/current_binding.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        return module.load_local_allocation(mode, consumer='turso-ui')
+    except AssertionError:
+        raise UiError('UI_LOCAL_ALLOCATION_REFUSED')
+
+
+def read_shell_proof(runtime):
+    proof = runtime.get('shellProof') if isinstance(runtime, dict) else None
+    require(isinstance(proof, dict), 'UI_CANONICAL_SHELL_UNAVAILABLE')
+    raw_path, raw_hash = proof.get('path'), proof.get('sha256')
+    require(isinstance(raw_path, str) and raw_path.startswith('/') and not raw_path.startswith('//'),
+            'UI_CANONICAL_SHELL_UNAVAILABLE')
+    path = Path(raw_path)
+    require(path.is_absolute() and not path.is_symlink(), 'UI_CANONICAL_SHELL_UNAVAILABLE')
+    require(re.fullmatch('[0-9a-f]{64}', raw_hash or ''), 'UI_CANONICAL_SHELL_UNAVAILABLE')
+    require(digest(path) == raw_hash, 'UI_CANONICAL_SHELL_UNAVAILABLE')
+    receipt = json.loads(path.read_text())
+    config = receipt['Config']
+    require(config.get('Image') == QUALIFIED_CANONICAL_IMAGE == runtime.get('imageId'),
+            'UI_CANONICAL_SHELL_UNAVAILABLE')
+    require(QUALIFIED_SHELL in (config.get('Cmd') or []), 'UI_CANONICAL_SHELL_UNAVAILABLE')
+    require(not any(str(item).startswith('FVOCI_LIBSQL_') for item in (config.get('Env') or [])),
+            'UI_DOCKER_ENV_SECRET_REFUSED')
+    return QUALIFIED_SHELL
+
+
+def open_referenced_grant(mode):
+    require(execution_mode() == 'orca-local', 'UI_EXECUTION_MODE_REFUSED')
+    grant = load_existing_local_lease(mode)
+    runtime = grant.get('canonicalRuntime')
+    require(isinstance(runtime, dict) and runtime.get('networkAuthorized') is True, 'UI_LOCAL_NETWORK_NOT_GRANTED')
+    require(read_shell_proof(runtime) == QUALIFIED_SHELL, 'UI_CANONICAL_SHELL_UNAVAILABLE')
+    return grant
+
+
+def capsule_text(environment):
+    require('LOCPATH' not in environment, 'UI_LOCPATH_REFUSED')
+    leaked = [key for key in environment if key not in NATIVE_CAPSULE_KEYS and (
+        key.startswith('FVOCI_LIBSQL_') or key.startswith('PASSWORD_') or 'TOKEN' in key
+        or 'SECRET' in key or key == 'LOCPATH')]
+    require(not leaked, 'UI_DOCKER_ENV_SECRET_REFUSED')
+    lines = []
+    for key in NATIVE_CAPSULE_KEYS:
+        if key not in environment:
+            continue
+        value = environment[key]
+        require(isinstance(value, str) and '\0' not in value and '\n' not in value, 'UI_DOCKER_ENV_SECRET_REFUSED')
+        lines.append(key + '=' + shlex.quote(value) + '\n')
+    require(all(any(line.startswith(key + '=') for line in lines) for key in SECRET_ENV_KEYS), 'UI_DOCKER_ENV_SECRET_REFUSED')
+    return ''.join(lines)
+
+
+def write_readonly_capsule(directory, environment):
+    path = Path(directory) / 'native-env.sh'
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w') as output:
+        output.write(capsule_text(environment))
+    require(stat.S_IMODE(path.stat().st_mode) == 0o600, 'UI_PRIVATE_INPUT_REFUSED')
+    return path
+
+
+def write_launcher(directory):
+    path = Path(directory) / 'launcher.sh'
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+    with os.fdopen(fd, 'w') as output:
+        output.write(FIXED_LAUNCHER)
+    os.chmod(path, 0o500)
+    require(FIXED_LAUNCHER == path.read_text() and "invented" not in FIXED_LAUNCHER, 'UI_CANONICAL_SHELL_UNAVAILABLE')
+    return path
+
+
+def container_argv(name, launcher, capsule, binary, mount_args, command):
+    require(str(launcher).startswith('/') and str(capsule).startswith('/'), 'UI_CURRENT_ARTIFACT_MISSING')
+    argv = ['docker', 'create', '--name', name, '--read-only', '--cap-drop', 'ALL',
+            '--security-opt', 'no-new-privileges', '--user', '1000:1000',
+            '--memory', DAEMON_CAPS['memory.max'], '--memory-swap', DAEMON_CAPS['memory.max'],
+            '--cpu-period', '100000', '--cpu-quota', '200000', '--pids-limit', DAEMON_CAPS['pids.max'],
+            '--tmpfs', '/tmp:rw,noexec,nosuid,size=67108864,uid=1000,gid=1000',
+            '--network', 'host', '--entrypoint', QUALIFIED_SHELL, *mount_args,
+            QUALIFIED_CANONICAL_IMAGE, LAUNCHER_DST, CAPSULE_DST, binary, *command]
+    require('--env-file' not in argv and '-e' not in argv, 'UI_DOCKER_ENV_SECRET_REFUSED')
+    return argv
+
+
+def admit_published_config(argv, env_items, secret_values):
+    keys = []
+    for item in env_items:
+        key, sep, _value = str(item).partition('=')
+        require(sep == '=', 'UI_DOCKER_ENV_SECRET_REFUSED')
+        keys.append(key)
+    require(not any(key in keys for key in SECRET_ENV_KEYS), 'UI_DOCKER_ENV_SECRET_REFUSED')
+    published = list(argv) + [str(item) for item in env_items]
+    for value in secret_values:
+        require(value and not any(value in item for item in published), 'UI_DOCKER_ENV_SECRET_REFUSED')
+    require('--env-file' not in argv and '-e' not in argv, 'UI_DOCKER_ENV_SECRET_REFUSED')
+
+
+def creation_identity(inspect, argv, secret_values, kind):
+    config, host = inspect['Config'], inspect['HostConfig']
+    require(inspect['State']['Pid'] == 0 and inspect['State']['Running'] is False, 'UI_DAEMON_PID_REFUSED')
+    require(config.get('Image') == QUALIFIED_CANONICAL_IMAGE, 'UI_CANONICAL_SHELL_UNAVAILABLE')
+    require(list(config.get('Entrypoint') or []) == [QUALIFIED_SHELL], 'UI_CANONICAL_SHELL_UNAVAILABLE')
+    admit_published_config(config.get('Cmd') or [], config.get('Env') or [], secret_values)
+    admit_published_config(argv, [], secret_values)
+    # HostConfig is a create-shape refusal only. It is not cgroup cap proof.
+    require(host.get('ReadonlyRootfs') is True and list(host.get('CapDrop') or []) == ['ALL'], 'UI_DAEMON_CAP_REFUSED')
+    require(config.get('User') == '1000:1000' and host.get('Privileged') is not True, 'UI_DAEMON_CAP_REFUSED')
+    live = ONE_SHOT_LIVE if kind == 'fixture' else 'pending-listen'
+    return {'phase': 'created', 'liveDaemon': live, 'qualification': BLOCKED,
+            'cgroupCaps': 'not-observed', 'shell': QUALIFIED_SHELL, 'image': QUALIFIED_CANONICAL_IMAGE}
+
+
+def finished_one_shot(creation, returncode):
+    require(creation.get('qualification') == BLOCKED and creation.get('liveDaemon') == ONE_SHOT_LIVE,
+            'UI_DAEMON_OBSERVATION_UNSUPPORTED')
+    require(creation.get('cgroupCaps') == 'not-observed', 'UI_DAEMON_CAP_REFUSED')
+    require(isinstance(returncode, int), 'UI_NATIVE_FIXTURE_OUTPUT_REFUSED')
+    return {'productExit': returncode, 'liveDaemon': ONE_SHOT_LIVE, 'qualification': BLOCKED}
+
+
+def running_daemon_sample(inspect, caps, proc_row, nspid, client_pid, binary, waited):
+    require(waited is True, 'UI_DAEMON_WAIT_MISSING')
+    state = inspect['State']
+    pid = state.get('Pid')
+    require(isinstance(pid, int) and pid > 0 and pid == proc_row['pid'] and pid != client_pid, 'UI_DAEMON_PID_REFUSED')
+    require(isinstance(nspid, int) and 0 < nspid != pid, 'UI_NAMESPACE_PID_REFUSED')
+    require(state.get('Running') is True and state.get('OOMKilled') is False, 'UI_DAEMON_STATE_REFUSED')
+    require('HostConfig' not in caps and 'CapDrop' not in caps, 'UI_DAEMON_CAP_REFUSED')
+    for key, expected in DAEMON_CAPS.items():
+        require(caps.get(key) == expected, 'UI_DAEMON_CAP_REFUSED')
+    require(proc_row.get('comm') == 'fvoci-server', 'UI_NORMAL_MAIN_IDENTITY_FAILED')
+    require(re.fullmatch('[0-9]+', str(proc_row.get('startTicks') or '')), 'UI_DAEMON_PID_REFUSED')
+    if proc_row.get('exeInspection') == 'observed':
+        require(proc_row.get('exe') == binary, 'UI_CANONICAL_IMAGE_BINARY_REFUSED')
+    else:
+        require(proc_row.get('exeInspection') == 'UNAVAILABLE', 'UI_NORMAL_MAIN_IDENTITY_FAILED')
+    return {'daemonPid': pid, 'pid': nspid, 'startTicks': proc_row['startTicks'], 'waited': True,
+            'qualification': 'daemon-observed', 'caps': {key: caps[key] for key in DAEMON_CAPS}}
+
+
 def fixture(manifest, mode, environment, input=None):
+    if execution_mode() == 'orca-local':
+        return local_fixture(manifest, mode, environment, input)
     env = clean_env()
     env.update({k: environment[k] for k in ('FVOCI_LIBSQL_URL', 'FVOCI_LIBSQL_AUTH_TOKEN',
         'PASSWORD_PEPPER_KEYS', 'PASSWORD_PEPPER_ACTIVE_KEY_ID', 'FVOCI_E2E_TURSO_NAMESPACE',
@@ -459,6 +675,8 @@ def attachment(cases, name):
 
 
 def actor():
+    if execution_mode() == 'orca-local':
+        load_existing_local_lease('actor')
     capsule = private_read(os.environ['FVOCI_E2E_TURSO_PRIVATE_INPUT'])
     namespace = os.environ.get('FVOCI_E2E_TURSO_NAMESPACE', '')
     require(namespace == capsule['namespace'] and re.fullmatch('tui-[a-f0-9]{20}', namespace), 'UI_ACTOR_NAMESPACE_REFUSED')
@@ -753,6 +971,8 @@ def port_closed(base):
 
 
 def stop(server, base, directory):
+    if getattr(server, 'container_id', None):
+        return stop_attached_daemon(server, base, directory)
     allocation = next(i for i, a in enumerate(_PROCESSES.allocations) if a['process'] is server)
     code = _PROCESSES.finish(server, True)
     rows = [e['identity'] for e in _PROCESSES.entries.values() if e['allocation'] in (allocation, None)]
@@ -764,6 +984,8 @@ def stop(server, base, directory):
 
 
 def start(manifest, environment, directory, expected_setup=False):
+    if execution_mode() == 'orca-local':
+        return local_server_start(manifest, environment, directory, expected_setup)
     logpath = directory / 'server.private.log'
     log = logpath.open('xb')
     os.fchmod(log.fileno(), 0o600)
@@ -900,7 +1122,7 @@ def execute_ui(manifest, baseline, environment):
             try:
                 server, base, log = start(manifest, env, directory, setup_needed)
                 audit['serverStarts'] += 1
-                server_allocations.append((server, directory, identity(server.pid)))
+                server_allocations.append((server, directory, allocation_identity(server)))
                 b_env = {'PLAYWRIGHT_BASE_URL': base, 'FVOCI_E2E_SELECTED_BACKEND': 'libsql-remote',
                     'FVOCI_E2E_SELECTED_FLOW': flow, 'FVOCI_E2E_TURSO_NAMESPACE': namespace,
                     'FVOCI_E2E_TURSO_SOURCE': source['source'], 'FVOCI_E2E_TURSO_TREE': source['tree'],
@@ -949,7 +1171,7 @@ def execute_ui(manifest, baseline, environment):
                     restart_dir.mkdir(mode=0o700)
                     server, base, log = start(manifest, env, restart_dir)
                     audit['serverStarts'] += 1
-                    server_allocations.append((server, restart_dir, identity(server.pid)))
+                    server_allocations.append((server, restart_dir, allocation_identity(server)))
                     restart_env = {k: v for k, v in b_env.items() if k not in ('FVOCI_E2E_SELECTED_FIXTURE_BIN', 'FVOCI_E2E_TURSO_PRIVATE_INPUT')}
                     restart_env.update(PLAYWRIGHT_BASE_URL=base, FVOCI_E2E_SELECTED_RESTART_SOURCE=source['source'],
                         FVOCI_E2E_SELECTED_RESTART_CHECKPOINT=str(directory / 'restart-checkpoint.private.json'))
@@ -1000,9 +1222,9 @@ def execute_ui(manifest, baseline, environment):
                     remember_actor(audit, private_read(path), namespace)
             except BaseException as error:
                 audit_errors.append(failure_code(error))
-        for server, directory, allocation_identity in server_allocations:
+        for server, directory, server_identity in server_allocations:
             try:
-                audit['servers'].append(maintenance_receipts(directory / 'server.private.log', allocation_identity, audit['targetSha256']))
+                audit['servers'].append(maintenance_receipts(directory / 'server.private.log', server_identity, audit['targetSha256']))
             except BaseException as error:
                 audit_errors.append(failure_code(error))
         receipt['auditErrors'] = audit_errors
@@ -1074,7 +1296,7 @@ def main():
     try:
         mode = sys.argv[1:]
         if mode == ['--record-before']:
-            write(root() / 'source-before.json', hosted_identity())
+            write(root() / 'source-before.json', source_identity('record-before'))
             write(root() / 'physical-before.private.json', physical_inputs())
         elif mode == ['--freeze']:
             freeze()
@@ -1090,6 +1312,542 @@ def main():
     except BaseException:
         print('UI_CONSUMER_FAILED', file=sys.stderr)
         return 78
+
+
+def local_fixture(manifest, mode, environment, input):
+    directory = root() / ('local-fixture-' + mode)
+    directory.mkdir(mode=0o700)
+    container_id, creation = publish_container(directory, environment, manifest, 'fvoci-e2e-fixture', [mode], 'fixture')
+    process = None
+    go_fd = None
+    original = None
+    receipt_errors = []
+    try:
+        require(creation.get('qualification') == BLOCKED and creation.get('liveDaemon') == ONE_SHOT_LIVE
+                and creation.get('cgroupCaps') == 'not-observed', 'UI_DAEMON_OBSERVATION_UNSUPPORTED')
+        deadline = budget_deadline(FIXTURE_BUDGET)
+        process = _PROCESSES.spawn(
+            ['docker', 'start', '--attach', '--interactive', container_id], 'fixture-' + mode,
+            env=clean_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        sample, go_fd = release_attached(directory, container_id, process, deadline)
+        stdout, _stderr = communicate_within_budget(process, canonical(input) if input else b'', deadline)
+        state = read_daemon_exit(container_id, 10)
+        require(len(stdout) < 64 * 1024 * 1024, 'UI_NATIVE_FIXTURE_OUTPUT_REFUSED')
+        value = json.loads(stdout)
+        require(isinstance(value, dict), 'UI_NATIVE_FIXTURE_OUTPUT_REFUSED')
+        native_code = state.get('ExitCode') if isinstance(state, dict) else None
+        failure = native_failure_code(value, native_code)
+        if failure is not None:
+            try:
+                write(directory / ('fixture-failure-' + secrets.token_hex(6) + '.private.json'),
+                      {'mode': mode, 'exit': native_code, 'receipt': value})
+            except BaseException:
+                receipt_errors.append('UI_NATIVE_FAILURE_RECEIPT_WRITE_FAILED')
+            raise UiError(failure)
+        record = prove_normal_daemon(process, sample, state, False)
+        require(value['lifecycleDrain'] == 'confirmed' and value['leases'] == 0
+                and value['serverCloseReceipt'] == 'not-exposed-by-sdk', 'UI_NATIVE_DRAIN_FAILED')
+        record['body'] = value
+        require(record['qualification'] == 'retired', 'UI_DAEMON_OBSERVATION_UNSUPPORTED')
+        write(directory / 'daemon-completion.private.json', record)
+        return value
+    except BaseException as error:
+        original = error
+        raise
+    finally:
+        errors = cleanup_owned(container_id, process, directory, [go_fd])
+        errors.extend(receipt_errors)
+        report_cleanup(original, errors)
+        if errors and original is None:
+            raise UiError('UI_PROCESS_CLOSURE_FAILED')
+
+
+def allocation_index(process):
+    return next(i for i, a in enumerate(_PROCESSES.allocations) if a['process'] is process)
+
+
+def budget_deadline(seconds):
+    require(seconds == FIXTURE_BUDGET or seconds == SERVER_BUDGET, 'UI_SERVER_START_FAILED')
+    return time.monotonic() + seconds
+
+
+def budget_remain(deadline):
+    remain = deadline - time.monotonic()
+    require(remain > 0, 'UI_SERVER_START_FAILED')
+    return remain
+
+
+def bounded_client_timeout(deadline):
+    remain = budget_remain(deadline)
+    if remain > 10:
+        return 10
+    return remain
+
+
+def communicate_within_budget(process, payload, deadline):
+    return process.communicate(input=payload, timeout=budget_remain(deadline))
+
+
+def accept_stat_payload(payload):
+    require(payload.__class__ is bytes and payload.endswith(b'\n') and payload.count(b'\n') == 1
+            and STAT_BODY_MAX >= len(payload) - 1 >= 1 and len(payload) <= STAT_READ_BOUND,
+            'UI_DAEMON_PID_REFUSED')
+    return payload[:-1].decode('utf-8')
+
+
+def stat_fields(text):
+    require(isinstance(text, str) and ' ' in text and ')' in text, 'UI_DAEMON_PID_REFUSED')
+    token, _sep, _rest = text.partition(' ')
+    tail = text.rsplit(')', 1)[1].split()
+    require(token.isdigit() and len(tail) > 19 and tail[19].isdigit(), 'UI_DAEMON_PID_REFUSED')
+    return token, tail[19]
+
+
+def stat_open_flags():
+    return os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
+
+
+def go_open_flags():
+    return os.O_RDWR | os.O_NONBLOCK | os.O_CLOEXEC
+
+
+def open_stat_reader(path):
+    return os.open(path, stat_open_flags())
+
+
+def open_go_holder(path):
+    return os.open(path, go_open_flags())
+
+
+def read_stat_once(fd, deadline):
+    remain = budget_remain(deadline)
+    readable, _writable, _except = select.select([fd], [], [], remain)
+    require(readable == [fd], 'UI_SERVER_START_FAILED')
+    return accept_stat_payload(os.read(fd, STAT_READ_BOUND))
+
+
+def write_go_once(fd):
+    written = os.write(fd, GO_MARKER)
+    require(written == len(GO_MARKER), 'UI_DAEMON_OBSERVATION_UNSUPPORTED')
+
+
+def prepare_private_fifos(directory):
+    directory = Path(directory)
+    made = []
+    for name in (STAT_FIFO_NAME, GO_FIFO_NAME):
+        path = directory / name
+        os.mkfifo(path, 0o600)
+        os.chmod(path, 0o600)
+        info = path.stat()
+        require(stat.S_ISFIFO(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600
+                and info.st_uid == os.getuid(), 'UI_PRIVATE_INPUT_REFUSED')
+        made.append(path)
+    return made[0], made[1]
+
+
+def unlink_private_fifos(directory):
+    for name in (STAT_FIFO_NAME, GO_FIFO_NAME):
+        try:
+            (Path(directory) / name).unlink()
+        except FileNotFoundError:
+            pass
+
+
+def parse_status_fields(text, label):
+    fields = next((line.split()[1:] for line in text.splitlines() if line.startswith(label)), None)
+    require(isinstance(fields, list) and len(fields) == 4 and all(item.isdigit() for item in fields),
+            'UI_DAEMON_PID_REFUSED')
+    return [int(item) for item in fields]
+
+
+def parse_nspid(text):
+    fields = next((line.split()[1:] for line in text.splitlines() if line.startswith('NSpid:')), None)
+    require(isinstance(fields, list) and len(fields) == 2 and all(item.isdigit() for item in fields),
+            'UI_NAMESPACE_PID_REFUSED')
+    return [int(item) for item in fields]
+
+
+def read_proc_status(pid):
+    return (Path('/proc') / str(pid) / 'status').read_text()
+
+
+def read_daemon_caps(pid):
+    lines = (Path('/proc') / str(pid) / 'cgroup').read_text().splitlines()
+    cgroup_line = next(line for line in lines if line.startswith('0:'))
+    cgroup = Path('/sys/fs/cgroup' + cgroup_line.split(':', 2)[2])
+    return {key: (cgroup / key).read_text().strip() for key in DAEMON_CAPS}
+
+
+def bind_paused_shell(stat_text, inspect, proc_row, nspid_fields, caps, client_pid, credentials):
+    token, ticks = stat_fields(stat_text)
+    state = inspect['State']
+    pid = state.get('Pid')
+    require(isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 and pid != client_pid,
+            'UI_DAEMON_PID_REFUSED')
+    require(isinstance(nspid_fields, list) and len(nspid_fields) == 2, 'UI_NAMESPACE_PID_REFUSED')
+    host_ns, namespace = nspid_fields
+    require(isinstance(host_ns, int) and isinstance(namespace, int) and pid == host_ns
+            and token == str(namespace) and pid != namespace, 'UI_NAMESPACE_PID_REFUSED')
+    require(proc_row.get('pid') == pid and proc_row.get('startTicks') == ticks, 'UI_DAEMON_PID_REFUSED')
+    require(proc_row.get('comm') == 'sh', 'UI_NORMAL_MAIN_IDENTITY_FAILED')
+    require(state.get('Running') is True and state.get('OOMKilled') is False, 'UI_DAEMON_STATE_REFUSED')
+    require(isinstance(caps, dict) and 'HostConfig' not in caps and 'CapDrop' not in caps, 'UI_DAEMON_CAP_REFUSED')
+    for key, expected in DAEMON_CAPS.items():
+        require(caps.get(key) == expected, 'UI_DAEMON_CAP_REFUSED')
+    uid, gid = credentials.get('uid'), credentials.get('gid')
+    require(uid == [1000, 1000, 1000, 1000] and gid == [1000, 1000, 1000, 1000], 'UI_DAEMON_PID_REFUSED')
+    return {'maintenance': {'pid': namespace, 'startTicks': ticks},
+            'retirement': {'pid': pid, 'startTicks': ticks}, 'clientPid': client_pid, 'comm': 'sh',
+            'caps': {key: caps[key] for key in DAEMON_CAPS}, 'uid': list(uid), 'gid': list(gid)}
+
+
+def allocation_identity(server):
+    maintenance = getattr(server, 'maintenance_identity', None)
+    if maintenance is not None:
+        return {'pid': maintenance['pid'], 'startTicks': maintenance['startTicks']}
+    return identity(server.pid)
+
+
+def qualify_daemon_exit(state, forced):
+    if not isinstance(state, dict) or state.get('Pid') != 0:
+        return False, None
+    code = state.get('ExitCode')
+    oom = state.get('OOMKilled')
+    if isinstance(code, bool) or not isinstance(code, int) or not isinstance(oom, bool) or not isinstance(forced, bool):
+        return False, None
+    return (forced is False and code == 0 and oom is False), code
+
+
+def capture_owned_daemon(client, row):
+    index = allocation_index(client)
+    _PROCESSES.capture(row, 'container-init', index)
+    return index
+
+
+def sample_paused_daemon(container_id, stat_text, client, deadline):
+    raw = docker_client(['docker', 'inspect', container_id], bounded_client_timeout(deadline))
+    inspected = json.loads(raw.decode())[0]
+    pid = inspected['State']['Pid']
+    status = read_proc_status(pid)
+    bound = bind_paused_shell(stat_text, inspected, identity(pid), parse_nspid(status), read_daemon_caps(pid),
+                               client.pid, {'uid': parse_status_fields(status, 'Uid:'),
+                                            'gid': parse_status_fields(status, 'Gid:')})
+    bound['allocation'] = capture_owned_daemon(client, proc_identity(pid))
+    return bound
+
+
+def release_attached(directory, container_id, client, deadline):
+    stat_fd = open_stat_reader(Path(directory) / STAT_FIFO_NAME)
+    go_fd = None
+    try:
+        go_fd = open_go_holder(Path(directory) / GO_FIFO_NAME)
+        sample = sample_paused_daemon(container_id, read_stat_once(stat_fd, deadline), client, deadline)
+        write_go_once(go_fd)
+        return sample, go_fd
+    except BaseException:
+        if go_fd is not None:
+            os.close(go_fd)
+        raise
+    finally:
+        os.close(stat_fd)
+
+
+def read_daemon_exit(container_id, timeout):
+    require(isinstance(container_id, str) and re.fullmatch('[0-9a-f]{64}', container_id), 'UI_DOCKER_CLIENT_FAILED')
+    require(isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and 0 < timeout <= 10,
+            'UI_SERVER_START_FAILED')
+    process = _PROCESSES.spawn(['docker', 'wait', container_id], 'docker-wait', env=clean_env(),
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    timed_out = False
+    try:
+        try:
+            process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            process.kill()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                raise UiError('UI_DOCKER_CLIENT_FAILED')
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+        try:
+            _PROCESSES.finish(process)
+        except UiError:
+            if not timed_out:
+                raise
+    if timed_out or process.returncode != 0:
+        return None
+    state = json.loads(docker_client(['docker', 'inspect', container_id], timeout).decode())[0]['State']
+    return {'Pid': state.get('Pid'), 'ExitCode': state.get('ExitCode'), 'OOMKilled': state.get('OOMKilled')}
+
+
+def native_rows(process):
+    index = allocation_index(process)
+    return index, [entry for entry in _PROCESSES.entries.values() if entry['allocation'] == index]
+
+
+def require_native_retired(process, retirement):
+    require(retired(retirement), 'UI_PROCESS_CLOSURE_FAILED')
+    _index, rows = native_rows(process)
+    native = [entry for entry in rows if entry['identity']['pid'] != process.pid]
+    require(native and all(retired(entry['identity']) for entry in native), 'UI_PROCESS_CLOSURE_FAILED')
+
+
+def allocation_retired(process):
+    index, rows = native_rows(process)
+    require(rows and _PROCESSES.allocations[index]['closed'] and not _PROCESSES.allocations[index]['forced']
+            and all(retired(entry['identity']) for entry in rows), 'UI_PROCESS_CLOSURE_FAILED')
+    return index
+
+
+def native_failure_code(value, exit_code):
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool) or exit_code == 0:
+        return None
+    code = value.get('originalFailure', 'UI_NATIVE_FIXTURE_FAILED')
+    require(isinstance(code, str) and re.fullmatch('TURSO_UI_[A-Z_]+|UI_NATIVE_FIXTURE_FAILED', code),
+            'UI_NATIVE_FAILURE_CODE_REFUSED')
+    return code
+
+
+def prove_normal_daemon(process, sample, state, forced):
+    qualified, product_exit = qualify_daemon_exit(state or {}, forced)
+    require(qualified, 'UI_DAEMON_OBSERVATION_UNSUPPORTED')
+    require_native_retired(process, sample['retirement'])
+    client_code = _PROCESSES.finish(process)
+    require(client_code == 0, 'UI_PROCESS_CLOSURE_FAILED')
+    record = {'productExit': product_exit, 'clientExit': client_code, 'qualification': 'retired',
+              'liveDaemon': 'retired', 'caps': sample['caps'], 'uid': sample['uid'], 'gid': sample['gid'],
+              'maintenance': sample['maintenance'], 'retirement': sample['retirement'],
+              'allocation': allocation_retired(process)}
+    require(record['qualification'] != BLOCKED and record['liveDaemon'] != ONE_SHOT_LIVE,
+            'UI_DAEMON_OBSERVATION_UNSUPPORTED')
+    return record
+
+
+def verify_own_closure(process, directory):
+    require(all(not (Path(directory) / name).exists() for name in (STAT_FIFO_NAME, GO_FIFO_NAME)),
+            'UI_PROCESS_CLOSURE_FAILED')
+    if process is None:
+        return
+    require(process.poll() is not None, 'UI_PROCESS_CLOSURE_FAILED')
+    index, rows = native_rows(process)
+    require(_PROCESSES.allocations[index]['closed'] and all(retired(entry['identity']) for entry in rows),
+            'UI_PROCESS_CLOSURE_FAILED')
+
+
+def cleanup_owned(container_id, process, directory, fds):
+    errors = []
+    seen = set()
+    for fd in fds:
+        if fd is None or fd in seen:
+            continue
+        seen.add(fd)
+        try:
+            os.close(fd)
+        except BaseException:
+            errors.append('UI_PROCESS_CLOSURE_FAILED')
+    try:
+        if process is not None and process.poll() is None:
+            docker_client(['docker', 'stop', '-t', '10', container_id], 10)
+    except BaseException:
+        errors.append('UI_DOCKER_CLIENT_FAILED')
+    try:
+        if process is not None:
+            _PROCESSES.finish(process)
+    except BaseException:
+        errors.append('UI_PROCESS_CLOSURE_FAILED')
+    try:
+        if container_id is not None:
+            docker_client(['docker', 'rm', container_id], 10)
+    except BaseException:
+        errors.append('UI_DOCKER_CLIENT_FAILED')
+    try:
+        unlink_private_fifos(directory)
+    except BaseException:
+        errors.append('UI_PROCESS_CLOSURE_FAILED')
+    try:
+        verify_own_closure(process, directory)
+    except BaseException:
+        errors.append('UI_PROCESS_CLOSURE_FAILED')
+    return errors
+
+
+def report_cleanup(original, errors):
+    if errors:
+        print(json.dumps({'originalFailure': failure_code(original) if original is not None else None,
+                          'cleanupErrors': errors}), file=sys.stderr)
+    return original
+
+
+def release_failed_publish(directory, container_id, original):
+    errors = []
+    if container_id is not None:
+        try:
+            docker_client(['docker', 'rm', container_id], 10)
+        except BaseException:
+            errors.append('UI_DOCKER_CLIENT_FAILED')
+    try:
+        unlink_private_fifos(directory)
+    except BaseException:
+        errors.append('UI_PROCESS_CLOSURE_FAILED')
+    report_cleanup(original, errors)
+    return original
+
+
+def stop_attached_daemon(server, base, directory):
+    original = None
+    try:
+        host = server.host_identity
+        require(isinstance(host, dict) and host.get('pid') != server.pid, 'UI_DAEMON_PID_REFUSED')
+        entry = _PROCESSES.entries[(host['pid'], host['startTicks'])]
+        forced = False
+        if not retired(host):
+            _PROCESSES.send(entry, signal.SIGTERM)
+        state = read_daemon_exit(server.container_id, 10)
+        if state is None or state.get('Pid') != 0:
+            forced = True
+            if not retired(host):
+                _PROCESSES.send(entry, signal.SIGKILL)
+            state = read_daemon_exit(server.container_id, 10)
+            if state is None or state.get('Pid') != 0:
+                docker_client(['docker', 'stop', '-t', '10', server.container_id], 10)
+                inspected = json.loads(docker_client(['docker', 'inspect', server.container_id], 10).decode())[0]
+                inspected = inspected['State']
+                state = {'Pid': inspected.get('Pid'), 'ExitCode': inspected.get('ExitCode'),
+                         'OOMKilled': inspected.get('OOMKilled')}
+        record = prove_normal_daemon(server, server.daemon_sample, state, forced)
+        require(port_closed(base), 'UI_SERVER_CLOSURE_FAILED')
+        stopped = {'serverExit': record['productExit'], 'clientExit': record['clientExit'],
+                   'qualification': record['qualification'], 'portClosed': True,
+                   'recordedIdentitiesRetired': True, 'forced': False, 'caps': record['caps'],
+                   'uid': record['uid'], 'gid': record['gid']}
+        rows = [item['identity'] for item in _PROCESSES.entries.values() if item['allocation'] == record['allocation']]
+        write(directory / ('server-identities-' + secrets.token_hex(6) + '.private.json'),
+              {'stopped': stopped, 'identities': rows})
+        return stopped
+    except BaseException as error:
+        original = error
+        raise
+    finally:
+        errors = cleanup_owned(getattr(server, 'container_id', None), server, directory, [getattr(server, 'go_fd', None)])
+        server.go_fd = None
+        report_cleanup(original, errors)
+        if errors and original is None:
+            raise UiError('UI_PROCESS_CLOSURE_FAILED')
+
+
+def local_server_start(manifest, environment, directory, expected_setup=False):
+    container_id, creation = publish_container(directory, environment, manifest, 'fvoci-migrate', ['--start'], 'server')
+    log = None
+    server = None
+    go_fd = None
+    try:
+        require(creation['qualification'] == BLOCKED and creation['cgroupCaps'] == 'not-observed',
+                'UI_DAEMON_OBSERVATION_UNSUPPORTED')
+        logpath = directory / 'server.private.log'
+        log = logpath.open('xb')
+        os.fchmod(log.fileno(), 0o600)
+        deadline = budget_deadline(SERVER_BUDGET)
+        server = _PROCESSES.spawn(['docker', 'start', '--attach', container_id], 'server',
+                                  env=clean_env(), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+        server.container_id = container_id
+        sample, go_fd = release_attached(directory, container_id, server, deadline)
+        server.go_fd = go_fd
+        go_fd = None
+        server.daemon_sample = sample
+        server.maintenance_identity = sample['maintenance']
+        server.host_identity = sample['retirement']
+        while True:
+            raw = logpath.read_bytes()
+            match = re.search(rb'fvoci-server listening on (http://127\.0\.0\.1:\d+)', raw)
+            if match:
+                base = match[1].decode()
+                break
+            require(server.poll() is None and time.monotonic() < deadline, 'UI_SERVER_START_FAILED')
+            time.sleep(0.02)
+        with build_opener(ProxyHandler({})).open(base + '/api/v1/setup', timeout=10) as response:
+            require(response.status == 200 and json.loads(response.read())['needed'] is expected_setup,
+                    'UI_INITIALIZED_SETUP_CHANGED')
+        return server, base, log
+    except BaseException as original:
+        held = [go_fd]
+        if server is not None:
+            held.append(getattr(server, 'go_fd', None))
+        errors = cleanup_owned(container_id, server, directory, held)
+        if server is not None:
+            server.go_fd = None
+        try:
+            if log is not None:
+                log.close()
+        except BaseException:
+            errors.append('UI_SERVER_LOG_CLOSE_FAILED')
+        report_cleanup(original, errors)
+        raise original
+
+
+def publish_container(directory, environment, manifest, binary_name, command, kind):
+    grant = open_referenced_grant(kind)
+    secret_values = [environment[key] for key in SECRET_ENV_KEYS]
+    storage = environment.get('FVOCI_STORAGE_DIR')
+    require(isinstance(storage, str) and storage.startswith('/') and ',' not in storage, 'UI_CURRENT_ARTIFACT_MISSING')
+    prepared = {key: environment[key] for key in NATIVE_CAPSULE_KEYS if key in environment}
+    prepared['FVOCI_COLLAB_ENGINE'] = BINARY_DST + '/collab-engine'
+    prepared['FVOCI_STATIC_DIR'] = DIST_DST
+    prepared['FVOCI_STORAGE_DIR'] = storage
+    capsule = write_readonly_capsule(directory, prepared)
+    launcher = write_launcher(directory)
+    container_id = None
+    try:
+        stat_fifo, go_fifo = prepare_private_fifos(directory)
+        parent = str(Path(manifest['binaries'][binary_name]['path']).resolve().parent)
+        mounts = [mount_spec(launcher, LAUNCHER_DST, True), mount_spec(capsule, CAPSULE_DST, True),
+                  mount_spec(stat_fifo, STAT_FIFO_DST, False), mount_spec(go_fifo, GO_FIFO_DST, False),
+                  mount_spec(parent, BINARY_DST, True), mount_spec(W / 'apps/web/dist', DIST_DST, True),
+                  mount_spec(storage, storage, False)]
+        argv = container_argv('fvoci-tui-' + secrets.token_hex(6), str(launcher), str(capsule),
+                              BINARY_DST + '/' + binary_name, mounts, command)
+        admit_published_config(argv, [], secret_values)
+        require(_PROCESSES is not None, 'UI_OWNED_PROCESS_SCOPE_REQUIRED')
+        container_id = docker_client(argv, 10).decode().strip()
+        require(re.fullmatch('[0-9a-f]{64}', container_id), 'UI_DOCKER_CLIENT_FAILED')
+        inspect = json.loads(docker_client(['docker', 'inspect', container_id], 10).decode())[0]
+        creation = creation_identity(inspect, argv, secret_values, kind)
+        require(creation['qualification'] == BLOCKED and grant['canonicalRuntime']['imageId'] == creation['image'],
+                'UI_DAEMON_OBSERVATION_UNSUPPORTED')
+        write(directory / 'creation-identity.private.json', creation)
+        return container_id, creation
+    except BaseException as original:
+        release_failed_publish(directory, container_id, original)
+        raise
+
+
+def mount_spec(src, dst, readonly):
+    src, dst = str(src), str(dst)
+    require(src.startswith('/') and dst.startswith('/') and not any(char in src + dst for char in ',\n'),
+            'UI_CURRENT_ARTIFACT_MISSING')
+    return 'type=bind,src=' + src + ',dst=' + dst + (',readonly' if readonly else '')
+
+
+def docker_client(args, timeout):
+    require(args and args[0] == 'docker' and '--env-file' not in args and '-e' not in args, 'UI_DOCKER_CLIENT_FAILED')
+    process = _PROCESSES.spawn(args, 'docker-client', env=clean_env(),
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        stdout, _stderr = process.communicate(timeout=timeout)
+        if process.returncode != 0:
+            raise UiError('UI_DOCKER_CLIENT_FAILED')
+        return stdout
+    finally:
+        if process.poll() is None:
+            process.kill()
+        try:
+            _PROCESSES.finish(process)
+        except BaseException:
+            if process.returncode == 0:
+                raise
 
 
 if __name__ == '__main__':

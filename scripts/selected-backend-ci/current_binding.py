@@ -14,6 +14,9 @@ import sys
 OWNER = os.environ['FVOCI_CI_OWNER']
 E = Path(os.environ['FVOCI_CI_SELECTED_RUNS'])
 W = Path(__file__).resolve().parents[2]
+SELECTED_BACKEND_MODES = frozenset({'record-before', 'stage', 'record-after', 'run'})
+TURSO_UI_MODES = frozenset({'record-before', 'freeze', 'current-build', 'actor', 'fixture', 'server'})
+TURSO_UI_REGISTRATION = 'selected-backend-ci/turso-ui.py'
 
 # The feature list cargo actually emits for the engine stage: crates/collab-engine
 # declares `default = []`, and a compiler-artifact lists every activated feature
@@ -69,7 +72,7 @@ def validate_off_report(report, backend):
     return cases
 
 
-def load_local_allocation(mode):
+def load_local_allocation(mode, *, consumer='selected-backend'):
     # Explicit same-user procedural ROOT lease, not authentication or a sandbox.
     # CI never falls back to this path, even when a local lease is also supplied.
     assert os.environ.get('FVOCI_SELECTED_EXECUTION_MODE') == 'orca-local'
@@ -96,14 +99,22 @@ def load_local_allocation(mode):
     assert subprocess.check_output(['git','-C',str(W),'rev-parse','HEAD'], text=True).strip() == grant['source']
     assert subprocess.check_output(['git','-C',str(W),'rev-parse','HEAD^{tree}'], text=True).strip() == grant['tree']
     assert subprocess.run(['git','-C',str(W),'diff','--quiet','HEAD']).returncode == 0
-    assert mode in grant['allowedModes'] and set(grant['allowedModes']) <= {'record-before','stage','record-after','run'}
+    assert mode in grant['allowedModes']
     from datetime import datetime, timezone
     assert datetime.now(timezone.utc) < datetime.fromisoformat(grant['expiresUtc'])
-    assert Path(grant['outputRoot']).is_absolute() and Path(grant['outputRoot']) == E.parent
-    assert Path(grant['outputRoot']) / 'runtime' == E
-    for name in ('run-selected-backend-e2e.py','selected-backend-ci/current_binding.py','selected-backend-ci/restart_checkpoint.py',
-                 'selected-backend-ci/current-install-driver.py','selected-backend-ci/current-postgres-driver.py','selected-backend-ci/current-sqlite-driver.py'):
-        assert grant['registrationHashes'][name] == sha(W / 'scripts' / name)
+    if consumer == 'selected-backend':
+        assert set(grant['allowedModes']) <= SELECTED_BACKEND_MODES
+        assert Path(grant['outputRoot']).is_absolute() and Path(grant['outputRoot']) == E.parent
+        assert Path(grant['outputRoot']) / 'runtime' == E
+        for name in ('run-selected-backend-e2e.py','selected-backend-ci/current_binding.py','selected-backend-ci/restart_checkpoint.py',
+                     'selected-backend-ci/current-install-driver.py','selected-backend-ci/current-postgres-driver.py','selected-backend-ci/current-sqlite-driver.py'):
+            assert grant['registrationHashes'][name] == sha(W / 'scripts' / name)
+    elif consumer == 'turso-ui':
+        assert set(grant['allowedModes']) <= TURSO_UI_MODES
+        assert set(grant['registrationHashes']) == {TURSO_UI_REGISTRATION}
+        assert grant['registrationHashes'][TURSO_UI_REGISTRATION] == sha(W / 'scripts' / TURSO_UI_REGISTRATION)
+    else:
+        raise AssertionError('local allocation consumer')
     return grant
 
 

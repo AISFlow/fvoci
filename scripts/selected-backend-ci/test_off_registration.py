@@ -199,7 +199,7 @@ class LocalAllocation(unittest.TestCase):
 
     ACTOR = 1000  # the only runtime actor the product accepts; the real host uid running this file may differ
 
-    def check(self, grant=None, env=None, mode='run', file_mode=0o600, file_owner=None):
+    def check(self, grant=None, env=None, mode='run', file_mode=0o600, file_owner=None, consumer='selected-backend'):
         """Model the lease file's owner as the simulated actor for the exact allocation path only.
         The real host uid is irrelevant to the product contract (owner == actor), so stat of that one
         path reports file_owner (default: the actor); mode, hash, symlink and every other check stay real.
@@ -217,7 +217,7 @@ class LocalAllocation(unittest.TestCase):
         with patch.dict(os.environ,current,clear=True), patch.object(os,'getuid',return_value=self.ACTOR), patch.object(os,'getgid',return_value=self.ACTOR):
             binding = module(HERE/'current_binding.py', 'binding_control')
             with patch.object(binding,'Path',LeasePath), patch.object(binding.subprocess,'check_output',side_effect=['a'*40+'\n','b'*40+'\n']), patch.object(binding.subprocess,'run',return_value=subprocess.CompletedProcess([],0)):
-                return binding.load_local_allocation(mode)
+                return binding.load_local_allocation(mode, consumer=consumer)
 
     def refused_at(self, **kwargs):
         """The source line of the actual failing assertion, so a refusal is attributed to its own precondition."""
@@ -278,6 +278,33 @@ class LocalAllocation(unittest.TestCase):
             link=self.path.parent/'link.json';link.symlink_to(self.path)
             os.environ['FVOCI_SELECTED_LOCAL_ALLOCATION']=str(link)
             with self.assertRaises(AssertionError):binding.load_local_allocation('run')
+
+    def test_turso_ui_consumer_registration_is_fixed_and_selected_backend_stays(self):
+        self.assertEqual(self.check(), self.grant)
+        grant = copy.deepcopy(self.grant)
+        grant['allowedModes'] = ['fixture', 'freeze', 'record-before', 'current-build', 'actor', 'server']
+        name = 'selected-backend-ci/turso-ui.py'
+        grant['registrationHashes'] = {name: hashlib.sha256((ROOT/'scripts'/name).read_bytes()).hexdigest()}
+        with self.assertRaises(AssertionError):
+            self.check(grant=grant, mode='fixture')
+        self.assertEqual(self.check(grant=grant, mode='fixture', consumer='turso-ui'), grant)
+        with self.assertRaises(AssertionError):
+            self.check(grant=grant, mode='run', consumer='turso-ui')
+        with self.assertRaises(AssertionError):
+            self.check(grant=grant, mode='fixture', consumer='other')
+        for field, value in (('source', 'c'*40), ('expiresUtc', '2000-01-01T00:00:00+00:00'), ('owner', 'foreign')):
+            mutated = copy.deepcopy(grant)
+            mutated[field] = value
+            with self.subTest(field=field), self.assertRaises(AssertionError):
+                self.check(grant=mutated, mode='fixture', consumer='turso-ui')
+        wrong = copy.deepcopy(grant)
+        wrong['registrationHashes'][name] = '0'*64
+        with self.assertRaises(AssertionError):
+            self.check(grant=wrong, mode='fixture', consumer='turso-ui')
+        enlarged = copy.deepcopy(grant)
+        enlarged['registrationHashes']['selected-backend-ci/current_binding.py'] = 'ab'*32
+        with self.assertRaises(AssertionError):
+            self.check(grant=enlarged, mode='fixture', consumer='turso-ui')
 
     def test_original_github_guards_remain_in_shared_binding_and_runner(self):
         for name in ('scripts/selected-backend-ci/current_binding.py','scripts/selected-backend-ci/restart_checkpoint.py','scripts/run-selected-backend-e2e.py'):
