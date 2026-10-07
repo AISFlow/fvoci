@@ -452,6 +452,47 @@ fn fk_witness_mapping(rowid: i64, check: &[Vec<Cell>], list: &[Vec<Cell>]) -> Re
     Ok(())
 }
 
+#[test]
+fn migration_fk_classification_never_uses_arbitrary_error_or_private_message() {
+    let sqlite = sqlx::Error::AnyDriverError(Box::new(libsql::Error::SqliteFailure(
+        787,
+        "literal fixture".into(),
+    )));
+    assert_eq!(genuine_remote_fk_failure(&sqlite), Ok(true));
+    let remote = sqlx::Error::AnyDriverError(Box::new(libsql::Error::RemoteSqliteFailure(
+        19,
+        787,
+        "literal fixture".into(),
+    )));
+    assert_eq!(genuine_remote_fk_failure(&remote), Ok(true));
+    let constraint = sqlx::Error::AnyDriverError(Box::new(libsql::Error::SqliteFailure(
+        19,
+        "FOREIGN KEY constraint failed SQLITE_CONSTRAINT_FOREIGNKEY".into(),
+    )));
+    assert_eq!(genuine_remote_fk_failure(&constraint), Ok(false));
+    let hidden = sqlx::Error::AnyDriverError(Box::new(libsql::Error::Hrana(Box::new(
+        std::io::Error::other("SQLITE_CONSTRAINT_FOREIGNKEY literal private-message fixture"),
+    ))));
+    assert_eq!(genuine_remote_fk_failure(&hidden), Ok(false));
+    // Numeric success is accepted only at the original public SDK boundary.
+    // A boxed error inside Hrana is not a maintained statement rejection.
+    let nested = sqlx::Error::AnyDriverError(Box::new(libsql::Error::Hrana(Box::new(
+        libsql::Error::SqliteFailure(787, "literal nested numeric fixture".into()),
+    ))));
+    assert_eq!(genuine_remote_fk_failure(&nested), Ok(false));
+    let arbitrary = sqlx::Error::AnyDriverError(Box::new(std::io::Error::other(
+        "SQLITE_CONSTRAINT_FOREIGNKEY arbitrary box fixture",
+    )));
+    assert_eq!(genuine_remote_fk_failure(&arbitrary), Ok(false));
+    assert_eq!(
+        genuine_remote_fk_failure(&sqlx::Error::PoolTimedOut),
+        Ok(false)
+    );
+}
+
+// One canonical statement for the original consumer and allocated local control.
+const MIGRATION_UNKNOWN_TASK_FENCE_SQL: &str = "INSERT INTO task_collab_room_fences(workspace_id,task_id,owner_token,fence,expires_at) VALUES(?1,?2,?3,17,1)";
+
 async fn migration_fk_rollback(
     backend: &Backend,
     workspace: uuid::Uuid,
