@@ -1152,5 +1152,90 @@ class ErrorProjectionControls(unittest.TestCase):
         self.assertEqual(result["exception_class"], "OSError")
 
 
+class RootAuthorityMountControls(unittest.TestCase):
+    setUp = HostedExperimentalResourceControls.setUp
+    make_chain = HostedExperimentalResourceControls.make_chain
+
+    def test_unrelated_mount_addition_removal_and_order_preserve_live_and_closing_proof(self):
+        proc, root = self.make_chain(); file = proc / "self/mountinfo"; original = file.read_text()
+        proof = {}; before = P.cgroup_chain(root=root, proc=proc, proof=proof); bound = copy.deepcopy(proof)
+        unrelated = "3 0 0:9 / /var/lib/docker/overlay2/fixture/merged rw - overlay overlay rw\n"
+        for table in [original + unrelated, unrelated + "".join(reversed(original.splitlines(keepends=True))), original]:
+            file.write_text(table)
+            with self.subTest(table=table):
+                self.assertEqual(P.cgroup_chain(root=root, proc=proc, proof=proof), before)
+                self.assertEqual(proof, bound)
+                self.assertEqual(P.cgroup_chain(root=root, proc=proc, relative="parent", proof=proof), before[:-1])
+                self.assertEqual(proof, bound)
+
+    def test_root_proc_and_parent_mount_authority_changes_refuse_stored_proof(self):
+        proc, root = self.make_chain(); file = proc / "self/mountinfo"; original = file.read_text()
+        # A real containing mount is authority even if root/proc rows and inodes stay unchanged.
+        parent = f"3 0 0:9 / {self.root} rw - tmpfs tmpfs rw\n"
+        file.write_text(original + parent); proof = {}; P.cgroup_chain(root=root, proc=proc, proof=proof)
+        bound = copy.deepcopy(proof)
+        changes = [original, original + parent.replace("3 0", "3 7"), original + parent.replace("0:9", "0:8"),
+                   original + parent.replace("/ ", "/hidden ", 1)]
+        for row in original.splitlines(keepends=True):
+            for old, new in [(row.split()[0] + " 0", row.split()[0] + " 7"), (row.split()[0] + " 0", "8 0")]:
+                changes.append(original.replace(row, row.replace(old, new, 1)) + parent)
+        for table in changes:
+            file.write_text(table)
+            with self.subTest(table=table), self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"):
+                P.cgroup_chain(root=root, proc=proc, proof=proof)
+            self.assertEqual(proof, bound)
+
+    def test_complete_unrelated_table_validation_and_guarded_masks_remain_required(self):
+        proc, root = self.make_chain(); file = proc / "self/mountinfo"; original = file.read_text()
+        proof = {}; P.cgroup_chain(root=root, proc=proc, proof=proof); bound = copy.deepcopy(proof)
+        for extra in ["malformed\n", "3 0 invalid / /var/lib/docker rw - tmpfs tmpfs rw\n",
+                      "3 0 0:9 / /unrelated\\999 rw - tmpfs tmpfs rw\n",
+                      "1 0 0:9 / /unrelated rw - tmpfs tmpfs rw\n"]:
+            file.write_text(original + extra)
+            with self.subTest(extra=extra), self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"):
+                P.cgroup_chain(root=root, proc=proc, proof=proof)
+            self.assertEqual(proof, bound)
+        for point in [root, root / "parent", root / "parent/child", root / "memory.max", proc,
+                      proc / str(P.os.getpid()), proc / str(P.os.getpid()) / "stat", proc / "self/cgroup"]:
+            file.write_text(original + f"3 0 0:9 / {point} rw - tmpfs tmpfs rw\n")
+            with self.subTest(point=point), self.assertRaisesRegex(P.Refusal, "CGROUP_ANCESTORS_HIDDEN"):
+                P.cgroup_chain(root=root, proc=proc, proof=proof)
+            self.assertEqual(proof, bound)
+
+    def test_unrelated_mount_cannot_stand_in_for_root_or_proc_replacement(self):
+        for replace in ["cg", "proc"]:
+            proc, root = self.make_chain(); file = proc / "self/mountinfo"
+            proof = {}; P.cgroup_chain(root=root, proc=proc, proof=proof); bound = copy.deepcopy(proof)
+            file.write_text(file.read_text() + "3 0 0:9 / /unrelated rw - tmpfs tmpfs rw\n")
+            target = self.root / replace; held = self.root / ("held-" + replace); target.rename(held); target.mkdir()
+            for source in held.rglob("*"):
+                destination = target / source.relative_to(held)
+                if source.is_symlink(): destination.symlink_to(P.os.readlink(source))
+                elif source.is_dir(): destination.mkdir(exist_ok=True)
+                else: destination.write_bytes(source.read_bytes())
+            with self.subTest(replace=replace), self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"):
+                P.cgroup_chain(root=root, proc=proc, proof=proof)
+            self.assertEqual(proof, bound)
+            # Keep each fixture independent without touching any external runtime.
+            self.doCleanups(); self.setUp()
+
+    def test_device_root_filesystem_and_tool_evidence_still_refuse(self):
+        proc, root = self.make_chain(); file = proc / "self/mountinfo"; original = file.read_text()
+        proof = {}; P.cgroup_chain(root=root, proc=proc, proof=proof); bound = copy.deepcopy(proof)
+        for row in original.splitlines(keepends=True):
+            for old, new, code in [(row.split()[2], "999:999", "CGROUP_HOST_ROOT_INVALID"),
+                                   (" / ", " /hidden ", "CGROUP_ANCESTORS_HIDDEN"),
+                                   (" - ", " - invalid", "CGROUP_ANCESTORS_HIDDEN")]:
+                file.write_text(original.replace(row, row.replace(old, new, 1)))
+                with self.subTest(row=row, old=old), self.assertRaisesRegex(P.Refusal, code):
+                    P.cgroup_chain(root=root, proc=proc, proof=proof)
+                self.assertEqual(proof, bound)
+        file.write_text(original)
+        with patch.object(P, "cgroup_filesystem", return_value="changed-tool-hash"):
+            with self.assertRaisesRegex(P.Refusal, "CGROUP_METADATA_UNKNOWN"):
+                P.cgroup_chain(root=root, proc=proc, proof=proof)
+        self.assertEqual(proof, bound)
+
+
 if __name__ == "__main__":
     unittest.main()

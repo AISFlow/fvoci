@@ -272,7 +272,7 @@ def cgroup_pid(stack: ExitStack, proc_fd: int, pid: str) -> tuple[int, int, str]
 
 def cgroup_chain(pid: str = "self", root: Path = Path("/sys/fs/cgroup"), proc: Path = Path("/proc"), *,
                  relative: str | None = None, proof: dict | None = None) -> list[dict]:
-    """Authenticate global root and live direct membership on every sample."""
+    """Bind roots and containing mounts; validate the full table and membership."""
     try:
         pid = str(os.getpid()) if pid == "self" else pid
         require(bool(re.fullmatch(r"[1-9][0-9]*", pid)), "CGROUP_METADATA_UNKNOWN")
@@ -293,7 +293,7 @@ def cgroup_chain(pid: str = "self", root: Path = Path("/sys/fs/cgroup"), proc: P
                 else: raise Refusal("CGROUP_HOST_ROOT_INVALID")
             require({"cpu", "memory"} <= set(cgroup_text(root_fd, "cgroup.controllers").split()), "CGROUP_HOST_ROOT_INVALID")
             identity = lambda fd: (os.fstat(fd).st_dev, os.fstat(fd).st_ino)
-            root_identity = digest(encoded([identity(root_fd), identity(proc_fd), mounts, root_tool, proc_tool]))
+            root_identity = digest(encoded([identity(root_fd), identity(proc_fd), sorted(r for r in mounts if Path(r[4]) in {root, proc, *root.parents, *proc.parents}), root_tool, proc_tool]))
             require(proof is None or not proof or proof.get("root") == root_identity, "CGROUP_METADATA_UNKNOWN")
             if relative is None:
                 pid_fd, tick, relative = cgroup_pid(stack, proc_fd, pid)
