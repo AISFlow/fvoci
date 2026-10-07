@@ -16,8 +16,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-READER_SHA = "f7c0c2003619b18a64c93a05188043e84f2bf975"
-READER_SOURCE_SHA256 = "f16422694d4a91209672f57bd0cd3c2dc8de16f6f67d6996b92548e1df147826"
+READER_SHA = "d5aa3c45ab3b0f3b1c6531c2452d4a30a441a20c"
+READER_SOURCE_SHA256 = "f0a5004ba264949021faa9811f953af98a7fc94a130654659d88c3854366aaca"
 READER_PATH = Path(__file__).resolve().parents[2].parent / "reader/scripts/selected-backend-ci/shipping-image-producer.py"
 CODES = {"CGROUP_METADATA_UNKNOWN", "CGROUP_ANCESTORS_HIDDEN", "CGROUP_HOST_ROOT_INVALID", "CGROUP_PATH_INVALID"}
 FUNCTION_RANGES = {'cgroup_open_directory': (168, 171), 'cgroup_open_absolute': (174, 179), 'cgroup_text': (182, 194), 'cgroup_filesystem': (197, 229), 'cgroup_mounts': (232, 257), 'cgroup_pid': (260, 270), 'cgroup_chain': (273, 351), 'membership': (312, 315)}
