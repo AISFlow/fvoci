@@ -8,7 +8,7 @@ Source inspected locally (read-only) at `393795261322b916e588043cf94feca99917584
 
 | Piece | Version |
 | --- | --- |
-| rustc / cargo | 1.98.1 (`CARGO_HOME=/home/kinesis/orca/toolchains/fvoci-rust/cargo`) |
+| rustc / cargo | 1.98.1 (`rust-toolchain.toml`) |
 | yrs | 0.23.5 (`skip_gc`, update V1) |
 | yjs | 13.6.32 |
 | y-protocols | 1.0.7 |
@@ -27,9 +27,6 @@ JS deps are dev-only (`compat/js`). `node_modules/` and `target/` are gitignored
 # Use the checked-in fixtures. Optional synthetic specimens go elsewhere:
 # python3 fixtures/gen.py --output-dir /tmp/fvoci-synthetic-fixtures
 npm --prefix js ci --ignore-scripts
-export CARGO_HOME=/home/kinesis/orca/toolchains/fvoci-rust/cargo
-export RUSTUP_HOME=/home/kinesis/orca/toolchains/fvoci-rust/rustup
-export PATH="$CARGO_HOME/bin:$PATH"
 export CARGO_TARGET_DIR="$PWD/target"
 cargo build --locked --bins
 YRS_BRIDGE="$PWD/target/debug/yrs-bridge" node js/probe.mjs
@@ -37,7 +34,7 @@ node js/hocuspocus-handshake.mjs
 ./target/debug/extract-probe fixtures/sample.pdf fixtures/sample.docx fixtures/sample.hwpx fixtures/sample.hwp
 ```
 
-After preparing dependencies, `bash run.sh` builds with `--locked --offline` and bounds each Node probe to 30 seconds. It uses the caller's Rust environment; the exports above describe this session's local toolchain only.
+After preparing dependencies, `bash run.sh` builds with `--locked --offline` and bounds each Node probe to 30 seconds. It uses the caller's Rust environment; `rust-toolchain.toml` selects the toolchain.
 
 ## Results (this worktree)
 

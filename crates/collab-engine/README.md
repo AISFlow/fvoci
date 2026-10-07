@@ -125,9 +125,6 @@ then exits.
 ## Commands
 
 ```sh
-export CARGO_HOME=/home/kinesis/orca/toolchains/fvoci-rust/cargo
-export RUSTUP_HOME=/home/kinesis/orca/toolchains/fvoci-rust/rustup
-export PATH="$CARGO_HOME/bin:$PATH"
 cd crates/collab-engine
 export CARGO_TARGET_DIR="$PWD/target"
 cargo fetch --locked

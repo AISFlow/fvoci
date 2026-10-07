@@ -10,11 +10,11 @@ exec bwrap --unshare-net \
   --ro-bind "$bun_path" /bin/bun --ro-bind "$python_path" /bin/python3 \
   --ro-bind /usr/bin/bash /bin/bash --ro-bind /usr/bin/env /bin/env \
   --bind "$PWD" "$PWD" --proc /proc --dev /dev --tmpfs /tmp \
-  --setenv PATH /bin --setenv HOME /tmp --chdir "$PWD" \
+  --setenv PATH /bin --setenv HOME /tmp --setenv HOST_NVM_DIR "${NVM_DIR:-$HOME/.nvm}" --chdir "$PWD" \
   /bin/bash -c '
     set -euo pipefail
     if command -v node; then exit 1; fi
-    python3 -c '\''from pathlib import Path; assert not list(Path("/bin").glob("node*")); assert not Path("/usr/bin").exists(); assert not Path("/home/kinesis/.nvm").exists(); print("isolated filesystem: Node absent, network isolated")'\''
+    python3 -c '\''import os; from pathlib import Path; assert not list(Path("/bin").glob("node*")); assert not Path("/usr/bin").exists(); assert not Path(os.environ["HOST_NVM_DIR"]).exists(); print("isolated filesystem: Node absent, network isolated")'\''
     bun -e '\''console.log(JSON.stringify({bun:process.versions.bun,execPath:process.execPath}))'\''
     python3 scripts/test_eslint.py "$@"
   ' lint-nodefree-proof "$@"
