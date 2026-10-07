@@ -264,17 +264,33 @@ PUBLIC_FAILURE_PHASES = ('container-prepare','server-startup','server-ready','br
 # receipt field failure_code, not a key inside original_driver_failure.
 PUBLIC_FAILURE_TYPES = ('ReturnedNonzero','AssertionError','RuntimeError')
 PUBLIC_FAILURE_CODES = ('SELECTED_DRIVER_EXCEPTION','SELECTED_BODY_NONZERO')
+# Sibling of original_driver_failure. A checkpoint is only an allowlisted file:line.
+KNOWN_ON_BROWSER_TEST = 'selected normal main: Vue setup, stable wiki create, native persist, manual revision and fresh actor readback'
+KNOWN_BROWSER_STATUSES = ('failed', 'timedOut', 'interrupted')
+KNOWN_BROWSER_CHECKPOINT = re.compile(r'^e2e-pending/workspace-wiki-selected-(?:backend\.spec|auxiliary)\.ts:[1-9][0-9]{0,4}$')
 
 
 def public_failure_fields(facts):
-    """Whitelisted phase, type, and code only. Never the failure object or its message."""
+    """Whitelisted phase, type, code, and one allowlisted file:line. Never a message or path."""
     phase = facts.get('failed_phase')
     failure = facts.get('original_driver_failure')
     kind = failure.get('type') if isinstance(failure, dict) else None
     code = facts.get('failure_code')
+    browser = phase == 'browser'
+    test = facts.get('known_browser_test')
+    status = facts.get('known_browser_status')
+    checkpoint = facts.get('known_browser_checkpoint')
+    published_checkpoint = None
+    if browser and type(checkpoint) is str and KNOWN_BROWSER_CHECKPOINT.fullmatch(checkpoint):
+        line = int(checkpoint.rsplit(':', 1)[1])
+        if 1 <= line <= 10000:
+            published_checkpoint = checkpoint
     return {'failed_phase': phase if phase in PUBLIC_FAILURE_PHASES else None,
             'original_driver_failure_type': kind if kind in PUBLIC_FAILURE_TYPES else None,
-            'original_driver_failure_code': code if code in PUBLIC_FAILURE_CODES else None}
+            'original_driver_failure_code': code if code in PUBLIC_FAILURE_CODES else None,
+            'known_browser_test': test if browser and test == KNOWN_ON_BROWSER_TEST else None,
+            'known_browser_status': status if browser and status in KNOWN_BROWSER_STATUSES else None,
+            'known_browser_checkpoint': published_checkpoint}
 
 
 def runtime_ownership_return(output):

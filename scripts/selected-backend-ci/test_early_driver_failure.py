@@ -133,7 +133,8 @@ class EarlyDriverFailure(unittest.TestCase):
         secret='http://secret.example/a cookie=PRIVATE_LANE_SECRET argv=/tmp/owned'
         self.assertEqual(runner.public_failure_fields({
             'failed_phase':'browser','failure_code':secret,'original_driver_failure':secret}),
-            {'failed_phase':'browser','original_driver_failure_type':None,'original_driver_failure_code':None})
+            {'failed_phase':'browser','original_driver_failure_type':None,'original_driver_failure_code':None,
+             'known_browser_test':None,'known_browser_status':None,'known_browser_checkpoint':None})
         cases=(
             ('server-ready','AssertionError','SELECTED_DRIVER_EXCEPTION','server-ready','AssertionError','SELECTED_DRIVER_EXCEPTION'),
             ('browser','ReturnedNonzero','SELECTED_BODY_NONZERO','browser','ReturnedNonzero','SELECTED_BODY_NONZERO'),
@@ -167,6 +168,52 @@ class EarlyDriverFailure(unittest.TestCase):
         self.assertEqual(lane['closure_facts']['owned_loopback_port_closed'], True)
         self.assertEqual(lane['cleanup_error_count'], 0)
         self.assertNotIn(secret, raw)
+        self.assertIsNone(lane['known_browser_test'])
+        self.assertIsNone(lane['known_browser_status'])
+        self.assertIsNone(lane['known_browser_checkpoint'])
+
+    def test_checkpoint_reads_only_emitted_location_fields(self):
+        secret = 'http://secret.example/a cookie=PRIVATE_BROWSER_SECRET'
+        title = runner.KNOWN_ON_BROWSER_TEST
+        driver = (HERE / 'current-postgres-driver.py').read_text()
+        tree = ast.parse(driver)
+        kept = [node for node in tree.body if (isinstance(node, ast.Assign) and any(
+                    isinstance(target, ast.Name) and target.id in (
+                        'KNOWN_ON_BROWSER_TEST', 'KNOWN_BROWSER_SUFFIXES', 'KNOWN_BROWSER_STATUSES')
+                    for target in node.targets)) or (
+                    isinstance(node, ast.FunctionDef) and node.name == 'known_browser_checkpoint')]
+        state = {}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=kept, type_ignores=[])), 'known-browser', 'exec'), state)
+        extract = state['known_browser_checkpoint']
+        spec_file = '/opt/fvoci/apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'
+
+        def report(result):
+            return {'config': {'workers': 1}, 'suites': [{'specs': [{
+                'title': title, 'file': spec_file, 'tests': [{'results': [result]}]}]}]}
+
+        found = extract(report({'status': 'failed', 'errorLocation': {'file': spec_file, 'line': 413, 'column': 5},
+                                'error': {'message': secret, 'stack': secret, 'snippet': secret},
+                                'errors': [{'message': secret, 'location': {'file': spec_file, 'line': 9, 'column': 1}}]}))
+        self.assertEqual(found['known_browser_checkpoint'], 'e2e-pending/workspace-wiki-selected-backend.spec.ts:413')
+        self.assertNotIn(secret, json.dumps(found))
+        missing = extract(report({'status': 'failed', 'errors': [{'message': secret}]}))
+        self.assertEqual(missing['known_browser_status'], 'failed')
+        self.assertIsNone(missing['known_browser_checkpoint'])
+        self.assertNotIn(secret, json.dumps(missing))
+        zero = extract(report({'status': 'failed', 'errorLocation': {'file': spec_file, 'line': 0, 'column': 0}}))
+        self.assertIsNone(zero['known_browser_checkpoint'])
+        timed = extract(report({'status': 'timedOut', 'errorLocation': {'file': spec_file, 'line': 323, 'column': 1}}))
+        self.assertEqual(timed['known_browser_status'], 'timedOut')
+        self.assertEqual(timed['known_browser_checkpoint'], 'e2e-pending/workspace-wiki-selected-backend.spec.ts:323')
+        canonical = {'type': 'ReturnedNonzero', 'phase': 'browser', 'observedExit': 1}
+        fields = runner.public_failure_fields({
+            'failed_phase': 'browser', 'failure_code': 'SELECTED_BODY_NONZERO',
+            'original_driver_failure': canonical, 'known_browser_test': title,
+            'known_browser_status': 'failed',
+            'known_browser_checkpoint': 'e2e-pending/workspace-wiki-selected-backend.spec.ts:413'})
+        self.assertEqual(fields['known_browser_checkpoint'], 'e2e-pending/workspace-wiki-selected-backend.spec.ts:413')
+        self.assertEqual(hashlib.sha256(json.dumps(canonical, sort_keys=True).encode()).hexdigest(),
+                         hashlib.sha256(json.dumps({'observedExit': 1, 'phase': 'browser', 'type': 'ReturnedNonzero'}, sort_keys=True).encode()).hexdigest())
 
 
 

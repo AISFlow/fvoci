@@ -82,6 +82,83 @@ def failure_checkpoint(receipt, directory, observed_exit, error=None, body_log=N
     except BaseException:
         receipt.setdefault('diagnostic_errors', []).append('original-failure-checkpoint-write-failed')
 
+KNOWN_ON_BROWSER_TEST = 'selected normal main: Vue setup, stable wiki create, native persist, manual revision and fresh actor readback'
+KNOWN_BROWSER_SUFFIXES = ('e2e-pending/workspace-wiki-selected-backend.spec.ts',
+                          'e2e-pending/workspace-wiki-selected-auxiliary.ts')
+KNOWN_BROWSER_STATUSES = ('failed', 'timedOut', 'interrupted')
+
+
+def known_browser_checkpoint(report):
+    """Use the reporter errorLocation field. Do not parse stacks. Missing stays null."""
+    empty = {'known_browser_test': None, 'known_browser_status': None, 'known_browser_checkpoint': None}
+
+    def known_source(path, suffix):
+        if type(path) is not str or len(path) > 4096 or '\n' in path or '\r' in path:
+            return False
+        normalized = path.replace('\\', '/')
+        return normalized == suffix or normalized.endswith('/' + suffix) or normalized == suffix.rsplit('/', 1)[-1]
+
+    def location_of(result):
+        if not isinstance(result, dict):
+            return None
+        found = result.get('errorLocation')
+        if isinstance(found, dict):
+            return found
+        errors = result.get('errors')
+        if isinstance(errors, list) and errors and isinstance(errors[0], dict) and isinstance(errors[0].get('location'), dict):
+            return errors[0].get('location')
+        return None
+
+    try:
+        if not isinstance(report, dict):
+            return empty
+        config = report.get('config')
+        workers = config.get('workers') if isinstance(config, dict) else None
+        if type(workers) is not int or workers != 1:
+            return empty
+        pending = report.get('suites')
+        if not isinstance(pending, list):
+            return empty
+        found = []
+        stack = list(pending)
+        while stack:
+            suite = stack.pop()
+            if not isinstance(suite, dict):
+                return empty
+            specs = suite.get('specs')
+            if isinstance(specs, list):
+                found.extend(item for item in specs if isinstance(item, dict))
+            children = suite.get('suites')
+            if isinstance(children, list):
+                stack.extend(children)
+        spec_suffix = 'e2e-pending/workspace-wiki-selected-backend.spec.ts'
+        matched = [spec for spec in found if spec.get('title') == KNOWN_ON_BROWSER_TEST
+                   and known_source(spec.get('file'), spec_suffix)]
+        if len(matched) != 1:
+            return empty
+        tests = matched[0].get('tests')
+        if not isinstance(tests, list) or len(tests) != 1 or not isinstance(tests[0], dict):
+            return empty
+        results = tests[0].get('results')
+        if not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict):
+            return empty
+        result = results[0]
+        status = result.get('status')
+        if status not in KNOWN_BROWSER_STATUSES:
+            return empty
+        location = location_of(result)
+        checkpoint = None
+        if isinstance(location, dict) and type(location.get('line')) is int and 1 <= location.get('line') <= 10000:
+            for suffix in KNOWN_BROWSER_SUFFIXES:
+                if known_source(location.get('file'), suffix):
+                    checkpoint = suffix + ':' + str(location.get('line'))
+                    break
+        return {'known_browser_test': KNOWN_ON_BROWSER_TEST, 'known_browser_status': status,
+                'known_browser_checkpoint': checkpoint}
+    except BaseException:
+        return empty
+
+
 
 def cleanup_attempt(receipt, errors, label, operation):
     try:
@@ -511,6 +588,11 @@ try:
     if (run / 'playwright-result.private.json').exists():
         os.chmod(run / 'playwright-result.private.json', 0o600)
         receipt['actual_json_report_sha256'] = sha(run / 'playwright-result.private.json')
+        if code != 0:
+            try:
+                receipt.update(known_browser_checkpoint(json.loads((run / 'playwright-result.private.json').read_text())))
+            except BaseException:
+                receipt.update(known_browser_test=None, known_browser_status=None, known_browser_checkpoint=None)
     if code == 0 and FLOW == 'on':
         assert re.search(r'\b1 passed\b', (run / 'browser.log').read_text())
         report = json.loads((run / 'playwright-result.private.json').read_text())
