@@ -1250,66 +1250,6 @@ test.describe("selected normal main OFF", () => {
     }
   });
 
-  test("wiki: membership revoke denies the actual pending command without effects, owner still saves", async ({
-    browser,
-  }) => {
-    const owner = await actor(browser, admin);
-    const peer = await actor(browser, member);
-    try {
-      const target = await wiki(owner.page);
-      await openOff(owner.page, target);
-      await replaceText(owner.page, "retained authorized history");
-      await save(owner.page, target);
-      const before = await readBody(owner.page, target);
-      await openOff(peer.page, target);
-      await replaceText(peer.page, "must never commit after revoke");
-      const path = `${target.path}/body/versioned`;
-      let command: SaveCommand | undefined;
-      let release: () => void = () => {};
-      const gate = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      await peer.page.route(`**${path}`, async (route) => {
-        if (route.request().method() !== "PUT") return route.continue();
-        command = route.request().postDataJSON() as SaveCommand;
-        await gate;
-        // No fabricated refusal: the current server evaluates revoked rights.
-        await route.continue();
-      });
-      const refused = peer.page.waitForResponse(
-        (response) =>
-          response.request().method() === "PUT" && new URL(response.url()).pathname === path,
-      );
-      await peer.page.getByRole("button", { name: "저장", exact: true }).click();
-      await expect.poll(() => command?.commandId).toMatch(UUID_RE);
-      try {
-        const revoke = await owner.page.request.delete(
-          `/api/v1/workspaces/${workspaceId}/members/${memberId}`,
-        );
-        expect(revoke.status()).toBe(200);
-      } finally {
-        release();
-      }
-      expect((await refused).status()).toBe(404);
-      expect(await readBody(owner.page, target)).toEqual(before);
-      const replay = await peer.page.request.put(path, { data: command });
-      expect(replay.status()).toBe(404);
-      expect(await readBody(owner.page, target)).toEqual(before);
-      await expect(
-        peer.page.locator('.fvoci-editor .ProseMirror[contenteditable="true"]'),
-      ).toHaveCount(0);
-      await replaceText(owner.page, "healthy owner after refusal");
-      const saved = await save(owner.page, target);
-      expect(saved.command.expectedTailSeq).toBe(before.tailSeq);
-      const after = await readBody(owner.page, target);
-      expect(extractText(after.contentJson)).toBe("healthy owner after refusal");
-      expectNative(after);
-      expect([...owner.sockets, ...peer.sockets]).toEqual([]);
-    } finally {
-      await Promise.all([owner.context.close(), peer.context.close()]);
-    }
-  });
-
   test("wiki: lost save response then a newer real head keeps the conflict when the old command is retried", async ({
     browser,
   }) => {
@@ -1373,6 +1313,66 @@ test.describe("selected normal main OFF", () => {
       expect([...a.sockets, ...b.sockets]).toEqual([]);
     } finally {
       await Promise.all([a.context.close(), b.context.close()]);
+    }
+  });
+
+  test("wiki: membership revoke denies the actual pending command without effects, owner still saves", async ({
+    browser,
+  }) => {
+    const owner = await actor(browser, admin);
+    const peer = await actor(browser, member);
+    try {
+      const target = await wiki(owner.page);
+      await openOff(owner.page, target);
+      await replaceText(owner.page, "retained authorized history");
+      await save(owner.page, target);
+      const before = await readBody(owner.page, target);
+      await openOff(peer.page, target);
+      await replaceText(peer.page, "must never commit after revoke");
+      const path = `${target.path}/body/versioned`;
+      let command: SaveCommand | undefined;
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await peer.page.route(`**${path}`, async (route) => {
+        if (route.request().method() !== "PUT") return route.continue();
+        command = route.request().postDataJSON() as SaveCommand;
+        await gate;
+        // No fabricated refusal: the current server evaluates revoked rights.
+        await route.continue();
+      });
+      const refused = peer.page.waitForResponse(
+        (response) =>
+          response.request().method() === "PUT" && new URL(response.url()).pathname === path,
+      );
+      await peer.page.getByRole("button", { name: "저장", exact: true }).click();
+      await expect.poll(() => command?.commandId).toMatch(UUID_RE);
+      try {
+        const revoke = await owner.page.request.delete(
+          `/api/v1/workspaces/${workspaceId}/members/${memberId}`,
+        );
+        expect(revoke.status()).toBe(200);
+      } finally {
+        release();
+      }
+      expect((await refused).status()).toBe(404);
+      expect(await readBody(owner.page, target)).toEqual(before);
+      const replay = await peer.page.request.put(path, { data: command });
+      expect(replay.status()).toBe(404);
+      expect(await readBody(owner.page, target)).toEqual(before);
+      await expect(
+        peer.page.locator('.fvoci-editor .ProseMirror[contenteditable="true"]'),
+      ).toHaveCount(0);
+      await replaceText(owner.page, "healthy owner after refusal");
+      const saved = await save(owner.page, target);
+      expect(saved.command.expectedTailSeq).toBe(before.tailSeq);
+      const after = await readBody(owner.page, target);
+      expect(extractText(after.contentJson)).toBe("healthy owner after refusal");
+      expectNative(after);
+      expect([...owner.sockets, ...peer.sockets]).toEqual([]);
+    } finally {
+      await Promise.all([owner.context.close(), peer.context.close()]);
     }
   });
 });
