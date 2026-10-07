@@ -32,6 +32,42 @@ def sha(path):
 def write(path, obj):
     path.write_text(json.dumps(obj, indent=2) + '\n')
 
+def failure_checkpoint(receipt, directory, observed_exit, error=None, body_log=None, packet_name='original-failure.private.json'):
+    """Persist this driver's first actual outcome before any risky cleanup."""
+    if 'original_driver_failure' not in receipt:
+        receipt['failed_phase'] = receipt['phase']
+        receipt['observed_failed_exit'] = observed_exit
+        receipt['original_driver_failure'] = ({'type': type(error).__name__, 'message': str(error)[:4096]}
+            if error is not None else {'type': 'ReturnedNonzero', 'phase': receipt['phase'], 'observedExit': observed_exit})
+        receipt['failure_code'] = 'SELECTED_DRIVER_EXCEPTION' if error is not None else 'SELECTED_BODY_NONZERO'
+        receipt['original_body_log_sha256'] = None
+        if body_log is not None:
+            try:
+                receipt['original_body_log_sha256'] = sha(body_log)
+            except BaseException:
+                receipt.setdefault('diagnostic_errors', []).append('original-body-log-hash-failed')
+    path = directory / packet_name
+    try:
+        if not path.exists():
+            with path.open('x') as output:
+                os.fchmod(output.fileno(), 0o600)
+                json.dump({key: receipt.get(key) for key in ('failed_phase', 'observed_failed_exit',
+                    'failure_code', 'original_driver_failure', 'original_body_log_sha256')}, output)
+        receipt['original_failure_checkpoint_sha256'] = sha(path)
+    except BaseException:
+        receipt.setdefault('diagnostic_errors', []).append('original-failure-checkpoint-write-failed')
+
+
+def cleanup_attempt(receipt, errors, label, operation):
+    try:
+        return operation()
+    except BaseException as error:
+        errors.append(label)
+        receipt.setdefault('secondary_cleanup_errors', []).append({
+            'phase': label, 'type': type(error).__name__, 'message': str(error)[:4096]})
+        return None
+
+
 def command(args, *, logfile=None, check=True):
     if logfile:
         with logfile.open('w') as log:
@@ -139,6 +175,8 @@ try:
     started = time.monotonic()
     result = command(args, logfile=P / 'test.log', check=False)
     code = result.returncode
+    if code != 0:
+        failure_checkpoint(receipt, P, code, body_log=P / 'test.log')
     receipt.update(body_end_utc=now(), exit_code=code, body_seconds=time.monotonic()-started,
                    log_sha256=sha(P / 'test.log'))
     copy = command(['docker', 'cp', NAME + ':/fvoci/run', str(P / 'retained-run')], check=False)
@@ -151,34 +189,55 @@ try:
         assert all(json.loads(f.read_text())['status'] is not None for f in processes)
         receipt.update(actual_tests=4, ignored=0, actual_owned_process_receipts=15)
 except BaseException as error:
-    receipt['failed_phase'] = receipt['phase']
-    receipt['original_driver_failure'] = {'type':type(error).__name__,'message':str(error)}
-    receipt['driver_error'] = str(error)
+    failure_checkpoint(receipt, P, receipt.get('exit_code'), error)
     code = code or 1
 finally:
+    cleanup_errors = list(receipt.get('diagnostic_errors', []))
     if created:
-        # Only this uniquely owned bounded container. Preserve test receipts first.
-        if not (P / 'retained-run').exists():
-            command(['docker', 'cp', NAME + ':/fvoci/run', str(P / 'retained-run')], check=False)
-        cleanup = command(['docker', 'rm', '-f', '-v', NAME], check=False)
-        receipt['owned_container_cleanup_exit'] = cleanup.returncode
-        absence = command(['docker', 'inspect', NAME], check=False)
-        receipt['owned_container_absent'] = absence.returncode != 0 and any(
-            marker in absence.stderr.lower() for marker in ('no such object','no such container'))
-        if cleanup.returncode or not receipt['owned_container_absent']:
-            code = code or 1
-    changed_inputs = [n for n, h in before['tracked'].items() if sha(W/n) != h] + [n for n, h in before['external'].items() if sha(n) != h]
-    changed_binaries = [n for n in bins if sha(n) != bins[n]['sha256']]
-    receipt.update(full_current_source_external_unchanged=not changed_inputs, actual_binary_hashes_unchanged=not changed_binaries, changed_inputs=changed_inputs, changed_binaries=changed_binaries)
-    if changed_inputs or changed_binaries: code = code or 1
-    receipt.update(end_utc=now(), final_exit_code=code, free_after=shutil.disk_usage(P).free,
-                   final_source=subprocess.check_output(['git', '-c', 'safe.directory=' + str(W), '-C', str(W), 'rev-parse', 'HEAD'], text=True).strip())
-    write(P / 'receipt.json', receipt)
+        def preserve_owned_receipts():
+            if not (P / 'retained-run').exists():
+                return command(['docker', 'cp', NAME + ':/fvoci/run', str(P / 'retained-run')], check=False).returncode
+            return 0
+        copied = cleanup_attempt(receipt, cleanup_errors, 'owned-receipt-copy-failed', preserve_owned_receipts)
+        if copied != 0: cleanup_errors.append('owned-receipt-copy-unconfirmed')
+        cleanup = cleanup_attempt(receipt, cleanup_errors, 'owned-container-removal-failed', lambda: command(['docker','rm','-f','-v',NAME], check=False))
+        if cleanup is None:
+            cleanup = cleanup_attempt(receipt, cleanup_errors, 'exceptional-owned-removal-failed', lambda: command(['docker','rm','-f','-v',NAME], check=False))
+        receipt['owned_container_cleanup_exit'] = cleanup.returncode if cleanup is not None else None
+        absence = cleanup_attempt(receipt, cleanup_errors, 'owned-container-absence-failed', lambda: command(['docker','inspect',NAME], check=False))
+        if absence is not None:
+            receipt['owned_container_absent'] = absence.returncode != 0 and any(
+                marker in absence.stderr.lower() for marker in ('no such object','no such container'))
+        if cleanup is None or cleanup.returncode or receipt['owned_container_absent'] is not True:
+            cleanup_errors.append('owned-container-cleanup-unconfirmed')
+    def observe_final_inputs():
+        changed_inputs = [n for n,h in before['tracked'].items() if sha(W/n) != h] + [n for n,h in before['external'].items() if sha(n) != h]
+        changed_binaries = [n for n in bins if sha(n) != bins[n]['sha256']]
+        receipt.update(full_current_source_external_unchanged=not changed_inputs, actual_binary_hashes_unchanged=not changed_binaries,
+                       changed_inputs=changed_inputs, changed_binaries=changed_binaries)
+        return not changed_inputs and not changed_binaries
+    unchanged = cleanup_attempt(receipt, cleanup_errors, 'install-post-input-observation-failed', observe_final_inputs)
+    if unchanged is not True:
+        receipt.update(full_current_source_external_unchanged=False, actual_binary_hashes_unchanged=False)
+        cleanup_errors.append('install-post-input-unconfirmed')
+    receipt['end_utc'] = cleanup_attempt(receipt, cleanup_errors, 'end-clock-observation-failed', now)
+    receipt['free_after'] = cleanup_attempt(receipt, cleanup_errors, 'final-disk-observation-failed', lambda: shutil.disk_usage(P).free)
+    receipt['final_source'] = cleanup_attempt(receipt, cleanup_errors, 'final-source-observation-failed', lambda: subprocess.check_output(
+        ['git','-c','safe.directory='+str(W),'-C',str(W),'rev-parse','HEAD'],text=True).strip())
+    if cleanup_errors: code = code or 1
+    receipt.update(final_exit_code=code, cleanup_errors=cleanup_errors)
+    cleanup_attempt(receipt, cleanup_errors, 'final-receipt-write-failed', lambda: write(P / 'receipt.json', receipt))
+    if cleanup_errors: code = code or 1
     summary={k:receipt.get(k) for k in ('source','final_exit_code','actual_tests','actual_owned_process_receipts',
-             'owned_container_absent','body_seconds','failed_phase')}
+             'owned_container_absent','body_seconds','failed_phase','observed_failed_exit',
+             'original_body_log_sha256','original_failure_checkpoint_sha256')}
     original=receipt.get('original_driver_failure')
-    summary.update(failure_code='SELECTED_INSTALL_DRIVER_FAILED' if code else None,
+    summary.update(failure_code='SELECTED_INSTALL_DRIVER_FAILED' if code else None, final_exit_code=code,
+        cleanup_failure_codes=cleanup_errors,
         original_driver_failure_sha256=hashlib.sha256(json.dumps(original,sort_keys=True).encode()).hexdigest() if original is not None else None)
-    print(json.dumps(summary),flush=True)
+    try:
+        print(json.dumps(summary),flush=True)
+    except BaseException:
+        code = code or 1
 
 sys.exit(code)

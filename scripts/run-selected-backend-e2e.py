@@ -526,17 +526,33 @@ def run(output):
             if r.returncode != 0 or not retirement['qualified']:break
             if lane=='install':closed=reference(runroot/'receipt.json')
     except BaseException as error:
-        original=output/'selected-launcher-failure.private.json'
-        write(original,{'type':type(error).__name__,'message':str(error)})
-        launcher_failure={'code':'SELECTED_LAUNCHER_FAILED','sha256':sha(original)}
         code=code or (130 if isinstance(error,KeyboardInterrupt) else 1)
+        original=output/'selected-launcher-failure.private.json'
+        packet={'type':type(error).__name__,'message':str(error)[:4096]}
+        launcher_failure={'code':'SELECTED_LAUNCHER_FAILED',
+            'originalOutcomeSha256':hashlib.sha256(json.dumps(packet,sort_keys=True).encode()).hexdigest(),
+            'sha256':None,'receiptWrite':'not-attempted'}
+        try:
+            write(original,packet)
+            launcher_failure.update(sha256=sha(original),receiptWrite='confirmed')
+        except BaseException:
+            launcher_failure['receiptWrite']='failed'
     finally:
         complete=[(r['lane'],r['flow']) for r in results] == list(selected_runs())
         if not complete:code=code or 1
-        write(output/'selected-ci-receipt.json',{'source':before['head'],'tree':before['tree'],'owner':owner,'runs':results,'exit':code,
+        aggregate={'source':before['head'],'tree':before['tree'],'owner':owner,'runs':results,'exit':code,
               'allRequestedRunsExecuted':complete,'launcherFailure':launcher_failure,
               'normalBothAndRestartRequired':True,'offBothRequired':True,'offTestsPerBackend':7,
-              'sqliteAuxiliary':'BLOCKED: normal writers unported','whole060Complete':False})
+              'sqliteAuxiliary':'BLOCKED: normal writers unported','whole060Complete':False}
+        try:
+            write(output/'selected-ci-receipt.json',aggregate)
+        except BaseException:
+            code=code or 1
+            try:
+                print(json.dumps({'source':before['head'],'tree':before['tree'],'exit':code,
+                    'launcherFailure':launcher_failure,'aggregateReceiptWrite':'failed'}),flush=True)
+            except BaseException:
+                pass
     return code
 
 

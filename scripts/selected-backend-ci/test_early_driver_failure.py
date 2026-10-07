@@ -7,6 +7,9 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
+import subprocess
+import types
 from pathlib import Path
 import tempfile
 import unittest
@@ -136,8 +139,12 @@ class ActualDriverSourceControls(unittest.TestCase):
                 main=next(n for n in tree.body if isinstance(n,ast.Try) and n.finalbody)
                 unknown=next(n for n in main.finalbody if isinstance(n,ast.If)
                     and ast.unparse(n.test)=='base is None')
-                state={'receipt':{},'cleanup_errors':[],'base':None,'code':7,'error':AssertionError(PRIVATE['message'])}
-                body=[initial,*main.handlers[0].body,unknown]
+                state={'receipt':{},'cleanup_errors':[],'base':None,'code':7,'error':AssertionError(PRIVATE['message']),
+                       'run':Path(tempfile.mkdtemp(prefix='fvoci-early-pure-')), 'json':json, 'os':os,
+                       'sha':lambda path:hashlib.sha256(Path(path).read_bytes()).hexdigest()}
+                helpers=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in ('failure_checkpoint','cleanup_attempt')]
+                self.addCleanup(__import__('shutil').rmtree,state['run'])
+                body=[*helpers,initial,*main.handlers[0].body,unknown]
                 exec(compile(ast.fix_missing_locations(ast.Module(body=body,type_ignores=[])),str(HERE/name),'exec'),state)
                 self.assertIsNone(state['receipt']['owned_loopback_port_closed'])
                 self.assertEqual(state['receipt']['failed_phase'],'container-prepare')
@@ -157,11 +164,177 @@ class ActualDriverSourceControls(unittest.TestCase):
                 stdout=io.StringIO()
                 with contextlib.redirect_stdout(stdout):
                     exec(compile(ast.fix_missing_locations(ast.Module(body=main.finalbody[start:],type_ignores=[])),str(HERE/name),'exec'),
-                         {'receipt':receipt,'code':7,'json':json,'hashlib':hashlib})
+                         {'receipt':receipt,'code':7,'json':json,'hashlib':hashlib,'cleanup_errors':[]})
                 summary=json.loads(stdout.getvalue())
                 self.assertNotIn(PRIVATE['message'],stdout.getvalue())
                 self.assertEqual(len(summary['original_driver_failure_sha256']),64)
                 self.assertEqual(summary['final_exit_code'],7)
+
+
+class WholeFinalizationFaults(unittest.TestCase):
+    def exercise(self, backend, fault=None, ordinary=False):
+        path = HERE / ('current-' + backend + '-driver.py')
+        tree = ast.parse(path.read_text())
+        main = next(n for n in tree.body if isinstance(n, ast.Try) and n.finalbody)
+        helpers = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('failure_checkpoint', 'cleanup_attempt')]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ('browser.log','test.log','normal-server.log'): (root/name).write_text('private synthetic body log')
+            receipt = {'source':SOURCE,'tree':TREE,'root_owner':OWNER,'selected_flow':'on','phase':'browser' if backend!='install' else 'install-body',
+                       'browser_exit':7, 'exit_code':7, 'owned_container_absent':None, 'owned_loopback_port_closed':None,
+                       'recorded_process_identities_retired':None}
+            attempted = []; writes = []
+            def command(args, **kwargs):
+                attempted.append(tuple(args[:2]))
+                self.assertTrue((root/'original-failure.private.json').exists(), 'original packet must precede cleanup')
+                if fault == 'remove' and args[1]=='rm': raise OSError('SECOND_PRIVATE_CLEANUP')
+                if fault == 'inspect' and args[1]=='inspect': raise OSError('SECOND_PRIVATE_CLEANUP')
+                if fault == 'copy' and args[1]=='cp': raise OSError('SECOND_PRIVATE_CLEANUP')
+                return types.SimpleNamespace(returncode=1 if args[1]=='inspect' else 0,stderr='No such container: owned')
+            def observe_rows(name):
+                if fault == 'rows': raise OSError('SECOND_PRIVATE_CLEANUP')
+                return [{'pid':22}]
+            def write(path, value):
+                writes.append(path.name)
+                if fault == 'receipt' and path.name=='receipt.json': raise OSError('SECOND_PRIVATE_CLEANUP')
+                path.write_text(json.dumps(value))
+            def sha(path):
+                if fault == 'log-hash' and Path(path).name=='normal-server.log': raise OSError('SECOND_PRIVATE_CLEANUP')
+                if backend=='install' and fault=='inputs' and Path(path).name=='test.log' and (root/'original-failure.private.json').exists(): raise OSError('SECOND_PRIVATE_CLEANUP')
+                if Path(path).is_file(): return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+                return 's'*64
+            def post():
+                if fault == 'inputs': raise OSError('SECOND_PRIVATE_CLEANUP')
+                return {}
+            process = types.SimpleNamespace(poll=lambda:None if fault=='wait' else 0,
+                wait=lambda **kwargs: (_ for _ in ()).throw(OSError('SECOND_PRIVATE_CLEANUP')) if fault=='wait' else 0,
+                kill=lambda: (_ for _ in ()).throw(OSError('SECOND_PRIVATE_CLEANUP')) if fault=='wait' else None)
+            log = types.SimpleNamespace(close=lambda: (_ for _ in ()).throw(OSError('SECOND_PRIVATE_CLEANUP')) if fault=='log-close' else None)
+            class Socket:
+                def __enter__(self): return self
+                def __exit__(self,*args): pass
+                def settimeout(self,*args): pass
+                def connect_ex(self,*args):
+                    if fault=='port': raise OSError('SECOND_PRIVATE_CLEANUP')
+                    return 1
+            state={'receipt':receipt, 'run':root,'P':root,'W':root,'NAME':'owned','name':'owned','code':7,'created':True,
+                   'server_row':{'namespace_pid':22},'server_process':process,'server_log':log,
+                   'base':'http://127.0.0.1:12345','owned_rows':observe_rows,'identity_gone':lambda row:row.get('pid')==22,
+                   'owned_object_absent':lambda args:command(args).returncode!=0,'command':command,
+                   'pg_sql':lambda sql:{},'write':write,'sha':sha,'post_inputs':post,'input_check':lambda before:post(),
+                   'source_before':{},'before':{'tracked':{'test.log':hashlib.sha256(b'private synthetic body log').hexdigest()},'external':{}},'browser_inputs':{},'assets':{'dist_files':{}},
+                   'dist':root,'tree_hashes':lambda path:{},'binaries':{n:{'sha256':'s'*64} for n in ('server','migrate','fixture','engine')},
+                   'server':'server','migrate':'migrate','fixture':'fixture','engine':'engine','bins':{},'abi':{'host_runtime_files':{}},
+                   'storage':root/'storage','dbroot':root/'db','now':lambda:'pure-clock',
+                   'socket':types.SimpleNamespace(socket=Socket),'subprocess':types.SimpleNamespace(check_output=lambda *args,**kw:SOURCE+'\n'),
+                   'shutil':types.SimpleNamespace(disk_usage=lambda path:types.SimpleNamespace(free=123)),
+                   'json':json,'hashlib':hashlib,'os':os,'result':types.SimpleNamespace(returncode=7)}
+            if ordinary:
+                index=next(i for i,n in enumerate(main.body) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='code' for t in n.targets) and ast.unparse(n.value)=='result.returncode')
+                body=[*helpers,*main.body[index:index+2],*main.finalbody]
+            else:
+                main.body=ast.parse("raise RuntimeError('FIRST_PRIVATE_ORIGINAL')").body
+                body=[*helpers,main]
+            stdout=io.StringIO()
+            with contextlib.redirect_stdout(stdout): exec(compile(ast.fix_missing_locations(ast.Module(body=body,type_ignores=[])),str(path),'exec'),state)
+            self.assertEqual(state['code'],7)
+            self.assertIn('receipt.json',writes)
+            packet=json.loads((root/'original-failure.private.json').read_text())
+            summary=json.loads(stdout.getvalue())
+            self.assertEqual(summary['final_exit_code'],7)
+            self.assertEqual(summary['failed_phase'],receipt['phase'])
+            self.assertEqual(packet['observed_failed_exit'],7)
+            self.assertNotIn('FIRST_PRIVATE_ORIGINAL',stdout.getvalue())
+            self.assertNotIn('SECOND_PRIVATE_CLEANUP',stdout.getvalue())
+            if ordinary:
+                self.assertEqual(packet['original_driver_failure']['type'],'ReturnedNonzero')
+                self.assertEqual(packet['failure_code'],'SELECTED_BODY_NONZERO')
+                self.assertEqual(packet['original_body_log_sha256'],hashlib.sha256(b'private synthetic body log').hexdigest())
+            else:
+                self.assertEqual(packet['original_driver_failure'],{'type':'RuntimeError','message':'FIRST_PRIVATE_ORIGINAL'})
+            if fault:
+                self.assertTrue(summary['cleanup_failure_codes'])
+            if fault=='rows': self.assertIsNone(receipt['recorded_process_identities_retired'])
+            if fault=='port': self.assertIsNone(receipt['owned_loopback_port_closed'])
+            if fault=='inspect': self.assertIsNone(receipt['owned_container_absent'])
+            self.assertIn(('docker','inspect'),attempted)
+            if fault!='receipt': self.assertTrue((root/'receipt.json').exists())
+            return summary
+
+    def test_entire_exception_handler_and_finalization_survives_each_secondary_fault(self):
+        for backend in ('postgres','sqlite','install'):
+            faults=('remove','inspect','inputs','receipt','copy') if backend=='install' else ('rows','remove','inspect','wait','log-close','log-hash','port','inputs','receipt')
+            self.exercise(backend)
+            for fault in faults:
+                with self.subTest(backend=backend,fault=fault): self.exercise(backend,fault)
+
+    def test_ordinary_nonzero_body_phase_exit_and_original_log_digest_survive_cleanup(self):
+        for backend in ('postgres','sqlite','install'):
+            for fault in (None,'remove','inputs'):
+                with self.subTest(backend=backend,fault=fault): self.exercise(backend,fault,ordinary=True)
+
+    def test_pg_parent_fixture_and_post_input_exceptions_still_emit_final_receipt(self):
+        path=HERE/'current-postgres-driver.py';tree=ast.parse(path.read_text())
+        branch=next(n for n in tree.body if isinstance(n,ast.If) and ast.unparse(n.test)=='len(sys.argv) == 1')
+        start=next(i for i,n in enumerate(branch.body) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='summary' for t in n.targets))
+        helpers=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in ('failure_checkpoint','cleanup_attempt')]
+        for fault in ('fixture','post','both','write'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);(root/'owned-fixtures.log').write_text('synthetic wrapper log')
+                (root/'receipt.json').write_text(json.dumps({'final_exit_code':7}))
+                writes=[]
+                def write(path,value):
+                    writes.append(path.name)
+                    if fault=='write' and path.name=='parent-receipt.json':raise OSError('SECOND_PARENT_PRIVATE')
+                    path.write_text(json.dumps(value))
+                def fixtures(run):
+                    if fault in ('fixture','both'):raise OSError('SECOND_PARENT_PRIVATE')
+                    return [dict(containerAbsent=True,recordedPIDIdentitiesRetired=True,portClosed=True,ownedVolumesAbsent={'owned':True}) for _ in range(2)]
+                def post():
+                    if fault in ('post','both'):raise OSError('SECOND_PARENT_PRIVATE')
+                    return {}
+                state={'HEAD':SOURCE,'TREE':TREE,'COMPILED_HEAD':SOURCE,'OWNER':OWNER,'FLOW':'on','run':root,
+                       'now':lambda:'pure-clock','command':lambda *args,**kwargs:types.SimpleNamespace(returncode=7),
+                       'PG_SCRIPT':'not-executed','sys':types.SimpleNamespace(executable='not-executed',exit=lambda code:code),
+                       'Path':Path,'__file__':str(path),'environment':{},'verify_fixtures_closed':fixtures,'source_before':{},
+                       'post_inputs':post,'write':write,'sha':lambda path:hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+                       'json':json,'os':os,'hashlib':hashlib}
+                stdout=io.StringIO()
+                with contextlib.redirect_stdout(stdout):exec(compile(ast.fix_missing_locations(ast.Module(body=[*helpers,*branch.body[start:]],type_ignores=[])),str(path),'exec'),state)
+                self.assertEqual(state['code'],7)
+                self.assertIn('parent-receipt.json',writes)
+                self.assertTrue((root/'parent-original-failure.private.json').exists())
+                self.assertNotIn('SECOND_PARENT_PRIVATE',stdout.getvalue())
+                self.assertEqual(json.loads(stdout.getvalue())['final_exit_code'],7)
+                if fault!='write':self.assertTrue((root/'parent-receipt.json').exists())
+
+
+    def test_aggregate_original_and_final_receipt_faults_preserve_first_exit_and_attempt_both(self):
+        path=ROOT/'scripts/run-selected-backend-e2e.py';tree=ast.parse(path.read_text())
+        function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='run')
+        main=next(n for n in function.body if isinstance(n,ast.Try) and n.finalbody)
+        main.body=ast.parse("raise RuntimeError('FIRST_AGGREGATE_PRIVATE')").body
+        for fault in ('original','aggregate','both'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as directory:
+                output=Path(directory);writes=[]
+                def write(path,value):
+                    writes.append(path.name)
+                    if fault=='both' or (fault=='original' and path.name.endswith('.private.json')) or (fault=='aggregate' and path.name=='selected-ci-receipt.json'):
+                        raise OSError('SECOND_AGGREGATE_PRIVATE')
+                    path.write_text(json.dumps(value))
+                state={'output':output,'code':7,'before':{'head':SOURCE,'tree':TREE},'owner':OWNER,
+                       'results':[{'lane':'postgres','flow':'on','exit':7}], 'launcher_failure':None,
+                       'selected_runs':runner.selected_runs,'write':write,'sha':lambda path:hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+                       'hashlib':hashlib,'json':json}
+                stdout=io.StringIO()
+                with contextlib.redirect_stdout(stdout):exec(compile(ast.fix_missing_locations(ast.Module(body=[main],type_ignores=[])),str(path),'exec'),state)
+                self.assertEqual(state['code'],7)
+                self.assertEqual(writes,['selected-launcher-failure.private.json','selected-ci-receipt.json'])
+                self.assertEqual(state['launcher_failure']['receiptWrite'],'failed' if fault in ('original','both') else 'confirmed')
+                self.assertEqual(len(state['launcher_failure']['originalOutcomeSha256']),64)
+                self.assertNotIn('FIRST_AGGREGATE_PRIVATE',stdout.getvalue())
+                self.assertNotIn('SECOND_AGGREGATE_PRIVATE',stdout.getvalue())
+                if fault in ('aggregate','both'):self.assertEqual(json.loads(stdout.getvalue())['exit'],7)
 
 
 if __name__=='__main__':unittest.main()

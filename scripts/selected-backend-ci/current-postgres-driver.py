@@ -57,6 +57,42 @@ def write(path, value):
     path.write_text(json.dumps(value, indent=2) + '\n')
 
 
+def failure_checkpoint(receipt, directory, observed_exit, error=None, body_log=None, packet_name='original-failure.private.json'):
+    """Persist this driver's first actual outcome before any risky cleanup."""
+    if 'original_driver_failure' not in receipt:
+        receipt['failed_phase'] = receipt['phase']
+        receipt['observed_failed_exit'] = observed_exit
+        receipt['original_driver_failure'] = ({'type': type(error).__name__, 'message': str(error)[:4096]}
+            if error is not None else {'type': 'ReturnedNonzero', 'phase': receipt['phase'], 'observedExit': observed_exit})
+        receipt['failure_code'] = 'SELECTED_DRIVER_EXCEPTION' if error is not None else 'SELECTED_BODY_NONZERO'
+        receipt['original_body_log_sha256'] = None
+        if body_log is not None:
+            try:
+                receipt['original_body_log_sha256'] = sha(body_log)
+            except BaseException:
+                receipt.setdefault('diagnostic_errors', []).append('original-body-log-hash-failed')
+    path = directory / packet_name
+    try:
+        if not path.exists():
+            with path.open('x') as output:
+                os.fchmod(output.fileno(), 0o600)
+                json.dump({key: receipt.get(key) for key in ('failed_phase', 'observed_failed_exit',
+                    'failure_code', 'original_driver_failure', 'original_body_log_sha256')}, output)
+        receipt['original_failure_checkpoint_sha256'] = sha(path)
+    except BaseException:
+        receipt.setdefault('diagnostic_errors', []).append('original-failure-checkpoint-write-failed')
+
+
+def cleanup_attempt(receipt, errors, label, operation):
+    try:
+        return operation()
+    except BaseException as error:
+        errors.append(label)
+        receipt.setdefault('secondary_cleanup_errors', []).append({
+            'phase': label, 'type': type(error).__name__, 'message': str(error)[:4096]})
+        return None
+
+
 def command(args, log=None, required=True, env=None, cwd=None):
     if log is None:
         result = subprocess.run(args, capture_output=True, text=True, env=env, cwd=cwd)
@@ -209,36 +245,59 @@ if len(sys.argv) == 1:
                    **{k: os.environ[k] for k in ('FVOCI_ROOT_CURRENT_BINDING','FVOCI_ROOT_CURRENT_ALLOCATION','FVOCI_ROOT_RESTART_GRANT','GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','CI','GITHUB_ACTIONS','GITHUB_SHA','GITHUB_REPOSITORY','GITHUB_JOB','FVOCI_CI_OWNER','FVOCI_CI_SELECTED_RUNS','FVOCI_CI_BUN','BUN_RUNTIME_TRANSPILER_CACHE_PATH','TMPDIR','FVOCI_E2E_SELECTED_FLOW','FVOCI_SELECTED_EXECUTION_MODE','FVOCI_SELECTED_LOCAL_ALLOCATION','FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256','FVOCI_LOCAL_RUN_ID','FVOCI_LOCAL_DISPATCH_ID','FVOCI_LOCAL_TASK_ID','ORCA_TERMINAL_HANDLE','FVOCI_LOCAL_ROOT_TERMINAL') if k in os.environ}}
     if os.environ.get('PLAYWRIGHT_BROWSERS_PATH'):
         environment['PLAYWRIGHT_BROWSERS_PATH'] = os.environ['PLAYWRIGHT_BROWSERS_PATH']
-    started = now()
-    result = command(['bash', str(PG_SCRIPT), sys.executable, str(Path(__file__).resolve()),
-                      '--pg-ready', str(run)], run / 'owned-fixtures.log', required=False, env=environment)
-    code = result.returncode
-    checks = verify_fixtures_closed(run)
-    complete = len(checks) == 2 and all(row['containerAbsent'] and row['recordedPIDIdentitiesRetired']
-               and row['portClosed'] and all(row['ownedVolumesAbsent'].values()) for row in checks)
-    child = json.loads((run / 'receipt.json').read_text()) if (run / 'receipt.json').exists() else None
-    if not complete or child is None or child['final_exit_code'] != 0:
-        code = code or 1
-    try:
-        after = post_inputs()
-        write(run / 'parent-source-inputs-after.json', after)
-        inputs_equal = source_before == after
-    except BaseException as error:
-        inputs_equal = False
-        write(run / 'parent-input-failure.json', {'type': type(error).__name__, 'message': str(error)})
-        code = code or 1
     summary = {'source': HEAD, 'tree': TREE, 'compiled_source': COMPILED_HEAD,
-               'root_owner': OWNER, 'driver_sha256': sha(__file__), 'selected_flow': FLOW, 'started_utc': started,
-               'wrapper_exit': result.returncode, 'actual_child_receipt_present': child is not None,
-               'fixture_closure': checks, 'all_owned_fixtures_closed': complete,
-               'exact_source_artifact_inputs_unchanged': inputs_equal, 'final_exit_code': code,
-               'ended_utc': now(), 'retained_private_evidence': str(run),
+               'root_owner': OWNER, 'selected_flow': FLOW, 'phase': 'owned-fixture-wrapper',
+               'wrapper_exit': None, 'started_utc': None, 'fixture_closure': None,
+               'all_owned_fixtures_closed': False, 'actual_child_receipt_present': False,
+               'exact_source_artifact_inputs_unchanged': False, 'retained_private_evidence': str(run),
                'scope': 'one normal restricted PG18/current Vue tracer; no full0.6/Turso/restore/CI/shipping acceptance'}
-    write(run / 'parent-receipt.json', summary)
-    print(json.dumps({'source':HEAD,'final_exit_code':code,'actual_child_receipt_present':child is not None,
-          'all_owned_fixtures_closed':complete,'exact_source_artifact_inputs_unchanged':inputs_equal,
-          'parent_receipt_sha256':sha(run/'parent-receipt.json'),
-          'failure_code':'SELECTED_PG_PARENT_FAILED' if code else None}),flush=True)
+    code = 1
+    cleanup_errors = []
+    try:
+        summary['started_utc'] = now()
+        result = command(['bash', str(PG_SCRIPT), sys.executable, str(Path(__file__).resolve()),
+                          '--pg-ready', str(run)], run / 'owned-fixtures.log', required=False, env=environment)
+        code = result.returncode
+        summary['wrapper_exit'] = code
+        if code != 0:
+            failure_checkpoint(summary, run, code, body_log=run / 'owned-fixtures.log', packet_name='parent-original-failure.private.json')
+    except BaseException as error:
+        failure_checkpoint(summary, run, summary['wrapper_exit'], error, packet_name='parent-original-failure.private.json')
+        code = code or 1
+    finally:
+        cleanup_errors.extend(summary.get('diagnostic_errors', []))
+        checks = cleanup_attempt(summary, cleanup_errors, 'fixture-closure-observation-failed', lambda: verify_fixtures_closed(run))
+        summary['fixture_closure'] = checks
+        if checks is not None:
+            complete = cleanup_attempt(summary, cleanup_errors, 'fixture-closure-shape-failed', lambda: len(checks) == 2 and all(
+                row['containerAbsent'] and row['recordedPIDIdentitiesRetired'] and row['portClosed']
+                and all(row['ownedVolumesAbsent'].values()) for row in checks))
+            summary['all_owned_fixtures_closed'] = complete is True
+        child = cleanup_attempt(summary, cleanup_errors, 'child-receipt-read-failed', lambda: json.loads((run / 'receipt.json').read_text()))
+        summary['actual_child_receipt_present'] = isinstance(child, dict)
+        if not summary['all_owned_fixtures_closed'] or not isinstance(child, dict) or type(child.get('final_exit_code')) is not int or child['final_exit_code'] != 0:
+            code = code or 1
+        def check_parent_inputs():
+            after = post_inputs()
+            write(run / 'parent-source-inputs-after.json', after)
+            return source_before == after
+        inputs_equal = cleanup_attempt(summary, cleanup_errors, 'parent-post-input-check-failed', check_parent_inputs)
+        summary['exact_source_artifact_inputs_unchanged'] = inputs_equal is True
+        if inputs_equal is not True: code = code or 1
+        summary['driver_sha256'] = cleanup_attempt(summary, cleanup_errors, 'parent-driver-hash-failed', lambda: sha(__file__))
+        summary['ended_utc'] = cleanup_attempt(summary, cleanup_errors, 'parent-end-clock-failed', now)
+        if cleanup_errors: code = code or 1
+        summary.update(final_exit_code=code, cleanup_errors=cleanup_errors)
+        cleanup_attempt(summary, cleanup_errors, 'parent-final-receipt-write-failed', lambda: write(run / 'parent-receipt.json', summary))
+        parent_hash = cleanup_attempt(summary, cleanup_errors, 'parent-receipt-hash-failed', lambda: sha(run / 'parent-receipt.json'))
+        if cleanup_errors: code = code or 1
+        try:
+            print(json.dumps({'source':HEAD,'final_exit_code':code,'actual_child_receipt_present':summary['actual_child_receipt_present'],
+                  'all_owned_fixtures_closed':summary['all_owned_fixtures_closed'],'exact_source_artifact_inputs_unchanged':summary['exact_source_artifact_inputs_unchanged'],
+                  'parent_receipt_sha256':parent_hash,'original_failure_checkpoint_sha256':summary.get('original_failure_checkpoint_sha256'),
+                  'failure_code':'SELECTED_PG_PARENT_FAILED' if code else None,'cleanup_failure_codes':cleanup_errors}),flush=True)
+        except BaseException:
+            code = code or 1
     sys.exit(code)
 
 assert len(sys.argv) == 3 and sys.argv[1] in ('--pg-ready', '--inside')
@@ -445,6 +504,8 @@ try:
     started = time.monotonic()
     result = command(args, run / 'browser.log', required=False, env=browser_env, cwd=W / 'apps/web')
     code = result.returncode
+    if code != 0:
+        failure_checkpoint(receipt, run, code, body_log=run / 'browser.log')
     receipt.update(browser_exit=code, browser_seconds=time.monotonic()-started,
                    browser_end_utc=now(), browser_log_sha256=sha(run / 'browser.log'))
     if (run / 'playwright-result.private.json').exists():
@@ -530,10 +591,11 @@ try:
                        tested_product_flow='immutable OFF7 actual Vue CAS/replay/native history/task/note/owner-transition/current revoke')
 
 except BaseException as error:
-    receipt['failed_phase'] = receipt['phase']
-    receipt['original_driver_failure'] = {'type': type(error).__name__, 'message': str(error)}
+    failure_checkpoint(receipt, run, receipt.get('browser_exit'), error)
     code = code or 1
 finally:
+    # The original packet exists before any observation/removal/hash can fail.
+    cleanup_errors = list(receipt.get('diagnostic_errors', []))
     # Preserve bounded synthetic tracer state before maintained wrappers remove
     # their private fixture. Do not export password hashes/session tokens/keys.
     try:
@@ -547,55 +609,58 @@ finally:
         receipt['retained_native_state_sha256'] = sha(run / 'retained-native-tracer-state.json')
     except BaseException as error:
         receipt['native_evidence_preservation_error'] = {'type': type(error).__name__, 'message': str(error)}
-        code = code or 1
-    cleanup_errors = []
+        cleanup_errors.append('native-evidence-preservation-failed')
+    rows = None
     if created:
-        try:
-            rows = owned_rows(name)
-            receipt['actual_process_rows_before_cleanup'] = rows
-            if server_row is not None and not identity_gone(server_row):
-                stopped = command(['docker', 'exec', '--user', '0', name, '/bin/kill', '-TERM', str(server_row['namespace_pid'])], required=False)
-                receipt['owned_server_sigterm_exit'] = stopped.returncode
-                if stopped.returncode:
-                    cleanup_errors.append('owned server SIGTERM failed')
-            if server_process is not None:
-                try:
-                    receipt['normal_server_exit'] = server_process.wait(timeout=10)
-                    if receipt['normal_server_exit'] != 0:
-                        cleanup_errors.append('normal server exit nonzero; see raw original log')
-                except subprocess.TimeoutExpired:
-                    cleanup_errors.append('owned server did not finish within unchanged10s; forced removal is not graceful PASS')
-            removed = command(['docker', 'rm', '-f', '-v', name], required=False)
-            receipt['owned_container_cleanup_exit'] = removed.returncode
-            receipt['owned_container_absent'] = owned_object_absent(['docker', 'inspect', name])
-            if removed.returncode or not receipt['owned_container_absent']:
-                cleanup_errors.append('owned app container cleanup/absence failed')
-            receipt['recorded_process_identities_retired'] = bool(rows) and all(identity_gone(row) for row in rows)
-            if not receipt['recorded_process_identities_retired']:
-                cleanup_errors.append('owned recorded app PID identity remains')
-        except BaseException as error:
-            cleanup_errors.append(f'cleanup {type(error).__name__}: {error}')
-            removed = command(['docker', 'rm', '-f', '-v', name], required=False)
-            receipt['exceptional_force_container_cleanup_exit'] = removed.returncode
-            receipt['owned_container_absent'] = owned_object_absent(['docker', 'inspect', name])
-            if removed.returncode or not receipt['owned_container_absent']:
-                cleanup_errors.append('exceptional owned app container cleanup/absence failed')
-    if server_process is not None and server_process.poll() is None:
-        try:
-            server_process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            server_process.kill()
-            server_process.wait()
-            cleanup_errors.append('owned docker-exec CLI force-reaped; cannot qualify graceful finish')
+        rows = cleanup_attempt(receipt, cleanup_errors, 'process-observation-failed', lambda: owned_rows(name))
+        receipt['actual_process_rows_before_cleanup'] = rows
+        if server_row is not None:
+            gone = cleanup_attempt(receipt, cleanup_errors, 'server-identity-observation-failed', lambda: identity_gone(server_row))
+            if gone is False:
+                stopped = cleanup_attempt(receipt, cleanup_errors, 'server-sigterm-failed', lambda: command(
+                    ['docker', 'exec', '--user', '0', name, '/bin/kill', '-TERM', str(server_row['namespace_pid'])], required=False))
+                if stopped is not None:
+                    receipt['owned_server_sigterm_exit'] = stopped.returncode
+                    if stopped.returncode: cleanup_errors.append('owned-server-sigterm-nonzero')
+        if server_process is not None:
+            receipt['normal_server_exit'] = cleanup_attempt(receipt, cleanup_errors, 'normal-server-wait-failed', lambda: server_process.wait(timeout=10))
+            if receipt['normal_server_exit'] != 0: cleanup_errors.append('normal-server-finish-unconfirmed')
+        removed = cleanup_attempt(receipt, cleanup_errors, 'owned-container-removal-failed', lambda: command(['docker','rm','-f','-v',name], required=False))
+        if removed is None:
+            removed = cleanup_attempt(receipt, cleanup_errors, 'exceptional-owned-removal-failed', lambda: command(['docker','rm','-f','-v',name], required=False))
+        receipt['owned_container_cleanup_exit'] = removed.returncode if removed is not None else None
+        absent = cleanup_attempt(receipt, cleanup_errors, 'owned-container-absence-failed', lambda: owned_object_absent(['docker', 'inspect', name]))
+        if absent is not None:
+            receipt['owned_container_absent'] = absent
+        if removed is None or removed.returncode or receipt['owned_container_absent'] is not True:
+            cleanup_errors.append('owned-container-cleanup-unconfirmed')
+        if rows is not None:
+            try:
+                receipt['recorded_process_identities_retired'] = bool(rows) and all(identity_gone(row) for row in rows)
+            except BaseException as error:
+                cleanup_errors.append('pid-retirement-observation-failed')
+                receipt.setdefault('secondary_cleanup_errors', []).append({'phase': 'pid-retirement-observation-failed', 'type': type(error).__name__, 'message': str(error)[:4096]})
+        if receipt['recorded_process_identities_retired'] is not True:
+            cleanup_errors.append('owned-pid-retirement-unconfirmed')
+    if server_process is not None:
+        running = cleanup_attempt(receipt, cleanup_errors, 'docker-exec-poll-failed', lambda: server_process.poll() is None)
+        if running is True:
+            waited = cleanup_attempt(receipt, cleanup_errors, 'docker-exec-wait-failed', lambda: server_process.wait(timeout=10))
+            if waited is None:
+                cleanup_attempt(receipt, cleanup_errors, 'docker-exec-kill-failed', server_process.kill)
+                cleanup_attempt(receipt, cleanup_errors, 'docker-exec-force-wait-failed', lambda: server_process.wait(timeout=10))
+                cleanup_errors.append('docker-exec-force-reap-not-normal-close')
     if server_log is not None:
-        server_log.close()
-        receipt['normal_server_log_sha256'] = sha(run / 'normal-server.log')
+        cleanup_attempt(receipt, cleanup_errors, 'server-log-close-failed', server_log.close)
+        receipt['normal_server_log_sha256'] = cleanup_attempt(receipt, cleanup_errors, 'server-log-hash-failed', lambda: sha(run / 'normal-server.log'))
     if base is not None:
-        with socket.socket() as probe:
-            probe.settimeout(1)
-            receipt['owned_loopback_port_closed'] = probe.connect_ex(('127.0.0.1', int(base.rsplit(':',1)[1]))) != 0
-        if not receipt['owned_loopback_port_closed']:
-            cleanup_errors.append('owned app loopback port remains open')
+        def observe_port():
+            with socket.socket() as probe:
+                probe.settimeout(1)
+                return probe.connect_ex(('127.0.0.1', int(base.rsplit(':',1)[1]))) != 0
+        receipt['owned_loopback_port_closed'] = cleanup_attempt(receipt, cleanup_errors, 'loopback-port-observation-failed', observe_port)
+        if receipt['owned_loopback_port_closed'] is not True:
+            cleanup_errors.append('owned-loopback-port-closure-unconfirmed')
     if base is None:
         cleanup_errors.append('owned loopback port never observed; retirement remains unqualified')
     try:
@@ -609,18 +674,25 @@ finally:
         receipt['exact_source_artifact_inputs_unchanged'] = True
     except BaseException as error:
         receipt['exact_source_artifact_inputs_unchanged'] = False
-        cleanup_errors.append(f'post-input check {type(error).__name__}: {error}')
-    if cleanup_errors:
-        code = code or 1
-    receipt.update(cleanup_errors=cleanup_errors, final_exit_code=code, ended_utc=now(),
+        cleanup_errors.append('post-input-check-failed')
+        receipt.setdefault('secondary_cleanup_errors', []).append({'phase':'post-input-check-failed', 'type':type(error).__name__, 'message':str(error)[:4096]})
+    receipt['ended_utc'] = cleanup_attempt(receipt, cleanup_errors, 'end-clock-observation-failed', now)
+    if cleanup_errors: code = code or 1
+    receipt.update(cleanup_errors=cleanup_errors, final_exit_code=code,
                    retained_private_evidence=str(run), retained_storage=str(storage))
-    write(run / 'receipt.json', receipt)
+    cleanup_attempt(receipt, cleanup_errors, 'final-receipt-write-failed', lambda: write(run / 'receipt.json', receipt))
+    if cleanup_errors: code = code or 1
     summary={key:receipt.get(key) for key in ('source','final_exit_code','actual_browser_tests','browser_exit',
              'owned_container_absent','owned_loopback_port_closed','recorded_process_identities_retired',
-             'loopback_port_observation','failed_phase','exact_source_artifact_inputs_unchanged')}
+             'loopback_port_observation','failed_phase','observed_failed_exit','original_body_log_sha256',
+             'original_failure_checkpoint_sha256','exact_source_artifact_inputs_unchanged')}
     original=receipt.get('original_driver_failure')
-    summary.update(failure_code='SELECTED_DRIVER_FAILED' if code else None,
+    summary.update(failure_code='SELECTED_DRIVER_FAILED' if code else None, final_exit_code=code,
+        cleanup_failure_codes=cleanup_errors,
         original_driver_failure_sha256=hashlib.sha256(json.dumps(original,sort_keys=True).encode()).hexdigest() if original is not None else None)
-    print(json.dumps(summary),flush=True)
+    try:
+        print(json.dumps(summary),flush=True)
+    except BaseException:
+        code = code or 1
 
 sys.exit(code)
