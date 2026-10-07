@@ -266,9 +266,11 @@ export FVOCI_E2E_SERVER_ENV_NAMES="$SERVER_ENV_NAMES"
 SERVER_PID=$!
 
 BASE_URL=""
+SERVER_READY=0
 for _ in $(seq 1 120); do
   BASE_URL="$(grep -m1 'fvoci-server listening on ' "$SERVER_LOG" 2>/dev/null | sed 's/.*listening on //' | tr -d '\r' || true)"
   if [[ -n "$BASE_URL" ]] && curl -fsS "$BASE_URL/api/v1/setup" >/dev/null 2>&1; then
+    SERVER_READY=1
     break
   fi
   if ! kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -278,8 +280,16 @@ for _ in $(seq 1 120); do
   sleep 0.25
 done
 
-if [[ -z "$BASE_URL" ]]; then
-  echo "server did not become ready within 30s" >&2
+# A listening line alone is not readiness: GET /api/v1/setup answers 200 on
+# any healthy server, so a server that never answers it must fail here with its
+# own log instead of handing Playwright an unready URL.
+if (( SERVER_READY == 0 )); then
+  if [[ -n "$BASE_URL" ]]; then
+    echo "server listened on $BASE_URL but GET /api/v1/setup did not succeed within 30s" >&2
+    curl -sS -o /dev/null -w 'last GET /api/v1/setup status: %{http_code}\n' "$BASE_URL/api/v1/setup" >&2 || true
+  else
+    echo "server did not become ready within 30s" >&2
+  fi
   cat "$SERVER_LOG" >&2
   exit 1
 fi

@@ -122,9 +122,17 @@ fi
 echo "unexpected ip invocation: $*" >&2
 exit 1
 STUB
+# FVOCI_FIXTURE_SETUP=fail: the server logs its listening line but the setup
+# probe never succeeds.
 cat >"$FAKE_BIN/curl" <<'STUB'
 #!/usr/bin/env bash
 if [[ "$*" == "-fsS http://127.0.0.1:9/api/v1/setup" ]]; then
+  [[ "${FVOCI_FIXTURE_SETUP:-ok}" == "ok" ]] && exit 0
+  echo "curl: (22) The requested URL returned error: 500" >&2
+  exit 22
+fi
+if [[ "$*" == '-sS -o /dev/null -w last GET /api/v1/setup status: %{http_code}\n http://127.0.0.1:9/api/v1/setup' ]]; then
+  echo "last GET /api/v1/setup status: 500"
   exit 0
 fi
 echo "unexpected curl invocation: $*" >&2
@@ -257,6 +265,26 @@ for pending in 0 1; do
   fi
   check_monitor_stopped "$label" "$log"
 done
+
+# A server that logs its listening line but never answers the setup probe
+# fails the group before Playwright starts, with the server's own log.
+log="$WORK/setup-unready.log"
+gh_output="$WORK/setup-unready.github-output"
+status=0
+(
+  export FVOCI_FIXTURE_SETUP=fail
+  run_group 0 pass quiet "$log" "$gh_output"
+) || status=$?
+((status != 0)) || fail "setup-unready: an unready server exited 0" "$log"
+grep -qx 'server listened on http://127.0.0.1:9 but GET /api/v1/setup did not succeed within 30s' "$log" \
+  || fail "setup-unready: readiness failure not reported" "$log"
+grep -qx 'last GET /api/v1/setup status: 500' "$log" || fail "setup-unready: last setup status not reported" "$log"
+! grep -q -e 'passed' -e 'failed' "$log" || fail "setup-unready: Playwright ran against an unready server" "$log"
+retained="$(sed -n 's/^failure-artifacts=//p' "$gh_output")"
+[[ -n "$retained" && -f "$retained/server.log" ]] || fail "setup-unready: server.log was not retained" "$log"
+! grep -q '# fvoci: playwright start' "$retained/net-events.log" || fail "setup-unready: Playwright was started" "$log"
+check_monitor_stopped "setup-unready" "$log"
+rm -rf "$retained"
 
 leftover="$(find "$RUN_TMP" -mindepth 1 -maxdepth 1 -name 'fvoci-*' -print -quit)"
 [[ -z "$leftover" ]] || fail "run directory not cleaned: $leftover"
