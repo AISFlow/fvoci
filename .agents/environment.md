@@ -6,7 +6,7 @@
 다음 행동은 [rewrite.md](../docs/rewrite.md), 설치·복구는 [RUNNING.md](../RUNNING.md)를 따른다.
 과거 모델 교체·PR별 일지를 현재 실행 절차에 섞지 않는다.
 
-## 1. 관측한 코디네이터와 Run 연결
+## 1. 과거 관측한 코디네이터와 Run 연결
 
 아래는 2026-10-01 03:43 KST의 terminal 환경·세션 JSONL·설치 CLI·run-current를 읽기 전용으로 대조한 snapshot이다.
 다른 세션이나 재개 시점의 현재 연결·권한·도구 가용성을 보장하지 않는다. 실제 환경을 다시 확인하고 기존 Run을 보존한다.
@@ -17,10 +17,10 @@
 | 실행 경로 / CLI          | Orca Codex 주 terminal, 세션 CLI `0.159.1` / 설치 CLI `0.159.2`, source `cli` | session_meta의 기존 세션 버전·03:43 `codex --version`의 설치 버전 구분       |
 | 주 세션                  | `01a0f2c1-0b9e-7453-80a6-3e490b6ef7f0`                                        | 실제 `CODEX_THREAD_ID`와 JSONL 일치                                          |
 | terminal handle          | `term_cc010fa2-f24c-4018-820f-16172de0e39f`                                   | 실제 `ORCA_TERMINAL_HANDLE`와 Run coordinator_handle 일치                    |
-| 현재 Run / generation    | `run_496803f4d94f` / `2`                                                      | 본인 terminal의 기존 Run 바인딩 및 최신 run-current                          |
+| 당시 Run / generation    | `run_496803f4d94f` / `2`                                                      | 본인 terminal의 기존 Run 바인딩 및 최신 run-current                          |
 | Orca runtime             | `73201137-ed1f-4a8a-bcde-302a44c54e4b`                                        | 현재 CLI 응답 `_meta.runtimeId`                                              |
 | 통합 worktree            | `/home/kinesis/orca/workspaces/fvoci/f272-batch-integration`                  | 최신 turn_context.cwd·실제 Git                                               |
-| 현재 sandbox / approval  | `danger-full-access` / `never`                                                | 최신 turn_context; filesystem·network 접근 가능, 강한 읽기 전용 sandbox 아님 |
+| 당시 sandbox / approval  | `danger-full-access` / `never`                                                | 최신 turn_context; filesystem·network 접근 가능, 강한 읽기 전용 sandbox 아님 |
 
 실제 transcript:
 `/home/kinesis/.codex/sessions/2026/09/30/rollout-2026-09-30T23-38-52-01a0f2c1-0b9e-7453-80a6-3e490b6ef7f0.jsonl`.
@@ -45,14 +45,16 @@ native subagent/workflow는 해당 런타임의 agent/run ID·시작 상태·실
 CLI `0.159.2`가 실제 설치됐다. 의도하지 않은 변경과 첫 Task 미주입·공식 release/retry 근거는
 기존 evidence의 `f272-codex-readiness-update-incident.json`에 보존한다. 모델 교체·계정/결제 변경은 없었고 추가 설치 변경은 하지 않는다.
 
+2026-10-07 현재 ROOT의 기존 Run generation5와 승인 경계는 rewrite.md §1·§4 및 실제 task/dispatch로 확인한다. 위 옛 handle·PID·모델 snapshot은 현재 소유권이 아니다. 사용자가 명시한 Grok 감사/retry는 해당 고정 후보·배정 범위의 예외이며 기존 Sol 역할·계정·설정 변경을 뜻하지 않는다. 과거 포괄 merge/0.x 발행 승인은 AGENTS의 역사 기록으로만 읽고 현재 별도 승인 조건을 적용한다.
+
 #272 후보 당시의 별도 승인 경계는 §6에 보존한다. 현재 Task/Dispatch·결과·다음 실행은
-rewrite.md §1·§4·§7의 관측 시각과 실제 Git·선택한 실행 경로·원격 상태를 대조한다.
+rewrite.md §1·§4의 관측 시각과 실제 Git·선택한 실행 경로·원격 상태를 대조한다.
 
 ## 2. 저장소와 설치 도구
 
 다음 경로·설치 값은 §1과 같은 호스트 관측 기록이다. 다른 환경에서는 실제 가용 도구와 권한을 확인한다.
 
-| 항목                 | 현재 경로·버전 / 확인 범위                                                                                         |
+| 항목                 | 관측 당시 경로·버전 / 확인 범위                                                                                    |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | 호스트               | Linux `6.18.33.2-microsoft-standard-WSL2`, x86_64; 62 GiB RAM. 00:36 관측 가용35 GiB·디스크583 GiB는 일시 snapshot |
 | Orca                 | `/home/kinesis/.local/bin/orca-ide`, **1.4.217**. 선택한 실행 파일을 모든 호출에 재사용                            |
@@ -117,8 +119,8 @@ AGENTS.md에 따라 환경을 선택하고 실제 활성 작업을 이어간다.
 
 코드 탐색·영향 확인에는 AGENTS.md에 따라 설치된 CodeGraph를 활용한다. 아래는 확인된 CLI 경로이며,
 미설치·호출 불가 시 제한을 보고하고 실제 source·검색·검사로 확인한 범위를 명시한다.
-과거 MCP 호출명을 현재 도구 가용성으로 가정하지 않는다. worktree마다 자기 `.codegraph/` 인덱스를 사용한다. `status` → 필요시 `init -y`/`sync` →
-`explore`/`callers`/`impact`로 조회하고 실제 source·SQL·RLS·cfg·IPC·trait dispatch·검사와 대조한다.
+과거 MCP 호출명을 현재 도구 가용성으로 가정하지 않는다. worktree마다 자기 `.codegraph/` 인덱스를 사용한다. 관계·영향 탐색이 필요한 범위는 `status` → 필요시 `init -y`/`sync` →
+`explore`/`callers`/`impact`로 조회하고 실제 source·SQL·RLS·cfg·IPC·trait dispatch·검사와 대조한다. AGENTS의 비례 원칙에 따라 단순 검색·문서 수정은 필요한 rg/파일 탐색으로 진행하며 미초기화 graph 때문에 별도 build를 기다리지 않는다.
 다른 worktree의 index를 복사·링크하지 않는다. status가 최신이어도 개별 탐색의 stale 경고를 확인한다.
 
 조회 command에는 `CODEGRAPH_TELEMETRY=0 DO_NOT_TRACK=1`을 준다. 최초 설치 때 telemetry off와
@@ -153,7 +155,7 @@ wrapper의 dist 존재 확인은 최신성이나 입력 동등성 검증이 아�
 빌려 쓰는 target/source에서 cargo·generate-api·run-web-e2e 전체 wrapper를 실행하지 않는다.
 
 이전 bc9 source의 rapid-close bundle과 411입력·5 binary/mode/hash·db-tests/worker 근거는
-rewrite.md §8 evidence에 보존한다. Closed outbound 수정 뒤의 own native와 최종 default-feature image는
+rewrite.md §6의 과거 evidence 포인터에 보존한다. Closed outbound 수정 뒤의 own native와 최종 default-feature image는
 별도 고정 입력·feature·metadata로 판단한다. 옛 prebuilt-8ada도 역사적 근거이며 현재 입력 검사를 대신하지 않는다.
 
 현재 pinned wrapper의 local PostgreSQL18.3/Meili1.53.2·read-only native feature 근거와
@@ -183,16 +185,16 @@ full-web emit TS2742·잘못 설치된 TS 버전 등을 any shim·rule 완화로
 Ultracode 요청/실제 effort·capacity/readiness 실패·old Run·dispatch/실행·정리 이력은 당시 사실로 보존한다.
 과거 모델을 현재 역할에 재배정하거나 실행 명령을 현재 재개 절차에 다시 넣지 않는다.
 
-- 현재 인수와 보고서: `/home/kinesis/orca/fvoci-evidence/recovery-20260930/takeover-evidence/`.
-- 이번 두 문서의 보존 delta·coverage·검토: 같은 root의 `sol-coordinator-docs-20261001/`.
+- 2026-09-30 인수와 보고서: `/home/kinesis/orca/fvoci-evidence/recovery-20260930/takeover-evidence/`.
+- 2026-10-01 두 문서의 보존 delta·coverage·검토: 같은 root의 `sol-coordinator-docs-20261001/`.
 - 과거 cleanup/cache·614GiB 회수 근거: `/home/kinesis/orca/fvoci-evidence/space-reclaim-2026-09-29/` 및 recovery result/receipts.
 - 최초 CodeGraph1.6.0 release/provenance: f442의2026-09-26 설치 기록, release tag `dfccdf62`, build `b59023f0`,
   tar SHA256SUMS 일치·attestation API 조회. gh2.46의 attestation verify 미지원은 API 조회와 구분한다.
 - 과거 Run `run_b01d432a9dee`와 당시 native/workflow 세션은 추적 자료다. 이 이력은 신규 작업의 native/workflow 사용을 금지하지 않으며 재개 대상은 실제 활성 상태로 판단한다.
 
-재개는 AGENTS → 이 파일의 관측 기록과 현재 실제 연결/도구 → rewrite.md §1·§4·§7 → 실제 Git·선택 경로의 task/worker 또는 workflow/agent·CI 순서다.
+재개는 AGENTS → 이 파일의 관측 기록과 현재 실제 연결/도구 → rewrite.md §1·§4 → 실제 Git·선택 경로의 task/worker 또는 workflow/agent·CI 순서다.
 이미 회수한 코드·검토·실패 근거를 재사용하고 현재 질문·남은 delta부터 이어간다.
-이번 정리는 재인수·재구현·전수 감사가 아니다. 모델·계정·권한 배정은 유지하며, 실제 CLI 설치 변경은 §1의 근거와 구분해 기록한다.
+2026-10-01 정리는 재인수·재구현·전수 감사가 아니었다. 모델·계정·권한 배정은 유지하며, 실제 CLI 설치 변경은 §1의 근거와 구분해 기록한다.
 
 ### 2026-09-30 모델 인계의 과거 맥락
 
