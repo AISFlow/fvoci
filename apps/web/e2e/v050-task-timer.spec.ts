@@ -5318,9 +5318,9 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
         type: "joint-restore-observation-error",
         description: phaseErrors.join(","),
       });
-      // Preserve a genuine original failure; an observer failure also refuses
-      // a would-be successful case instead of silently losing the evidence.
-      if (!phasePrimaryFailed) throw new Error("joint restore phase observation incomplete");
     }
   }
+  // A rethrown main failure bypasses this check; cleanup errors stay annotated.
+  // An observer failure still refuses a would-be successful case.
+  if (phaseErrors.length) throw new Error("joint restore phase observation incomplete");
 });

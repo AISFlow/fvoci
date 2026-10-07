@@ -26,8 +26,8 @@ use crate::db::labels::{
     purge_label, update_label,
 };
 use crate::db::milestones::{
-    create_milestone, list_project_milestones_backend as list_project_milestones,
-    purge_milestone, update_milestone,
+    create_milestone, list_project_milestones_backend as list_project_milestones, purge_milestone,
+    update_milestone,
 };
 use crate::db::projects::ProjectDbError;
 use crate::db::task_activity::{

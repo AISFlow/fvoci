@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import * as Y from "yjs";
+import { z } from "zod";
 import { getSchema } from "@tiptap/core";
 import {
   isTiptapDoc,
@@ -76,9 +77,13 @@ function expectActorControls(original: Schema["SessionUserOutput"]): void {
     { ...original, email: "wrong-actor@example.invalid" },
     fresh,
   ]) {
-    expect(() => expectActorIdentity(wrong, original, false)).toThrow();
+    expect(() => {
+      expectActorIdentity(wrong, original, false);
+    }).toThrow();
   }
-  expect(() => expectActorIdentity(original, original, true)).toThrow();
+  expect(() => {
+    expectActorIdentity(original, original, true);
+  }).toThrow();
 }
 
 async function captureActorSession(
@@ -277,15 +282,17 @@ function revisionOracleNegatives(body: Body, snapshotBytes: Uint8Array, content:
   const snapshot = Y.decodeSnapshot(snapshotBytes);
   expect(snapshot.sv.size).toBeGreaterThan(0);
   const wrongVector = new Map(snapshot.sv);
-  const [client, clock] = [...wrongVector][0]!;
+  const first = [...wrongVector][0];
+  if (!first) throw new Error("revision snapshot state vector must not be empty");
+  const [client, clock] = first;
   wrongVector.set(client, clock + 1);
-  expect(() =>
+  expect(() => {
     expectRevisionNative(
       body,
       Y.encodeSnapshot(Y.createSnapshot(snapshot.ds, wrongVector)),
       content,
-    ),
-  ).toThrow();
+    );
+  }).toThrow();
   const deleted = new Y.Doc({ gc: false });
   const wrongDecoder = new Y.Doc({ gc: false });
   try {
@@ -294,25 +301,29 @@ function revisionOracleNegatives(body: Body, snapshotBytes: Uint8Array, content:
     deleted.getText("negative").insert(0, "history");
     deleted.getText("negative").delete(0, 1);
     const generated = Y.snapshot(deleted);
-    expect(() => Y.applyUpdate(wrongDecoder, Y.encodeSnapshot(generated))).toThrow();
+    expect(() => {
+      Y.applyUpdate(wrongDecoder, Y.encodeSnapshot(generated));
+    }).toThrow();
     const wrongDeletes = Y.equalSnapshots(Y.createSnapshot(generated.ds, snapshot.sv), snapshot)
       ? Y.createDeleteSet()
       : generated.ds;
-    expect(() =>
+    expect(() => {
       expectRevisionNative(
         body,
         Y.encodeSnapshot(Y.createSnapshot(wrongDeletes, snapshot.sv)),
         content,
-      ),
-    ).toThrow();
+      );
+    }).toThrow();
   } finally {
     deleted.destroy();
     wrongDecoder.destroy();
   }
-  expect(() => expectRevisionNative(body, snapshotBytes, { type: "doc", content: [] })).toThrow();
-  expect(() =>
-    expectRevisionNative(body, Buffer.from(body.snapshotV1, "base64"), content),
-  ).toThrow();
+  expect(() => {
+    expectRevisionNative(body, snapshotBytes, { type: "doc", content: [] });
+  }).toThrow();
+  expect(() => {
+    expectRevisionNative(body, Buffer.from(body.snapshotV1, "base64"), content);
+  }).toThrow();
 }
 
 async function revision(page: Page, target: Target, result: SaveResult, body: Body): Promise<void> {
@@ -386,13 +397,14 @@ function canonicalEditorMine(value: unknown) {
       for (const key of ["textAlign", "ychange"] as const) {
         if (node.attrs?.[key] !== null) continue;
         expect(comparisonSchema.nodes[node.type]?.spec.attrs?.[key]?.default).toBeNull();
-        delete node.attrs[key];
+        Reflect.deleteProperty(node.attrs, key);
       }
     }
     // y-tiptap's native observer emits an empty attrs object for attrless
     // marks; ProseMirror editor JSON omits it. No mark or set attr is removed.
     if (Array.isArray(node.marks)) {
-      for (const mark of node.marks) {
+      for (const value of node.marks) {
+        const mark: unknown = value;
         if (!mark || typeof mark !== "object" || Object.hasOwn(mark, "attrs")) continue;
         const type: unknown = Reflect.get(mark, "type");
         if (typeof type !== "string") continue;
@@ -426,35 +438,54 @@ function expectComparisonControls(): void {
     ],
   };
   const editor = structuredClone(expected);
-  Reflect.deleteProperty(editor.content[0]!.content[0]!.marks[0]!, "attrs");
-  Object.assign(editor.content[0]!.attrs, { ychange: null });
+  const editorParagraph = editor.content[0];
+  const editorText = editorParagraph?.content[0];
+  const editorMark = editorText?.marks[0];
+  if (!editorParagraph || !editorText || !editorMark)
+    throw new Error("comparison fixture paragraph, text and mark missing");
+  Reflect.deleteProperty(editorMark, "attrs");
+  Object.assign(editorParagraph.attrs, { ychange: null });
   expect(canonicalEditorMine(editor)).toEqual(expected);
   const defaults = structuredClone(editor);
-  Object.assign(defaults.content[0]!.attrs, { textAlign: null });
+  const defaultsParagraph = defaults.content[0];
+  if (!defaultsParagraph) throw new Error("comparison defaults paragraph missing");
+  Object.assign(defaultsParagraph.attrs, { textAlign: null });
   const defaultExpected = structuredClone(expected);
-  Reflect.deleteProperty(defaultExpected.content[0]!.attrs, "textAlign");
+  const defaultParagraph = defaultExpected.content[0];
+  if (!defaultParagraph) throw new Error("comparison expected paragraph missing");
+  Reflect.deleteProperty(defaultParagraph.attrs, "textAlign");
   expect(canonicalEditorMine(defaults)).toEqual(defaultExpected);
   const start = structuredClone(expected);
-  start.content[0]!.content[0]!.text = "start 한글";
+  const startText = start.content[0]?.content[0];
+  if (!startText) throw new Error("comparison start text missing");
+  startText.text = "start 한글";
   const current = structuredClone(expected);
-  current.content[0]!.content[0]!.text = "winner 中 😀";
+  const currentText = current.content[0]?.content[0];
+  if (!currentText) throw new Error("comparison current text missing");
+  currentText.text = "winner 中 😀";
   expectComparisonBodies([start, expected, current], start, expected, current);
-  expect(() =>
-    expectComparisonBodies([current, expected, start], start, expected, current),
-  ).toThrow();
+  expect(() => {
+    expectComparisonBodies([current, expected, start], start, expected, current);
+  }).toThrow();
   for (let index = 0; index < 3; index++) {
     for (const mutation of ["id", "text", "marks", "alignment"] as const) {
       const values = [structuredClone(start), structuredClone(expected), structuredClone(current)];
-      const paragraph = values[index]!.content[0]!;
+      const paragraph = values[index]?.content[0];
+      const text = paragraph?.content[0];
+      if (!paragraph || !text) throw new Error("comparison mutation paragraph or text missing");
       if (mutation === "id") paragraph.attrs.id = "87654321-4321-4321-8321-cba987654321";
-      if (mutation === "text") paragraph.content[0]!.text = "lost private text";
-      if (mutation === "marks") paragraph.content[0]!.marks = [];
+      if (mutation === "text") text.text = "lost private text";
+      if (mutation === "marks") text.marks = [];
       if (mutation === "alignment") Reflect.deleteProperty(paragraph.attrs, "textAlign");
-      expect(() => expectComparisonBodies(values, start, expected, current)).toThrow();
+      expect(() => {
+        expectComparisonBodies(values, start, expected, current);
+      }).toThrow();
     }
   }
   const unsupported = structuredClone(editor);
-  Object.assign(unsupported.content[0]!.attrs, { futureAttribute: null });
+  const unsupportedParagraph = unsupported.content[0];
+  if (!unsupportedParagraph) throw new Error("comparison unsupported paragraph missing");
+  Object.assign(unsupportedParagraph.attrs, { futureAttribute: null });
   expect(() => canonicalEditorMine(unsupported)).toThrow();
 }
 
@@ -571,8 +602,12 @@ test.describe("selected normal main OFF", () => {
     const runRoot = requiredFixtureInput("FVOCI_E2E_RESULT_DIR");
     expect(isAbsolute(runRoot)).toBe(true);
     expect(testInfo.project.outputDir).toBe(join(runRoot, "playwright-output"));
-    const ready = JSON.parse(readFileSync(join(runRoot, "normal-main-ready.json"), "utf8"));
+    const ready = z
+      .record(z.string(), z.unknown())
+      .parse(JSON.parse(readFileSync(join(runRoot, "normal-main-ready.json"), "utf8")));
     expect(typeof ready.current_binding).toBe("string");
+    if (typeof ready.current_binding !== "string")
+      throw new Error("current binding path must be a string");
     expect(isAbsolute(ready.current_binding)).toBe(true);
     const bindingBytes = readFileSync(ready.current_binding);
     const allocation = offAllocationIdentity(
@@ -580,7 +615,7 @@ test.describe("selected normal main OFF", () => {
       requiredFixtureInput("FVOCI_E2E_SELECTED_FLOW"),
       baseUrl,
       ready,
-      JSON.parse(bindingBytes.toString("utf8")),
+      z.record(z.string(), z.unknown()).parse(JSON.parse(bindingBytes.toString("utf8"))),
       createHash("sha256").update(bindingBytes).digest("hex"),
     );
     // Project output is shared by replacement workers in THIS allocated run,
