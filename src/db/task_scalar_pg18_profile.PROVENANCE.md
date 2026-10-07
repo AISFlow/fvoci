@@ -1,10 +1,22 @@
 # Immutable public PG18 Task scalar reference input
 
-PREP data only: runtime_profiles is empty; no product/runtime admission.
+Canonical x86_64 runtime envelope backed by actual bootstrap14 qualification.
+ROOT accepted the runtime qualification receipt; independent code review and current
+production acceptance are pending. GNU 2.43 and the exact canonical en_US archive
+below are the only admitted runtime input; aarch64, local archive44f7 and all other
+archives remain NOT QUALIFIED. No whole-product acceptance is claimed.
 Image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db; Debian13 amd64; tzdata2026a-0+deb13u1.
 Original PG catalog: UTF8/provider c/deterministic/en_US.utf8/collation2.41.
-GNU reference: libc6/locales2.41-12+deb13u2; Ubuntu product equivalence is NOTRUN.
-Compiled JSON SHA256: f3db49e34407399e19fa1654d22b6faf322ab19ee8461e0c214e83e12a82a90c; producer SHA256: e2e16080fc4803d399dd0a30071dfbfa8a8e883193aab9472f2ba7a520b0b7f8.
+GNU reference: libc6/locales2.41-12+deb13u2.
+Canonical runtime image: sha256:396a5f8e43e8de4b2e1567f2c8a8e841bf45037a4e4ff7cb76dc384951025f35.
+Canonical libc6/libc-bin/locales: 2.43-2ubuntu2.4; x86_64 GNU 2.43.
+Canonical locale archive: 3064432 bytes, SHA256 74336f094157053703fe153f9fe4efa9efd7589bfc4e9695ac8195cf8d5fa4c4.
+Qualification receipt: canonical-x86_64-scalar-qualification.json, SHA256 725715f8df67685bbf60cac6daf9e087f2826b024ad10724f3f1695f7fc13f5d.
+Receipt binds 340 verified original evidence members and actual 14 exact nonignored
+bootstrap bodies on the fresh b9e PREP ELF in the canonical image, unchanged consumer,
+negative controls, full source/native/SDK/toolchain/image inputs, and process closure.
+Reference+zone data identity is unchanged: 87c748703be14b07e96a29ee04e031bca7c2f1f60267c9760af76b8de40bad71.
+Compiled JSON SHA256: a5922390ade58f265bcb06e30450ad6d431d8bc4112d9626e2715ad818977ae3; producer SHA256: e2e16080fc4803d399dd0a30071dfbfa8a8e883193aab9472f2ba7a520b0b7f8.
 487 exact UTF8 names joined newline WITHOUT final newline SHA256: 104662bf43ab373bc83f5999f5a18bc5ac094baeeca996e1a8f761fad8279c8c.
 TZif bytes were copied from a fresh never-started pinned image container, never synthesized.
 tz-rs0.7.3 is the consumer parser; this producer only retains bytes and alias closure.

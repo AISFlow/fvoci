@@ -2162,14 +2162,29 @@ enum TaskScalarUse {
     // Bootstrap only in the DB-test binary: never an endpoint/env fallback.
     #[cfg(all(test, feature = "db-tests"))]
     ReferenceQualification,
+    // Explicit pending-envelope guard exercise; absent from product builds.
+    #[cfg(all(test, feature = "db-tests"))]
+    PendingEnvelopeProduction,
 }
 
 impl TaskScalarUse {
+    fn profile(self) -> Result<&'static TaskScalarProfile, sqlx::Error> {
+        match self {
+            Self::Production => TaskScalarProfile::compiled(),
+            #[cfg(all(test, feature = "db-tests"))]
+            Self::ReferenceQualification | Self::PendingEnvelopeProduction => {
+                TaskScalarProfile::pending_envelope()
+            }
+        }
+    }
+
     fn require_runtime(self, profile: &TaskScalarProfile) -> Result<(), sqlx::Error> {
         match self {
             Self::Production => profile.require_runtime(),
             #[cfg(all(test, feature = "db-tests"))]
             Self::ReferenceQualification => Ok(()),
+            #[cfg(all(test, feature = "db-tests"))]
+            Self::PendingEnvelopeProduction => profile.require_runtime(),
         }
     }
 
@@ -2178,6 +2193,8 @@ impl TaskScalarUse {
             Self::Production => TaskTextLocale::for_profile(profile),
             #[cfg(all(test, feature = "db-tests"))]
             Self::ReferenceQualification => TaskTextLocale::new(),
+            #[cfg(all(test, feature = "db-tests"))]
+            Self::PendingEnvelopeProduction => TaskTextLocale::for_profile(profile),
         }
     }
 }
@@ -2346,11 +2363,11 @@ struct TaskScalarProfile {
     runtime_checked: std::sync::OnceLock<Result<(), &'static str>>,
 }
 
-// Exact real public PREP asset; runtime_profiles is empty, so production still
-// refuses admission. ROOT's later qualified envelope requires a reviewed hash
-// update and final-candidate admission/refusal tests, never an implicit fallback.
+// Immutable PG18 reference plus the exact canonical x86_64 runtime receipt.
+// Admission remains bound to the exact GNU version and locale archive; other
+// archives and architectures require separate qualification, never a fallback.
 const TASK_SCALAR_PROFILE_SHA256: &str =
-    "f3db49e34407399e19fa1654d22b6faf322ab19ee8461e0c214e83e12a82a90c";
+    "a5922390ade58f265bcb06e30450ad6d431d8bc4112d9626e2715ad818977ae3";
 
 impl TaskScalarProfile {
     fn decode_sealed(raw: &str, expected: &str) -> Result<Self, &'static str> {
@@ -2445,6 +2462,25 @@ impl TaskScalarProfile {
             .get_or_init(|| {
                 let raw = include_str!("task_scalar_pg18_profile.json");
                 Self::decode_sealed(raw, TASK_SCALAR_PROFILE_SHA256)
+            })
+            .as_ref()
+            .map_err(|error| task_scalar_error(error))
+    }
+
+    // Derive a pending fixture from the sealed real input, changing only the
+    // admission envelope. This cannot be selected by a product endpoint.
+    #[cfg(all(test, feature = "db-tests"))]
+    fn pending_envelope() -> Result<&'static Self, sqlx::Error> {
+        static PROFILE: std::sync::OnceLock<Result<TaskScalarProfile, &'static str>> =
+            std::sync::OnceLock::new();
+        PROFILE
+            .get_or_init(|| {
+                let raw = include_str!("task_scalar_pg18_profile.json");
+                Self::decode_sealed(raw, TASK_SCALAR_PROFILE_SHA256)?;
+                let mut value: serde_json::Value =
+                    serde_json::from_str(raw).map_err(|_| "Task scalar profile schema invalid")?;
+                value["runtime_profiles"] = serde_json::json!([]);
+                Self::decode(&value.to_string())
             })
             .as_ref()
             .map_err(|error| task_scalar_error(error))
@@ -3050,7 +3086,7 @@ async fn list_project_tasks_family(
             .cell(0)?
             .string()?,
     )?;
-    let profile = TaskScalarProfile::compiled()?;
+    let profile = scalar_use.profile()?;
     scalar_use.require_runtime(profile)?;
     let plan = match prepare_selected_task_view(
         tx,
@@ -7226,14 +7262,173 @@ mod selected_project_list_tests {
     #[tokio::test]
     async fn selected_task_list_reference_qualification_gnu_text_pages_literal_filter_and_error_recovery(
     ) {
-        // Bootstrap receipt only: this deliberately refuses an admitted envelope.
-        // ROOT runs the separate production selector after real admission.
-        assert!(TaskScalarProfile::compiled()
-            .unwrap()
-            .runtime_profiles
-            .is_empty());
+        // The explicit pending envelope retains bootstrap refusal coverage
+        // after the separately qualified production envelope is admitted.
+        let pending = TaskScalarProfile::pending_envelope().unwrap();
+        assert!(pending.runtime_profiles.is_empty());
+        assert_eq!(
+            pending.data_identity,
+            TaskScalarProfile::compiled().unwrap().data_identity
+        );
         gnu_text_pages_literal_filter_and_error_recovery(TaskScalarUse::ReferenceQualification)
             .await;
+    }
+
+    #[test]
+    fn selected_scalar_qualified_runtime_admission_and_exact_drift_refusal() {
+        let profile = TaskScalarProfile::compiled().unwrap();
+        profile.require_runtime().unwrap();
+        drop(TaskTextLocale::for_profile(profile).unwrap());
+        let original: Value =
+            serde_json::from_str(include_str!("task_scalar_pg18_profile.json")).unwrap();
+        for (field, value, expected) in [
+            (
+                "glibc_version",
+                "0.0".to_owned(),
+                "Task GNU version mismatch",
+            ),
+            (
+                "locale_archive_sha256",
+                {
+                    let mut hash = profile
+                        .runtime_profiles
+                        .iter()
+                        .find(|runtime| runtime.arch == std::env::consts::ARCH)
+                        .unwrap()
+                        .locale_archive_sha256
+                        .clone();
+                    hash.replace_range(..1, if hash.starts_with('0') { "1" } else { "0" });
+                    hash
+                },
+                "Task GNU locale archive mismatch",
+            ),
+        ] {
+            // Negative drift only; keep the real receipt and reference/zones.
+            let mut drift = original.clone();
+            let runtime = drift["runtime_profiles"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|runtime| runtime["arch"] == std::env::consts::ARCH)
+                .unwrap();
+            runtime[field] = json!(value);
+            let drift = TaskScalarProfile::decode(&drift.to_string()).unwrap();
+            assert_eq!(drift.data_identity, profile.data_identity);
+            assert!(matches!(
+                drift.require_runtime(),
+                Err(sqlx::Error::Protocol(message)) if message == expected
+            ));
+            assert!(matches!(
+                TaskTextLocale::for_profile(&drift),
+                Err(sqlx::Error::Protocol(message)) if message == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn selected_scalar_qualified_runtime_locpath_refusal_in_serial_child() {
+        const SELECTOR: &str = "db::tasks::selected_project_list_tests::selected_scalar_qualified_runtime_locpath_refusal_in_serial_child";
+        const CHILD_MARKER: &str = "FVOCI_SCALAR_LOCPATH_CHILD";
+        let profile = TaskScalarProfile::compiled().unwrap();
+        if let Some(marker) = std::env::var_os(CHILD_MARKER) {
+            assert_eq!(marker, "serial-locpath-refusal");
+            assert_eq!(
+                std::env::var("LOCPATH").unwrap(),
+                "/FVOCI-unqualified-test-locale"
+            );
+            assert!(matches!(
+                profile.require_runtime(),
+                Err(sqlx::Error::Protocol(message)) if message == "Task GNU locale search path unsupported"
+            ));
+            assert!(matches!(
+                TaskTextLocale::for_profile(profile),
+                Err(sqlx::Error::Protocol(message)) if message == "Task GNU locale search path unsupported"
+            ));
+        } else {
+            profile.require_runtime().unwrap();
+            drop(TaskTextLocale::for_profile(profile).unwrap());
+            let executable = std::env::current_exe().unwrap();
+            // Set only the fresh child's environment; no global env mutation.
+            let child = std::process::Command::new(&executable)
+                .args(["--exact", SELECTOR, "--test-threads=1"])
+                .env(CHILD_MARKER, "serial-locpath-refusal")
+                .env("LOCPATH", "/FVOCI-unqualified-test-locale")
+                .output()
+                .unwrap();
+            // Optional caller-owned evidence output, never an admission input.
+            if let Some(directory) = std::env::var_os("FVOCI_SCALAR_CHILD_RECEIPT_DIR") {
+                use std::io::Write;
+                use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+                let directory = std::path::PathBuf::from(directory);
+                let temporary = std::env::temp_dir();
+                assert!(directory.is_absolute() && temporary.is_absolute());
+                assert_eq!(temporary.canonicalize().unwrap(), temporary);
+                assert_eq!(directory.canonicalize().unwrap(), directory);
+                assert!(directory.starts_with(&temporary) && directory != temporary);
+                let metadata = std::fs::symlink_metadata(&directory).unwrap();
+                assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+                // SAFETY: geteuid has no arguments or borrowed memory.
+                let uid = unsafe { libc::geteuid() };
+                assert_eq!(metadata.uid(), uid);
+                assert_eq!(metadata.mode() & 0o777, 0o700);
+                assert!(child.stdout.len() <= 65536 && child.stderr.len() <= 65536);
+                let receipt = serde_json::to_vec_pretty(&json!({
+                    "selector": SELECTOR,
+                    "executable": executable,
+                    "argv": ["--exact", SELECTOR, "--test-threads=1"],
+                    "exit": child.status.code(),
+                    "waited": true,
+                    "positive_parent_admission_before_child": true,
+                    "child_environment": {
+                        "FVOCI_SCALAR_LOCPATH_CHILD": "serial-locpath-refusal",
+                        "LOCPATH": "/FVOCI-unqualified-test-locale"
+                    },
+                    "stdout_sha256": task_scalar_sha256(&child.stdout),
+                    "stderr_sha256": task_scalar_sha256(&child.stderr)
+                }))
+                .unwrap();
+                for (name, bytes) in [
+                    ("stdout", child.stdout.as_slice()),
+                    ("stderr", child.stderr.as_slice()),
+                    ("receipt.json", receipt.as_slice()),
+                ] {
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .custom_flags(libc::O_NOFOLLOW)
+                        .open(directory.join(name))
+                        .unwrap();
+                    let metadata = file.metadata().unwrap();
+                    assert!(metadata.is_file());
+                    assert_eq!(metadata.uid(), uid);
+                    assert_eq!(metadata.mode() & 0o777, 0o600);
+                    file.write_all(bytes).unwrap();
+                    file.sync_all().unwrap();
+                }
+            }
+            assert!(child.status.success());
+            let output = String::from_utf8(child.stdout).unwrap()
+                + &String::from_utf8(child.stderr).unwrap();
+            assert_eq!(
+                output
+                    .lines()
+                    .filter(|line| *line == "running 1 test")
+                    .count(),
+                1
+            );
+            assert!(output
+                .lines()
+                .any(|line| line == format!("test {SELECTOR} ... ok")));
+            assert_eq!(
+                output
+                    .lines()
+                    .filter(|line| line.starts_with("test result:"))
+                    .count(),
+                1
+            );
+            assert!(output.contains("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured;"));
+        }
     }
 
     async fn scalar_list(
@@ -7261,7 +7456,7 @@ mod selected_project_list_tests {
         let (f, credential, project, status) = setup().await;
         if matches!(scalar_use, TaskScalarUse::ReferenceQualification) {
             assert!(matches!(
-                list_project_tasks_backend(&f.backend, f.workspace, project, f.user, credential, &query(None, 7)).await,
+                list_project_tasks_backend_with_use(&f.backend, f.workspace, project, f.user, credential, &query(None, 7), TaskScalarUse::PendingEnvelopeProduction).await,
                 Err(sqlx::Error::Protocol(message)) if message == "Task scalar runtime qualification unavailable"
             ));
         }
