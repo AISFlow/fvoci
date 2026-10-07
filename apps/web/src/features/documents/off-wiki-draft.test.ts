@@ -375,4 +375,172 @@ describe("OFF wiki native draft owner", () => {
     await Promise.resolve();
     exhausted.retire();
   });
+  test("lost response then head 3 keeps the conflict when old receipt 2 is replayed", async () => {
+    const persisted = storage();
+    const initial = source("initial", "1");
+    const draft = new OffWikiDraft(
+      owner,
+      initial,
+      persisted,
+      () => {},
+      () => commandId,
+    );
+    edit(draft.doc, " client A");
+    let first!: BodySaveCommand;
+    await expect(
+      draft.save(
+        (command) =>
+          new Promise<BodySaveResult>(() => {
+            first = structuredClone(command);
+            throw new Error("connection lost after commit");
+          }),
+      ),
+    ).rejects.toThrow();
+    await Promise.resolve();
+    const newest = source("newer client B", "3");
+    draft.observeAuthorizedBody(newest);
+    const receipt = result(first);
+    expect(receipt.tailSeq).toBe("2");
+    let replayed = 0;
+    expect(
+      await draft.save(
+        (command) =>
+          new Promise<BodySaveResult>((resolve) => {
+            replayed += 1;
+            expect(command).toEqual(first);
+            resolve(receipt);
+            return;
+          }),
+      ),
+    ).toBe(false);
+    expect(replayed).toBe(1);
+    expect(draft.latest?.tailSeq).toBe("3");
+    expect(draft.durable).toBe(false);
+    expect(draft.frozen).toBeNull();
+    expect(draft.start.tailSeq).toBe("1");
+    expect(draft.start.contentJson).toEqual(initial.contentJson);
+    expect(draft.comparison?.start).toEqual(draft.start.contentJson);
+    expect(draft.comparison?.mine).toEqual(draft.mine);
+    expect(draft.comparison?.current).toEqual(newest.contentJson);
+    expect(JSON.stringify(draft.mine)).toContain("client A");
+    expect(JSON.stringify(draft.start.contentJson)).not.toContain("newer client B");
+    edit(draft.doc, " live");
+    expect(JSON.stringify(draft.mine)).toContain(" live");
+    expect(draft.latest?.tailSeq).toBe("3");
+    expect(draft.durable).toBe(false);
+    let settled = 0;
+    expect(
+      await draft.save(
+        () =>
+          new Promise<BodySaveResult>(() => {
+            settled += 1;
+            throw new Error("settled command must not be sent");
+          }),
+      ),
+    ).toBe(false);
+    expect(settled).toBe(0);
+    draft.retire();
+    const readonlyHead = { ...newest, writable: false };
+    const restored = new OffWikiDraft(owner, readonlyHead, persisted, () => {});
+    expect(restored.start.writable).toBe(false);
+    expect(restored.start.tailSeq).toBe("1");
+    expect(restored.latest?.tailSeq).toBe("3");
+    expect(restored.frozen).toBeNull();
+    expect(restored.durable).toBe(false);
+    expect(JSON.stringify(restored.mine)).toContain(" live");
+    expect(restored.comparison?.start).toEqual(initial.contentJson);
+    expect(restored.comparison?.mine).toEqual(restored.mine);
+    expect(restored.comparison?.current).toEqual(readonlyHead.contentJson);
+    let restoredSend = 0;
+    expect(
+      await restored.save(
+        () =>
+          new Promise<BodySaveResult>(() => {
+            restoredSend += 1;
+            throw new Error("readonly conflict must not write");
+          }),
+      ),
+    ).toBe(false);
+    expect(restoredSend).toBe(0);
+    restored.retire();
+  });
+  test("a newer authorized head observed during await stays the conflict", async () => {
+    const initial = source("initial", "9007199254740993");
+    const draft = new OffWikiDraft(
+      owner,
+      initial,
+      storage(),
+      () => {},
+      () => commandId,
+    );
+    edit(draft.doc, " client A");
+    const pending = deferred<BodySaveResult>();
+    let command!: BodySaveCommand;
+    const save = draft.save((input) => {
+      command = input;
+      return pending.promise;
+    });
+    const newest = { ...source("newer client B", "9007199254740995"), writable: false };
+    draft.observeAuthorizedBody(newest);
+    edit(draft.doc, " during");
+    const receipt = result(command);
+    expect(receipt.tailSeq).toBe("9007199254740994");
+    pending.resolve(receipt);
+    expect(await save).toBe(false);
+    expect(draft.latest?.tailSeq).toBe("9007199254740995");
+    expect(draft.start.tailSeq).toBe("9007199254740993");
+    expect(draft.start.writable).toBe(false);
+    expect(draft.start.contentJson).toEqual(initial.contentJson);
+    expect(draft.frozen).toBeNull();
+    expect(draft.durable).toBe(false);
+    expect(draft.comparison?.start).toEqual(draft.start.contentJson);
+    expect(draft.comparison?.mine).toEqual(draft.mine);
+    expect(draft.comparison?.current).toEqual(newest.contentJson);
+    expect(JSON.stringify(draft.mine)).toContain(" during");
+    expect(JSON.stringify(draft.mine)).not.toContain("newer client B");
+    let settled = 0;
+    expect(
+      await draft.save(
+        () =>
+          new Promise<BodySaveResult>(() => {
+            settled += 1;
+            throw new Error("settled command must not be sent");
+          }),
+      ),
+    ).toBe(false);
+    expect(settled).toBe(0);
+    draft.retire();
+  });
+  test("a conflict callback during await is kept when the old receipt arrives", async () => {
+    const initial = source("initial", "1");
+    const draft = new OffWikiDraft(
+      owner,
+      initial,
+      storage(),
+      () => {},
+      () => commandId,
+    );
+    edit(draft.doc, " client A");
+    const pending = deferred<BodySaveResult>();
+    let command!: BodySaveCommand;
+    const save = draft.save((input) => {
+      command = input;
+      return pending.promise;
+    });
+    const current = source("conflict head", "3");
+    draft.conflict(current);
+    pending.resolve(result(command));
+    expect(await save).toBe(false);
+    expect(draft.latest?.tailSeq).toBe("3");
+    expect(draft.start.tailSeq).toBe("1");
+    expect(draft.start.contentJson).toEqual(initial.contentJson);
+    expect(draft.frozen).toBeNull();
+    expect(draft.durable).toBe(false);
+    expect(draft.comparison?.start).toEqual(draft.start.contentJson);
+    expect(draft.comparison?.mine).toEqual(draft.mine);
+    expect(draft.comparison?.current).toEqual(current.contentJson);
+    expect(JSON.stringify(draft.mine)).toContain("client A");
+    expect(JSON.stringify(draft.mine)).not.toContain("conflict head");
+    draft.retire();
+  });
 });

@@ -323,6 +323,22 @@ export class OffWikiDraft {
       ) {
         throw new Error("Unmatched body save acknowledgement");
       }
+      // Matching command, target, tail and revision still gate this path.
+      // The receipt settles that command. It does not replace a newer
+      // authorized head, a definite in-flight conflict, or the live draft.
+      const newerHead = this.latest !== null && tail(this.latest.tailSeq) > tail(result.tailSeq);
+      if (this.frozen !== pending || newerHead) {
+        if (this.frozen === pending) this.frozen = null;
+        if (this.latest) {
+          this.comparison = {
+            start: this.start.contentJson,
+            mine: this.mine,
+            current: this.latest.contentJson,
+          };
+        }
+        this.persist();
+        return false;
+      }
       const acknowledgedDoc = this.snapshotDoc(pending.snapshot);
       let contentJson;
       try {
