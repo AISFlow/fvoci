@@ -1833,6 +1833,15 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
             }
             if cache != [expected_cache]:
                 errors.append("rust: fast server cache must retain exact pinned restore-only complete-input key without post save")
+            for step in jobs.get("fast", {}).get("steps", []):
+                if not isinstance(step, dict) or not str(step.get("uses", "")).startswith((
+                        "actions/cache@", "actions/cache/save@")):
+                    continue
+                paths = str(step.get("with", {}).get("path", "")).splitlines()
+                if any("target" in Path(p.strip()).parts or p.strip() in (
+                        ".", "./", "**", "${{ github.workspace }}", "${{ github.workspace }}/",
+                        "${{ env.CARGO_TARGET_DIR }}") for p in paths):
+                    errors.append("rust: fast target output cache writers are prohibited regardless of step name")
 
         reserved_gate = gate_job_id(workflow)
         if PLAN_JOB_ID not in jobs:

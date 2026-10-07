@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import importlib.util
 import json
 import os
@@ -2232,6 +2233,24 @@ class SelectedLibraryExecutionTest(unittest.TestCase):
                     self.assertEqual(len(self.run_workflow_fixture(kind, fail_index)), fail_index + 1)
 
 class RegistryMutationCliTest(unittest.TestCase):
+    def test_differently_named_fast_target_writers_cannot_bypass_restore_only(self) -> None:
+        for family in ("save", "combined"):
+            for target in ("target", "./target", "target/debug", "${{ github.workspace }}/target", ".", "~/.cargo/registry\ntarget"):
+                with self.subTest(family=family, target=target):
+                    root = self._mutated_root()
+                    path = root / ".github/workflows/rust.yml"
+                    data, err = SEL._load_yaml_mapping(path)
+                    self.assertIsNone(err)
+                    step = copy.deepcopy(next(step for step in data["jobs"]["fast"]["steps"] if step.get("name") == "Restore server build outputs"))
+                    step["name"] = "Differently named optional save"
+                    step["uses"] = step["uses"].replace("cache/restore@", "cache/save@" if family == "save" else "cache@")
+                    step["with"]["path"] = target
+                    data["jobs"]["fast"]["steps"].append(step)
+                    import yaml
+                    path.write_text(yaml.safe_dump(data, sort_keys=False))
+                    proc, output = self._plan_against(root)
+                    self._assert_no_green_outputs(proc, output, "fast target output cache writers are prohibited")
+
     def test_fast_cache_retains_restore_only_pin_and_complete_inputs(self) -> None:
         for mutation in ("combined-post", "wrong-pin", "path", "architecture", "toolchain", "sqlite", "source", "fallback", "skip"):
             with self.subTest(mutation=mutation):
