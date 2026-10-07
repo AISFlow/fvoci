@@ -197,7 +197,7 @@ def current_build():
 
 QUALIFIED_CANONICAL_IMAGE = 'sha256:396a5f8e43e8de4b2e1567f2c8a8e841bf45037a4e4ff7cb76dc384951025f35'
 QUALIFIED_SHELL = '/bin/sh'
-DAEMON_CAPS = {'memory.max': '12884901888', 'cpu.max': '200000 100000',
+DAEMON_CAPS = {'memory.max': '12884901888', 'cpu.max': 'max 100000',
                'pids.max': '128', 'memory.swap.max': '0'}
 SECRET_ENV_KEYS = ('FVOCI_LIBSQL_URL', 'FVOCI_LIBSQL_AUTH_TOKEN')
 NATIVE_CAPSULE_KEYS = SECRET_ENV_KEYS + (
@@ -333,11 +333,13 @@ def container_argv(name, launcher, capsule, binary, mount_args, command):
     argv = ['docker', 'create', '--name', name, '--read-only', '--cap-drop', 'ALL',
             '--security-opt', 'no-new-privileges', '--user', '1000:1000',
             '--memory', DAEMON_CAPS['memory.max'], '--memory-swap', DAEMON_CAPS['memory.max'],
-            '--cpu-period', '100000', '--cpu-quota', '200000', '--pids-limit', DAEMON_CAPS['pids.max'],
+            '--pids-limit', DAEMON_CAPS['pids.max'],
             '--tmpfs', '/tmp:rw,noexec,nosuid,size=67108864,uid=1000,gid=1000',
             '--network', 'host', '--entrypoint', QUALIFIED_SHELL, *mount_args,
             QUALIFIED_CANONICAL_IMAGE, LAUNCHER_DST, CAPSULE_DST, binary, *command]
     require('--env-file' not in argv and '-e' not in argv, 'UI_DOCKER_ENV_SECRET_REFUSED')
+    require(not any(flag in argv for flag in ('--cpus', '--cpu-quota', '--cpu-period', '--cpuset-cpus')),
+            'UI_DAEMON_CAP_REFUSED')
     return argv
 
 
@@ -364,6 +366,15 @@ def creation_identity(inspect, argv, secret_values, kind):
     # HostConfig is a create-shape refusal only. It is not cgroup cap proof.
     require(host.get('ReadonlyRootfs') is True and list(host.get('CapDrop') or []) == ['ALL'], 'UI_DAEMON_CAP_REFUSED')
     require(config.get('User') == '1000:1000' and host.get('Privileged') is not True, 'UI_DAEMON_CAP_REFUSED')
+    # Present CPU fields must be the Docker zero values. Missing fields are not proof.
+    if 'CpuQuota' in host:
+        quota = host.get('CpuQuota')
+        require(isinstance(quota, int) and not isinstance(quota, bool) and quota == 0, 'UI_DAEMON_CAP_REFUSED')
+    if 'NanoCpus' in host:
+        nano = host.get('NanoCpus')
+        require(isinstance(nano, int) and not isinstance(nano, bool) and nano == 0, 'UI_DAEMON_CAP_REFUSED')
+    if 'CpusetCpus' in host:
+        require(host.get('CpusetCpus') == '', 'UI_DAEMON_CAP_REFUSED')
     live = ONE_SHOT_LIVE if kind == 'fixture' else 'pending-listen'
     return {'phase': 'created', 'liveDaemon': live, 'qualification': BLOCKED,
             'cgroupCaps': 'not-observed', 'shell': QUALIFIED_SHELL, 'image': QUALIFIED_CANONICAL_IMAGE}

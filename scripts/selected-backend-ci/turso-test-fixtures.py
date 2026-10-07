@@ -1721,6 +1721,12 @@ class UiAdapterTests(unittest.TestCase):
         self.assertIn('FVOCI_LIBSQL_AUTH_TOKEN=' + __import__('shlex').quote("invented'token"), text)
         argv = self.ui.container_argv('fvoci-tui-aa', '/host/launcher.sh', '/host/native-env.sh',
                                       '/fvoci-current/bin/fvoci-migrate', [], ['--start'])
+        for flag in ('--cpus', '--cpu-quota', '--cpu-period', '--cpuset-cpus'):
+            self.assertNotIn(flag, argv)
+        self.assertEqual(argv[argv.index('--memory') + 1], '12884901888')
+        self.assertEqual(argv[argv.index('--memory-swap') + 1], '12884901888')
+        self.assertEqual(argv[argv.index('--pids-limit') + 1], '128')
+        self.assertEqual(self.ui.DAEMON_CAPS['cpu.max'], 'max 100000')
         self.ui.admit_published_config(argv, ['PATH=/usr/bin:/bin', 'FVOCI_COLLAB_ENGINE=/opt/fvoci/bin/collab-engine'],
                                        ["invented'token", 'libsql://invented.invalid'])
         self.assertNotIn('--env-file', argv)
@@ -1750,6 +1756,16 @@ class UiAdapterTests(unittest.TestCase):
         creation = self.ui.creation_identity(created, argv, ['invented-token'], 'fixture')
         self.assertEqual(creation['qualification'], 'BLOCKED')
         self.assertEqual(creation['cgroupCaps'], 'not-observed')
+        self.assertNotIn('cpuUnlimited', creation)
+        unlimited = {'State': created['State'], 'Config': created['Config'],
+                     'HostConfig': dict(created['HostConfig'], CpuQuota=0, NanoCpus=0, CpusetCpus='')}
+        admitted = self.ui.creation_identity(unlimited, argv, ['invented-token'], 'fixture')
+        self.assertEqual(admitted['cgroupCaps'], 'not-observed')
+        self.assertNotIn('cpuUnlimited', admitted)
+        for restricted in ({'CpuQuota': 200000}, {'NanoCpus': 2000000000}, {'CpusetCpus': '0-1'}):
+            with self.assertRaisesRegex(self.ui.UiError, 'UI_DAEMON_CAP_REFUSED'):
+                self.ui.creation_identity({'State': created['State'], 'Config': created['Config'],
+                                          'HostConfig': dict(created['HostConfig'], **restricted)}, argv, ['invented-token'], 'fixture')
         self.assertNotIn('caps', creation)
         done = self.ui.finished_one_shot(creation, 0)
         self.assertEqual(done, {'productExit': 0, 'liveDaemon': 'unsupported-before-execution', 'qualification': 'BLOCKED'})
@@ -1761,6 +1777,9 @@ class UiAdapterTests(unittest.TestCase):
         sample = self.ui.running_daemon_sample(running, dict(self.ui.DAEMON_CAPS), proc, 1, 77,
                                                '/fvoci-current/bin/fvoci-server', True)
         self.assertEqual(sample['qualification'], 'daemon-observed')
+        old_quota = dict(self.ui.DAEMON_CAPS, **{'cpu.max': '200000 100000'})
+        with self.assertRaisesRegex(self.ui.UiError, 'UI_DAEMON_CAP_REFUSED'):
+            self.ui.running_daemon_sample(running, old_quota, proc, 1, 77, '/fvoci-current/bin/fvoci-server', True)
         self.assertEqual(sample['startTicks'], '100')
         with self.assertRaisesRegex(self.ui.UiError, 'UI_DAEMON_WAIT_MISSING'):
             self.ui.running_daemon_sample(running, dict(self.ui.DAEMON_CAPS), proc, 1, 77,
@@ -1788,7 +1807,8 @@ class UiAdapterTests(unittest.TestCase):
         created = {'State': {'Pid': 0, 'Running': False, 'OOMKilled': False},
                    'Config': {'Image': self.ui.QUALIFIED_CANONICAL_IMAGE, 'Entrypoint': ['/bin/sh'],
                               'Cmd': ['/fvoci-current/launcher.sh'], 'Env': ['PATH=/usr/bin:/bin'], 'User': '1000:1000'},
-                   'HostConfig': {'ReadonlyRootfs': True, 'CapDrop': ['ALL'], 'Privileged': False}}
+                   'HostConfig': {'ReadonlyRootfs': True, 'CapDrop': ['ALL'], 'Privileged': False,
+                                  'CpuQuota': 0, 'NanoCpus': 0, 'CpusetCpus': ''}}
         def fake_docker(args, timeout):
             calls.append(list(args))
             if args[1] == 'create':
