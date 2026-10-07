@@ -2109,7 +2109,7 @@ def verify_turso_workflow(path: Path) -> list[str]:
                        'bun install --frozen-lockfile\n'
                        'bun --bun x playwright install --with-deps chromium\n'
                        'python3 scripts/selected-backend-ci/turso-ui.py --record-before\n'
-                       'bun run --cwd apps/web build\n'},
+                       'bun --bun run --cwd apps/web build\n'},
                {'name': 'Credential-free current native UI cohort and freeze',
                 'run': 'set -euo pipefail\n'
                        'cargo build --locked --offline --features api-schema,db-tests --jobs 2 --bin '

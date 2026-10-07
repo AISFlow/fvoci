@@ -141,7 +141,7 @@ jobs:
           bun install --frozen-lockfile
           bun --bun x playwright install --with-deps chromium
           python3 scripts/selected-backend-ci/turso-ui.py --record-before
-          bun run --cwd apps/web build
+          bun --bun run --cwd apps/web build
       - name: Credential-free current native UI cohort and freeze
         run: |
           set -euo pipefail
