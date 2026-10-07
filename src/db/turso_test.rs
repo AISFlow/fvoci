@@ -493,10 +493,18 @@ fn migration_fk_classification_never_uses_arbitrary_error_or_private_message() {
 // One canonical statement for the original consumer and allocated local control.
 const MIGRATION_UNKNOWN_TASK_FENCE_SQL: &str = "INSERT INTO task_collab_room_fences(workspace_id,task_id,owner_token,fence,expires_at) VALUES(?1,?2,?3,17,1)";
 
+/// Closed proof kinds of the shared FK rollback: `EXTENDED` for the typed proof of
+/// the unchanged strict classifier, `SAME_WRITER_PRIMARY_HRANA` only for the exact
+/// original SDK typed primary-only Hrana `SQLITE_CONSTRAINT` plus the full same-writer
+/// row witness. Nothing else is ever reported as a proof.
+const FK_PROOF_EXTENDED: &str = "EXTENDED";
+const FK_PROOF_SAME_WRITER_PRIMARY_HRANA: &str = "SAME_WRITER_PRIMARY_HRANA";
+const FK_PROOF_NOT_CONFIRMED: &str = "NOT_CONFIRMED";
+
 async fn migration_fk_rollback(
     backend: &Backend,
     workspace: uuid::Uuid,
-) -> Result<(), &'static str> {
+) -> Result<&'static str, &'static str> {
     let steps = super::migrate::compiled_sqlite_steps();
     if steps.len() != 12 || steps[11].version != 12 {
         return Err("CURRENT_LINEAGE_CHANGED");
@@ -515,13 +523,14 @@ async fn migration_fk_rollback(
         migration_fk_baseline(family, &cells).await?;
         original_fk_error = family.execute(MIGRATION_UNKNOWN_TASK_FENCE_SQL, &cells).await.err();
         let error = original_fk_error.as_ref().ok_or("FK_FAILURE_MISSING")?;
-        if !genuine_remote_fk_failure(error)? {
-            // Only the primary-only Hrana code is admitted, and only through the
-            // same-writer causal witness; any other kind or code stays refused.
-            if !primary_only_hrana_constraint(error) { return Err("WRONG_FK_FAILURE"); }
-            migration_fk_witness(family, &cells).await?;
+        if genuine_remote_fk_failure(error)? {
+            return Ok(FK_PROOF_EXTENDED);
         }
-        Ok(())
+        // Only the primary-only Hrana code is admitted, and only through the
+        // same-writer causal witness; any other kind or code stays refused.
+        if !primary_only_hrana_constraint(error) { return Err("WRONG_FK_FAILURE"); }
+        migration_fk_witness(family, &cells).await?;
+        Ok(FK_PROOF_SAME_WRITER_PRIMARY_HRANA)
     }.await;
     // Always finish the SAME writer after the real FK statement, including an
     // unexpected statement/DDL failure. Drop/Close is never a rollback receipt.
@@ -858,6 +867,7 @@ async fn turso_primary_current12_install_resume() -> Result<(), &'static str> {
             .map_err(|_| "CONNECT_FAILED")?,
     );
     let workspace = uuid::Uuid::now_v7();
+    let mut fk_proof = FK_PROOF_NOT_CONFIRMED;
     let primary = async {
         if super::migrate::compiled_sqlite_steps().len() != 12 {
             return Err("CURRENT_LINEAGE_CHANGED");
@@ -875,7 +885,7 @@ async fn turso_primary_current12_install_resume() -> Result<(), &'static str> {
                 if message == "SQLite schema is ahead, incomplete or unprepared" => {}
             _ => return Err("INCOMPLETE_PREFIX_REFUSAL_NOT_CONFIRMED"),
         }
-        migration_fk_rollback(&backend, workspace).await?;
+        fk_proof = migration_fk_rollback(&backend, workspace).await?;
         if migration_snapshot(&backend, 11).await? != prefix {
             return Err("FK_ROLLBACK_PREFIX_CHANGED");
         }
@@ -939,11 +949,19 @@ async fn turso_primary_current12_install_resume() -> Result<(), &'static str> {
     .await;
     let close = close_migration_owner(&backend).await;
     let ok = primary.is_ok() && close.is_ok();
+    // The proof kind is one closed literal, printed only with a confirmed run and
+    // after cleanup; raw SDK codes, messages or identifiers never reach the receipt.
+    let fk_proof = match fk_proof {
+        FK_PROOF_EXTENDED if ok => FK_PROOF_EXTENDED,
+        FK_PROOF_SAME_WRITER_PRIMARY_HRANA if ok => FK_PROOF_SAME_WRITER_PRIMARY_HRANA,
+        _ => FK_PROOF_NOT_CONFIRMED,
+    };
     println!(
-        "FVOCI_TURSO_MIGRATION_RECEIPT primary={} prefix={} fk_rollback={} current={} restart={} close={} leases={}",
+        "FVOCI_TURSO_MIGRATION_RECEIPT primary={} prefix={} fk_rollback={} fk_proof={} current={} restart={} close={} leases={}",
         if ok { "OK" } else { "FAILED" },
         if ok { "OK" } else { "NOT_CONFIRMED" },
         if ok { "OK" } else { "NOT_CONFIRMED" },
+        fk_proof,
         if ok { "OK" } else { "NOT_CONFIRMED" },
         if ok { "OK" } else { "NOT_CONFIRMED" },
         if close.is_ok() { "OK" } else { "FAILED" },

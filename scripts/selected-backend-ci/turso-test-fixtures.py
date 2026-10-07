@@ -331,14 +331,30 @@ class AdmissionTests(unittest.TestCase):
         self.denied("WRONG_CONSUMER_PHASE", guard.run_migration, "a" * 40, self.inputs)
 
     def test_migration_receipt_rejects_missing_partial_wrong_test_and_zero_execution(self):
-        valid = ("test " + guard.MIGRATION_TEST_NAME + " ... FVOCI_TURSO_MIGRATION_RECEIPT primary=OK prefix=OK fk_rollback=OK current=OK restart=OK close=OK leases=ZERO\nok\n"
+        valid = ("test " + guard.MIGRATION_TEST_NAME + " ... FVOCI_TURSO_MIGRATION_RECEIPT primary=OK prefix=OK fk_rollback=OK fk_proof=EXTENDED current=OK restart=OK close=OK leases=ZERO\nok\n"
                  "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out;\n")
         success = subprocess.CompletedProcess([], 0, b"")
         with contextlib.redirect_stdout(io.StringIO()) as output:
             guard.migration_result(success, valid)
+        self.assertIn("TURSO_MIGRATION_FK_PROOF kind=EXTENDED\n", output.getvalue())
+        self.assertIn("TURSO_MIGRATION_PASS tests=1 ignored=0", output.getvalue())
+        # The same-writer proof kind is the only other confirmed kind; it is echoed closed.
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            guard.migration_result(success, valid.replace("fk_proof=EXTENDED", "fk_proof=SAME_WRITER_PRIMARY_HRANA"))
+        self.assertIn("TURSO_MIGRATION_FK_PROOF kind=SAME_WRITER_PRIMARY_HRANA\n", output.getvalue())
         self.assertIn("TURSO_MIGRATION_PASS tests=1 ignored=0", output.getvalue())
         for changed, code in (
             (valid.replace("1 passed", "0 passed"), "TURSO_MIGRATION_FAILED"),
+            # Proof field: NOT_CONFIRMED never passes; missing, extra, unknown, generic,
+            # lower-case or injected kinds are not a receipt at all.
+            (valid.replace("fk_proof=EXTENDED", "fk_proof=NOT_CONFIRMED"), "TURSO_MIGRATION_FAILED"),
+            (valid.replace(" fk_proof=EXTENDED", ""), "TURSO_MIGRATION_RECEIPT_MISSING"),
+            (valid.replace("fk_proof=EXTENDED", "fk_proof=EXTENDED witness=PROVEN"), "TURSO_MIGRATION_RECEIPT_MISSING"),
+            (valid.replace("fk_proof=EXTENDED", "fk_proof=GENERIC_19"), "TURSO_MIGRATION_RECEIPT_MISSING"),
+            (valid.replace("fk_proof=EXTENDED", "fk_proof=SQLITE_CONSTRAINT"), "TURSO_MIGRATION_RECEIPT_MISSING"),
+            (valid.replace("fk_proof=EXTENDED", "fk_proof=extended"), "TURSO_MIGRATION_RECEIPT_MISSING"),
+            (valid.replace("fk_proof=EXTENDED", "fk_proof=EXTENDED_FAKE_PRIVATE_TOKEN"), "TURSO_MIGRATION_RECEIPT_MISSING"),
+            (valid.replace("fk_proof=EXTENDED", "fk_proof="), "TURSO_MIGRATION_RECEIPT_MISSING"),
             (valid.replace("0 ignored", "1 ignored"), "TURSO_MIGRATION_FAILED"),
             (valid.replace(guard.MIGRATION_TEST_NAME, guard.TEST_NAME), "TURSO_MIGRATION_FAILED"),
             (valid.replace("fk_rollback=OK", "fk_rollback=NOT_CONFIRMED"), "TURSO_MIGRATION_FAILED"),
@@ -367,7 +383,7 @@ class AdmissionTests(unittest.TestCase):
             (root / "turso-connection-build.json").write_text(json.dumps(manifest))
             environment = {"PATH": os.environ.get("PATH", ""), "FVOCI_DATABASE_BACKEND": "libsql-remote", "FVOCI_LIBSQL_URL": self.secrets["FVOCI_TEST_TURSO_DATABASE_URL"], "FVOCI_LIBSQL_AUTH_TOKEN": self.secrets["FVOCI_TEST_TURSO_AUTH_TOKEN"], "RUNNER_TEMP": directory, "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true", "UNRELATED_FAKE_CREDENTIAL": "never forwarded"}
             inputs = {"phase": "migration", "destructive": True}
-            valid = ("test " + guard.MIGRATION_TEST_NAME + " ... FVOCI_TURSO_MIGRATION_RECEIPT primary=OK prefix=OK fk_rollback=OK current=OK restart=OK close=OK leases=ZERO\nok\n"
+            valid = ("test " + guard.MIGRATION_TEST_NAME + " ... FVOCI_TURSO_MIGRATION_RECEIPT primary=OK prefix=OK fk_rollback=OK fk_proof=EXTENDED current=OK restart=OK close=OK leases=ZERO\nok\n"
                      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out;\n").encode()
             with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(guard, "source_digest", return_value="fixture"), mock.patch.object(guard.subprocess, "run") as run:
                 run.return_value = subprocess.CompletedProcess([], 0, valid)
@@ -389,9 +405,9 @@ class AdmissionTests(unittest.TestCase):
 
 
 class MigrationDiagnosticTests(unittest.TestCase):
-    success = ("test " + guard.MIGRATION_TEST_NAME + " ... FVOCI_TURSO_MIGRATION_RECEIPT primary=OK prefix=OK fk_rollback=OK current=OK restart=OK close=OK leases=ZERO\nok\n"
+    success = ("test " + guard.MIGRATION_TEST_NAME + " ... FVOCI_TURSO_MIGRATION_RECEIPT primary=OK prefix=OK fk_rollback=OK fk_proof=EXTENDED current=OK restart=OK close=OK leases=ZERO\nok\n"
                "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out;\n")
-    failure = ("test " + guard.MIGRATION_TEST_NAME + " ... FVOCI_TURSO_MIGRATION_RECEIPT primary=FAILED prefix=NOT_CONFIRMED fk_rollback=NOT_CONFIRMED current=NOT_CONFIRMED restart=NOT_CONFIRMED close=OK leases=ZERO\nFAILED\n"
+    failure = ("test " + guard.MIGRATION_TEST_NAME + " ... FVOCI_TURSO_MIGRATION_RECEIPT primary=FAILED prefix=NOT_CONFIRMED fk_rollback=NOT_CONFIRMED fk_proof=NOT_CONFIRMED current=NOT_CONFIRMED restart=NOT_CONFIRMED close=OK leases=ZERO\nFAILED\n"
                "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 100 filtered out;\n")
 
     def failed_output(self, text, status=1):
@@ -418,6 +434,9 @@ class MigrationDiagnosticTests(unittest.TestCase):
             "DATA_WRITE_FAILED",
             "DATA_WRITE_MISMATCH",
             "DDL_FAILED",
+            "DEFER_PRAGMA_REFUSED",
+            "FENCE_BASELINE_NOT_EMPTY",
+            "FENCE_ROW_UNBOUND",
             "FENCE_WRITE_FAILED",
             "FK_DECODE_FAILED",
             "FK_FAILURE_MISSING",
@@ -434,6 +453,8 @@ class MigrationDiagnosticTests(unittest.TestCase):
             "NEGATIVE_REFUSAL_NOT_CONFIRMED",
             "NEGATIVE_ROLLBACK_CHANGED_CURRENT",
             "NEGATIVE_WRITE_FAILED",
+            "NOT_FK_ONLY",
+            "PARENT_PRESENT",
             "PREFIX_APPLY_FAILED",
             "PREFIX_RECEIPTS_CHANGED",
             "PREFIX_VALIDATION_FAILED",
@@ -447,11 +468,19 @@ class MigrationDiagnosticTests(unittest.TestCase):
             "SEED_MISMATCH",
             "SEED_QUERY_FAILED",
             "UNEXPECTED_TARGET_DATA",
+            "WITNESS_DECODE_FAILED",
+            "WITNESS_MISMATCH",
+            "WITNESS_QUERY_FAILED",
             "WRONG_BACKEND",
             "WRONG_FK_FAILURE",
         }
         self.assertEqual(guard.MIGRATION_PRIMARY_CODES, expected)
         self.assertEqual(guard.MIGRATION_CLOSE_CODES, {"CLOSE_FAILED", "LEASES_NOT_ZERO"})
+        self.assertEqual(guard.MIGRATION_FK_PROOF_KINDS, {"EXTENDED", "SAME_WRITER_PRIMARY_HRANA"})
+        # A failed receipt never carries a confirmed proof kind into a pass.
+        for kind in ("EXTENDED", "SAME_WRITER_PRIMARY_HRANA"):
+            output = self.failed_output(self.failure.replace("fk_proof=NOT_CONFIRMED", "fk_proof=" + kind))
+            self.assertNotIn("TURSO_MIGRATION_FK_PROOF", output)
         for primary in expected:
             for close in ("OK", "CLOSE_FAILED", "LEASES_NOT_ZERO"):
                 with self.subTest(primary=primary, close=close):

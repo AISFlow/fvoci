@@ -484,6 +484,9 @@ MIGRATION_PRIMARY_CODES = frozenset({
     "DATA_WRITE_FAILED",
     "DATA_WRITE_MISMATCH",
     "DDL_FAILED",
+    "DEFER_PRAGMA_REFUSED",
+    "FENCE_BASELINE_NOT_EMPTY",
+    "FENCE_ROW_UNBOUND",
     "FENCE_WRITE_FAILED",
     "FK_DECODE_FAILED",
     "FK_FAILURE_MISSING",
@@ -500,6 +503,8 @@ MIGRATION_PRIMARY_CODES = frozenset({
     "NEGATIVE_REFUSAL_NOT_CONFIRMED",
     "NEGATIVE_ROLLBACK_CHANGED_CURRENT",
     "NEGATIVE_WRITE_FAILED",
+    "NOT_FK_ONLY",
+    "PARENT_PRESENT",
     "PREFIX_APPLY_FAILED",
     "PREFIX_RECEIPTS_CHANGED",
     "PREFIX_VALIDATION_FAILED",
@@ -513,15 +518,21 @@ MIGRATION_PRIMARY_CODES = frozenset({
     "SEED_MISMATCH",
     "SEED_QUERY_FAILED",
     "UNEXPECTED_TARGET_DATA",
+    "WITNESS_DECODE_FAILED",
+    "WITNESS_MISMATCH",
+    "WITNESS_QUERY_FAILED",
     "WRONG_BACKEND",
     "WRONG_FK_FAILURE",
 })
 MIGRATION_CLOSE_CODES = frozenset({"CLOSE_FAILED", "LEASES_NOT_ZERO"})
+# Closed proof kinds of the shared FK rollback (post-cleanup receipt field): the typed
+# extended proof, or the exact primary-only Hrana code plus the same-writer row witness.
+MIGRATION_FK_PROOF_KINDS = frozenset({"EXTENDED", "SAME_WRITER_PRIMARY_HRANA"})
 
 
 def migration_result(result, output):
     receipt = re.findall(
-        r"FVOCI_TURSO_MIGRATION_RECEIPT primary=(OK|FAILED) prefix=(OK|NOT_CONFIRMED) fk_rollback=(OK|NOT_CONFIRMED) current=(OK|NOT_CONFIRMED) restart=(OK|NOT_CONFIRMED) close=(OK|FAILED) leases=(ZERO|FAILED)(?:\r?\n|$)",
+        r"FVOCI_TURSO_MIGRATION_RECEIPT primary=(OK|FAILED) prefix=(OK|NOT_CONFIRMED) fk_rollback=(OK|NOT_CONFIRMED) fk_proof=(EXTENDED|SAME_WRITER_PRIMARY_HRANA|NOT_CONFIRMED) current=(OK|NOT_CONFIRMED) restart=(OK|NOT_CONFIRMED) close=(OK|FAILED) leases=(ZERO|FAILED)(?:\r?\n|$)",
         output,
     )
     if len(receipt) != 1:
@@ -546,14 +557,17 @@ def migration_result(result, output):
         if (primary not in MIGRATION_PRIMARY_CODES | {"OK"}
                 or close not in MIGRATION_CLOSE_CODES | {"OK"}
                 or (primary == "OK" and close == "OK")
-                or (close == "OK") != (receipt[0][5] == "OK")):
+                or (close == "OK") != (receipt[0][6] == "OK")):
             reject("TURSO_MIGRATION_FAILED")
         # The complete, anchored line and both closed sets were validated.
         print("TURSO_MIGRATION_DIAGNOSTIC primary=" + primary + " close=" + close)
-    if (result.returncode != 0 or receipt[0] != ("OK", "OK", "OK", "OK", "OK", "OK", "ZERO")
+    # A confirmed run names exactly one closed proof kind; NOT_CONFIRMED never passes.
+    if (result.returncode != 0 or receipt[0][:3] != ("OK", "OK", "OK") or receipt[0][3] not in MIGRATION_FK_PROOF_KINDS
+            or receipt[0][4:] != ("OK", "OK", "OK", "ZERO")
             or not re.search(r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out;", output)
             or not re.search(r"test " + re.escape(MIGRATION_TEST_NAME) + r" \.\.\. ", output)):
         reject("TURSO_MIGRATION_FAILED")
+    print("TURSO_MIGRATION_FK_PROOF kind=" + receipt[0][3])
     print("TURSO_MIGRATION_PASS tests=1 ignored=0")
 
 
