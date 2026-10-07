@@ -300,13 +300,8 @@ pub(crate) async fn read_body(
             .await,
         )?,
         DocumentScope::Project(_) => db_result(
-            authorize_document(
-                state
-                    .auth
-                    .db
-                    .pool
-                    .postgres("src/http/routes/document_body.rs")
-                    .map_err(internal)?,
+            authorize_document_backend(
+                &state.auth.db.pool,
                 workspace_id,
                 auth.user_id,
                 auth.credential_id,
