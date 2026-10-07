@@ -7,6 +7,23 @@
 
 ## 1. 범위와 현재 체크포인트
 
+### 0.6.0 WSL 재개 — 2026-10-07
+
+현재 정본은 [#331](https://github.com/AISFlow/fvoci/issues/331), [#335](https://github.com/AISFlow/fvoci/issues/335)와
+[종료 전 인계](https://github.com/AISFlow/fvoci/issues/331#issuecomment-6030957827)다. 기존 Run을 새 ROOT가 generation5로 연결했고
+실제 `gpt-6.1-sol/high`를 확인했다. Linux ext4 확장은 반영됐으며 기존162개 worktree·11개 dirty WIP를 보존했다.
+
+원격 Draft #347은 `8862f794`이며, 로컬 통합은 독립 수락된 형식/lint `0e6dac8e`와 설치 테스트 `2399c1d7`의 조합이다.
+설치 최종 actual4는 4 PASS/0 ignored/exit0, process receipts15(관측 종료12·의도적 실패 fixture exceptional-force-reap3)다.
+SIGTERM 두 단계의 original cancellation/Closed143/noexec, 6초 hold, EOF/admission, inode·current ledger·user·재시작을 별도로 확인했다.
+제품 수명 결함은 입증되지 않았으며 원 Web nested log MISSING과 baseline3PASS1FAIL101은 보존한다.
+
+다음 수락은 고정 통합 diff 검토, 새 HEAD의 관련 검사·필수 전체 CI와 남은 PG/SQLite ON/OFF 실제 흐름이다.
+Turso current12/FK와 실제9202 PostgreSQL 이미지 흐름의 수락은 유지하되, 실제 Turso UI는 미완료다.
+현재 hosted `ui-ack`와 remote actor/native observer 연결이 없어 최소 검증 경로 연결부터 필요하다.
+전체0.6 완료·main 병합(#353/#360/#361 포함)·태그·릴리스·배포는 아직 수락되지 않았으며 별도 사용자 승인이 필요하다.
+현재 소유권·명령·로그는 영속 `v060-20261004/coherent-final-ci-root/current-ownership-ledger.json`의 `wsl_restart`에서 이어간다.
+
 합의된 Rust 백엔드와 Vue 3 + Nuxt UI + Tiptap 프론트엔드를 보존하고 실제 사용자 URL,
 Rust/API·제한된 앱 역할 DB, 저장·복구·권한, 실제 제품 이미지까지 검증한다.
 프론트엔드는 **#272 한 후보에 누적**한다. **별도 사용자 승인 전 #272 머지·태그·릴리스·제품 배포 금지**다.
