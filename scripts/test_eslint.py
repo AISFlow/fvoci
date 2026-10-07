@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Positive and negative proofs for the pinned Bun-only Vue toolchain."""
 import json
-import os
 from pathlib import Path
 import subprocess
 import tempfile

@@ -1,0 +1,47 @@
+# Development tooling for the Python scripts under scripts/. They are run as
+# plain files (`python3 scripts/<tool>.py`), not installed as a package, and
+# the product server never runs Python. CI still installs PyYAML from
+# scripts/ci_selection_requirements.txt, which stays the only pin for it.
+[project]
+name = "fvoci-dev-tools"
+version = "0"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = ["mypy==2.3.1", "ruff==0.16.8"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+# Correctness only (syntax errors, undefined names, unused imports and
+# variables). Style rules and `ruff format` are not applied yet: the existing
+# files would be rewritten wholesale while most of them are under active work.
+select = ["E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Existing unused imports and placeholder-less f-strings in files under active
+# 0.6 work. Remove an entry when its file is next changed; new findings of any
+# other kind still fail in these files.
+"scripts/fixtures/sqlite-ci/test-wiring.py" = ["F401"]
+"scripts/schema-baseline/test_compare_catalogs.py" = ["F541"]
+"scripts/selected-backend-ci/current-postgres-driver.py" = ["F401"]
+"scripts/selected-backend-ci/current-sqlite-driver.py" = ["F401"]
+"scripts/selected-backend-ci/test_early_driver_failure.py" = ["F401"]
+"scripts/selected-backend-ci/turso-test-fixtures.py" = ["F401"]
+"scripts/test_ci_selection.py" = ["F541"]
+"scripts/web-e2e-groups.py" = ["F401"]
+
+[tool.mypy]
+python_version = "3.11"
+# Shared tools that CI or other scripts call and that type-check cleanly
+# today. scripts/ci_selection.py is the next candidate (40 existing errors).
+files = [
+  "scripts/encryption_keys.py",
+  "scripts/smtp-sink.py",
+  "scripts/web-e2e-groups.py",
+]
