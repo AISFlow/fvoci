@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       run_shipping_producer:
-        description: Producer-only exact product5b1a78ee image export; no application runtime (requires measured 32 GiB disk and 16 GiB available memory)
+        description: Producer-only exact product9202f823 image export; no application runtime (requires measured 32 GiB disk and 16 GiB available memory)
         type: boolean
         default: false
       run_upgrade_smoke_arm:
@@ -174,7 +174,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 5b1a78ee77648444fe56654f57e1129d20ebb684
+          ref: 9202f823b22d1a6ed8351ad3ed15740612ecaed4
           path: product
           persist-credentials: false
       - name: Produce one source-stamped image and closed public receipts
@@ -192,7 +192,7 @@ jobs:
       # native capture traces, browser/DB/HTTP evidence, or runtime credentials.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: shipping-image-5b1a78ee-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          name: shipping-image-9202f823-amd64-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/shipping-producer/public/shipping-image.tar
             ${{ runner.temp }}/shipping-producer/public/producer-receipt.json

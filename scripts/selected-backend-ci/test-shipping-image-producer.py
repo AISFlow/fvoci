@@ -629,9 +629,9 @@ class HostedExperimentalResourceControls(unittest.TestCase):
         line = "  --resource-profile " + P.HOSTED_PROFILE + " \\\n"
         self.assertEqual(command.count(line), 1)
         current["jobs"]["shipping-image-producer"]["steps"][2]["run"] = command.replace(line, "")
-        prior[True]["workflow_dispatch"]["inputs"]["run_shipping_producer"]["description"] = prior[True]["workflow_dispatch"]["inputs"]["run_shipping_producer"]["description"].replace("joint551", "product5b1a78ee")
-        prior["jobs"]["shipping-image-producer"]["steps"][1]["with"]["ref"] = "5b1a78ee77648444fe56654f57e1129d20ebb684"
-        prior["jobs"]["shipping-image-producer"]["steps"][3]["with"]["name"] = "shipping-image-5b1a78ee-amd64-${{ github.run_id }}-${{ github.run_attempt }}"
+        prior[True]["workflow_dispatch"]["inputs"]["run_shipping_producer"]["description"] = prior[True]["workflow_dispatch"]["inputs"]["run_shipping_producer"]["description"].replace("joint551", "product9202f823")
+        prior["jobs"]["shipping-image-producer"]["steps"][1]["with"]["ref"] = "9202f823b22d1a6ed8351ad3ed15740612ecaed4"
+        prior["jobs"]["shipping-image-producer"]["steps"][3]["with"]["name"] = "shipping-image-9202f823-amd64-${{ github.run_id }}-${{ github.run_attempt }}"
         self.assertEqual(current, prior)
 
     def test_recipe_wires_all_guards_and_seals_latest_measurements(self):
@@ -1024,6 +1024,132 @@ class ClosingPhaseControls(unittest.TestCase):
                 "--tooling-sha", "a"*40, "--work-dir", str(self.root / "work"), "--run-id", "1-1", "--resource-profile", P.HOSTED_PROFILE])
         receipt = json.loads(stderr.getvalue())
         self.assertEqual(result, 1); self.assertEqual(receipt["result"], "ORIGINAL_FAILURE"); self.assertEqual(receipt["closure"], "BUILDER_OOM")
+
+
+class ErrorProjectionControls(unittest.TestCase):
+    setUp = HostedExperimentalResourceControls.setUp
+    row = HostedExperimentalResourceControls.row
+    measured = HostedExperimentalResourceControls.measured
+
+    @staticmethod
+    def read_error(error):
+        try:
+            with patch.object(P.os, "open", side_effect=error):
+                P.cgroup_text(123, "memory.peak")
+        except Exception as cause:
+            try:
+                raise P.Refusal("CGROUP_METADATA_UNKNOWN") from cause
+            except P.Refusal as wrapped:
+                return wrapped
+        raise AssertionError("synthetic read must refuse")
+
+    def test_bootstrap_launcher_and_builder_original_cause_projection(self):
+        for role in ["launcher", "builder"]:
+            with self.subTest(role=role):
+                producer = P.Producer(self.root, "fixture", P.HOSTED_PROFILE)
+                producer.builder_created = role == "builder"; producer.cid = self.cid
+                error = self.read_error(OSError(13, "PRIVATE_TOKEN", "memory.peak"))
+                def chain(pid="self", **kw):
+                    if (role == "launcher" and pid == "self") or (role == "builder" and pid == "123"):
+                        raise error
+                    return []
+                with patch.object(P, "cgroup_chain", side_effect=chain), patch.object(P, "resources", return_value=self.measured(P.MEMORY_FLOOR)), \
+                        patch.object(producer, "owned_builder", return_value=self.live), patch.object(producer, "command") as command:
+                    with self.assertRaises(P.Refusal) as caught: producer.check_resources("builder-bootstrap", running=True)
+                command.assert_not_called()
+                self.assertEqual(P.failure_diagnostic(caught.exception, producer.diagnostic_context), {
+                    "phase": "builder-bootstrap", "role": role, "primitive": "MEMORY_PEAK_READ_PARSE",
+                    "exception_class": "OSError", "errno": 13, "source_line": 184})
+
+    def test_main_preserves_primary_and_distinct_closure_diagnostic(self):
+        old_umask = P.os.umask(0o022); P.os.umask(old_umask); self.addCleanup(P.os.umask, old_umask)
+        producer = self.producer
+        primary = self.read_error(OSError(13, "PRIMARY_PRIVATE", "memory.peak"))
+        closing = self.read_error(OSError(2, "CLOSURE_PRIVATE", "memory.max"))
+        def fail_build(*args):
+            producer.builder_created = True
+            producer.diagnostic_context = {"phase": "builder-bootstrap", "role": "builder"}
+            raise primary
+        def fail_close():
+            producer.diagnostic_context = {"phase": "builder-closing", "role": "builder-ancestors"}
+            raise closing
+        stderr = io.StringIO()
+        with patch.object(P, "Producer", return_value=producer), patch.object(producer, "build", side_effect=fail_build), \
+                patch.object(producer, "stop_builder", side_effect=fail_close), patch.object(P.sys, "stderr", stderr), patch.object(P.signal, "signal"):
+            result = P.main(["--product-root", str(self.root / "product"), "--tooling-root", str(self.root / "tooling"),
+                "--tooling-sha", "a"*40, "--work-dir", str(self.root / "work"), "--run-id", "1-1", "--resource-profile", P.HOSTED_PROFILE])
+        receipt = json.loads(stderr.getvalue())
+        self.assertEqual(result, 1); self.assertEqual(receipt["result"], "CGROUP_METADATA_UNKNOWN")
+        self.assertEqual(receipt["closure"], "CGROUP_METADATA_UNKNOWN")
+        self.assertEqual(receipt["diagnostic"], {"phase": "builder-bootstrap", "role": "builder",
+            "primitive": "MEMORY_PEAK_READ_PARSE", "exception_class": "OSError", "errno": 13, "source_line": 184})
+        self.assertEqual(receipt["closure_diagnostic"], {"phase": "builder-closing", "role": "builder-ancestors",
+            "primitive": "MEMORY_MAX_READ", "exception_class": "OSError", "errno": 2, "source_line": 184})
+        self.assertNotIn("PRIMARY_PRIVATE", stderr.getvalue()); self.assertNotIn("CLOSURE_PRIVATE", stderr.getvalue())
+        self.assertIsNone(receipt["resource_profile"]["builder_terminal"])
+
+    def test_hostile_foreign_and_invalid_context_never_dumped(self):
+        class Hostile(OSError):
+            def __str__(self): raise AssertionError("must not stringify")
+            def __repr__(self): raise AssertionError("must not represent")
+        for number in [13, -1, 4096, True]:
+            try: raise Hostile(number, "PRIVATE_TOKEN", "/private/SECRET")
+            except Hostile as error:
+                result = P.failure_diagnostic(error, {"phase": "PRIVATE_PHASE", "role": "PRIVATE_ROLE"})
+            self.assertEqual(result, {"phase": "UNKNOWN", "role": "UNKNOWN", "primitive": "UNKNOWN",
+                "exception_class": "OSError", "errno": 13 if number == 13 else None, "source_line": None})
+            self.assertNotIn("PRIVATE", P.encoded(result).decode()); self.assertNotIn("SECRET", P.encoded(result).decode())
+
+    def test_direct_owned_refusal_and_parse_cause_are_closed(self):
+        for raw, primitive, line, kind in [("malformed", "PID_STAT_PREDICATE", 263, "Refusal"),
+                ("123 (fixture) S " + "0 "*18 + "bad 0", "PID_START_TICK_PARSE", 265, "ValueError")]:
+            with patch.object(P, "cgroup_open_directory", return_value=123), patch.object(P, "cgroup_text", return_value=raw):
+                try: P.cgroup_pid(None, 123, "123")
+                except Exception as error:
+                    result = P.failure_diagnostic(error, {"phase": "builder-bootstrap", "role": "builder"})
+            self.assertEqual(result, {"phase": "builder-bootstrap", "role": "builder", "primitive": primitive,
+                "exception_class": kind, "errno": None, "source_line": line})
+
+    def test_timeout_cause_uses_policy_source_not_private_command(self):
+        from types import SimpleNamespace
+        info = SimpleNamespace(st_mode=0o100755, st_uid=0, st_dev=1, st_ino=2, st_size=100)
+        def metadata(path): return info if path == Path("/usr/bin/gnustat") else SimpleNamespace(st_mode=0o40755, st_uid=0)
+        child = unittest.mock.Mock(returncode=0); child.stdout.fileno.return_value = 987
+        child.wait.side_effect = [P.subprocess.TimeoutExpired(["/private/SECRET", "PRIVATE_TOKEN"], 5), None]
+        with patch.object(Path, "lstat", autospec=True, side_effect=metadata), patch.object(Path, "read_bytes", return_value=b"synthetic tool"), \
+                patch.object(P.subprocess, "Popen", return_value=child), patch.object(P.select, "select", return_value=([child.stdout], [], [])), \
+                patch.object(P.os, "read", return_value=b""):
+            try: P.cgroup_filesystem(123, b"63677270")
+            except P.subprocess.TimeoutExpired as cause:
+                try: raise P.Refusal("CGROUP_METADATA_UNKNOWN") from cause
+                except P.Refusal as error:
+                    result = P.failure_diagnostic(error, {"phase": "builder-bootstrap", "role": "builder"})
+        self.assertEqual(result, {"phase": "builder-bootstrap", "role": "builder", "primitive": "STAT_WAIT",
+            "exception_class": "TimeoutExpired", "errno": None, "source_line": 219})
+        child.stdout.close.assert_called_once(); self.assertNotIn("PRIVATE", P.encoded(result).decode())
+
+    def test_diagnostic_policy_failure_never_masks_original_error(self):
+        with patch("runpy.run_path", side_effect=OSError(13, "PRIVATE_TOKEN", "/private/SECRET")):
+            result = P.failure_diagnostic(P.Refusal("ORIGINAL_FAILURE"), {"phase": "builder-bootstrap", "role": "builder"})
+        self.assertEqual(result, {"phase": "UNKNOWN", "role": "UNKNOWN", "primitive": "UNKNOWN",
+            "exception_class": "UNKNOWN", "errno": None, "source_line": None})
+
+    def test_successful_sample_clears_stale_failure_context(self):
+        self.producer.diagnostic_context = {"phase": "builder-bootstrap", "role": "builder"}
+        with patch.object(P, "cgroup_chain", return_value=[]), patch.object(P, "resources", return_value=self.measured(P.MEMORY_FLOOR)):
+            self.producer.check_resources("preflight")
+        self.assertIsNone(self.producer.diagnostic_context)
+        result = P.failure_diagnostic(P.Refusal("OTHER_FAILURE"), self.producer.diagnostic_context)
+        self.assertEqual(result["phase"], "UNKNOWN"); self.assertEqual(result["role"], "UNKNOWN")
+
+    def test_policy_load_never_observes_or_runs_entrypoint(self):
+        stdout = io.StringIO(); stderr = io.StringIO()
+        with patch.object(P.subprocess, "Popen") as spawn, patch.object(P, "cgroup_chain") as chain, \
+                patch.object(P.sys, "stdout", stdout), patch.object(P.sys, "stderr", stderr):
+            result = P.failure_diagnostic(OSError(13, "PRIVATE_TOKEN", "/private/SECRET"))
+        spawn.assert_not_called(); chain.assert_not_called()
+        self.assertEqual(stdout.getvalue(), ""); self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(result["exception_class"], "OSError")
 
 
 if __name__ == "__main__":

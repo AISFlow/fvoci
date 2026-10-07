@@ -28,8 +28,8 @@ from datetime import datetime, timezone
 from contextlib import ExitStack
 from pathlib import Path, PurePosixPath
 
-PRODUCT_SHA = "5b1a78ee77648444fe56654f57e1129d20ebb684"
-PRODUCT_TREE = "739ea2312f5f3ec59363f86f966503cef1401bc2"
+PRODUCT_SHA = "9202f823b22d1a6ed8351ad3ed15740612ecaed4"
+PRODUCT_TREE = "62c38f19018bc12fad5ce2c360aad3a8f4973f3b"
 # The admitted local amd64 builder's actual immutable RepoDigest, not its tag.
 BUILDKIT_IMAGE = "moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea"
 DISK_FLOOR = 32 * 1024**3
@@ -512,11 +512,13 @@ class Producer:
         self.builder_closing = False; self.builder_parent = None; self.builder_terminal = None
         self.profile = profile; self.builder_closed = False; self.cgroups = {}; self.chains = {}; self.phases = {}
         self.cgroup_proofs = {}
+        self.diagnostic_context = None
         self.memory_floor = MEMORY_FLOOR if profile == LEGACY_PROFILE else BUILDER_MEMORY + HOST_RESERVE
 
     def check_resources(self, stage: str, *, running: bool = False) -> dict:
         measured = resources(self.paths)
         if self.profile == HOSTED_PROFILE:
+            self.diagnostic_context = {"phase": stage, "role": "launcher"}
             chains = {"launcher": cgroup_chain(proof=self.cgroup_proofs.setdefault("launcher", {}))}
             live = None
             if self.builder_created and not self.builder_closed:
@@ -532,6 +534,7 @@ class Producer:
                     require(not live["State"].get("OOMKilled"), "BUILDER_OOM")
                     if live["State"]["Running"]:
                         require(type(live["State"]["Pid"]) is int and live["State"]["Pid"] > 0, "BUILDER_PID_INVALID")
+                        self.diagnostic_context["role"] = "builder"
                         chains["builder"] = cgroup_chain(str(live["State"]["Pid"]), proof=self.cgroup_proofs.setdefault("builder", {}))
                         require(self.cgroup_proofs["builder"].get("root") == self.cgroup_proofs["launcher"].get("root"),
                                 "CGROUP_IDENTITY_DRIFT")
@@ -552,6 +555,7 @@ class Producer:
                         if self.builder_closing and self.builder_parent is not None:
                             # PID0 cannot supply final leaf counters. Re-read the
                             # recorded parent chain; never substitute stale usage.
+                            self.diagnostic_context["role"] = "builder-ancestors"
                             chains["builder-ancestors"] = cgroup_chain(relative=self.builder_parent,
                                 proof=self.cgroup_proofs.setdefault("builder", {}))
                             require(self.cgroup_proofs["builder"].get("root") == self.cgroup_proofs["launcher"].get("root"),
@@ -597,6 +601,7 @@ class Producer:
         self.memory_floor = MEMORY_FLOOR if self.profile == LEGACY_PROFILE else HOST_RESERVE + (0 if running else BUILDER_MEMORY)
         phase["memory_floor"] = self.memory_floor
         admit(measured, self.profile, running=running)
+        self.diagnostic_context = None
         return measured
 
     def profile_receipt(self) -> dict:
@@ -750,6 +755,32 @@ class Producer:
         return receipt
 
 
+def failure_diagnostic(error: BaseException | None, context: dict | None = None) -> dict:
+    """Reuse the existing closed observer policy; never execute its entrypoint."""
+    result = {"phase": "UNKNOWN", "role": "UNKNOWN", "primitive": "UNKNOWN",
+              "exception_class": "UNKNOWN", "errno": None, "source_line": None}
+    if error is None:
+        return result
+    try:
+        import runpy
+        policy = runpy.run_path(str(Path(__file__).with_name("shipping-cgroup-observer.py")))
+        cause = error.__cause__ if isinstance(error.__cause__, subprocess.TimeoutExpired) else error
+        result.update(policy["diagnostic"](cause, __file__, Refusal))
+        if isinstance(cause, subprocess.TimeoutExpired):
+            result["exception_class"] = "TimeoutExpired"
+        if type(context) is dict:
+            if context.get("phase") in {"preflight", "before-bootstrap", "builder-bootstrap", "shipping-build",
+                    "before-builder-stop", "builder-closing", "image-save", "python-validation"}:
+                result["phase"] = context["phase"]
+            if result["source_line"] is not None and context.get("role") in {"launcher", "builder", "builder-ancestors"}:
+                result["role"] = context["role"]
+    except Exception:
+        # Diagnostic availability must never replace the original refusal.
+        return {"phase": "UNKNOWN", "role": "UNKNOWN", "primitive": "UNKNOWN",
+                "exception_class": "UNKNOWN", "errno": None, "source_line": None}
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--product-root", required=True, type=Path)
@@ -764,7 +795,9 @@ def main(argv: list[str] | None = None) -> int:
     def cancelled(_signum, _frame):
         raise Refusal("PRODUCER_CANCELLED")
     signal.signal(signal.SIGTERM, cancelled)
-    def failure(code: str) -> int:
+    def failure(code: str, error: BaseException | None = None) -> int:
+        diagnostic = failure_diagnostic(error, producer.diagnostic_context if producer else None)
+        closure_diagnostic = None
         closure = "NO_OWN_BUILDER_STARTED"
         if producer is not None and producer.builder_created:
             try:
@@ -772,9 +805,12 @@ def main(argv: list[str] | None = None) -> int:
                 closure = "OWN_BUILDER_CLOSED"
             except Refusal as e:
                 closure = str(e)
-            except Exception:
+                closure_diagnostic = failure_diagnostic(e, producer.diagnostic_context)
+            except Exception as e:
                 closure = "OWN_BUILDER_CLOSURE_UNVERIFIED"
+                closure_diagnostic = failure_diagnostic(e, producer.diagnostic_context)
         print(encoded({"result": code, "closure": closure,
+            "diagnostic": diagnostic, "closure_diagnostic": closure_diagnostic,
             "host": producer.host if producer else None,
             "disk_floor": DISK_FLOOR, "memory_floor": producer.memory_floor if producer else MEMORY_FLOOR,
             "minimum_sampled_resources": producer.minimum if producer else None,
@@ -790,10 +826,10 @@ def main(argv: list[str] | None = None) -> int:
         print("PRODUCER_ONLY_PASS_NOT_RUNTIME_QUALIFIED")
         return 0
     except Refusal as e:
-        return failure(str(e))
-    except (Exception, KeyboardInterrupt):
+        return failure(str(e), e)
+    except (Exception, KeyboardInterrupt) as e:
         # Never let a raw exception/command dump become public Actions output.
-        return failure("PRODUCER_UNEXPECTED_FAILURE")
+        return failure("PRODUCER_UNEXPECTED_FAILURE", e)
 
 
 if __name__ == "__main__":
