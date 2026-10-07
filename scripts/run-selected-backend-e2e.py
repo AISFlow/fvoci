@@ -5,6 +5,7 @@ serially. No product fixture, SQL writer, protocol parser or build fallback here
 """
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -510,6 +511,124 @@ def lane_retirement(runroot, lane, flow, source, tree, owner, driver_exit):
     return facts
 
 
+def config_list_inputs(output):
+    """Recheck the already consumed cohort as1000; never create a lane grant."""
+    if sys.flags.optimize:
+        raise RuntimeError('current input assertions require ordinary Python')
+    assert os.environ.get('FVOCI_SELECTED_EXECUTION_MODE', 'github-ci') == 'github-ci'
+    assert os.environ.get('FVOCI_WEB_BUILD_PHASE') == 'consume', 'config list requires admitted consumer'
+    assert os.getuid() == os.getgid() == 1000
+    owner = identity('config-list', output)
+    assert not (output/'runtime').exists() and not list(output.glob('*-allocation.json')) and not list(output.glob('*-binding.json')), 'config list must precede all selected allocations'
+    consumed = read(output/'handoff-consumed.json')
+    before = read(output/'before.json')
+    assert consumed['source'] == before['head'] == os.environ['GITHUB_SHA']
+    assert consumed['tree'] == before['tree'] == call(['git','rev-parse','HEAD^{tree}'])
+    assert consumed['repository'] == os.environ['GITHUB_REPOSITORY']
+    assert consumed['run'] == os.environ['GITHUB_RUN_ID'] and consumed['attempt'] == os.environ['GITHUB_RUN_ATTEMPT']
+    assert consumed['full_current_physical_inputs_equal'] is True and consumed['fresh_dist_equal'] is True
+    assert read(output/'after.json') == before
+    assert call(['git','status','--short']) == before['status'].strip()
+    assert set(call(['git','ls-files','-z']).split('\0')) - {''} == set(before['tracked'])
+    for names, base in ((before['tracked'], ROOT), (before['external'], Path('/')), (before['untracked'], ROOT)):
+        for name, digest in names.items():
+            assert sha(base/name) == digest, 'current config-list input changed'
+    # Reuse the handoff's exact destination catalog rather than invent a second
+    # native/receipt schema. The producer admission already qualified all stages.
+    sys.dont_write_bytecode = True
+    spec = importlib.util.spec_from_file_location('config_list_handoff', TEMPLATES/'web-build-handoff.py')
+    handoff = importlib.util.module_from_spec(spec);spec.loader.exec_module(handoff)
+    bundle = read(output/'bundle.json')
+    expected, _, _ = handoff.expected_files(bundle, output)
+    assert set(consumed['received']) == {str(p) for p in expected}
+    for name, recorded in consumed['received'].items():
+        path = handoff.regular(name);facts = path.stat()
+        assert sha(path) == recorded['sha256'] and facts.st_ino == recorded['inode']
+        assert stat.S_IMODE(facts.st_mode) == recorded['mode'], 'consumed file mode changed'
+    assert bundle['source'] == before['head'] and bundle['tree'] == before['tree']
+    web = read(output/'web-receipt.json')
+    assert web['source'] == before['head'] and web['tree'] == before['tree']
+    assert web['dist_files'] == {str(p.relative_to(ROOT/'apps/web/dist')):sha(p)
+                               for p in (ROOT/'apps/web/dist').rglob('*') if p.is_file()}
+    abi = read(output/'abi-receipt.json')
+    assert abi['currentSource'] == before['head']
+    for name, digest in abi['host_runtime_files'].items():assert sha(name) == digest
+    access = read(output/'runtime-access-stage.json')
+    assert access['source'] == before['head'] and access['tree'] == before['tree'] and access['owner'] == owner
+    assert access['runtime_uid'] == access['runtime_gid'] == 1000
+    assert access['preflight_exit'] == 0 and access['preflight']['missing'] == 0
+    assert sorted(os.getgroups()) == access['groups'], 'runtime read groups differ'
+    bun = str(Path(shutil.which('bun')).resolve())
+    assert read(output/'build-environment.json')['bun'] == '1.4.2'
+    assert sha(bun) == before['external'][bun]
+    chromium = admitted_browser(output)
+    browser = {'bun':{'path':bun,'sha256':sha(bun)},'chromium':{'path':chromium,'sha256':sha(chromium)},
+               'chromium_directory_files':browser_inventory(Path(chromium).parent)}
+    runtime_access([*(str(ROOT/p) for p in before['tracked']), *before['external'], *bundle['binaries']], browser)
+    for name in bundle['binaries']:assert os.access(name,os.R_OK|os.X_OK)
+    modules = {}
+    for name in ('@playwright/test', 'playwright', 'playwright-core'):
+        path = ROOT/'node_modules'/name/'package.json'
+        assert read(path)['version'] == '1.63.0'
+        modules[name] = sha(path)
+    return before, browser, modules
+
+
+def config_list(output):
+    """Credential-free load/list only. Original body errors remain private/MISSING."""
+    before, browser, modules = config_list_inputs(output)
+    directory = output/'config-list'
+    directory.mkdir(mode=0o700)  # Occupied, symlink and retry destinations refuse.
+    for name in ('tmp', 'bun-transpiler-cache'):(directory/name).mkdir(mode=0o700)
+    env = {'PATH':os.environ['PATH'], 'LANG':os.environ.get('LANG','C.UTF-8'), 'CI':'true',
+           'TMPDIR':str(directory/'tmp'), 'BUN_RUNTIME_TRANSPILER_CACHE_PATH':str(directory/'bun-transpiler-cache'),
+           'PLAYWRIGHT_BROWSERS_PATH':os.environ['PLAYWRIGHT_BROWSERS_PATH'],
+           'FVOCI_E2E_SELECTED_BACKEND':'postgres', 'FVOCI_E2E_SELECTED_FLOW':'on',
+           'FVOCI_E2E_SELECTED_AUXILIARY':'normal-api',
+           'FVOCI_E2E_SELECTED_SOURCE':before['head'], 'FVOCI_E2E_SELECTED_COMPILED_SOURCE':before['head'],
+           'FVOCI_E2E_RESULT_DIR':str(directory), 'PLAYWRIGHT_JSON_OUTPUT_FILE':str(directory/'listing.json')}
+    args = [browser['bun']['path'],'--bun','x','--no-install','playwright','test',
+            '--config','e2e-pending/collab-playwright.config.ts','--reporter=line,json',
+            '--list','workspace-wiki-selected-backend.spec.ts']
+    # Only qualified identity, metadata and env NAMES enter the safe capture.
+    receipt = {'schema':1,'phase':'config-list','source':before['head'],'tree':before['tree'],
+               'compiledSource':before['head'],'uid':os.getuid(),'gid':os.getgid(),'groups':sorted(os.getgroups()),
+               'environment_names':sorted(env),'list_only':True,'actual_browser_tests':0,'actual_db_tests':0,
+               'bun_version':'1.4.2','module_hashes':modules,
+               'executables':{name:{'sha256':facts['sha256'], 'mode':stat.S_IMODE(Path(facts['path']).stat().st_mode),
+                                   'uid':Path(facts['path']).stat().st_uid,'gid':Path(facts['path']).stat().st_gid}
+                              for name,facts in browser.items() if name in ('bun','chromium')}}
+    write(directory/'start.json',receipt)
+    print(json.dumps(receipt),flush=True)
+    mask = os.umask(0o077)
+    try:
+        # Inherit ONLY the runner-opened captures; no runtime browser log copy.
+        result = subprocess.run(args,cwd=ROOT/'apps/web',env=env,stdin=subprocess.DEVNULL)
+    finally:
+        os.umask(mask)
+    receipt['exit'] = result.returncode
+    # Actual exit precedes report observations and post-admission checks.
+    write(directory/'result.json',receipt)
+    print(json.dumps(receipt),flush=True)
+    if result.returncode:return result.returncode
+    report = directory/'listing.json'
+    assert not report.is_symlink() and report.is_file() and report.stat().st_uid == 1000
+    os.chmod(report,0o600)
+    listed = read(report)
+    assert listed['config']['workers'] == 1 and listed['errors'] == []
+    assert listed['config']['metadata'] == {'selectedBackend':'postgres','selectedFlow':'on'}
+    assert listed['stats']['expected'] == listed['stats']['unexpected'] == listed['stats']['flaky'] == 0
+    assert listed['stats']['skipped'] == 1  # list discovery, not an actual skipped body
+    assert len(listed['suites']) == len(listed['suites'][0]['specs']) == 1
+    case = listed['suites'][0]['specs'][0]
+    assert case['title'] == KNOWN_ON_BROWSER_TEST and len(case['tests']) == 1 and case['tests'][0]['results'] == []
+    config_list_inputs(output)
+    receipt.update(json_report_sha256=sha(report),configuration_load_qualified=True)
+    write(directory/'qualified.json',receipt)
+    print(json.dumps(receipt),flush=True)
+    return 0
+
+
 def run(output):
     assert os.environ.get("GITHUB_JOB") != "collaboration-build", "build producer cannot start runtime"
     assert os.getuid()==os.getgid()==1000, 'normal SQLite browser/fixture/app file ownership must be1000:1000'
@@ -603,9 +722,11 @@ def run(output):
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('mode',choices=['record-before','stage','record-after','run','permissions','owner-return']);parser.add_argument('--output',required=True);parser.add_argument('--stage-name');parser.add_argument('--sqlite-parent');parser.add_argument('--docker-gid',type=int);args,command=parser.parse_known_args()
+    parser=argparse.ArgumentParser();parser.add_argument('mode',choices=['record-before','stage','record-after','run','permissions','owner-return','config-list']);parser.add_argument('--output',required=True);parser.add_argument('--stage-name');parser.add_argument('--sqlite-parent');parser.add_argument('--docker-gid',type=int);args,command=parser.parse_known_args()
     assert args.mode=='stage' or not command, 'unexpected arguments outside compiler stage'
     assert args.mode=='permissions' or (args.sqlite_parent is None and args.docker_gid is None), 'unexpected runtime permission arguments'
+    if args.mode=='config-list':
+        assert Path(args.output).is_absolute() and Path(args.output).resolve()==Path(args.output), 'config list requires physical output'
     output=Path(args.output).resolve();assert output.is_dir() and output.stat().st_uid==os.getuid() and output.stat().st_mode&0o777==0o700
     if args.mode=='record-before':record_before(output)
     elif args.mode=='record-after':record_after(output)
@@ -614,6 +735,7 @@ def main():
         assert args.sqlite_parent and args.docker_gid is not None
         runtime_permissions(output, args.sqlite_parent, args.docker_gid)
     elif args.mode=='owner-return':runtime_ownership_return(output)
+    elif args.mode=='config-list':return config_list(output)
     else:return run(output)
     return 0
 

@@ -318,13 +318,30 @@ PY_DIAGNOSTICS
   export PLAYWRIGHT_BROWSERS_PATH="$FVOCI_SELECTED_CI_OUTPUT/browser"
   sudo chown -h -R 1000:1000 "$FVOCI_SELECTED_CI_OUTPUT" "$FVOCI_SELECTED_CI_SQLITE_PARENT"
   sudo install -d -o 1000 -g 1000 -m 0700 "$FVOCI_SELECTED_CI_OUTPUT/tmp"
-  sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,PLAYWRIGHT_BROWSERS_PATH \
-    setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
-    env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
-      python3 "$ROOT/scripts/run-selected-backend-e2e.py" run --output "$FVOCI_SELECTED_CI_OUTPUT" || selected_status=$?
+  config_list_exit=not-run
+  launcher_status=not-run
+  if [[ "$SELECTED_PHASE" == consume ]]; then
+    config_list_exit=0
+    # Runner-owned exclusive captures survive later owner-return refusal. This
+    # leaf receives no DB/key inputs and starts no selected fixtures or lanes.
+    (umask 077
+      set -o noclobber
+      sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,FVOCI_WEB_BUILD_PHASE,PLAYWRIGHT_BROWSERS_PATH \
+        setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
+        env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
+          python3 "$ROOT/scripts/run-selected-backend-e2e.py" config-list --output "$FVOCI_SELECTED_CI_OUTPUT" \
+          >"$safe_diagnostics/config-list.stdout.log" 2>"$safe_diagnostics/config-list.stderr.log") || config_list_exit=$?
+    selected_status="$config_list_exit"
+  fi
+  if [[ "$config_list_exit" == not-run || "$config_list_exit" -eq 0 ]]; then
+    sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,PLAYWRIGHT_BROWSERS_PATH \
+      setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
+      env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
+        python3 "$ROOT/scripts/run-selected-backend-e2e.py" run --output "$FVOCI_SELECTED_CI_OUTPUT" || selected_status=$?
+    launcher_status="$selected_status"
+  fi
   # The launcher has returned, but require existing exact resource-retirement
   # witnesses (or proof no runtime began) before changing private data ownership.
-  launcher_status="$selected_status"
   ownership_status=0
   (umask 077
     sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB \
@@ -356,14 +373,15 @@ PY_DIAGNOSTICS
     if [[ "$selected_status" -eq 0 ]]; then selected_status=1; fi
   fi
   diagnostic_status=0
-  python3 - "$safe_diagnostics" "$launcher_status" "$ownership_status" "$selected_status" "$pending_status" <<'PY_STATUS' || diagnostic_status=$?
+  python3 - "$safe_diagnostics" "$launcher_status" "$ownership_status" "$selected_status" "$pending_status" "$config_list_exit" <<'PY_STATUS' || diagnostic_status=$?
 from pathlib import Path
 import json,os,sys
 prefix=Path(sys.argv[1])
 assert not prefix.is_symlink() and prefix.stat().st_uid == os.getuid() and prefix.stat().st_mode & 0o777 == 0o700
 with (prefix/'launcher-stage.json').open('x') as receipt:
     os.fchmod(receipt.fileno(),0o600)
-    json.dump(dict(zip(('actual_launcher_exit','ownership_return_exit','selected_final_exit','pending_exit'),map(int,sys.argv[2:]))),receipt)
+    values = [None if value == 'not-run' else int(value) for value in sys.argv[2:]]
+    json.dump(dict(zip(('actual_launcher_exit','ownership_return_exit','selected_final_exit','pending_exit','config_list_exit'),values)),receipt)
     receipt.write('\n')
 PY_STATUS
   if [[ "$diagnostic_status" -ne 0 && "$selected_status" -eq 0 ]]; then selected_status=1; fi

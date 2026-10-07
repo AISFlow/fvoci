@@ -516,4 +516,231 @@ class WholeFinalizationFaults(unittest.TestCase):
                 if fault in ('aggregate','both'):self.assertEqual(json.loads(stdout.getvalue())['exit'],7)
 
 
+class ConfigListPreflight(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.output = self.root/'output';self.output.mkdir(mode=0o700)
+        self.bun = self.root/'bun';self.bun.write_text('synthetic pinned executable')
+        self.bun.chmod(0o555)
+        self.chromium = self.root/'chromium';self.chromium.write_text('synthetic admitted browser')
+        self.before = {'head':SOURCE,'tree':TREE}
+        self.browser = {'bun':{'path':str(self.bun),'sha256':runner.sha(self.bun)},
+                        'chromium':{'path':str(self.chromium),'sha256':runner.sha(self.chromium)}}
+        self.env = {'PATH':'/usr/bin','LANG':'C.UTF-8','PLAYWRIGHT_BROWSERS_PATH':'/qualified/browser',
+                    'HOME':'PRIVATE_HOME','GITHUB_TOKEN':'SYNTHETIC_TOKEN','FVOCI_E2E_ADMIN_DATABASE_URL':'SYNTHETIC_DB_SECRET',
+                    'PASSWORD_PEPPER_KEYS':'SYNTHETIC_PEPPER','DATABASE_URL':'SYNTHETIC_DB_SECRET',
+                    'FVOCI_TEST_TURSO_URL':'SYNTHETIC_REMOTE_SECRET'}
+
+    def listing(self):
+        return {'config':{'workers':1,'metadata':{'selectedBackend':'postgres','selectedFlow':'on'}},
+                'errors':[],'stats':{'expected':0,'unexpected':0,'flaky':0,'skipped':1},
+                'suites':[{'specs':[{'title':runner.KNOWN_ON_BROWSER_TEST,'tests':[{'results':[]}]}]}]}
+
+    def execute(self, exit_code=0, report=True):
+        def child(args, **kw):
+            self.assertEqual(args,[str(self.bun),'--bun','x','--no-install','playwright','test','--config',
+                                  'e2e-pending/collab-playwright.config.ts','--reporter=line,json','--list',
+                                  'workspace-wiki-selected-backend.spec.ts'])
+            self.assertEqual(kw['cwd'],runner.ROOT/'apps/web')
+            self.assertEqual(kw['stdin'],subprocess.DEVNULL)
+            self.assertNotIn('stdout',kw);self.assertNotIn('stderr',kw)
+            allowed = {'PATH','LANG','CI','TMPDIR','BUN_RUNTIME_TRANSPILER_CACHE_PATH','PLAYWRIGHT_BROWSERS_PATH',
+                       'FVOCI_E2E_SELECTED_BACKEND','FVOCI_E2E_SELECTED_FLOW','FVOCI_E2E_SELECTED_AUXILIARY',
+                       'FVOCI_E2E_SELECTED_SOURCE','FVOCI_E2E_SELECTED_COMPILED_SOURCE','FVOCI_E2E_RESULT_DIR',
+                       'PLAYWRIGHT_JSON_OUTPUT_FILE'}
+            self.assertEqual(set(kw['env']),allowed)
+            self.assertEqual(kw['env']['FVOCI_E2E_SELECTED_SOURCE'],SOURCE)
+            self.assertEqual(kw['env']['FVOCI_E2E_SELECTED_COMPILED_SOURCE'],SOURCE)
+            self.assertEqual(kw['env']['CI'],'true')
+            self.assertNotIn('SYNTHETIC_',json.dumps(kw['env']))
+            if report:Path(kw['env']['PLAYWRIGHT_JSON_OUTPUT_FILE']).write_text(json.dumps(self.listing()))
+            if exit_code:print('ORIGINAL_CONFIG_LOAD_FAILURE',file=runner.sys.stderr)
+            return types.SimpleNamespace(returncode=exit_code)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.dict(runner.os.environ,self.env,clear=True), \
+             patch.object(runner,'config_list_inputs',return_value=(self.before,self.browser,{})) as admission, \
+             patch.object(runner.subprocess,'run',side_effect=child) as launch, \
+             patch.object(runner.os,'getuid',return_value=1000),patch.object(runner.os,'getgid',return_value=1000), \
+             contextlib.redirect_stdout(stdout),contextlib.redirect_stderr(stderr):
+            code = runner.config_list(self.output)
+        return code, stdout.getvalue(), stderr.getvalue(), admission.call_count, launch.call_count
+
+    def test_filtered_child_env_and_pinned_list_success_is_zero_body_only(self):
+        code, stdout, stderr, admissions, launches = self.execute()
+        self.assertEqual((code,admissions,launches),(0,2,1));self.assertEqual(stderr,'')
+        receipt = json.loads((self.output/'config-list/qualified.json').read_text())
+        self.assertEqual(receipt['actual_browser_tests'],0);self.assertEqual(receipt['actual_db_tests'],0)
+        self.assertTrue(receipt['list_only']);self.assertNotIn('SYNTHETIC_',stdout)
+        self.assertFalse((self.output/'selected-ci-receipt.json').exists())
+        self.assertFalse((self.output/'runtime').exists())
+        for path in (self.output/'config-list').rglob('*'):
+            self.assertEqual(path.stat().st_mode & 0o777,0o700 if path.is_dir() else 0o600)
+
+    def test_original_nonzero_error_and_exit_precede_any_postcheck_or_resource(self):
+        code, stdout, stderr, admissions, launches = self.execute(7,report=False)
+        self.assertEqual((code,admissions,launches),(7,1,1))
+        self.assertEqual(stderr,'ORIGINAL_CONFIG_LOAD_FAILURE\n')
+        self.assertEqual(json.loads((self.output/'config-list/result.json').read_text())['exit'],7)
+        self.assertFalse((self.output/'config-list/qualified.json').exists())
+        self.assertFalse((self.output/'runtime').exists())
+
+    def test_zero_exit_missing_json_is_not_configuration_load_acceptance(self):
+        with self.assertRaises(AssertionError):self.execute(0,report=False)
+        self.assertEqual(json.loads((self.output/'config-list/result.json').read_text())['exit'],0)
+        self.assertFalse((self.output/'config-list/qualified.json').exists())
+
+    def test_occupied_or_symlink_output_is_preserved_without_launch(self):
+        foreign = self.root/'foreign';foreign.mkdir();(foreign/'old').write_text('retained')
+        destination = self.output/'config-list'
+        for symlink in (False,True):
+            if symlink:destination.symlink_to(foreign,target_is_directory=True)
+            else:destination.mkdir();(destination/'old').write_text('retained')
+            with patch.object(runner,'config_list_inputs',return_value=(self.before,self.browser,{})), \
+                 patch.object(runner.subprocess,'run') as launch:
+                with self.assertRaises(FileExistsError):runner.config_list(self.output)
+                launch.assert_not_called()
+            self.assertEqual((destination/'old').read_text(),'retained')
+            if symlink:destination.unlink()
+            else:(destination/'old').unlink();destination.rmdir()
+
+    def prepare_cohort(self):
+        source = self.root/'source';source.mkdir()
+        config = source/'config.ts';config.write_text('fixed selected config')
+        (source/'apps/web/dist').mkdir(parents=True)
+        (source/'apps/web/dist/asset.js').write_text('fixed dist')
+        external = {str(self.bun):runner.sha(self.bun)}
+        for name in ('@playwright/test','playwright','playwright-core'):
+            path = source/'node_modules'/name/'package.json';path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({'version':'1.63.0'}));external[str(path)]=runner.sha(path)
+        before = {'head':SOURCE,'tree':TREE,'status':'','tracked':{'config.ts':runner.sha(config)},
+                  'external':external,'untracked':{}}
+        binaries = {}
+        for name in ('fvoci-server','fvoci-migrate','fvoci-e2e-fixture','fvoci_server','selected_install_lifetime','collab-engine'):
+            path = self.root/name;path.write_text('synthetic coherent artifact');path.chmod(0o555)
+            binaries[str(path)] = {'sha256':runner.sha(path)}
+        core = self.root/'libfvoci.rlib';core.write_text('synthetic emitted core');core.chmod(0o444)
+        bundle = {'source':SOURCE,'tree':TREE,'binaries':binaries,'compiler_artifacts':[{
+            'target':{'name':'fvoci_server'},'profile':{'test':False},'features':['api-schema','db-tests'],
+            'filenames':[str(core)]}]}
+        receipts = {'before.json':before,'after.json':before,'bundle.json':bundle,
+                    'build-environment.json':{'bun':'1.4.2'},'build-env-inputs.json':{},'compile-receipt.json':{},
+                    'web-receipt.json':{'source':SOURCE,'tree':TREE,'dist_files':{'asset.js':runner.sha(source/'apps/web/dist/asset.js')}},
+                    'abi-receipt.json':{'currentSource':SOURCE,'host_runtime_files':{}}}
+        for name,data in receipts.items():runner.write(self.output/name,data)
+        for stage in ('main','lib','install','engine'):
+            for suffix in ('-stage.json','-compiler.jsonl'):runner.write(self.output/(stage+suffix),{})
+        received = {}
+        for path in [*(self.output/name for name in receipts),*(self.output/(n+s) for n in ('main','lib','install','engine')
+                      for s in ('-stage.json','-compiler.jsonl')),*(Path(p) for p in binaries),core]:
+            received[str(path)] = {'sha256':runner.sha(path),'inode':path.stat().st_ino,'mode':path.stat().st_mode & 0o777}
+        runner.write(self.output/'handoff-consumed.json',{'source':SOURCE,'tree':TREE,'repository':'owned/repo',
+                     'run':'123','attempt':'1','full_current_physical_inputs_equal':True,'fresh_dist_equal':True,'received':received})
+        groups = sorted(os.getgroups())
+        runner.write(self.output/'runtime-access-stage.json',{'source':SOURCE,'tree':TREE,'owner':OWNER,
+                     'runtime_uid':1000,'runtime_gid':1000,'groups':groups,'preflight_exit':0,'preflight':{'missing':0}})
+        browser = self.output/'browser';browser.mkdir(mode=0o700)
+        component = browser/'chromium-123';component.mkdir(mode=0o700)
+        chromium = component/'chrome';chromium.write_text('synthetic private executable');chromium.chmod(0o700)
+        runner.write(self.output/'runtime-browser-stage.json',{'source':SOURCE,'cache':str(browser),'chromium':str(chromium),
+                     'files':{component.name:runner.browser_inventory(component,(1000,1000))},
+                     'metadata':{component.name:runner.browser_inventory(component,(1000,1000),metadata=True)}})
+        env = {'CI':'true','GITHUB_ACTIONS':'true','FVOCI_WEB_BUILD_PHASE':'consume','GITHUB_JOB':'collaboration-flow',
+               'GITHUB_SHA':SOURCE,'GITHUB_REPOSITORY':'owned/repo','GITHUB_RUN_ID':'123','GITHUB_RUN_ATTEMPT':'1',
+               'PLAYWRIGHT_BROWSERS_PATH':str(browser)}
+        def git(args):
+            return TREE if args[-1]=='HEAD^{tree}' else 'config.ts\0' if args[-1]=='-z' else ''
+        return source,config,env,git
+
+    def test_consumed_live_source_metadata_browser_and_groups_must_still_match(self):
+        source, config, env, git = self.prepare_cohort()
+        with patch.dict(runner.os.environ,env,clear=True),patch.object(runner,'identity',return_value=OWNER), \
+             patch.object(runner,'ROOT',source),patch.object(runner,'call',side_effect=git), \
+             patch.object(runner.shutil,'which',return_value=str(self.bun)),patch.object(runner.subprocess,'run') as launch:
+            self.assertEqual(runner.config_list_inputs(self.output)[0]['head'],SOURCE)
+            original = config.read_text();config.write_text('changed config')
+            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+            config.write_text(original)
+            self.bun.chmod(0o555)
+            with patch.object(runner.os,'getgroups',return_value=[0]):
+                with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+            received = self.output/'build-environment.json';received.chmod(0o644)
+            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+            received.chmod(0o600)
+            private_browser = self.output/'browser/chromium-123/chrome';private_browser.chmod(0o755)
+            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+            private_browser.chmod(0o700)
+            with patch.dict(runner.os.environ,{'FVOCI_WEB_BUILD_PHASE':'prepare'}):
+                with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+            with patch.dict(runner.os.environ,{'FVOCI_SELECTED_EXECUTION_MODE':'orca-local'}):
+                with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+            with patch.object(runner.os,'getuid',return_value=0):
+                with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+            with patch.object(runner.sys,'flags',types.SimpleNamespace(optimize=1)):
+                with self.assertRaises(RuntimeError):runner.config_list_inputs(self.output)
+            (self.output/'runtime').mkdir()
+            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+            (self.output/'runtime').rmdir()
+            (self.output/'handoff-consumed.json').unlink()
+            with self.assertRaises(FileNotFoundError):runner.config_list_inputs(self.output)
+            launch.assert_not_called()
+
+    def wrapper(self, leaf=0, owner=0, occupied=False):
+        safe = self.root/'safe';safe.mkdir(mode=0o700)
+        if occupied:
+            name = 'config-list.stderr.log' if occupied == 'stderr' else 'config-list.stdout.log'
+            (safe/name).write_text('OLD_CAPTURE')
+        source = (ROOT/'scripts/run-web-e2e.sh').read_text()
+        start = source.index('  config_list_exit=not-run\n')
+        end = source.index('\nfi\nif [[ "$pending_status"',start)
+        script = self.root/'wrapper-fragment.sh'
+        script.write_text('''set -euo pipefail
+sudo() {
+  for arg in "$@"; do
+    case "$arg" in
+      config-list) printf 'list\n' >> "$MARKS"; printf 'CREDENTIAL_FREE_LIST\n'; printf 'ORIGINAL_LOAD_ERROR\n' >&2; return "$LEAF" ;;
+      run) printf 'run\n' >> "$MARKS"; return 0 ;;
+      owner-return) printf 'owner\n' >> "$MARKS"; printf '{"ownership_return_qualified":false}\n'; return "$OWNER_EXIT" ;;
+    esac
+  done
+  return 0
+}
+''' + source[start:end] + '\nexit "$selected_status"\n')
+        env = {'PATH':os.environ['PATH'],'SELECTED_PHASE':'consume','ROOT':str(ROOT),'safe_diagnostics':str(safe),
+               'FVOCI_SELECTED_CI_OUTPUT':str(self.output),'FVOCI_SELECTED_CI_SQLITE_PARENT':str(self.root/'sqlite'),
+               'runtime_groups':'1000','runner_uid':'1000','runner_gid':'1000','selected_status':'0','pending_status':'0',
+               'LEAF':str(leaf),'OWNER_EXIT':str(owner),'MARKS':str(self.root/'marks')}
+        result = subprocess.run(['bash',str(script)],env=env,capture_output=True,text=True)
+        marks = (self.root/'marks').read_text().splitlines() if (self.root/'marks').exists() else []
+        return result,safe,marks
+
+    def test_wrapper_leaf_failure_skips_real_launcher_preserves_error_and_no_start_owner_gate(self):
+        result,safe,marks = self.wrapper(leaf=7)
+        self.assertEqual(result.returncode,7);self.assertEqual(marks,['list','owner'])
+        receipt = json.loads((safe/'launcher-stage.json').read_text())
+        self.assertIsNone(receipt['actual_launcher_exit']);self.assertEqual(receipt['config_list_exit'],7)
+        self.assertEqual(receipt['selected_final_exit'],7)
+        self.assertEqual((safe/'config-list.stderr.log').read_text(),'ORIGINAL_LOAD_ERROR\n')
+        for name in ('config-list.stdout.log','config-list.stderr.log'):
+            self.assertEqual((safe/name).stat().st_mode & 0o777,0o600)
+
+    def test_wrapper_list_success_still_runs_mandatory_launcher_and_owner_failure_keeps_captures(self):
+        result,safe,marks = self.wrapper(owner=1)
+        self.assertEqual(result.returncode,1);self.assertEqual(marks,['list','run','owner'])
+        receipt = json.loads((safe/'launcher-stage.json').read_text())
+        self.assertEqual(receipt['actual_launcher_exit'],0);self.assertEqual(receipt['config_list_exit'],0)
+        self.assertTrue((safe/'config-list.stdout.log').is_file());self.assertTrue((safe/'config-list.stderr.log').is_file())
+
+    def test_wrapper_occupied_capture_refuses_without_clobber_or_launcher(self):
+        result,safe,marks = self.wrapper(occupied=True)
+        self.assertNotEqual(result.returncode,0);self.assertEqual(marks,['owner'])
+        self.assertEqual((safe/'config-list.stdout.log').read_text(),'OLD_CAPTURE')
+
+    def test_wrapper_occupied_stderr_refuses_without_clobber_or_launcher(self):
+        result,safe,marks = self.wrapper(occupied='stderr')
+        self.assertNotEqual(result.returncode,0);self.assertEqual(marks,['owner'])
+        self.assertEqual((safe/'config-list.stderr.log').read_text(),'OLD_CAPTURE')
+
+
 if __name__=='__main__':unittest.main()
