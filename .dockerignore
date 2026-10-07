@@ -36,3 +36,4 @@ scripts/document-convert/node_modules
 # CodeGraph dev-tool index
 .codegraph
 .venv
+**/__pycache__
