@@ -273,6 +273,127 @@ fn genuine_remote_fk_failure(error: &sqlx::Error) -> Result<bool, &'static str> 
     }
 }
 
+/// `true` only for the maintained Hrana statement rejection whose exposed machine
+/// code is exactly the primary `SQLITE_CONSTRAINT`. The pinned sqld serializes a
+/// constraint failure as that primary code and discards the extended code, so the
+/// code alone never proves a foreign-key failure: it only admits the same-writer
+/// causal witness below. Every other kind, code or message stays refused.
+fn primary_only_hrana_constraint(error: &sqlx::Error) -> bool {
+    let sqlx::Error::AnyDriverError(original) = error else {
+        return false;
+    };
+    matches!(
+        original.downcast_ref::<libsql::Error>(),
+        Some(error @ libsql::Error::Hrana(_))
+            if error.hrana_error_code() == Some("SQLITE_CONSTRAINT")
+    )
+}
+
+const FENCE_TABLE: &str = "task_collab_room_fences";
+
+/// Same-writer causal witness for a primary-only `SQLITE_CONSTRAINT` rejection of
+/// `MIGRATION_UNKNOWN_TASK_FENCE_SQL`, run on the SAME writer that already holds the
+/// original immediate failure: `defer_foreign_keys` must read 0, be enabled and read
+/// back 1 while `foreign_keys` stays 1; the IDENTICAL statement with the IDENTICAL
+/// cells must then succeed, so every non-deferrable constraint of the fence table
+/// (NOT NULL, CHECK, STRICT typing, PRIMARY KEY) is satisfied by exactly these
+/// values; `foreign_key_check` must identify exactly that fence row against the
+/// composite `tasks` key, cross-checked by `foreign_key_list`. The deferred violation
+/// is left for the caller's unconditional rollback and is never committed. Unknown or
+/// refused pragmas, an altered outcome, unexpected rows or a missing mapping fail.
+async fn migration_fk_witness(family: &mut FamilyTx, cells: &[Cell]) -> Result<(), &'static str> {
+    if pragma_integer(family, "PRAGMA defer_foreign_keys").await? != 0 {
+        return Err("DEFER_PRAGMA_REFUSED");
+    }
+    family
+        .execute("PRAGMA defer_foreign_keys=ON", &[])
+        .await
+        .map_err(|_| "DEFER_PRAGMA_REFUSED")?;
+    if pragma_integer(family, "PRAGMA defer_foreign_keys").await? != 1 {
+        return Err("DEFER_PRAGMA_REFUSED");
+    }
+    if pragma_integer(family, "PRAGMA foreign_keys").await? != 1 {
+        return Err("FOREIGN_KEYS_NOT_ONE");
+    }
+    if family
+        .execute(MIGRATION_UNKNOWN_TASK_FENCE_SQL, cells)
+        .await
+        .map_err(|_| "NOT_FK_ONLY")?
+        != 1
+    {
+        return Err("NOT_FK_ONLY");
+    }
+    let check = pragma_rows(family, "PRAGMA foreign_key_check(task_collab_room_fences)", 4).await?;
+    let list = pragma_rows(family, "PRAGMA foreign_key_list(task_collab_room_fences)", 5).await?;
+    fk_witness_mapping(&check, &list)
+}
+
+async fn pragma_integer(family: &mut FamilyTx, statement: &'static str) -> Result<i64, &'static str> {
+    let rows = family
+        .query(statement, &[])
+        .await
+        .map_err(|_| "WITNESS_QUERY_FAILED")?;
+    match (rows.len(), rows.first().map(|row| row.cell(0))) {
+        (1, Some(Ok(Cell::Integer(value)))) => Ok(value),
+        _ => Err("WITNESS_DECODE_FAILED"),
+    }
+}
+
+async fn pragma_rows(
+    family: &mut FamilyTx,
+    statement: &'static str,
+    columns: usize,
+) -> Result<Vec<Vec<Cell>>, &'static str> {
+    let rows = family
+        .query(statement, &[])
+        .await
+        .map_err(|_| "WITNESS_QUERY_FAILED")?;
+    rows.iter()
+        .map(|row| {
+            (0..columns)
+                .map(|index| row.cell(index).map_err(|_| "WITNESS_DECODE_FAILED"))
+                .collect()
+        })
+        .collect()
+}
+
+/// Pure witness mapping: exactly one violating row of the fence table against the
+/// parent `tasks` through foreign key 0, and that key is exactly the composite
+/// (workspace_id,task_id) -> tasks(workspace_id,id) mapping; anything else fails.
+fn fk_witness_mapping(check: &[Vec<Cell>], list: &[Vec<Cell>]) -> Result<(), &'static str> {
+    let [row] = check else {
+        return Err("WITNESS_MISMATCH");
+    };
+    let [table, rowid, parent, fkid] = row.as_slice() else {
+        return Err("WITNESS_MISMATCH");
+    };
+    if *table != Cell::text(FENCE_TABLE)
+        || !matches!(rowid, Cell::Integer(_))
+        || *parent != Cell::text("tasks")
+        || *fkid != Cell::Integer(0)
+    {
+        return Err("WITNESS_MISMATCH");
+    }
+    let expected = [("workspace_id", "workspace_id"), ("task_id", "id")];
+    if list.len() != expected.len() {
+        return Err("WITNESS_MISMATCH");
+    }
+    for (sequence, (row, (child, parent_column))) in list.iter().zip(expected).enumerate() {
+        let [id, seq, table, from, to, ..] = row.as_slice() else {
+            return Err("WITNESS_MISMATCH");
+        };
+        if *id != Cell::Integer(0)
+            || *seq != Cell::Integer(sequence as i64)
+            || *table != Cell::text("tasks")
+            || *from != Cell::text(child)
+            || *to != Cell::text(parent_column)
+        {
+            return Err("WITNESS_MISMATCH");
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn migration_fk_classification_never_uses_arbitrary_error_or_private_message() {
     let sqlite = sqlx::Error::AnyDriverError(Box::new(libsql::Error::SqliteFailure(
@@ -332,12 +453,15 @@ async fn migration_fk_rollback(
             .map_err(|_| "PREFIX_VALIDATION_FAILED")?;
         // Use the actual immutable registry SQL; no copied DDL or fake failure.
         family.apply_migration_batch(steps[11].sql).await.map_err(|_| "DDL_FAILED")?;
-        original_fk_error = family.execute(
-            MIGRATION_UNKNOWN_TASK_FENCE_SQL,
-            &[Cell::uuid(workspace), Cell::uuid(uuid::Uuid::now_v7()), Cell::uuid(uuid::Uuid::now_v7())],
-        ).await.err();
+        let cells = [Cell::uuid(workspace), Cell::uuid(uuid::Uuid::now_v7()), Cell::uuid(uuid::Uuid::now_v7())];
+        original_fk_error = family.execute(MIGRATION_UNKNOWN_TASK_FENCE_SQL, &cells).await.err();
         let error = original_fk_error.as_ref().ok_or("FK_FAILURE_MISSING")?;
-        if !genuine_remote_fk_failure(error)? { return Err("WRONG_FK_FAILURE"); }
+        if !genuine_remote_fk_failure(error)? {
+            // Only the primary-only Hrana code is admitted, and only through the
+            // same-writer causal witness; any other kind or code stays refused.
+            if !primary_only_hrana_constraint(error) { return Err("WRONG_FK_FAILURE"); }
+            migration_fk_witness(family, &cells).await?;
+        }
         Ok(())
     }.await;
     // Always finish the SAME writer after the real FK statement, including an
@@ -2345,6 +2469,94 @@ mod reset_policy_tests {
         assert_eq!(fk_control_observe(&unknown).primary, "UNKNOWN");
         assert_eq!(fk_control_observe(&unknown).extended, "UNKNOWN");
         assert!(!format!("{:?}", fk_control_observe(&unknown)).contains("private-token"));
+
+        // The same-writer witness admission: no numeric, remote, arbitrary-box,
+        // code-less Hrana or non-driver error is ever a primary-only Hrana
+        // SQLITE_CONSTRAINT (a coded Hrana error is private to the SDK; the
+        // pinned-sqld body exercises that path).
+        for error in [
+            generic,
+            sqlx::Error::AnyDriverError(Box::new(libsql::Error::SqliteFailure(
+                787,
+                "SQLITE_CONSTRAINT".into(),
+            ))),
+            remote,
+            unknown,
+            arbitrary,
+            sqlx::Error::AnyDriverError(Box::new(libsql::Error::Hrana(Box::new(
+                std::io::Error::other("SQLITE_CONSTRAINT"),
+            )))),
+            sqlx::Error::PoolTimedOut,
+        ] {
+            assert!(!primary_only_hrana_constraint(&error));
+        }
+
+        // The pure witness mapping: exactly one fence row against the composite
+        // tasks key through foreign key 0, and exactly that key mapping.
+        fn check(table: &str, rowid: Cell, parent: &str, fkid: i64) -> Vec<Cell> {
+            vec![Cell::text(table), rowid, Cell::text(parent), Cell::Integer(fkid)]
+        }
+        fn key(id: i64, seq: i64, table: &str, from: &str, to: &str) -> Vec<Cell> {
+            vec![
+                Cell::Integer(id),
+                Cell::Integer(seq),
+                Cell::text(table),
+                Cell::text(from),
+                Cell::text(to),
+                Cell::text("NO ACTION"),
+                Cell::text("CASCADE"),
+                Cell::text("NONE"),
+            ]
+        }
+        let good_check = [check(FENCE_TABLE, Cell::Integer(1), "tasks", 0)];
+        let good_list = [
+            key(0, 0, "tasks", "workspace_id", "workspace_id"),
+            key(0, 1, "tasks", "task_id", "id"),
+        ];
+        assert_eq!(fk_witness_mapping(&good_check, &good_list), Ok(()));
+        for bad_check in [
+            vec![],
+            vec![
+                check(FENCE_TABLE, Cell::Integer(1), "tasks", 0),
+                check(FENCE_TABLE, Cell::Integer(2), "tasks", 0),
+            ],
+            vec![check("documents", Cell::Integer(1), "tasks", 0)],
+            vec![check(FENCE_TABLE, Cell::Integer(1), "projects", 0)],
+            vec![check(FENCE_TABLE, Cell::Integer(1), "tasks", 1)],
+            vec![check(FENCE_TABLE, Cell::text("1"), "tasks", 0)],
+            vec![check(FENCE_TABLE, Cell::Null, "tasks", 0)],
+            vec![vec![Cell::text(FENCE_TABLE), Cell::Integer(1), Cell::text("tasks")]],
+        ] {
+            assert_eq!(fk_witness_mapping(&bad_check, &good_list), Err("WITNESS_MISMATCH"));
+        }
+        for bad_list in [
+            vec![],
+            vec![key(0, 0, "tasks", "workspace_id", "workspace_id")],
+            vec![
+                key(0, 0, "tasks", "task_id", "id"),
+                key(0, 1, "tasks", "workspace_id", "workspace_id"),
+            ],
+            vec![
+                key(0, 0, "tasks", "workspace_id", "workspace_id"),
+                key(0, 1, "tasks", "task_id", "task_id"),
+            ],
+            vec![
+                key(0, 0, "projects", "workspace_id", "workspace_id"),
+                key(0, 1, "projects", "task_id", "id"),
+            ],
+            vec![
+                key(1, 0, "tasks", "workspace_id", "workspace_id"),
+                key(1, 1, "tasks", "task_id", "id"),
+            ],
+            vec![
+                key(0, 0, "tasks", "workspace_id", "workspace_id"),
+                key(0, 1, "tasks", "task_id", "id"),
+                key(1, 0, "projects", "workspace_id", "workspace_id"),
+            ],
+            vec![vec![Cell::Integer(0), Cell::Integer(0), Cell::text("tasks")], good_list[1].clone()],
+        ] {
+            assert_eq!(fk_witness_mapping(&good_check, &bad_list), Err("WITNESS_MISMATCH"));
+        }
     }
 
     #[tokio::test]
@@ -2392,6 +2604,7 @@ mod reset_policy_tests {
         )));
         let mut observation = FkControlObservation::NOT_OBSERVED;
         let mut strict_fk = "NOT_OBSERVED";
+        let mut witness = "NOT_RUN";
         let mut rollback = "NOT_STARTED";
         let mut preserved = "NOT_RUN";
         let mut healthy = "NOT_RUN";
@@ -2413,14 +2626,28 @@ mod reset_policy_tests {
                 super::super::migrate::turso_test_schema_in_writer(family, 11)
                     .await.map_err(|_| "PREFIX_VALIDATION_FAILED")?;
                 family.apply_migration_batch(steps[11].sql).await.map_err(|_| "DDL_FAILED")?;
-                original_fk_error = family.execute(MIGRATION_UNKNOWN_TASK_FENCE_SQL, &[
-                    Cell::uuid(workspace), Cell::uuid(uuid::Uuid::now_v7()), Cell::uuid(uuid::Uuid::now_v7()),
-                ]).await.err();
+                let cells = [Cell::uuid(workspace), Cell::uuid(uuid::Uuid::now_v7()), Cell::uuid(uuid::Uuid::now_v7())];
+                original_fk_error = family.execute(MIGRATION_UNKNOWN_TASK_FENCE_SQL, &cells).await.err();
                 let error = original_fk_error.as_ref().ok_or("FK_FAILURE_MISSING")?;
                 observation = fk_control_observe(error);
-                let genuine = genuine_remote_fk_failure(error)?;
-                strict_fk = if genuine { "EXPECTED" } else { "REFUSED" };
-                if !genuine { return Err("WRONG_FK_FAILURE"); }
+                strict_fk = "REFUSED";
+                if genuine_remote_fk_failure(error)? {
+                    witness = "NOT_NEEDED";
+                } else if primary_only_hrana_constraint(error) {
+                    // The same-writer causal witness is the only admission of the
+                    // primary-only code; its exact failure category is reported.
+                    witness = match migration_fk_witness(family, &cells).await {
+                        Ok(()) => "PROVEN",
+                        Err(code) => {
+                            witness = code;
+                            return Err(code);
+                        }
+                    };
+                } else {
+                    witness = "NOT_ADMITTED";
+                    return Err("WRONG_FK_FAILURE");
+                }
+                strict_fk = "EXPECTED";
                 Ok(())
             }.await;
             // Keep the exact typed statement error alive through original finish.
@@ -2480,9 +2707,9 @@ mod reset_policy_tests {
         });
         // Only closed categories are printed, after cleanup. Keep own fixture
         // files for ROOT evidence; never print raw exchanges or SDK error text.
-        println!("FVOCI_LOCAL_MIGRATION_FK_CONTROL kind={} primary_code={} extended_code={} hrana_code={} strict_fk={} rollback={} preserved={} healthy={} close={} leases={} fixture={}",
+        println!("FVOCI_LOCAL_MIGRATION_FK_CONTROL kind={} primary_code={} extended_code={} hrana_code={} strict_fk={} witness={} rollback={} preserved={} healthy={} close={} leases={} fixture={}",
             observation.kind, observation.primary, observation.extended, observation.hrana,
-            strict_fk, rollback, preserved, healthy,
+            strict_fk, witness, rollback, preserved, healthy,
             if close.is_ok() { "OK" } else { "UNCONFIRMED" },
             if leases_zero { "ZERO" } else { "FAILED" },
             if fixture_confirmed { "OK" } else { "UNCONFIRMED" });
