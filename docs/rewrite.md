@@ -43,7 +43,7 @@ PASS·FAIL·CANCELLED·NOTRUN·SKIP·MISSING을 구분한다. 실행 시작·준
 | d686 / `E/d686-integration-fast/`·`E/sqlite-ui-cost-v3-and-composition-review/` | maintained CI선택193·OFF등록16·초기실패13 PASS; 별도 `ACCEPT_FIXED_COMPOSITION_SOURCE_ONLY`                                                   | 첫 직접 Python CI선택 실행의 준비 FAIL을 보존; maintained 명령 PASS와 구분. d686 전체 native/UI/CI 수락 아님                                                                                         |
 | SQLite c207 / #331·#335                                                         | native9와 serial child PASS, scoped 검토·통합                                                                                                 | 원래 host FAIL/NOTRUN·bootstrap14 보존; 해당 source/입력의 reader 범위만, d686 UI/ARM/전체 수락 아님                                                                                                 |
 | Turso/selected 2c1d / #331                                                      | native-check7 중 현재3 PASS, scoped 검토·통합                                                                                                 | 나머지 검사와 hosted UI 수락 아님; 원 실패와 SOURCE_ONLY 판정 구분                                                                                                                                   |
-| SQLite UI/archive/비용 v3 / `E/remaining-sqlite-ui-cost-author/source-v3/`      | 47-member seal `546b61d42141dffc4899945aa5c462d69091ccf16b23fa66a98676be4d5a9680`, 별도 `ACCEPT_SOURCE_ONLY`                                  | 정상 기동 observer 실증 MISSING; v3는 b9에 고정. d686 source/codec/command/native/dist/ABI 입력 재바인딩·실제 SQLite 흐름/측정 NOTRUN                                                                |
+| SQLite UI/archive/비용 v3 / `E/remaining-sqlite-ui-cost-author/submission-v3/`  | 47-member seal `546b61d42141dffc4899945aa5c462d69091ccf16b23fa66a98676be4d5a9680`, 별도 `ACCEPT_SOURCE_ONLY`                                  | 정상 기동 observer 실증 MISSING; v3는 b9에 고정. d686 source/codec/command/native/dist/ABI 입력 재바인딩·실제 SQLite 흐름/측정 NOTRUN                                                                |
 | 실제 image source9202 / `E/image9202-postgres-flow-root-acceptance.json`        | 독립 `ACCEPT_ACTUAL_IMAGE_POSTGRES_FLOW_ONLY`: 설치·UI 저장/일치 ACK·앱 역할 DB/native history·새 client·재시작·현재 반출·별도 설치 복원 PASS | image396a의 PostgreSQL 해당 흐름. 중단 없는 단일23-PASS 실행으로 바꾸지 않음. 입력 불변이면 반복하지 않고 새 delta만 확인; SQLite/Turso로 확대하지 않음                                              |
 | source9202 실제 Turso / #331 인계                                               | current12/FK·migration·동일 writer/primary readback·rollback·재연결 scoped 수락                                                               | hosted Turso UI NOTRUN. 과거 false 복구와 현재 exact `FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE=false` 조회 확인을 보존. 앞선 short alias404는 조회명 오류였으며 설정 변경/hosted 실행 없음                 |
 | 설치 수명 수정 / #331 인계·후속                                                 | actual4 PASS/0 ignored/exit0, 15 receipts = 관측 종료12 + 의도적 exceptional-force-reap3                                                      | baseline3 PASS/1 FAIL101·원 Web nested log MISSING 유지. 정상 cancellation/Closed143/noexec·6초 hold·EOF/admission·inode/ledger/user/restart만 수락; 제품 수명 결함 입증 아님                        |
@@ -150,21 +150,21 @@ SOURCE/compile/unit PASS로 실제 DB/browser/image 수락을 대신하지 않�
 사용자 보장: 현재 본문·revision/UUIDv7·범위 번호·리소스 참조·첨부 bytes/권한·JSON 숫자/시간 의미가 저장·새 client·복원 후 유지된다.
 담당/후보: ROOT, SQLite 후속 owner 미배정; candidate d686/native 재바인딩 전 v3는 b9 source-only다.
 남은 실제 검사: personal/project/task-origin·revision/history/native reader·첨부참조와 컬렉션 숫자/날짜 정밀도를 세 backend에서 검증한다. c207 native9·2c1d native3는 해당 qualified scope PASS이며 UI/전체 정밀도 수락 아님.
-수락/근거/재사용: [#342](https://github.com/AISFlow/fvoci/issues/342)·`E/remaining-sqlite-ui-cost-author/source-v3/`·`E/sqlite-ui-cost-v3-and-composition-review/`의 exact oracle/거부 controls를 유지한다. locale/TZif·codec/ABI·source/command 입력을 고정하고 차이를 정규화로 숨기지 않는다. 현재 archive reader의 tamper/missing 거부·원 실패/봉인은 보존한다.
+수락/근거/재사용: [#342](https://github.com/AISFlow/fvoci/issues/342)·`E/remaining-sqlite-ui-cost-author/submission-v3/`·`E/sqlite-ui-cost-v3-and-composition-review/`의 exact oracle/거부 controls를 유지한다. locale/TZif·codec/ABI·source/command 입력을 고정하고 차이를 정규화로 숨기지 않는다. 현재 archive reader의 tamper/missing 거부·원 실패/봉인은 보존한다.
 
 ### 3.6 재시작·반출·별도 설치본 복원
 
 사용자 보장: durable 저장은 정상/실패 후 재시작에도 남으며 현재 archive를 다른 격리 설치본에 복원한 뒤 새 client/native reader가 현재 데이터·권한·리비전·참조·첨부를 확인한다.
 담당/후보: ROOT의 SQLite 유한 runtime owner 미배정, Turso 작성자는 hosted 연결 prerequisite 준비; d686 final input은 재바인딩 필요하다.
 남은 실제 검사: SQLite 정상 기동 observer 실증 → 실제 UI 저장/ON-OFF → restart → 현재 반출/별도 설치 restore → restart/fresh client; hosted Turso의 해당 UI 흐름은 NOTRUN이다.
-수락/근거/재사용: [#342](https://github.com/AISFlow/fvoci/issues/342), `E/image9202-postgres-flow-root-acceptance.json`, `E/remaining-sqlite-ui-cost-author/source-v3/`. 이미 독립 수락한9202 PostgreSQL 흐름은 입력 불변이면 반복하지 않는다. image/compile/readback 범위를 SQLite/Turso에 전용하지 않고 현재 schema12·rollback/close/drain·failure cleanup을 실제 확인한다.
+수락/근거/재사용: [#342](https://github.com/AISFlow/fvoci/issues/342), `E/image9202-postgres-flow-root-acceptance.json`, `E/remaining-sqlite-ui-cost-author/submission-v3/`. 이미 독립 수락한9202 PostgreSQL 흐름은 입력 불변이면 반복하지 않는다. image/compile/readback 범위를 SQLite/Turso에 전용하지 않고 현재 schema12·rollback/close/drain·failure cleanup을 실제 확인한다.
 
 ### 3.7 동등 작업량 ON/OFF 자원 비교
 
 사용자 보장: 같은 사용자 작업·저장/ACK·실패 조건에서 ON/OFF 비용을 비교하며 기능/검사를 줄여 더 빠르다고 하지 않는다.
 담당/후보: ROOT가 유한 실행 owner·caps를 배정; v3 source-only/b9 고정, d686 정상 기동/측정은 NOTRUN이다.
 남은 실제 검사: 같은 backend/data/이미지·작업량·준비/warm 조건을 고정하고 CPU/RSS·ACK latency·DB/room 자원과 정상 종료를 측정한다. non-dumpable 제품 보호를 유지하고 권한 확대 없이 observer/sample 권한을 입증한다.
-수락/근거/재사용: `E/remaining-sqlite-ui-cost-author/source-v3/`의 sealed pair-policy/sampler·정상 launch receipt·raw samples·input hash로 판정한다. 순수 controls PASS·다른 환경 성능은 실제 equal-work 비용 수락이 아니다. 남은 측정은 [#335](https://github.com/AISFlow/fvoci/issues/335)에 연결한다.
+수락/근거/재사용: `E/remaining-sqlite-ui-cost-author/submission-v3/`의 sealed pair-policy/sampler·정상 launch receipt·raw samples·input hash로 판정한다. 순수 controls PASS·다른 환경 성능은 실제 equal-work 비용 수락이 아니다. 남은 측정은 [#335](https://github.com/AISFlow/fvoci/issues/335)에 연결한다.
 
 ## 4. 현재 소유권·다음 행동·승인
 
