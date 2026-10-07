@@ -77,7 +77,9 @@ def failure_checkpoint(receipt, directory, observed_exit, error=None, body_log=N
             with path.open('x') as output:
                 os.fchmod(output.fileno(), 0o600)
                 json.dump({key: receipt.get(key) for key in ('failed_phase', 'observed_failed_exit',
-                    'failure_code', 'original_driver_failure', 'original_body_log_sha256')}, output)
+                    'failure_code', 'original_driver_failure', 'original_body_log_sha256',
+                    'known_browser_test', 'known_browser_status', 'known_browser_checkpoint',
+                    'browser_report_state')}, output)
         receipt['original_failure_checkpoint_sha256'] = sha(path)
     except BaseException:
         receipt.setdefault('diagnostic_errors', []).append('original-failure-checkpoint-write-failed')
@@ -90,7 +92,8 @@ KNOWN_BROWSER_STATUSES = ('failed', 'timedOut', 'interrupted')
 
 def known_browser_checkpoint(report):
     """Use the reporter errorLocation field. Do not parse stacks. Missing stays null."""
-    empty = {'known_browser_test': None, 'known_browser_status': None, 'known_browser_checkpoint': None}
+    empty = {'known_browser_test': None, 'known_browser_status': None,
+             'known_browser_checkpoint': None, 'browser_report_state': 'report-unreadable'}
 
     def known_source(path, suffix):
         if type(path) is not str or len(path) > 4096 or '\n' in path or '\r' in path:
@@ -115,9 +118,11 @@ def known_browser_checkpoint(report):
         config = report.get('config')
         workers = config.get('workers') if isinstance(config, dict) else None
         if type(workers) is not int or workers != 1:
+            empty['browser_report_state'] = 'workers-not-one'
             return empty
         pending = report.get('suites')
         if not isinstance(pending, list):
+            empty['browser_report_state'] = 'spec-mismatch'
             return empty
         found = []
         stack = list(pending)
@@ -135,16 +140,20 @@ def known_browser_checkpoint(report):
         matched = [spec for spec in found if spec.get('title') == KNOWN_ON_BROWSER_TEST
                    and known_source(spec.get('file'), spec_suffix)]
         if len(matched) != 1:
+            empty['browser_report_state'] = 'spec-mismatch'
             return empty
         tests = matched[0].get('tests')
         if not isinstance(tests, list) or len(tests) != 1 or not isinstance(tests[0], dict):
+            empty['browser_report_state'] = 'spec-mismatch'
             return empty
         results = tests[0].get('results')
         if not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict):
+            empty['browser_report_state'] = 'spec-mismatch'
             return empty
         result = results[0]
         status = result.get('status')
         if status not in KNOWN_BROWSER_STATUSES:
+            empty['browser_report_state'] = 'status-not-known'
             return empty
         location = location_of(result)
         checkpoint = None
@@ -154,7 +163,7 @@ def known_browser_checkpoint(report):
                     checkpoint = suffix + ':' + str(location.get('line'))
                     break
         return {'known_browser_test': KNOWN_ON_BROWSER_TEST, 'known_browser_status': status,
-                'known_browser_checkpoint': checkpoint}
+                'known_browser_checkpoint': checkpoint, 'browser_report_state': 'matched'}
     except BaseException:
         return empty
 
@@ -582,17 +591,30 @@ try:
     result = command(args, run / 'browser.log', required=False, env=browser_env, cwd=W / 'apps/web')
     code = result.returncode
     if code != 0:
-        failure_checkpoint(receipt, run, code, body_log=run / 'browser.log')
+        # Mode 0600 on the original raw files, then the allowlisted classification,
+        # then the existing packet. No second copy: the job temp is discarded.
+        browser_log = run / 'browser.log'
+        report_path = run / 'playwright-result.private.json'
+        if browser_log.is_file():
+            os.chmod(browser_log, 0o600)
+        if report_path.is_file():
+            os.chmod(report_path, 0o600)
+            try:
+                receipt['actual_json_report_sha256'] = sha(report_path)
+                receipt.update(known_browser_checkpoint(json.loads(report_path.read_text())))
+            except BaseException:
+                receipt.update(known_browser_test=None, known_browser_status=None,
+                               known_browser_checkpoint=None, browser_report_state='report-unreadable')
+                receipt.setdefault('diagnostic_errors', []).append('browser-report-read-failed')
+        else:
+            receipt.update(known_browser_test=None, known_browser_status=None,
+                           known_browser_checkpoint=None, browser_report_state='report-missing')
+        failure_checkpoint(receipt, run, code, body_log=browser_log)
     receipt.update(browser_exit=code, browser_seconds=time.monotonic()-started,
                    browser_end_utc=now(), browser_log_sha256=sha(run / 'browser.log'))
-    if (run / 'playwright-result.private.json').exists():
+    if (run / 'playwright-result.private.json').exists() and 'actual_json_report_sha256' not in receipt:
         os.chmod(run / 'playwright-result.private.json', 0o600)
         receipt['actual_json_report_sha256'] = sha(run / 'playwright-result.private.json')
-        if code != 0:
-            try:
-                receipt.update(known_browser_checkpoint(json.loads((run / 'playwright-result.private.json').read_text())))
-            except BaseException:
-                receipt.update(known_browser_test=None, known_browser_status=None, known_browser_checkpoint=None)
     if code == 0 and FLOW == 'on':
         assert re.search(r'\b1 passed\b', (run / 'browser.log').read_text())
         report = json.loads((run / 'playwright-result.private.json').read_text())

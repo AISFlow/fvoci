@@ -134,7 +134,7 @@ class EarlyDriverFailure(unittest.TestCase):
         self.assertEqual(runner.public_failure_fields({
             'failed_phase':'browser','failure_code':secret,'original_driver_failure':secret}),
             {'failed_phase':'browser','original_driver_failure_type':None,'original_driver_failure_code':None,
-             'known_browser_test':None,'known_browser_status':None,'known_browser_checkpoint':None})
+             'browser_report_state':None,'known_browser_test':None,'known_browser_status':None,'known_browser_checkpoint':None})
         cases=(
             ('server-ready','AssertionError','SELECTED_DRIVER_EXCEPTION','server-ready','AssertionError','SELECTED_DRIVER_EXCEPTION'),
             ('browser','ReturnedNonzero','SELECTED_BODY_NONZERO','browser','ReturnedNonzero','SELECTED_BODY_NONZERO'),
@@ -171,6 +171,26 @@ class EarlyDriverFailure(unittest.TestCase):
         self.assertIsNone(lane['known_browser_test'])
         self.assertIsNone(lane['known_browser_status'])
         self.assertIsNone(lane['known_browser_checkpoint'])
+        self.assertIsNone(lane['browser_report_state'])
+        browser = dict(complete, failed_phase='browser', failure_code='SELECTED_BODY_NONZERO',
+                       original_driver_failure={'type':'ReturnedNonzero','phase':'browser','observedExit':1},
+                       browser_report_state='matched', known_browser_test=runner.KNOWN_ON_BROWSER_TEST,
+                       known_browser_status='failed',
+                       known_browser_checkpoint='e2e-pending/workspace-wiki-selected-backend.spec.ts:413')
+        diagnostic, raw = self._refused_ownership(browser, 'all mandatory lanes remain required', parent=True)
+        lane = diagnostic['lanes'][0]
+        self.assertFalse(diagnostic['ownership_return_qualified'])
+        self.assertEqual(diagnostic['proof_error_type'], 'AssertionError')
+        self.assertEqual(lane['browser_report_state'], 'matched')
+        self.assertEqual(lane['known_browser_status'], 'failed')
+        self.assertEqual(lane['known_browser_checkpoint'], 'e2e-pending/workspace-wiki-selected-backend.spec.ts:413')
+        self.assertNotIn(secret, raw)
+        missing = dict(browser, browser_report_state='report-missing', known_browser_test=None,
+                       known_browser_status=None, known_browser_checkpoint=None)
+        diagnostic, raw = self._refused_ownership(missing, 'all mandatory lanes remain required', parent=True)
+        self.assertEqual(diagnostic['lanes'][0]['browser_report_state'], 'report-missing')
+        self.assertIsNone(diagnostic['lanes'][0]['known_browser_status'])
+        self.assertNotIn(secret, raw)
 
     def test_checkpoint_reads_only_emitted_location_fields(self):
         secret = 'http://secret.example/a cookie=PRIVATE_BROWSER_SECRET'
@@ -384,6 +404,53 @@ class WholeFinalizationFaults(unittest.TestCase):
         for backend in ('postgres','sqlite','install'):
             for fault in (None,'remove','inputs'):
                 with self.subTest(backend=backend,fault=fault): self.exercise(backend,fault,ordinary=True)
+
+    def test_postgres_nonzero_browser_records_first_error_before_cleanup(self):
+        path = HERE / 'current-postgres-driver.py'
+        tree = ast.parse(path.read_text())
+        main = next(n for n in tree.body if isinstance(n, ast.Try) and n.finalbody)
+        index = next(i for i, n in enumerate(main.body) if isinstance(n, ast.Assign)
+                     and any(isinstance(t, ast.Name) and t.id == 'code' for t in n.targets)
+                     and ast.unparse(n.value) == 'result.returncode')
+        self.assertIsInstance(main.body[index + 1], ast.If)
+        helpers = [n for n in tree.body if (isinstance(n, ast.Assign) and any(
+                       isinstance(t, ast.Name) and t.id in (
+                           'KNOWN_ON_BROWSER_TEST', 'KNOWN_BROWSER_SUFFIXES', 'KNOWN_BROWSER_STATUSES')
+                       for t in n.targets)) or (isinstance(n, ast.FunctionDef)
+                       and n.name in ('failure_checkpoint', 'known_browser_checkpoint'))]
+        secret = 'SECRET_COOKIE=synthetic-not-a-cause'
+        spec_file = '/opt/fvoci/apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'browser.log').write_text('1 failed\n' + secret + '\n')
+            report = {'config': {'workers': 1}, 'suites': [{'specs': [{
+                'title': 'selected normal main: Vue setup, stable wiki create, native persist, manual revision and fresh actor readback',
+                'file': spec_file,
+                'tests': [{'results': [{'status': 'failed', 'error': {'message': secret, 'stack': secret},
+                    'errorLocation': {'file': spec_file, 'line': 42, 'column': 1}}]}]}]}]}
+            (root / 'playwright-result.private.json').write_text(json.dumps(report))
+            attempted = []
+            def command(args, **kwargs):
+                attempted.append(args)
+                raise AssertionError('cleanup must not start')
+            receipt = {'phase': 'browser'}
+            state = {'receipt': receipt, 'run': root, 'result': types.SimpleNamespace(returncode=7),
+                     'os': os, 'json': json, 'command': command,
+                     'sha': lambda item: hashlib.sha256(Path(item).read_bytes()).hexdigest(),
+                     'time': types.SimpleNamespace(monotonic=lambda: 0), 'now': lambda: 'pure-clock'}
+            exec(compile(ast.fix_missing_locations(ast.Module(body=[*helpers, *main.body[index:index + 2]], type_ignores=[])), str(path), 'exec'), state)
+            packet = json.loads((root / 'original-failure.private.json').read_text())
+            self.assertEqual(packet['browser_report_state'], 'matched')
+            self.assertEqual(packet['known_browser_status'], 'failed')
+            self.assertEqual(packet['known_browser_checkpoint'], 'e2e-pending/workspace-wiki-selected-backend.spec.ts:42')
+            self.assertEqual(packet['failure_code'], 'SELECTED_BODY_NONZERO')
+            self.assertNotIn(secret, json.dumps(packet))
+            for name in ('browser.log', 'playwright-result.private.json'):
+                self.assertEqual((root / name).stat().st_mode & 0o777, 0o600)
+            self.assertFalse((root / 'browser-first-error.private.log').exists())
+            self.assertFalse((root / 'playwright-first-error.private.json').exists())
+            self.assertEqual(attempted, [])
+            self.assertFalse((root / 'receipt.json').exists())
 
     def test_pg_parent_fixture_and_post_input_exceptions_still_emit_final_receipt(self):
         path=HERE/'current-postgres-driver.py';tree=ast.parse(path.read_text())
