@@ -2493,7 +2493,7 @@ class RegistryMutationCliTest(unittest.TestCase):
             ("      destructive:\n", "      checkout_sha:\n", "fixed phase inputs"),
             ("default: connection", "default: migration", "fixed phase inputs"),
             ("default: false", "default: true", "fixed phase inputs"),
-            ("Connection and inventory read-only; migration and reset require both destructive gates; others NOT IMPLEMENTED", "All phases implemented", "fixed phase inputs"),
+            ("Connection, inventory and ui-baseline read-only; migration, reset and ui-ack require both destructive gates; others NOT IMPLEMENTED", "All phases implemented", "fixed phase inputs"),
             ("  contents: read\n", "  contents: write\n", "contents read only"),
             ("  cancel-in-progress: false\n", "  cancel-in-progress: true\n", "fixed database concurrency"),
             ("github.repository == 'AISFlow/fvoci'", "github.repository == 'attacker/fvoci'", "trusted admission"),
@@ -2522,8 +2522,65 @@ class RegistryMutationCliTest(unittest.TestCase):
                 proc, output = self._plan_against(root)
                 self._assert_no_green_outputs(proc, output, needle)
 
+    def test_turso_ui_allocation_cannot_expand_credentials_or_bypass_current_binding(self) -> None:
+        cases = [
+            ("    needs: admission\n", "    needs: []\n"),
+            ("github.event.inputs.phase == 'ui-ack'", "github.event.inputs.phase != 'ui-ack'"),
+            ("github.repository == 'AISFlow/fvoci'", "github.repository == 'attacker/fvoci'"),
+            ("github.ref == 'refs/heads/main'", "startsWith(github.ref, 'refs/heads/')"),
+            ("    environment: fvoci-turso-test\n", "    environment: production\n"),
+            ("    timeout-minutes: 40\n", "    timeout-minutes: 90\n"),
+            ("      FVOCI_BUILD_SHA: ${{ github.sha }}\n", "      FVOCI_BUILD_SHA: stale9202\n"),
+            ("      CARGO_BUILD_JOBS: 2\n", "      CARGO_BUILD_JOBS: 12\n"),
+            ("      CARGO_INCREMENTAL: 0\n", "      TOKEN: ${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}\n"),
+            ("          ref: ${{ github.sha }}\n", "          ref: main\n"),
+            ("          persist-credentials: false\n", "          persist-credentials: true\n"),
+            ("          cargo fetch --locked\n", "          cargo fetch\n"),
+            ("          bun-version: 1.4.2\n", "          bun-version: latest\n"),
+            ("          bun install --frozen-lockfile\n", "          bun install\n"),
+            ("          python3 scripts/selected-backend-ci/turso-ui.py --record-before\n", ""),
+            ("          bun run --cwd apps/web build\n", "          cp -r /stale9202/dist apps/web/dist\n"),
+            ("--features api-schema,db-tests --jobs 2", "--features db-tests --jobs 2"),
+            ("--features worker --jobs 2", "--jobs 2"),
+            ("          python3 scripts/selected-backend-ci/turso-ui.py --freeze\n", ""),
+            ("      - name: Actual current primary UI baseline or guarded ON restart OFF consumer\n",
+             "      - name: Actual current primary UI baseline or guarded ON restart OFF consumer\n        if: false\n"),
+            ("${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}", "true"),
+            ("${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}", "${{ secrets.PRODUCTION_TOKEN }}"),
+            ("        run: python3 scripts/selected-backend-ci/turso-test-guard.py --consume\n",
+             "        run: python3 scripts/selected-backend-ci/turso-ui.py --actor\n"),
+        ]
+        for old, new in cases:
+            with self.subTest(mutation=new):
+                root = self._mutated_root()
+                path = root / ".github" / "workflows" / "turso-test.yml"
+                prefix, ui = path.read_text(encoding="utf-8").split("  turso-ui:\n", 1)
+                self.assertIn(old, ui)
+                path.write_text(prefix + "  turso-ui:\n" + ui.replace(old, new, 1), encoding="utf-8")
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, "fixed private Turso UI job and current source baseline consumer")
+        root = self._mutated_root()
+        path = root / ".github" / "workflows" / "turso-test.yml"
+        path.write_text(path.read_text() + "    extra-step: {uses: actions/upload-artifact@v4}\n")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "fixed private Turso UI job and current source baseline consumer")
+
+    def test_turso_ui_inputs_cannot_accept_an_unreviewed_source_or_dataset(self) -> None:
+        for old, new in (("      ui_source_sha:\n", "      arbitrary_source:\n"),
+                         ("      ui_baseline_sha256:\n", "      arbitrary_dataset:\n"),
+                         ("options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline]",
+                          "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack]")):
+            with self.subTest(mutation=new):
+                root = self._mutated_root()
+                path = root / ".github" / "workflows" / "turso-test.yml"
+                text = path.read_text()
+                self.assertIn(old, text)
+                path.write_text(text.replace(old, new, 1))
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, "fixed phase inputs and non-destructive default")
+
     def test_turso_inventory_phase_registration_is_closed_before_outputs(self) -> None:
-        phases = "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack]"
+        phases = "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline]"
         cases = [
             phases.replace(", inventory", ""),
             phases.replace("inventory", "unapproved-phase"),
@@ -2544,7 +2601,7 @@ class RegistryMutationCliTest(unittest.TestCase):
                 )
 
     def test_turso_reset_phase_registration_is_closed_before_outputs(self) -> None:
-        phases = "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack]"
+        phases = "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline]"
         for mutated in (phases.replace(", reset", ""), phases.replace("reset", "unapproved-phase"),
                         phases.replace("reset", "reset, reset"), phases.replace("reset", "reset, unapproved-phase")):
             with self.subTest(phases=mutated):

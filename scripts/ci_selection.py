@@ -1991,15 +1991,17 @@ def verify_turso_workflow(path: Path) -> list[str]:
     require(isinstance(triggers, dict) and set(triggers) == {"push", "workflow_dispatch"} and triggers.get("push") == {"branches": ["fvoci/v060-turso-verified-connection"]}, "manual dispatch only with fixed credential-free bootstrap")
     dispatch = triggers.get("workflow_dispatch", {}) if isinstance(triggers, dict) else {}
     require(dispatch.get("inputs") == {
-        "phase": {"description": "Connection and inventory read-only; migration and reset require both destructive gates; others NOT IMPLEMENTED", "type": "choice", "default": "connection", "options": ["connection", "crud", "transactions", "migration", "inventory", "reset", "persistence", "restore", "ui-ack"]},
-        "destructive": {"description": "Explicit isolated test DB mutation confirmation (connection and inventory must be false)", "type": "boolean", "default": False},
+        "phase": {"description": "Connection, inventory and ui-baseline read-only; migration, reset and ui-ack require both destructive gates; others NOT IMPLEMENTED", "type": "choice", "default": "connection", "options": ["connection", "crud", "transactions", "migration", "inventory", "reset", "persistence", "restore", "ui-ack", "ui-baseline"]},
+        "destructive": {"description": "Explicit isolated test DB mutation confirmation (connection, inventory and ui-baseline must be false)", "type": "boolean", "default": False},
+        "ui_source_sha": {"description": "ROOT reviewed exact UI source SHA (ui-baseline and ui-ack only)", "type": "string", "default": ""},
+        "ui_baseline_sha256": {"description": "ROOT verified just-observed current dataset digest (ui-ack only)", "type": "string", "default": ""},
     } if isinstance(dispatch, dict) else False, "fixed phase inputs and non-destructive default")
     require(data.get("permissions") == {"contents": "read"}, "contents read only")
     require("env" not in data, "no global credential environment")
     require(data.get("concurrency") == {"group": "fvoci-turso-test-database", "cancel-in-progress": False}, "fixed database concurrency without cancellation")
     jobs = data.get("jobs")
-    if not isinstance(jobs, dict) or set(jobs) != {"admission", "turso-connection"}:
-        return [*errors, f"{path.name}: exactly admission and turso-connection jobs required"]
+    if not isinstance(jobs, dict) or set(jobs) != {"admission", "turso-connection", "turso-ui"}:
+        return [*errors, f"{path.name}: exactly admission, turso-connection and turso-ui jobs required"]
     trusted = "github.event_name == 'workflow_dispatch' && github.repository == 'AISFlow/fvoci' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection')"
     bootstrap_admission = "github.repository == 'AISFlow/fvoci' && ((github.event_name == 'push' && github.ref == 'refs/heads/fvoci/v060-turso-verified-connection') || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection')))"
     checkout = {"uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262", "with": {"ref": "${{ github.sha }}", "persist-credentials": False}}
@@ -2013,7 +2015,7 @@ def verify_turso_workflow(path: Path) -> list[str]:
         {"name": "Pure admission fixtures (no credentials or network)", "run": "python3 scripts/selected-backend-ci/turso-test-fixtures.py"},
         {"name": "Verify preexisting Environment (no configuration writes)", "id": "admit", "run": "python3 scripts/selected-backend-ci/turso-test-guard.py --admit"}], "pre-Environment admission steps")
     require(set(runtime) == {"needs", "if", "environment", "runs-on", "timeout-minutes", "env", "steps"}, "runtime job cannot add unchecked execution or permissions")
-    require(runtime.get("needs") == "admission" and runtime.get("if") == trusted + " && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''", "runtime needs successful trusted admission")
+    require(runtime.get("needs") == "admission" and runtime.get("if") == trusted.replace("github.event_name == 'workflow_dispatch'", "github.event_name == 'workflow_dispatch' && github.event.inputs.phase != 'ui-baseline' && github.event.inputs.phase != 'ui-ack'", 1) + " && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''", "runtime needs successful trusted admission")
     require(runtime.get("environment") == "fvoci-turso-test", "fixed Environment")
     require(runtime.get("env") == {"LIBCLANG_PATH": "/usr/lib/llvm-18/lib", "CARGO_BUILD_JOBS": 4, "CARGO_INCREMENTAL": 0, "CARGO_PROFILE_DEV_DEBUG": 0, "CARGO_PROFILE_TEST_DEBUG": 0}, "credential-free compiler environment")
     require(admission.get("runs-on") == runtime.get("runs-on") == "ubuntu-26.04" and admission.get("timeout-minutes") == 5 and runtime.get("timeout-minutes") == 15, "fixed runner and budgets")
@@ -2032,6 +2034,61 @@ def verify_turso_workflow(path: Path) -> list[str]:
         "FVOCI_LIBSQL_AUTH_TOKEN": "${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}",
         "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}",
     }, "run": "python3 scripts/selected-backend-ci/turso-test-guard.py --consume"}, "only one sanitized runtime step consumes two secrets")
+    # Entire private UI allocation is closed: no extra unchecked step, secret
+    # in preparation, artifact upload, mutable source, bypass or other target.
+    require(jobs["turso-ui"] == {'needs': 'admission',
+     'if': "github.event_name == 'workflow_dispatch' && (github.event.inputs.phase == 'ui-baseline' || "
+           "github.event.inputs.phase == 'ui-ack') && github.repository == 'AISFlow/fvoci' && (github.ref == "
+           "'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection') && "
+           "needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''",
+     'environment': 'fvoci-turso-test',
+     'runs-on': 'ubuntu-26.04',
+     'timeout-minutes': 40,
+     'env': {'FVOCI_BUILD_SHA': '${{ github.sha }}',
+             'LIBCLANG_PATH': '/usr/lib/llvm-18/lib',
+             'CARGO_BUILD_JOBS': 2,
+             'CARGO_INCREMENTAL': 0,
+             'CARGO_PROFILE_DEV_DEBUG': 0,
+             'CARGO_PROFILE_TEST_DEBUG': 0,
+             'BUN_INSTALL_CACHE_DIR': '${{ runner.temp }}/turso-bun-cache',
+             'PLAYWRIGHT_BROWSERS_PATH': '${{ runner.temp }}/turso-browsers'},
+     'steps': [{'uses': 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
+                'with': {'ref': '${{ github.sha }}', 'persist-credentials': False}},
+               {'name': 'Credential-free current UI input preparation',
+                'run': 'set -euo pipefail\n'
+                       'printf \'CARGO_TARGET_DIR=%s/turso-ui-target\\n\' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n'
+                       'rustup toolchain install 1.98.1 --profile minimal\n'
+                       'sudo apt-get update\n'
+                       'sudo apt-get install -y --no-install-recommends python3 gcc binutils curl '
+                       'libclang-18-dev=1:18.1.8-20ubuntu8\n'
+                       'mkdir "$RUNNER_TEMP/fvoci-sqlite"\n'
+                       'dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"\n'
+                       'bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \\\n'
+                       '  --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"\n'
+                       'cargo fetch --locked\n'},
+               {'uses': 'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6',
+                'with': {'bun-version': '1.4.2'}},
+               {'name': 'Credential-free fixed dependencies and fresh browser assets',
+                'run': 'set -euo pipefail\n'
+                       'bun install --frozen-lockfile\n'
+                       'bun --bun x playwright install --with-deps chromium\n'
+                       'python3 scripts/selected-backend-ci/turso-ui.py --record-before\n'
+                       'bun run --cwd apps/web build\n'},
+               {'name': 'Credential-free current native UI cohort and freeze',
+                'run': 'set -euo pipefail\n'
+                       'cargo build --locked --offline --features api-schema,db-tests --jobs 2 --bin '
+                       'fvoci-server --bin fvoci-migrate --bin fvoci-e2e-fixture --message-format=json > '
+                       '"$RUNNER_TEMP/ui-compile.json"\n'
+                       'cargo build --locked --offline --manifest-path crates/collab-engine/Cargo.toml '
+                       '--features worker --jobs 2 --bin collab-engine --message-format=json > '
+                       '"$RUNNER_TEMP/ui-engine-compile.json"\n'
+                       'python3 scripts/selected-backend-ci/turso-ui.py --freeze\n'},
+               {'name': 'Actual current primary UI baseline or guarded ON restart OFF consumer',
+                'env': {'FVOCI_DATABASE_BACKEND': 'libsql-remote',
+                        'FVOCI_LIBSQL_URL': '${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}',
+                        'FVOCI_LIBSQL_AUTH_TOKEN': '${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}',
+                        'FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE': '${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}'},
+                'run': 'python3 scripts/selected-backend-ci/turso-test-guard.py --consume'}]}, "fixed private Turso UI job and current source baseline consumer")
     return errors
 
 
