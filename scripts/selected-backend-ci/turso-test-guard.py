@@ -32,6 +32,7 @@ PHASES = (
 REPOSITORY = "AISFlow/fvoci"
 ENVIRONMENT = "fvoci-turso-test"
 REVIEWED_REF = "refs/heads/fvoci/v060-turso-verified-connection"
+UI_REVIEWED_REF = "refs/heads/fvoci/v060-product-integration-20261005"
 TEST_NAME = "db::turso_test::turso_primary_connection"
 MIGRATION_TEST_NAME = "db::turso_test::turso_primary_current12_install_resume"
 INVENTORY_TEST_NAME = "db::turso_test::turso_primary_migration_target_inventory"
@@ -55,8 +56,9 @@ def boolean(value):
 
 def validate_dispatch(context, inputs, checkout_sha):
     manual = context.get("event_name") == "workflow_dispatch" and context.get("ref") in ("refs/heads/main", REVIEWED_REF)
+    ui_manual = context.get("event_name") == "workflow_dispatch" and context.get("ref") == UI_REVIEWED_REF
     bootstrap = context.get("event_name") == "push" and context.get("ref") == REVIEWED_REF
-    if context.get("repository") != REPOSITORY or not (manual or bootstrap):
+    if context.get("repository") != REPOSITORY or not (manual or ui_manual or bootstrap):
         reject("UNTRUSTED_DISPATCH")
     sha = context.get("sha", "")
     if not re.fullmatch(r"[0-9a-f]{40}", sha) or checkout_sha != sha:
@@ -64,6 +66,8 @@ def validate_dispatch(context, inputs, checkout_sha):
     phase = inputs.get("phase", "connection")
     if phase not in PHASES:
         reject("UNKNOWN_PHASE")
+    if ui_manual and phase not in ("ui-baseline", "ui-ack"):
+        reject("UI_REF_PHASE_REQUIRED")
     destructive = boolean(inputs.get("destructive", False))
     if bootstrap and phase != "connection":
         reject("SECRET_MODE_REQUIRES_MANUAL")

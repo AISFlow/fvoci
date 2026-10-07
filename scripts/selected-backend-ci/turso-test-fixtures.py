@@ -84,6 +84,20 @@ class AdmissionTests(unittest.TestCase):
             result = subprocess.run(["python3", str(GUARD_PATH), "--consume"], env=environment, capture_output=True, text=True, check=False)
             self.assertEqual((result.returncode, result.stdout, result.stderr), (78, "", "SECRET_MODE_REQUIRES_MANUAL\n"))
 
+    def test_product_integration_ref_is_manual_ui_only(self):
+        ui = dict(self.context, ref=guard.UI_REVIEWED_REF)
+        self.assertEqual(guard.validate_dispatch(ui, {"phase": "ui-baseline", "destructive": False}, "a" * 40), "ui-baseline")
+        self.assertEqual(guard.validate_dispatch(ui, {"phase": "ui-ack", "destructive": True}, "a" * 40), "ui-ack")
+        self.denied("UNTRUSTED_DISPATCH", guard.validate_dispatch, dict(ui, event_name="push"), self.inputs, "a" * 40)
+        self.denied("UNTRUSTED_DISPATCH", guard.validate_dispatch, dict(ui, event_name="pull_request"), self.inputs, "a" * 40)
+        self.denied("UNTRUSTED_DISPATCH", guard.validate_dispatch, dict(ui, repository="attacker/fvoci"), {"phase": "ui-baseline", "destructive": False}, "a" * 40)
+        self.denied("CHECKOUT_MISMATCH", guard.validate_dispatch, ui, {"phase": "ui-baseline", "destructive": False}, "b" * 40)
+        for phase in guard.PHASES:
+            if phase in ("ui-baseline", "ui-ack"):
+                continue
+            destructive = phase not in ("connection", "inventory")
+            self.denied("UI_REF_PHASE_REQUIRED", guard.validate_dispatch, ui, {"phase": phase, "destructive": destructive}, "a" * 40)
+
     def test_denied_event_repository_and_ref(self):
         for key, value in (
             ("event_name", "pull_request"),
@@ -994,6 +1008,9 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(workflow.count("ref: ${{ github.sha }}"), 3)
         self.assertEqual(workflow.count("github.repository == 'AISFlow/fvoci'"), 3)
         self.assertEqual(workflow.count("refs/heads/fvoci/v060-turso-verified-connection"), 4)
+        self.assertEqual(workflow.count(guard.UI_REVIEWED_REF), 2)
+        self.assertNotIn(guard.UI_REVIEWED_REF, workflow.split("  turso-connection:", 1)[1].split("  turso-ui:", 1)[0])
+        self.assertNotIn(guard.UI_REVIEWED_REF, workflow.split("jobs:", 1)[0])
         self.assertEqual(workflow.count("timeout-minutes: 5"), 1)
         self.assertEqual(workflow.count("timeout-minutes: 15"), 1)
         self.assertEqual(workflow.count("environment: fvoci-turso-test"), 2)

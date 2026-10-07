@@ -2037,7 +2037,7 @@ def verify_turso_workflow(path: Path) -> list[str]:
     if not isinstance(jobs, dict) or set(jobs) != {"admission", "turso-connection", "turso-ui"}:
         return [*errors, f"{path.name}: exactly admission, turso-connection and turso-ui jobs required"]
     trusted = "github.event_name == 'workflow_dispatch' && github.repository == 'AISFlow/fvoci' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection')"
-    bootstrap_admission = "github.repository == 'AISFlow/fvoci' && ((github.event_name == 'push' && github.ref == 'refs/heads/fvoci/v060-turso-verified-connection') || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection')))"
+    bootstrap_admission = "github.repository == 'AISFlow/fvoci' && ((github.event_name == 'push' && github.ref == 'refs/heads/fvoci/v060-turso-verified-connection') || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/fvoci/v060-product-integration-20261005' && (github.event.inputs.phase == 'ui-baseline' || github.event.inputs.phase == 'ui-ack')))"
     checkout = {"uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262", "with": {"ref": "${{ github.sha }}", "persist-credentials": False}}
     admission = jobs["admission"]
     runtime = jobs["turso-connection"]
@@ -2073,7 +2073,8 @@ def verify_turso_workflow(path: Path) -> list[str]:
     require(jobs["turso-ui"] == {'needs': 'admission',
      'if': "github.event_name == 'workflow_dispatch' && (github.event.inputs.phase == 'ui-baseline' || "
            "github.event.inputs.phase == 'ui-ack') && github.repository == 'AISFlow/fvoci' && (github.ref == "
-           "'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection') && "
+           "'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection' || "
+           "github.ref == 'refs/heads/fvoci/v060-product-integration-20261005') && "
            "needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''",
      'environment': 'fvoci-turso-test',
      'runs-on': 'ubuntu-26.04',

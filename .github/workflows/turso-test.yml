@@ -38,7 +38,7 @@ concurrency:
 
 jobs:
   admission:
-    if: github.repository == 'AISFlow/fvoci' && ((github.event_name == 'push' && github.ref == 'refs/heads/fvoci/v060-turso-verified-connection') || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection')))
+    if: github.repository == 'AISFlow/fvoci' && ((github.event_name == 'push' && github.ref == 'refs/heads/fvoci/v060-turso-verified-connection') || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/fvoci/v060-product-integration-20261005' && (github.event.inputs.phase == 'ui-baseline' || github.event.inputs.phase == 'ui-ack')))
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
@@ -100,7 +100,7 @@ jobs:
 
   turso-ui:
     needs: admission
-    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.phase == 'ui-baseline' || github.event.inputs.phase == 'ui-ack') && github.repository == 'AISFlow/fvoci' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection') && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.phase == 'ui-baseline' || github.event.inputs.phase == 'ui-ack') && github.repository == 'AISFlow/fvoci' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection' || github.ref == 'refs/heads/fvoci/v060-product-integration-20261005') && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''
     environment: fvoci-turso-test
     runs-on: ubuntu-26.04
     timeout-minutes: 40
