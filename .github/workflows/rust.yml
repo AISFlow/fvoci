@@ -67,6 +67,13 @@ jobs:
         run: bash scripts/fixtures/rust-ci/run-collaboration-admission-fixture-test.sh
       - name: Pinned SQLite build wiring fixtures (no native compilation)
         run: python3 scripts/fixtures/sqlite-ci/test-wiring.py
+      - name: Script unit tests without a database
+        run: |
+          python3 scripts/schema-baseline/test_compare_catalogs.py
+          python3 scripts/fixtures/rustup-ci/test_metadata.py
+          python3 scripts/selected-backend-ci/test_early_driver_failure.py
+          python3 scripts/selected-backend-ci/test_restart_ledger.py
+          python3 scripts/selected-backend-ci/test_current_binding_engine_features.py
       - name: restore.sh env-file parsing and app password argv checks
         run: bash scripts/test-restore-env.sh
       - name: Restore Cargo downloads
