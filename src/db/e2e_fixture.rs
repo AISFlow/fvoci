@@ -45,6 +45,22 @@ struct TableComparison {
 }
 
 impl TableComparison {
+    fn identifiers(actual: &[String], expected: &[String]) -> Self {
+        // SQLite compares identifiers without ASCII case distinctions:
+        // https://sqlite.org/c3ref/stricmp.html and datatype3.html#collation.
+        // Catalog BINARY order can change with spelling, so sort after folding.
+        // Retain duplicate entries: list equality must refuse extra catalog rows.
+        let fold = |names: &[String]| {
+            let mut names = names
+                .iter()
+                .map(|name| name.to_ascii_lowercase())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        Self::observe(&fold(actual), &fold(expected))
+    }
+
     fn observe(actual: &[String], expected: &[String]) -> Self {
         let actual_set = actual.iter().collect::<BTreeSet<_>>();
         let expected_set = expected.iter().collect::<BTreeSet<_>>();
@@ -585,8 +601,9 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
         let mut expected = PRESERVATION_READS.iter().map(|(name, _)| name.to_string()).collect::<Vec<_>>();
         expected.sort();
         phase = "table-contract";
-        if names != expected {
-            table_comparison = Some(TableComparison::observe(&names, &expected));
+        let comparison = TableComparison::identifiers(&names, &expected);
+        if !comparison.order_equal {
+            table_comparison = Some(comparison);
             return Err(refused());
         }
         let mut fingerprints = BTreeMap::new();
@@ -809,6 +826,56 @@ mod tests {
         );
         assert_ne!(exact(Cell::Blob(vec![0, 255])), exact(Cell::text("00ff")));
         assert_ne!(exact(Cell::Null), exact(Cell::text("null")));
+    }
+
+    #[test]
+    fn table_identifiers_fold_ascii_then_sort_without_losing_duplicates() {
+        let expected = PRESERVATION_READS
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(expected.len(), 99);
+        let mut actual = expected.clone();
+        *actual.iter_mut().find(|name| *name == "groups").unwrap() = "GROUPS".into();
+        // sqlite_schema ORDER BY name uses BINARY: GROUPS precedes api_tokens.
+        // Identifier order must instead be compared after ASCII folding and sorting.
+        actual.sort();
+        assert_eq!(actual[0], "GROUPS");
+        assert!(TableComparison::identifiers(&actual, &expected).order_equal);
+
+        let mut different = actual.clone();
+        different[0] = "different_table".into();
+        let comparison = TableComparison::identifiers(&different, &expected);
+        assert!(!comparison.order_equal);
+        assert_eq!(comparison.actual_only_count, 1);
+        assert_eq!(comparison.expected_only_count, 1);
+
+        let mut extra = actual.clone();
+        extra.push("extra_table".into());
+        let comparison = TableComparison::identifiers(&extra, &expected);
+        assert!(!comparison.order_equal);
+        assert_eq!(comparison.actual_only_count, 1);
+        assert_eq!(comparison.expected_only_count, 0);
+
+        let comparison = TableComparison::identifiers(&actual[1..], &expected);
+        assert!(!comparison.order_equal);
+        assert_eq!(comparison.actual_only_count, 0);
+        assert_eq!(comparison.expected_only_count, 1);
+
+        // Compare lists, not deduplicated sets: two spellings of one identifier
+        // are still an invalid extra catalog row, even though setEqual is true.
+        let mut duplicate = actual.clone();
+        duplicate.push("groups".into());
+        let comparison = TableComparison::identifiers(&duplicate, &expected);
+        assert!(!comparison.order_equal);
+        assert!(comparison.set_equal);
+        assert_eq!(comparison.actual_count, 100);
+
+        let comparison = TableComparison::identifiers(&["Ä".into()], &["ä".into()]);
+        assert!(
+            !comparison.order_equal,
+            "SQLite identifier folding is ASCII-only"
+        );
     }
 
     #[test]

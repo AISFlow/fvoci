@@ -448,6 +448,8 @@ def baseline_failure_diagnostic(value):
             return None
         result = {'phase': item['phase'], 'category': item['category']}
         if 'tableComparison' in item:
+            # Native facts compare sorted ASCII-folded table identifiers; counts
+            # retain duplicate rows and indices refer to those folded lists.
             comparison = item['tableComparison']
             keys = {'expectedCount','actualCount','setEqual','orderEqual',
                     'actualOnlyCount','expectedOnlyCount','actualOnlyUnderscoreCount',

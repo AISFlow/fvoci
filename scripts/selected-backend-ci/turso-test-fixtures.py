@@ -1843,6 +1843,21 @@ class UiAdapterTests(unittest.TestCase):
         self.assertEqual(diagnostic['baselineFailure'], {'phase': 'table-contract', 'category': 'protocol'})
         self.assertEqual(diagnostic['diagnosticStatus'], 'qualified')
 
+    def test_table_contract_projection_keeps_folded_identifier_duplicate_refusal(self):
+        # [api_tokens, GROUPS, groups] folds/sorts to [api_tokens, groups, groups].
+        # Against [api_tokens, groups], set equality cannot accept the extra row.
+        facts = {'expectedCount': 2, 'actualCount': 3, 'setEqual': True,
+                 'actualOnlyCount': 0, 'expectedOnlyCount': 0, 'actualOnlyUnderscoreCount': 0,
+                 'orderEqual': False, 'firstMismatchIndex': 2, 'actualMismatchExpectedIndex': 1}
+        packet = self.baseline_packet()
+        packet['nativeOutcome']['baselineFailure'] = {'phase': 'table-contract', 'category': 'protocol',
+                                                      'tableComparison': facts}
+        diagnostic = self.ui.baseline_failure_diagnostic(packet)
+        self.assertEqual(diagnostic['diagnosticStatus'], 'qualified')
+        self.assertEqual(diagnostic['baselineFailure']['tableComparison'], facts)
+        self.assertEqual(len(diagnostic['baselineFailure']['tableComparison']), 9)
+        self.assertNotIn('groups', json.dumps(diagnostic))
+
     def test_table_contract_projection_refuses_private_names_and_forged_counts_or_indices(self):
         facts = {'expectedCount': 99, 'actualCount': 99, 'setEqual': False,
                  'actualOnlyCount': 1, 'expectedOnlyCount': 1, 'actualOnlyUnderscoreCount': 0,
