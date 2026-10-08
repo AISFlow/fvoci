@@ -1,0 +1,196 @@
+name: CI base image
+
+on:
+  pull_request:
+    paths: &image-paths
+      - docker/ci-base/**
+      - scripts/ci/**
+      - .github/workflows/ci-base-image.yml
+      - scripts/ci_selection.py
+      - rust-toolchain.toml
+      - .bun-version
+      - apps/web/package.json
+  push:
+    branches: [main]
+    paths: *image-paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-base-image-${{ github.event_name == 'pull_request' && github.ref || 'publication' }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.event_name == 'pull_request'
+    strategy: &native-matrix
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        image: [ci-base, ci-web]
+        include:
+          - runner: ubuntu-26.04
+            arch: amd64
+          - runner: ubuntu-26.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps: &image-steps
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Prepare pinned Bun on native runner
+        run: &bun-bootstrap |
+          set -euo pipefail
+          work="$RUNNER_TEMP/ci-base-bun"
+          mkdir "$work"
+          case "$(uname -m)" in
+            x86_64) archive=bun-linux-x64; checksum=36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913 ;;
+            aarch64) archive=bun-linux-aarch64; checksum=54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7 ;;
+            *) exit 1 ;;
+          esac
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/$archive.zip" -o "$work/bun.zip"
+          printf '%s  %s\n' "$checksum" "$work/bun.zip" | sha256sum --check --strict
+          unzip -q "$work/bun.zip" -d "$work"
+          test "$("$work/$archive/bun" --version)" = 1.4.2
+          printf '%s\n' "$work/$archive" >> "$GITHUB_PATH"
+      - name: GHCR login (publication only)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          DOCKER_CONFIG: ${{ runner.temp }}/ci-base-docker
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Native build, inspect and publish only after checks
+        env:
+          ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.image }}
+          PUBLISH: ${{ github.ref == 'refs/heads/main' }}
+          DOCKER_CONFIG: ${{ runner.temp }}/ci-base-docker
+        run: |
+          set -euo pipefail
+          bun scripts/ci/ci-base-image.ts inputs
+          bun test scripts/ci/ci-base-image.test.ts
+          [[ "$(uname -m)" == "$([[ "$ARCH" == amd64 ]] && echo x86_64 || echo aarch64)" ]]
+          IMAGE="ghcr.io/aisflow/fvoci-$TARGET"
+          work=$(mktemp -d "$RUNNER_TEMP/ci-base.XXXXXX")
+          builder="$TARGET-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$ARCH"
+          tag="$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$ARCH"
+          ref="$IMAGE:$tag"
+          cleanup() {
+            code=$?
+            if [[ -f "$work/build.log" ]]; then
+              if ! bun scripts/ci/ci-base-image.ts summary "$work/build.log" "$work/image.json" | tee -a "$GITHUB_STEP_SUMMARY"; then
+                if [[ "$code" == 0 ]]; then code=1; fi
+              fi
+            fi
+            docker buildx rm "$builder" >/dev/null 2>&1 || true
+            docker logout ghcr.io >/dev/null 2>&1 || true
+            rm -rf "$work" "$DOCKER_CONFIG" "$RUNNER_TEMP/ci-base-bun"
+            exit "$code"
+          }
+          trap cleanup EXIT
+          docker buildx version
+          docker buildx create --name "$builder" --driver docker-container --use
+          docker buildx inspect --bootstrap
+          args=(--platform "linux/$ARCH" --file docker/ci-base/Dockerfile --target "$TARGET"
+                --label "org.opencontainers.image.source=https://github.com/AISFlow/fvoci"
+                --label "org.opencontainers.image.revision=$GITHUB_SHA"
+                --provenance=false --progress=plain)
+          started=$SECONDS
+          docker buildx build "${args[@]}" --tag "$ref" --load \
+            --cache-from "type=registry,ref=$IMAGE:cache-$ARCH" docker/ci-base 2>&1 | tee "$work/build.log"
+          printf 'Native build %s/%s: %ss\n' "$TARGET" "$ARCH" "$((SECONDS-started))" | tee -a "$GITHUB_STEP_SUMMARY"
+          docker image inspect "$ref" --format '{{json .}}' > "$work/image.json"
+          docker image inspect "$ref" --format '{{index .Config.Labels "org.opencontainers.image.source"}}'
+          docker image save "$ref" --output "$work/image.tar"
+          bun scripts/ci/ci-base-image.ts scan "$work/image.tar" "$work/image.json" "$ARCH"
+          docker run --rm --network none "$ref" bash -ec '
+            test "$(id -u):$(id -g)" = 1000:1000
+            test "$(rustc --version | cut -d" " -f2)" = 1.98.1
+            test "$(bun --version)" = 1.4.2
+            cargo fmt --version
+            cargo clippy --version
+            git --version
+            zstd --version
+            dpkg-query -W ca-certificates
+            test -s /etc/ssl/certs/ca-certificates.crt
+            test -f "$LIBCLANG_PATH/libclang.so"
+          '
+          if [[ "$TARGET" == ci-web ]]; then
+            docker run --rm --network none "$ref" bash -ec '
+              browser=$(find "$PLAYWRIGHT_BROWSERS_PATH" -type f -path "*/chrome-linux*/chrome" -print -quit)
+              test -n "$browser"
+              "$browser" --headless --no-sandbox --disable-gpu --dump-dom about:blank
+            '
+          fi
+          if [[ "$PUBLISH" == true ]]; then
+            started=$SECONDS
+            docker push "$ref"
+            # Export only the already inspected recipe's local BuildKit layers.
+            docker buildx build "${args[@]}" --output type=cacheonly \
+              --cache-to "type=registry,ref=$IMAGE:cache-$ARCH,mode=max" docker/ci-base
+            printf 'Image/cache publish %s/%s: %ss\n' "$TARGET" "$ARCH" "$((SECONDS-started))" | tee -a "$GITHUB_STEP_SUMMARY"
+            docker buildx imagetools inspect "$ref" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+  push:
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    strategy: *native-matrix
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps: *image-steps
+
+  push-manifest:
+    if: github.ref == 'refs/heads/main'
+    needs: push
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [ci-base, ci-web]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Prepare pinned Bun on native runner
+        run: *bun-bootstrap
+      - name: Publish multi-arch manifest by verified digests
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          TARGET: ${{ matrix.image }}
+          DOCKER_CONFIG: ${{ runner.temp }}/ci-base-manifest-docker
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/aisflow/fvoci-$TARGET"
+          work=$(mktemp -d "$RUNNER_TEMP/ci-base-manifest.XXXXXX")
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true; rm -rf "$work" "$DOCKER_CONFIG" "$RUNNER_TEMP/ci-base-bun"' EXIT
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          prefix="$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          sources=()
+          for arch in amd64 arm64; do
+            ref="$IMAGE:$prefix-$arch"
+            docker buildx imagetools inspect "$ref" --format '{{json .Image}}' > "$work/config.json"
+            docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' > "$work/manifest.json"
+            digest=$(bun scripts/ci/ci-base-image.ts arch-digest "$work/config.json" "$work/manifest.json" "$arch")
+            sources+=("$IMAGE@$digest")
+            docker buildx imagetools inspect "$ref" --raw > "$work/raw.json"
+            bun scripts/ci/ci-base-image.ts layer-size "$work/raw.json" "$arch" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          started=$SECONDS
+          ref="$IMAGE:sha-$GITHUB_SHA"
+          docker buildx imagetools create --tag "$ref" "${sources[@]}"
+          docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' > "$work/index.json"
+          bun scripts/ci/ci-base-image.ts manifest "$work/index.json" "$IMAGE" "${sources[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          printf 'Manifest publish: %ss\n' "$((SECONDS-started))" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -49,6 +49,7 @@ WORKFLOW_YAML: dict[str, str] = {
 # selection workflow, so it has no ci-plan/gate; it is allowed only while it
 # cannot run for untrusted refs and write scopes stay in the listed jobs.
 RELEASE_WORKFLOW_FILE = "release.yml"
+CI_BASE_WORKFLOW_FILE = "ci-base-image.yml"
 RELEASE_WRITE_SCOPES: dict[str, frozenset[str]] = {
     "build": frozenset({"packages"}),
     "index": frozenset({"packages"}),
@@ -1317,7 +1318,7 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
 def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     workflows_dir = repo_root / ".github" / "workflows"
-    allowed_files = {*WORKFLOW_YAML.values(), RELEASE_WORKFLOW_FILE}
+    allowed_files = {*WORKFLOW_YAML.values(), RELEASE_WORKFLOW_FILE, CI_BASE_WORKFLOW_FILE}
     discovered_files = list_workflow_files(repo_root)
     if not workflows_dir.is_dir():
         errors.append("missing .github/workflows directory")
