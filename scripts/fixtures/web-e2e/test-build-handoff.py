@@ -479,8 +479,12 @@ def run(output):
             source=(ROOT/'scripts/run-web-e2e.sh').read_text()
             if original:
                 source=ORIGINAL_C7_SELECTED_FOOTER
+            if not original:
+                self.assertIn('\nSELECTED_PHASE="whole"\n', source[:source.index('selected_status=0\n')])
             footer=source[source.index('selected_status=0\n'):]
             environment={'PATH':str(fake)+':'+os.defpath,'ROOT':str(repo),'RUNNER_TEMP':str(temp),
+                # Footer extraction omits the wrapper's real argument-parser default.
+                'SELECTED_PHASE':'whole',
                 'SELECTED_BACKENDS':'true','FVOCI_SELECTED_CI_OUTPUT':str(output),
                 'FVOCI_SELECTED_CI_SQLITE_PARENT':str(sqlite),'SQLITE3_LIB_DIR':str(lib),
                 'CI':'true','GITHUB_ACTIONS':'true','GITHUB_JOB':'collaboration-flow',
@@ -542,6 +546,7 @@ print(json.dumps({'diagnostics':facts(d) if d.exists() else None,
     def test_fixed_exact_footer_real_access_then_private_owner_roundtrip(self):
         result,facts=self.case()
         self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIsNone(facts['safe_launcher']['config_list_exit'])
         self.assertEqual(facts['marker'],{'uid':1000,'gid':1000,'groups':[986,1001]})
         self.assertEqual(facts['stage']['groups'],[986,1001])
         self.assertEqual(facts['stage']['preflight']['missing'],0)
@@ -626,7 +631,7 @@ print(json.dumps({'diagnostics':facts(d) if d.exists() else None,
                 self.assertEqual(lane['launcher_observed_driver_exit'],7)
                 self.assertEqual(lane['receipt_final_exit'],7)
                 self.assertEqual(len(lane['receipt_sha256']),64)
-                self.assertEqual(facts['safe_launcher'],{'actual_launcher_exit':7,'ownership_return_exit':1,'selected_final_exit':7,'pending_exit':0})
+                self.assertEqual(facts['safe_launcher'],{'actual_launcher_exit':7,'ownership_return_exit':1,'selected_final_exit':7,'pending_exit':0,'config_list_exit':None})
                 self.assertNotIn('PRIVATE_CANARY',json.dumps(summary))
                 key='recorded_process_identities_retired' if fault=='missing-pid' else 'owned_loopback_port_closed'
                 self.assertIn(key,lane['invalid_required_fields'] if fault=='invalid-port' else lane['missing_required_fields'])

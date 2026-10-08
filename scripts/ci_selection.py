@@ -2101,7 +2101,8 @@ def verify_turso_workflow(path: Path) -> list[str]:
                        'dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"\n'
                        'bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \\\n'
                        '  --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"\n'
-                       'cargo fetch --locked\n'},
+                       'cargo fetch --locked\n'
+                       'cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml\n'},
                {'uses': 'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6',
                 'with': {'bun-version': '1.4.2'}},
                {'name': 'Credential-free fixed dependencies and fresh browser assets',
