@@ -1063,7 +1063,7 @@ def postgres_matrix_inventory(jobs: dict) -> tuple[dict[str, set[str]], str | No
 
 # Finite PG16 A budget split; these two complete targets alone move to C.
 RUST_POSTGRES_C_TARGETS = frozenset({"task_integration", "comment_integration"})
-RUST_POSTGRES_BUDGET = "${{ matrix.shard == 'b' && 20 || 15 }}"
+RUST_POSTGRES_BUDGET = "${{ matrix.shard == 'b' && (matrix.runner == 'ubuntu-26.04-arm' && 25 || 20) || 15 }}"
 RUST_POSTGRES_IMAGES = {
     "16": "postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54",
     "17": "postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f",
@@ -1084,7 +1084,7 @@ def verify_postgres_budget_matrix(jobs: dict) -> list[str]:
         return ["rust: PostgreSQL budget job missing"]
     errors: list[str] = []
     if job.get("timeout-minutes") != RUST_POSTGRES_BUDGET:
-        errors.append("rust: PostgreSQL budget must retain A/C15m and B20m")
+        errors.append("rust: PostgreSQL budget must retain A/C15m, x64 B20m and ARM64 B25m")
     if job.get("runs-on") != "${{ matrix.runner }}" or "continue-on-error" in job:
         errors.append("rust: PostgreSQL budget requires isolated matrix runners without error masking")
     strategy = job.get("strategy", {})

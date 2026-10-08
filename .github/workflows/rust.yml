@@ -195,7 +195,9 @@ jobs:
       matrix:
         # A/C split only task/comment from measured PG16 A: 160.19s moved,
         # 404.03s retained (cold compile/setup are separate). Both keep 15m.
-        # B retains its existing targets/helper/install/S3 and 20m budget.
+        # B retains every target/helper/install/S3: x64 20m, ARM64 25m.
+        # Measured ARM setup/PG 17m59.916s + install 3m30s + S3/post 34s
+        # = 22m03.916s; 25m leaves 2m56.084s for hosted variation/cleanup.
         # Each major/architecture pair runs every suite exactly once across
         # A/B/C. PG18 covers both architectures; PG16/17 cover x64.
         # Keep image pins in sync with scripts/start-test-postgres.sh.
@@ -274,8 +276,8 @@ jobs:
             tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration
     runs-on: ${{ matrix.runner }}
     # Main PG16 B measured ~818s PostgreSQL + ~48s S3, exceeding 15m with setup.
-    # Keep A at 15m; B gets a finite 20m allowance for this observed cold path.
-    timeout-minutes: ${{ matrix.shard == 'b' && 20 || 15 }}
+    # A/C stay at 15m and x64 B at 20m; ARM64 B uses the measured allowance above.
+    timeout-minutes: ${{ matrix.shard == 'b' && (matrix.runner == 'ubuntu-26.04-arm' && 25 || 20) || 15 }}
     services:
       postgres:
         image: ${{ matrix.postgres_image }}

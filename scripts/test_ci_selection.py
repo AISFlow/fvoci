@@ -1312,7 +1312,7 @@ class WorkflowRegistryTest(unittest.TestCase):
         self.assertIn("steps.sqlite.outputs.cache_identity", cache["with"]["key"])
         self.assertNotIn("restore-keys", cache["with"])
         self.assertFalse(any(step.get("name") == check["name"] for step in pg_steps))
-        self.assertEqual(jobs["postgres"]["timeout-minutes"], "${{ matrix.shard == 'b' && 20 || 15 }}")
+        self.assertEqual(jobs["postgres"]["timeout-minutes"], "${{ matrix.shard == 'b' && (matrix.runner == 'ubuntu-26.04-arm' && 25 || 20) || 15 }}")
         self.assertIn("native-arm64", SEL.WORKFLOW_JOBS["rust"])
         self.assertIn("native-arm64", jobs["rust-ci-gate"]["needs"])
         self.assertEqual(jobs["rust-ci-gate"]["if"], "always()")
@@ -1440,6 +1440,35 @@ class RustSuiteRegistryTest(unittest.TestCase):
         step = next(step for step in job["steps"] if step.get("name") == SEL.RUST_POSTGRES_INTEGRATION_STEP)
         self.assertEqual(step["run"], SEL.RUST_POSTGRES_INTEGRATION_RUN_CANONICAL)
         self.assertEqual(step["env"]["FVOCI_COLLAB_ENGINE"], "${{ matrix.shard == 'b' && format('{0}/crates/collab-engine/target/debug/collab-engine', github.workspace) || '' }}")
+
+    def test_postgres_arm64_b_budget_rejects_scope_and_limit_drift(self) -> None:
+        jobs, error = SEL._rust_workflow_jobs(ROOT)
+        self.assertIsNone(error)
+        expected = "${{ matrix.shard == 'b' && (matrix.runner == 'ubuntu-26.04-arm' && 25 || 20) || 15 }}"
+        self.assertEqual(jobs["postgres"]["timeout-minutes"], expected)
+        self.assertEqual(SEL.verify_postgres_budget_matrix(jobs), [])
+        # Refuse the old budget, a global increase, other ARM shards, x64
+        # increases and larger limits before the planner emits selections.
+        for budget in (
+            None, 15, 20, 25, 30,
+            "${{ matrix.shard == 'b' && 20 || 15 }}",
+            "${{ matrix.shard == 'b' && 25 || 15 }}",
+            "${{ matrix.runner == 'ubuntu-26.04-arm' && 25 || 20 }}",
+            expected.replace("ubuntu-26.04-arm", "ubuntu-26.04"),
+            expected.replace("&& 25", "&& 26"),
+            expected.replace("|| 20", "|| 25"),
+            expected.replace("|| 15", "|| 20"),
+        ):
+            with self.subTest(budget=budget):
+                bad = copy.deepcopy(jobs)
+                if budget is None:
+                    del bad["postgres"]["timeout-minutes"]
+                else:
+                    bad["postgres"]["timeout-minutes"] = budget
+                self.assertIn(
+                    "rust: PostgreSQL budget must retain A/C15m, x64 B20m and ARM64 B25m",
+                    SEL.verify_postgres_budget_matrix(bad),
+                )
 
     def test_postgres_budget_row_and_coverage_mutations_fail(self) -> None:
         mutations = ("missing-c", "duplicate-row", "unknown-shard", "wrong-major", "wrong-pin", "duplicate-check",
@@ -2358,7 +2387,7 @@ class RegistryMutationCliTest(unittest.TestCase):
                     needle = "postgres if must be"
                 elif mutation == "longer-budget":
                     job["timeout-minutes"] = 30
-                    needle = "A/C15m and B20m"
+                    needle = "A/C15m, x64 B20m and ARM64 B25m"
                 else:
                     cache = next(step for step in job["steps"] if step.get("name") == "Restore server build outputs")
                     cache["with"]["restore-keys"] = "v2-server-"
