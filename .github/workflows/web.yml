@@ -445,13 +445,13 @@ jobs:
       - run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-build-step-03 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Prepare owned pinned Rustup component metadata before input capture
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-build-step-04 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-04 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-04 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           python3 -B scripts/prepare-rustup-ci-metadata.py --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -467,7 +467,7 @@ jobs:
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-build-step-06 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-06 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-06 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
           . /etc/os-release
@@ -504,7 +504,7 @@ jobs:
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-build-step-09 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-09 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-09 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           cargo fetch --locked
           cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
           bun ci
@@ -513,7 +513,7 @@ jobs:
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-build-step-10 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-10 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-10 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           bun --bun x --no-install playwright install --with-deps chromium
       - name: Qualify current selected native outputs (no browser or DB)
         id: prepare
@@ -522,7 +522,7 @@ jobs:
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-build-step-11 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           export FVOCI_SELECTED_CI_OUTPUT="$RUNNER_TEMP/fvoci-selected-current"
           export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"
@@ -567,13 +567,13 @@ jobs:
       - run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-flow-step-03 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Prepare owned pinned Rustup component metadata before input capture
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-flow-step-04 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-04 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-04 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           python3 -B scripts/prepare-rustup-ci-metadata.py --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -589,7 +589,7 @@ jobs:
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-flow-step-06 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-06 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-06 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
           . /etc/os-release
@@ -615,7 +615,7 @@ jobs:
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-flow-step-07 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-07 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-07 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           cargo fetch --locked
           cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
           bun ci
@@ -624,7 +624,7 @@ jobs:
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-flow-step-08 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-08 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-08 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           bun --bun x --no-install playwright install --with-deps chromium
       - name: Require a successful exact producer artifact
         env:
@@ -634,7 +634,7 @@ jobs:
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-flow-step-09 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-09 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-09 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           [[ "$PRODUCER_RESULT" == success ]]
           [[ "$PRODUCER_ARTIFACT" =~ ^[0-9]+$ ]]
@@ -650,7 +650,7 @@ jobs:
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-flow-step-11 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-wire.test.ts ./apps/web/e2e-pending/collab-restart.test.ts
           bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-helpers.test.ts
           (cd apps/web && bun --bun x --no-install tsc -p e2e-pending/collab-tsconfig.json)
@@ -662,7 +662,7 @@ jobs:
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-flow-step-12 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-12 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-12 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           # Only this ephemeral CI job's checkout/SQLite input/target/report ownership.
           # No account creation/global Git setting or operating resource changes.
