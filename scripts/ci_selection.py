@@ -56,6 +56,14 @@ RELEASE_WRITE_SCOPES: dict[str, frozenset[str]] = {
     "release": frozenset({"contents"}),
 }
 
+# Image publication is separate from tag-driven product releases.
+CI_BASE_WORKFLOW_FILE = "ci-base-image.yml"
+CI_BASE_WRITE_SCOPES: dict[str, frozenset[str]] = {
+    "build": frozenset(),
+    "push": frozenset({"packages"}),
+    "push-manifest": frozenset({"packages"}),
+}
+
 PLAN_JOB_ID = "ci-plan"
 PLAN_OUTPUT_KEYS = ("mode", "reason_code", "plan_ok", "plan_json")
 PYYAML_PIN = "PyYAML==6.0.3"
@@ -1317,7 +1325,7 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
 def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     workflows_dir = repo_root / ".github" / "workflows"
-    allowed_files = {*WORKFLOW_YAML.values(), RELEASE_WORKFLOW_FILE}
+    allowed_files = {*WORKFLOW_YAML.values(), RELEASE_WORKFLOW_FILE, CI_BASE_WORKFLOW_FILE}
     discovered_files = list_workflow_files(repo_root)
     if not workflows_dir.is_dir():
         errors.append("missing .github/workflows directory")
@@ -1493,6 +1501,14 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
     if release_path.is_file():
         errors.extend(verify_release_workflow(release_path))
 
+    image_path = workflows_dir / CI_BASE_WORKFLOW_FILE
+    if image_path.is_file():
+        data, parse_err = _load_yaml_mapping(image_path)
+        if parse_err:
+            errors.append(f"{image_path.name}: {parse_err}")
+        else:
+            errors.extend(verify_workflow_write_scopes(data, image_path.name, CI_BASE_WRITE_SCOPES))
+
     errors.extend(verify_rust_suite_registry(repo_root))
     return errors
 
@@ -1518,8 +1534,6 @@ def verify_release_workflow(path: Path) -> list[str]:
             or not all(isinstance(tag, str) and tag.startswith("v0.") for tag in tags)
         ):
             errors.append(f"{name}: push must list only v0.* tags")
-    if data.get("permissions") != {"contents": "read"}:
-        errors.append(f"{name}: top-level permissions must be exactly contents: read")
     # One queue for every tag: runs for two patch tags must not race on :0.y.
     concurrency = data.get("concurrency")
     if (
@@ -1531,6 +1545,16 @@ def verify_release_workflow(path: Path) -> list[str]:
         errors.append(
             f"{name}: concurrency must be one fixed group with cancel-in-progress: false"
         )
+    return [*errors, *verify_workflow_write_scopes(data, name, RELEASE_WRITE_SCOPES)]
+
+
+def verify_workflow_write_scopes(
+    data: dict, name: str, allowed_write_scopes: dict[str, frozenset[str]]
+) -> list[str]:
+    """Reuse the release token-scope check for registered publication workflows."""
+    errors: list[str] = []
+    if data.get("permissions") != {"contents": "read"}:
+        errors.append(f"{name}: top-level permissions must be exactly contents: read")
     jobs = data.get("jobs")
     if not isinstance(jobs, dict) or not jobs:
         return [*errors, f"{name}: jobs mapping missing"]
@@ -1543,7 +1567,7 @@ def verify_release_workflow(path: Path) -> list[str]:
             errors.append(f"{name}: {job_id} permissions must be a scope mapping")
             continue
         writes = {scope for scope, level in permissions.items() if level == "write"}
-        allowed = RELEASE_WRITE_SCOPES.get(job_id, frozenset())
+        allowed = allowed_write_scopes.get(job_id, frozenset())
         if not writes <= allowed:
             errors.append(
                 f"{name}: {job_id} may not write {sorted(writes - allowed)}"
