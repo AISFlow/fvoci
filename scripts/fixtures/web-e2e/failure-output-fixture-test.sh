@@ -7,11 +7,16 @@
 # settle wait returns, waits for tentative addresses, and stays bounded.
 # PostgreSQL, Meilisearch, SMTP, migrations, the server and `ip` are stubbed; no
 # browser is launched because the fixture specs never request `page`.
+# Both inner wrappers must reject listening-only/early-exit servers and launch
+# Playwright exactly once when setup becomes healthy on the final startup poll.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # The web workspace's install (bun ci at the repository root).
 WORKSPACE_MODULES="$ROOT/node_modules"
+REAL_BUN="$(command -v bun)"
+REAL_SLEEP="$(command -v sleep)"
+REAL_SEQ="$(command -v seq)"
 if ! (cd "$ROOT/apps/web" && bun --bun x --no-install playwright --version) >/dev/null 2>&1; then
   echo "missing the locked Playwright install; run bun ci" >&2
   exit 1
@@ -25,13 +30,15 @@ trap cleanup EXIT
 
 FIXTURE_ROOT="$WORK/root"
 FAKE_BIN="$WORK/bin"
+FIXTURE_PATH="$FAKE_BIN:$PATH"
 RUN_TMP="$WORK/tmp"
 NET_STATE="$WORK/net"
-mkdir -p "$FIXTURE_ROOT/scripts" "$FIXTURE_ROOT/apps/web/e2e" \
+mkdir -p "$FIXTURE_ROOT/scripts/perf" "$FIXTURE_ROOT/apps/web/e2e" \
   "$FIXTURE_ROOT/apps/web/e2e-pending" "$FIXTURE_ROOT/apps/web/dist" \
   "$FIXTURE_ROOT/target/debug" "$FAKE_BIN" "$RUN_TMP"
 cp "$ROOT/scripts/web-e2e-run-group.sh" "$ROOT/scripts/web-e2e-inner.sh" \
   "$ROOT/scripts/web-e2e-trace-summary.py" "$FIXTURE_ROOT/scripts/"
+cp "$ROOT/scripts/perf/perf-inner.sh" "$FIXTURE_ROOT/scripts/perf/"
 cp "$ROOT/apps/web/playwright.config.ts" "$FIXTURE_ROOT/apps/web/"
 cp "$ROOT/apps/web/e2e-pending/collab-playwright.config.ts" "$FIXTURE_ROOT/apps/web/e2e-pending/"
 ln -s "$WORKSPACE_MODULES" "$FIXTURE_ROOT/node_modules"
@@ -83,6 +90,11 @@ echo "fvoci-server listening on http://127.0.0.1:9"
 # real server must never log), and the admin URL web-e2e-inner.sh withholds
 # from the server environment ("unset" only when truly absent).
 echo "probe DATABASE_APP_URL=${DATABASE_APP_URL:-} admin ${FVOCI_E2E_ADMIN_DATABASE_URL-unset}"
+echo "$$" >"$FVOCI_FIXTURE_NET_STATE.server-pid"
+if [[ "${FVOCI_FIXTURE_SETUP:-ok}" == "earlydeath" ]]; then
+  echo "fixture server exited before setup"
+  exit 42
+fi
 exec sleep 600
 STUB
 # Only the calls the inner script needs are allowed; anything else fails closed.
@@ -125,10 +137,55 @@ STUB
 cat >"$FAKE_BIN/curl" <<'STUB'
 #!/usr/bin/env bash
 if [[ "$*" == "-fsS http://127.0.0.1:9/api/v1/setup" ]]; then
+  calls=$(($(cat "$FVOCI_FIXTURE_NET_STATE.setup-calls" 2>/dev/null || echo 0) + 1))
+  echo "$calls" >"$FVOCI_FIXTURE_NET_STATE.setup-calls"
+  case "${FVOCI_FIXTURE_SETUP:-ok}" in
+    neverhealthy | earlydeath) exit 22 ;;
+    latehealthy) ((calls == 120)) || exit 22 ;;
+    ok) ;;
+    *) echo "unexpected setup mode" >&2; exit 1 ;;
+  esac
+  echo "$calls" >"$FVOCI_FIXTURE_NET_STATE.setup-success"
   exit 0
 fi
 echo "unexpected curl invocation: $*" >&2
 exit 1
+STUB
+# Only startup polling sleeps are accelerated in readiness cases. The actual
+# wrappers still execute all 120 polls with their unchanged production limits.
+cat >"$FAKE_BIN/sleep" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$*" == "0.25" && "${FVOCI_FIXTURE_SETUP:-ok}" != "ok" ]]; then
+  exit 0
+fi
+exec "$FVOCI_FIXTURE_REAL_SLEEP" "$@"
+STUB
+# Synchronize the controlled listening line before the real startup loop. A
+# background stub otherwise races the first poll, making final-poll health
+# depend on scheduling rather than on the readiness contract under test.
+cat >"$FAKE_BIN/seq" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$*" == "1 120" && "${FVOCI_FIXTURE_SETUP:-ok}" != "ok" ]]; then
+  for _ in {1..100}; do
+    [[ ! -f "$FVOCI_FIXTURE_NET_STATE.server-pid" ]] || exec "$FVOCI_FIXTURE_REAL_SEQ" "$@"
+    "$FVOCI_FIXTURE_REAL_SLEEP" 0.01
+  done
+  echo "fixture server did not publish its listening line" >&2
+  exit 1
+fi
+exec "$FVOCI_FIXTURE_REAL_SEQ" "$@"
+STUB
+# Ordinary readiness cases enter the real page-less Playwright CLI. Perf only
+# records entry: its real specs require a database and browser outside this test.
+cat >"$FAKE_BIN/bun" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${FVOCI_FIXTURE_RECORD_PLAYWRIGHT:-0}" == "1" && "${1:-}" == "--bun" && "${2:-}" == "x" && "${3:-}" == "--no-install" && "${4:-}" == "playwright" && "${5:-}" == "test" ]]; then
+  echo "launch" >>"$FVOCI_FIXTURE_NET_STATE.playwright-launches"
+  if [[ "${6:-}" == "--config=e2e/perf/perf.config.ts" ]]; then
+    exit 0
+  fi
+fi
+exec "$FVOCI_FIXTURE_REAL_BUN" "$@"
 STUB
 chmod +x "$FIXTURE_ROOT"/scripts/*.sh "$FIXTURE_ROOT/target/debug/"* "$FAKE_BIN/"*
 
@@ -142,7 +199,7 @@ run_group() {
   : >"$gh_output"
   rm -f "$NET_STATE".*
   (
-    export PATH="$FAKE_BIN:$PATH"
+    export PATH="$FIXTURE_PATH"
     export TMPDIR="$RUN_TMP"
     export ROOT="$FIXTURE_ROOT"
     export CARGO_TARGET_DIR="$FIXTURE_ROOT/target"
@@ -150,6 +207,9 @@ run_group() {
     export FVOCI_FIXTURE_OUTCOME="$outcome"
     export FVOCI_FIXTURE_NET="$net_mode"
     export FVOCI_FIXTURE_NET_STATE="$NET_STATE"
+    export FVOCI_FIXTURE_REAL_BUN="$REAL_BUN"
+    export FVOCI_FIXTURE_REAL_SLEEP="$REAL_SLEEP"
+    export FVOCI_FIXTURE_REAL_SEQ="$REAL_SEQ"
     if [[ "$pending" == "1" ]]; then
       export FVOCI_E2E_PENDING=1
     else
@@ -256,6 +316,87 @@ for pending in 0 1; do
     ! grep -q 'while Playwright ran' "$log" || fail "$label: event count without a monitor" "$log"
   fi
   check_monitor_stopped "$label" "$log"
+done
+
+# The real startup paths run against controlled listening/health/process
+# outcomes. No database, browser or production server is required.
+run_perf() {
+  local run_dir="$1" log="$2"
+  mkdir -p "$run_dir/out" "$run_dir/static"
+  rm -f "$NET_STATE".*
+  (
+    unset FVOCI_PERF_GREP FVOCI_PERF_TAG FVOCI_PERF_KEEP_SERVER_LOG
+    env PATH="$FIXTURE_PATH" ROOT="$FIXTURE_ROOT" RUN_DIR="$run_dir" \
+      RELEASE="$FIXTURE_ROOT/target/debug" FVOCI_TEST_PG_CONTAINER=fvoci-fixture-pg \
+      TEST_DATABASE_URL="postgres://postgres:fixture-secret@127.0.0.1:5432/postgres" \
+      FVOCI_PERF_OUT="$run_dir/out" FVOCI_PERF_DATASET=fixture \
+      FVOCI_FIXTURE_NET_STATE="$NET_STATE" FVOCI_FIXTURE_REAL_BUN="$REAL_BUN" \
+      FVOCI_FIXTURE_REAL_SLEEP="$REAL_SLEEP" \
+      FVOCI_FIXTURE_REAL_SEQ="$REAL_SEQ" \
+      bash "$FIXTURE_ROOT/scripts/perf/perf-inner.sh"
+  ) >"$log" 2>&1
+}
+
+for wrapper in ordinary perf; do
+  for mode in neverhealthy earlydeath latehealthy; do
+    label="$wrapper-$mode"
+    log="$WORK/$label.log"
+    gh_output="$WORK/$label.github-output"
+    status=0
+    (
+      export FVOCI_FIXTURE_SETUP="$mode"
+      export FVOCI_FIXTURE_RECORD_PLAYWRIGHT=1
+      if [[ "$wrapper" == "ordinary" ]]; then
+        run_group 0 pass quiet "$log" "$gh_output"
+      else
+        run_perf "$WORK/$label" "$log"
+      fi
+    ) || status=$?
+    launches=0
+    [[ ! -f "$NET_STATE.playwright-launches" ]] || launches="$(wc -l <"$NET_STATE.playwright-launches")"
+    probes="$(cat "$NET_STATE.setup-calls" 2>/dev/null || echo 0)"
+    if [[ "$mode" == "latehealthy" ]]; then
+      ((status == 0)) || fail "$label: late health failed" "$log"
+      ((probes == 120 && launches == 1)) || fail "$label: expected 120 probes and one Playwright launch" "$log"
+      [[ "$(cat "$NET_STATE.setup-success")" == "120" ]] || fail "$label: launched without final-poll health" "$log"
+      if [[ "$wrapper" == "ordinary" ]]; then
+        grep -q '2 passed' "$log" || fail "$label: page-less Playwright tests did not pass" "$log"
+        [[ ! -s "$gh_output" ]] || fail "$label: successful run retained artifacts" "$log"
+      else
+        [[ -f "$WORK/$label/out/run-fixture.json" ]] || fail "$label: perf did not reach run metadata" "$log"
+      fi
+    else
+      ((status != 0)) || fail "$label: unready server exited 0 (setup probes=$probes, Playwright launches=$launches)" "$log"
+      ((launches == 0)) || fail "$label: Playwright entered before readiness" "$log"
+      [[ ! -f "$NET_STATE.setup-success" ]] || fail "$label: unexpected health success" "$log"
+      if [[ "$mode" == "neverhealthy" ]]; then
+        ((probes == 120)) || fail "$label: startup polling bound changed" "$log"
+        grep -q '^server did not become ready within 30s (GET /api/v1/setup never succeeded)$' "$log" \
+          || fail "$label: missing health failure diagnosis" "$log"
+      else
+        ((probes < 120)) || fail "$label: did not stop on early exit" "$log"
+        grep -qx 'server exited during startup' "$log" || fail "$label: missing early-exit diagnosis" "$log"
+        grep -qx 'fixture server exited before setup' "$log" || fail "$label: missing server failure log" "$log"
+      fi
+      grep -q '^fvoci-server listening on ' "$log" || fail "$label: missing server startup log" "$log"
+      ! grep -q 'fixture-secret' "$log" || fail "$label: credentials in startup diagnostics" "$log"
+      if [[ "$wrapper" == "ordinary" ]]; then
+        retained="$(sed -n 's/^failure-artifacts=//p' "$gh_output")"
+        [[ -n "$retained" && -f "$retained/server.log" ]] || fail "$label: server log not retained" "$log"
+        grep -qx 'probe DATABASE_APP_URL=redacted admin unset' "$retained/server.log" \
+          || fail "$label: retained server log missing redacted probe" "$log"
+        ! grep -q '# fvoci: playwright start' "$retained/net-events.log" || fail "$label: browser marker before readiness" "$log"
+        [[ ! -d "$retained/playwright-output" ]] || fail "$label: unexpected Playwright output" "$log"
+        rm -rf "$retained"
+      else
+        [[ ! -f "$WORK/$label/out/run-fixture.json" ]] || fail "$label: perf metadata before readiness" "$log"
+      fi
+    fi
+    check_monitor_stopped "$label" "$log"
+    [[ -f "$NET_STATE.server-pid" ]] || fail "$label: server never started" "$log"
+    ! kill -0 "$(cat "$NET_STATE.server-pid")" 2>/dev/null || fail "$label: owned server still running" "$log"
+    echo "readiness fixture: $label status=$status setup-probes=$probes Playwright-launches=$launches"
+  done
 done
 
 leftover="$(find "$RUN_TMP" -mindepth 1 -maxdepth 1 -name 'fvoci-*' -print -quit)"
