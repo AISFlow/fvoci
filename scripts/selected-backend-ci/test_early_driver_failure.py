@@ -240,6 +240,51 @@ class EarlyDriverFailure(unittest.TestCase):
 
 
 class SQLitePreparationFailureControls(unittest.TestCase):
+    def test_host_network_proof_uses_attached_driver_not_mode_rendering(self):
+        path = HERE / 'current-sqlite-driver.py'
+        tree = ast.parse(path.read_text())
+        main = next(n for n in tree.body if isinstance(n, ast.Try) and any(
+            isinstance(a, ast.Assign) and any(isinstance(x, ast.Name) and x.id == 'created' for x in a.targets) for a in n.body))
+        start = next(i for i, n in enumerate(main.body) if 'actual-network-mode.log' in ast.unparse(n))
+        end = next(i for i, n in enumerate(main.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == "receipt['phase']")
+        proof = compile(ast.fix_missing_locations(ast.Module(body=main.body[start:end], type_ignores=[])), str(path), 'exec')
+        network_id = 'c' * 64
+        # Alternate mode strings are synthetic compatibility cases, not a hosted reproduction.
+        cases = [('host\n', {'host': {'NetworkID': network_id}}, network_id + ' host\n', True),
+                 (network_id + '\n', {'host': {'NetworkID': network_id}}, network_id + ' host\n', True),
+                 ('WARNING: synthetic stderr\nhost\n', {'host': {'NetworkID': network_id}}, network_id + ' host\n', True),
+                 ('host\n', {'bridge': {'NetworkID': network_id}}, network_id + ' bridge\n', False),
+                 ('host\n', {'host': {'NetworkID': network_id}}, network_id + ' Host\n', False),
+                 ('host\n', {'host': {'NetworkID': network_id}}, 'd' * 64 + ' host\n', False),
+                 ('host\n', {}, '', False),
+                 ('host\n', {'host': {'NetworkID': network_id}, 'bridge': {'NetworkID': 'd' * 64}}, '', False)]
+        for mode, attachments, actual_driver, accepted in cases:
+            with self.subTest(mode=mode, attachments=attachments, driver=actual_driver), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                receipt = {'phase': 'container-prepare'}
+                def command(args, log=None, preparation_receipt=None):
+                    self.assertIs(preparation_receipt, receipt)
+                    preparation_receipt['last_preparation_command_exit'] = 0
+                    if args[1] == 'network':
+                        self.assertEqual(args, ['docker', 'network', 'inspect', '--format', '{{.Id}} {{.Driver}}', network_id])
+                        output = actual_driver
+                    elif args[3] == '{{json .NetworkSettings.Networks}}':
+                        output = json.dumps(attachments)
+                    else:
+                        self.assertEqual(args, ['docker', 'inspect', '--format', '{{.HostConfig.NetworkMode}}', 'synthetic-owned'])
+                        output = mode
+                    if log is not None:
+                        log.write_text(output)
+                    return types.SimpleNamespace(returncode=0, stdout=output)
+                state = {'command': command, 'run': root, 'name': 'synthetic-owned', 'receipt': receipt, 'json': json}
+                if accepted:
+                    exec(proof, state)
+                else:
+                    with self.assertRaises(AssertionError):
+                        exec(proof, state)
+                self.assertEqual((root / 'actual-network-mode.log').read_text(), mode)
+                self.assertEqual(receipt['last_preparation_command_exit'], 0)
+
     def test_actual_preparation_assertions_and_command_failure_record_before_cleanup(self):
         path = HERE / 'current-sqlite-driver.py'
         tree = ast.parse(path.read_text())
@@ -250,12 +295,15 @@ class SQLitePreparationFailureControls(unittest.TestCase):
         preparation = compile(ast.fix_missing_locations(ast.Module(body=main.body[:end], type_ignores=[])), str(path), 'exec')
         assertion_lines = [n.lineno for n in main.body[:end] if isinstance(n, ast.Assert)]
         for fault, expected_exit, expected_line in [('ldd', 0, assertion_lines[0]), ('hash', 0, assertion_lines[1]),
-                ('network', 0, assertion_lines[2]), ('query', 7, None), ('spawn', None, None)]:
+                ('network', 0, assertion_lines[-1]), ('query', 7, None), ('attachment-query', 7, None),
+                ('driver-query', 7, None), ('spawn', None, None)]:
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 receipt = {'phase':'container-prepare'}
                 def run(args, **kwargs):
-                    if args[1] == 'inspect' and fault == 'query':
+                    if ((args[1] == 'inspect' and fault == 'query') or
+                            (args[1] == 'inspect' and args[3] == '{{json .NetworkSettings.Networks}}' and fault == 'attachment-query') or
+                            (args[1] == 'network' and fault == 'driver-query')):
                         return types.SimpleNamespace(returncode=7, stdout='', stderr='SYNTHETIC_PRIVATE_QUERY')
                     if args[1] == 'inspect' and fault == 'spawn':
                         raise OSError('SYNTHETIC_PRIVATE_SPAWN')
@@ -264,8 +312,10 @@ class SQLitePreparationFailureControls(unittest.TestCase):
                         output = 'dependency not found\n' if fault == 'ldd' else 'qualified dependency\n'
                     elif 'sha256sum' in args:
                         output = '\n'.join(('wrong' if fault == 'hash' else 'h') + ' file' for _ in range(3))
+                    elif args[1] == 'network':
+                        output = 'c' * 64 + (' bridge\n' if fault == 'network' else ' host\n')
                     elif args[1] == 'inspect':
-                        output = 'bridge\n' if fault == 'network' else 'host\n'
+                        output = json.dumps({'host': {'NetworkID': 'c' * 64}}) if args[3] == '{{json .NetworkSettings.Networks}}' else 'host\n'
                     if 'stdout' in kwargs:
                         kwargs['stdout'].write(output)
                     return types.SimpleNamespace(returncode=0, stdout=output, stderr='')

@@ -267,7 +267,13 @@ try:
     (run / 'copied-executable-hashes.log').write_text(hashes)
     assert [line.split()[0] for line in hashes.splitlines()] == [binaries[path]['sha256'] for path in (server, migrate, engine)]
     command(['docker', 'inspect', '--format', '{{.HostConfig.NetworkMode}}', name], run / 'actual-network-mode.log', preparation_receipt=receipt)
-    assert (run / 'actual-network-mode.log').read_text().strip() == 'host'
+    # NetworkMode is diagnostic; prove the sole actual attachment uses Docker's host driver.
+    attached_networks = json.loads(command(['docker', 'inspect', '--format', '{{json .NetworkSettings.Networks}}', name], preparation_receipt=receipt).stdout)
+    assert type(attached_networks) is dict and len(attached_networks) == 1
+    network_id = next(iter(attached_networks.values()))['NetworkID']
+    actual_network = command(['docker', 'network', 'inspect', '--format', '{{.Id}} {{.Driver}}', network_id], preparation_receipt=receipt).stdout
+    (run / 'actual-network-driver.log').write_text(actual_network)
+    assert actual_network.strip().split() == [network_id, 'host']
     receipt['phase'] = 'server-startup'
     server_log = (run / 'normal-server.log').open('w')
     server_process = subprocess.Popen(['docker', 'exec', name, '/bin/sh', '-ec',
