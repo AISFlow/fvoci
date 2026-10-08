@@ -4,6 +4,6 @@
     "noUncheckedIndexedAccess": true,
     "rootDirs": ["../..", "../../node_modules/.cache/fvoci-vue-lint/types"]
   },
-  "include": ["**/*.ts", "**/*.tsx", "**/*.vue"],
+  "include": ["**/*.ts", "**/*.tsx", "**/*.vue", "../../scripts/ci/workflows.test.ts"],
   "exclude": ["node_modules", "src/generated/api.ts"]
 }
