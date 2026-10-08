@@ -383,7 +383,7 @@ exit "${PREREQ_EXIT:-0}"
             text = (ROOT / '.github/workflows' / (workflow+'.yml')).read_text()
             jobs = dict(re.findall(r'^  ([a-z][\w-]*):\n(.*?)(?=^  [a-z][\w-]*:|\Z)',
                                    text, re.M | re.S))
-            actual = {name for name,body in jobs.items() if 'id: sqlite' in body}
+            actual = {name for name,body in jobs.items() if re.search(r'^        id: sqlite$', body, re.M)}
             self.assertEqual(actual, expected)
             for job in expected:
                 body = jobs[job]
@@ -415,6 +415,48 @@ exit "${PREREQ_EXIT:-0}"
                     self.assertNotIn('restore-keys:', root_cache)
                 self.assertIn('--github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"', body)
                 self.assertIn('libclang-18-dev=1:18.1.8-20ubuntu8', body)
+                # Every root output cache and compilation must follow usable
+                # preparation; source-download caches do not contain build output.
+                blocks = list(re.finditer(r'^      - .*?(?=^      - |\Z)', body, re.M | re.S))
+                prepare = next(block for block in blocks if re.search(r'^        id: sqlite$', block.group(), re.M))
+                ready = prepare
+                if workflow == 'rust':
+                    verified = [block for block in blocks if 'name: Verify cached SQLite prefix or build\n' in block.group()]
+                    self.assertEqual(len(verified), 1, 'required SQLite verification step missing/duplicated')
+                    ready = verified[0]
+                    self.assertLessEqual(prepare.end(), ready.start())
+                    prefix_restore = next(block for block in blocks if 'name: Restore prepared SQLite prefix\n' in block.group())
+                    self.assertLessEqual(prepare.end(), prefix_restore.start())
+                    self.assertLessEqual(prefix_restore.end(), ready.start())
+                    self.assertIn('--expected-cache-identity "${{ steps.sqlite.outputs.cache_identity }}"', ready.group())
+                    self.assertIn('--github-env "$GITHUB_ENV"', ready.group())
+                for preparation in (prepare, ready):
+                    self.assertNotRegex(preparation.group(), r'(?m)^        (?:if|continue-on-error):', 'preparation cannot be skipped or masked')
+                for block in blocks:
+                    text = block.group()
+                    if re.search(r'^          path: target(?:/[^\n]+)?$', text, re.M):
+                        self.assertLessEqual(ready.end(), block.start())
+                        if 'actions/cache/save@' in text:
+                            key = re.search(r'key: \$\{\{ steps\.([a-z_]+)\.outputs\.cache-primary-key \}\}', text)
+                            self.assertIsNotNone(key, 'save must use its qualified restore key')
+                            restored = [entry for entry in blocks if re.search(r'^        id: ' + key.group(1) + '$', entry.group(), re.M)]
+                            self.assertEqual(len(restored), 1)
+                            self.assertIn('actions/cache/restore@', restored[0].group())
+                            self.assertIn('${{ steps.sqlite.outputs.cache_identity }}', restored[0].group())
+                            self.assertEqual(re.search(r'^          path: (target[^\n]*)$', text, re.M).group(1),
+                                             re.search(r'^          path: (target[^\n]*)$', restored[0].group(), re.M).group(1))
+                        else:
+                            self.assertIn('${{ steps.sqlite.outputs.cache_identity }}', text)
+                        self.assertNotIn('restore-keys:', text)
+                    # Documents defaults to the independent native crate; root steps override it.
+                    if (workflow != 'documents' or 'working-directory: .' in text):
+                        root_work = ('working-directory: crates/' not in text and any(
+                            re.search(r'cargo (?:build|test|clippy|check)\b|scripts/ci_selection.py rust-binaries build|bash scripts/run-web-e2e.sh', line)
+                            and not re.search(r'--manifest-path [\"\']?crates/', line) for line in text.splitlines()))
+                        if root_work:
+                            self.assertLessEqual(ready.end(), block.start())
+                    if 'path: crates/collab-engine/target' in text:
+                        self.assertNotIn('steps.sqlite.outputs.cache_identity', text, 'independent helper cache must retain its own inputs')
             if workflow == 'documents':
                 body = jobs['native-extraction']
                 self.assertLess(body.index('Production helper rejects test controls'), body.index('id: sqlite'))
@@ -430,6 +472,49 @@ exit "${PREREQ_EXIT:-0}"
         self.assertIn('prepare-sqlite-ci.sh --parent /sqlite-build -- cargo build', builder)
         for tool in ('libclang', 'python3', 'gcc', '/sqlite-build'):
             self.assertNotIn(tool, runtime)
+
+    def test_new_producer_mutations_fail_same_wiring_contract(self):
+        fixture = self.root / 'producer-workflow-mutations'
+        (fixture / '.github/workflows').mkdir(parents=True)
+        (fixture / 'infra/rust').mkdir(parents=True)
+        for workflow in ('rust', 'web', 'documents', 'collab-engine', 'install'):
+            shutil.copy(ROOT / '.github/workflows' / (workflow + '.yml'), fixture / '.github/workflows' / (workflow + '.yml'))
+        shutil.copy(ROOT / 'infra/rust/Dockerfile', fixture / 'infra/rust/Dockerfile')
+        for workflow, job in (('rust', 'postgres-build'), ('web', 'workspace-browser-build')):
+            path = fixture / '.github/workflows' / (workflow + '.yml')
+            original = path.read_text()
+            match = re.search(r'^  ' + job + r':\n(.*?)(?=^  [a-z][\w-]*:|\Z)', original, re.M | re.S)
+            self.assertIsNotNone(match)
+            body = match.group(1)
+            blocks = list(re.finditer(r'^      - .*?(?=^      - |\Z)', body, re.M | re.S))
+            prep = next(block for block in blocks if re.search(r'^        id: sqlite$', block.group(), re.M))
+            root_cache = next(block for block in blocks if re.search(r'^          path: target(?:/[^\n]+)?$', block.group(), re.M))
+            helper_cache = next(block for block in blocks if 'path: crates/collab-engine/target' in block.group())
+            changes = {
+                'missing producer preparation': body.replace('id: sqlite\n', 'id: missing-sqlite\n', 1),
+                'output cache before preparation': body[:prep.start()] + root_cache.group() + body[prep.start():root_cache.start()] + body[root_cache.end():],
+                'unqualified producer cache': body.replace(root_cache.group(), root_cache.group().replace('steps.sqlite.outputs.cache_identity', 'foreign_identity'), 1),
+                'fallback producer cache': body.replace(root_cache.group(), root_cache.group() + '          restore-keys: unsafe\n', 1),
+                'compile before preparation': body[:prep.start()] + '      - run: cargo build --locked\n' + body[prep.start():],
+                'skipped producer preparation': body.replace('id: sqlite\n', 'id: sqlite\n        if: false\n', 1),
+                'masked producer preparation': body.replace('id: sqlite\n', 'id: sqlite\n        continue-on-error: true\n', 1),
+                'second unqualified root cache': body + '      - uses: actions/cache@fixture\n        with:\n          path: target/extra\n          key: unqualified\n',
+                'helper borrows SQLite inputs': body.replace(helper_cache.group(), helper_cache.group() + '          sqlite: ${{ steps.sqlite.outputs.cache_identity }}\n', 1),
+            }
+            if workflow == 'rust':
+                verify = next(block for block in blocks if 'name: Verify cached SQLite prefix or build\n' in block.group())
+                changes['missing producer verification'] = body[:verify.start()] + body[verify.end():]
+                changes['output cache before verification'] = body[:verify.start()] + root_cache.group() + body[verify.start():root_cache.start()] + body[root_cache.end():]
+            with mock.patch.dict(globals(), ROOT=fixture):
+                self.test_workflow_root_cache_preparation_order_and_independent_crates()
+            for label, changed in changes.items():
+                with self.subTest(workflow=workflow, job=job, mutation=label):
+                    self.assertNotEqual(body, changed)
+                    path.write_text(original[:match.start(1)] + changed + original[match.end(1):])
+                    with mock.patch.dict(globals(), ROOT=fixture):
+                        with self.assertRaises(AssertionError):
+                            self.test_workflow_root_cache_preparation_order_and_independent_crates()
+            path.write_text(original)
 
     def test_web_producer_consumer_mutations_fail_same_wiring_contract(self):
         fixture = self.root / 'web-workflow-mutations'
