@@ -152,6 +152,7 @@ jobs:
           python3 scripts/selected-backend-ci/test_off_registration.py
       - name: Verify normal web e2e shard plan
         run: |
+          python3 -m pip install --disable-pip-version-check --user --break-system-packages -r scripts/ci_selection_requirements.txt
           bash scripts/test-web-e2e-groups.sh
           python3 scripts/fixtures/web-e2e/test-build-handoff.py
 
@@ -213,24 +214,25 @@ jobs:
           cargo clippy --locked --offline --all-targets --features db-tests,api-schema -- -D warnings
           cargo test --locked --offline --test static_api
 
-  workspace-browser-shard:
+  # Exact default-feature browser binaries and fresh dist, built once for all shards.
+  workspace-browser-build:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_workspace_browser_shard == 'true'
-    name: web-browser-shard-${{ matrix.shard }}
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     runs-on: ubuntu-26.04
-    # Cold native/web preparation plus every browser group consumed the 15m
-    # job budget in run 37447254405; testcase deadlines and retries stay fixed.
     timeout-minutes: 20
+    outputs:
+      artifact_id: ${{ steps.publish.outputs.artifact-id }}
+      handoff_sha256: ${{ steps.prepare.outputs.handoff_sha256 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
       - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
+      - name: Prepare owned pinned Rustup component metadata before input capture
+        run: python3 -B scripts/prepare-rustup-ci-metadata.py --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -268,13 +270,13 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target
-          key: v2-web-ubuntu-26.04-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
+          key: v1-web-browser-default-fixture-ubuntu-26.04-${{ runner.arch }}-1.98.1-default-server-db-tests-fixture-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - name: Restore production collaboration helper outputs
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: crates/collab-engine/target
-          key: v1-web-collab-helper-ubuntu-26.04-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-${{ hashFiles('crates/collab-engine/src/**') }}
-          restore-keys: v1-web-collab-helper-ubuntu-26.04-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-
+          key: v1-web-browser-worker-helper-ubuntu-26.04-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-${{ hashFiles('crates/collab-engine/src/**') }}
+          restore-keys: v1-web-browser-worker-helper-ubuntu-26.04-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-
       - name: Prepare locked dependencies
         run: |
           cargo fetch --locked
@@ -283,10 +285,122 @@ jobs:
       - name: Prepare Chromium and system libraries
         working-directory: apps/web
         run: bun --bun x --no-install playwright install --with-deps chromium
-      - name: Real React browser shard ${{ matrix.shard }} with PostgreSQL app role
+      - name: Build and qualify ordinary browser outputs without DB credentials
+        id: prepare
+        run: |
+          set -euo pipefail
+          export FVOCI_SELECTED_CI_OUTPUT="$RUNNER_TEMP/fvoci-browser-current"
+          export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-browser-build-handoff"
+          mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
+          bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-prepare-browser
+      - name: Publish the exact successful browser packet
+        id: publish
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web-browser-build-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/fvoci-browser-build-handoff/handoff.json
+            ${{ runner.temp }}/fvoci-browser-build-handoff/payload.tar
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain failed browser compilation diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: browser-compile-diagnostics-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/fvoci-browser-current/*-stderr.log
+            ${{ runner.temp }}/fvoci-browser-current/*-stage.json
+            ${{ runner.temp }}/fvoci-browser-current/handoff-input-*-safe.json
+          if-no-files-found: warn
+          retention-days: 3
+
+  workspace-browser-shard:
+    needs: [ci-plan, workspace-browser-build]
+    if: needs.ci-plan.outputs.select_workspace_browser_shard == 'true'
+    name: web-browser-shard-${{ matrix.shard }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    runs-on: ubuntu-26.04
+    # Dependencies and groups retain their budgets; compilation is producer-only.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
+      - name: Prepare owned pinned Rustup component metadata before input capture
+        run: python3 -B scripts/prepare-rustup-ci-metadata.py --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
+      - name: Restore Cargo downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - name: Prepare pinned SQLite root build inputs
+        id: sqlite
+        env:
+          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+        run: |
+          set -euo pipefail
+          # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
+          . /etc/os-release
+          [[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
+          case "$(dpkg --print-architecture)" in
+            amd64)
+              test -f /etc/apt/apt-mirrors.txt
+              grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
+              grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
+              test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
+              printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+              ;;
+            arm64) ;;
+            *) exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          mkdir "$RUNNER_TEMP/fvoci-sqlite"
+          dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
+          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+            --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - name: Prepare locked dependencies
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
+          bun ci
+      - name: Prepare Chromium and system libraries
+        working-directory: apps/web
+        run: bun --bun x --no-install playwright install --with-deps chromium
+      - name: Require a successful exact browser producer artifact
+        env:
+          PRODUCER_RESULT: ${{ needs.workspace-browser-build.result }}
+          PRODUCER_ARTIFACT: ${{ needs.workspace-browser-build.outputs.artifact_id }}
+          PRODUCER_DIGEST: ${{ needs.workspace-browser-build.outputs.handoff_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$PRODUCER_RESULT" == success && "$PRODUCER_ARTIFACT" =~ ^[0-9]+$ && "$PRODUCER_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+      - name: Download this run's immutable browser producer artifact by ID
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.workspace-browser-build.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/fvoci-browser-build-handoff
+      - name: Real Vue browser shard ${{ matrix.shard }} with PostgreSQL app role
         id: browser
-        # web-checks generates/diffs the same committed outputs; the gate requires it.
-        run: bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-shard ${{ matrix.shard }}
+        env:
+          FVOCI_WEB_BUILD_HANDOFF_SHA256: ${{ needs.workspace-browser-build.outputs.handoff_sha256 }}
+        run: |
+          set -euo pipefail
+          export FVOCI_SELECTED_CI_OUTPUT="$RUNNER_TEMP/fvoci-browser-current"
+          export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-browser-build-handoff"
+          mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
+          bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-browser --ci-shard ${{ matrix.shard }}
       - name: Retain failed browser DOM diagnostics
         if: (failure() || cancelled()) && steps.browser.outputs.failure-artifacts != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -303,6 +417,15 @@ jobs:
             ${{ steps.browser.outputs.failure-artifacts }}/net-events.log
           retention-days: 3
           if-no-files-found: warn
+
+      - name: Retain failed browser handoff hash diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: browser-shard-${{ matrix.shard }}-handoff-diagnostics-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fvoci-browser-current/handoff-input-*-safe.json
+          if-no-files-found: warn
+          retention-days: 3
 
   collaboration-build:
     needs: ci-plan
@@ -534,6 +657,7 @@ jobs:
         web-static,
         web-checks,
         web-native-checks,
+        workspace-browser-build,
         workspace-browser-shard,
         collaboration-build,
         collaboration-flow,

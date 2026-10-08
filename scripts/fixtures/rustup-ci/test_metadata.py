@@ -360,8 +360,8 @@ class ScopeControls(unittest.TestCase):
             stack.enter_context(patch.object(metadata.shutil,'which',return_value=which or '/home/runner/.cargo/bin/rustup'))
             return metadata.scope(output)
 
-    def test_two_allocated_jobs_positive(self):
-        for job in ('collaboration-build','collaboration-flow'):
+    def test_four_allocated_jobs_positive(self):
+        for job in ('collaboration-build','collaboration-flow','workspace-browser-build','workspace-browser-shard'):
             with self.subTest(job=job):
                 root, _, receipt = self.check_scope({'GITHUB_JOB':job})
                 self.assertEqual(str(root), '/home/runner/.rustup/toolchains/'+metadata.TOOLCHAIN)

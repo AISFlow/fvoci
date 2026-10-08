@@ -10,6 +10,10 @@ import os
 import re
 import subprocess
 import sys
+import shutil
+import stat
+import tarfile
+import io
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,8 +27,8 @@ NarrowFamily = Literal["docs", "frontend_web_install", "web_tests"]
 PLAN_VERSION = 3
 
 WORKFLOW_JOBS: dict[str, tuple[str, ...]] = {
-    "web": ("web-static", "web-checks", "web-native-checks", "workspace-browser-shard", "collaboration-build", "collaboration-flow"),
-    "rust": ("fast", "native-arm64", "postgres", "collaboration"),
+    "web": ("web-static", "web-checks", "web-native-checks", "workspace-browser-build", "workspace-browser-shard", "collaboration-build", "collaboration-flow"),
+    "rust": ("fast", "native-arm64", "postgres-build", "postgres", "collaboration"),
     "documents": ("native-extraction",),
     "collab-engine": ("native-collab-engine",),
     "install": ("install-smoke", "backup-restore-smoke", "upgrade-smoke-arm64"),
@@ -204,6 +208,10 @@ def select_output_key(job: str) -> str:
     # Both mandatory web budget lanes use the same existing selection output.
     if job == "web-native-checks":
         job = "web-checks"
+    if job == "workspace-browser-build":
+        job = "workspace-browser-shard"
+    if job == "postgres-build":
+        job = "postgres"
     return f"select_{job.replace('-', '_')}"
 
 
@@ -889,9 +897,9 @@ def verify_selected_library_execution(jobs: dict) -> list[str]:
     if len(matches) != 1:
         errors.append("rust: selected library step must appear exactly once in fast")
         return errors
-    if matches[0] != {"name": RUST_SELECTED_LIBRARY_STEP, "run": RUST_SELECTED_LIBRARY_RUN + "\n"}:
+    if matches[0] != {"name": RUST_SELECTED_LIBRARY_STEP, "env": {"CARGO_TARGET_DIR": "target/db-lib"}, "run": RUST_SELECTED_LIBRARY_RUN + "\n"}:
         errors.append("rust: selected library step must keep exact unconditional command without extra env or flags")
-    plain = {"run": "cargo test --locked --offline --lib --bin fvoci-server"}
+    plain = {"run": "cargo test --locked --offline --lib --bin fvoci-server", "env": {"CARGO_TARGET_DIR": "target/default"}}
     plain_indices = [i for i, s in enumerate(steps) if s == plain]
     if len(plain_indices) != 1 or plain_indices[0] >= steps.index(matches[0]):
         errors.append("rust: selected library step must preserve preceding default plain library command")
@@ -903,7 +911,7 @@ RUST_SELECTED_INSTALL_STEP = "Selected SQLite install lifetime controls"
 RUST_SELECTED_INSTALL_TARGET = "selected_install_lifetime"
 RUST_SELECTED_INSTALL_IF = "matrix.shard == 'b' && matrix.pg_major == '18'"
 # Bind the actual owned setup, compiler artifact selection and execution/count gate.
-RUST_SELECTED_INSTALL_RUN_SHA256 = "52996bd6cfcfc23baa6066cb096464f931e538895f7aee5b7c42650b47c77bad"
+RUST_SELECTED_INSTALL_RUN_SHA256 = "cc1a88016e90b5aa59944736c9690a454a2c98e7fe1aa5cb201a47d8afbc29ee"
 RUST_POSTGRES_INTEGRATION_STEP = "PostgreSQL integration tests"
 RUST_S3_INTEGRATION_STEP = "S3-compatible storage integration tests (pinned test server)"
 RUST_COLLAB_INTEGRATION_STEP = "WebSocket, PostgreSQL and native helper integration tests"
@@ -925,11 +933,10 @@ RUST_AUTOTEST_FAST_NATIVE_EXCLUSIONS: frozenset[str] = frozenset(
 CARGO_TEST_FLAG_RE = re.compile(r"(?:^|\s)--test\s+([A-Za-z0-9_-]+)")
 CARGO_TEST_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 RUST_POSTGRES_INTEGRATION_RUN_CANONICAL = (
-    "cargo test --locked --offline --no-fail-fast --features db-tests ${{ matrix.tests }}"
+    'python3 scripts/ci_selection.py rust-binaries run --directory "$RUNNER_TEMP/rust-binaries" ${{ matrix.tests }}'
 )
 RUST_S3_INTEGRATION_RUN_CANONICAL = (
-    "bash scripts/start-test-minio.sh cargo test --locked --offline --no-fail-fast "
-    "--features db-tests --test attachment_s3_integration"
+    'bash scripts/start-test-minio.sh python3 scripts/ci_selection.py rust-binaries run --directory "$RUNNER_TEMP/rust-binaries" --test attachment_s3_integration'
 )
 
 
@@ -1070,11 +1077,86 @@ RUST_POSTGRES_IMAGES = {
     "18": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
 }
 RUST_POSTGRES_BUILD_CACHE_KEY = (
-    "v2-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-db-db-tests-nodebug-"
+    "v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-postgres-db-tests-test-nodebug-"
     "${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-"
-    "${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-"
+    "${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-"
     "${{ steps.sqlite.outputs.cache_identity }}"
 )
+
+CACHE_PIN = "0057852bfaa89a56745cba8c7296529d2fc39830"
+RUST_HELPER_CACHE_KEY = (
+    "v2-collab-product-helper-ubuntu-26.04-${{ runner.arch }}-1.98.1-worker-dev-nodebug-"
+    "${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock', 'rust-toolchain.toml') }}-"
+    "${{ hashFiles('crates/collab-engine/**', 'crates/vendor/**', '.cargo/**') }}"
+)
+
+
+def rust_fast_cache_steps() -> list[dict]:
+    steps = []
+    for name, directory, identity, step_id in (
+        ("server", "target/default", "fast-default-test", "default_cache"),
+        ("clippy", "target/clippy", "fast-db-tests-clippy", "clippy_cache"),
+        ("SQLite library", "target/db-lib", "fast-db-tests-lib-test", "db_lib_cache"),
+    ):
+        steps.append({"name": "Restore " + name + " build outputs", "id": step_id,
+                      "uses": "actions/cache/restore@" + CACHE_PIN,
+                      "with": {"path": directory, "key": RUST_POSTGRES_BUILD_CACHE_KEY.replace("postgres-db-tests-test", identity)}})
+        steps.append({"name": "Save " + name + " build outputs after validation",
+                      "if": f"steps.{step_id}.outputs.cache-hit != 'true'", "uses": "actions/cache/save@" + CACHE_PIN,
+                      "with": {"path": directory, "key": "${{ steps." + step_id + ".outputs.cache-primary-key }}"}})
+    return steps
+
+
+def verify_rust_binary_handoff(jobs: dict) -> list[str]:
+    errors = []
+    def require(condition, message):
+        if not condition:
+            errors.append("rust: " + message)
+    fast_steps = jobs.get("fast", {}).get("steps", [])
+    expected = rust_fast_cache_steps()
+    actual = [s for s in fast_steps if s.get("name") in {e["name"] for e in expected}]
+    require(len(actual) == len(expected) and all(e in actual for e in expected),
+            "fast server cache must retain exact pinned restore/save pairs and complete inputs")
+    safe_download = {"path": "~/.cargo/registry\n~/.cargo/git\n",
+                     "key": "v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}"}
+    for step in fast_steps:
+        if str(step.get("uses", "")).startswith("actions/cache") and step not in expected:
+            require(set(step) <= {"name", "uses", "with"} and step.get("with") == safe_download,
+                    "only the exact qualified target restore/save and safe Cargo downloads are allowed")
+    for save in expected[1::2]:
+        if save in fast_steps:
+            require(fast_steps.index(save) > max((i for i, s in enumerate(fast_steps) if "cargo test" in s.get("run", "")), default=-1),
+                    "fast cache saves must follow all validation")
+    native_cache = [s for s in jobs.get("native-arm64", {}).get("steps", []) if s.get("name") == "Restore server build outputs"]
+    require(len(native_cache) == 1 and native_cache[0].get("with") == {"path": "target", "key": RUST_POSTGRES_BUILD_CACHE_KEY.replace("postgres-db-tests-test", "native-default-dev-test")},
+            "native default-feature cache must be distinct from DB test outputs")
+    producer = jobs.get("postgres-build", {})
+    require(producer.get("needs") == "ci-plan" and producer.get("if") == expected_select_if("postgres-build"), "binary producer must use registered selection")
+    require(producer.get("runs-on") == "${{ matrix.runner }}" and producer.get("strategy") == {"fail-fast": False, "matrix": {"include": [{"runner": "ubuntu-26.04"}, {"runner": "ubuntu-26.04-arm"}]}}, "binary producer must run once per architecture")
+    require("services" not in producer and "env" not in producer and "continue-on-error" not in producer, "binary producer must remain credential-free and fail closed")
+    producer_steps = producer.get("steps", [])
+    for name, path, key in (("server", "target/db-tests", RUST_POSTGRES_BUILD_CACHE_KEY),
+                            ("schema default", "target/schema-default", RUST_POSTGRES_BUILD_CACHE_KEY.replace("postgres-db-tests-test", "schema-default-dev")),
+                            ("production helper", "crates/collab-engine/target", RUST_HELPER_CACHE_KEY)):
+        matching = [s for s in producer_steps if s.get("name") == "Restore " + name + " build outputs"]
+        require(matching == [{"name": "Restore " + name + " build outputs", "uses": "actions/cache@" + CACHE_PIN, "with": {"path": path, "key": key}}], "producer cache must have one exact writer and complete inputs")
+    build = [s for s in producer_steps if s.get("name") == "Build all PostgreSQL test executables once per architecture"]
+    require(build == [{"name": "Build all PostgreSQL test executables once per architecture", "env": {"CARGO_TARGET_DIR": "${{ github.workspace }}/target/db-tests"}, "run": 'mkdir "$RUNNER_TEMP/rust-binaries"\npython3 scripts/ci_selection.py rust-binaries build --directory "$RUNNER_TEMP/rust-binaries"\n'}], "binary producer must build the complete registered cohort")
+    for job_name, cohort in (("postgres", "postgres"), ("collaboration", "helper")):
+        job = jobs.get(job_name, {})
+        require(job.get("needs") == ["ci-plan", "postgres-build"], "binary consumers must need the successful producer")
+        steps = job.get("steps", [])
+        download = [s for s in steps if s.get("name") == f"Download required {cohort} executables for this SHA and architecture"]
+        require(download == [{"name": f"Download required {cohort} executables for this SHA and architecture", "uses": "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093", "with": {"name": "rust-" + cohort + "-${{ runner.arch }}-${{ github.sha }}-${{ github.run_attempt }}", "path": "${{ runner.temp }}/rust-binaries"}}], "binary consumers must download the exact SHA/architecture/attempt artifact")
+        validate = [s for s in steps if s.get("name") == f"Validate and restore finished {cohort} executables (no rebuild fallback)"]
+        require(validate == [{"name": f"Validate and restore finished {cohort} executables (no rebuild fallback)", "run": 'python3 scripts/ci_selection.py rust-binaries unpack --cohort ' + cohort + ' --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"'}], "binary consumers must validate all inputs and hashes unconditionally")
+        if download and validate:
+            require(steps.index(download[0]) < steps.index(validate[0]), "download must precede binary validation")
+        if job_name == "postgres":
+            require(not any(any(word in s.get("run", "") for word in ("cargo ", "\"cargo\"", "'cargo'")) or str(s.get("uses", "")).startswith("actions/cache") for s in steps), "PostgreSQL consumers must never restore build caches or rebuild")
+        else:
+            require(not any("--bin collab-engine" in s.get("run", "") or s.get("with", {}).get("path") == "crates/collab-engine/target" for s in steps), "collaboration must reuse helper without build/cache fallback")
+    return errors
 
 
 def verify_postgres_budget_matrix(jobs: dict) -> list[str]:
@@ -1138,9 +1220,10 @@ def verify_postgres_budget_matrix(jobs: dict) -> list[str]:
     baseline = per_pair.get(("ubuntu-26.04", "18"), set())
     if any(targets != baseline for targets in per_pair.values()):
         errors.append("rust: PostgreSQL budget must retain equal target coverage on every platform/major pair")
-    cache = [step for step in job.get("steps", []) if isinstance(step, dict) and step.get("name") == "Restore server build outputs"]
-    if len(cache) != 1 or cache[0].get("with") != {"path": "target", "key": RUST_POSTGRES_BUILD_CACHE_KEY}:
-        errors.append("rust: PostgreSQL budget must retain strict complete-input server cache without restore fallback")
+    producer = jobs.get("postgres-build", {})
+    cache = [step for step in producer.get("steps", []) if isinstance(step, dict) and step.get("name") == "Restore server build outputs"]
+    if len(cache) != 1 or cache[0].get("with") != {"path": "target/db-tests", "key": RUST_POSTGRES_BUILD_CACHE_KEY}:
+        errors.append("rust: PostgreSQL producer must retain strict complete-input server cache without restore fallback")
     return errors
 
 
@@ -1273,7 +1356,7 @@ def _verify_postgres_integration_run(run: str) -> str | None:
     if norm.startswith("echo "):
         return (
             "rust: PostgreSQL integration step must execute "
-            "cargo test with --features db-tests and ${{ matrix.tests }}"
+            "validated db-tests binaries for ${{ matrix.tests }}"
         )
     suppression = _cargo_command_suppression_error(norm, "PostgreSQL integration step")
     if suppression:
@@ -1282,7 +1365,7 @@ def _verify_postgres_integration_run(run: str) -> str | None:
     if collapsed != RUST_POSTGRES_INTEGRATION_RUN_CANONICAL:
         return (
             "rust: PostgreSQL integration step must execute "
-            "cargo test with --features db-tests and ${{ matrix.tests }}"
+            "validated db-tests binaries for ${{ matrix.tests }}"
         )
     return None
 
@@ -1291,7 +1374,7 @@ def _verify_s3_integration_run(run: str) -> str | None:
     norm = _normalize_run_script(run).strip()
     if norm.startswith("echo "):
         return (
-            "rust: S3 integration step must invoke start-test-minio.sh with a db-tests cargo test"
+            "rust: S3 integration step must invoke start-test-minio.sh with the validated db-tests binary"
         )
     suppression = _cargo_command_suppression_error(norm, "S3 integration step")
     if suppression:
@@ -1299,7 +1382,7 @@ def _verify_s3_integration_run(run: str) -> str | None:
     collapsed = _collapse_shell_words(norm)
     if collapsed != RUST_S3_INTEGRATION_RUN_CANONICAL:
         return (
-            "rust: S3 integration step must invoke start-test-minio.sh with a db-tests cargo test"
+            "rust: S3 integration step must invoke start-test-minio.sh with the validated db-tests binary"
         )
     return None
 
@@ -1531,24 +1614,13 @@ def selected_install_inventory(jobs: dict) -> tuple[set[str], str | None]:
             "unfiltered execution and count gate"
         )
     helper, err = _unique_named_step(
-        steps, "Build production helper for PostgreSQL B native fixtures", job="postgres"
+        steps, "Validate and restore finished postgres executables (no rebuild fallback)", job="postgres"
     )
     if err:
         return set(), err
-    assert helper is not None
-    expected_helper = (
-        "cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml\n"
-        "cargo build --locked --offline --manifest-path crates/collab-engine/Cargo.toml "
-        "--features worker --bin collab-engine"
-    )
-    if (
-        helper.get("if") != "matrix.shard == 'b'"
-        or "continue-on-error" in helper
-        or helper.get("env") != {"CARGO_TARGET_DIR": "${{ github.workspace }}/crates/collab-engine/target"}
-        or str(helper.get("run", "")).strip() != expected_helper
-        or steps.index(helper) >= steps.index(step)
-    ):
-        return set(), "rust: selected install requires the preceding mandatory production worker helper build"
+    expected_run = 'python3 scripts/ci_selection.py rust-binaries unpack --cohort postgres --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"'
+    if "if" in helper or "continue-on-error" in helper or helper.get("run") != expected_run or steps.index(helper) >= steps.index(step):
+        return set(), "rust: selected install requires preceding mandatory validated production helper artifact"
     rows, err = _postgres_matrix_rows(jobs["postgres"])
     if err:
         return set(), err
@@ -1563,7 +1635,7 @@ def selected_install_inventory(jobs: dict) -> tuple[set[str], str | None]:
 
 
 RUST_SCHEMA_BASELINE_STEP = "Schema baseline SQLite controls and prepared PostgreSQL catalog"
-RUST_SCHEMA_BASELINE_RUN_SHA256 = "d16a7b44c1fb87bd8a25148a4976881dd70b84ba4d6aaffd09b862ef7caece72"
+RUST_SCHEMA_BASELINE_RUN_SHA256 = "919415320553e025982e0a41708b202c1fa159a0019de7d3e3b100680ed59c52"
 
 
 def schema_baseline_inventory(jobs: dict) -> tuple[set[str], str | None]:
@@ -1797,7 +1869,7 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
                     if cache.get("path") == "crates/document-extract/.vendor-src/rhwp":
                         continue
                     for field in ("key", "restore-keys"):
-                        if field in cache and any("ubuntu-26.04-${{ runner.arch }}-1.98.1-" not in line for line in str(cache[field]).splitlines()):
+                        if (field in cache and not (path.name == "rust.yml" and job_id == "fast" and step in rust_fast_cache_steps()[1::2])) and any("ubuntu-26.04-${{ runner.arch }}-1.98.1-" not in line for line in str(cache[field]).splitlines()):
                             errors.append(f"{path.name}: {job_id} cache {field} must bind Ubuntu 26.04, architecture and toolchain")
 
     for workflow, filename in WORKFLOW_YAML.items():
@@ -1823,36 +1895,7 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
             continue
 
         if workflow == "rust":
-            cache = [step for step in jobs.get("fast", {}).get("steps", [])
-                     if isinstance(step, dict) and step.get("name") == "Restore server build outputs"]
-            expected_cache = {
-                "name": "Restore server build outputs",
-                "uses": "actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830",
-                "with": {"path": "target", "key": RUST_POSTGRES_BUILD_CACHE_KEY.replace(
-                    "-db-db-tests-nodebug-", "-fast-db-tests-nodebug-", 1)},
-            }
-            if cache != [expected_cache]:
-                errors.append("rust: fast server cache must retain exact pinned restore-only complete-input key without post save")
-            download_cache = {
-                "path": "~/.cargo/registry\n~/.cargo/git\n",
-                "key": "v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}",
-            }
-            for step in jobs.get("fast", {}).get("steps", []):
-                if not isinstance(step, dict) or not str(step.get("uses", "")).startswith((
-                        "actions/cache@", "actions/cache/restore@", "actions/cache/save@")):
-                    continue
-                if step == expected_cache:
-                    continue
-                # Only this literal download shape is known to exclude build
-                # outputs. Do not interpret arbitrary globs or expressions.
-                safe_download = (set(step) <= {"name", "uses", "with"}
-                    and step.get("with") == download_cache
-                    and step.get("uses") in {
-                        "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830",
-                        "actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830",
-                        "actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830"})
-                if not safe_download:
-                    errors.append("rust: fast target output cache writers are prohibited; only the exact qualified target restore and safe Cargo downloads are allowed regardless of step name")
+            errors.extend(verify_rust_binary_handoff(jobs))
 
         reserved_gate = gate_job_id(workflow)
         if PLAN_JOB_ID not in jobs:
@@ -2304,6 +2347,13 @@ def _validate_plan_schema(plan: object, workflow: str) -> str | None:
         selected = entry.get("selected")
         if type(selected) is not bool:
             return "PLAN_SELECTED_TYPE"
+    if workflow == "rust" and (
+        jobs["postgres-build"] != jobs["postgres"]
+        or (jobs["collaboration"]["selected"] and not jobs["postgres-build"]["selected"])
+    ):
+        return "PLAN_BINARY_PRODUCER_SELECTION"
+    if workflow == "web" and jobs["workspace-browser-build"] != jobs["workspace-browser-shard"]:
+        return "PLAN_BROWSER_PRODUCER_SELECTION"
     return None
 
 
@@ -2463,6 +2513,191 @@ def cmd_verify_workflows(argv: list[str] | None = None) -> int:
     return 1 if errors else 0
 
 
+def rust_binary_targets(jobs: dict) -> list[str]:
+    """Only the existing PostgreSQL, S3, schema and install execution cohorts."""
+    rows, error = _postgres_matrix_rows(jobs["postgres"])
+    if error:
+        raise ValueError(error)
+    return sorted({name for row in rows for name in cargo_test_flags_in_text(row["tests"])} |
+                  {"attachment_s3_integration", "schema_baseline_integration", "selected_install_lifetime"})
+
+
+def rust_product_binary_targets(repo_root: Path = ROOT) -> list[str]:
+    cargo = tomllib.loads((repo_root / "Cargo.toml").read_text())
+    return sorted(entry["name"] for entry in cargo.get("bin", [])
+                  if set(entry.get("required-features", [])) <= {"db-tests"})
+
+
+def rust_binary_context(sqlite_identity: str) -> dict:
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    if not validate_sha(head) or head != os.environ.get("GITHUB_SHA"):
+        raise ValueError("Rust binary checkout SHA mismatch")
+    arch = os.environ.get("RUNNER_ARCH")
+    if arch not in {"X64", "ARM64"} or not re.fullmatch(r"[0-9a-f]{64}", sqlite_identity):
+        raise ValueError("Rust binary platform/SQLite identity invalid")
+    rustc = subprocess.check_output(["rustc", "-vV"], text=True)
+    host = "x86_64-unknown-linux-gnu" if arch == "X64" else "aarch64-unknown-linux-gnu"
+    if not rustc.startswith("rustc 1.98.1 ") or f"host: {host}" not in rustc.splitlines():
+        raise ValueError("Rust binary pinned toolchain mismatch")
+    return {"sha": head, "workspace": str(Path.cwd().resolve()), "arch": arch,
+            "os": Path("/etc/os-release").read_text(), "rustc": rustc,
+            "sqlite": sqlite_identity, "profile": "dev-test-nodebug",
+            "build_environment": {key: os.environ.get(key) for key in (
+                "CARGO_INCREMENTAL", "CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG",
+                "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET")}}
+
+
+def rust_binary_records(path: Path) -> list[dict]:
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    if not records or records[-1] != {"reason": "build-finished", "success": True}:
+        raise ValueError("Rust binary producer did not finish successfully")
+    return [record for record in records if record.get("reason") == "compiler-artifact" and record.get("executable")]
+
+
+def rust_binary_entries(records: list[dict], names: list[str], kind: str, features: list[str], root: Path) -> dict:
+    entries = {}
+    for name in names:
+        matches = [r for r in records if r["target"]["name"] == name and r["target"]["kind"] == [kind]
+                   and r["profile"]["test"] is (kind == "test")]
+        if len(matches) != 1:
+            raise ValueError("Rust binary executable missing or ambiguous: " + name)
+        record = matches[0]
+        if sorted(record["features"]) != features or record["profile"]["opt_level"] != "0" or record["profile"]["debuginfo"] not in (0, None):
+            raise ValueError("Rust binary feature/profile mismatch: " + name)
+        path = Path(record["executable"])
+        relative = path.relative_to(root).as_posix()
+        if not path.is_absolute() or path.resolve() != path or not stat.S_ISREG(path.lstat().st_mode):
+            raise ValueError("Rust binary executable is not physical regular file")
+        entries[name] = {"path": relative, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                         "record": record}
+    return entries
+
+
+def rust_binary_pack(output: Path, context: dict, entries: dict) -> None:
+    manifest = {"version": 1, "context": context, "entries": entries}
+    raw = json.dumps(manifest, sort_keys=True).encode()
+    with tarfile.open(output, "x:gz") as archive:
+        info = tarfile.TarInfo("manifest.json"); info.size = len(raw)
+        archive.addfile(info, io.BytesIO(raw))
+        for entry in entries.values():
+            archive.add(Path(context["workspace"]) / entry["path"], arcname=entry["path"], recursive=False)
+
+
+def rust_binary_unpack(archive_path: Path, context: dict, names: set[str], root: Path) -> dict:
+    """Validate every member before writing; no cache/rebuild fallback exists."""
+    with tarfile.open(archive_path, "r:gz") as archive:
+        members = archive.getmembers()
+        if not members or len({m.name for m in members}) != len(members) or any(not m.isfile() for m in members):
+            raise ValueError("Rust binary archive has duplicate or nonregular members")
+        member = archive.getmember("manifest.json")
+        if member.size > 4 * 1024 * 1024:
+            raise ValueError("Rust binary manifest too large")
+        manifest = json.load(archive.extractfile(member))
+        if manifest.get("version") != 1 or manifest.get("context") != context:
+            raise ValueError("Rust binary source/platform/native inputs mismatch")
+        entries = manifest.get("entries", {})
+        if set(entries) != names:
+            raise ValueError("Rust binary cohort missing or foreign executable")
+        paths = {entry["path"] for entry in entries.values()}
+        if len(paths) != len(entries) or {m.name for m in members} != paths | {"manifest.json"}:
+            raise ValueError("Rust binary archive member inventory mismatch")
+        for name, entry in entries.items():
+            relative = Path(entry["path"])
+            if relative.is_absolute() or ".." in relative.parts or not str(relative).startswith(("target/", "crates/collab-engine/target/")):
+                raise ValueError("Rust binary archive path escape")
+            destination = root / relative
+            if any(p.is_symlink() for p in (destination, *destination.parents)) or destination.exists():
+                raise ValueError("Rust binary destination occupied or symlinked")
+            raw = archive.extractfile(entry["path"]).read()
+            record = entry["record"]
+            features = ["default", "worker"] if name == "collab-engine" else ([] if name == "schema-migrate" else ["db-tests"])
+            kind = "bin" if name in {*rust_product_binary_targets(), "schema-migrate", "collab-engine"} else "test"
+            target_name = "fvoci-migrate" if name == "schema-migrate" else name
+            if (hashlib.sha256(raw).hexdigest() != entry["sha256"] or sorted(record["features"]) != features
+                    or record["profile"]["opt_level"] != "0" or record["profile"]["debuginfo"] not in (0, None)
+                    or record["profile"]["test"] is not (kind == "test")
+                    or record["target"]["kind"] != [kind] or record["target"]["name"] != target_name
+                    or record["executable"] != str(destination)):
+                raise ValueError("Rust binary digest/feature/profile/path mismatch")
+        for entry in entries.values():
+            destination = root / entry["path"]
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open("xb") as handle:
+                shutil.copyfileobj(archive.extractfile(entry["path"]), handle)
+            destination.chmod(0o755)
+    return manifest
+
+
+def rust_binary_run(manifest: dict, names: list[str], libtest_args: list[str]) -> int:
+    if not names or len(names) != len(set(names)) or set(libtest_args) - {"--nocapture", "--test-threads=1"}:
+        raise ValueError("Rust binary run must name unique targets without test filters")
+    status = 0
+    for name in names:
+        entry = manifest["entries"][name]
+        path = Path(manifest["context"]["workspace"]) / entry["path"]
+        if (not stat.S_ISREG(path.lstat().st_mode) or path.is_symlink()
+                or hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]
+                or entry["record"]["target"]["kind"] != ["test"]):
+            raise ValueError("Rust binary changed after validation")
+        # Preserve Cargo --no-fail-fast across executables; libtest failures propagate.
+        result = subprocess.run([str(path), *libtest_args]).returncode
+        if result and not status:
+            status = result if result > 0 else 1
+    return status
+
+
+def cmd_rust_binaries(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Rust workflow's PostgreSQL executable handoff (never rebuilds consumers)")
+    parser.add_argument("action", choices=("build", "pack", "unpack", "run"))
+    parser.add_argument("--sqlite-identity")
+    parser.add_argument("--directory", type=Path)
+    parser.add_argument("--cohort", choices=("postgres", "helper"), default="postgres")
+    parser.add_argument("--test", action="append", default=[])
+    parser.add_argument("--nocapture", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        jobs, error = _rust_workflow_jobs(ROOT)
+        if error:
+            raise ValueError(error)
+        names = rust_binary_targets(jobs)
+        if args.action == "build":
+            command = ["cargo", "test", "--locked", "--offline", "--features", "db-tests", "--no-run", "--message-format=json"]
+            for name in names:
+                command.extend(["--test", name])
+            with (args.directory / "tests.jsonl").open("x") as output:
+                return subprocess.run(command, stdout=output).returncode
+        if args.action == "run":
+            manifest = json.loads((args.directory / "postgres-manifest.json").read_text())
+            if (manifest["context"]["sha"] != os.environ.get("GITHUB_SHA")
+                    or manifest["context"]["arch"] != os.environ.get("RUNNER_ARCH")
+                    or manifest["context"]["workspace"] != str(Path.cwd().resolve())):
+                raise ValueError("Rust binary execution source/path mismatch")
+            return rust_binary_run(manifest, args.test, ["--nocapture"] if args.nocapture else [])
+        context = rust_binary_context(args.sqlite_identity)
+        root = Path(context["workspace"])
+        if args.action == "pack":
+            helper = rust_binary_entries(rust_binary_records(args.directory / "helper.jsonl"), ["collab-engine"], "bin", ["default", "worker"], root)
+            rust_binary_pack(args.directory / "helper.tar.gz", context, helper)
+            records = rust_binary_records(args.directory / "tests.jsonl")
+            entries = rust_binary_entries(records, names, "test", ["db-tests"], root)
+            entries.update(rust_binary_entries(records, rust_product_binary_targets(), "bin", ["db-tests"], root))
+            schema = rust_binary_entries(rust_binary_records(args.directory / "schema.jsonl"), ["fvoci-migrate"], "bin", [], root)
+            entries["schema-migrate"] = schema["fvoci-migrate"]
+            entries.update(helper)
+            rust_binary_pack(args.directory / "postgres.tar.gz", context, entries)
+        else:
+            expected = {"collab-engine"} if args.cohort == "helper" else set(names) | set(rust_product_binary_targets()) | {"schema-migrate", "collab-engine"}
+            manifest = rust_binary_unpack(args.directory / (args.cohort + ".tar.gz"), context, expected, root)
+            (args.directory / (args.cohort + "-manifest.json")).write_text(json.dumps(manifest))
+            if args.cohort == "postgres":
+                records = [entry["record"] for entry in manifest["entries"].values() if entry["record"]["features"] == ["db-tests"]]
+                (args.directory / "selected-install-build.jsonl").write_text("\n".join(json.dumps(record) for record in records))
+        return 0
+    except (OSError, ValueError, KeyError, tarfile.TarError) as error:
+        print("Rust binary handoff refused: " + str(error), file=sys.stderr)
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
@@ -2470,6 +2705,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     command = argv[0]
     rest = argv[1:]
+    if command == "rust-binaries":
+        return cmd_rust_binaries(rest)
     if command == "plan":
         return cmd_plan(rest)
     if command == "gate":

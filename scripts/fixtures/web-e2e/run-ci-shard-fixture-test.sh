@@ -190,6 +190,16 @@ if (
   exit 1
 fi
 
+# Test-only handoff leaf: checks invocation/propagates refusal, without build.
+mkdir -p "$FIXTURE_ROOT/scripts/selected-backend-ci"
+cat >"$FIXTURE_ROOT/scripts/selected-backend-ci/web-build-handoff.py" <<'STUB'
+import os, sys
+assert sys.argv[1:] == ['consume']
+assert os.environ['FVOCI_WEB_BUILD_PHASE'] == 'consume'
+print('fvoci-web-e2e-fake-handoff-consume')
+sys.exit(int(os.environ.get('FVOCI_TEST_HANDOFF_EXIT', '0')))
+STUB
+
 # Explicit CI consumption must use physical tracked outputs from its tested
 # checkout, with no generator fallback. All runtime/builds remain stubbed here.
 mkdir -p "$FIXTURE_ROOT/apps/web/src/generated"
@@ -210,7 +220,10 @@ run_committed_api() {
     export GITHUB_JOB="${FVOCI_TEST_JOB:-workspace-browser-shard}"
     export GITHUB_SHA="${FVOCI_TEST_SHA:-$(git -C "$FIXTURE_ROOT" rev-parse HEAD)}"
     cd "$FIXTURE_ROOT"
-    bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-shard 0 "$@"
+    export FVOCI_SELECTED_CI_OUTPUT="$FIXTURE_ROOT/browser-output"
+    export FVOCI_WEB_BUILD_HANDOFF="$FIXTURE_ROOT/browser-packet"
+    export FVOCI_WEB_BUILD_HANDOFF_SHA256="${FVOCI_TEST_HANDOFF_DIGEST-$(printf '%064d' 0)}"
+    bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-browser --ci-shard 0 "$@"
   ) >"$api_log" 2>&1
 }
 reject_committed_api() {
@@ -233,16 +246,20 @@ if grep -q 'fvoci-web-e2e-fake-generate-api' "$api_log"; then
   echo 'CI silently regenerated committed outputs' >&2
   exit 1
 fi
-[[ "$(grep -c 'fvoci-web-e2e-fake-bun-build' "$api_log")" == 1 ]]
-[[ "$(grep -c 'fvoci-web-e2e-fake-cargo' "$api_log")" == 3 ]]
-grep -Fq 'build --locked --offline --bin fvoci-e2e-fixture --features db-tests' "$api_log"
-grep -Fxq 'fvoci-web-e2e-fake-cargo build --locked --offline --bin fvoci-server --bin fvoci-migrate' "$api_log"
-grep -Fq -- '--features worker --bin collab-engine' "$api_log"
+if grep -Eq 'fvoci-web-e2e-fake-(bun-build|cargo)' "$api_log"; then
+  echo 'consumer performed a local build' >&2; exit 1
+fi
+[[ "$(grep -c 'fvoci-web-e2e-fake-handoff-consume' "$api_log")" == 1 ]]
 [[ "$(grep -c '^fvoci-web-e2e-run-group ' "$api_log")" == "${#planned_groups[@]}" ]]
-for stage in web-build fixture-build default-server-build worker-build; do
-  grep -Eq "^web-e2e stage=${stage} elapsed_seconds=[0-9]+ exit=0$" "$api_log"
-done
-echo 'committed-api positive: same checkout, fresh web/native preparation, all groups'
+grep -Eq '^web-e2e stage=browser-handoff-consume elapsed_seconds=[0-9]+ exit=0$' "$api_log"
+echo 'committed-api positive: same checkout, producer consumption, all groups, zero builds'
+FVOCI_TEST_HANDOFF_DIGEST='' reject_committed_api 'missing artifact digest'
+status=0
+FVOCI_TEST_HANDOFF_EXIT=7 run_committed_api || status=$?
+[[ "$status" == 7 ]]
+if grep -Eq 'fvoci-web-e2e-fake-(generate-api|bun-build|cargo)|^fvoci-web-e2e-run-group ' "$api_log"; then
+  echo 'local fallback/runtime ran after artifact refusal' >&2; exit 1
+fi
 
 FVOCI_TEST_CI=false reject_committed_api 'not CI'
 FVOCI_TEST_ACTIONS=false reject_committed_api 'not GitHub Actions'
@@ -279,33 +296,6 @@ fixture_commit 'Restore tracked output'
 printf '%s\n' '// dirty source' >>"$FIXTURE_ROOT/apps/web/e2e/workspace-flow.spec.ts"
 reject_committed_api 'dirty tracked source'
 git -C "$FIXTURE_ROOT" restore apps/web/e2e/workspace-flow.spec.ts
-
-if FVOCI_TEST_DIRTY_API_DURING_BUILD=1 run_committed_api; then
-  echo 'accepted generated output altered during fresh web build' >&2
-  exit 1
-fi
-grep -q 'fvoci-web-e2e-fake-bun-build' "$api_log"
-if grep -Eq 'fvoci-web-e2e-fake-(generate-api|cargo)|^fvoci-web-e2e-run-group ' "$api_log"; then
-  echo 'native/runtime or fallback ran after outputs changed during web build' >&2
-  exit 1
-fi
-git -C "$FIXTURE_ROOT" restore apps/web/src/generated/api.ts
-echo 'committed-api negative: mutation during build rejected before native/runtime'
-for failed_stage in web native; do
-  status=0
-  if [[ "$failed_stage" == web ]]; then
-    FVOCI_TEST_BUN_BUILD_EXIT=7 run_committed_api || status=$?
-  else
-    FVOCI_TEST_CARGO_EXIT=7 run_committed_api || status=$?
-  fi
-  [[ "$status" == 7 ]]
-  grep -Eq '^web-e2e stage=.+ elapsed_seconds=[0-9]+ exit=7$' "$api_log"
-  if grep -Eq 'fvoci-web-e2e-fake-generate-api|^fvoci-web-e2e-run-group ' "$api_log"; then
-    echo 'fallback/runtime ran despite current preparation failure' >&2
-    exit 1
-  fi
-  echo "committed-api negative: $failed_stage preparation exit 7 propagated"
-done
 
 # Exercise the actual timer dispatch prefix with only its downstream runtime
 # stubbed; no DB/browser allocation or alternate production mode is introduced.

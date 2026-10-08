@@ -123,7 +123,7 @@ class UbuntuPrimaryMirrorTest(unittest.TestCase):
 
     def test_every_x64_root_preparation_selects_signed_primary_before_apt(self):
         steps = self.preparation_steps()
-        self.assertEqual(set(steps), {('web', 'web-checks'), ('web', 'web-native-checks'), ('web', 'workspace-browser-shard'),
+        self.assertEqual(set(steps), {('web', 'web-checks'), ('web', 'web-native-checks'), ('web', 'workspace-browser-build'), ('web', 'workspace-browser-shard'),
             ('web', 'collaboration-build'), ('web', 'collaboration-flow')})
         for name, step in steps.items():
             with self.subTest(consumer=name):
@@ -217,7 +217,7 @@ class SchemaCatalogLifecycleTest(unittest.TestCase):
         calls = []
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            binary = root / "target/debug/fvoci-migrate"; binary.parent.mkdir(parents=True); binary.write_bytes(b"fixture, not ELF")
+            binary = root / "target/schema-default/debug/fvoci-migrate"; binary.parent.mkdir(parents=True); binary.write_bytes(b"fixture, not ELF")
             env = {"CI":"true", "GITHUB_ACTIONS":"true", "GITHUB_SHA":"a"*40,
                    "PG_CONTAINER":"b"*64, "RUNNER_TEMP":str(root),
                    "PREPARATION_DATABASE_URL":"postgres://postgres:fixture-only@127.0.0.1:5432/postgres"}
@@ -237,8 +237,8 @@ class SchemaCatalogLifecycleTest(unittest.TestCase):
                     self.assertRegex(env["DATABASE_URL"], r'/fvoci_schema_ci_[a-f0-9]{16}$')
                     self.assertNotIn("FVOCI_SCHEMA_CATALOG_DATABASE_URL", env)
                     return subprocess.CompletedProcess(args, 0, b"", b"")
-                self.assertEqual(args, ["cargo","test","--locked","--offline","--features","db-tests",
-                                       "--test","schema_baseline_integration","--","--nocapture"])
+                self.assertEqual(args, ["python3","scripts/ci_selection.py","rust-binaries","run","--directory",
+                                       str(root) + "/rust-binaries","--test","schema_baseline_integration","--nocapture"])
                 self.assertNotIn("DATABASE_URL", env)
                 self.assertEqual(env["TEST_DATABASE_URL"], "postgres://postgres:fixture-only@127.0.0.1:5432/postgres")
                 self.assertNotIn("PREPARATION_DATABASE_URL", env)
@@ -1287,8 +1287,7 @@ class WorkflowRegistryTest(unittest.TestCase):
         # Preserve every build input/cache step, with only the exact ARM mirror
         # override needed for the stalled Azure download. Signing stays intact.
         pg_steps = jobs["postgres"]["steps"]
-        expected_setup = [dict(step) for step in pg_steps
-                          if step.get("name") != "PostgreSQL service major matches matrix"][:6]
+        expected_setup = [copy.deepcopy(step) for step in jobs["postgres-build"]["steps"][:4]]
         mirror_setup = (
             "# This runner's Azure mirror stalled the pinned ARM libclang download.\n"
             "# Change only its mirror list; keep the Ubuntu archive Signed-By policy.\n"
@@ -1305,10 +1304,10 @@ class WorkflowRegistryTest(unittest.TestCase):
         self.assertIn(X64_APT_MIRROR_SETUP, prepare["run"])
         prepare["run"] = prepare["run"].replace(X64_APT_MIRROR_SETUP, "", 1)
         prepare["run"] = prepare["run"].replace("set -euo pipefail\n", "set -euo pipefail\n" + mirror_setup, 1)
-        self.assertEqual(steps[:-1], expected_setup)
+        self.assertEqual(steps[:4], expected_setup)
         cache = next(step for step in steps if step.get("name") == "Restore server build outputs")
         self.assertEqual(cache["with"]["path"], "target")
-        self.assertIn("db-db-tests-nodebug", cache["with"]["key"])
+        self.assertIn("native-default-dev-test-nodebug", cache["with"]["key"])
         self.assertIn("steps.sqlite.outputs.cache_identity", cache["with"]["key"])
         self.assertNotIn("restore-keys", cache["with"])
         self.assertFalse(any(step.get("name") == check["name"] for step in pg_steps))
@@ -1352,6 +1351,127 @@ class WorkflowRegistryTest(unittest.TestCase):
     def test_requirements_pin_pyyaml(self) -> None:
         text = (ROOT / "scripts" / "ci_selection_requirements.txt").read_text(encoding="utf-8")
         self.assertIn("PyYAML==6.0.3", text)
+
+
+class RustBinaryArtifactTest(unittest.TestCase):
+    def test_all_enabled_child_binaries_are_inventoried(self):
+        self.assertEqual(SEL.rust_product_binary_targets(ROOT),
+                         ["fvoci-e2e-fixture", "fvoci-mcp", "fvoci-migrate", "fvoci-server"])
+
+    def fixture(self, directory, *, failure=False):
+        root = Path(directory)
+        context = {"sha": "a" * 40, "arch": "X64", "workspace": str(root), "sqlite": "b" * 64,
+                   "rustc": "pinned fixture", "profile": "dev-test-nodebug"}
+        records = []
+        for name in ("first", "second"):
+            path = root / "target/db-tests/debug/deps" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("#!/bin/sh\nexit " + ("7" if failure and name == "first" else "0") + "\n")
+            path.chmod(0o755)
+            records.append({"reason": "compiler-artifact", "target": {"name": name, "kind": ["test"]},
+                            "profile": {"test": True, "opt_level": "0", "debuginfo": 0},
+                            "features": ["db-tests"], "executable": str(path)})
+        entries = SEL.rust_binary_entries(records, ["first", "second"], "test", ["db-tests"], root)
+        return root, context, entries
+
+    def test_roundtrip_and_no_fail_fast_execute_actual_transferred_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, context, entries = self.fixture(directory, failure=True)
+            archive = root / "postgres.tar.gz"
+            SEL.rust_binary_pack(archive, context, entries)
+            shutil.rmtree(root / "target")
+            manifest = SEL.rust_binary_unpack(archive, context, set(entries), root)
+            with mock.patch.object(SEL.subprocess, "run", wraps=subprocess.run) as run:
+                self.assertEqual(SEL.rust_binary_run(manifest, ["first", "second"], []), 7)
+                self.assertEqual(run.call_count, 2)
+                self.assertFalse(any("cargo" in call.args[0] for call in run.call_args_list))
+
+    def test_missing_archive_and_source_platform_native_context_refuse_before_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, context, entries = self.fixture(directory)
+            archive = root / "postgres.tar.gz"
+            with self.assertRaises(FileNotFoundError):
+                SEL.rust_binary_unpack(archive, context, set(entries), root)
+            SEL.rust_binary_pack(archive, context, entries)
+            shutil.rmtree(root / "target")
+            for key in ("sha", "arch", "workspace", "sqlite", "profile", "rustc"):
+                with self.subTest(key=key), self.assertRaisesRegex(ValueError, "inputs mismatch"):
+                    SEL.rust_binary_unpack(archive, {**context, key: "foreign"}, set(entries), root)
+                self.assertFalse((root / "target").exists())
+
+    def test_digest_feature_profile_cohort_and_path_corruption_refuse_before_writing(self):
+        for defect in ("digest", "feature", "profile", "missing", "escape", "duplicate-path"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
+                root, context, entries = self.fixture(directory)
+                expected = set(entries)
+                if defect == "digest": entries["first"]["sha256"] = "0" * 64
+                elif defect == "feature": entries["first"]["record"]["features"] = ["extract-native-tests", "db-tests"]
+                elif defect == "profile": entries["first"]["record"]["profile"]["debuginfo"] = 2
+                elif defect == "missing": entries.pop("first")
+                elif defect == "escape":
+                    entries["first"]["path"] = "target/../target/db-tests/debug/deps/first"
+                else: entries["second"]["path"] = entries["first"]["path"]
+                archive = root / "postgres.tar.gz"
+                SEL.rust_binary_pack(archive, context, entries)
+                shutil.rmtree(root / "target")
+                with self.assertRaises(ValueError):
+                    SEL.rust_binary_unpack(archive, context, expected, root)
+                self.assertFalse((root / "target").exists())
+
+    def test_producer_rejects_missing_ambiguous_features_and_profiles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, _, entries = self.fixture(directory)
+            record = entries["first"]["record"]
+            for records in ([], [record, record], [{**record, "features": []}],
+                            [{**record, "profile": {**record["profile"], "opt_level": "3"}}]):
+                with self.assertRaises(ValueError):
+                    SEL.rust_binary_entries(records, ["first"], "test", ["db-tests"], root)
+
+    def test_run_refuses_changed_executable_and_filters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, context, entries = self.fixture(directory)
+            manifest = {"context": context, "entries": entries}
+            with self.assertRaises(ValueError):
+                SEL.rust_binary_run(manifest, ["first"], ["nonexistent_filter"])
+            (root / entries["first"]["path"]).write_bytes(b"changed")
+            with self.assertRaises(ValueError):
+                SEL.rust_binary_run(manifest, ["first"], [])
+
+    def test_workflow_missing_producer_download_validation_and_cache_fallback_fail(self):
+        jobs, error = SEL._rust_workflow_jobs(ROOT)
+        self.assertIsNone(error)
+        self.assertEqual(SEL.verify_rust_binary_handoff(jobs), [])
+        for defect in ("producer", "needs", "download", "validate", "skip", "rebuild", "fallback", "clippy"):
+            bad = copy.deepcopy(jobs)
+            if defect == "producer": bad["postgres-build"]["strategy"]["matrix"]["include"].pop()
+            elif defect == "needs": bad["postgres"]["needs"] = "ci-plan"
+            elif defect in ("download", "validate", "skip"):
+                match = next(s for s in bad["postgres"]["steps"] if s.get("name", "").startswith("Download required" if defect == "download" else "Validate and restore"))
+                if defect == "skip": match["continue-on-error"] = True
+                else: bad["postgres"]["steps"].remove(match)
+            elif defect == "rebuild": bad["postgres"]["steps"].append({"run": "cargo test --features db-tests"})
+            elif defect == "fallback":
+                next(s for s in bad["postgres-build"]["steps"] if s.get("name") == "Restore server build outputs")["with"]["restore-keys"] = "v3-server-"
+            else:
+                next(s for s in bad["fast"]["steps"] if s.get("name") == "Restore clippy build outputs")["with"]["path"] = "target/default"
+            with self.subTest(defect=defect): self.assertTrue(SEL.verify_rust_binary_handoff(bad))
+
+    def test_registered_producer_selection_matches_pg_and_is_required_by_gate(self):
+        self.assertIn("postgres-build", SEL.WORKFLOW_JOBS["rust"])
+        self.assertEqual(SEL.select_output_key("postgres-build"), "select_postgres")
+        self.assertEqual(SEL.select_output_key("workspace-browser-build"), "select_workspace_browser_shard")
+        gate = GateSchemaTest()
+        plan = gate._plan("rust", {j: True for j in SEL.WORKFLOW_JOBS["rust"]})
+        results = {j: "success" for j in SEL.WORKFLOW_JOBS["rust"]}
+        for result in ("failure", "cancelled", "skipped"):
+            self.assertEqual(gate._gate(plan, "rust", {**results, "postgres-build": result}), 1)
+        self.assertEqual(gate._gate(plan, "rust", results, omit_jobs=frozenset({"postgres-build"})), 1)
+        inconsistent = copy.deepcopy(plan)
+        inconsistent["jobs"]["postgres-build"]["selected"] = False
+        self.assertEqual(gate._gate(inconsistent, "rust", {**results, "postgres-build": "skipped"}), 1)
+        web = gate._plan("web", {j: True for j in SEL.WORKFLOW_JOBS["web"]})
+        web["jobs"]["workspace-browser-build"]["selected"] = False
+        self.assertEqual(gate._gate(web, "web", {j: "skipped" if j == "workspace-browser-build" else "success" for j in SEL.WORKFLOW_JOBS["web"]}), 1)
 
 
 class RustSuiteRegistryFixture:
@@ -1502,7 +1622,8 @@ class RustSuiteRegistryTest(unittest.TestCase):
                 fx.write_cargo()
                 def change(data: dict) -> None:
                     job = data["jobs"]["postgres"]
-                    cache = next(step for step in job["steps"] if step.get("name") == "Restore server build outputs")
+                    producer = data["jobs"]["postgres-build"]
+                    cache = next(step for step in producer["steps"] if step.get("name") == "Restore server build outputs")
                     if mutation == "timeout": job["timeout-minutes"] = 20
                     elif mutation == "fail-fast": job["strategy"]["fail-fast"] = True
                     elif mutation == "mask": job["continue-on-error"] = True
@@ -1510,7 +1631,7 @@ class RustSuiteRegistryTest(unittest.TestCase):
                     elif mutation == "cache-fallback": cache["with"]["restore-keys"] = "v2-server-"
                     elif mutation == "cache-key": cache["with"]["key"] = "v2-server-ubuntu-26.04-incomplete"
                     elif mutation == "cache-path": cache["with"]["path"] = "/foreign/target"
-                    else: job["steps"].remove(cache)
+                    else: producer["steps"].remove(cache)
                 fx.mutate_rust_workflow(change)
                 self.assertTrue(SEL.verify_postgres_budget_matrix(SEL._rust_workflow_jobs(fx.root)[0]))
 
@@ -1538,7 +1659,7 @@ class RustSuiteRegistryTest(unittest.TestCase):
                 elif mutation == "masked": step["continue-on-error"] = True
                 elif mutation == "wrong-row": step["if"] = "matrix.shard == 'b'"
                 elif mutation == "missing-url": step["env"].pop("PREPARATION_DATABASE_URL")
-                elif mutation == "skip": step["run"] = step["run"].replace("'--','--nocapture'", "'--','--skip','postgres_catalog_dump'")
+                elif mutation == "skip": step["run"] = step["run"].replace("'--nocapture'", "'--skip','postgres_catalog_dump'")
                 elif mutation == "count": step["run"] = step["run"].replace("4 passed; 0 failed; 0 ignored;", "3 passed; 0 failed; 0 ignored;")
                 elif mutation == "missing-gate-url": step["run"] = step["run"].replace("observer['TEST_DATABASE_URL'] = os.environ['PREPARATION_DATABASE_URL']", "observer.pop('TEST_DATABASE_URL', None)")
                 else: step["run"] = step["run"].replace("'DATABASE_URL':owner_url", "'TEST_DATABASE_URL':owner_url")
@@ -1691,8 +1812,8 @@ class RustSuiteRegistryTest(unittest.TestCase):
                     elif mutation == "zero-count":
                         step["run"] = step["run"].replace('4 passed;', '0 passed;')
                     elif mutation == "wrong-helper-feature":
-                        helper = next(item for item in steps if item.get("name") == "Build production helper for PostgreSQL B native fixtures")
-                        helper["run"] = helper["run"].replace('--features worker ', '')
+                        helper = next(item for item in steps if item.get("name") == "Validate and restore finished postgres executables (no rebuild fallback)")
+                        helper["run"] = helper["run"].replace('--cohort postgres ', '--cohort helper ')
                     else:
                         row = next(row for row in job["strategy"]["matrix"]["include"] if row["runner"] == "ubuntu-26.04-arm" and row["shard"] == "b")
                         row["pg_major"] = "17"
@@ -1825,8 +1946,8 @@ class RustSuiteRegistryTest(unittest.TestCase):
                 1,
             )
             text = text.replace(
-                "        run: cargo test --locked --offline --no-fail-fast --features db-tests ${{ matrix.tests }}\n",
-                "        run: cargo test --locked --offline --no-fail-fast --features db-tests\n",
+                '        run: python3 scripts/ci_selection.py rust-binaries run --directory "$RUNNER_TEMP/rust-binaries" ${{ matrix.tests }}\n',
+                '        run: python3 scripts/ci_selection.py rust-binaries run --directory "$RUNNER_TEMP/rust-binaries"\n',
                 1,
             )
             rust.write_text(text, encoding="utf-8")
@@ -2146,7 +2267,7 @@ class SelectedLibraryExecutionTest(unittest.TestCase):
                 elif mutation == "swallow-command":
                     step["run"] += "true\n"
                 else:
-                    steps.remove({"run": "cargo test --locked --offline --lib --bin fvoci-server"})
+                    steps.remove({"run": "cargo test --locked --offline --lib --bin fvoci-server", "env": {"CARGO_TARGET_DIR": "target/default"}})
                 fx.mutate_rust_workflow(lambda original: original.update(data))
                 errors = SEL.verify_workflow_registry(fx.root)
                 self.assertTrue(any("selected library" in e for e in errors), errors)
@@ -2310,9 +2431,9 @@ class RegistryMutationCliTest(unittest.TestCase):
                 import yaml
                 path.write_text(yaml.safe_dump(data, sort_keys=False))
                 proc, output = self._plan_against(root)
-                self._assert_no_green_outputs(proc, output, "only the exact qualified target restore and safe Cargo downloads")
+                self._assert_no_green_outputs(proc, output, "only the exact qualified target restore/save and safe Cargo downloads")
 
-    def test_differently_named_fast_target_writers_cannot_bypass_restore_only(self) -> None:
+    def test_differently_named_fast_target_writers_cannot_bypass_exact_save_pairs(self) -> None:
         for family in ("save", "combined"):
             for target in ("target", "./target", "target/debug", "${{ github.workspace }}/target", ".", "~/.cargo/registry\ntarget"):
                 with self.subTest(family=family, target=target):
@@ -2328,9 +2449,9 @@ class RegistryMutationCliTest(unittest.TestCase):
                     import yaml
                     path.write_text(yaml.safe_dump(data, sort_keys=False))
                     proc, output = self._plan_against(root)
-                    self._assert_no_green_outputs(proc, output, "fast target output cache writers are prohibited")
+                    self._assert_no_green_outputs(proc, output, "only the exact qualified target restore/save and safe Cargo downloads")
 
-    def test_fast_cache_retains_restore_only_pin_and_complete_inputs(self) -> None:
+    def test_fast_cache_retains_explicit_restore_save_pins_and_complete_inputs(self) -> None:
         for mutation in ("combined-post", "wrong-pin", "path", "architecture", "toolchain", "sqlite", "source", "fallback", "skip"):
             with self.subTest(mutation=mutation):
                 root = self._mutated_root()
@@ -2350,7 +2471,7 @@ class RegistryMutationCliTest(unittest.TestCase):
                 import yaml
                 path.write_text(yaml.safe_dump(data, sort_keys=False))
                 proc, output = self._plan_against(root)
-                self._assert_no_green_outputs(proc, output, "fast server cache must retain exact pinned restore-only")
+                self._assert_no_green_outputs(proc, output, "fast server cache must retain exact pinned restore/save")
 
     def test_official_separate_cache_families_keep_architecture_and_toolchain_qualification(self) -> None:
         for family in ("restore", "save"):
@@ -2389,7 +2510,7 @@ class RegistryMutationCliTest(unittest.TestCase):
                     job["timeout-minutes"] = 30
                     needle = "A/C15m, x64 B20m and ARM64 B25m"
                 else:
-                    cache = next(step for step in job["steps"] if step.get("name") == "Restore server build outputs")
+                    cache = next(step for step in data["jobs"]["postgres-build"]["steps"] if step.get("name") == "Restore server build outputs")
                     cache["with"]["restore-keys"] = "v2-server-"
                     needle = "strict complete-input server cache"
                 import yaml
@@ -2861,6 +2982,7 @@ class RegistryMutationCliTest(unittest.TestCase):
         web-static,
         web-checks,
         web-native-checks,
+        workspace-browser-build,
         workspace-browser-shard,
         collaboration-build,
         collaboration-flow,

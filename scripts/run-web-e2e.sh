@@ -22,6 +22,7 @@ SPEC_ARGS=()
 SELECTED_BACKENDS=false
 CI_COMMITTED_API=false
 SELECTED_PHASE="whole"
+BROWSER_PHASE=""
 
 while (($# > 0)); do
   case "$1" in
@@ -31,6 +32,11 @@ while (($# > 0)); do
         exit 1
       fi
       CI_COMMITTED_API=true
+      shift
+      ;;
+    --ci-prepare-browser|--ci-consume-browser)
+      [[ -z "$BROWSER_PHASE" ]] || { echo "duplicate browser phase" >&2; exit 1; }
+      if [[ "$1" == --ci-prepare-browser ]]; then BROWSER_PHASE=prepare; else BROWSER_PHASE=consume; fi
       shift
       ;;
     --ci-prepare-selected|--ci-consume-selected)
@@ -71,7 +77,7 @@ verify_committed_api() {
   # web-checks generates and diffs these same-checkout files; its mandatory
   # aggregate gate remains responsible for schema freshness. Never regenerate
   # or fall back if this explicit browser-only consumption fails qualification.
-  python3 - "$ROOT" "$CI_SHARD" "$SELECTED_BACKENDS" <<'PY_API'
+  python3 - "$ROOT" "$CI_SHARD" "$SELECTED_BACKENDS" "$BROWSER_PHASE" <<'PY_API'
 import os
 from pathlib import Path
 import re
@@ -87,9 +93,11 @@ def git(*args):
 if os.environ.get("CI") != "true" or os.environ.get("GITHUB_ACTIONS") != "true":
     fail("requires GitHub CI")
 job = "workspace-browser-shard" if sys.argv[2] else "collaboration-flow"
+if sys.argv[4] == "prepare":
+    job = "workspace-browser-build"
 if os.environ.get("GITHUB_JOB") == "collaboration-build" and sys.argv[3] == "true":
     job = "collaboration-build"
-if not sys.argv[2] and sys.argv[3] != "true":
+if not sys.argv[2] and sys.argv[3] != "true" and sys.argv[4] != "prepare":
     fail("requires a browser shard or selected companion")
 if os.environ.get("GITHUB_JOB") != job:
     fail("requires the allocated browser job")
@@ -206,8 +214,12 @@ run_ci_shard() {
     exit 1
   fi
 
-  echo "=== web e2e shard ${shard_index}/${CI_SHARD_COUNT}: build once ===" >&2
-  build_current_artifacts
+  echo "=== web e2e shard ${shard_index}/${CI_SHARD_COUNT}: qualify artifacts ===" >&2
+  if [[ "$BROWSER_PHASE" == consume ]]; then
+    run_stage browser-handoff-consume python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" consume
+  else
+    build_current_artifacts
+  fi
 
   local -a plan_lines=()
   mapfile -t plan_lines <"$plan_file"
@@ -240,6 +252,26 @@ run_ci_shard() {
   echo "=== web e2e shard ${shard_index}: all groups passed ===" >&2
 }
 
+if [[ -n "$BROWSER_PHASE" ]]; then
+  [[ "$SELECTED_BACKENDS" == false && "$CI_COMMITTED_API" == true && ${#SPEC_ARGS[@]} -eq 0 ]] || { echo "browser handoff requires committed API and no selected/spec options" >&2; exit 1; }
+  [[ "${CI:-}" == true && "${GITHUB_ACTIONS:-}" == true ]] || { echo "browser handoff requires GitHub CI" >&2; exit 1; }
+  : "${FVOCI_SELECTED_CI_OUTPUT:?required private browser build output}"
+  : "${FVOCI_WEB_BUILD_HANDOFF:?missing browser producer packet path}"
+  [[ "${FVOCI_E2E_PROFILE:-debug}" == debug ]] || { echo "browser packet requires debug profile" >&2; exit 1; }
+  export FVOCI_WEB_BUILD_PHASE="$BROWSER_PHASE"
+  if [[ "$BROWSER_PHASE" == prepare ]]; then
+    [[ "${GITHUB_JOB:-}" == workspace-browser-build && -z "$CI_SHARD" ]] || { echo "wrong browser producer job" >&2; exit 1; }
+  else
+    [[ "${GITHUB_JOB:-}" == workspace-browser-shard && -n "$CI_SHARD" ]] || { echo "wrong browser consumer job" >&2; exit 1; }
+    : "${FVOCI_WEB_BUILD_HANDOFF_SHA256:?missing browser producer digest}"
+  fi
+fi
+# Hosted shards must consume an exact producer packet, with no local fallback.
+if [[ "${GITHUB_ACTIONS:-}" == true && "${GITHUB_JOB:-}" == workspace-browser-shard && "$BROWSER_PHASE" != consume ]]; then
+  echo "hosted browser shard requires --ci-consume-browser" >&2
+  exit 1
+fi
+
 if [[ "$SELECTED_BACKENDS" == true ]]; then
   if [[ -n "$CI_SHARD" || "${FVOCI_E2E_PENDING:-}" != 1 || ${#SPEC_ARGS[@]} -ne 0 ]]; then
     echo "--with-selected-backends requires the whole pending suite and cannot combine shard/spec/grep options" >&2
@@ -267,6 +299,19 @@ if [[ "$SELECTED_PHASE" == consume ]]; then
   run_stage selected-handoff-admit python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" admit
 fi
 require_prepared
+
+if [[ "$BROWSER_PHASE" == prepare ]]; then
+  [[ ! -e "$ROOT/apps/web/dist" ]] || { echo "browser producer requires absent dist" >&2; exit 1; }
+  run_stage browser-input-before python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" browser-before
+  (cd "$ROOT/apps/web" && run_stage web-build bun --bun run build)
+  verify_committed_api
+  run_stage fixture-build python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" browser-stage fixture
+  run_stage default-server-build python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" browser-stage default
+  CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" run_stage worker-build python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" browser-stage engine
+  run_stage browser-input-after python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" browser-after
+  run_stage browser-handoff-export python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" export
+  exit 0
+fi
 
 if [[ -n "$CI_SHARD" ]]; then
   if ((${#SPEC_ARGS[@]} > 0)); then

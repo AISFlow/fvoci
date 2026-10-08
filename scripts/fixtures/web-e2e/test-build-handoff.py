@@ -706,6 +706,295 @@ else:raise AssertionError('private runtime became upload-readable')
 
 
 
+class WebBuildCacheTest(unittest.TestCase):
+    def workflow(self):
+        import yaml
+        return yaml.safe_load((ROOT/'.github/workflows/web.yml').read_text())['jobs']
+
+    def assert_unique_writer_keys(self, jobs):
+        writers = []
+        for job, config in jobs.items():
+            for step in config.get('steps', []):
+                action = step.get('uses', '')
+                settings = step.get('with', {})
+                if action.startswith(('actions/cache@', 'actions/cache/save@')) and any(
+                    path.strip() in ('target', 'crates/collab-engine/target')
+                    for path in settings.get('path', '').splitlines()
+                ):
+                    writers.append((job, settings['key']))
+        self.assertTrue(writers, 'no build-cache writers checked')
+        keys = [key for _, key in writers]
+        self.assertEqual(len(keys), len(set(keys)), 'duplicate Web build-cache writer keys: '+str(writers))
+
+    def test_workflow_build_cache_writers_are_unique(self):
+        self.assert_unique_writer_keys(self.workflow())
+
+    def test_each_original_producer_collision_is_detected(self):
+        for path in ('target', 'crates/collab-engine/target'):
+            with self.subTest(path=path):
+                jobs = self.workflow()
+                ordinary = next(step['with'] for step in jobs['workspace-browser-build']['steps']
+                                if step.get('with', {}).get('path') == path)
+                selected = next(step['with'] for step in jobs['collaboration-build']['steps']
+                                if step.get('with', {}).get('path') == path)
+                ordinary['key'] = selected['key']
+                with self.assertRaisesRegex(AssertionError, 'duplicate Web build-cache writer'):
+                    self.assert_unique_writer_keys(jobs)
+
+
+class BrowserPacketTest(unittest.TestCase):
+    """Same packet format, default-feature binaries and transferred fresh dist."""
+    put = PacketTest.put
+    get = PacketTest.get
+    inputs = PacketTest.inputs
+    call = PacketTest.call
+    ldd_text = PacketTest.ldd_text
+    change_manifest = PacketTest.change_manifest
+
+    def ldd(self, args, **kwargs):
+        if args[0] == "git":
+            return type('CleanGit', (), {'returncode': 0})()
+        return PacketTest.ldd(self, args, **kwargs)
+
+    def setUp(self):
+        PacketTest.setUp(self)
+        os.environ.update(GITHUB_JOB='workspace-browser-build', FVOCI_WEB_BUILD_PHASE='prepare')
+        for name in ('before.json', 'after.json'):
+            self.put(name, H.build_inputs())
+        stages = []
+        for name in H.BROWSER_STAGES:
+            self.put(name+'-stage.json', {'source':SHA, 'tree':TREE, 'command':['actual-fixed-fixture', name], 'exit_code':0, 'seconds':1})
+            (self.output/(name+'-compiler.jsonl')).write_text('{}\n')
+            stages.append({**self.get(name+'-stage.json'), 'compilerMessages':H.CI.reference(self.output/(name+'-compiler.jsonl'))})
+        receipt = self.get('compile-receipt.json'); receipt['stages'] = stages; self.put('compile-receipt.json', receipt)
+        bundle = self.get('bundle.json'); bundle['compiler_artifacts'] = []
+        bundle['binaries'] = {p:r for p,r in bundle['binaries'].items() if not r['profile']['test']}
+        for record in bundle['binaries'].values():
+            name = record['target']['name']
+            record['target']['kind'] = ['bin']
+            record['profile'] = {'test':False, 'opt_level':'0', 'debuginfo':0}
+            record['features'] = ['default','worker'] if name=='collab-engine' else (['db-tests'] if name=='fvoci-e2e-fixture' else [])
+        self.put('bundle.json', bundle)
+        env = self.get('build-environment.json'); env['features'] = []; self.put('build-environment.json', env)
+        abi = self.get('abi-receipt.json'); abi['actualCurrentELFldd'] = {p:self.ldd_text('0x1111') for p in bundle['binaries']}; self.put('abi-receipt.json', abi)
+
+    def transfer(self):
+        H.export()
+        manifest = json.loads((self.packet/'handoff.json').read_text())
+        for entry in manifest['entries'].values():
+            Path(entry['path']).unlink()
+        os.environ.update(GITHUB_JOB='workspace-browser-shard', FVOCI_WEB_BUILD_PHASE='consume',
+                          FVOCI_WEB_BUILD_HANDOFF_SHA256=H.CI.sha(self.packet/'handoff.json'))
+        return manifest
+
+    def test_exact_input_and_asset_hashes_equal_without_consumer_build(self):
+        before = H.build_inputs(); assets = H.dist_files()
+        self.transfer(); H.consume()
+        self.assertEqual(H.build_inputs(), before)
+        self.assertEqual(H.dist_files(), assets)
+        receipt = self.get('handoff-consumed.json')
+        self.assertTrue(receipt['fresh_dist_equal'])
+        self.assertEqual(len(receipt['received']), 19)
+        self.assertEqual({r['target']['name']: r['features'] for r in self.get('bundle.json')['binaries'].values()},
+                         {'fvoci-server':[], 'fvoci-migrate':[], 'fvoci-e2e-fixture':['db-tests'], 'collab-engine':['default','worker']})
+
+    def test_missing_manifest_or_payload_refused(self):
+        self.transfer()
+        for name in ('handoff.json', 'payload.tar'):
+            with self.subTest(name=name):
+                path = self.packet/name; data = path.read_bytes(); path.unlink()
+                with self.assertRaises(FileNotFoundError): H.consume()
+                self.assertFalse((self.output/'handoff-consumed.json').exists())
+                path.write_bytes(data)
+
+    def test_wrong_tested_sha_or_platform_refused(self):
+        manifest = self.transfer()
+        for key in ('source', 'tree', 'run', 'attempt', 'consumer_job', 'producer_job', 'root', 'output', 'platform'):
+            with self.subTest(key=key):
+                altered = copy.deepcopy(manifest); altered[key] = 'foreign'; self.change_manifest(altered)
+                with self.assertRaises(AssertionError): H.consume()
+                self.assertFalse((self.output/'before.json').exists())
+        self.change_manifest(manifest)
+        os.environ['GITHUB_SHA'] = 'c'*40
+        with self.assertRaisesRegex(AssertionError, 'tested SHA'): H.consume()
+
+    def test_manifest_and_payload_hash_mismatch_refused_before_extraction(self):
+        self.transfer()
+        expected = os.environ['FVOCI_WEB_BUILD_HANDOFF_SHA256']
+        os.environ['FVOCI_WEB_BUILD_HANDOFF_SHA256'] = '0'*64
+        with self.assertRaisesRegex(AssertionError, 'manifest digest'): H.consume()
+        os.environ['FVOCI_WEB_BUILD_HANDOFF_SHA256'] = expected
+        archive = self.packet/'payload.tar'; archive.write_bytes(archive.read_bytes()+b'corrupt')
+        with self.assertRaises(AssertionError): H.consume()
+        self.assertFalse((self.output/'before.json').exists())
+
+    def test_missing_asset_or_member_hash_refused_even_with_valid_outer_hash(self):
+        manifest = self.transfer(); original = copy.deepcopy(manifest)
+        asset = next(k for k,e in manifest['entries'].items() if e['path']==str(self.dist/'index.html'))
+        for fault in ('missing', 'hash'):
+            with self.subTest(fault=fault):
+                m = copy.deepcopy(original)
+                if fault == 'missing': del m['entries'][asset]
+                else: m['entries'][asset]['sha256'] = '0'*64
+                self.change_manifest(m)
+                with self.assertRaises(AssertionError): H.consume()
+                self.assertFalse((self.output/'before.json').exists())
+
+    def test_changed_physical_source_refused(self):
+        self.transfer(); self.header.write_bytes(b'drift')
+        with self.assertRaisesRegex(AssertionError, 'physical inputs differ'): H.consume()
+        self.assertFalse((self.output/'handoff-consumed.json').exists())
+
+    def test_changed_frontend_environment_refused(self):
+        self.transfer(); os.environ['VITE_FIXTURE_INPUT'] = 'drift'
+        with self.assertRaisesRegex(AssertionError, 'physical inputs differ'): H.consume()
+        self.assertFalse((self.output/'handoff-consumed.json').exists())
+
+    def test_ignored_dotenv_input_refused(self):
+        self.transfer(); (self.root/'apps/web/.env.production.local').write_bytes(b'VITE_FIXTURE=drift')
+        with self.assertRaisesRegex(AssertionError, 'physical inputs differ'): H.consume()
+        self.assertFalse((self.output/'handoff-consumed.json').exists())
+
+    def test_schema_feature_server_cannot_replace_default_server(self):
+        bundle = self.get('bundle.json')
+        for record in bundle['binaries'].values():
+            if record['target']['name']=='fvoci-server': record['features']=['api-schema','db-tests']
+        self.put('bundle.json', bundle)
+        with self.assertRaises(AssertionError): H.export()
+        self.assertFalse(self.packet.exists())
+
+    def test_host_runtime_bytes_and_target_triple_refused(self):
+        original = self.get('bundle.json')
+        changed = copy.deepcopy(original); next(iter(changed['binaries'].values()))['targetTriple'] = 'aarch64-unknown-linux-gnu'
+        self.put('bundle.json', changed)
+        with self.assertRaises(AssertionError): H.export()
+        self.put('bundle.json', original); self.library.write_bytes(b'other runner ABI')
+        with self.assertRaises(AssertionError): H.export()
+
+    def test_existing_dist_destination_and_symlink_asset_refused(self):
+        manifest = self.transfer(); (self.dist/'index.html').write_bytes(b'stale')
+        with self.assertRaisesRegex(AssertionError, 'existing destination'): H.consume()
+        self.assertFalse((self.output/'before.json').exists())
+        (self.dist/'index.html').unlink(); (self.dist/'index.html').symlink_to(self.header)
+        with self.assertRaises(AssertionError): H.consume()
+
+    @staticmethod
+    def invalid_binary_fields():
+        # Expected metadata comes from the ordinary debug/zero-debuginfo contract.
+        return [('profile', 'opt_level', '3'), ('profile', 'opt_level', None),
+                ('profile', 'opt_level', 0), ('profile', 'debuginfo', 2),
+                ('profile', 'debuginfo', 'missing'), ('profile', 'debuginfo', False),
+                ('profile', 'test', True), ('profile', 'test', 'missing'),
+                ('profile', 'test', 0), ('target', 'kind', ['lib']),
+                ('target', 'kind', ['bin', 'lib']), ('target', 'kind', 'missing')]
+
+    @staticmethod
+    def change_binary_field(record, field, key, value):
+        if value == 'missing' or (key == 'opt_level' and value is None):
+            del record[field][key]
+        else:
+            record[field][key] = value
+
+    def test_wrong_or_missing_profile_and_bin_kind_refused_for_each_binary(self):
+        original = self.get('bundle.json')
+        for path in original['binaries']:
+            for field, key, value in self.invalid_binary_fields():
+                with self.subTest(binary=original['binaries'][path]['target']['name'], field=key, value=value):
+                    changed = copy.deepcopy(original)
+                    self.change_binary_field(changed['binaries'][path], field, key, value)
+                    self.put('bundle.json', changed)
+                    with self.assertRaisesRegex(AssertionError, 'browser (target|opt_level|debuginfo|test)'):
+                        H.export()
+                    self.assertFalse(self.packet.exists())
+        self.put('bundle.json', original)
+
+    def write_emitted_logs(self, bundle):
+        for stage in H.BROWSER_STAGES:
+            emitted = []
+            for path, record in bundle['binaries'].items():
+                name = record['target']['name']
+                if (stage == 'fixture' and name == 'fvoci-e2e-fixture') or (stage == 'default' and name in ('fvoci-server','fvoci-migrate')) or (stage == 'engine' and name == 'collab-engine'):
+                    emitted.append({'reason':'compiler-artifact','target':record['target'], 'executable':path,
+                                    'features':record['features'],'profile':record['profile']})
+            (self.output/(stage+'-compiler.jsonl')).write_text(''.join(json.dumps(a)+'\n' for a in emitted))
+
+    def test_emitted_wrong_or_missing_profile_and_kind_refused_for_each_binary(self):
+        original = self.get('bundle.json')
+        for path in original['binaries']:
+            for field, key, value in self.invalid_binary_fields():
+                with self.subTest(binary=original['binaries'][path]['target']['name'], field=key, value=value):
+                    changed = copy.deepcopy(original)
+                    self.change_binary_field(changed['binaries'][path], field, key, value)
+                    self.write_emitted_logs(changed)
+                    (self.output/'after.json').unlink(missing_ok=True)
+                    with self.assertRaisesRegex(AssertionError, 'browser (target|opt_level|debuginfo|test)'):
+                        H.browser_after()
+                    self.assertEqual(self.get('bundle.json'), original)
+
+    def reseal_packet_bundle(self, change):
+        manifest = self.transfer()
+        archive = self.packet/'payload.tar'
+        members = []
+        with tarfile.open(archive, 'r:') as tar:
+            for member in tar.getmembers():
+                data = tar.extractfile(member).read()
+                if manifest['entries'][member.name]['path'] == str(self.output/'bundle.json'):
+                    bundle = json.loads(data)
+                    change(next(iter(bundle['binaries'].values())))
+                    data = json.dumps(bundle).encode()
+                    member.size = len(data)
+                    manifest['entries'][member.name].update(bytes=len(data), sha256=H.digest(data))
+                members.append((member, data))
+        with tarfile.open(archive, 'w') as tar:
+            for member, data in members:
+                tar.addfile(member, io.BytesIO(data))
+        manifest['payload_sha256'] = H.CI.sha(archive)
+        self.change_manifest(manifest)
+
+    def test_consumer_rejects_resealed_foreign_profile(self):
+        self.reseal_packet_bundle(lambda r: r['profile'].update(opt_level='3', debuginfo=2))
+        with self.assertRaisesRegex(AssertionError, 'browser opt_level'): H.consume()
+        self.assertFalse((self.output/'handoff-consumed.json').exists())
+
+    def test_consumer_rejects_resealed_incomplete_profile(self):
+        self.reseal_packet_bundle(lambda r: r.update(profile={'test':False}))
+        with self.assertRaisesRegex(AssertionError, 'browser opt_level'): H.consume()
+        self.assertFalse((self.output/'handoff-consumed.json').exists())
+
+    def test_consumer_rejects_resealed_non_bin_target(self):
+        self.reseal_packet_bundle(lambda r: r['target'].update(kind=['lib']))
+        with self.assertRaisesRegex(AssertionError, 'browser target'): H.consume()
+        self.assertFalse((self.output/'handoff-consumed.json').exists())
+
+    def test_present_null_debuginfo_is_admitted(self):
+        bundle = self.get('bundle.json')
+        for record in bundle['binaries'].values(): record['profile']['debuginfo'] = None
+        self.put('bundle.json', bundle)
+        self.transfer(); H.consume()
+        self.assertTrue((self.output/'handoff-consumed.json').exists())
+
+    def test_producer_records_actual_emitted_features_and_default_commands(self):
+        bundle = self.get('bundle.json')
+        for name in ('after.json', 'compile-receipt.json', 'bundle.json', 'web-receipt.json', 'abi-receipt.json'):
+            (self.output/name).unlink()
+        self.write_emitted_logs(bundle)
+        H.browser_after(); H.export()
+        self.assertEqual(self.get('bundle.json')['binaries'], bundle['binaries'])
+        calls = []
+        def compile(command, **kwargs):
+            calls.append(command)
+            return type('CompilerResult', (), {'returncode':0})()
+        for stage in H.BROWSER_STAGES:
+            for suffix in ('-stage.json', '-compiler.jsonl', '-stderr.log'):
+                (self.output/(stage+suffix)).unlink(missing_ok=True)
+            with patch.object(H.CI.subprocess, 'run', side_effect=lambda command, **kwargs: type('GitResult', (), {'returncode':0})() if command[0]=='git' else compile(command, **kwargs)):
+                self.assertEqual(H.browser_stage(stage), 0)
+        self.assertIn('--features', calls[0]); self.assertIn('db-tests', calls[0])
+        self.assertNotIn('--features', calls[1]); self.assertIn('fvoci-server', calls[1]); self.assertIn('fvoci-migrate', calls[1])
+        self.assertIn('worker', calls[2])
+
+
+
 class BrowserAssetsTest(unittest.TestCase):
     """Owned POSIX data/subprocess only: no Chromium, Bun or native execution."""
     def setUp(self):

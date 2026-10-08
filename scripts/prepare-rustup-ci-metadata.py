@@ -85,7 +85,7 @@ def scope(output):
     env = os.environ
     for name in ('CI', 'GITHUB_ACTIONS'):
         require(env.get(name) == 'true', 'not-github-ci')
-    require(env.get('GITHUB_JOB') in ('collaboration-build', 'collaboration-flow'), 'unallocated-job')
+    require(env.get('GITHUB_JOB') in ('collaboration-build', 'collaboration-flow', 'workspace-browser-build', 'workspace-browser-shard'), 'unallocated-job')
     require(env.get('RUNNER_ENVIRONMENT') == 'github-hosted' and env.get('RUNNER_OS') == 'Linux'
             and env.get('RUNNER_ARCH') == 'X64', 'unsupported-runner')
     require(platform.system() == 'Linux' and platform.machine() == 'x86_64', 'unsupported-platform')
