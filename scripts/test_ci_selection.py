@@ -1377,7 +1377,7 @@ class RustBinaryArtifactTest(unittest.TestCase):
     def test_roundtrip_and_no_fail_fast_execute_actual_transferred_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root, context, entries = self.fixture(directory, failure=True)
-            archive = root / "postgres.tar.gz"
+            archive = root / "postgres.tar"
             SEL.rust_binary_pack(archive, context, entries)
             shutil.rmtree(root / "target")
             manifest = SEL.rust_binary_unpack(archive, context, set(entries), root)
@@ -1389,7 +1389,7 @@ class RustBinaryArtifactTest(unittest.TestCase):
     def test_missing_archive_and_source_platform_native_context_refuse_before_writing(self):
         with tempfile.TemporaryDirectory() as directory:
             root, context, entries = self.fixture(directory)
-            archive = root / "postgres.tar.gz"
+            archive = root / "postgres.tar"
             with self.assertRaises(FileNotFoundError):
                 SEL.rust_binary_unpack(archive, context, set(entries), root)
             SEL.rust_binary_pack(archive, context, entries)
@@ -1411,7 +1411,7 @@ class RustBinaryArtifactTest(unittest.TestCase):
                 elif defect == "escape":
                     entries["first"]["path"] = "target/../target/db-tests/debug/deps/first"
                 else: entries["second"]["path"] = entries["first"]["path"]
-                archive = root / "postgres.tar.gz"
+                archive = root / "postgres.tar"
                 SEL.rust_binary_pack(archive, context, entries)
                 shutil.rmtree(root / "target")
                 with self.assertRaises(ValueError):

@@ -393,18 +393,45 @@ jobs:
             trap 'fvoci_timing_exit=$?; printf "ci-step stage=postgres-build-step-15 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           fi
           python3 scripts/ci_selection.py rust-binaries pack --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
+      - name: Verify zstd CLI for executable handoff
+        run: zstd --version
+      - name: Compress sealed executable archives with zstd
+        run: |
+          fvoci_timing_started=$SECONDS
+          printf 'ci-step stage=rust-binaries-compress started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          fvoci_finish_timing() {
+            fvoci_timing_exit=$?
+            printf 'ci-step stage=rust-binaries-compress finished at=%s elapsed_seconds=%s exit=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"
+            exit "$fvoci_timing_exit"
+          }
+          trap fvoci_finish_timing EXIT
+          zstd -T0 --no-progress -- "$RUNNER_TEMP/rust-binaries/postgres.tar" "$RUNNER_TEMP/rust-binaries/helper.tar"
+      - name: Hash compressed executable archives
+        run: |
+          fvoci_timing_started=$SECONDS
+          printf 'ci-step stage=rust-binaries-hash started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          fvoci_finish_timing() {
+            fvoci_timing_exit=$?
+            printf 'ci-step stage=rust-binaries-hash finished at=%s elapsed_seconds=%s exit=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"
+            exit "$fvoci_timing_exit"
+          }
+          trap fvoci_finish_timing EXIT
+          cd "$RUNNER_TEMP/rust-binaries" || exit 1
+          sha256sum postgres.tar.zst helper.tar.zst
       - name: Upload postgres finished executables
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: rust-postgres-${{ runner.arch }}-${{ github.sha }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/rust-binaries/postgres.tar.gz
+          path: ${{ runner.temp }}/rust-binaries/postgres.tar.zst
+          compression-level: 0
           if-no-files-found: error
           retention-days: 1
       - name: Upload helper finished executables
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: rust-helper-${{ runner.arch }}-${{ github.sha }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/rust-binaries/helper.tar.gz
+          path: ${{ runner.temp }}/rust-binaries/helper.tar.zst
+          compression-level: 0
           if-no-files-found: error
           retention-days: 1
 
@@ -581,6 +608,10 @@ jobs:
         with:
           name: rust-postgres-${{ runner.arch }}-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rust-binaries
+      - name: Decompress sealed postgres executables
+        run: |
+          zstd --version
+          zstd --decompress --no-progress -- "$RUNNER_TEMP/rust-binaries/postgres.tar.zst"
       - name: Validate and restore finished postgres executables (no rebuild fallback)
         run: python3 scripts/ci_selection.py rust-binaries unpack --cohort postgres --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
       - name: PostgreSQL integration tests
@@ -827,6 +858,10 @@ jobs:
         with:
           name: rust-helper-${{ runner.arch }}-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rust-binaries
+      - name: Decompress sealed helper executables
+        run: |
+          zstd --version
+          zstd --decompress --no-progress -- "$RUNNER_TEMP/rust-binaries/helper.tar.zst"
       - name: Validate and restore finished helper executables (no rebuild fallback)
         run: python3 scripts/ci_selection.py rust-binaries unpack --cohort helper --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
       - run: cargo fetch --locked
