@@ -94,9 +94,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Two shards per architecture, balanced by measured suite time; each
-        # PostgreSQL suite runs in exactly one shard. Keep both lists in sync
-        # when adding a suite. PostgreSQL 18 runs on both architectures; the
+        # Two DB shards on x64; ARM64 also has a small C shard for the native
+        # default-feature build and policy tests. The cold native checks took
+        # 483s before A's DB build, exhausting its 15m budget on main 6fb29931.
+        # Each PostgreSQL suite runs in exactly one shard per major/architecture.
+        # Keep the lists in sync when adding a suite. PG18 runs on both; the
         # other source-supported majors (16, 17) run both shards on x64 only.
         # Keep image pins in sync with scripts/start-test-postgres.sh.
         include:
@@ -117,7 +119,13 @@ jobs:
             postgres_image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
             check: postgres-arm64
             shard: a
-            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration --test pool_release_integration
+            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration
+          - runner: ubuntu-24.04-arm
+            pg_major: "18"
+            postgres_image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
+            check: postgres-arm64-c
+            shard: c
+            tests: --test schedule_ics_integration --test pool_release_integration
           - runner: ubuntu-24.04-arm
             pg_major: "18"
             postgres_image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
@@ -150,7 +158,7 @@ jobs:
             tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration
     runs-on: ${{ matrix.runner }}
     # Main PG16 B measured ~818s PostgreSQL + ~48s S3, exceeding 15m with setup.
-    # Keep A at 15m; B gets a finite 20m allowance for this observed cold path.
+    # Keep A/C at 15m; B gets a finite 20m allowance for this observed cold path.
     timeout-minutes: ${{ matrix.shard == 'b' && 20 || 15 }}
     services:
       postgres:
@@ -204,7 +212,7 @@ jobs:
           restore-keys: v2-server-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-db-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-
       - run: cargo fetch --locked
       - name: Native server build and policy tests (ARM64)
-        if: runner.arch == 'ARM64' && matrix.shard == 'a'
+        if: runner.arch == 'ARM64' && matrix.shard == 'c'
         run: |
           cargo build --locked --offline --bins
           cargo test --locked --offline --lib
