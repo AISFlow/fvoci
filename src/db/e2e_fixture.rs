@@ -104,7 +104,11 @@ pub fn failure_receipt(error: &sqlx::Error) -> Value {
             if let Some(diagnostic) = failure.original.as_ref().and_then(baseline_diagnostic) {
                 receipt["baselineFailure"] = diagnostic;
             }
-            if let Some(diagnostic) = failure.rollback_error.as_ref().and_then(baseline_diagnostic) {
+            if let Some(diagnostic) = failure
+                .rollback_error
+                .as_ref()
+                .and_then(baseline_diagnostic)
+            {
                 receipt["baselineRollbackFailure"] = diagnostic;
             }
             return receipt;
@@ -493,11 +497,16 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
     if !matches!(backend, Backend::LibsqlRemote(_)) {
         return Err(baseline_failure("backend-contract", refused()));
     }
-    let current = super::migrate::assert_sqlite_schema_current(backend).await.map_err(|error| baseline_failure("schema-check", error))?;
+    let current = super::migrate::assert_sqlite_schema_current(backend)
+        .await
+        .map_err(|error| baseline_failure("schema-check", error))?;
     if current.applied_steps != 12 {
         return Err(baseline_failure("schema-contract", refused()));
     }
-    let mut tx = backend.begin_read().await.map_err(|error| baseline_failure("begin-read", error))?;
+    let mut tx = backend
+        .begin_read()
+        .await
+        .map_err(|error| baseline_failure("begin-read", error))?;
     let mut phase = "family-contract";
     let result = async {
         let f = family(&mut tx)?;
@@ -563,7 +572,10 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
             "startupHazards":hazards[0].cell(0)?.integer()?,"liveOutboxLeases":live_outbox[0].cell(0)?.integer()?}))
     }.await;
     let result = result.map_err(|error| baseline_failure(phase, error));
-    let rollback = tx.rollback().await.map_err(|error| baseline_failure("rollback", error));
+    let rollback = tx
+        .rollback()
+        .await
+        .map_err(|error| baseline_failure("rollback", error));
     finished(result, rollback, "not-attempted")
 }
 
@@ -724,24 +736,47 @@ mod tests {
 
     #[test]
     fn baseline_phase_and_typed_category_do_not_publish_error_values() {
-        let original = baseline_failure("row-hash", sqlx::Error::Protocol("PRIVATE_ROW_OR_ENDPOINT".into()));
-        let rollback = baseline_failure("rollback", sqlx::Error::AnyDriverError(Box::new(
-            libsql::Error::ConnectionFailed("PRIVATE_AUTH_OR_URL".into()),
-        )));
+        let original = baseline_failure(
+            "row-hash",
+            sqlx::Error::Protocol("PRIVATE_ROW_OR_ENDPOINT".into()),
+        );
+        let rollback = baseline_failure(
+            "rollback",
+            sqlx::Error::AnyDriverError(Box::new(libsql::Error::ConnectionFailed(
+                "PRIVATE_AUTH_OR_URL".into(),
+            ))),
+        );
         let error = finished::<()>(Err(original), Err(rollback), "not-attempted").unwrap_err();
         let receipt = failure_receipt(&error);
-        assert_eq!(receipt["baselineFailure"], json!({"phase":"row-hash","category":"protocol"}));
-        assert_eq!(receipt["baselineRollbackFailure"], json!({"phase":"rollback","category":"request"}));
+        assert_eq!(
+            receipt["baselineFailure"],
+            json!({"phase":"row-hash","category":"protocol"})
+        );
+        assert_eq!(
+            receipt["baselineRollbackFailure"],
+            json!({"phase":"rollback","category":"request"})
+        );
         assert_eq!(receipt["operation"], "failed");
         assert_eq!(receipt["rollback"], "unknown");
         assert!(!receipt.to_string().contains("PRIVATE_"));
         let error = baseline_failure("begin-read", sqlx::Error::PoolClosed);
-        assert_eq!(failure_receipt(&error)["baselineFailure"], json!({"phase":"begin-read","category":"pool"}));
+        assert_eq!(
+            failure_receipt(&error)["baselineFailure"],
+            json!({"phase":"begin-read","category":"pool"})
+        );
         assert_eq!(failure_receipt(&error)["rollback"], "not-attempted");
-        let error = finished::<()>(Ok(()), Err(baseline_failure("rollback", refused())), "not-attempted").unwrap_err();
+        let error = finished::<()>(
+            Ok(()),
+            Err(baseline_failure("rollback", refused())),
+            "not-attempted",
+        )
+        .unwrap_err();
         assert!(failure_receipt(&error).get("baselineFailure").is_none());
         assert_eq!(failure_receipt(&error)["operation"], "confirmed");
-        assert_eq!(failure_receipt(&error)["baselineRollbackFailure"]["phase"], "rollback");
+        assert_eq!(
+            failure_receipt(&error)["baselineRollbackFailure"]["phase"],
+            "rollback"
+        );
     }
 
     #[test]
