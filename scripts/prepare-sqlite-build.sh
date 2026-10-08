@@ -20,6 +20,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 
 ARCHIVE_HASH = '1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d'
@@ -40,6 +41,10 @@ ENV = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'LANG': 'C'}
 # Required consumer inputs cannot be removed by editing the cache manifest.
 REQUIRED_OUTPUTS = {'env.sh', 'include/sqlite3.h', 'lib/libsqlite3.a',
                     'proof.txt', 'smoke', 'smoke.c', 'sqlite3.c', 'sqlite3.o'}
+TIMINGS = {}
+COMPILE_TIMEOUT = 180
+# Hosted Rust run 37740220181 postgres-c ar exceeded 30s; use the C compile's bounded 180s class.
+ARCHIVE_TIMEOUT = COMPILE_TIMEOUT
 
 
 def fail(message):
@@ -50,10 +55,18 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def run(argv, timeout=30):
+def run(argv, timeout=30, step='inspection'):
     print('+ ' + shlex.join(map(str, argv)), file=sys.stderr)
-    result = subprocess.run(list(map(str, argv)), env=ENV, capture_output=True,
-                            text=True, timeout=timeout)
+    started = time.monotonic()
+    status = -1
+    try:
+        result = subprocess.run(list(map(str, argv)), env=ENV, capture_output=True,
+                                text=True, timeout=timeout)
+        status = result.returncode
+    finally:
+        TIMINGS[step] = {'elapsed_seconds': round(min(time.monotonic() - started, 86400), 6),
+                         'timeout_seconds': timeout, 'exit_code': status}
+        print('sqlite-prepare step=' + step + ' ' + json.dumps(TIMINGS[step], sort_keys=True), file=sys.stderr)
     if result.returncode:
         fail(f'command exit {result.returncode}: {result.stdout}{result.stderr}')
     if result.stderr:
@@ -67,7 +80,7 @@ def tool(name):
         fail(f'tool unavailable: {name}')
     path = Path(executable).resolve(strict=True)
     return path, {'path': str(path), 'sha256': digest(path.read_bytes()),
-                  'version': run([path, '--version'])}
+                  'version': run([path, '--version'], step=name + '_version')}
 
 
 def no_symlinks(path):
@@ -174,7 +187,7 @@ int main(int argc, char **argv) {
 
 def smoke(prefix):
     with tempfile.TemporaryDirectory(prefix='smoke-run-', dir=prefix) as directory:
-        return run([prefix / 'smoke', Path(directory) / 'smoke.db'])
+        return run([prefix / 'smoke', Path(directory) / 'smoke.db'], step='smoke_run')
 
 
 def main():
@@ -184,6 +197,7 @@ def main():
     parser.add_argument('--target', required=True)
     parser.add_argument('--cc', default='cc', help='single native compiler executable')
     parser.add_argument('--ar', default='ar', help='single archiver executable')
+    parser.add_argument('--identity-only', action='store_true', help='authenticate inputs without compiling or exporting a usable prefix')
     args = parser.parse_args(sys.argv[2:])
     archive = Path(os.path.abspath(args.archive))
     prefix = Path(os.path.abspath(args.prefix))
@@ -220,7 +234,7 @@ def main():
         fail('only explicit matching native Linux GNU x86_64/aarch64 targets supported; no cross build')
     cc, cc_id = tool(args.cc)
     ar, ar_id = tool(args.ar)
-    machine = run([cc, '-dumpmachine']).strip()
+    machine = run([cc, '-dumpmachine'], step='compiler_target').strip()
     if machine != host[1]:
         fail(f'compiler target mismatch: {machine}, expected {host[1]}')
     if not prefix.parent.is_dir() or prefix.parent.stat().st_uid != os.getuid():
@@ -234,6 +248,9 @@ def main():
     env_text = ''.join(f'export {k}={shlex.quote(v)}\n' for k, v in {
         'SQLITE3_LIB_DIR': str(prefix / 'lib'), 'SQLITE3_INCLUDE_DIR': str(prefix / 'include'),
         'SQLITE3_STATIC': '1', 'SQLITE3_NO_PKG_CONFIG': '1'}.items())
+    if args.identity_only:
+        print(json.dumps({'inputs': inputs, 'exports': env_text, 'timings': TIMINGS}))
+        return
     lock = prefix.with_name(prefix.name + '.lock')
     # O_EXCL refuses another writer or a stale lock without touching its files.
     fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -271,11 +288,11 @@ def main():
             (stage / 'sqlite3.c').write_bytes(c_source)
             (stage / 'include/sqlite3.h').write_bytes(header)
             (stage / 'smoke.c').write_text(SMOKE)
-            run([cc, *FLAGS, '-c', stage / 'sqlite3.c', '-o', stage / 'sqlite3.o'], timeout=180)
-            run([ar, 'rcs', stage / 'lib/libsqlite3.a', stage / 'sqlite3.o'])
+            run([cc, *FLAGS, '-c', stage / 'sqlite3.c', '-o', stage / 'sqlite3.o'], timeout=COMPILE_TIMEOUT, step='compile')
+            run([ar, 'rcs', stage / 'lib/libsqlite3.a', stage / 'sqlite3.o'], timeout=ARCHIVE_TIMEOUT, step='archive')
             # Exact archive filename: never -lsqlite3/-L or a system lookup.
             run([cc, '-std=c11', '-I', stage / 'include', stage / 'smoke.c',
-                 stage / 'lib/libsqlite3.a', '-pthread', '-ldl', '-lm', '-o', stage / 'smoke'])
+                 stage / 'lib/libsqlite3.a', '-pthread', '-ldl', '-lm', '-o', stage / 'smoke'], step='smoke_link')
             proof = smoke(stage)
             (stage / 'proof.txt').write_text(proof)
             (stage / 'env.sh').write_text(env_text)
@@ -288,9 +305,12 @@ def main():
             stage.rename(prefix)
             stage = None
             print('Built and linked pinned SQLite 3.53.4', file=sys.stderr)
+        # Keep elapsed provenance outside the prefix: Web hashes every prefix file.
+        prefix.with_name(prefix.name + '.prepare-timings.json').write_text(json.dumps(TIMINGS, indent=2) + '\n')
         print(env_text, end='')
     finally:
         if stage is not None:
+            (stage / 'failure-timings.json').write_text(json.dumps(TIMINGS, indent=2) + '\n')
             print(f'Incomplete build preserved for diagnosis: {stage}', file=sys.stderr)
         lock.unlink()
 

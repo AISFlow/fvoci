@@ -2411,6 +2411,45 @@ class SelectedLibraryExecutionTest(unittest.TestCase):
                     self.assertEqual(len(self.run_workflow_fixture(kind, fail_index)), fail_index + 1)
 
 class RegistryMutationCliTest(unittest.TestCase):
+    def test_sqlite_prefix_cache_mutations_fail_closed_for_every_consumer(self) -> None:
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/rust.yml")
+        self.assertIsNone(error)
+        self.assertEqual(SEL.verify_sqlite_prefix_cache(data["jobs"]), [])
+        for job in ("fast", "native-arm64", "postgres-build", "postgres", "collaboration"):
+            for mutation in ("pin", "key", "path", "restore-fallback", "save-consumer", "skip-verify",
+                             "missing-verify", "reorder", "expected-identity", "skip-preflight", "packages", "early-consumer"):
+                with self.subTest(job=job, mutation=mutation):
+                    jobs = copy.deepcopy(data["jobs"])
+                    steps = jobs[job]["steps"]
+                    restore, verify = (next(s for s in steps if s.get("name") == name) for name in
+                                       ("Restore prepared SQLite prefix", "Verify cached SQLite prefix or build"))
+                    prep = next(s for s in steps if s.get("id") == "sqlite")
+                    if mutation == "pin": restore["uses"] = "actions/cache/restore@v4"
+                    elif mutation == "key": restore["with"]["key"] = "unqualified"
+                    elif mutation == "path": restore["with"]["path"] = "target"
+                    elif mutation == "restore-fallback": restore["with"]["restore-keys"] = "v1-sqlite"
+                    elif mutation == "save-consumer": steps.append(copy.deepcopy(SEL.sqlite_prefix_cache_steps(True)[2]))
+                    elif mutation == "skip-verify": verify["if"] = "steps.sqlite_prefix_cache.outputs.cache-hit != 'true'"
+                    elif mutation == "missing-verify": steps.remove(verify)
+                    elif mutation == "reorder": steps.remove(verify);steps.insert(0, verify)
+                    elif mutation == "expected-identity": verify["run"] = verify["run"].replace("--expected-cache-identity", "--foreign-identity")
+                    elif mutation == "skip-preflight": prep["continue-on-error"] = True
+                    elif mutation == "packages": prep["run"] = prep["run"].replace(SEL.SQLITE_PACKAGES, "dpkg-query -W")
+                    else: steps.insert(0, {"run": "cargo build --locked"})
+                    self.assertTrue(SEL.verify_sqlite_prefix_cache(jobs))
+
+    def test_sqlite_prefix_missing_verification_prevents_green_plan(self) -> None:
+        root = self._mutated_root()
+        path = root / ".github/workflows/rust.yml"
+        data, error = SEL._load_yaml_mapping(path)
+        self.assertIsNone(error)
+        data["jobs"]["postgres"]["steps"] = [step for step in data["jobs"]["postgres"]["steps"]
+                                               if step.get("name") != "Verify cached SQLite prefix or build"]
+        import yaml
+        path.write_text(yaml.safe_dump(data, sort_keys=False))
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "SQLite prefix cache must retain exact preflight/restore/verify")
+
     def test_extra_cache_steps_require_exact_safe_download_shape(self) -> None:
         cases = [(family, path) for family in ("save", "restore", "combined")
                  for path in ("tar?et/**", "tar*/**", "**/target", "${{ github.workspace }}/**", "~/.cargo/registry\n~/.cargo/git\n../target")]

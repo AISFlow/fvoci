@@ -1091,6 +1091,61 @@ RUST_HELPER_CACHE_KEY = (
 )
 
 
+SQLITE_PREFIX_PATH = "${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}"
+SQLITE_PREFIX_KEY = "v1-sqlite-prefix-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ steps.sqlite.outputs.cache_identity }}"
+SQLITE_PACKAGES = 'dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev python3 curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"'
+
+
+def sqlite_prefix_cache_steps(saver=False) -> list[dict]:
+    steps = [
+        {"name": "Restore prepared SQLite prefix", "id": "sqlite_prefix_cache",
+         "uses": "actions/cache/restore@" + CACHE_PIN,
+         "with": {"path": SQLITE_PREFIX_PATH, "key": SQLITE_PREFIX_KEY}},
+        {"name": "Verify cached SQLite prefix or build", "env": {"LIBCLANG_PATH": "/usr/lib/llvm-18/lib"},
+         "run": 'bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \\\n'
+                '  --cache-fallback --expected-cache-identity "${{ steps.sqlite.outputs.cache_identity }}" \\\n'
+                '  --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"\n'},
+    ]
+    if saver:
+        steps.append({"name": "Save verified SQLite prefix",
+                      "if": "steps.sqlite_prefix_cache.outputs.cache-hit != 'true'",
+                      "uses": "actions/cache/save@" + CACHE_PIN,
+                      "with": {"path": SQLITE_PREFIX_PATH,
+                               "key": "${{ steps.sqlite_prefix_cache.outputs.cache-primary-key }}"}})
+    return steps
+
+
+def verify_sqlite_prefix_cache(jobs: dict) -> list[str]:
+    errors = []
+    for name in ("fast", "native-arm64", "postgres-build", "postgres", "collaboration"):
+        steps = jobs.get(name, {}).get("steps", [])
+        expected = sqlite_prefix_cache_steps(name == "postgres-build")
+        actual = [step for step in steps if step.get("name") in {s["name"] for s in sqlite_prefix_cache_steps(True)}
+                  or step.get("id") == "sqlite_prefix_cache"
+                  or "fvoci-sqlite" in str(step.get("with", {}).get("path", ""))]
+        prep = [step for step in steps if step.get("id") == "sqlite"]
+        preflight = ('bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \\\n'
+                     '  --identity-only --github-output "$GITHUB_OUTPUT"\n')
+        if (actual != expected or len(prep) != 1 or set(prep[0]) != {"name", "id", "env", "run"}
+                or prep[0].get("env") != {"LIBCLANG_PATH": "/usr/lib/llvm-18/lib"}
+                or not prep[0].get("run", "").endswith(preflight)
+                or SQLITE_PACKAGES not in prep[0].get("run", "")):
+            errors.append(f"rust: {name} SQLite prefix cache must retain exact preflight/restore/verify and producer-only save")
+            continue
+        positions = [steps.index(prep[0]), *(steps.index(step) for step in expected)]
+        if positions != sorted(positions):
+            errors.append(f"rust: {name} SQLite prefix verification must precede save and all consumers")
+        verify_pos = steps.index(expected[1])
+        for index, step in enumerate(steps):
+            if step in expected or step == prep[0]:
+                continue
+            if (step.get("with", {}).get("path", "").startswith(("target", "${{ runner.temp }}/rust-binaries"))
+                    or "cargo " in step.get("run", "")
+                    or "rust-binaries unpack" in step.get("run", "")) and index < verify_pos:
+                errors.append(f"rust: {name} SQLite prefix verification must precede save and all consumers")
+    return errors
+
+
 def rust_fast_cache_steps() -> list[dict]:
     steps = []
     for name, directory, identity, step_id in (
@@ -1108,7 +1163,7 @@ def rust_fast_cache_steps() -> list[dict]:
 
 
 def verify_rust_binary_handoff(jobs: dict) -> list[str]:
-    errors = []
+    errors = verify_sqlite_prefix_cache(jobs)
     def require(condition, message):
         if not condition:
             errors.append("rust: " + message)
@@ -1120,7 +1175,7 @@ def verify_rust_binary_handoff(jobs: dict) -> list[str]:
     safe_download = {"path": "~/.cargo/registry\n~/.cargo/git\n",
                      "key": "v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}"}
     for step in fast_steps:
-        if str(step.get("uses", "")).startswith("actions/cache") and step not in expected:
+        if str(step.get("uses", "")).startswith("actions/cache") and step not in expected and step not in sqlite_prefix_cache_steps():
             require(set(step) <= {"name", "uses", "with"} and step.get("with") == safe_download,
                     "only the exact qualified target restore/save and safe Cargo downloads are allowed")
     for save in expected[1::2]:
@@ -1153,7 +1208,7 @@ def verify_rust_binary_handoff(jobs: dict) -> list[str]:
         if download and validate:
             require(steps.index(download[0]) < steps.index(validate[0]), "download must precede binary validation")
         if job_name == "postgres":
-            require(not any(any(word in s.get("run", "") for word in ("cargo ", "\"cargo\"", "'cargo'")) or str(s.get("uses", "")).startswith("actions/cache") for s in steps), "PostgreSQL consumers must never restore build caches or rebuild")
+            require(not any(any(word in s.get("run", "") for word in ("cargo ", "\"cargo\"", "'cargo'")) or (str(s.get("uses", "")).startswith("actions/cache") and s not in sqlite_prefix_cache_steps()) for s in steps), "PostgreSQL consumers must never restore build caches or rebuild")
         else:
             require(not any("--bin collab-engine" in s.get("run", "") or s.get("with", {}).get("path") == "crates/collab-engine/target" for s in steps), "collaboration must reuse helper without build/cache fallback")
     return errors
@@ -1869,7 +1924,7 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
                     if cache.get("path") == "crates/document-extract/.vendor-src/rhwp":
                         continue
                     for field in ("key", "restore-keys"):
-                        if (field in cache and not (path.name == "rust.yml" and job_id == "fast" and step in rust_fast_cache_steps()[1::2])) and any("ubuntu-26.04-${{ runner.arch }}-1.98.1-" not in line for line in str(cache[field]).splitlines()):
+                        if (field in cache and not (path.name == "rust.yml" and job_id == "fast" and step in rust_fast_cache_steps()[1::2]) and not (path.name == "rust.yml" and job_id == "postgres-build" and step == sqlite_prefix_cache_steps(True)[2])) and any("ubuntu-26.04-${{ runner.arch }}-1.98.1-" not in line for line in str(cache[field]).splitlines()):
                             errors.append(f"{path.name}: {job_id} cache {field} must bind Ubuntu 26.04, architecture and toolchain")
 
     for workflow, filename in WORKFLOW_YAML.items():

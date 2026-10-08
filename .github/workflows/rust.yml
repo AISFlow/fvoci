@@ -99,8 +99,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
-          dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
+          dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev python3 curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+            --identity-only --github-output "$GITHUB_OUTPUT"
+      - name: Restore prepared SQLite prefix
+        id: sqlite_prefix_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}
+          key: v1-sqlite-prefix-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ steps.sqlite.outputs.cache_identity }}
+      - name: Verify cached SQLite prefix or build
+        env:
+          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+        run: |
+          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+            --cache-fallback --expected-cache-identity "${{ steps.sqlite.outputs.cache_identity }}" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
       - name: Restore server build outputs
         id: default_cache
@@ -220,8 +233,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
-          dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
+          dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev python3 curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+            --identity-only --github-output "$GITHUB_OUTPUT"
+      - name: Restore prepared SQLite prefix
+        id: sqlite_prefix_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}
+          key: v1-sqlite-prefix-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ steps.sqlite.outputs.cache_identity }}
+      - name: Verify cached SQLite prefix or build
+        env:
+          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+        run: |
+          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+            --cache-fallback --expected-cache-identity "${{ steps.sqlite.outputs.cache_identity }}" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
       - name: Restore server build outputs
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -278,9 +304,28 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
-          dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
+          dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev python3 curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+            --identity-only --github-output "$GITHUB_OUTPUT"
+      - name: Restore prepared SQLite prefix
+        id: sqlite_prefix_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}
+          key: v1-sqlite-prefix-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ steps.sqlite.outputs.cache_identity }}
+      - name: Verify cached SQLite prefix or build
+        env:
+          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+        run: |
+          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+            --cache-fallback --expected-cache-identity "${{ steps.sqlite.outputs.cache_identity }}" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - name: Save verified SQLite prefix
+        if: steps.sqlite_prefix_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}
+          key: ${{ steps.sqlite_prefix_cache.outputs.cache-primary-key }}
       - name: Restore server build outputs
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
@@ -486,8 +531,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
-          dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
+          dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev python3 curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+            --identity-only --github-output "$GITHUB_OUTPUT"
+      - name: Restore prepared SQLite prefix
+        id: sqlite_prefix_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}
+          key: v1-sqlite-prefix-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ steps.sqlite.outputs.cache_identity }}
+      - name: Verify cached SQLite prefix or build
+        env:
+          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+        run: |
+          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+            --cache-fallback --expected-cache-identity "${{ steps.sqlite.outputs.cache_identity }}" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
       - name: Download required postgres executables for this SHA and architecture
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -714,8 +772,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
-          dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
+          dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev python3 curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+            --identity-only --github-output "$GITHUB_OUTPUT"
+      - name: Restore prepared SQLite prefix
+        id: sqlite_prefix_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}
+          key: v1-sqlite-prefix-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ steps.sqlite.outputs.cache_identity }}
+      - name: Verify cached SQLite prefix or build
+        env:
+          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+        run: |
+          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+            --cache-fallback --expected-cache-identity "${{ steps.sqlite.outputs.cache_identity }}" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
       - name: Restore server build outputs
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4

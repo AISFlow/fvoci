@@ -28,22 +28,28 @@ VERSION = VERSION_LITERAL
 SOURCE_ID = SOURCE_ID_LITERAL
 p = argparse.ArgumentParser()
 for name in ('archive', 'prefix', 'target'): p.add_argument('--'+name, required=True)
+p.add_argument('--identity-only', action='store_true')
 a = p.parse_args(sys.argv[2:])
-with open(os.environ['TRACE'], 'a') as t: t.write('helper '+a.target+'\\n')
+with open(os.environ['TRACE'], 'a') as t: t.write(('inspect ' if a.identity_only else 'helper ')+a.target+'\\n')
 if os.environ.get('HELPER_FAIL'): sys.exit(9)
 prefix = pathlib.Path(a.prefix)
 if pathlib.Path(a.archive).read_bytes() != b'fixture source': sys.exit(7)
 env = {'SQLITE3_LIB_DIR': str(prefix/'lib'), 'SQLITE3_INCLUDE_DIR': str(prefix/'include'),
        'SQLITE3_STATIC': '1', 'SQLITE3_NO_PKG_CONFIG': '1'}
 exports = ''.join('export '+k+'='+shlex.quote(v)+'\\n' for k,v in env.items())
+inputs = {'helper_sha256': hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest(),
+          'target': a.target, 'flags': ['fixture profile']}
+timings = {'archive': {'elapsed_seconds': 0.002, 'timeout_seconds': 180, 'exit_code': 0}}
+if a.identity_only:
+    print(json.dumps({'inputs': inputs, 'exports': exports, 'timings': {}}))
+    sys.exit(0)
 if not prefix.exists():
     (prefix/'lib').mkdir(parents=True)
     (prefix/'include').mkdir()
     (prefix/'lib/libsqlite3.a').write_bytes(b'fixture static archive')
     (prefix/'include/sqlite3.h').write_bytes(b'fixture exact header')
     (prefix/'env.sh').write_text(exports)
-    manifest = {'inputs': {'helper_sha256': hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest(),
-                           'target': a.target, 'flags': ['fixture profile']},
+    manifest = {'inputs': inputs,
                 'outputs': {n:hashlib.sha256((prefix/n).read_bytes()).hexdigest()
                             for n in ['env.sh','lib/libsqlite3.a','include/sqlite3.h']}}
     (prefix/'manifest.json').write_text(json.dumps(manifest))
@@ -51,6 +57,7 @@ else:
     manifest = json.loads((prefix/'manifest.json').read_text())
     for n,h in manifest['outputs'].items():
         if hashlib.sha256((prefix/n).read_bytes()).hexdigest() != h: sys.exit(8)
+prefix.with_name(prefix.name + '.prepare-timings.json').write_text(json.dumps(timings))
 if os.environ.get('BAD_EXPORT'): exports += 'export UNEXPECTED=bad\\n'
 print(exports, end='')
 PY
@@ -134,24 +141,25 @@ sys.exit(int(os.environ.get('CONSUMER_EXIT','0')))
         self.assertEqual(dict(line.split('=',1) for line in self.github_env.read_text().splitlines()), exports)
         trace = self.trace.read_text().splitlines()
         self.assertTrue(trace[0].startswith('curl '))
-        self.assertEqual(trace[1], 'helper '+TARGET)
+        self.assertEqual(trace[1], 'inspect '+TARGET)
         self.assertTrue(trace[-1].startswith('consumer '))
         self.assertIn('https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip', trace[0])
         for flag in ("'--proto', '=https'", "'--max-time', '90'", "'--retry', '0'", "'--max-filesize', '16777216'"):
             self.assertIn(flag, trace[0])
+        self.assertIn('cache: MISS; building pinned source', result.stderr)
         identity = json.loads((self.parent / 'consumer-inputs.json').read_text())
         self.assertIn('outputs', identity['manifest'])
         self.assertIn('flags', identity['manifest']['inputs'])
         self.assertEqual(identity['exports'], exports)
         self.assertEqual(identity['os_release'], Path('/etc/os-release').read_text())
         self.assertEqual(identity['architecture'], platform.machine())
-        self.assertEqual(len(self.github_output.read_text().strip().split('=')[1]), 64)
+        self.assertEqual(len(dict(line.split('=', 1) for line in self.github_output.read_text().splitlines())['cache_identity']), 64)
 
     def test_download_failure_never_runs_helper_or_consumer(self):
         self.env['CURL_FAIL'] = '1'
         self.rejected(self.invoke('--', 'consumer'))
         self.assertNotIn('helper ', self.trace.read_text())
-        self.assertEqual(list(self.parent.iterdir()), [])
+        self.assertEqual({p.name for p in self.parent.iterdir()}, {'preparation-timings.json'})
 
     def test_helper_failure_never_exports_or_runs_consumer(self):
         self.env['HELPER_FAIL'] = '1'
@@ -257,6 +265,79 @@ sys.exit(int(os.environ.get('CONSUMER_EXIT','0')))
         self.assertEqual(self.trace.read_text().count('curl '), 1)
         self.assertEqual(self.trace.read_text().count('helper '), 2)
 
+    def test_helper_archive_budget_and_timeout_timings_are_bounded(self):
+        # Exercise the actual subprocess/timing helper without invoking a native tool.
+        names = {'TIMINGS', 'ENV', 'COMPILE_TIMEOUT', 'ARCHIVE_TIMEOUT'}
+        body = [node for node in TREE.body if isinstance(node, (ast.Import, ast.ImportFrom))
+                or (isinstance(node, ast.FunctionDef) and node.name == 'run')
+                or (isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id in names)]
+        namespace = {}
+        exec(compile(ast.Module(body=body, type_ignores=[]), '<actual-helper-timing>', 'exec'), namespace)
+        self.assertEqual(namespace['ARCHIVE_TIMEOUT'], namespace['COMPILE_TIMEOUT'])
+        self.assertEqual(namespace['ARCHIVE_TIMEOUT'], 180)
+        with mock.patch.object(namespace['subprocess'], 'run', side_effect=subprocess.TimeoutExpired(['ar'], 180)):
+            with mock.patch.object(namespace['time'], 'monotonic', side_effect=[0, 90000]):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    namespace['run'](['ar'], timeout=180, step='archive')
+        self.assertEqual(namespace['TIMINGS']['archive'],
+                         {'elapsed_seconds': 86400, 'timeout_seconds': 180, 'exit_code': -1})
+        with mock.patch.object(namespace['subprocess'], 'run', return_value=subprocess.CompletedProcess(['ar'], 0, '', '')):
+            with mock.patch.object(namespace['time'], 'monotonic', side_effect=[5, 5.125]):
+                namespace['run'](['ar'], timeout=180, step='archive')
+        self.assertEqual(namespace['TIMINGS']['archive'],
+                         {'elapsed_seconds': 0.125, 'timeout_seconds': 180, 'exit_code': 0})
+
+    def test_preflight_exports_no_build_paths_and_matches_verified_identity(self):
+        self.assertEqual(self.invoke('--identity-only').returncode, 0)
+        self.assertEqual(self.github_env.read_text(), '')
+        self.assertFalse((self.parent / TARGET).exists())
+        expected = dict(line.split('=', 1) for line in self.github_output.read_text().splitlines())['cache_identity']
+        self.assertEqual(self.invoke('--expected-cache-identity', expected).returncode, 0)
+        self.assertEqual(json.loads((self.parent / 'consumer-inputs.json').read_text())['cache_identity'], expected)
+        self.assertIn('archive', json.loads((self.parent / 'consumer-inputs.json').read_text())['helper_timings'])
+
+    def test_wrong_expected_identity_cannot_export_or_build(self):
+        self.rejected(self.invoke('--expected-cache-identity', 'f' * 64))
+        self.assertFalse((self.parent / TARGET).exists())
+
+    def test_timings_do_not_change_cache_identity(self):
+        self.assertEqual(self.invoke().returncode, 0)
+        first = self.github_output.read_text().splitlines()[-1]
+        timing_path = self.parent / (TARGET + '.prepare-timings.json')
+        timing_path.write_text(json.dumps({'archive': {'elapsed_seconds': 30.1}}))
+        manifest_path = self.parent / TARGET / 'manifest.json'
+        before = manifest_path.read_bytes()
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('cache: HIT;', result.stderr)
+        self.assertEqual(first, self.github_output.read_text().splitlines()[-1])
+        self.assertEqual(before, manifest_path.read_bytes())
+        for timing in json.loads((self.parent / 'consumer-inputs.json').read_text())['timings'].values():
+            self.assertGreaterEqual(timing['elapsed_seconds'], 0)
+            self.assertLessEqual(timing['elapsed_seconds'], 86400)
+            self.assertGreater(timing['timeout_seconds'], 0)
+
+    def test_explicit_cache_fallback_preserves_rejected_prefix_and_logs_build(self):
+        self.assertEqual(self.invoke().returncode, 0)
+        archive = self.parent / TARGET / 'lib/libsqlite3.a'
+        archive.write_bytes(b'rejected bytes')
+        result = self.invoke('--cache-fallback')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('cache: REJECTED;', result.stderr)
+        self.assertIn('cache: MISS/BUILD;', result.stderr)
+        rejected = list(self.parent.glob(TARGET + '.rejected-*'))
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual((rejected[0] / 'lib/libsqlite3.a').read_bytes(), b'rejected bytes')
+        self.assertEqual(archive.read_bytes(), b'fixture static archive')
+
+    def test_cache_fallback_cannot_bypass_source_authentication_or_symlink(self):
+        (self.parent / 'sqlite-amalgamation-3530400.zip').write_bytes(b'wrong source')
+        self.rejected(self.invoke('--cache-fallback'))
+        (self.parent / 'sqlite-amalgamation-3530400.zip').unlink()
+        (self.parent / TARGET).symlink_to(self.root)
+        self.rejected(self.invoke('--cache-fallback'))
+
     def test_consumer_exit_is_propagated(self):
         self.env['CONSUMER_EXIT'] = '23'
         self.assertEqual(self.invoke('--', 'consumer').returncode, 23)
@@ -294,8 +375,8 @@ exit "${PREREQ_EXIT:-0}"
                 del self.env['PREREQ_EXIT']
 
     def test_workflow_root_cache_preparation_order_and_independent_crates(self):
-        consumers = {'rust': {'fast', 'native-arm64', 'postgres', 'collaboration'},
-                     'web': {'web-checks', 'web-native-checks', 'workspace-browser-shard', 'collaboration-build', 'collaboration-flow'},
+        consumers = {'rust': {'fast', 'native-arm64', 'postgres-build', 'postgres', 'collaboration'},
+                     'web': {'web-checks', 'web-native-checks', 'workspace-browser-build', 'workspace-browser-shard', 'collaboration-build', 'collaboration-flow'},
                      'documents': {'native-extraction'}}
         for workflow, expected in consumers.items():
             # Bounded textual contract; the CI planner separately parses/validates YAML.
@@ -306,7 +387,17 @@ exit "${PREREQ_EXIT:-0}"
             self.assertEqual(actual, expected)
             for job in expected:
                 body = jobs[job]
-                if workflow == 'web' and job == 'collaboration-flow':
+                if workflow == 'rust' and job == 'postgres':
+                    self.assertNotIn('path: target', body)
+                    self.assertIn('Restore prepared SQLite prefix', body)
+                    self.assertLess(body.index('Verify cached SQLite prefix'), body.index('Download required postgres'))
+                elif workflow == 'web' and job == 'workspace-browser-shard':
+                    self.assertNotIn('path: target', body)
+                    self.assertIn('needs: [ci-plan, workspace-browser-build]', body)
+                    self.assertIn('artifact-ids: ${{ needs.workspace-browser-build.outputs.artifact_id }}', body)
+                    self.assertIn('--ci-consume-browser', body)
+                    self.assertLess(body.index('id: sqlite'), body.index('Download this run'))
+                elif workflow == 'web' and job == 'collaboration-flow':
                     # The current consumer prepares its own SDK before admitting
                     # the successful producer's exact artifact; it has no target cache.
                     self.assertNotIn('path: target', body)
