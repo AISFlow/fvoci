@@ -22,6 +22,7 @@ SPEC_ARGS=()
 SELECTED_BACKENDS=false
 CI_COMMITTED_API=false
 SELECTED_PHASE="whole"
+SELECTED_PART="whole"
 BROWSER_PHASE=""
 
 while (($# > 0)); do
@@ -53,6 +54,11 @@ while (($# > 0)); do
       SELECTED_BACKENDS=true
       shift
       ;;
+    --ci-consume-part)
+      [[ "$SELECTED_PART" == whole && $# -ge 2 ]] || { echo "missing/duplicate selected consumer part" >&2; exit 1; }
+      case "$2" in pending|restart) SELECTED_PART="$2" ;; *) echo "selected consumer part must be pending or restart" >&2; exit 1 ;; esac
+      shift 2
+      ;;
     --ci-shard)
       CI_SHARD="${2:?--ci-shard requires an index}"
       shift 2
@@ -72,6 +78,13 @@ while (($# > 0)); do
       ;;
   esac
 done
+
+if [[ "$SELECTED_PART" != whole || "$SELECTED_PHASE" == consume ]]; then
+  [[ "$SELECTED_PHASE" == consume && "$SELECTED_PART" != whole && "$CI_COMMITTED_API" == true && -z "$BROWSER_PHASE" && -z "$CI_SHARD" && ${#SPEC_ARGS[@]} -eq 0 ]] || { echo "selected consumer requires exactly one pending/restart part" >&2; exit 1; }
+  [[ "${CI:-}" == true && "${GITHUB_ACTIONS:-}" == true && "${GITHUB_JOB:-}" == collaboration-flow ]] || { echo "selected part requires its allocated GitHub consumer" >&2; exit 1; }
+  [[ "${FVOCI_COLLAB_FLOW_PART:-$SELECTED_PART}" == "$SELECTED_PART" ]] || { echo "selected part differs from matrix allocation" >&2; exit 1; }
+  export FVOCI_COLLAB_FLOW_PART="$SELECTED_PART"
+fi
 
 verify_committed_api() {
   # web-checks generates and diffs these same-checkout files; its mandatory
@@ -128,6 +141,7 @@ PY_API
 run_stage() {
   local name="$1" started="$SECONDS" status timestamp=""
   shift
+  if [[ "${GITHUB_JOB:-}" == collaboration-flow && "$SELECTED_PART" != whole ]]; then name="${name}-${SELECTED_PART}"; fi
   if [[ "${GITHUB_JOB:-}" == collaboration-build || "${GITHUB_JOB:-}" == collaboration-flow ]]; then
     timestamp=" at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   fi
@@ -334,9 +348,11 @@ if [[ "$SELECTED_PHASE" == prepare ]]; then
   exit 0
 fi
 pending_status=0
-bash "$ROOT/scripts/web-e2e-run-group.sh" "${SPEC_ARGS[@]}" || pending_status=$?
+if [[ "$SELECTED_PART" != restart ]]; then
+  bash "$ROOT/scripts/web-e2e-run-group.sh" "${SPEC_ARGS[@]}" || pending_status=$?
+fi
 selected_status=0
-if [[ "$SELECTED_BACKENDS" == true ]]; then
+if [[ "$SELECTED_BACKENDS" == true && "$SELECTED_PART" != pending ]]; then
   # Mandatory companion is attempted even after pending failure; keep its first status.
   # Preparation/build and original pending suite keep the existing CI runner UID.
   # Only this job-owned output/native prefix transfers to the1000 runtime actor.
@@ -347,8 +363,13 @@ import sys
 assert Path(sys.argv[1]).resolve().is_relative_to(Path(sys.argv[2]).resolve())
 PY_PARENT
   # Exclusive runner-owned safe output stays outside the transferred prefixes.
-  safe_diagnostics="$RUNNER_TEMP/fvoci-selected-diagnostics"
-  python3 - "$safe_diagnostics" <<'PY_DIAGNOSTICS'
+  diagnostics_temp="$RUNNER_TEMP"
+  if [[ "$SELECTED_PART" != whole ]]; then
+    diagnostics_temp="$RUNNER_TEMP/fvoci-collab-$SELECTED_PART"
+    [[ "${TMPDIR:-}" == "$diagnostics_temp" && -d "$diagnostics_temp" ]] || { echo "missing part-owned diagnostic parent" >&2; exit 1; }
+  fi
+  safe_diagnostics="$diagnostics_temp/fvoci-selected-diagnostics"
+  RUNNER_TEMP="$diagnostics_temp" python3 - "$safe_diagnostics" <<'PY_DIAGNOSTICS'
 from pathlib import Path
 import os,sys
 prefix=Path(sys.argv[1])
@@ -377,7 +398,7 @@ PY_DIAGNOSTICS
     # leaf receives no DB/key inputs and starts no selected fixtures or lanes.
     (umask 077
       set -o noclobber
-      sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,FVOCI_WEB_BUILD_PHASE,PLAYWRIGHT_BROWSERS_PATH \
+      sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,FVOCI_COLLAB_FLOW_PART,FVOCI_WEB_BUILD_PHASE,PLAYWRIGHT_BROWSERS_PATH \
         setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
         env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
           python3 "$ROOT/scripts/run-selected-backend-e2e.py" config-list --output "$FVOCI_SELECTED_CI_OUTPUT" \
@@ -385,7 +406,7 @@ PY_DIAGNOSTICS
     selected_status="$config_list_exit"
   fi
   if [[ "$config_list_exit" == not-run || "$config_list_exit" -eq 0 ]]; then
-    sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,PLAYWRIGHT_BROWSERS_PATH \
+    sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,FVOCI_COLLAB_FLOW_PART,PLAYWRIGHT_BROWSERS_PATH \
       setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
       env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
         python3 "$ROOT/scripts/run-selected-backend-e2e.py" run --output "$FVOCI_SELECTED_CI_OUTPUT" || selected_status=$?
@@ -395,7 +416,7 @@ PY_DIAGNOSTICS
   # witnesses (or proof no runtime began) before changing private data ownership.
   ownership_status=0
   (umask 077
-    sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB \
+    sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,FVOCI_COLLAB_FLOW_PART \
       setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
       python3 "$ROOT/scripts/run-selected-backend-e2e.py" owner-return --output "$FVOCI_SELECTED_CI_OUTPUT" \
       >"$safe_diagnostics/ownership-stage.json") || ownership_status=$?
