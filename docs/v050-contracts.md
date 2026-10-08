@@ -12,7 +12,7 @@ Durable preparation reports are under `/home/kinesis/orca/fvoci-evidence/v050-20
 `w1-w2-contract-v2.md`, `preparation-independent-review-v2.md`, `w3-loss-oracle.md`, `w7-boundary.md`.
 The first two have preparation acceptance; W3/W7 are source findings, not runtime acceptance.
 Current author owns only this document and `packages/editor/test/v050-contract-corpus{,.test}.ts`.
-Operation rules remain in AGENTS/environment; current integration/release evidence remains coordinator-owned.
+Operation rules are in [AGENTS.md](../AGENTS.md); current integration/release evidence is in the PR #347 checkpoint and #331.
 
 ## Confirmed decisions and scoped technical recommendations
 

@@ -2,7 +2,7 @@
 
 The source consumers are prepared; Rust compilation and actual Turso execution are
 **NOT RUN**. Independent review and a separately allocated execution are still required.
-Root may publish the reviewed fixed source to the single hardcoded branch
+The integrator (통합) may publish the reviewed fixed source to the single hardcoded branch
 `fvoci/v060-turso-verified-connection`. Its push bootstrap runs **only pure
 fixtures/source admission**, with no Environment, credentials, build or probe.
 The secret job permits only manual dispatch on main or that exact same-repo
@@ -12,7 +12,7 @@ branch requirement for manual dispatch. The designated reviewed branch was
 actually dispatched in [run37312388258](https://github.com/AISFlow/fvoci/actions/runs/37312388258)
 at `04d36b34d1a79e7499f87a31646492eea1a1bbfd` and completed the non-destructive
 connection probe. That historical execution proves this branch consumer path,
-not current migration or this candidate. Root must record each new exact
+not current migration or this candidate. The evidence keeper (증거기록) must record each new exact
 checkout and API acceptance/rejection without an arbitrary-ref/merge fallback.
 [GitHub manual dispatch](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch).
 
@@ -38,7 +38,7 @@ neither server identity proof nor permission to initialize/reset anything.
 
 Current Environment `deployment_branch_policy` is null and is allowed. The
 secret job enforces AISFlow/fvoci + workflow_dispatch + main or the single
-root-reviewed branch, and exact github.sha with credentials persistence disabled.
+reviewed branch, and exact github.sha with credentials persistence disabled.
 Bootstrap pushes cannot enter that job. The admission job
 first verifies the preexisting named Environment through an anonymous public
 GitHub metadata GET. It does not create or modify an Environment or policy;
@@ -79,9 +79,11 @@ SDK patch below adds typed error inspection; upstream connection, transport and
 parser behavior are unchanged.
 
 Manual phase `migration` requires both dispatch `destructive=true` and
-Environment variable `FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE=true`. ROOT alone owns
-that flag lifecycle and the allocated isolated remote execution; the current
-registered flag remains false. Bootstrap pushes cannot select migration.
+Environment variable `FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE=true`. The lead (리드)
+owns that flag lifecycle and the allocated isolated remote execution. Setting the
+flag and any destructive remote DB operation require explicit approval from the
+user; secrets are set or changed only by the user. The current registered flag
+remains false. Bootstrap pushes cannot select migration.
 The final consuming wrapper chooses exactly
 `db::turso_test::turso_primary_current12_install_resume`, exports the exact four
 cfg-test helper selection/phase/destructive flags, and requires one passed test
@@ -96,8 +98,9 @@ migration owner through cfg(test, db-tests) Fable-owned helpers. Initial exact
 blank catalog admission occurs before DDL; unexpected/foreign/populated/current
 targets refuse, without automatic reset, service deletion or schema overwrite.
 The secret URL remains the designated target, not an invented host/DB-ID proof.
-ROOT may separately prepare/reset the user-authorized disposable test DB after
-concrete target checks; this consumer never performs that reset.
+The lead may separately prepare/reset the disposable test DB only with the
+user's explicit approval for that reset and after concrete target checks; this
+consumer never performs that reset.
 
 The consumer applies genuine steps01–11, commits a uniquely identified test
 workspace and fence counter17, and verifies the complete-current gate refuses
@@ -128,7 +131,7 @@ lineage/hash/schema, original data/counter and every seeded key/generation.
 Only confirmed commits advance; remote uncertain commit/rollback stops without
 fresh-observer reconciliation or blind retry. Successful close is product owner
 drain/zero active leases, not an unexposed server Close ACK. The uniquely
-identified test workspace and current schema remain retained for ROOT inspection.
+identified test workspace and current schema remain retained for the lead's inspection.
 
 Other phases (`crud`, `transactions`, `persistence`, `restore`, `ui-ack`) remain
 **NOT IMPLEMENTED** and refuse before credential consumption. Current tenant
