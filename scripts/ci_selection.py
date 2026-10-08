@@ -2632,7 +2632,7 @@ def rust_binary_entries(records: list[dict], names: list[str], kind: str, featur
 def rust_binary_pack(output: Path, context: dict, entries: dict) -> None:
     manifest = {"version": 1, "context": context, "entries": entries}
     raw = json.dumps(manifest, sort_keys=True).encode()
-    with tarfile.open(output, "x:gz") as archive:
+    with tarfile.open(output, "x:") as archive:
         info = tarfile.TarInfo("manifest.json"); info.size = len(raw)
         archive.addfile(info, io.BytesIO(raw))
         for entry in entries.values():
@@ -2641,7 +2641,7 @@ def rust_binary_pack(output: Path, context: dict, entries: dict) -> None:
 
 def rust_binary_unpack(archive_path: Path, context: dict, names: set[str], root: Path) -> dict:
     """Validate every member before writing; no cache/rebuild fallback exists."""
-    with tarfile.open(archive_path, "r:gz") as archive:
+    with tarfile.open(archive_path, "r:") as archive:
         members = archive.getmembers()
         if not members or len({m.name for m in members}) != len(members) or any(not m.isfile() for m in members):
             raise ValueError("Rust binary archive has duplicate or nonregular members")
@@ -2743,17 +2743,17 @@ def cmd_rust_binaries(argv: list[str]) -> int:
         root = Path(context["workspace"])
         if args.action == "pack":
             helper = rust_binary_entries(rust_binary_records(args.directory / "helper.jsonl"), ["collab-engine"], "bin", ["default", "worker"], root)
-            rust_binary_pack(args.directory / "helper.tar.gz", context, helper)
+            rust_binary_pack(args.directory / "helper.tar", context, helper)
             records = rust_binary_records(args.directory / "tests.jsonl")
             entries = rust_binary_entries(records, names, "test", ["db-tests"], root)
             entries.update(rust_binary_entries(records, rust_product_binary_targets(), "bin", ["db-tests"], root))
             schema = rust_binary_entries(rust_binary_records(args.directory / "schema.jsonl"), ["fvoci-migrate"], "bin", [], root)
             entries["schema-migrate"] = schema["fvoci-migrate"]
             entries.update(helper)
-            rust_binary_pack(args.directory / "postgres.tar.gz", context, entries)
+            rust_binary_pack(args.directory / "postgres.tar", context, entries)
         else:
             expected = {"collab-engine"} if args.cohort == "helper" else set(names) | set(rust_product_binary_targets()) | {"schema-migrate", "collab-engine"}
-            manifest = rust_binary_unpack(args.directory / (args.cohort + ".tar.gz"), context, expected, root)
+            manifest = rust_binary_unpack(args.directory / (args.cohort + ".tar"), context, expected, root)
             (args.directory / (args.cohort + "-manifest.json")).write_text(json.dumps(manifest))
             if args.cohort == "postgres":
                 records = [entry["record"] for entry in manifest["entries"].values() if entry["record"]["features"] == ["db-tests"]]
