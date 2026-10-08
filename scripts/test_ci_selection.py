@@ -686,6 +686,37 @@ class PrCheckoutBindingTest(unittest.TestCase):
 
 
 class GateSchemaTest(unittest.TestCase):
+    def test_collaboration_matrix_selected_requires_aggregate_and_both_parts(self) -> None:
+        selected = dict.fromkeys(SEL.WORKFLOW_JOBS["web"], True)
+        plan = self._plan("web", selected)
+        results = dict.fromkeys(selected, "success")
+        self.assertEqual(self._gate(plan, "web", results), 0)
+        for part in ("pending", "restart"):
+            for result in ("failure", "cancelled", "skipped"):
+                with self.subTest(part=part, result=result):
+                    self.assertEqual(self._gate(plan, "web", {**results, "collaboration-flow": result}), 1)
+            for result in (None, "failure", "cancelled", "skipped", ""):
+                outputs = {"pending": "success", "restart": "success"}
+                if result is None: del outputs[part]
+                else: outputs[part] = result
+                with self.subTest(part=part, completion=result):
+                    self.assertEqual(self._gate(plan, "web", results, job_entries={
+                        "collaboration-flow": {"result": "success", "outputs": outputs}}), 1)
+        self.assertEqual(self._gate(plan, "web", results, omit_jobs=frozenset({"collaboration-flow"})), 1)
+
+    def test_selected_web_path_cannot_skip_collaboration_matrix(self) -> None:
+        plan = SEL.build_plan(workflow="web", event_name="pull_request", base_sha="b" * 40,
+            head_sha="c" * 40, merge_base_sha="b" * 40, tested_sha="a" * 40, paths=["apps/web/src/x.ts"])
+        self.assertTrue(plan["jobs"]["collaboration-flow"]["selected"])
+        self.assertEqual(self._gate(plan, "web", {
+            **dict.fromkeys(SEL.WORKFLOW_JOBS["web"], "success"), "collaboration-flow": "skipped"}), 1)
+
+    def test_unselected_web_path_must_skip_collaboration_matrix(self) -> None:
+        plan = SEL.build_plan(workflow="web", event_name="pull_request", base_sha="b" * 40,
+            head_sha="c" * 40, merge_base_sha="b" * 40, tested_sha="a" * 40, paths=["README.md"])
+        self.assertFalse(plan["jobs"]["collaboration-flow"]["selected"])
+        self.assertEqual(self._gate(plan, "web", {"collaboration-flow": "skipped"}), 0)
+
     def test_postgres_budget_matrix_aggregate_is_required_by_gate(self) -> None:
         plan = self._plan("rust", {job: True for job in SEL.WORKFLOW_JOBS["rust"]})
         results = {job: "success" for job in SEL.WORKFLOW_JOBS["rust"]}
@@ -748,7 +779,9 @@ class GateSchemaTest(unittest.TestCase):
             if job_entries and job in job_entries:
                 needs[job] = job_entries[job]
                 continue
-            needs[job] = {"result": (results or {}).get(job, "skipped"), "outputs": {}}
+            result = (results or {}).get(job, "skipped")
+            needs[job] = {"result": result, "outputs": {"pending": "success", "restart": "success"}
+                          if job == "collaboration-flow" and result == "success" else {}}
         if extra:
             needs.update(extra)
         return json.dumps(needs)
@@ -1148,6 +1181,16 @@ class WorkflowRegistryTest(unittest.TestCase):
         self.assertEqual(SEL._verify_web_build_handoff(jobs), [])
         mutations = []
         bad = copy.deepcopy(jobs); bad["collaboration-flow"]["needs"] = "ci-plan"; mutations.append(bad)
+        for strategy in ({"fail-fast": True, "matrix": {"part": ["pending", "restart"]}},
+                         {"fail-fast": False, "matrix": {"part": ["pending"]}},
+                         {"fail-fast": False, "matrix": {"part": ["restart"]}},
+                         {"fail-fast": False, "matrix": {"part": ["pending", "restart", "extra"]}}):
+            bad = copy.deepcopy(jobs); bad["collaboration-flow"]["strategy"] = strategy; mutations.append(bad)
+        bad = copy.deepcopy(jobs); bad["collaboration-flow"]["outputs"].pop("restart"); mutations.append(bad)
+        bad = copy.deepcopy(jobs)
+        next(s for s in bad["collaboration-flow"]["steps"] if s.get("name") == "Check collaborative browser fixtures").pop("if"); mutations.append(bad)
+        bad = copy.deepcopy(jobs)
+        next(s for s in bad["collaboration-flow"]["steps"] if str(s.get("uses", "")).startswith("actions/upload-artifact@"))["with"]["name"] = "shared-diagnostics"; mutations.append(bad)
         bad = copy.deepcopy(jobs); bad["collaboration-build"]["timeout-minutes"] = 16; mutations.append(bad)
         for job, key in (("collaboration-build", "prepare"), ("collaboration-build", "publish"), ("collaboration-flow", "browser")):
             bad = copy.deepcopy(jobs); step = next(s for s in bad[job]["steps"] if s.get("id") == key)

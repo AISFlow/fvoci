@@ -1842,10 +1842,14 @@ def _verify_web_build_handoff(jobs: dict) -> list[str]:
     require(consumer.get("needs") == ["ci-plan", "collaboration-build"], "consumer needs successful registered producer")
     for name, job in (("collaboration-build", producer), ("collaboration-flow", consumer)):
         require(job.get("runs-on") == "ubuntu-26.04" and job.get("timeout-minutes") == 15, "fixed runner/budget")
-        require(not any(k in job for k in ("continue-on-error", "strategy", "env", "permissions")), "no masked/alternate authority")
+        require(not any(k in job for k in ("continue-on-error", "env", "permissions"))
+                and (name != "collaboration-build" or "strategy" not in job), "no masked/alternate authority")
         checkout = [step for step in job.get("steps", []) if str(step.get("uses", "")).startswith("actions/checkout@")]
         require(len(checkout) == 1 and checkout[0].get("with") == {"persist-credentials": False}, "default exact checkout without stored credentials")
         require(job.get("if") == "needs.ci-plan.outputs.select_" + name.replace("-", "_") + " == 'true'", "selection only by registered plan")
+    require(consumer.get("strategy") == {"fail-fast": False, "matrix": {"part": ["pending", "restart"]}}, "exact pending/restart matrix without cancellation or omissions")
+    require(consumer.get("name") == "collaboration-flow-${{ matrix.part }}", "distinct matrix job display names")
+    require(consumer.get("outputs") == {part: "${{ steps.browser.outputs." + part + " }}" for part in ("pending", "restart")}, "both matrix completion outputs required")
     # Pending registration controls are DB-free, but not part of apps/web's
     # default src-only unit discovery. Require their explicit mandatory consumer.
     unit = [step for step in jobs.get("web-checks", {}).get("steps", [])
@@ -1873,13 +1877,24 @@ def _verify_web_build_handoff(jobs: dict) -> list[str]:
     download = [step for step in steps if str(step.get("uses", "")).startswith("actions/download-artifact@")]
     require(len(download) == 1 and download[0].get("uses") == "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
             and download[0].get("with") == {"artifact-ids": "${{ needs.collaboration-build.outputs.artifact_id }}", "merge-multiple": True,
-                "path": "${{ runner.temp }}/fvoci-web-build-handoff"}
+                "path": "${{ runner.temp }}/fvoci-web-build-handoff-${{ matrix.part }}"}
             and not any(k in download[0] for k in ("if", "continue-on-error")), "current-run exact artifact ID without foreign token/ref/run")
     runtime = [step for step in steps if step.get("id") == "browser"]
     require(len(runtime) == 1 and runtime[0].get("env") == {"FVOCI_E2E_PENDING": "1",
-                "FVOCI_WEB_BUILD_HANDOFF_SHA256": "${{ needs.collaboration-build.outputs.handoff_sha256 }}"}
-            and "bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected" in runtime[0].get("run", "")
+                "FVOCI_WEB_BUILD_HANDOFF_SHA256": "${{ needs.collaboration-build.outputs.handoff_sha256 }}",
+                "FVOCI_COLLAB_FLOW_PART": "${{ matrix.part }}"}
+            and 'bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected --ci-consume-part "$FVOCI_COLLAB_FLOW_PART"' in runtime[0].get("run", "")
+            and 'printf \'%s=success\\n\' "$FVOCI_COLLAB_FLOW_PART" >> "$GITHUB_OUTPUT"' in runtime[0].get("run", "")
+            and 'export TMPDIR="$RUNNER_TEMP/fvoci-collab-$FVOCI_COLLAB_FLOW_PART"' in runtime[0].get("run", "")
+            and 'export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff-$FVOCI_COLLAB_FLOW_PART"' in runtime[0].get("run", "")
             and not any(k in runtime[0] for k in ("if", "continue-on-error")), "mandatory full original runtime after qualification")
+    fixtures = [step for step in steps if step.get("name") == "Check collaborative browser fixtures"]
+    require(len(fixtures) == 1 and fixtures[0].get("if") == "matrix.part == 'pending'"
+            and "continue-on-error" not in fixtures[0], "browser fixtures run in exactly the pending part")
+    uploads = [step for step in steps if str(step.get("uses", "")).startswith("actions/upload-artifact@")]
+    require(len(uploads) == 2 and {step.get("with", {}).get("name") for step in uploads} == {
+                "collaboration-browser-failure-${{ matrix.part }}-${{ github.run_attempt }}",
+                "selected-normal-diagnostics-${{ matrix.part }}-${{ github.run_attempt }}"}, "all consumer diagnostics names include the matrix part")
     require(not any(step.get("with", {}).get("path") in ("target", "crates/collab-engine/target")
             for step in steps if str(step.get("uses", "")).startswith("actions/cache@")), "consumer cannot borrow target cache")
     return errors
@@ -2555,6 +2570,11 @@ def cmd_gate(argv: list[str] | None = None) -> int:
             print(f"gate: unselected job {job} must be skipped, got {result}", file=sys.stderr)
             return 1
 
+    if args.workflow == "web" and plan["jobs"]["collaboration-flow"]["selected"]:
+        outputs = json.loads(needs_raw)["collaboration-flow"].get("outputs", {})
+        if not isinstance(outputs, dict) or any(outputs.get(part) != "success" for part in ("pending", "restart")):
+            print("gate: collaboration-flow requires both pending and restart completion outputs", file=sys.stderr)
+            return 1
     print("gate: ok")
     return 0
 

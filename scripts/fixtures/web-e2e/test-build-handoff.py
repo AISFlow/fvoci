@@ -161,6 +161,10 @@ class PacketTest(unittest.TestCase):
         with patch.object(H.CI.subprocess, 'run', return_value=Status()):
             os.environ['GITHUB_JOB']='collaboration-flow';os.environ.pop('FVOCI_WEB_BUILD_PHASE')
             self.assertEqual(ORIGINAL_IDENTITY(), 'github:AISFlow/fvoci:123:1:collaboration-flow')
+            for part in ('pending', 'restart'):
+                os.environ['FVOCI_COLLAB_FLOW_PART'] = part
+                self.assertEqual(ORIGINAL_IDENTITY(), 'github:AISFlow/fvoci:123:1:collaboration-flow:'+part)
+            os.environ.pop('FVOCI_COLLAB_FLOW_PART')
             os.environ['GITHUB_JOB']='collaboration-build'
             with self.assertRaises(AssertionError):ORIGINAL_IDENTITY()
             os.environ['FVOCI_WEB_BUILD_PHASE']='prepare'
@@ -484,7 +488,7 @@ def run(output):
             footer=source[source.index('selected_status=0\n'):]
             environment={'PATH':str(fake)+':'+os.defpath,'ROOT':str(repo),'RUNNER_TEMP':str(temp),
                 # Footer extraction omits the wrapper's real argument-parser default.
-                'SELECTED_PHASE':'whole',
+                'SELECTED_PHASE':'whole','SELECTED_PART':'whole',
                 'SELECTED_BACKENDS':'true','FVOCI_SELECTED_CI_OUTPUT':str(output),
                 'FVOCI_SELECTED_CI_SQLITE_PARENT':str(sqlite),'SQLITE3_LIB_DIR':str(lib),
                 'CI':'true','GITHUB_ACTIONS':'true','GITHUB_JOB':'collaboration-flow',

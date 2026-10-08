@@ -64,7 +64,9 @@ def identity(mode="handoff", output=None):
     else:
         assert os.environ['GITHUB_JOB']=='collaboration-flow'
         assert os.environ.get('FVOCI_WEB_BUILD_PHASE') in (None, 'consume'), 'wrong runtime phase'
-    return 'github:'+':'.join(os.environ[k] for k in ('GITHUB_REPOSITORY','GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','GITHUB_JOB'))
+    part = os.environ.get('FVOCI_COLLAB_FLOW_PART', 'whole')
+    assert part in ('whole', 'pending', 'restart'), 'unallocated collaboration part'
+    return 'github:'+':'.join(os.environ[k] for k in ('GITHUB_REPOSITORY','GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','GITHUB_JOB')) + (':'+part if os.environ['GITHUB_JOB'] == 'collaboration-flow' and part != 'whole' else '')
 
 
 def inputs():
