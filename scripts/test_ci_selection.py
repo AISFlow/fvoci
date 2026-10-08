@@ -1411,7 +1411,9 @@ class RegistryMutationCliTest(unittest.TestCase):
         cases = (
             ("build", "packages"),
             ("push", "issues"),
+            ("push", "contents"),
             ("push-manifest", "contents"),
+            ("push-manifest", "issues"),
         )
         for job, scope in cases:
             with self.subTest(job=job, scope=scope):
