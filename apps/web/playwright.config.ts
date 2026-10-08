@@ -11,6 +11,7 @@ if (process.env.CI && !process.versions.bun) {
 }
 
 export default defineConfig({
+  forbidOnly: !!process.env.CI,
   testDir: "./e2e",
   workers: 1,
   retries: 0,
