@@ -557,6 +557,14 @@ jobs:
     if: needs.ci-plan.outputs.select_collaboration_flow == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 15
+    name: collaboration-flow-${{ matrix.part }}
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [pending, restart]
+    outputs:
+      pending: ${{ steps.browser.outputs.pending }}
+      restart: ${{ steps.browser.outputs.restart }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -566,14 +574,14 @@ jobs:
           bun-version-file: .bun-version
       - run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-flow-step-03 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-flow-${{ matrix.part }}-step-03 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-${{ matrix.part }}-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Prepare owned pinned Rustup component metadata before input capture
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-flow-step-04 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-04 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-flow-${{ matrix.part }}-step-04 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-${{ matrix.part }}-step-04 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           python3 -B scripts/prepare-rustup-ci-metadata.py --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -588,8 +596,8 @@ jobs:
           LIBCLANG_PATH: /usr/lib/llvm-18/lib
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-flow-step-06 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-06 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-flow-${{ matrix.part }}-step-06 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-${{ matrix.part }}-step-06 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
           . /etc/os-release
@@ -614,8 +622,8 @@ jobs:
       - name: Prepare locked dependencies
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-flow-step-07 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-07 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-flow-${{ matrix.part }}-step-07 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-${{ matrix.part }}-step-07 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           cargo fetch --locked
           cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
           bun ci
@@ -623,8 +631,8 @@ jobs:
         working-directory: apps/web
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-flow-step-08 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-08 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-flow-${{ matrix.part }}-step-08 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-${{ matrix.part }}-step-08 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           bun --bun x --no-install playwright install --with-deps chromium
       - name: Require a successful exact producer artifact
         env:
@@ -633,8 +641,8 @@ jobs:
           PRODUCER_DIGEST: ${{ needs.collaboration-build.outputs.handoff_sha256 }}
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-flow-step-09 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-09 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-flow-${{ matrix.part }}-step-09 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-${{ matrix.part }}-step-09 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           [[ "$PRODUCER_RESULT" == success ]]
           [[ "$PRODUCER_ARTIFACT" =~ ^[0-9]+$ ]]
@@ -644,39 +652,44 @@ jobs:
         with:
           artifact-ids: ${{ needs.collaboration-build.outputs.artifact_id }}
           merge-multiple: true
-          path: ${{ runner.temp }}/fvoci-web-build-handoff
+          path: ${{ runner.temp }}/fvoci-web-build-handoff-${{ matrix.part }}
       - name: Check collaborative browser fixtures
+        if: matrix.part == 'pending'
         # Same per-test bound as the web and editor test scripts (node --test had none).
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-flow-step-11 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-flow-${{ matrix.part }}-step-11 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-${{ matrix.part }}-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-wire.test.ts ./apps/web/e2e-pending/collab-restart.test.ts
           bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-helpers.test.ts
           (cd apps/web && bun --bun x --no-install tsc -p e2e-pending/collab-tsconfig.json)
-      - name: Pending collaboration and mandatory selected normal PostgreSQL/SQLite restart
+      - name: Collaborative browser ${{ matrix.part }} part
         id: browser
         env:
           FVOCI_E2E_PENDING: "1"
           FVOCI_WEB_BUILD_HANDOFF_SHA256: ${{ needs.collaboration-build.outputs.handoff_sha256 }}
+          FVOCI_COLLAB_FLOW_PART: ${{ matrix.part }}
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-flow-step-12 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-step-12 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-flow-${{ matrix.part }}-step-12 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-flow-${{ matrix.part }}-step-12 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           # Only this ephemeral CI job's checkout/SQLite input/target/report ownership.
           # No account creation/global Git setting or operating resource changes.
           export FVOCI_SELECTED_CI_OUTPUT="$RUNNER_TEMP/fvoci-selected-current"
           export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"
-          export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
+          export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff-$FVOCI_COLLAB_FLOW_PART"
+          export TMPDIR="$RUNNER_TEMP/fvoci-collab-$FVOCI_COLLAB_FLOW_PART"
+          mkdir -m 0700 "$TMPDIR"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
           export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
-          bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected
+          bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected --ci-consume-part "$FVOCI_COLLAB_FLOW_PART"
+          printf '%s=success\n' "$FVOCI_COLLAB_FLOW_PART" >> "$GITHUB_OUTPUT"
       - name: Retain failed browser DOM diagnostics
         if: (failure() || cancelled()) && steps.browser.outputs.failure-artifacts != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: collaboration-browser-failure-${{ github.run_attempt }}
+          name: collaboration-browser-failure-${{ matrix.part }}-${{ github.run_attempt }}
           # Same selection as the browser shards; raw traces are never uploaded.
           path: |
             ${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/error-context.md
@@ -688,10 +701,10 @@ jobs:
           if-no-files-found: warn
 
       - name: Retain selected current build and runtime diagnostics
-        if: failure() || cancelled()
+        if: (failure() || cancelled()) && matrix.part == 'restart'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: selected-normal-diagnostics-${{ github.run_attempt }}
+          name: selected-normal-diagnostics-${{ matrix.part }}-${{ github.run_attempt }}
           # The private1000 prefix is published only after strict retirement.
           path: |
             ${{ steps.browser.outputs.selected-safe-diagnostics }}
