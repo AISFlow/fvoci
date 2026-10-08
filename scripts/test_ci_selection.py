@@ -2740,6 +2740,36 @@ class RegistryMutationCliTest(unittest.TestCase):
         proc, output = self._plan_against(root)
         self._assert_no_green_outputs(proc, output, "release.yml: triggers must be exactly push (tags) and workflow_dispatch")
 
+    def test_ci_base_workflow_write_scope_registration_passes(self) -> None:
+        root = self._mutated_root()
+        self.assertEqual(SEL.verify_workflow_registry(root), [])
+
+    def test_ci_base_workflow_extra_write_scope_rejected_before_outputs(self) -> None:
+        cases = (
+            ("build", "packages"),
+            ("push", "issues"),
+            ("push", "contents"),
+            ("push-manifest", "contents"),
+            ("push-manifest", "issues"),
+        )
+        for job, scope in cases:
+            with self.subTest(job=job, scope=scope):
+                root = self._mutated_root()
+                image = root / ".github" / "workflows" / "ci-base-image.yml"
+                text = image.read_text(encoding="utf-8")
+                job_at = text.index(f"  {job}:\n", text.index("jobs:\n"))
+                if job == "build":
+                    insert_at = job_at + len(f"  {job}:\n")
+                    addition = f"    permissions:\n      {scope}: write\n"
+                else:
+                    insert_at = text.index("    permissions:\n", job_at) + len("    permissions:\n")
+                    addition = f"      {scope}: write\n"
+                    if scope == "contents":
+                        text = text[:insert_at] + text[insert_at:].replace("      contents: read\n", "", 1)
+                image.write_text(text[:insert_at] + addition + text[insert_at:], encoding="utf-8")
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, f"ci-base-image.yml: {job} may not write ['{scope}']")
+
     def test_release_workflow_write_scope_outside_listed_job_rejected(self) -> None:
         root = self._mutated_root()
         release = root / ".github" / "workflows" / "release.yml"
