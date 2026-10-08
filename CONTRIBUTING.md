@@ -43,9 +43,9 @@ uv sync
 
 ```sh
 export LIBCLANG_PATH=/usr/lib/llvm-18/lib
-mkdir -p target/sqlite
-bash scripts/prepare-sqlite-ci.sh --parent "$(cd target/sqlite && pwd -P)" --env-file target/sqlite/env.sh
-. target/sqlite/env.sh
+parent="$(mkdir -p target/sqlite && cd target/sqlite && pwd -P)" &&
+  bash scripts/prepare-sqlite-ci.sh --parent "$parent" --env-file target/sqlite/env.sh &&
+  . target/sqlite/env.sh
 ```
 
 새 셸마다 다음 두 줄을 다시 실행합니다. `env.sh`에는 `SQLITE3_*`만 들어 있고, `prepare-sqlite-ci.sh`는 재사용할 때도
