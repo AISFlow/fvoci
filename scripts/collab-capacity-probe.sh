@@ -52,4 +52,18 @@ if [[ "$PROBE_EXIT" -ne 0 ]]; then
   exit "$PROBE_EXIT"
 fi
 
+if ! awk '
+  /^[[:space:]]*Running / {
+    target = ($0 ~ /^[[:space:]]*Running tests\/collab_capacity_probe\.rs[[:space:]]+\(/)
+    if (target) summary = ""
+  }
+  target && /^test result: / { summary = $0 }
+  END {
+    exit !(summary ~ /^test result: ok\. 1 passed; 0 failed; 0 ignored; [0-9]+ measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$/)
+  }
+' "$LOG_PATH"; then
+  echo "collab capacity probe must report exactly 1 passed, 0 failed, 0 ignored; log: $LOG_PATH" >&2
+  exit 1
+fi
+
 echo "collab capacity probe passed; log: $LOG_PATH"
