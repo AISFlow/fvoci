@@ -117,7 +117,12 @@ jobs:
             cargo clippy --version
             git --version
             zstd --version
-            dpkg-query -W ca-certificates
+            test ! -e /tmp/bootstrap-ca.crt
+            dpkg-query -s ca-certificates
+            ca_changes=$(dpkg --verify ca-certificates)
+            test -z "$ca_changes"
+            local_ca=$(find /usr/local/share/ca-certificates -type f -print -quit)
+            test -z "$local_ca"
             test -s /etc/ssl/certs/ca-certificates.crt
             test -f "$LIBCLANG_PATH/libclang.so"
           '

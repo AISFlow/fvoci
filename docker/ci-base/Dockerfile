@@ -9,7 +9,7 @@ RUN rustup set profile minimal \
 
 # Ubuntu's index includes native linux/amd64 and linux/arm64 images.
 FROM ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 AS system-tools
-COPY --from=rust-toolchain /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=rust-toolchain /etc/ssl/certs/ca-certificates.crt /tmp/bootstrap-ca.crt
 
 ARG UBUNTU_SNAPSHOT=20261008T000000Z
 ENV LIBCLANG_PATH=/usr/lib/llvm-18/lib
@@ -24,11 +24,13 @@ RUN printf '%s\n' \
       'Check-Valid-Until: no' \
       > /etc/apt/sources.list.d/ubuntu.sources \
  && cat /etc/apt/sources.list.d/ubuntu.sources \
- && apt-get update \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+ && apt-get -o Acquire::https::CAInfo=/tmp/bootstrap-ca.crt update \
+ && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::https::CAInfo=/tmp/bootstrap-ca.crt install -y --no-install-recommends \
       ca-certificates curl git gcc g++ make binutils libc6-dev pkg-config \
       python3 python3-pip unzip xz-utils zstd sudo \
       libclang-18-dev \
+ && rm /tmp/bootstrap-ca.crt \
+ && test -s /etc/ssl/certs/ca-certificates.crt \
  && python3 -m pip install --no-cache-dir --break-system-packages PyYAML==6.0.3 \
  && dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev python3 curl \
       > /usr/local/share/ci-base-build-packages.txt \
