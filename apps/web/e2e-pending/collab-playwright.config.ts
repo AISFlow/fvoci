@@ -27,6 +27,7 @@ if (selectedBackend !== undefined) {
 }
 
 export default defineConfig({
+  forbidOnly: !!process.env.CI,
   testDir: ".",
   testMatch:
     selectedBackend === undefined
