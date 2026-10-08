@@ -1,19 +1,31 @@
-# FVOCI Rust backend
+# FVOCI
 
-FVOCI 백엔드의 단계적 Rust 재작성입니다. 현재 PostgreSQL 기반 초기 설치·로그인·세션·인증된 사용자 프로필 변경을 구현하고 실제 HTTP·DB 검증을 마쳤습니다. 전체 FVOCI를 대체하는 릴리스가 아닙니다.
+FVOCI는 워크스페이스·프로젝트 단위로 문서(위키)를 함께 편집하고 작업·일정을 관리하는 협업 도구입니다.
+이 저장소는 기존 FVOCI를 작은 Rust 서버와 Vue 3 웹 앱으로 다시 구현합니다.
 
-실행 방법과 환경 변수는 [RUNNING.md](RUNNING.md), 고정 원본 기준선·검증 결과·남은 기능은 [docs/rewrite.md](docs/rewrite.md)를 참조하세요.
+- 서버: Rust(Tokio·axum·SQLx). 인증·세션·인가(PostgreSQL RLS), 실시간 공동 편집(Yrs, 격리된 helper 프로세스),
+  첨부·문서 텍스트 추출, DOCX/PDF/PPTX/Markdown 내보내기, 검색(Meilisearch), 메일, 백업·복원 도구를 포함합니다.
+- 웹: Vue 3 + Nuxt UI + Tiptap(`apps/web`, `packages/editor`, `packages/i18n`).
+- 서버 런타임에는 Node가 없습니다. Bun은 웹 빌드·개발 도구로만 씁니다.
 
-```sh
-cargo fetch --locked
-cargo fmt --check
-cargo check --locked --offline --all-targets --features db-tests
-cargo clippy --locked --offline --all-targets --features db-tests -- -D warnings
-cargo test --locked --offline --lib
-```
+현재 0.x 개발 단계이며, 1.0 전까지 호환성과 지원 범위가 바뀔 수 있습니다. 승인된 다음 범위(0.6: PostgreSQL·로컬
+SQLite·원격 libSQL/Turso)와 남은 수락 항목은 [docs/rewrite.md](docs/rewrite.md)를 따릅니다.
 
-빠른 검사는 외부 DB나 Docker를 요구하지 않습니다. 실제 인가·원자성·경합 검사는 별도 PostgreSQL 환경에서 `cargo test --locked --offline --features db-tests --test db_integration`으로 실행하며 `TEST_DATABASE_URL`이 없으면 실패합니다.
+## 문서
 
-서버 런타임은 Rust와 PostgreSQL을 사용합니다. `compat/`의 JS 도구는 협업 프로토콜 조사 전용이며 제품 서버에서 호출하지 않습니다. 기존 프론트엔드 연결, 협업 서버, 문서 처리, 데이터 이관·백업·복원 및 다른 DB 엔진 지원은 아직 완료되지 않았습니다.
+| 목적                                        | 문서                                   |
+| ------------------------------------------- | -------------------------------------- |
+| 개발 환경, 빠른 검사, 테스트, 기여 절차     | [CONTRIBUTING.md](CONTRIBUTING.md)     |
+| 설치, 환경 변수, 운영 명령, 업그레이드·복원 | [RUNNING.md](RUNNING.md)               |
+| 릴리스 절차                                 | [docs/RELEASING.md](docs/RELEASING.md) |
+| 현재 범위와 수락 상태                       | [docs/rewrite.md](docs/rewrite.md)     |
+| AI 에이전트 작업 규칙                       | [AGENTS.md](AGENTS.md)                 |
 
-에이전트 운영 규칙은 [AGENTS.md](AGENTS.md), 실제 도구 검증 기록은 [.agents/environment.md](.agents/environment.md)에 있습니다. 라이선스는 [MIT](LICENSE)입니다.
+## 개발 시작
+
+필요한 도구, 처음 설정, 고정 SQLite 준비, 변경 종류별 검사와 Docker가 필요한 DB·브라우저 테스트는
+[CONTRIBUTING.md](CONTRIBUTING.md)에 있습니다. 컨테이너 설치는 [RUNNING.md의 Container install](RUNNING.md#container-install)을 따릅니다.
+
+## 라이선스
+
+[MIT](LICENSE)
