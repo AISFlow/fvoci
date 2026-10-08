@@ -13,7 +13,7 @@
 
 - 작성자와 리뷰어는 항상 다른 주체다. 같은 주체의 자기 검토나 동의는 독립 검토가 아니다.
 - 리드가 직접 커밋을 쓰면 그 커밋의 작성자다. 다른 봇이 독립 검토하고 통합이 push한다.
-- PR 브랜치 push는 통합 봇만 일반 push로 한다. 작성자 봇은 작업 브랜치에만 커밋하고, 독립 리뷰어가 ACCEPT한 커밋만 PR 브랜치로 들어간다. 승인 대상 경로는 AGENTS.md, `.agents/`, `.github/workflows/`, `scripts/ci_selection.py`, `docs/testing-turso.md`, `docs/rewrite.md`이다. 이 중 하나라도 바꾸는 커밋은 같은 SHA에 대한 사용자 승인도 필요하고, 나머지 커밋은 리뷰어 ACCEPT로 충분하다. Turso 검증 브랜치 `fvoci/v060-turso-verified-connection`(`docs/testing-turso.md` 참고) push도 PR 브랜치와 같은 기준을 따른다.
+- PR 브랜치 push는 통합 봇만 일반 push로 한다. 작성자 봇은 작업 브랜치에만 커밋하고, 독립 리뷰어가 ACCEPT한 커밋만 PR 브랜치로 들어간다. 승인 대상 경로는 AGENTS.md, `.agents/`, `.github/workflows/`, `scripts/ci_selection.py`, `xtask/**`, `docs/testing-turso.md`, `docs/rewrite.md`이다. 이 중 하나라도 바꾸는 커밋은 같은 SHA에 대한 사용자 승인도 필요하고, 나머지 커밋은 리뷰어 ACCEPT로 충분하다. Turso 검증 브랜치 `fvoci/v060-turso-verified-connection`(`docs/testing-turso.md` 참고) push도 PR 브랜치와 같은 기준을 따른다.
 - ACCEPT와 사용자 승인은 고정 커밋 SHA를 가리킨다. 통합은 그 커밋 객체를 다시 적용(cherry-pick·patch)하지 않고 그대로 push하므로, SHA가 같으면 트리와 부모도 같다. push된 head는 리뷰·승인받은 커밋 SHA와 같고 그 부모는 직전 head여야 한다. push 직전에는 통합이, 직후에는 증거기록이 SHA·부모를 다시 확인해 기록하고, 모두 같을 때만 수락이 이어진다. 하나라도 다르면 push하지 않거나 즉시 알린다.
 - 큰 작업은 계획을 먼저 제시하고 사용자 승인 뒤 진행한다.
 - 정본은 PR 본문의 현재 체크포인트(`<!-- fvoci-current-checkpoint -->`)와 이슈 #331이다. 레포 문서에는 현재 상태로 읽힐 head SHA·run ID·세션·로컬 경로를 적지 않는다.
@@ -83,6 +83,7 @@ PR 수락·머지는 전체 종료/릴리스/배포 완료가 아니다. 전체 
 
 - 승인 범위: 통합 역할의 PR 작업 브랜치 일반 push(리뷰어 ACCEPT 커밋, 위 승인 대상 경로를 바꾸는 커밋은 사용자 승인까지), Turso 검증 브랜치 일반 push(PR 브랜치와 같은 기준), Draft PR 본문 갱신(사용자가 승인한 내용).
 - 별도 사용자 승인 필요: main 병합·auto-merge, Ready 전환, 이슈 종료, 태그, 릴리스, 배포, 추가 비용, 권한 확대.
+- 0.x main 병합 예외: 1.0.0 미만(0.9.x 포함, 예: 0.9.999…)에서는 다음을 모두 만족하면 Yeonghwan의 매번 명시 승인 없이 main에 병합할 수 있다 — 독립 리뷰어 두 명의 ACCEPT, 최종 head의 모든 required check PASS(FAIL·NOTRUN·MISSING 없음), 병합 SHA를 팀 방에 먼저 게시, 통합 봇이 gh 계정 `fvoci`로 병합. 예외 없이 매번 명시 승인이 필요한 것: 1.0.0 병합, auto-merge, 태그, 릴리스, 배포, 시크릿, AGENTS.md·`.agents/` 변경, force push.
 - 금지: force push, `reset --hard`, 진행 중 CI cancel, 원본 원격 쓰기, main 직접 push, 보호 조건 우회·약화, 운영 DB 변경, 시크릿·권한·공개 범위 변경.
 
 수락에는 최신 head의 필요한 검사, 실제 실행된 원격 CI, 작성자와 다른 주체의 고정 SHA 독립 검토가 모두 필요하다. 병합 승인 후에도 기대 head를 지정하고, 병합 후 기본 브랜치와 CI를 확인한다.
