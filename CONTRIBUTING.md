@@ -44,8 +44,15 @@ uv sync
 ```sh
 export LIBCLANG_PATH=/usr/lib/llvm-18/lib
 mkdir -p target/sqlite
-bash scripts/prepare-sqlite-ci.sh --parent "$PWD/target/sqlite" --env-file target/sqlite/env.sh
-. target/sqlite/env.sh   # 새 셸마다 다시 불러옵니다
+bash scripts/prepare-sqlite-ci.sh --parent "$(pwd -P)/target/sqlite" --env-file target/sqlite/env.sh
+```
+
+새 셸마다 다음 두 줄을 다시 실행합니다. `env.sh`에는 `SQLITE3_*`만 들어 있고, `prepare-sqlite-ci.sh`는 재사용할 때도
+`LIBCLANG_PATH`를 확인합니다. `--parent` 경로에 symlink가 있으면 거부하므로 `pwd -P`로 실제 경로를 씁니다.
+
+```sh
+export LIBCLANG_PATH=/usr/lib/llvm-18/lib
+. target/sqlite/env.sh
 ```
 
 `--parent`나 불러온 환경 없이 `prepare-sqlite-ci.sh`를 실행하면 호출마다 새 임시 디렉터리에 SQLite를 다시 빌드하고,
@@ -67,7 +74,8 @@ cargo test --locked --offline --lib --bin fvoci-server
 
 SQLite 작업 텍스트 비교 테스트(`db::tasks`)는 CI runner인 Ubuntu 26.04 x86_64의 glibc 2.43과 `en_US.UTF-8`
 `locale-archive` 해시에 맞춰 검증된 profile(`src/db/task_scalar_pg18_profile.json`)만 허용합니다. 다른 glibc나
-locale archive에서는 `Task GNU locale …` 오류로 실패하며, 이는 우회하지 않고 CI에서 확인합니다.
+locale archive에서는 `Task GNU version mismatch`, `Task GNU locale unavailable`, `Task GNU locale archive mismatch`
+(x86_64 외에서는 `Task scalar runtime qualification unavailable`) 오류로 실패하며, 이는 우회하지 않고 CI에서 확인합니다.
 
 **웹·편집기** ([`web.yml`](.github/workflows/web.yml)의 `web-static`·`web-checks` job)
 
@@ -100,7 +108,8 @@ e2e wrapper(`scripts/web-e2e-*`, `scripts/run-web-e2e.sh`)를 바꿨다면 `bash
 ## DB 통합 테스트 (Docker 필요)
 
 `scripts/start-test-postgres.sh`는 실행마다 새 PostgreSQL 컨테이너(127.0.0.1의 임의 포트)를 띄우고,
-`TEST_DATABASE_URL`을 넘긴 명령이 끝나면 컨테이너를 지웁니다. 고정 SQLite 환경을 불러온 셸에서 실행합니다.
+`TEST_DATABASE_URL`을 넘긴 명령이 끝나면 컨테이너를 지웁니다. 고정 SQLite 환경(`LIBCLANG_PATH`와 `env.sh`)을 불러온
+셸에서 실행합니다. 기본 명령과 `run-web-e2e.sh`는 `prepare-sqlite-ci.sh`를 다시 거칩니다.
 명령을 생략하면 `scripts/run-db-tests.sh`가 `db_integration` 한 target만 실행합니다.
 
 ```sh
@@ -133,7 +142,7 @@ spec 파일마다 그룹을 나눕니다(`scripts/web-e2e-groups.py`). `workspac
 ## 실패 진단
 
 - **브라우저 e2e**: 실패한 그룹은 `retained failure artifacts for group <이름> in <디렉터리>`를 출력합니다.
-  그 디렉터리에 `server.log`(접속 정보 가림), `playwright-output/**/error-context.md`, `browser-summary.txt`,
+  그 디렉터리에 `server.log`(접속 정보 가림), `playwright-output/**/error-context.md`, `playwright-output/**/browser-summary.txt`,
   `net-events.log`가 남습니다. CI에서는 같은 내용이 `*-browser-failure-*` artifact로 올라갑니다.
 - **서버가 준비되지 않음**: e2e는 Playwright를 시작하기 전에 마지막 `/api/v1/setup` 상태와 서버 로그를 출력하고 실패합니다.
 - **Rust 테스트 하나만**: `cargo test --locked --offline --features db-tests --test <target> <이름> -- --exact --nocapture`.
@@ -146,4 +155,4 @@ spec 파일마다 그룹을 나눕니다(`scripts/web-e2e-groups.py`). `workspac
 2. 위의 해당 검사를 로컬에서 실행하고, PR 본문에 실행한 명령과 결과·실행하지 못한 검사를 적습니다.
 3. 새 의존성은 필요성·대안·버전·라이선스·빌드 영향을 함께 설명합니다. lockfile은 도구로만 갱신합니다.
 4. 비밀값(`.env`, 토큰, 접속 URL)을 커밋하거나 로그·PR에 붙이지 않습니다.
-5. CI의 필수 job과 리뷰가 통과해야 병합됩니다. 병합·태그·릴리스는 [docs/RELEASING.md](docs/RELEASING.md)의 별도 절차입니다.
+5. CI의 필수 job과 리뷰가 통과해야 병합됩니다. 태그·릴리스는 [docs/RELEASING.md](docs/RELEASING.md)의 별도 절차입니다.
