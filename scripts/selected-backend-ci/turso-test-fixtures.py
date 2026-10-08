@@ -1811,6 +1811,7 @@ class UiAdapterTests(unittest.TestCase):
 
     def test_table_contract_projection_keeps_only_bounded_comparison_facts(self):
         facts = {'expectedCount': 99, 'actualCount': 99, 'setEqual': False,
+                 'actualOnlyCount': 1, 'expectedOnlyCount': 1, 'actualOnlyUnderscoreCount': 0,
                  'orderEqual': False, 'firstMismatchIndex': 1, 'actualMismatchExpectedIndex': 2}
         packet = self.baseline_packet()
         packet['nativeOutcome']['baselineFailure'] = {'phase': 'table-contract', 'category': 'protocol',
@@ -1821,11 +1822,16 @@ class UiAdapterTests(unittest.TestCase):
         self.assertEqual(diagnostic['nativeOutcome']['rollback'], 'unknown')
         self.assertEqual(diagnostic['baselineRollbackFailure'], {'phase': 'rollback', 'category': 'request'})
         self.assertNotIn('PRIVATE_', json.dumps(diagnostic))
-        for expected, actual, mismatch, actual_expected in (
-                (99, 98, 98, None), (99, 100, 99, 0),
-                (100001, 100001, 100000, 0), (100001, 100001, None, None)):
+        for expected, actual, mismatch, actual_expected, actual_only, expected_only, underscore in (
+                (99, 98, 98, None, 0, 1, 0), (99, 100, 99, 0, 0, 0, 0),
+                (99, 99, 0, None, 1, 1, 1), (99, 99, 1, 2, 0, 0, 0),
+                (100001, 100001, 100000, 0, 1, 1, 1),
+                (100001, 100001, None, None, 100001, 100001, 100001)):
             with self.subTest(expected=expected, actual=actual, mismatch=mismatch):
                 comparison = dict(facts, expectedCount=expected, actualCount=actual,
+                                  actualOnlyCount=actual_only, expectedOnlyCount=expected_only,
+                                  actualOnlyUnderscoreCount=underscore,
+                                  setEqual=actual_only == expected_only == 0,
                                   firstMismatchIndex=mismatch, actualMismatchExpectedIndex=actual_expected)
                 packet['nativeOutcome']['baselineFailure']['tableComparison'] = comparison
                 diagnostic = self.ui.baseline_failure_diagnostic(packet)
@@ -1839,13 +1845,18 @@ class UiAdapterTests(unittest.TestCase):
 
     def test_table_contract_projection_refuses_private_names_and_forged_counts_or_indices(self):
         facts = {'expectedCount': 99, 'actualCount': 99, 'setEqual': False,
+                 'actualOnlyCount': 1, 'expectedOnlyCount': 1, 'actualOnlyUnderscoreCount': 0,
                  'orderEqual': False, 'firstMismatchIndex': 1, 'actualMismatchExpectedIndex': 2}
         faults = [('actualNames', ['PRIVATE_TABLE_CANARY']), ('expectedCount', True),
                   ('actualCount', 'PRIVATE_NAME_OR_ENDPOINT'), ('actualCount', 100002),
                   ('setEqual', 'PRIVATE_TOKEN'), ('orderEqual', True),
                   ('firstMismatchIndex', -1), ('firstMismatchIndex', 100),
                   ('actualMismatchExpectedIndex', True), ('actualMismatchExpectedIndex', 99),
-                  ('actualMismatchExpectedIndex', 'PRIVATE_TABLE_CANARY')]
+                  ('actualMismatchExpectedIndex', 'PRIVATE_TABLE_CANARY'),
+                  ('actualOnlyCount', 100), ('expectedOnlyCount', 100),
+                  ('actualOnlyUnderscoreCount', 2), ('setEqual', True)]
+        for field in ('actualOnlyCount', 'expectedOnlyCount', 'actualOnlyUnderscoreCount'):
+            faults.extend((field, value) for value in (True, -1, 100002, None, 'PRIVATE_TABLE_CANARY'))
         for field, value in faults:
             with self.subTest(field=field, value=value):
                 packet = self.baseline_packet()
@@ -1856,6 +1867,18 @@ class UiAdapterTests(unittest.TestCase):
                 self.assertEqual(diagnostic['diagnosticStatus'], 'refused')
                 self.assertIsNone(diagnostic['baselineFailure'])
                 self.assertNotIn('PRIVATE_', json.dumps(diagnostic))
+        for field in facts:
+            with self.subTest(missing_field=field):
+                packet = self.baseline_packet()
+                comparison = dict(facts)
+                del comparison[field]
+                packet['nativeOutcome']['baselineFailure'] = {'phase': 'table-contract', 'category': 'protocol',
+                                                              'tableComparison': comparison}
+                self.assertEqual(self.ui.baseline_failure_diagnostic(packet)['diagnosticStatus'], 'refused')
+        packet = self.baseline_packet()
+        packet['nativeOutcome']['baselineFailure'] = {'phase': 'table-contract', 'category': 'protocol',
+            'tableComparison': dict(facts, actualOnlyCount=0, expectedOnlyCount=0)}
+        self.assertEqual(self.ui.baseline_failure_diagnostic(packet)['diagnosticStatus'], 'refused')
         for count in (99, 0):
             with self.subTest(equal_exact_count=count):
                 packet = self.baseline_packet()
@@ -1876,6 +1899,7 @@ class UiAdapterTests(unittest.TestCase):
         packet = self.baseline_packet()
         packet['nativeOutcome']['baselineFailure'] = {'phase': 'table-contract', 'category': 'protocol',
             'tableComparison': dict(facts, actualCount=98, firstMismatchIndex=98,
+                                    actualOnlyCount=0,
                                     actualMismatchExpectedIndex=None)}
         self.assertEqual(self.ui.baseline_failure_diagnostic(packet)['diagnosticStatus'], 'qualified')
         for field, value in [('phase', 'row-hash'), ('category', 'driver')]:
@@ -1891,6 +1915,7 @@ class UiAdapterTests(unittest.TestCase):
                 packet = self.baseline_packet();events=[]
                 packet['nativeOutcome']['baselineFailure'] = {'phase':'table-contract','category':'protocol',
                     'tableComparison':{'expectedCount':99,'actualCount':98,'setEqual':False,'orderEqual':False,
+                                       'actualOnlyCount':0,'expectedOnlyCount':1,'actualOnlyUnderscoreCount':0,
                                        'firstMismatchIndex':0,'actualMismatchExpectedIndex':1}}
                 process = types.SimpleNamespace(returncode=7,communicate=lambda **kw:(json.dumps(packet).encode(),b'PRIVATE_STDERR_CANARY'))
                 def finish(process):
@@ -1919,6 +1944,7 @@ class UiAdapterTests(unittest.TestCase):
                     first = json.loads(output.splitlines()[0])
                     self.assertEqual(first['baselineFailure'],{'phase':'table-contract','category':'protocol',
                         'tableComparison':{'expectedCount':99,'actualCount':98,'setEqual':False,'orderEqual':False,
+                                           'actualOnlyCount':0,'expectedOnlyCount':1,'actualOnlyUnderscoreCount':0,
                                            'firstMismatchIndex':0,'actualMismatchExpectedIndex':1}})
                     self.assertEqual(first['nativeOutcome']['rollback'],'unknown')
                 else:

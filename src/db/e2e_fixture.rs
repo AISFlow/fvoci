@@ -35,6 +35,9 @@ struct BaselineFailure {
 struct TableComparison {
     expected_count: usize,
     actual_count: usize,
+    actual_only_count: usize,
+    expected_only_count: usize,
+    actual_only_underscore_count: usize,
     set_equal: bool,
     order_equal: bool,
     first_mismatch_index: Option<usize>,
@@ -43,6 +46,8 @@ struct TableComparison {
 
 impl TableComparison {
     fn observe(actual: &[String], expected: &[String]) -> Self {
+        let actual_set = actual.iter().collect::<BTreeSet<_>>();
+        let expected_set = expected.iter().collect::<BTreeSet<_>>();
         let first_mismatch = actual
             .iter()
             .zip(expected)
@@ -53,8 +58,14 @@ impl TableComparison {
         Self {
             expected_count: expected.len().min(100001),
             actual_count: actual.len().min(100001),
-            set_equal: actual.iter().collect::<BTreeSet<_>>()
-                == expected.iter().collect::<BTreeSet<_>>(),
+            actual_only_count: actual_set.difference(&expected_set).count().min(100001),
+            expected_only_count: expected_set.difference(&actual_set).count().min(100001),
+            actual_only_underscore_count: actual_set
+                .difference(&expected_set)
+                .filter(|name| name.starts_with('_'))
+                .count()
+                .min(100001),
+            set_equal: actual_set == expected_set,
             order_equal: actual == expected,
             first_mismatch_index: first_mismatch.filter(|index| *index <= 100000),
             actual_mismatch_expected_index: first_mismatch
@@ -67,6 +78,9 @@ impl TableComparison {
     fn diagnostic(&self) -> Value {
         json!({
             "expectedCount":self.expected_count,"actualCount":self.actual_count,
+            "actualOnlyCount":self.actual_only_count,
+            "expectedOnlyCount":self.expected_only_count,
+            "actualOnlyUnderscoreCount":self.actual_only_underscore_count,
             "setEqual":self.set_equal,"orderEqual":self.order_equal,
             "firstMismatchIndex":self.first_mismatch_index,
             "actualMismatchExpectedIndex":self.actual_mismatch_expected_index
@@ -811,6 +825,9 @@ mod tests {
         assert_eq!(reordered["orderEqual"], false);
         assert_eq!(reordered["firstMismatchIndex"], 1);
         assert_eq!(reordered["actualMismatchExpectedIndex"], 2);
+        assert_eq!(reordered["actualOnlyCount"], 0);
+        assert_eq!(reordered["expectedOnlyCount"], 0);
+        assert_eq!(reordered["actualOnlyUnderscoreCount"], 0);
 
         let mut unknown = expected.clone();
         unknown[1] = "PRIVATE_TABLE_ENDPOINT_OR_TOKEN".into();
@@ -830,9 +847,22 @@ mod tests {
         assert_eq!(comparison["setEqual"], false);
         assert_eq!(comparison["firstMismatchIndex"], 1);
         assert_eq!(comparison["actualMismatchExpectedIndex"], Value::Null);
+        assert_eq!(comparison["actualOnlyCount"], 1);
+        assert_eq!(comparison["expectedOnlyCount"], 1);
+        assert_eq!(comparison["actualOnlyUnderscoreCount"], 0);
         assert_eq!(receipt["rollback"], "confirmed");
         assert_eq!(receipt["commit"], "not-attempted");
         assert!(!receipt.to_string().contains("PRIVATE_"));
+
+        unknown[1] = "_PRIVATE_PLATFORM_TABLE".into();
+        unknown.sort();
+        let underscore = TableComparison::observe(&unknown, &expected).diagnostic();
+        assert_eq!(underscore["firstMismatchIndex"], 0);
+        assert_eq!(underscore["actualMismatchExpectedIndex"], Value::Null);
+        assert_eq!(underscore["actualOnlyCount"], 1);
+        assert_eq!(underscore["expectedOnlyCount"], 1);
+        assert_eq!(underscore["actualOnlyUnderscoreCount"], 1);
+        assert!(!underscore.to_string().contains("PRIVATE_"));
 
         let mut duplicate = expected.clone();
         duplicate.push(expected[0].clone());

@@ -450,12 +450,18 @@ def baseline_failure_diagnostic(value):
         if 'tableComparison' in item:
             comparison = item['tableComparison']
             keys = {'expectedCount','actualCount','setEqual','orderEqual',
+                    'actualOnlyCount','expectedOnlyCount','actualOnlyUnderscoreCount',
                     'firstMismatchIndex','actualMismatchExpectedIndex'}
             if (rollback or item['phase'] != 'table-contract' or item['category'] != 'protocol'
                     or not isinstance(comparison, dict) or set(comparison) != keys
                     or any(type(comparison[k]) is not int or not 0 <= comparison[k] <= 100001
-                           for k in ('expectedCount','actualCount'))
+                           for k in ('expectedCount','actualCount','actualOnlyCount',
+                                     'expectedOnlyCount','actualOnlyUnderscoreCount'))
                     or type(comparison['setEqual']) is not bool or comparison['orderEqual'] is not False
+                    or comparison['actualOnlyCount'] > comparison['actualCount']
+                    or comparison['expectedOnlyCount'] > comparison['expectedCount']
+                    or comparison['actualOnlyUnderscoreCount'] > comparison['actualOnlyCount']
+                    or comparison['setEqual'] != (comparison['actualOnlyCount'] == comparison['expectedOnlyCount'] == 0)
                     or (comparison['firstMismatchIndex'] is not None and (
                         type(comparison['firstMismatchIndex']) is not int
                         or not 0 <= comparison['firstMismatchIndex'] <= min(
