@@ -569,8 +569,14 @@ def config_list_inputs(output):
     modules = {}
     for name in ('@playwright/test', 'playwright', 'playwright-core'):
         path = ROOT/'node_modules'/name/'package.json'
-        assert read(path)['version'] == '1.63.0'
+        package = read(path)
+        assert package['version'] == '1.63.0'
+        if name == 'playwright':assert package['bin']['playwright'] == 'cli.js'
         modules[name] = sha(path)
+    cli = ROOT/'node_modules/playwright/cli.js'
+    assert not cli.is_symlink() and cli.is_file() and os.access(cli,os.R_OK)
+    assert sha(cli) == before['external'][str(cli)], 'Playwright CLI must be in the admitted input closure'
+    modules['playwright/cli.js'] = sha(cli)
     return before, browser, modules
 
 
@@ -587,7 +593,8 @@ def config_list(output):
            'FVOCI_E2E_SELECTED_AUXILIARY':'normal-api',
            'FVOCI_E2E_SELECTED_SOURCE':before['head'], 'FVOCI_E2E_SELECTED_COMPILED_SOURCE':before['head'],
            'FVOCI_E2E_RESULT_DIR':str(directory), 'PLAYWRIGHT_JSON_OUTPUT_FILE':str(directory/'listing.json')}
-    args = [browser['bun']['path'],'--bun','x','--no-install','playwright','test',
+    # Run the admitted official entrypoint directly; bunx --bun uses a node shim.
+    args = [browser['bun']['path'],'--no-install',str(ROOT/'node_modules/playwright/cli.js'),'test',
             '--config','e2e-pending/collab-playwright.config.ts','--reporter=line,json',
             '--list','workspace-wiki-selected-backend.spec.ts']
     # Only qualified identity, metadata and env NAMES enter the safe capture.

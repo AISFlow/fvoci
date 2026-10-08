@@ -238,6 +238,46 @@ class EarlyDriverFailure(unittest.TestCase):
 
 
 class ActualDriverSourceControls(unittest.TestCase):
+    def test_postgres_sqlite_direct_cli_keeps_on_off_selection_and_no_install(self):
+        for name in ('postgres','sqlite'):
+            tree = ast.parse((HERE/('current-'+name+'-driver.py')).read_text())
+            args = next(n for n in ast.walk(tree) if isinstance(n,ast.Assign)
+                        and any(isinstance(v,ast.Name) and v.id == 'args' for v in n.targets)
+                        and isinstance(n.value,ast.List) and any(isinstance(v,ast.Name) and v.id == 'SPEC' for v in n.value.elts))
+            for spec in ('workspace-wiki-selected-backend.spec.ts','workspace-off-selected-backend.spec.ts'):
+                with self.subTest(driver=name,spec=spec):
+                    state = {'BUN':Path('/qualified/bun'),'W':Path('/qualified'),
+                             'PLAYWRIGHT_CLI':Path('/qualified/node_modules/playwright/cli.js'),'SPEC':spec}
+                    exec(compile(ast.fix_missing_locations(ast.Module(body=[args],type_ignores=[])),'browser-cli','exec'),state)
+                    self.assertEqual(state['args'],['/qualified/bun','--no-install','/qualified/node_modules/playwright/cli.js',
+                        'test','--config','e2e-pending/collab-playwright.config.ts','--reporter=line,json',spec])
+
+    def test_postgres_direct_cli_requires_pinned_bin_regular_file_and_admitted_hash(self):
+        tree = ast.parse((HERE/'current-postgres-driver.py').read_text())
+        start = next(i for i,n in enumerate(tree.body) if isinstance(n,ast.Assign)
+                     and any(isinstance(v,ast.Name) and v.id == 'PLAYWRIGHT_CLI' for v in n.targets))
+        qualification = compile(ast.fix_missing_locations(ast.Module(body=tree.body[start:start+5],type_ignores=[])),
+                                'cli-qualification','exec')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory);cli = root/'node_modules/playwright/cli.js';cli.parent.mkdir(parents=True)
+            cli.write_text('synthetic official CLI');package = cli.parent/'package.json'
+            package.write_text(json.dumps({'version':'1.63.0','bin':{'playwright':'cli.js'}}))
+            bun = root/'bun';bun.write_text('synthetic qualified Bun')
+            state = {'W':root,'BUN':bun,'json':json,'before':{'external':{str(cli):runner.sha(cli)}},'sha':runner.sha}
+            exec(qualification,state)
+            for fault in ('hash','missing','bin','version','symlink'):
+                with self.subTest(fault=fault):
+                    package.write_text(json.dumps({'version':'1.63.0','bin':{'playwright':'cli.js'}}))
+                    state['before']['external'] = {str(cli):runner.sha(cli)}
+                    if fault == 'hash':state['before']['external'][str(cli)] = '0'*64
+                    if fault == 'missing':state['before']['external'] = {}
+                    if fault == 'bin':package.write_text(json.dumps({'version':'1.63.0','bin':{'playwright':'other.js'}}))
+                    if fault == 'version':package.write_text(json.dumps({'version':'0.0.0','bin':{'playwright':'cli.js'}}))
+                    if fault == 'symlink':
+                        target = root/'foreign-cli';cli.rename(target);cli.symlink_to(target)
+                    with self.assertRaises((AssertionError,KeyError)):exec(qualification,state)
+                    if fault == 'symlink':cli.unlink();target.rename(cli)
+
     def test_actual_container_absence_requires_positive_docker_absence(self):
         for name in ('sqlite','install'):
             tree=ast.parse((HERE/('current-'+name+'-driver.py')).read_text())
@@ -540,7 +580,7 @@ class ConfigListPreflight(unittest.TestCase):
 
     def execute(self, exit_code=0, report=True):
         def child(args, **kw):
-            self.assertEqual(args,[str(self.bun),'--bun','x','--no-install','playwright','test','--config',
+            self.assertEqual(args,[str(self.bun),'--no-install',str(runner.ROOT/'node_modules/playwright/cli.js'),'test','--config',
                                   'e2e-pending/collab-playwright.config.ts','--reporter=line,json','--list',
                                   'workspace-wiki-selected-backend.spec.ts'])
             self.assertEqual(kw['cwd'],runner.ROOT/'apps/web')
@@ -613,7 +653,8 @@ class ConfigListPreflight(unittest.TestCase):
         external = {str(self.bun):runner.sha(self.bun)}
         for name in ('@playwright/test','playwright','playwright-core'):
             path = source/'node_modules'/name/'package.json';path.parent.mkdir(parents=True)
-            path.write_text(json.dumps({'version':'1.63.0'}));external[str(path)]=runner.sha(path)
+            path.write_text(json.dumps({'version':'1.63.0','bin':{'playwright':'cli.js'}}));external[str(path)]=runner.sha(path)
+        cli = source/'node_modules/playwright/cli.js';cli.write_text('synthetic official CLI');external[str(cli)]=runner.sha(cli)
         before = {'head':SOURCE,'tree':TREE,'status':'','tracked':{'config.ts':runner.sha(config)},
                   'external':external,'untracked':{}}
         binaries = {}
@@ -685,6 +726,37 @@ class ConfigListPreflight(unittest.TestCase):
             (self.output/'handoff-consumed.json').unlink()
             with self.assertRaises(FileNotFoundError):runner.config_list_inputs(self.output)
             launch.assert_not_called()
+
+    def test_config_list_direct_cli_requires_recorded_regular_file_and_official_bin(self):
+        source, config, env, git = self.prepare_cohort()
+        cli = source/'node_modules/playwright/cli.js'
+        package = cli.parent/'package.json'
+        def rebind_external(change):
+            before = runner.read(self.output/'before.json');change(before['external'])
+            for name in ('before.json','after.json'):(self.output/name).write_text(json.dumps(before))
+            consumed = runner.read(self.output/'handoff-consumed.json')
+            for name in ('before.json','after.json'):consumed['received'][str(self.output/name)]['sha256'] = runner.sha(self.output/name)
+            (self.output/'handoff-consumed.json').write_text(json.dumps(consumed))
+        with patch.dict(runner.os.environ,env,clear=True),patch.object(runner,'identity',return_value=OWNER), \
+             patch.object(runner,'ROOT',source),patch.object(runner,'call',side_effect=git), \
+             patch.object(runner.shutil,'which',return_value=str(self.bun)),patch.object(runner.subprocess,'run') as launch:
+            self.assertEqual(runner.config_list_inputs(self.output)[2]['playwright/cli.js'],runner.sha(cli))
+            rebind_external(lambda external:external.pop(str(cli)))
+            with self.assertRaises(KeyError):runner.config_list_inputs(self.output)
+            rebind_external(lambda external:external.update({str(cli):runner.sha(cli)}))
+            target = self.root/'foreign-cli';cli.rename(target);cli.symlink_to(target)
+            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+            cli.unlink();target.rename(cli)
+            original = package.read_text();package.write_text(json.dumps({'version':'1.63.0','bin':{'playwright':'other.js'}}))
+            rebind_external(lambda external:external.update({str(package):runner.sha(package)}))
+            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+            package.write_text(original)
+            rebind_external(lambda external:external.update({str(package):runner.sha(package)}))
+            cli.write_text('changed unqualified CLI')
+            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+            launch.assert_not_called()
+            self.assertFalse((self.output/'runtime').exists())
+            self.assertFalse((self.output/'config-list').exists())
 
     def wrapper(self, leaf=0, owner=0, occupied=False):
         safe = self.root/'safe';safe.mkdir(mode=0o700)

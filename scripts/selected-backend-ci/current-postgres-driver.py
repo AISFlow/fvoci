@@ -251,7 +251,11 @@ fixture = next(p for p in binaries if p.endswith('/fvoci-e2e-fixture'))
 engine = next(p for p in binaries if p.endswith('/collab-engine'))
 dist = W / 'apps/web/dist'
 actual_bundle_hashes = {p:r['sha256'] for p,r in binaries.items()}
-assert BUN.is_file() and (W / 'node_modules/.bin/playwright').is_file()
+PLAYWRIGHT_CLI = W / 'node_modules/playwright/cli.js'
+assert BUN.is_file() and not PLAYWRIGHT_CLI.is_symlink() and PLAYWRIGHT_CLI.is_file()
+playwright_package = json.loads((W / 'node_modules/playwright/package.json').read_text())
+assert playwright_package['version'] == '1.63.0' and playwright_package['bin']['playwright'] == 'cli.js'
+assert sha(PLAYWRIGHT_CLI) == before['external'][str(PLAYWRIGHT_CLI)], 'Playwright CLI must be in the admitted input closure'
 
 
 PG_SCRIPT = W / 'scripts/start-test-postgres.sh'
@@ -582,7 +586,8 @@ try:
                       'chromium': {'path': chromium, 'sha256': sha(chromium)},
                       'chromium_directory_files': tree_hashes(Path(chromium).parent)}
     write(run / 'actual-browser-inputs.json', browser_inputs)
-    args = [str(BUN), '--bun', 'x', 'playwright', 'test', '--config', 'e2e-pending/collab-playwright.config.ts',
+    # Use Bun itself, without bunx's node shim, for both selected flows.
+    args = [str(BUN), '--no-install', str(PLAYWRIGHT_CLI), 'test', '--config', 'e2e-pending/collab-playwright.config.ts',
             '--reporter=line,json', SPEC]
     receipt['phase'] = 'browser'
     receipt.update(browser_command=args, browser_environment_names=sorted(browser_env), browser_start_utc=now())
