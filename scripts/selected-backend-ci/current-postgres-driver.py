@@ -90,8 +90,10 @@ KNOWN_BROWSER_SUFFIXES = ('e2e-pending/workspace-wiki-selected-backend.spec.ts',
 KNOWN_BROWSER_STATUSES = ('failed', 'timedOut', 'interrupted')
 
 
-def known_browser_checkpoint(report):
+def known_browser_checkpoint(report, *, restart=False):
     """Use the reporter errorLocation field. Do not parse stacks. Missing stays null."""
+    title = ('selected normal main restart: fresh actor reads persisted native history and manual revision'
+             if restart else KNOWN_ON_BROWSER_TEST)
     empty = {'known_browser_test': None, 'known_browser_status': None,
              'known_browser_checkpoint': None, 'browser_report_state': 'report-unreadable'}
 
@@ -137,7 +139,7 @@ def known_browser_checkpoint(report):
             if isinstance(children, list):
                 stack.extend(children)
         spec_suffix = 'e2e-pending/workspace-wiki-selected-backend.spec.ts'
-        matched = [spec for spec in found if spec.get('title') == KNOWN_ON_BROWSER_TEST
+        matched = [spec for spec in found if spec.get('title') == title
                    and known_source(spec.get('file'), spec_suffix)]
         if len(matched) != 1:
             empty['browser_report_state'] = 'spec-mismatch'
@@ -162,7 +164,7 @@ def known_browser_checkpoint(report):
                 if known_source(location.get('file'), suffix):
                     checkpoint = suffix + ':' + str(location.get('line'))
                     break
-        return {'known_browser_test': KNOWN_ON_BROWSER_TEST, 'known_browser_status': status,
+        return {'known_browser_test': title, 'known_browser_status': status,
                 'known_browser_checkpoint': checkpoint, 'browser_report_state': 'matched'}
     except BaseException:
         return empty

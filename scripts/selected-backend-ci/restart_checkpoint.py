@@ -72,6 +72,16 @@ def port_closed(base):
         return probe.connect_ex(('127.0.0.1', int(base.rsplit(':', 1)[1]))) != 0
 
 
+def restart_browser_args(g):
+    # Reuse PG's admitted CLI; SQLite's maintained body uses this same literal file.
+    cli = Path(g.get('PLAYWRIGHT_CLI', g['W'] / 'node_modules/playwright/cli.js'))
+    assert cli == g['W'] / 'node_modules/playwright/cli.js'
+    assert not cli.is_symlink() and cli.is_file()
+    assert digest(cli) == g['before']['external'][str(cli)], 'restart CLI must remain in the admitted input closure'
+    return [str(g['BUN']), '--no-install', str(cli), 'test', '--config', 'e2e-pending/collab-playwright.config.ts',
+            '--reporter=line,json', '--grep', TITLE, g['SPEC']]
+
+
 def restart_same_app(g):
     # Names are the concrete state of the two accepted drivers, not a product DI.
     run, name, selected = g['run'], g['name'], g['browser_env']['FVOCI_E2E_SELECTED_BACKEND']
@@ -101,6 +111,7 @@ def restart_same_app(g):
     restart_base = None
     before_rows = []
     def inputs():
+        restart_browser_args(g)
         assert g['input_check'](g['before']) == g['source_before']
         for path, record in g['binaries'].items():
             assert digest(path) == record['sha256']
@@ -172,6 +183,7 @@ def restart_same_app(g):
         receipt['checkpointSha256'] = digest(checkpoint_path)
         inputs()
         restart_log = (run / 'restarted-normal-server.log').open('x')
+        os.fchmod(restart_log.fileno(), 0o600)
         # Same container, literal private environment, DB and storage; port0 again.
         restart_process = subprocess.Popen(['docker', 'exec', name, '/bin/sh', '-ec',
                  '. /fvoci/inputs/environment.sh; exec /fvoci/bin/fvoci-migrate --start'],
@@ -230,8 +242,7 @@ def restart_same_app(g):
         env.update(PLAYWRIGHT_BASE_URL=restart_base, FVOCI_E2E_SELECTED_BACKEND=selected,
                    FVOCI_E2E_SELECTED_RESTART_SOURCE=g['HEAD'], FVOCI_E2E_SELECTED_RESTART_CHECKPOINT=str(checkpoint_path),
                    FVOCI_E2E_RESULT_DIR=str(run / 'restart-browser'), PLAYWRIGHT_JSON_OUTPUT_FILE=str(run / 'restart-playwright-result.private.json'))
-        args = [str(g['BUN']), '--bun', 'x', 'playwright', 'test', '--config', 'e2e-pending/collab-playwright.config.ts',
-                '--reporter=line,json', '--grep', TITLE, g['SPEC']]
+        args = restart_browser_args(g)
         receipt['restartBrowserCommand'] = args
         started = time.monotonic()
         result = g['command'](args, run / 'restart-browser.log', required=False, env=env, cwd=g['W'] / 'apps/web')
@@ -252,6 +263,39 @@ def restart_same_app(g):
         inputs()
     except BaseException as error:
         receipt['originalFailure'] = {'type': type(error).__name__, 'message': str(error)}
+        # Publish only a fixed helper file:line and the maintained reporter projection.
+        # Original messages/logs/reports remain private; no stack/locals are formatted.
+        safe = {'restart_stage': receipt['stage'], 'restart_helper_checkpoint': None,
+                'restart_browser_exit': receipt['restartBrowserExit'],
+                'known_browser_test': None, 'known_browser_status': None,
+                'known_browser_checkpoint': None, 'browser_report_state': 'report-missing'}
+        tb = error.__traceback__
+        while tb is not None:
+            if tb.tb_frame.f_code.co_filename == __file__:
+                safe['restart_helper_checkpoint'] = 'scripts/selected-backend-ci/restart_checkpoint.py:' + str(tb.tb_lineno)
+            tb = tb.tb_next
+        try:
+            report_path = run / 'restart-playwright-result.private.json'
+            if report_path.exists():
+                os.chmod(report_path, 0o600)
+                receipt['restartReportSha256'] = digest(report_path)
+                project = g.get('known_browser_checkpoint')
+                if callable(project):
+                    projected = project(json.loads(report_path.read_text()), restart=True)
+                    safe.update({key: projected[key] for key in ('known_browser_test', 'known_browser_status',
+                                                                'known_browser_checkpoint', 'browser_report_state')})
+                else:
+                    safe['browser_report_state'] = 'report-unreadable'
+        except BaseException:
+            safe['browser_report_state'] = 'report-unreadable'
+            receipt['diagnosticError'] = 'restart-safe-failure-collection-failed'
+        receipt['safeFailure'] = safe
+        try:
+            g['receipt'].update({key: safe[key] for key in ('known_browser_test', 'known_browser_status',
+                                                          'known_browser_checkpoint', 'browser_report_state')})
+            print(json.dumps(safe), flush=True)
+        except BaseException:
+            receipt['diagnosticError'] = 'restart-safe-failure-publication-failed'
         raise
     finally:
         # Caller retains original finally for its container and PG/Meili wrappers.
@@ -279,6 +323,13 @@ def restart_same_app(g):
         if restart_log is not None:
             restart_log.close()
             receipt['restartServerLogSha256'] = digest(run / 'restarted-normal-server.log')
+        browser_log = run / 'restart-browser.log'
+        if browser_log.exists():
+            try:
+                os.chmod(browser_log, 0o600)
+                receipt['restartBrowserLogSha256'] = digest(browser_log)
+            except BaseException as error:
+                receipt['cleanupErrors'].append({'type': type(error).__name__, 'message': 'restart browser log qualification failed'})
         private_write(run / 'restart-receipt.private.json', receipt)
     assert receipt['cleanupErrors'] == [], 'restart cleanup failure is not PASS; parent retains original failure'
     return receipt
