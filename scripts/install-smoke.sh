@@ -215,8 +215,9 @@ UPLOAD_INIT="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H
   -d "{\"name\":\"sample.hwpx\",\"sizeBytes\":$(wc -c <"$FIXTURE_HWPX"),\"declaredMime\":\"application/x-hwp\"}")"
 ATTACHMENT_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["attachmentId"])' "$UPLOAD_INIT")"
 PART_URL="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["parts"][0]["url"])' "$UPLOAD_INIT")"
-ETAG="$(curl -fsS -b "$COOKIE_JAR" -H "origin: $ORIGIN" -X PUT "$BASE_URL${PART_URL}" \
-  --data-binary @"$FIXTURE_HWPX" -D - -o /dev/null | awk '/^[Ee]tag:/ { print $2; exit }' | tr -d '\r')"
+PART_HEADERS="$(curl -fsS -b "$COOKIE_JAR" -H "origin: $ORIGIN" -X PUT "$BASE_URL${PART_URL}" \
+  --data-binary @"$FIXTURE_HWPX" -D - -o /dev/null)"
+ETAG="$(awk '/^[Ee]tag:/ { print $2; exit }' <<<"$PART_HEADERS" | tr -d '\r')"
 curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $ORIGIN" \
   -X POST "$BASE_URL/api/v1/workspaces/${WORKSPACE_ID}/attachments/${ATTACHMENT_ID}/complete" \
   -d "{\"parts\":[{\"partNumber\":1,\"etag\":\"${ETAG}\"}]}" >/dev/null
