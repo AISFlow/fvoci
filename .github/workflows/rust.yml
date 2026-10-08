@@ -355,7 +355,7 @@ jobs:
           if [[ "${RUNNER_ARCH:-}" == X64 ]]; then
             fvoci_timing_started=$SECONDS
             printf 'ci-step stage=postgres-build-step-11 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            trap 'fvoci_timing_exit=$?; printf "ci-step stage=postgres-build-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+            trap 'fvoci_timing_exit=$?; printf "ci-step stage=postgres-build-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           fi
           cargo fetch --locked
           cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
@@ -372,7 +372,7 @@ jobs:
           if [[ "${RUNNER_ARCH:-}" == X64 ]]; then
             fvoci_timing_started=$SECONDS
             printf 'ci-step stage=postgres-build-step-13 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            trap 'fvoci_timing_exit=$?; printf "ci-step stage=postgres-build-step-13 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+            trap 'fvoci_timing_exit=$?; printf "ci-step stage=postgres-build-step-13 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           fi
           cargo build --locked --offline --bin fvoci-migrate --message-format=json > "$RUNNER_TEMP/rust-binaries/schema.jsonl"
       - name: Build production helper once per architecture
@@ -382,7 +382,7 @@ jobs:
           if [[ "${RUNNER_ARCH:-}" == X64 ]]; then
             fvoci_timing_started=$SECONDS
             printf 'ci-step stage=postgres-build-step-14 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            trap 'fvoci_timing_exit=$?; printf "ci-step stage=postgres-build-step-14 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+            trap 'fvoci_timing_exit=$?; printf "ci-step stage=postgres-build-step-14 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           fi
           cargo build --locked --offline --manifest-path crates/collab-engine/Cargo.toml --features worker --bin collab-engine --message-format=json > "$RUNNER_TEMP/rust-binaries/helper.jsonl"
       - name: Seal finished executables and exact native inputs
@@ -390,7 +390,7 @@ jobs:
           if [[ "${RUNNER_ARCH:-}" == X64 ]]; then
             fvoci_timing_started=$SECONDS
             printf 'ci-step stage=postgres-build-step-15 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            trap 'fvoci_timing_exit=$?; printf "ci-step stage=postgres-build-step-15 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+            trap 'fvoci_timing_exit=$?; printf "ci-step stage=postgres-build-step-15 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           fi
           python3 scripts/ci_selection.py rust-binaries pack --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
       - name: Verify zstd CLI for executable handoff
