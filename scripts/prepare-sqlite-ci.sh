@@ -37,15 +37,22 @@ def main():
     if args.identity_only and (command or args.env_file):
         raise ValueError('identity-only cannot run a consumer or export build paths')
     timings = {}
+    timed = os.environ.get('GITHUB_JOB') in {'collaboration-build', 'collaboration-flow'} or (
+        os.environ.get('GITHUB_JOB') == 'postgres-build' and os.environ.get('RUNNER_ARCH') == 'X64')
     def measured(step, argv, timeout, **kwargs):
         started = time.monotonic()
         status = -1
+        if timed:
+            print('sqlite-ci-timing step=' + step + ' started at=' + time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), file=sys.stderr, flush=True)
         try:
             result = subprocess.run(argv, timeout=timeout, **kwargs)
             status = result.returncode
             result.check_returncode()
             return result
         finally:
+            if timed:
+                print('sqlite-ci-timing step=' + step + ' finished at=' + time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()) +
+                      ' elapsed_seconds=' + str(round(time.monotonic() - started)) + ' exit=' + str(status), file=sys.stderr, flush=True)
             timings[step] = {'elapsed_seconds': round(min(time.monotonic() - started, 86400), 6),
                              'timeout_seconds': timeout, 'exit_code': status}
             print('sqlite-ci step=' + step + ' ' + json.dumps(timings[step], sort_keys=True), file=sys.stderr)

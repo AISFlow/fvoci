@@ -352,6 +352,11 @@ jobs:
           key: v2-collab-product-helper-ubuntu-26.04-${{ runner.arch }}-1.98.1-worker-dev-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('crates/collab-engine/**', 'crates/vendor/**', '.cargo/**') }}
       - name: Fetch locked dependencies before credential-free compilation
         run: |
+          if [[ "${RUNNER_ARCH:-}" == X64 ]]; then
+            fvoci_timing_started=$SECONDS
+            printf 'ci-step stage=postgres-build-step-11 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            trap 'fvoci_timing_exit=$?; printf "ci-step stage=postgres-build-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          fi
           cargo fetch --locked
           cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
       - name: Build all PostgreSQL test executables once per architecture
@@ -364,14 +369,29 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/schema-default
         run: |
+          if [[ "${RUNNER_ARCH:-}" == X64 ]]; then
+            fvoci_timing_started=$SECONDS
+            printf 'ci-step stage=postgres-build-step-13 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            trap 'fvoci_timing_exit=$?; printf "ci-step stage=postgres-build-step-13 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          fi
           cargo build --locked --offline --bin fvoci-migrate --message-format=json > "$RUNNER_TEMP/rust-binaries/schema.jsonl"
       - name: Build production helper once per architecture
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/crates/collab-engine/target
         run: |
+          if [[ "${RUNNER_ARCH:-}" == X64 ]]; then
+            fvoci_timing_started=$SECONDS
+            printf 'ci-step stage=postgres-build-step-14 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            trap 'fvoci_timing_exit=$?; printf "ci-step stage=postgres-build-step-14 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          fi
           cargo build --locked --offline --manifest-path crates/collab-engine/Cargo.toml --features worker --bin collab-engine --message-format=json > "$RUNNER_TEMP/rust-binaries/helper.jsonl"
       - name: Seal finished executables and exact native inputs
         run: |
+          if [[ "${RUNNER_ARCH:-}" == X64 ]]; then
+            fvoci_timing_started=$SECONDS
+            printf 'ci-step stage=postgres-build-step-15 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            trap 'fvoci_timing_exit=$?; printf "ci-step stage=postgres-build-step-15 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - fvoci_timing_started))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          fi
           python3 scripts/ci_selection.py rust-binaries pack --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
       - name: Upload postgres finished executables
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

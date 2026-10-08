@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import shutil
 import stat
 import tarfile
@@ -2720,7 +2721,17 @@ def cmd_rust_binaries(argv: list[str]) -> int:
             for name in names:
                 command.extend(["--test", name])
             with (args.directory / "tests.jsonl").open("x") as output:
-                return subprocess.run(command, stdout=output).returncode
+                if os.environ.get("GITHUB_JOB") != "postgres-build" or os.environ.get("RUNNER_ARCH") != "X64":
+                    return subprocess.run(command, stdout=output).returncode
+                started = time.monotonic()
+                status = -1
+                print("rust-binaries stage=postgres-tests started at=" + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), file=sys.stderr, flush=True)
+                try:
+                    status = subprocess.run(command, stdout=output).returncode
+                    return status
+                finally:
+                    print("rust-binaries stage=postgres-tests finished at=" + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) +
+                          f" elapsed_seconds={round(time.monotonic() - started)} exit={status}", file=sys.stderr, flush=True)
         if args.action == "run":
             manifest = json.loads((args.directory / "postgres-manifest.json").read_text())
             if (manifest["context"]["sha"] != os.environ.get("GITHUB_SHA")

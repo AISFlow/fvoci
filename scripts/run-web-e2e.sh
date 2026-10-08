@@ -126,11 +126,17 @@ PY_API
 }
 
 run_stage() {
-  local name="$1" started="$SECONDS" status
+  local name="$1" started="$SECONDS" status timestamp=""
   shift
-  echo "web-e2e stage=${name} started" >&2
+  if [[ "${GITHUB_JOB:-}" == collaboration-build || "${GITHUB_JOB:-}" == collaboration-flow ]]; then
+    timestamp=" at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  fi
+  echo "web-e2e stage=${name} started${timestamp}" >&2
   if "$@"; then status=0; else status=$?; fi
-  echo "web-e2e stage=${name} elapsed_seconds=$((SECONDS - started)) exit=${status}" >&2
+  if [[ "${GITHUB_JOB:-}" == collaboration-build || "${GITHUB_JOB:-}" == collaboration-flow ]]; then
+    timestamp=" finished at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  fi
+  echo "web-e2e stage=${name}${timestamp} elapsed_seconds=$((SECONDS - started)) exit=${status}" >&2
   return "$status"
 }
 
