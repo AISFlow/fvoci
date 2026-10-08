@@ -484,7 +484,7 @@ def run(output):
             footer=source[source.index('selected_status=0\n'):]
             environment={'PATH':str(fake)+':'+os.defpath,'ROOT':str(repo),'RUNNER_TEMP':str(temp),
                 # Footer extraction omits the wrapper's real argument-parser default.
-                'SELECTED_PHASE':'whole',
+                'SELECTED_PHASE':'whole','SELECTED_PART':'whole',
                 'SELECTED_BACKENDS':'true','FVOCI_SELECTED_CI_OUTPUT':str(output),
                 'FVOCI_SELECTED_CI_SQLITE_PARENT':str(sqlite),'SQLITE3_LIB_DIR':str(lib),
                 'CI':'true','GITHUB_ACTIONS':'true','GITHUB_JOB':'collaboration-flow',
