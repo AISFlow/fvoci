@@ -16,6 +16,23 @@ export function checkText(text: string, databaseUrls = true) {
   );
 }
 const json = async (path: string) => JSON.parse(await Bun.file(path).text());
+const layerCodecs = new Map([
+  ["application/vnd.oci.image.layer.v1.tar", "tar"],
+  ["application/vnd.oci.image.layer.v1.tar+gzip", "gzip"],
+  ["application/vnd.oci.image.layer.v1.tar+zstd", "zstd"],
+  ["application/vnd.oci.image.layer.nondistributable.v1.tar", "tar"],
+  ["application/vnd.oci.image.layer.nondistributable.v1.tar+gzip", "gzip"],
+  ["application/vnd.oci.image.layer.nondistributable.v1.tar+zstd", "zstd"],
+  ["application/vnd.docker.image.rootfs.diff.tar.gzip", "gzip"],
+  ["application/vnd.docker.image.rootfs.foreign.diff.tar.gzip", "gzip"],
+]);
+function descriptorName(descriptor: any) {
+  check(
+    typeof descriptor?.digest === "string" && /^sha256:[0-9a-f]{64}$/.test(descriptor.digest),
+    "invalid saved image descriptor digest; content withheld",
+  );
+  return "blobs/sha256/" + descriptor.digest.slice(7);
+}
 
 const tarMessages = new Set([
   "tar: This does not look like a tar archive",
@@ -164,25 +181,92 @@ export function verifyMetadata(info: any, architecture: string) {
 export async function scanImage(path: string, inspection: string, arch: string) {
   verifyMetadata(await json(inspection), arch);
   const image = new Bun.Archive(await Bun.file(path).bytes());
-  async function entry(name: string) {
+  async function entry(name: string, missing = "saved image entry missing") {
     const file = (await image.files(name)).get(name);
-    check(file, "saved image entry missing");
+    check(file, missing);
     return file;
   }
-  const manifests = JSON.parse(await (await entry("manifest.json")).text());
+  function parseMetadata(bytes: Uint8Array) {
+    try {
+      return JSON.parse(new TextDecoder().decode(bytes));
+    } catch {
+      throw new PolicyError("invalid saved image metadata; content withheld");
+    }
+  }
+  async function descriptorBytes(descriptor: any) {
+    const bytes = await (await entry(descriptorName(descriptor))).bytes();
+    check(
+      Number.isSafeInteger(descriptor.size) &&
+        descriptor.size >= 0 &&
+        descriptor.size === bytes.length &&
+        descriptor.digest ===
+          "sha256:" + new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
+      "saved image descriptor content mismatch; content withheld",
+    );
+    return bytes;
+  }
+  const manifests = parseMetadata(await (await entry("manifest.json")).bytes());
   check(
-    manifests.length === 1 && manifests[0].Layers.length > 0,
+    Array.isArray(manifests) &&
+      manifests.length === 1 &&
+      Array.isArray(manifests[0]?.Layers) &&
+      manifests[0].Layers.length > 0,
     "expected one saved image with layers",
   );
-  checkText(await (await entry(manifests[0].Config)).text());
+  const layout = parseMetadata(
+    await (
+      await entry("oci-layout", "saved image OCI descriptors missing; content withheld")
+    ).bytes(),
+  );
+  check(layout?.imageLayoutVersion === "1.0.0", "unsupported saved image layout; content withheld");
+  const index = parseMetadata(
+    await (
+      await entry("index.json", "saved image OCI descriptors missing; content withheld")
+    ).bytes(),
+  );
+  check(
+    index?.schemaVersion === 2 &&
+      index.mediaType === "application/vnd.oci.image.index.v1+json" &&
+      Array.isArray(index.manifests) &&
+      index.manifests.length === 1,
+    "expected one saved image OCI manifest; content withheld",
+  );
+  const manifestDescriptor = index.manifests[0];
+  check(
+    [
+      "application/vnd.oci.image.manifest.v1+json",
+      "application/vnd.docker.distribution.manifest.v2+json",
+    ].includes(manifestDescriptor?.mediaType),
+    "unsupported saved image manifest media type; content withheld",
+  );
+  const manifest = parseMetadata(await descriptorBytes(manifestDescriptor));
+  check(
+    manifest?.schemaVersion === 2 &&
+      manifest.mediaType === manifestDescriptor.mediaType &&
+      Array.isArray(manifest.layers) &&
+      manifest.layers.length > 0 &&
+      [
+        "application/vnd.oci.image.config.v1+json",
+        "application/vnd.docker.container.image.v1+json",
+      ].includes(manifest.config?.mediaType),
+    "invalid saved image OCI manifest; content withheld",
+  );
+  check(
+    manifests[0].Config === descriptorName(manifest.config) &&
+      Bun.deepEquals(manifests[0].Layers, manifest.layers.map(descriptorName)),
+    "saved image OCI/legacy references disagree; content withheld",
+  );
+  checkText(new TextDecoder().decode(await descriptorBytes(manifest.config)));
   // Include lower layers: deleting a credential later does not remove it.
-  for (const [index, layer] of manifests[0].Layers.entries()) {
-    const blob = await entry(layer);
-    let bytes = await blob.bytes();
+  for (const [index, descriptor] of manifest.layers.entries()) {
+    const layer = descriptorName(descriptor);
+    let bytes = await descriptorBytes(descriptor);
     const identity = layerIdentity(index, layer, bytes);
+    const codec = layerCodecs.get(descriptor.mediaType);
+    check(codec, `unsupported layer media type: ${identity}; content withheld`);
     try {
       // Decode once so GNU tar and Bun inspect the same uncompressed archive.
-      if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+      if (codec === "gzip") {
         const decoded = gunzipSync(bytes, { info: true }) as unknown as {
           buffer: Uint8Array;
           engine: { bytesWritten: number };
@@ -190,7 +274,7 @@ export async function scanImage(path: string, inspection: string, arch: string) 
         // Gunzip can stop at NUL padding and silently discard the remaining input.
         check(decoded.engine.bytesWritten === bytes.length, "unconsumed gzip input");
         bytes = decoded.buffer;
-      } else if (bytes[0] === 0x28 && bytes[1] === 0xb5 && bytes[2] === 0x2f && bytes[3] === 0xfd) {
+      } else if (codec === "zstd") {
         bytes = await Bun.zstdDecompress(bytes);
       }
     } catch {

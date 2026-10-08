@@ -114,6 +114,15 @@ jobs:
             test "$(id -u):$(id -g)" = 1000:1000
             test "$(rustc --version | cut -d" " -f2)" = 1.98.1
             test "$(bun --version)" = 1.4.2
+            non_root_owned=$(find /opt/rustup /opt/cargo ! -uid 0 -print -quit)
+            test -z "$non_root_owned"
+            world_writable=$(find -L /opt/rustup /opt/cargo -perm -0002 -print -quit)
+            test -z "$world_writable"
+            user_writable=$(find -L /opt/rustup /opt/cargo -writable -print -quit)
+            test -z "$user_writable"
+            test -w "$CARGO_HOME/registry"
+            test -w "$CARGO_HOME/git"
+            cargo --version
             cargo fmt --version
             cargo clippy --version
             git --version
