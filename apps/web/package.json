@@ -13,7 +13,7 @@
     "@fvoci/editor": "workspace:*",
     "@fvoci/i18n": "workspace:*",
     "@hocuspocus/provider": "4.6.0",
-    "@nuxt/ui": "4.11.2",
+    "@nuxt/ui": "4.11.3",
     "@office-kit/pptx": "0.21.0",
     "@office-kit/pptx-preview": "0.11.0",
     "@office-kit/xlsx": "0.21.1",
