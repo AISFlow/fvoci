@@ -44,11 +44,12 @@ uv sync
 ```sh
 export LIBCLANG_PATH=/usr/lib/llvm-18/lib
 mkdir -p target/sqlite
-bash scripts/prepare-sqlite-ci.sh --parent "$(pwd -P)/target/sqlite" --env-file target/sqlite/env.sh
+bash scripts/prepare-sqlite-ci.sh --parent "$(cd target/sqlite && pwd -P)" --env-file target/sqlite/env.sh
+. target/sqlite/env.sh
 ```
 
 새 셸마다 다음 두 줄을 다시 실행합니다. `env.sh`에는 `SQLITE3_*`만 들어 있고, `prepare-sqlite-ci.sh`는 재사용할 때도
-`LIBCLANG_PATH`를 확인합니다. `--parent` 경로에 symlink가 있으면 거부하므로 `pwd -P`로 실제 경로를 씁니다.
+`LIBCLANG_PATH`를 확인합니다. `--parent` 경로나 그 상위에 symlink가 있으면 거부하므로 `cd … && pwd -P`로 실제 경로를 넘깁니다.
 
 ```sh
 export LIBCLANG_PATH=/usr/lib/llvm-18/lib
@@ -74,7 +75,7 @@ cargo test --locked --offline --lib --bin fvoci-server
 
 SQLite 작업 텍스트 비교 테스트(`db::tasks`)는 CI runner인 Ubuntu 26.04 x86_64의 glibc 2.43과 `en_US.UTF-8`
 `locale-archive` 해시에 맞춰 검증된 profile(`src/db/task_scalar_pg18_profile.json`)만 허용합니다. 다른 glibc나
-locale archive에서는 `Task GNU version mismatch`, `Task GNU locale unavailable`, `Task GNU locale archive mismatch`
+locale archive에서는 `Task GNU version mismatch`, `Task GNU locale unavailable`, `Task GNU locale archive mismatch`/`unavailable`
 (x86_64 외에서는 `Task scalar runtime qualification unavailable`) 오류로 실패하며, 이는 우회하지 않고 CI에서 확인합니다.
 
 **웹·편집기** ([`web.yml`](.github/workflows/web.yml)의 `web-static`·`web-checks` job)
