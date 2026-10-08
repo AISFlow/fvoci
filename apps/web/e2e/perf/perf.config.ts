@@ -3,6 +3,7 @@ import { defineConfig, devices } from "@playwright/test";
 // Opt-in performance baseline. `*.perf.ts` is outside the default e2e
 // testMatch and the CI shard planner, so the required suite never runs it.
 export default defineConfig({
+  forbidOnly: !!process.env.CI,
   testDir: ".",
   testMatch: /.*\.perf\.ts$/,
   workers: 1,

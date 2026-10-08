@@ -2,6 +2,7 @@ import { defineConfig } from "@playwright/test";
 if (!process.env.FVOCI_NATIVE_IME_SESSION)
   throw new Error("Invoke run-private.sh explicitly; this lane requires OS IBus Hangul");
 export default defineConfig({
+  forbidOnly: !!process.env.CI,
   testDir: ".",
   testMatch: "editor.spec.ts",
   workers: 1,
