@@ -695,7 +695,11 @@ def run(output):
             env['FVOCI_E2E_SELECTED_FLOW']=flow
             if lane=='postgres' and flow=='on':env['FVOCI_E2E_SELECTED_AUXILIARY']='normal-api'
             else:env.pop('FVOCI_E2E_SELECTED_AUXILIARY',None)
+            # Public timing only: lane, flow, UTC time, elapsed seconds and exit.
+            print(f"selected-driver lane={lane} flow={flow} started at={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",flush=True)
+            started=time.monotonic()
             with (output/(lane+'-'+flow+'-driver.log')).open('x') as log:r=subprocess.run([sys.executable,str(driver)],env=env,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)
+            print(f"selected-driver lane={lane} flow={flow} finished at={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} elapsed_seconds={round(time.monotonic()-started)} exit={r.returncode}",flush=True)
             results.append({'lane':lane,'flow':flow,'exit':r.returncode,'actualSource':before['head'],'runRoot':str(runroot)})
             code=code or r.returncode
             retirement=lane_retirement(runroot,lane,flow,before['head'],before['tree'],owner,r.returncode)
