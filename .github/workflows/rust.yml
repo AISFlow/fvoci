@@ -63,6 +63,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
+      - name: Record runner uid, gid and groups once
+        run: id
       - name: Collaboration CI runner fixture
         run: bash scripts/fixtures/rust-ci/run-collaboration-admission-fixture-test.sh
       - name: Pinned SQLite build wiring fixtures (no native compilation)

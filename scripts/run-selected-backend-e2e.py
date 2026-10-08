@@ -165,15 +165,16 @@ def prepare_browser(output, chromium):
     return destination/chromium.relative_to(cache)
 
 
-def admitted_browser(output):
+def admitted_browser(output, expected_owner=(1000, 1000)):
+    # Runtime callers keep1000:1000; pure fixtures supply their real file owner.
     receipt = read(output/'runtime-browser-stage.json')
     assert receipt['source'] == os.environ['GITHUB_SHA']
     directory = output/'browser'
     assert receipt['cache'] == str(directory) and os.environ.get('PLAYWRIGHT_BROWSERS_PATH') == str(directory)
-    assert directory.stat().st_uid == 1000 and directory.stat().st_mode & 0o777 == 0o700
-    actual = {p.name: browser_inventory(p, (1000, 1000)) for p in directory.iterdir()}
+    assert directory.stat().st_uid == expected_owner[0] and directory.stat().st_mode & 0o777 == 0o700
+    actual = {p.name: browser_inventory(p, expected_owner) for p in directory.iterdir()}
     assert actual == receipt['files'], 'current private browser assets differ'
-    assert {p.name:browser_inventory(p,(1000,1000),metadata=True) for p in directory.iterdir()} == receipt['metadata'], 'current private browser metadata differs'
+    assert {p.name:browser_inventory(p,expected_owner,metadata=True) for p in directory.iterdir()} == receipt['metadata'], 'current private browser metadata differs'
     chromium = Path(receipt['chromium'])
     assert chromium.is_relative_to(directory) and chromium.is_file()
     return str(chromium)
@@ -520,7 +521,7 @@ def lane_retirement(runroot, lane, flow, source, tree, owner, driver_exit):
     return facts
 
 
-def config_list_inputs(output):
+def config_list_inputs(output, browser_owner=(1000, 1000)):
     """Recheck the already consumed cohort as1000; never create a lane grant."""
     if sys.flags.optimize:
         raise RuntimeError('current input assertions require ordinary Python')
@@ -570,7 +571,7 @@ def config_list_inputs(output):
     bun = str(Path(shutil.which('bun')).resolve())
     assert read(output/'build-environment.json')['bun'] == '1.4.2'
     assert sha(bun) == before['external'][bun]
-    chromium = admitted_browser(output)
+    chromium = admitted_browser(output, browser_owner)
     browser = {'bun':{'path':bun,'sha256':sha(bun)},'chromium':{'path':chromium,'sha256':sha(chromium)},
                'chromium_directory_files':browser_inventory(Path(chromium).parent)}
     runtime_access([*(str(ROOT/p) for p in before['tracked']), *before['external'], *bundle['binaries']], browser)
@@ -589,8 +590,9 @@ def config_list_inputs(output):
     return before, browser, modules
 
 
-def config_list(output):
+def config_list(output, expected_uid=1000):
     """Credential-free load/list only. Original body errors remain private/MISSING."""
+    # The CLI keeps UID1000; a pure fixture may supply its report creator's UID.
     before, browser, modules = config_list_inputs(output)
     directory = output/'config-list'
     directory.mkdir(mode=0o700)  # Occupied, symlink and retry destinations refuse.
@@ -628,7 +630,7 @@ def config_list(output):
     print(json.dumps(receipt),flush=True)
     if result.returncode:return result.returncode
     report = directory/'listing.json'
-    assert not report.is_symlink() and report.is_file() and report.stat().st_uid == 1000
+    assert not report.is_symlink() and report.is_file() and report.stat().st_uid == expected_uid
     os.chmod(report,0o600)
     listed = read(report)
     assert listed['config']['workers'] == 1 and listed['errors'] == []

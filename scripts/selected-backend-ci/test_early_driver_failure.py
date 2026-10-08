@@ -709,6 +709,7 @@ class ConfigListPreflight(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        self.fixture_owner = (os.getuid(), os.getgid())
         self.output = self.root/'output';self.output.mkdir(mode=0o700)
         self.bun = self.root/'bun';self.bun.write_text('synthetic pinned executable')
         self.bun.chmod(0o555)
@@ -726,7 +727,7 @@ class ConfigListPreflight(unittest.TestCase):
                 'errors':[],'stats':{'expected':0,'unexpected':0,'flaky':0,'skipped':1},
                 'suites':[{'specs':[{'title':runner.KNOWN_ON_BROWSER_TEST,'tests':[{'results':[]}]}]}]}
 
-    def execute(self, exit_code=0, report=True):
+    def execute(self, exit_code=0, report=True, expected_uid=None):
         def child(args, **kw):
             self.assertEqual(args,[str(self.bun),'--no-install',str(runner.ROOT/'node_modules/playwright/cli.js'),'test','--config',
                                   'e2e-pending/collab-playwright.config.ts','--reporter=line,json','--list',
@@ -750,9 +751,8 @@ class ConfigListPreflight(unittest.TestCase):
         with patch.dict(runner.os.environ,self.env,clear=True), \
              patch.object(runner,'config_list_inputs',return_value=(self.before,self.browser,{})) as admission, \
              patch.object(runner.subprocess,'run',side_effect=child) as launch, \
-             patch.object(runner.os,'getuid',return_value=1000),patch.object(runner.os,'getgid',return_value=1000), \
              contextlib.redirect_stdout(stdout),contextlib.redirect_stderr(stderr):
-            code = runner.config_list(self.output)
+            code = runner.config_list(self.output, self.fixture_owner[0] if expected_uid is None else expected_uid)
         return code, stdout.getvalue(), stderr.getvalue(), admission.call_count, launch.call_count
 
     def test_filtered_child_env_and_pinned_list_success_is_zero_body_only(self):
@@ -776,6 +776,11 @@ class ConfigListPreflight(unittest.TestCase):
 
     def test_zero_exit_missing_json_is_not_configuration_load_acceptance(self):
         with self.assertRaises(AssertionError):self.execute(0,report=False)
+        self.assertEqual(json.loads((self.output/'config-list/result.json').read_text())['exit'],0)
+        self.assertFalse((self.output/'config-list/qualified.json').exists())
+
+    def test_foreign_report_owner_never_qualifies_a_zero_exit(self):
+        with self.assertRaises(AssertionError):self.execute(expected_uid=self.fixture_owner[0] + 1)
         self.assertEqual(json.loads((self.output/'config-list/result.json').read_text())['exit'],0)
         self.assertFalse((self.output/'config-list/qualified.json').exists())
 
@@ -833,8 +838,8 @@ class ConfigListPreflight(unittest.TestCase):
         component = browser/'chromium-123';component.mkdir(mode=0o700)
         chromium = component/'chrome';chromium.write_text('synthetic private executable');chromium.chmod(0o700)
         runner.write(self.output/'runtime-browser-stage.json',{'source':SOURCE,'cache':str(browser),'chromium':str(chromium),
-                     'files':{component.name:runner.browser_inventory(component,(1000,1000))},
-                     'metadata':{component.name:runner.browser_inventory(component,(1000,1000),metadata=True)}})
+                     'files':{component.name:runner.browser_inventory(component,self.fixture_owner)},
+                     'metadata':{component.name:runner.browser_inventory(component,self.fixture_owner,metadata=True)}})
         env = {'CI':'true','GITHUB_ACTIONS':'true','FVOCI_WEB_BUILD_PHASE':'consume','GITHUB_JOB':'collaboration-flow',
                'GITHUB_SHA':SOURCE,'GITHUB_REPOSITORY':'owned/repo','GITHUB_RUN_ID':'123','GITHUB_RUN_ATTEMPT':'1',
                'PLAYWRIGHT_BROWSERS_PATH':str(browser)}
@@ -842,37 +847,49 @@ class ConfigListPreflight(unittest.TestCase):
             return TREE if args[-1]=='HEAD^{tree}' else 'config.ts\0' if args[-1]=='-z' else ''
         return source,config,env,git
 
+    def test_browser_fixture_owner_is_exact_and_symlink_assets_refuse(self):
+        _, _, env, _ = self.prepare_cohort()
+        with patch.dict(runner.os.environ,env,clear=True):
+            self.assertEqual(runner.admitted_browser(self.output,self.fixture_owner),str(self.output/'browser/chromium-123/chrome'))
+            for owner in ((self.fixture_owner[0] + 1,self.fixture_owner[1]),
+                          (self.fixture_owner[0],self.fixture_owner[1] + 1),
+                          (self.fixture_owner[0],0)):
+                with self.subTest(owner=owner),self.assertRaises(AssertionError):runner.admitted_browser(self.output,owner)
+            (self.output/'browser/chromium-123/linked-asset').symlink_to(self.bun)
+            with self.assertRaises(AssertionError):runner.admitted_browser(self.output,self.fixture_owner)
+
     def test_consumed_live_source_metadata_browser_and_groups_must_still_match(self):
         source, config, env, git = self.prepare_cohort()
         with patch.dict(runner.os.environ,env,clear=True),patch.object(runner,'identity',return_value=OWNER), \
              patch.object(runner,'ROOT',source),patch.object(runner,'call',side_effect=git), \
-             patch.object(runner.shutil,'which',return_value=str(self.bun)),patch.object(runner.subprocess,'run') as launch:
-            self.assertEqual(runner.config_list_inputs(self.output)[0]['head'],SOURCE)
+             patch.object(runner.shutil,'which',return_value=str(self.bun)),patch.object(runner.subprocess,'run') as launch, \
+             patch.object(runner.os,'getuid',return_value=1000),patch.object(runner.os,'getgid',return_value=1000):
+            self.assertEqual(runner.config_list_inputs(self.output,self.fixture_owner)[0]['head'],SOURCE)
             original = config.read_text();config.write_text('changed config')
-            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output,self.fixture_owner)
             config.write_text(original)
             self.bun.chmod(0o555)
             with patch.object(runner.os,'getgroups',return_value=[0]):
-                with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+                with self.assertRaises(AssertionError):runner.config_list_inputs(self.output,self.fixture_owner)
             received = self.output/'build-environment.json';received.chmod(0o644)
-            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output,self.fixture_owner)
             received.chmod(0o600)
             private_browser = self.output/'browser/chromium-123/chrome';private_browser.chmod(0o755)
-            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output,self.fixture_owner)
             private_browser.chmod(0o700)
             with patch.dict(runner.os.environ,{'FVOCI_WEB_BUILD_PHASE':'prepare'}):
-                with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+                with self.assertRaises(AssertionError):runner.config_list_inputs(self.output,self.fixture_owner)
             with patch.dict(runner.os.environ,{'FVOCI_SELECTED_EXECUTION_MODE':'orca-local'}):
-                with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+                with self.assertRaises(AssertionError):runner.config_list_inputs(self.output,self.fixture_owner)
             with patch.object(runner.os,'getuid',return_value=0):
-                with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+                with self.assertRaises(AssertionError):runner.config_list_inputs(self.output,self.fixture_owner)
             with patch.object(runner.sys,'flags',types.SimpleNamespace(optimize=1)):
-                with self.assertRaises(RuntimeError):runner.config_list_inputs(self.output)
+                with self.assertRaises(RuntimeError):runner.config_list_inputs(self.output,self.fixture_owner)
             (self.output/'runtime').mkdir()
-            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output,self.fixture_owner)
             (self.output/'runtime').rmdir()
             (self.output/'handoff-consumed.json').unlink()
-            with self.assertRaises(FileNotFoundError):runner.config_list_inputs(self.output)
+            with self.assertRaises(FileNotFoundError):runner.config_list_inputs(self.output,self.fixture_owner)
             launch.assert_not_called()
 
     def test_config_list_direct_cli_requires_recorded_regular_file_and_official_bin(self):
@@ -887,21 +904,22 @@ class ConfigListPreflight(unittest.TestCase):
             (self.output/'handoff-consumed.json').write_text(json.dumps(consumed))
         with patch.dict(runner.os.environ,env,clear=True),patch.object(runner,'identity',return_value=OWNER), \
              patch.object(runner,'ROOT',source),patch.object(runner,'call',side_effect=git), \
-             patch.object(runner.shutil,'which',return_value=str(self.bun)),patch.object(runner.subprocess,'run') as launch:
-            self.assertEqual(runner.config_list_inputs(self.output)[2]['playwright/cli.js'],runner.sha(cli))
+             patch.object(runner.shutil,'which',return_value=str(self.bun)),patch.object(runner.subprocess,'run') as launch, \
+             patch.object(runner.os,'getuid',return_value=1000),patch.object(runner.os,'getgid',return_value=1000):
+            self.assertEqual(runner.config_list_inputs(self.output,self.fixture_owner)[2]['playwright/cli.js'],runner.sha(cli))
             rebind_external(lambda external:external.pop(str(cli)))
-            with self.assertRaises(KeyError):runner.config_list_inputs(self.output)
+            with self.assertRaises(KeyError):runner.config_list_inputs(self.output,self.fixture_owner)
             rebind_external(lambda external:external.update({str(cli):runner.sha(cli)}))
             target = self.root/'foreign-cli';cli.rename(target);cli.symlink_to(target)
-            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output,self.fixture_owner)
             cli.unlink();target.rename(cli)
             original = package.read_text();package.write_text(json.dumps({'version':'1.63.0','bin':{'playwright':'other.js'}}))
             rebind_external(lambda external:external.update({str(package):runner.sha(package)}))
-            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output,self.fixture_owner)
             package.write_text(original)
             rebind_external(lambda external:external.update({str(package):runner.sha(package)}))
             cli.write_text('changed unqualified CLI')
-            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output)
+            with self.assertRaises(AssertionError):runner.config_list_inputs(self.output,self.fixture_owner)
             launch.assert_not_called()
             self.assertFalse((self.output/'runtime').exists())
             self.assertFalse((self.output/'config-list').exists())
