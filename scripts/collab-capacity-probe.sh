@@ -42,7 +42,7 @@ set +e
   export COLLAB_PROBE_DURATION_SECS='$COLLAB_PROBE_DURATION_SECS'
   export FVOCI_COLLAB_MAX_ROOMS='$FVOCI_COLLAB_MAX_ROOMS'
   export RUST_LOG='$RUST_LOG'
-  cargo test --release --features db-tests --test collab_capacity_probe -- --nocapture
+  cargo test --release --features db-tests --test collab_capacity_probe -- --include-ignored --nocapture
 " 2>&1 | tee "$LOG_PATH"
 PROBE_EXIT=${PIPESTATUS[0]}
 set -e

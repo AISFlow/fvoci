@@ -788,6 +788,7 @@ fn hostile_sample_indices(max_rooms: usize) -> Vec<usize> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 32)]
+#[ignore = "heavy PostgreSQL capacity probe; run scripts/collab-capacity-probe.sh explicitly"]
 async fn collab_capacity_probe() {
     raise_nofile_to_hard_limit();
     let _ = tracing_subscriber::fmt()
