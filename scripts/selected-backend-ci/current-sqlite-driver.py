@@ -60,6 +60,19 @@ def failure_checkpoint(receipt, directory, observed_exit, error=None, body_log=N
     """Persist this driver's first actual outcome before any risky cleanup."""
     if 'original_driver_failure' not in receipt:
         receipt['failed_phase'] = receipt['phase']
+        if receipt['phase'] == 'container-prepare':
+            receipt['known_driver_checkpoint'] = None
+            receipt['preparation_command_exit'] = receipt.get('last_preparation_command_exit')
+            # Only this module's actual exception location; never format a traceback.
+            try:
+                trace = error.__traceback__ if error is not None else None
+                while trace is not None:
+                    if (trace.tb_frame.f_code.co_name == '<module>' and
+                            trace.tb_frame.f_code.co_filename == str(W / 'scripts/selected-backend-ci/current-sqlite-driver.py')):
+                        receipt['known_driver_checkpoint'] = 'scripts/selected-backend-ci/current-sqlite-driver.py:' + str(trace.tb_lineno)
+                    trace = trace.tb_next
+            except BaseException:
+                receipt.setdefault('diagnostic_errors', []).append('original-driver-checkpoint-unavailable')
         receipt['observed_failed_exit'] = observed_exit
         receipt['original_driver_failure'] = ({'type': type(error).__name__, 'message': str(error)[:4096]}
             if error is not None else {'type': 'ReturnedNonzero', 'phase': receipt['phase'], 'observedExit': observed_exit})
@@ -76,7 +89,8 @@ def failure_checkpoint(receipt, directory, observed_exit, error=None, body_log=N
             with path.open('x') as output:
                 os.fchmod(output.fileno(), 0o600)
                 json.dump({key: receipt.get(key) for key in ('failed_phase', 'observed_failed_exit',
-                    'failure_code', 'original_driver_failure', 'original_body_log_sha256')}, output)
+                    'failure_code', 'original_driver_failure', 'original_body_log_sha256',
+                    'known_driver_checkpoint', 'preparation_command_exit')}, output)
         receipt['original_failure_checkpoint_sha256'] = sha(path)
     except BaseException:
         receipt.setdefault('diagnostic_errors', []).append('original-failure-checkpoint-write-failed')
@@ -92,12 +106,16 @@ def cleanup_attempt(receipt, errors, label, operation):
         return None
 
 
-def command(args, log=None, required=True, env=None, cwd=None):
+def command(args, log=None, required=True, env=None, cwd=None, preparation_receipt=None):
+    if preparation_receipt is not None:
+        preparation_receipt['last_preparation_command_exit'] = None
     if log is None:
         result = subprocess.run(args, capture_output=True, text=True, env=env, cwd=cwd)
     else:
         with log.open('w') as file:
             result = subprocess.run(args, stdout=file, stderr=subprocess.STDOUT, env=env, cwd=cwd)
+    if preparation_receipt is not None:
+        preparation_receipt['last_preparation_command_exit'] = result.returncode
     if required and result.returncode:
         raise RuntimeError(f'owned command failed exit={result.returncode}; executable={args[0]}')
     return result
@@ -226,29 +244,29 @@ try:
              '--label', 'fvoci.owner=' + OWNER, '--label', 'fvoci.test-run=v060-current-normal-vue-sqlite',
              '--mount', f'type=bind,src={dbroot},dst=/fvoci/database',
              '--mount', f'type=bind,src={storage},dst=/fvoci/storage',
-             '--entrypoint', '/bin/sleep', IMAGE, '1800'], run / 'container-create.log')
+             '--entrypoint', '/bin/sleep', IMAGE, '1800'], run / 'container-create.log', preparation_receipt=receipt)
     created = True
-    command(['docker', 'start', name], run / 'container-start.log')
+    command(['docker', 'start', name], run / 'container-start.log', preparation_receipt=receipt)
     command(['docker', 'exec', name, '/bin/sh', '-ec',
-             'mkdir -p /fvoci/bin /fvoci/inputs /srv/fvoci-web; chmod 0700 /fvoci/inputs; ldd --version | head -1'], run / 'runtime-abi.log')
+             'mkdir -p /fvoci/bin /fvoci/inputs /srv/fvoci-web; chmod 0700 /fvoci/inputs; ldd --version | head -1'], run / 'runtime-abi.log', preparation_receipt=receipt)
     copies = [(server, '/fvoci/bin/fvoci-server'), (migrate, '/fvoci/bin/fvoci-migrate'),
               (engine, '/fvoci/bin/collab-engine'), (str(run / 'environment.private.sh'), '/fvoci/inputs/environment.sh')]
     for source, destination in copies:
-        command(['docker', 'cp', source, name + ':' + destination])
-    command(['docker', 'exec', name, 'chown', '0:0', *[dest for _, dest in copies]])
-    command(['docker', 'exec', name, 'chmod', '0755', *[dest for _, dest in copies[:-1]]])
+        command(['docker', 'cp', source, name + ':' + destination], preparation_receipt=receipt)
+    command(['docker', 'exec', name, 'chown', '0:0', *[dest for _, dest in copies]], preparation_receipt=receipt)
+    command(['docker', 'exec', name, 'chmod', '0755', *[dest for _, dest in copies[:-1]]], preparation_receipt=receipt)
     runtime_ldd = command(['docker', 'exec', name, '/bin/sh', '-ec',
                            '. /etc/os-release; test "$ID" = ubuntu; test "$VERSION_ID" = 26.04; for binary do ldd "$binary"; done',
-                           'fvoci-runtime-abi', *[dest for _, dest in copies[:-1]]]).stdout
+                           'fvoci-runtime-abi', *[dest for _, dest in copies[:-1]]], preparation_receipt=receipt).stdout
     (run / 'native-runtime-abi.log').write_text(runtime_ldd)
     assert 'not found' not in runtime_ldd, 'Ubuntu26 runtime ELF dependencies missing'
-    command(['docker', 'exec', name, 'chmod', '0600', copies[-1][1]])
-    command(['docker', 'cp', str(dist) + '/.', name + ':/srv/fvoci-web'])
-    command(['docker', 'exec', name, 'stat', '-c', '%n %u %g %a', *[dest for _, dest in copies]], run / 'copied-owned-files.log')
-    hashes = command(['docker', 'exec', name, 'sha256sum', *[dest for _, dest in copies[:-1]]]).stdout
+    command(['docker', 'exec', name, 'chmod', '0600', copies[-1][1]], preparation_receipt=receipt)
+    command(['docker', 'cp', str(dist) + '/.', name + ':/srv/fvoci-web'], preparation_receipt=receipt)
+    command(['docker', 'exec', name, 'stat', '-c', '%n %u %g %a', *[dest for _, dest in copies]], run / 'copied-owned-files.log', preparation_receipt=receipt)
+    hashes = command(['docker', 'exec', name, 'sha256sum', *[dest for _, dest in copies[:-1]]], preparation_receipt=receipt).stdout
     (run / 'copied-executable-hashes.log').write_text(hashes)
     assert [line.split()[0] for line in hashes.splitlines()] == [binaries[path]['sha256'] for path in (server, migrate, engine)]
-    command(['docker', 'inspect', '--format', '{{.HostConfig.NetworkMode}}', name], run / 'actual-network-mode.log')
+    command(['docker', 'inspect', '--format', '{{.HostConfig.NetworkMode}}', name], run / 'actual-network-mode.log', preparation_receipt=receipt)
     assert (run / 'actual-network-mode.log').read_text().strip() == 'host'
     receipt['phase'] = 'server-startup'
     server_log = (run / 'normal-server.log').open('w')

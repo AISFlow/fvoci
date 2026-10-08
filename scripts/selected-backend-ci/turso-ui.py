@@ -440,15 +440,40 @@ def baseline_failure_diagnostic(value):
                   'row-hash','row-allocation','ui-read','ui-conversion','summary-read',
                   'ledger-read','ledger-conversion','summary-conversion','rollback'}
         categories = {'request','database','row-conversion','protocol','pool','driver','other','libsql-hrana'}
-        if (not isinstance(item, dict) or set(item) != {'phase','category'}
+        if (not isinstance(item, dict) or set(item) not in ({'phase','category'}, {'phase','category','tableComparison'})
                 or not isinstance(item['phase'], str) or item['phase'] not in phases
                 or (rollback and item['phase'] != 'rollback')
                 or not isinstance(item['category'], str) or item['category'] not in categories):
             status = 'refused'
             return None
+        result = {'phase': item['phase'], 'category': item['category']}
+        if 'tableComparison' in item:
+            comparison = item['tableComparison']
+            keys = {'expectedCount','actualCount','setEqual','orderEqual',
+                    'firstMismatchIndex','actualMismatchExpectedIndex'}
+            if (rollback or item['phase'] != 'table-contract' or item['category'] != 'protocol'
+                    or not isinstance(comparison, dict) or set(comparison) != keys
+                    or any(type(comparison[k]) is not int or not 0 <= comparison[k] <= 100001
+                           for k in ('expectedCount','actualCount'))
+                    or type(comparison['setEqual']) is not bool or comparison['orderEqual'] is not False
+                    or (comparison['firstMismatchIndex'] is not None and (
+                        type(comparison['firstMismatchIndex']) is not int
+                        or not 0 <= comparison['firstMismatchIndex'] <= min(
+                            comparison['expectedCount'], comparison['actualCount'], 100000)
+                        or (comparison['expectedCount'] == comparison['actualCount'] < 100001
+                            and comparison['firstMismatchIndex'] >= comparison['actualCount'])))
+                    or (comparison['actualMismatchExpectedIndex'] is not None and (
+                        type(comparison['actualMismatchExpectedIndex']) is not int
+                        or not 0 <= comparison['actualMismatchExpectedIndex'] < min(comparison['expectedCount'], 100001)))
+                    or (comparison['actualMismatchExpectedIndex'] is not None and (
+                        comparison['firstMismatchIndex'] is None
+                        or comparison['firstMismatchIndex'] >= comparison['actualCount']))):
+                status = 'refused'
+                return None
+            result['tableComparison'] = dict(comparison)
         if status != 'refused':
             status = 'qualified'
-        return {'phase': item['phase'], 'category': item['category']}
+        return result
     first = cause('baselineFailure')
     rollback = cause('baselineRollbackFailure', rollback=True)
     def state(container, name, allowed):
@@ -1111,7 +1136,20 @@ def browser(manifest, directory, environment, spec, grep=None):
     env.update(CI='true', FVOCI_E2E_RESULT_DIR=str(directory), PLAYWRIGHT_JSON_OUTPUT_FILE=str(report))
     require(not any(k in env for k in ('FVOCI_LIBSQL_URL', 'FVOCI_LIBSQL_AUTH_TOKEN', 'DATABASE_URL',
                                      'DATABASE_APP_URL', 'PASSWORD_PEPPER_KEYS')), 'UI_BROWSER_SECRET_ENV_REFUSED')
-    args = [manifest['bun']['path'], '--bun', 'x', 'playwright', 'test', '--config',
+    # Use the official CLI from the already admitted physical input closure.
+    physical = manifest['physicalInputs']
+    require(digest(physical['path']) == physical['sha256'], 'UI_PHYSICAL_RECEIPT_CHANGED')
+    admitted = private_read(physical['path'], 64 * 1024 * 1024)['files']['external']
+    cli = W / 'node_modules/playwright/cli.js'
+    package_path = cli.with_name('package.json')
+    for path in (cli, package_path):
+        require(path.is_absolute() and not path.is_symlink() and path.is_file()
+                and os.access(path, os.R_OK), 'UI_PLAYWRIGHT_CLI_REFUSED')
+        require(admitted.get(str(path)) == digest(path), 'UI_PLAYWRIGHT_CLI_REFUSED')
+    package = json.loads(package_path.read_text())
+    require(package.get('version') == '1.63.0' and package.get('bin', {}).get('playwright') == 'cli.js',
+            'UI_PLAYWRIGHT_CLI_REFUSED')
+    args = [manifest['bun']['path'], '--no-install', str(cli), 'test', '--config',
             'e2e-pending/collab-playwright.config.ts', '--reporter=line,json']
     if grep:
         args += ['--grep', grep]

@@ -4,7 +4,7 @@ use super::backend::{Backend, DbTransaction, FamilyTx};
 use super::codec::{Cell, FamilyRow};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 fn refused() -> sqlx::Error {
@@ -28,10 +28,58 @@ struct BaselineFailure {
     phase: &'static str,
     #[source]
     original: sqlx::Error,
+    table_comparison: Option<TableComparison>,
+}
+
+#[derive(Debug)]
+struct TableComparison {
+    expected_count: usize,
+    actual_count: usize,
+    set_equal: bool,
+    order_equal: bool,
+    first_mismatch_index: Option<usize>,
+    actual_mismatch_expected_index: Option<usize>,
+}
+
+impl TableComparison {
+    fn observe(actual: &[String], expected: &[String]) -> Self {
+        let first_mismatch = actual
+            .iter()
+            .zip(expected)
+            .position(|(actual, expected)| actual != expected)
+            .or_else(|| {
+                (actual.len() != expected.len()).then_some(actual.len().min(expected.len()))
+            });
+        Self {
+            expected_count: expected.len().min(100001),
+            actual_count: actual.len().min(100001),
+            set_equal: actual.iter().collect::<BTreeSet<_>>()
+                == expected.iter().collect::<BTreeSet<_>>(),
+            order_equal: actual == expected,
+            first_mismatch_index: first_mismatch.filter(|index| *index <= 100000),
+            actual_mismatch_expected_index: first_mismatch
+                .and_then(|index| actual.get(index))
+                .and_then(|actual| expected.iter().position(|name| name == actual))
+                .filter(|index| *index <= 100000),
+        }
+    }
+
+    fn diagnostic(&self) -> Value {
+        json!({
+            "expectedCount":self.expected_count,"actualCount":self.actual_count,
+            "setEqual":self.set_equal,"orderEqual":self.order_equal,
+            "firstMismatchIndex":self.first_mismatch_index,
+            "actualMismatchExpectedIndex":self.actual_mismatch_expected_index
+        })
+    }
 }
 
 fn baseline_failure(phase: &'static str, original: sqlx::Error) -> sqlx::Error {
-    sqlx::Error::AnyDriverError(Box::new(BaselineFailure { phase, original }))
+    sqlx::Error::AnyDriverError(Box::new(BaselineFailure {
+        phase,
+        original,
+        table_comparison: None,
+    }))
 }
 
 fn baseline_category(error: &sqlx::Error) -> &'static str {
@@ -74,7 +122,12 @@ fn baseline_diagnostic(error: &sqlx::Error) -> Option<Value> {
         return None;
     };
     let failure = source.downcast_ref::<BaselineFailure>()?;
-    Some(json!({"phase":failure.phase,"category":baseline_category(&failure.original)}))
+    let mut diagnostic =
+        json!({"phase":failure.phase,"category":baseline_category(&failure.original)});
+    if let Some(comparison) = &failure.table_comparison {
+        diagnostic["tableComparison"] = comparison.diagnostic();
+    }
+    Some(diagnostic)
 }
 
 fn finished<T>(
@@ -508,6 +561,7 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
         .await
         .map_err(|error| baseline_failure("begin-read", error))?;
     let mut phase = "family-contract";
+    let mut table_comparison = None;
     let result = async {
         let f = family(&mut tx)?;
         phase = "table-read";
@@ -517,7 +571,10 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
         let mut expected = PRESERVATION_READS.iter().map(|(name, _)| name.to_string()).collect::<Vec<_>>();
         expected.sort();
         phase = "table-contract";
-        if names != expected { return Err(refused()) }
+        if names != expected {
+            table_comparison = Some(TableComparison::observe(&names, &expected));
+            return Err(refused());
+        }
         let mut fingerprints = BTreeMap::new();
         let mut allocations = BTreeMap::new();
         let mut total = 0usize;
@@ -571,7 +628,13 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
             "fingerprints":fingerprints,"allocations":allocations,"rows":total,"operations":operations,
             "startupHazards":hazards[0].cell(0)?.integer()?,"liveOutboxLeases":live_outbox[0].cell(0)?.integer()?}))
     }.await;
-    let result = result.map_err(|error| baseline_failure(phase, error));
+    let result = result.map_err(|original| {
+        sqlx::Error::AnyDriverError(Box::new(BaselineFailure {
+            phase,
+            original,
+            table_comparison,
+        }))
+    });
     let rollback = tx
         .rollback()
         .await
@@ -732,6 +795,63 @@ mod tests {
         );
         assert_ne!(exact(Cell::Blob(vec![0, 255])), exact(Cell::text("00ff")));
         assert_ne!(exact(Cell::Null), exact(Cell::text("null")));
+    }
+
+    #[test]
+    fn table_contract_comparison_keeps_indices_without_private_names() {
+        let mut expected = PRESERVATION_READS
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect::<Vec<_>>();
+        expected.sort();
+        let mut reordered = expected.clone();
+        reordered.swap(1, 2);
+        let reordered = TableComparison::observe(&reordered, &expected).diagnostic();
+        assert_eq!(reordered["setEqual"], true);
+        assert_eq!(reordered["orderEqual"], false);
+        assert_eq!(reordered["firstMismatchIndex"], 1);
+        assert_eq!(reordered["actualMismatchExpectedIndex"], 2);
+
+        let mut unknown = expected.clone();
+        unknown[1] = "PRIVATE_TABLE_ENDPOINT_OR_TOKEN".into();
+        let comparison = TableComparison::observe(&unknown, &expected);
+        let error = sqlx::Error::AnyDriverError(Box::new(BaselineFailure {
+            phase: "table-contract",
+            original: refused(),
+            table_comparison: Some(comparison),
+        }));
+        let error = finished::<()>(Err(error), Ok(()), "not-attempted").unwrap_err();
+        let receipt = failure_receipt(&error);
+        assert_eq!(receipt["baselineFailure"]["phase"], "table-contract");
+        assert_eq!(receipt["baselineFailure"]["category"], "protocol");
+        let comparison = &receipt["baselineFailure"]["tableComparison"];
+        assert_eq!(comparison["expectedCount"], expected.len());
+        assert_eq!(comparison["actualCount"], expected.len());
+        assert_eq!(comparison["setEqual"], false);
+        assert_eq!(comparison["firstMismatchIndex"], 1);
+        assert_eq!(comparison["actualMismatchExpectedIndex"], Value::Null);
+        assert_eq!(receipt["rollback"], "confirmed");
+        assert_eq!(receipt["commit"], "not-attempted");
+        assert!(!receipt.to_string().contains("PRIVATE_"));
+
+        let mut duplicate = expected.clone();
+        duplicate.push(expected[0].clone());
+        let comparison = TableComparison::observe(&duplicate, &expected).diagnostic();
+        assert_eq!(comparison["setEqual"], true);
+        assert_eq!(comparison["actualCount"], expected.len() + 1);
+        assert_eq!(comparison["firstMismatchIndex"], expected.len());
+        assert_eq!(comparison["actualMismatchExpectedIndex"], 0);
+        let missing = TableComparison::observe(&expected[1..], &expected).diagnostic();
+        assert_eq!(missing["setEqual"], false);
+        assert_eq!(missing["actualMismatchExpectedIndex"], 1);
+        let missing_last =
+            TableComparison::observe(&expected[..expected.len() - 1], &expected).diagnostic();
+        assert_eq!(missing_last["firstMismatchIndex"], expected.len() - 1);
+        assert_eq!(missing_last["actualMismatchExpectedIndex"], Value::Null);
+        let empty = TableComparison::observe(&[], &expected).diagnostic();
+        assert_eq!(empty["actualCount"], 0);
+        assert_eq!(empty["firstMismatchIndex"], 0);
+        assert_eq!(empty["actualMismatchExpectedIndex"], Value::Null);
     }
 
     #[test]

@@ -133,7 +133,8 @@ class EarlyDriverFailure(unittest.TestCase):
         secret='http://secret.example/a cookie=PRIVATE_LANE_SECRET argv=/tmp/owned'
         self.assertEqual(runner.public_failure_fields({
             'failed_phase':'browser','failure_code':secret,'original_driver_failure':secret}),
-            {'failed_phase':'browser','original_driver_failure_type':None,'original_driver_failure_code':None,
+            {'failed_phase':'browser','known_driver_checkpoint':None,'preparation_command_exit':None,
+             'original_driver_failure_type':None,'original_driver_failure_code':None,
              'browser_report_state':None,'known_browser_test':None,'known_browser_status':None,'known_browser_checkpoint':None})
         cases=(
             ('server-ready','AssertionError','SELECTED_DRIVER_EXCEPTION','server-ready','AssertionError','SELECTED_DRIVER_EXCEPTION'),
@@ -235,6 +236,103 @@ class EarlyDriverFailure(unittest.TestCase):
         self.assertEqual(hashlib.sha256(json.dumps(canonical, sort_keys=True).encode()).hexdigest(),
                          hashlib.sha256(json.dumps({'observedExit': 1, 'phase': 'browser', 'type': 'ReturnedNonzero'}, sort_keys=True).encode()).hexdigest())
 
+
+
+
+class SQLitePreparationFailureControls(unittest.TestCase):
+    def test_actual_preparation_assertions_and_command_failure_record_before_cleanup(self):
+        path = HERE / 'current-sqlite-driver.py'
+        tree = ast.parse(path.read_text())
+        helpers = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('command', 'failure_checkpoint')]
+        main = next(n for n in tree.body if isinstance(n, ast.Try) and any(
+            isinstance(a, ast.Assign) and any(isinstance(x, ast.Name) and x.id == 'created' for x in a.targets) for a in n.body))
+        end = next(i for i, n in enumerate(main.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == "receipt['phase']")
+        preparation = compile(ast.fix_missing_locations(ast.Module(body=main.body[:end], type_ignores=[])), str(path), 'exec')
+        assertion_lines = [n.lineno for n in main.body[:end] if isinstance(n, ast.Assert)]
+        for fault, expected_exit, expected_line in [('ldd', 0, assertion_lines[0]), ('hash', 0, assertion_lines[1]),
+                ('network', 0, assertion_lines[2]), ('query', 7, None), ('spawn', None, None)]:
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                receipt = {'phase':'container-prepare'}
+                def run(args, **kwargs):
+                    if args[1] == 'inspect' and fault == 'query':
+                        return types.SimpleNamespace(returncode=7, stdout='', stderr='SYNTHETIC_PRIVATE_QUERY')
+                    if args[1] == 'inspect' and fault == 'spawn':
+                        raise OSError('SYNTHETIC_PRIVATE_SPAWN')
+                    output = ''
+                    if 'fvoci-runtime-abi' in args:
+                        output = 'dependency not found\n' if fault == 'ldd' else 'qualified dependency\n'
+                    elif 'sha256sum' in args:
+                        output = '\n'.join(('wrong' if fault == 'hash' else 'h') + ' file' for _ in range(3))
+                    elif args[1] == 'inspect':
+                        output = 'bridge\n' if fault == 'network' else 'host\n'
+                    if 'stdout' in kwargs:
+                        kwargs['stdout'].write(output)
+                    return types.SimpleNamespace(returncode=0, stdout=output, stderr='')
+                state = {'subprocess':types.SimpleNamespace(run=run, STDOUT=subprocess.STDOUT), 'os':os, 'json':json,
+                    'sha':lambda p:hashlib.sha256(Path(p).read_bytes()).hexdigest(), 'W':ROOT, 'receipt':receipt,
+                    'name':'synthetic-owned', 'OWNER':OWNER, 'IMAGE':'synthetic-image', 'run':root,
+                    'dbroot':root/'db', 'storage':root/'storage', 'dist':root/'dist',
+                    'server':'server', 'migrate':'migrate', 'engine':'engine',
+                    'binaries':{p:{'sha256':'h'} for p in ('server','migrate','engine')}}
+                exec(compile(ast.fix_missing_locations(ast.Module(body=helpers,type_ignores=[])), str(path), 'exec'), state)
+                try:
+                    exec(preparation, state)
+                except (AssertionError, RuntimeError, OSError) as error:
+                    state['failure_checkpoint'](receipt, root, None, error)
+                else:
+                    self.fail('actual preparation refusal was not reached')
+                packet = json.loads((root/'original-failure.private.json').read_text())
+                self.assertEqual((root/'original-failure.private.json').stat().st_mode & 0o777, 0o600)
+                self.assertEqual(packet['preparation_command_exit'], expected_exit)
+                checkpoint = packet['known_driver_checkpoint']
+                self.assertTrue(checkpoint.startswith('scripts/selected-backend-ci/current-sqlite-driver.py:'))
+                if expected_line is not None:
+                    self.assertEqual(checkpoint.rsplit(':',1)[1], str(expected_line))
+                published = runner.public_failure_fields(receipt)
+                self.assertEqual(published['preparation_command_exit'], expected_exit)
+                self.assertNotIn('SYNTHETIC_PRIVATE', json.dumps(published))
+                receipt['last_preparation_command_exit'] = 99
+                state['failure_checkpoint'](receipt, root, 99, RuntimeError('SECOND_PRIVATE_CLEANUP'))
+                self.assertEqual(json.loads((root/'original-failure.private.json').read_text()), packet)
+                self.assertEqual(receipt['preparation_command_exit'], expected_exit)
+                self.assertIsNone(receipt['observed_failed_exit'])
+
+    def test_foreign_error_frame_never_becomes_owned_checkpoint(self):
+        path = HERE / 'current-sqlite-driver.py'
+        helper = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.FunctionDef) and n.name == 'failure_checkpoint')
+        with tempfile.TemporaryDirectory() as tmp:
+            state = {'os':os, 'json':json, 'W':ROOT, 'sha':lambda p:hashlib.sha256(Path(p).read_bytes()).hexdigest()}
+            exec(compile(ast.fix_missing_locations(ast.Module(body=[helper],type_ignores=[])), str(path), 'exec'),state)
+            receipt = {'phase':'container-prepare', 'last_preparation_command_exit':0}
+            try:
+                exec(compile("raise RuntimeError('PRIVATE_URL_cookie')", '/foreign/current-sqlite-driver.py', 'exec'))
+            except RuntimeError as error:
+                state['failure_checkpoint'](receipt,Path(tmp),None,error)
+            self.assertIsNone(receipt['known_driver_checkpoint'])
+            fields = runner.public_failure_fields(receipt)
+            self.assertIsNone(fields['preparation_command_exit'])
+            self.assertNotIn('PRIVATE_URL_cookie', json.dumps(fields))
+
+    def test_public_projection_refuses_malformed_unmatched_and_noninteger_fields(self):
+        facts = {'failed_phase':'container-prepare','original_driver_failure':{'type':'AssertionError','message':'PRIVATE'},
+                 'failure_code':'SELECTED_DRIVER_EXCEPTION', 'known_driver_checkpoint':'scripts/selected-backend-ci/current-sqlite-driver.py:244',
+                 'preparation_command_exit':0}
+        self.assertEqual(runner.public_failure_fields(facts)['preparation_command_exit'],0)
+        for checkpoint in (None, 244, 'https://private.example/a', '/foreign/current-sqlite-driver.py:244',
+                'scripts/selected-backend-ci/current-postgres-driver.py:244',
+                'scripts/selected-backend-ci/current-sqlite-driver.py:0',
+                'scripts/selected-backend-ci/current-sqlite-driver.py:244\nPRIVATE'):
+            fields = runner.public_failure_fields(dict(facts,known_driver_checkpoint=checkpoint))
+            self.assertIsNone(fields['known_driver_checkpoint'])
+            self.assertIsNone(fields['preparation_command_exit'])
+        for value in (None, True, '0', 256, -256, {'secret':'PRIVATE'}):
+            self.assertIsNone(runner.public_failure_fields(dict(facts,preparation_command_exit=value))['preparation_command_exit'])
+        for phase in ('browser','server-ready','restart','PRIVATE'):
+            fields = runner.public_failure_fields(dict(facts,failed_phase=phase))
+            self.assertIsNone(fields['known_driver_checkpoint'])
+            self.assertIsNone(fields['preparation_command_exit'])
+        self.assertIsNone(runner.public_failure_fields(dict(facts,failure_code='PRIVATE'))['known_driver_checkpoint'])
 
 
 class ActualDriverSourceControls(unittest.TestCase):

@@ -293,7 +293,16 @@ def public_failure_fields(facts):
         if 1 <= line <= 10000:
             published_checkpoint = checkpoint
     matched = state == 'matched' or (state is None and browser and published_checkpoint is not None)
+    driver_checkpoint = facts.get('known_driver_checkpoint')
+    preparation_exit = facts.get('preparation_command_exit')
+    preparation = phase == 'container-prepare' and kind in PUBLIC_FAILURE_TYPES and code in PUBLIC_FAILURE_CODES
+    if (not preparation or type(driver_checkpoint) is not str or not re.fullmatch(
+            r'scripts/selected-backend-ci/current-sqlite-driver\.py:[1-9][0-9]{0,3}', driver_checkpoint)):
+        driver_checkpoint = None
+    if driver_checkpoint is None or type(preparation_exit) is not int or not -255 <= preparation_exit <= 255:
+        preparation_exit = None
     return {'failed_phase': phase if phase in PUBLIC_FAILURE_PHASES else None,
+            'known_driver_checkpoint': driver_checkpoint, 'preparation_command_exit': preparation_exit,
             'original_driver_failure_type': kind if kind in PUBLIC_FAILURE_TYPES else None,
             'original_driver_failure_code': code if code in PUBLIC_FAILURE_CODES else None,
             'browser_report_state': state,

@@ -1307,6 +1307,107 @@ class UiAdapterTests(unittest.TestCase):
         cls.ui = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.ui)
 
+    @contextlib.contextmanager
+    def direct_browser_inputs(self):
+        with tempfile.TemporaryDirectory(prefix="fvoci-turso-cli-pure-") as directory:
+            workspace = Path(directory)
+            cli = workspace / 'node_modules/playwright/cli.js'
+            cli.parent.mkdir(parents=True)
+            cli.write_text('/* pure fixture; never executed */')
+            package = cli.with_name('package.json')
+            package.write_text(json.dumps({'version': '1.63.0', 'bin': {'playwright': 'cli.js'}}))
+            physical = workspace / 'physical.private.json'
+            self.ui.write(physical, {'files': {'external': {
+                str(path): self.ui.digest(path) for path in (cli, package)}}})
+            manifest = {'bun': {'path': '/never-executed/admitted-bun'},
+                        'physicalInputs': {'path': str(physical), 'sha256': self.ui.digest(physical)}}
+            run = workspace / 'run'
+            run.mkdir(mode=0o700)
+            (run / 'playwright.private.json').write_text('{"fixture":true}')
+            process = mock.Mock()
+            process.wait.return_value = 0
+            processes = mock.Mock()
+            processes.spawn.return_value = process
+            with mock.patch.object(self.ui, 'W', workspace), mock.patch.object(self.ui, '_PROCESSES', processes), mock.patch.dict(os.environ, {
+                    'PATH': '/pure/path', 'FVOCI_LIBSQL_URL': 'PRIVATE_ENDPOINT',
+                    'FVOCI_LIBSQL_AUTH_TOKEN': 'PRIVATE_TOKEN', 'GITHUB_TOKEN': 'PRIVATE_GITHUB_TOKEN',
+                    'DATABASE_URL': 'PRIVATE_DATABASE', 'PASSWORD_PEPPER_KEYS': 'PRIVATE_PEPPER'}, clear=True):
+                yield workspace, cli, package, physical, manifest, run, process, processes
+
+    def test_browser_direct_cli_keeps_arguments_environment_wait_and_ownership(self):
+        for spec, grep in ((self.ui.ON, '^selected normal main:'),
+                           (self.ui.OFF, None),
+                           (self.ui.ON, '^selected normal main restart:')):
+            with self.subTest(spec=spec, grep=grep), self.direct_browser_inputs() as values:
+                workspace, cli, _, _, manifest, run, process, processes = values
+                result = self.ui.browser(manifest, run, {'FVOCI_E2E_SELECTED_FLOW': 'on'}, spec, grep)
+                self.assertEqual(result, {'fixture': True})
+                args, label = processes.spawn.call_args.args
+                expected = ['/never-executed/admitted-bun', '--no-install', str(cli), 'test',
+                            '--config', 'e2e-pending/collab-playwright.config.ts', '--reporter=line,json']
+                if grep: expected += ['--grep', grep]
+                self.assertEqual(args, expected + ['e2e-pending/' + spec])
+                self.assertEqual(label, 'browser')
+                kwargs = processes.spawn.call_args.kwargs
+                self.assertEqual(kwargs['cwd'], workspace / 'apps/web')
+                self.assertIs(kwargs['stderr'], subprocess.STDOUT)
+                self.assertEqual(set(kwargs['env']), {'PATH', 'FVOCI_E2E_SELECTED_FLOW', 'CI',
+                    'FVOCI_E2E_RESULT_DIR', 'PLAYWRIGHT_JSON_OUTPUT_FILE'})
+                self.assertEqual(kwargs['env']['CI'], 'true')
+                self.assertNotIn('PRIVATE_', json.dumps(args) + json.dumps(kwargs['env']))
+                process.wait.assert_called_once_with(timeout=900)
+                processes.finish.assert_called_once_with(process)
+                self.assertEqual((run / 'browser.private.log').stat().st_mode & 0o777, 0o600)
+                self.assertEqual((run / 'playwright.private.json').stat().st_mode & 0o777, 0o600)
+
+    def test_browser_refuses_missing_symlink_nonregular_drift_or_unadmitted_cli_before_child(self):
+        for fault in ('missing', 'symlink', 'directory', 'drift', 'unadmitted',
+                      'package-drift', 'package-version', 'package-bin', 'receipt-drift'):
+            with self.subTest(fault=fault), self.direct_browser_inputs() as values:
+                _, cli, package, physical, manifest, run, _, processes = values
+                if fault == 'missing': cli.unlink()
+                elif fault == 'symlink':
+                    target = cli.with_name('actual.js'); cli.rename(target); cli.symlink_to(target)
+                elif fault == 'directory': cli.unlink(); cli.mkdir()
+                elif fault == 'drift': cli.write_text('changed fixture bytes')
+                elif fault == 'package-drift': package.write_text('{}')
+                elif fault in ('package-version', 'package-bin'):
+                    package.write_text(json.dumps({'version': '1.62.0' if fault == 'package-version' else '1.63.0',
+                        'bin': {'playwright': 'other.js' if fault == 'package-bin' else 'cli.js'}}))
+                    record = json.loads(physical.read_text())
+                    record['files']['external'][str(package)] = self.ui.digest(package)
+                    physical.write_text(json.dumps(record))
+                    manifest['physicalInputs']['sha256'] = self.ui.digest(physical)
+                elif fault == 'unadmitted':
+                    record = json.loads(physical.read_text()); del record['files']['external'][str(cli)]
+                    physical.write_text(json.dumps(record))
+                    manifest['physicalInputs']['sha256'] = self.ui.digest(physical)
+                else: physical.write_text('{}')
+                code = 'UI_PHYSICAL_RECEIPT_CHANGED' if fault == 'receipt-drift' else 'UI_PLAYWRIGHT_CLI_REFUSED'
+                with self.assertRaisesRegex(self.ui.UiError, '^' + code + '$'):
+                    self.ui.browser(manifest, run, {}, self.ui.ON)
+                processes.spawn.assert_not_called()
+                self.assertFalse((run / 'browser.private.log').exists())
+
+    def test_browser_explicit_secret_environment_is_refused_before_child(self):
+        for key in ('FVOCI_LIBSQL_URL', 'FVOCI_LIBSQL_AUTH_TOKEN', 'DATABASE_URL',
+                    'DATABASE_APP_URL', 'PASSWORD_PEPPER_KEYS'):
+            with self.subTest(key=key), self.direct_browser_inputs() as values:
+                _, _, _, _, manifest, run, _, processes = values
+                with self.assertRaisesRegex(self.ui.UiError, '^UI_BROWSER_SECRET_ENV_REFUSED$'):
+                    self.ui.browser(manifest, run, {key: 'PRIVATE_VALUE'}, self.ui.ON)
+                processes.spawn.assert_not_called()
+                self.assertFalse((run / 'browser.private.log').exists())
+
+    def test_browser_child_failure_keeps_original_failure_and_finishes_owned_process(self):
+        with self.direct_browser_inputs() as values:
+            _, _, _, _, manifest, run, process, processes = values
+            process.wait.return_value = 1
+            with self.assertRaisesRegex(self.ui.UiError, '^UI_ACTUAL_BROWSER_FAILED$'):
+                self.ui.browser(manifest, run, {}, self.ui.ON)
+            process.wait.assert_called_once_with(timeout=900)
+            processes.finish.assert_called_once_with(process)
+
     def test_remote_baseline_keeps_both_readonly_gates_and_exact_source_binding(self):
         fixture = AdmissionTests()
         fixture.setUp()
@@ -1708,11 +1809,89 @@ class UiAdapterTests(unittest.TestCase):
             self.assertEqual(diagnostic['diagnosticStatus'],'refused')
             self.assertIsNone(diagnostic[field])
 
+    def test_table_contract_projection_keeps_only_bounded_comparison_facts(self):
+        facts = {'expectedCount': 99, 'actualCount': 99, 'setEqual': False,
+                 'orderEqual': False, 'firstMismatchIndex': 1, 'actualMismatchExpectedIndex': 2}
+        packet = self.baseline_packet()
+        packet['nativeOutcome']['baselineFailure'] = {'phase': 'table-contract', 'category': 'protocol',
+                                                      'tableComparison': facts}
+        diagnostic = self.ui.baseline_failure_diagnostic(packet)
+        self.assertEqual(diagnostic['diagnosticStatus'], 'qualified')
+        self.assertEqual(diagnostic['baselineFailure']['tableComparison'], facts)
+        self.assertEqual(diagnostic['nativeOutcome']['rollback'], 'unknown')
+        self.assertEqual(diagnostic['baselineRollbackFailure'], {'phase': 'rollback', 'category': 'request'})
+        self.assertNotIn('PRIVATE_', json.dumps(diagnostic))
+        for expected, actual, mismatch, actual_expected in (
+                (99, 98, 98, None), (99, 100, 99, 0),
+                (100001, 100001, 100000, 0), (100001, 100001, None, None)):
+            with self.subTest(expected=expected, actual=actual, mismatch=mismatch):
+                comparison = dict(facts, expectedCount=expected, actualCount=actual,
+                                  firstMismatchIndex=mismatch, actualMismatchExpectedIndex=actual_expected)
+                packet['nativeOutcome']['baselineFailure']['tableComparison'] = comparison
+                diagnostic = self.ui.baseline_failure_diagnostic(packet)
+                self.assertEqual(diagnostic['diagnosticStatus'], 'qualified')
+                self.assertEqual(diagnostic['baselineFailure']['tableComparison'], comparison)
+        # Earlier original receipts keep their existing phase even without these new facts.
+        del packet['nativeOutcome']['baselineFailure']['tableComparison']
+        diagnostic = self.ui.baseline_failure_diagnostic(packet)
+        self.assertEqual(diagnostic['baselineFailure'], {'phase': 'table-contract', 'category': 'protocol'})
+        self.assertEqual(diagnostic['diagnosticStatus'], 'qualified')
+
+    def test_table_contract_projection_refuses_private_names_and_forged_counts_or_indices(self):
+        facts = {'expectedCount': 99, 'actualCount': 99, 'setEqual': False,
+                 'orderEqual': False, 'firstMismatchIndex': 1, 'actualMismatchExpectedIndex': 2}
+        faults = [('actualNames', ['PRIVATE_TABLE_CANARY']), ('expectedCount', True),
+                  ('actualCount', 'PRIVATE_NAME_OR_ENDPOINT'), ('actualCount', 100002),
+                  ('setEqual', 'PRIVATE_TOKEN'), ('orderEqual', True),
+                  ('firstMismatchIndex', -1), ('firstMismatchIndex', 100),
+                  ('actualMismatchExpectedIndex', True), ('actualMismatchExpectedIndex', 99),
+                  ('actualMismatchExpectedIndex', 'PRIVATE_TABLE_CANARY')]
+        for field, value in faults:
+            with self.subTest(field=field, value=value):
+                packet = self.baseline_packet()
+                comparison = dict(facts, **{field: value})
+                packet['nativeOutcome']['baselineFailure'] = {'phase': 'table-contract', 'category': 'protocol',
+                                                              'tableComparison': comparison}
+                diagnostic = self.ui.baseline_failure_diagnostic(packet)
+                self.assertEqual(diagnostic['diagnosticStatus'], 'refused')
+                self.assertIsNone(diagnostic['baselineFailure'])
+                self.assertNotIn('PRIVATE_', json.dumps(diagnostic))
+        for count in (99, 0):
+            with self.subTest(equal_exact_count=count):
+                packet = self.baseline_packet()
+                comparison = dict(facts, expectedCount=count, actualCount=count,
+                                  firstMismatchIndex=count, actualMismatchExpectedIndex=None)
+                packet['nativeOutcome']['baselineFailure'] = {'phase': 'table-contract', 'category': 'protocol',
+                                                              'tableComparison': comparison}
+                diagnostic = self.ui.baseline_failure_diagnostic(packet)
+                self.assertEqual(diagnostic['diagnosticStatus'], 'refused')
+                self.assertIsNone(diagnostic['baselineFailure'])
+        for mismatch in (None, 98):
+            packet = self.baseline_packet()
+            comparison = dict(facts, actualCount=98, firstMismatchIndex=mismatch,
+                              actualMismatchExpectedIndex=0)
+            packet['nativeOutcome']['baselineFailure'] = {'phase': 'table-contract', 'category': 'protocol',
+                                                          'tableComparison': comparison}
+            self.assertEqual(self.ui.baseline_failure_diagnostic(packet)['diagnosticStatus'], 'refused')
+        packet = self.baseline_packet()
+        packet['nativeOutcome']['baselineFailure'] = {'phase': 'table-contract', 'category': 'protocol',
+            'tableComparison': dict(facts, actualCount=98, firstMismatchIndex=98,
+                                    actualMismatchExpectedIndex=None)}
+        self.assertEqual(self.ui.baseline_failure_diagnostic(packet)['diagnosticStatus'], 'qualified')
+        for field, value in [('phase', 'row-hash'), ('category', 'driver')]:
+            packet = self.baseline_packet()
+            packet['nativeOutcome']['baselineFailure'] = dict(
+                {'phase': 'table-contract', 'category': 'protocol', 'tableComparison': facts}, **{field: value})
+            self.assertEqual(self.ui.baseline_failure_diagnostic(packet)['diagnosticStatus'], 'refused')
+
     def test_baseline_nonzero_publishes_before_packet_write_and_process_cleanup(self):
         import types
         for fault in ('none','write','finish','both','diagnostic-write'):
             with self.subTest(fault=fault),tempfile.TemporaryDirectory() as directory:
                 packet = self.baseline_packet();events=[]
+                packet['nativeOutcome']['baselineFailure'] = {'phase':'table-contract','category':'protocol',
+                    'tableComparison':{'expectedCount':99,'actualCount':98,'setEqual':False,'orderEqual':False,
+                                       'firstMismatchIndex':0,'actualMismatchExpectedIndex':1}}
                 process = types.SimpleNamespace(returncode=7,communicate=lambda **kw:(json.dumps(packet).encode(),b'PRIVATE_STDERR_CANARY'))
                 def finish(process):
                     events.append('finish')
@@ -1738,7 +1917,9 @@ class UiAdapterTests(unittest.TestCase):
                 self.assertNotIn('PRIVATE_',output)
                 if fault != 'diagnostic-write':
                     first = json.loads(output.splitlines()[0])
-                    self.assertEqual(first['baselineFailure'],{'phase':'row-hash','category':'protocol'})
+                    self.assertEqual(first['baselineFailure'],{'phase':'table-contract','category':'protocol',
+                        'tableComparison':{'expectedCount':99,'actualCount':98,'setEqual':False,'orderEqual':False,
+                                           'firstMismatchIndex':0,'actualMismatchExpectedIndex':1}})
                     self.assertEqual(first['nativeOutcome']['rollback'],'unknown')
                 else:
                     self.assertIn('UI_NATIVE_BASELINE_DIAGNOSTIC_WRITE_FAILED',output)
