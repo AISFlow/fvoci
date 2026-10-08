@@ -1211,7 +1211,7 @@ def verify_rust_binary_handoff(jobs: dict) -> list[str]:
         require(job.get("needs") == ["ci-plan", "postgres-build"], "binary consumers must need the successful producer")
         steps = job.get("steps", [])
         download = [s for s in steps if s.get("name") == f"Download required {cohort} executables for this SHA and architecture"]
-        require(download == [{"name": f"Download required {cohort} executables for this SHA and architecture", "uses": "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093", "with": {"name": "rust-" + cohort + "-${{ runner.arch }}-${{ github.sha }}-${{ github.run_attempt }}", "path": "${{ runner.temp }}/rust-binaries"}}], "binary consumers must download the exact SHA/architecture/attempt artifact")
+        require(download == [{"name": f"Download required {cohort} executables for this SHA and architecture", "uses": "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333", "with": {"digest-mismatch": "error", "name": "rust-" + cohort + "-${{ runner.arch }}-${{ github.sha }}-${{ github.run_attempt }}", "path": "${{ runner.temp }}/rust-binaries"}}], "binary consumers must download the exact SHA/architecture/attempt artifact")
         validate = [s for s in steps if s.get("name") == f"Validate and restore finished {cohort} executables (no rebuild fallback)"]
         require(validate == [{"name": f"Validate and restore finished {cohort} executables (no rebuild fallback)", "run": 'python3 scripts/ci_selection.py rust-binaries unpack --cohort ' + cohort + ' --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"'}], "binary consumers must validate all inputs and hashes unconditionally")
         if download and validate:
@@ -1879,8 +1879,8 @@ def _verify_web_build_handoff(jobs: dict) -> list[str]:
             "handoff_sha256": "${{ steps.prepare.outputs.handoff_sha256 }}"}, "producer artifact identity and digest outputs")
     steps = consumer.get("steps", [])
     download = [step for step in steps if str(step.get("uses", "")).startswith("actions/download-artifact@")]
-    require(len(download) == 1 and download[0].get("uses") == "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
-            and download[0].get("with") == {"artifact-ids": "${{ needs.collaboration-build.outputs.artifact_id }}", "merge-multiple": True,
+    require(len(download) == 1 and download[0].get("uses") == "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"
+            and download[0].get("with") == {"digest-mismatch": "error", "artifact-ids": "${{ needs.collaboration-build.outputs.artifact_id }}", "merge-multiple": True,
                 "path": "${{ runner.temp }}/fvoci-web-build-handoff"}
             and not any(k in download[0] for k in ("if", "continue-on-error")), "current-run exact artifact ID without foreign token/ref/run")
     runtime = [step for step in steps if step.get("id") == "browser"]
