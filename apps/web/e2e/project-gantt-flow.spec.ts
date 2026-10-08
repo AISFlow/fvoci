@@ -620,10 +620,8 @@ test("a task changed elsewhere is not overwritten, and a broken dependency snaps
   });
   expect(dep.status()).toBe(200);
 
-  // No stream: the page must not learn of the other edit before the drag.
-  await page.route(/\/api\/v1\/workspaces\/[^/]+\/projects\/[^/]+\/stream$/, (route) =>
-    route.abort(),
-  );
+  // Block the pooled workspace task stream so the layout stays stale until the drag.
+  await page.route(/\/api\/v1\/workspaces\/[^/]+\/task-stream$/, (route) => route.abort());
   await page.goto(ganttUrl(project.key));
   await expect(bar(page, first.id)).toHaveAttribute("data-end", day(12));
 
@@ -631,10 +629,14 @@ test("a task changed elsewhere is not overwritten, and a broken dependency snaps
     data: { dueDate: day(13) },
   });
   expect(elsewhere.ok()).toBe(true);
+  await expect(bar(page, first.id)).toHaveAttribute("data-end", day(12));
 
   const patch = patchOf(page, first.id);
   await dragBy(page, first.id, 2);
   const conflict = await patch;
+  expect(conflict.request().postDataJSON()).toMatchObject({
+    expectedDates: { startDate: day(10), dueDate: day(12), dueAt: null },
+  });
   expect(conflict.status()).toBe(409);
   expect(errorSchema.parse(await conflict.json()).code).toBe("document_version_mismatch");
   await expect(page.getByRole("alert")).toContainText("다른 곳에서 먼저 수정되었습니다");
