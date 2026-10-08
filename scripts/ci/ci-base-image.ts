@@ -1,6 +1,7 @@
 // CI-only policy around Bun's YAML/TOML/tar implementations and GNU tar.
 // No extraction to disk and no matched credential values are printed.
 import { basename } from "node:path";
+import { gunzipSync } from "node:zlib";
 
 class PolicyError extends Error {}
 function check(condition: unknown, message: string): asserts condition {
@@ -15,6 +16,45 @@ export function checkText(text: string, databaseUrls = true) {
   );
 }
 const json = async (path: string) => JSON.parse(await Bun.file(path).text());
+
+const tarMessages = new Set([
+  "tar: This does not look like a tar archive",
+  "tar: Skipping to next header",
+  "tar: Unexpected EOF in archive",
+  "tar: Unexpected EOF on archive file",
+  "tar: Error is not recoverable: exiting now",
+  "tar: Exiting with failure status due to previous errors",
+  "tar: Archive is compressed. Use -z option",
+  "tar: Archive is compressed. Use --zstd option",
+]);
+async function tarStderrPrefix(stream: ReadableStream<Uint8Array>) {
+  let prefix = "";
+  let truncated = false;
+  // Drain the entire pipe, but retain at most 512 bytes for diagnostics.
+  for await (const chunk of stream) {
+    const remaining = 512 - prefix.length;
+    prefix += Buffer.from(chunk.subarray(0, remaining)).toString("latin1");
+    if (chunk.length > remaining) truncated = true;
+  }
+  // GNU tar can echo filenames and PAX values. Only fixed tool messages are safe.
+  const safe = prefix
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => (tarMessages.has(line) ? line : "[content withheld]"))
+    .join("; ")
+    .slice(0, 512);
+  return (safe || "(empty)") + (truncated ? " [truncated]" : "");
+}
+function layerIdentity(index: number, name: string, bytes: Uint8Array) {
+  // Docker-save names may be untrusted; retain only its fixed content-addressed forms.
+  const safeName = /^(?:[0-9a-f]{64}\/layer\.tar|blobs\/sha256\/[0-9a-f]{64}|layer\.tar)$/.test(
+    name,
+  )
+    ? name
+    : "name withheld";
+  const magic = Buffer.from(bytes.subarray(0, 4)).toString("hex") || "empty";
+  return `layer ${index} (${safeName}), magic=${magic}`;
+}
 
 export function verifyWorkflow(data: any) {
   check(
@@ -136,15 +176,46 @@ export async function scanImage(path: string, inspection: string, arch: string) 
   );
   checkText(await (await entry(manifests[0].Config)).text());
   // Include lower layers: deleting a credential later does not remove it.
-  for (const layer of manifests[0].Layers) {
+  for (const [index, layer] of manifests[0].Layers.entries()) {
     const blob = await entry(layer);
-    // GNU tar enumerates non-regular entries too; Bun.files() returns regulars.
-    const listing = Bun.spawn(["tar", "-tf", "-"], { stdin: blob, stdout: "pipe", stderr: "pipe" });
-    const names = await new Response(listing.stdout).text();
-    await new Response(listing.stderr).text();
-    check((await listing.exited) === 0, "layer archive listing failed");
+    let bytes = await blob.bytes();
+    const identity = layerIdentity(index, layer, bytes);
+    try {
+      // Decode once so GNU tar and Bun inspect the same uncompressed archive.
+      if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+        const decoded = gunzipSync(bytes, { info: true }) as unknown as {
+          buffer: Uint8Array;
+          engine: { bytesWritten: number };
+        };
+        // Gunzip can stop at NUL padding and silently discard the remaining input.
+        check(decoded.engine.bytesWritten === bytes.length, "unconsumed gzip input");
+        bytes = decoded.buffer;
+      } else if (bytes[0] === 0x28 && bytes[1] === 0xb5 && bytes[2] === 0x2f && bytes[3] === 0xfd) {
+        bytes = await Bun.zstdDecompress(bytes);
+      }
+    } catch {
+      throw new PolicyError(`layer decompression failed: ${identity}; content withheld`);
+    }
+    // Include entries after zero blocks/concatenated archives, including non-regulars.
+    const listing = Bun.spawn(["tar", "--ignore-zeros", "-tf", "-"], {
+      stdin: bytes,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, LC_ALL: "C", TAR_OPTIONS: "" },
+    });
+    const [names, stderr, exitCode] = await Promise.all([
+      new Response(listing.stdout).text(),
+      tarStderrPrefix(listing.stderr),
+      listing.exited,
+    ]);
+    // GNU tar can ignore a final partial block; reject that framing without parsing headers.
+    const framing = bytes.length % 512 === 0 ? "" : "incomplete tar block; ";
+    check(
+      exitCode === 0 && !framing,
+      `layer archive listing failed: ${identity}; ${framing}stderr prefix: ${stderr}`,
+    );
     check(!/(^|\/)\.env(?:[.\s]|$)/m.test(names), "environment file found; content withheld");
-    const files = await new Bun.Archive(await blob.bytes()).files();
+    const files = await new Bun.Archive(bytes).files();
     for (const [name, file] of files) {
       check(
         basename(name) !== ".env" && !basename(name).startsWith(".env."),
