@@ -1657,6 +1657,92 @@ class UiAdapterTests(unittest.TestCase):
         self.assertIn('UI_PROCESS_RECEIPT_WRITE_FAILED', diagnostics.getvalue())
         self.assertNotIn('PRIVATE_FAKE', diagnostics.getvalue())
 
+    def baseline_packet(self):
+        return {'originalFailure':'TURSO_UI_BASELINE_FAILED',
+                'nativeOutcome':{'operation':'failed','rollback':'unknown','commit':'not-attempted',
+                    'baselineFailure':{'phase':'row-hash','category':'protocol'},
+                    'baselineRollbackFailure':{'phase':'rollback','category':'request'}},
+                'lifecycleDrain':'unconfirmed','drainOutcome':'failed',
+                'rows':['PRIVATE_ROW_CANARY'],'token':'PRIVATE_AUTH_CANARY'}
+
+    def test_baseline_projection_keeps_first_leaf_and_independent_finish_only(self):
+        packet = self.baseline_packet()
+        diagnostic = self.ui.baseline_failure_diagnostic(packet)
+        self.assertEqual(diagnostic,{'originalFailure':'TURSO_UI_BASELINE_FAILED','diagnosticStatus':'qualified',
+            'baselineFailure':{'phase':'row-hash','category':'protocol'},
+            'baselineRollbackFailure':{'phase':'rollback','category':'request'},
+            'nativeOutcome':{'operation':'failed','rollback':'unknown','commit':'not-attempted'},
+            'lifecycleDrain':'unconfirmed','drainOutcome':'failed'})
+        self.assertNotIn('PRIVATE_',json.dumps(diagnostic))
+        packet['nativeOutcome'].pop('baselineFailure')
+        packet['nativeOutcome']['operation'] = 'confirmed'
+        diagnostic = self.ui.baseline_failure_diagnostic(packet)
+        self.assertIsNone(diagnostic['baselineFailure'])
+        self.assertEqual(diagnostic['baselineRollbackFailure']['phase'],'rollback')
+        self.assertEqual(diagnostic['nativeOutcome']['operation'],'confirmed')
+
+    def test_baseline_missing_or_forged_native_classification_never_invents_cause(self):
+        packet = self.baseline_packet()
+        for field in ('baselineFailure','baselineRollbackFailure'):packet['nativeOutcome'].pop(field)
+        diagnostic = self.ui.baseline_failure_diagnostic(packet)
+        self.assertEqual(diagnostic['diagnosticStatus'],'missing')
+        self.assertIsNone(diagnostic['baselineFailure'])
+        faults = [('phase','PRIVATE_ENDPOINT_CANARY'),('category','PRIVATE_TOKEN_CANARY'),
+                  ('phase',[]),('category',{}),('unexpected','PRIVATE_ROW_CANARY')]
+        for field,value in faults:
+            with self.subTest(field=field,value=value):
+                packet = self.baseline_packet();packet['nativeOutcome']['baselineFailure'][field] = value
+                diagnostic = self.ui.baseline_failure_diagnostic(packet)
+                self.assertEqual(diagnostic['diagnosticStatus'],'refused')
+                self.assertIsNone(diagnostic['baselineFailure'])
+                self.assertNotIn('PRIVATE_',json.dumps(diagnostic))
+        for field in ('operation','rollback','commit'):
+            packet = self.baseline_packet();packet['nativeOutcome'][field] = 'PRIVATE_STATE_CANARY'
+            diagnostic = self.ui.baseline_failure_diagnostic(packet)
+            self.assertEqual(diagnostic['diagnosticStatus'],'refused')
+            self.assertIsNone(diagnostic['nativeOutcome'][field])
+            self.assertNotIn('PRIVATE_',json.dumps(diagnostic))
+        for field in ('lifecycleDrain','drainOutcome'):
+            packet = self.baseline_packet();packet[field] = 'PRIVATE_STATE_CANARY'
+            diagnostic = self.ui.baseline_failure_diagnostic(packet)
+            self.assertEqual(diagnostic['diagnosticStatus'],'refused')
+            self.assertIsNone(diagnostic[field])
+
+    def test_baseline_nonzero_publishes_before_packet_write_and_process_cleanup(self):
+        import types
+        for fault in ('none','write','finish','both','diagnostic-write'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as directory:
+                packet = self.baseline_packet();events=[]
+                process = types.SimpleNamespace(returncode=7,communicate=lambda **kw:(json.dumps(packet).encode(),b'PRIVATE_STDERR_CANARY'))
+                def finish(process):
+                    events.append('finish')
+                    if fault in ('finish','both'):raise self.ui.UiError('UI_PROCESS_CLOSURE_FAILED')
+                scope = types.SimpleNamespace(spawn=mock.Mock(return_value=process),finish=mock.Mock(side_effect=finish))
+                def write(path,value):
+                    events.append('write')
+                    if fault in ('write','both'):raise OSError('PRIVATE_WRITE_CANARY')
+                real_print = print
+                def emit(value,**kwargs):
+                    events.append('diagnostic')
+                    if fault == 'diagnostic-write' and len(events) == 1:raise OSError('PRIVATE_STDERR_WRITE_CANARY')
+                    real_print(value,**kwargs)
+                with mock.patch.object(self.ui,'_PROCESSES',scope),mock.patch.object(self.ui,'clean_env',return_value={}), \
+                     mock.patch.object(self.ui,'root',return_value=Path(directory)),mock.patch.object(self.ui,'write',side_effect=write), \
+                     mock.patch('builtins.print',side_effect=emit),contextlib.redirect_stderr(io.StringIO()) as diagnostics:
+                    with self.assertRaises(self.ui.UiError) as caught:
+                        self.ui.fixture({'binaries':{'fvoci-e2e-fixture':{'path':'/never/executed'}}},'baseline',{})
+                self.assertEqual(str(caught.exception),'TURSO_UI_BASELINE_FAILED')
+                self.assertEqual(events[:3],['diagnostic','write','finish'])
+                scope.finish.assert_called_once_with(process)
+                output = diagnostics.getvalue()
+                self.assertNotIn('PRIVATE_',output)
+                if fault != 'diagnostic-write':
+                    first = json.loads(output.splitlines()[0])
+                    self.assertEqual(first['baselineFailure'],{'phase':'row-hash','category':'protocol'})
+                    self.assertEqual(first['nativeOutcome']['rollback'],'unknown')
+                else:
+                    self.assertIn('UI_NATIVE_BASELINE_DIAGNOSTIC_WRITE_FAILED',output)
+
     def test_native_nonzero_precedes_finish_and_packet_write_failures(self):
         import types
         packet = {'originalFailure': 'TURSO_UI_ACTOR_FAILED',

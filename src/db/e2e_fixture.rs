@@ -21,6 +21,62 @@ struct ObservationFailure {
     commit: &'static str,
 }
 
+// Baseline-only context; the original typed error is retained without Display.
+#[derive(Debug, thiserror::Error)]
+#[error("Turso UI baseline failed at a fixed observation phase")]
+struct BaselineFailure {
+    phase: &'static str,
+    #[source]
+    original: sqlx::Error,
+}
+
+fn baseline_failure(phase: &'static str, original: sqlx::Error) -> sqlx::Error {
+    sqlx::Error::AnyDriverError(Box::new(BaselineFailure { phase, original }))
+}
+
+fn baseline_category(error: &sqlx::Error) -> &'static str {
+    match error {
+        sqlx::Error::AnyDriverError(source) => {
+            if let Some(error) = source.downcast_ref::<libsql::Error>() {
+                match error {
+                    libsql::Error::ConnectionFailed(_) => "request",
+                    // Hrana's inner enum is private in the pinned SDK. Do not
+                    // parse its Display text to invent a transport/SQL cause.
+                    libsql::Error::Hrana(_) => "libsql-hrana",
+                    libsql::Error::SqliteFailure(..) | libsql::Error::RemoteSqliteFailure(..) => {
+                        "database"
+                    }
+                    libsql::Error::InvalidColumnType
+                    | libsql::Error::InvalidColumnIndex
+                    | libsql::Error::ColumnNotFound(_)
+                    | libsql::Error::NullValue => "row-conversion",
+                    _ => "driver",
+                }
+            } else {
+                "driver"
+            }
+        }
+        sqlx::Error::Io(_) | sqlx::Error::Tls(_) => "request",
+        sqlx::Error::Database(_) => "database",
+        sqlx::Error::Decode(_)
+        | sqlx::Error::ColumnDecode { .. }
+        | sqlx::Error::ColumnIndexOutOfBounds { .. }
+        | sqlx::Error::ColumnNotFound(_)
+        | sqlx::Error::RowNotFound => "row-conversion",
+        sqlx::Error::Protocol(_) => "protocol",
+        sqlx::Error::PoolClosed | sqlx::Error::PoolTimedOut => "pool",
+        _ => "other",
+    }
+}
+
+fn baseline_diagnostic(error: &sqlx::Error) -> Option<Value> {
+    let sqlx::Error::AnyDriverError(source) = error else {
+        return None;
+    };
+    let failure = source.downcast_ref::<BaselineFailure>()?;
+    Some(json!({"phase":failure.phase,"category":baseline_category(&failure.original)}))
+}
+
 fn finished<T>(
     result: Result<T, sqlx::Error>,
     rollback: Result<(), sqlx::Error>,
@@ -43,14 +99,25 @@ pub fn failure_receipt(error: &sqlx::Error) -> Value {
     let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
     while let Some(error) = source {
         if let Some(failure) = error.downcast_ref::<ObservationFailure>() {
-            return json!({"operation": if failure.original.is_some() { "failed" } else { "confirmed" },
+            let mut receipt = json!({"operation": if failure.original.is_some() { "failed" } else { "confirmed" },
                 "rollback": if !failure.rollback_attempted { "not-attempted" } else if failure.rollback_error.is_some() { "unknown" } else { "confirmed" }, "commit": failure.commit});
+            if let Some(diagnostic) = failure.original.as_ref().and_then(baseline_diagnostic) {
+                receipt["baselineFailure"] = diagnostic;
+            }
+            if let Some(diagnostic) = failure.rollback_error.as_ref().and_then(baseline_diagnostic) {
+                receipt["baselineRollbackFailure"] = diagnostic;
+            }
+            return receipt;
         }
         if error
             .downcast_ref::<super::backend::CommitUnknown>()
             .is_some()
         {
             return json!({"operation":"failed","rollback":"not-attempted","commit":"unknown"});
+        }
+        if let Some(failure) = error.downcast_ref::<BaselineFailure>() {
+            return json!({"operation":"failed","rollback":"not-attempted","commit":"not-attempted",
+                "baselineFailure":{"phase":failure.phase,"category":baseline_category(&failure.original)}});
         }
         source = error.source();
     }
@@ -424,42 +491,54 @@ const PRESERVATION_READS: &[(&str, &str)] = &[
 
 pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
     if !matches!(backend, Backend::LibsqlRemote(_)) {
-        return Err(refused());
+        return Err(baseline_failure("backend-contract", refused()));
     }
-    let current = super::migrate::assert_sqlite_schema_current(backend).await?;
+    let current = super::migrate::assert_sqlite_schema_current(backend).await.map_err(|error| baseline_failure("schema-check", error))?;
     if current.applied_steps != 12 {
-        return Err(refused());
+        return Err(baseline_failure("schema-contract", refused()));
     }
-    let mut tx = backend.begin_read().await?;
+    let mut tx = backend.begin_read().await.map_err(|error| baseline_failure("begin-read", error))?;
+    let mut phase = "family-contract";
     let result = async {
         let f = family(&mut tx)?;
+        phase = "table-read";
         let tables = f.query("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name", &[]).await?;
+        phase = "table-conversion";
         let names = tables.iter().map(|r| r.cell(0)?.string()).collect::<Result<Vec<_>, sqlx::Error>>()?;
         let mut expected = PRESERVATION_READS.iter().map(|(name, _)| name.to_string()).collect::<Vec<_>>();
         expected.sort();
+        phase = "table-contract";
         if names != expected { return Err(refused()) }
         let mut fingerprints = BTreeMap::new();
         let mut allocations = BTreeMap::new();
         let mut total = 0usize;
         for (name, sql) in PRESERVATION_READS {
+            phase = "preservation-read";
             let rows = f.query(sql, &[]).await?;
             total += rows.len();
+            phase = "row-limit";
             if rows.len() > 10000 || total > 100000 { return Err(refused()) }
             let mut hashes = BTreeMap::<String, usize>::new();
             let mut owners = BTreeMap::new();
             for row in &rows {
+                phase = "row-hash";
                 let hash = row_hash(row)?;
+                phase = "row-allocation";
                 owners.insert(hash.clone(), row_allocation(name, row)?);
                 *hashes.entry(hash).or_default() += 1;
             }
             fingerprints.insert(*name, hashes);
             allocations.insert(*name, owners);
         }
+        phase = "summary-read";
         let users = f.query("SELECT count(*) FROM users WHERE deleted_at IS NULL", &[]).await?;
         let mut operations = BTreeMap::new();
         for (name, sql) in UI_OPERATION_READS {
+            phase = "ui-read";
             let rows = f.query(sql, &[]).await?;
+            phase = "row-limit";
             if rows.len() > 10000 { return Err(refused()) }
+            phase = "ui-conversion";
             let cells = rows.iter().map(|row| {
                 let FamilyRow::Remote(remote) = row else { return Err(refused()) };
                 (0..remote.column_count()).map(|i| row.cell(i as usize).map(exact)).collect::<Result<Vec<_>, _>>()
@@ -469,17 +548,22 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
         // Conservative startup admission. Preserve populated ordinary users /
         // workspaces, but do not let normal background work consume old jobs,
         // expired tokens, withdrawn users, deleted workspaces or leased rooms.
+        phase = "summary-read";
         let hazards = f.query("SELECT (SELECT count(*) FROM users WHERE deleted_at IS NOT NULL)+(SELECT count(*) FROM workspaces WHERE deleted_at IS NOT NULL)+(SELECT count(*) FROM collab_room_fences WHERE expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000))+(SELECT count(*) FROM task_collab_room_fences WHERE expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000))+(SELECT count(*) FROM maintenance_job_claims WHERE owner_token IS NOT NULL)", &[]).await?;
         let live_outbox = f.query("SELECT count(*) FROM outbox_consumers WHERE lease_owner IS NOT NULL", &[]).await?;
+        phase = "ledger-read";
         let ledger = f.query("SELECT version,lineage,sql_sha256,applied_at FROM schema_migrations ORDER BY version", &[]).await?;
+        phase = "ledger-conversion";
         let ledger = ledger.iter().map(|row| (0..4).map(|i| row.cell(i).map(exact)).collect::<Result<Vec<_>, _>>()).collect::<Result<Vec<_>, _>>()?;
+        phase = "summary-conversion";
         Ok(json!({"schema":1,"backend":"libsql-remote","schemaCurrent":true,
             "schemaSha256":current.schema_sha256,"lineage":current.lineage,
             "ledger":ledger,"setupNeeded":users[0].cell(0)?.integer()? == 0,
             "fingerprints":fingerprints,"allocations":allocations,"rows":total,"operations":operations,
             "startupHazards":hazards[0].cell(0)?.integer()?,"liveOutboxLeases":live_outbox[0].cell(0)?.integer()?}))
     }.await;
-    let rollback = tx.rollback().await;
+    let result = result.map_err(|error| baseline_failure(phase, error));
+    let rollback = tx.rollback().await.map_err(|error| baseline_failure("rollback", error));
     finished(result, rollback, "not-attempted")
 }
 
@@ -636,6 +720,28 @@ mod tests {
         );
         assert_ne!(exact(Cell::Blob(vec![0, 255])), exact(Cell::text("00ff")));
         assert_ne!(exact(Cell::Null), exact(Cell::text("null")));
+    }
+
+    #[test]
+    fn baseline_phase_and_typed_category_do_not_publish_error_values() {
+        let original = baseline_failure("row-hash", sqlx::Error::Protocol("PRIVATE_ROW_OR_ENDPOINT".into()));
+        let rollback = baseline_failure("rollback", sqlx::Error::AnyDriverError(Box::new(
+            libsql::Error::ConnectionFailed("PRIVATE_AUTH_OR_URL".into()),
+        )));
+        let error = finished::<()>(Err(original), Err(rollback), "not-attempted").unwrap_err();
+        let receipt = failure_receipt(&error);
+        assert_eq!(receipt["baselineFailure"], json!({"phase":"row-hash","category":"protocol"}));
+        assert_eq!(receipt["baselineRollbackFailure"], json!({"phase":"rollback","category":"request"}));
+        assert_eq!(receipt["operation"], "failed");
+        assert_eq!(receipt["rollback"], "unknown");
+        assert!(!receipt.to_string().contains("PRIVATE_"));
+        let error = baseline_failure("begin-read", sqlx::Error::PoolClosed);
+        assert_eq!(failure_receipt(&error)["baselineFailure"], json!({"phase":"begin-read","category":"pool"}));
+        assert_eq!(failure_receipt(&error)["rollback"], "not-attempted");
+        let error = finished::<()>(Ok(()), Err(baseline_failure("rollback", refused())), "not-attempted").unwrap_err();
+        assert!(failure_receipt(&error).get("baselineFailure").is_none());
+        assert_eq!(failure_receipt(&error)["operation"], "confirmed");
+        assert_eq!(failure_receipt(&error)["baselineRollbackFailure"]["phase"], "rollback");
     }
 
     #[test]

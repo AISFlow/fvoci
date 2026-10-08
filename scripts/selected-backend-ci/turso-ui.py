@@ -425,6 +425,49 @@ def running_daemon_sample(inspect, caps, proc_row, nspid, client_pid, binary, wa
             'qualification': 'daemon-observed', 'caps': {key: caps[key] for key in expected}}
 
 
+def baseline_failure_diagnostic(value):
+    """Project fixed native classifications only; never SDK text or row values."""
+    outcome = value.get('nativeOutcome')
+    outcome = outcome if isinstance(outcome, dict) else {}
+    status = 'missing'
+    def cause(name, rollback=False):
+        nonlocal status
+        item = outcome.get(name)
+        if item is None:
+            return None
+        phases = {'backend-contract','schema-check','schema-contract','begin-read','family-contract',
+                  'table-read','table-conversion','table-contract','preservation-read','row-limit',
+                  'row-hash','row-allocation','ui-read','ui-conversion','summary-read',
+                  'ledger-read','ledger-conversion','summary-conversion','rollback'}
+        categories = {'request','database','row-conversion','protocol','pool','driver','other','libsql-hrana'}
+        if (not isinstance(item, dict) or set(item) != {'phase','category'}
+                or not isinstance(item['phase'], str) or item['phase'] not in phases
+                or (rollback and item['phase'] != 'rollback')
+                or not isinstance(item['category'], str) or item['category'] not in categories):
+            status = 'refused'
+            return None
+        if status != 'refused':
+            status = 'qualified'
+        return {'phase': item['phase'], 'category': item['category']}
+    first = cause('baselineFailure')
+    rollback = cause('baselineRollbackFailure', rollback=True)
+    def state(container, name, allowed):
+        nonlocal status
+        item = container.get(name)
+        if not isinstance(item, str) or item not in allowed:
+            status = 'refused'
+            return None
+        return item
+    native = {'operation':state(outcome,'operation',{'failed','confirmed'}),
+              'rollback':state(outcome,'rollback',{'not-attempted','unknown','confirmed'}),
+              'commit':state(outcome,'commit',{'not-attempted','unknown','confirmed'})}
+    drain = state(value,'lifecycleDrain',{'confirmed','unconfirmed'})
+    drain_outcome = state(value,'drainOutcome',{'confirmed','failed'})
+    return {'originalFailure':'TURSO_UI_BASELINE_FAILED','diagnosticStatus':status,
+            'baselineFailure':first,'baselineRollbackFailure':rollback,'nativeOutcome':native,
+            'lifecycleDrain':drain,'drainOutcome':drain_outcome}
+
+
 def fixture(manifest, mode, environment, input=None):
     if execution_mode() == 'orca-local':
         return local_fixture(manifest, mode, environment, input)
@@ -450,6 +493,11 @@ def fixture(manifest, mode, environment, input=None):
             code = value.get('originalFailure', 'UI_NATIVE_FIXTURE_FAILED')
             require(isinstance(code, str) and re.fullmatch('TURSO_UI_[A-Z_]+|UI_NATIVE_FIXTURE_FAILED', code), 'UI_NATIVE_FAILURE_CODE_REFUSED')
             original = UiError(code)
+            if mode == 'baseline' and code == 'TURSO_UI_BASELINE_FAILED':
+                try:
+                    print(json.dumps(baseline_failure_diagnostic(value)), file=sys.stderr, flush=True)
+                except BaseException:
+                    failures.append('UI_NATIVE_BASELINE_DIAGNOSTIC_WRITE_FAILED')
             try:
                 write(root() / ('fixture-failure-' + secrets.token_hex(6) + '.private.json'),
                       {'mode': mode, 'exit': result.returncode, 'receipt': value})
