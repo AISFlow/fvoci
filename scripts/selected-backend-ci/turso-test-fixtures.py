@@ -1307,6 +1307,179 @@ class UiAdapterTests(unittest.TestCase):
         cls.ui = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.ui)
 
+    START_MISSING = (b'fvoci: ENCRYPTION_KEYS is not set (see the env example)\n'
+                     b'fvoci: ENCRYPTION_ACTIVE_KEY_ID is not set (see the env example)\n'
+                     b'fvoci: not starting; fix .env and run docker compose up -d again\n')
+
+    def startup_record(self, raw, code=2, now=102, started=100, deadline=110):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / 'server.private.log'
+            log.write_bytes(raw)
+            with mock.patch.object(self.ui.time, 'monotonic', return_value=now):
+                return self.ui.server_start_diagnostic(mock.Mock(poll=mock.Mock(return_value=code)), log, started, deadline)
+
+    def test_start_exit_two_exact_missing_keyring_and_bounded_public_record(self):
+        record = self.startup_record(self.START_MISSING)
+        self.assertEqual(record, {'originalFailure': 'UI_SERVER_START_FAILED', 'diagnosticStatus': 'qualified',
+                                 'processState': 'exited', 'exitCode': 2, 'elapsedMs': 2000,
+                                 'phase': 'prepare-config', 'category': 'missing-encryption-keyring'})
+        self.assertLessEqual(len(json.dumps(record).encode()), 2048)
+        self.assertEqual(self.startup_record(self.START_MISSING.replace(b'\n', b'\r\n')), record)
+
+    def test_start_real_db_free_child_exit_and_live_deadline_snapshot(self):
+        import sys
+        with tempfile.TemporaryDirectory() as directory:
+            logpath = Path(directory) / 'server.private.log'
+            for exiting in (True, False):
+                with self.subTest(exiting=exiting), logpath.open('wb') as output:
+                    child = subprocess.Popen([sys.executable, '-c',
+                        'import os; os.write(2, ' + repr(self.START_MISSING) + '); raise SystemExit(2)'
+                        if exiting else 'import time; time.sleep(30)'], stdout=output, stderr=subprocess.STDOUT,
+                        env={'PATH': os.environ['PATH']})
+                    try:
+                        if exiting: self.assertEqual(child.wait(timeout=5), 2)
+                        with mock.patch.object(self.ui.time, 'monotonic', return_value=110):
+                            record = self.ui.server_start_diagnostic(child, logpath, 100, 110)
+                        self.assertEqual(record['processState'], 'exited' if exiting else 'deadline')
+                        self.assertEqual(record['exitCode'], 2 if exiting else None)
+                        self.assertEqual(record['category'], 'missing-encryption-keyring' if exiting else None)
+                    finally:
+                        if child.poll() is None: child.terminate()
+                        child.wait(timeout=5)
+
+    def test_start_local_path_publishes_before_owned_cleanup_and_keeps_receipt(self):
+        for failing in (False, True):
+            with self.subTest(failing=failing), tempfile.TemporaryDirectory() as directory:
+                events = []
+                server = mock.Mock(poll=mock.Mock(return_value=2))
+                scope = mock.Mock()
+                def spawn(*args, **kwargs):
+                    kwargs['stdout'].write(self.START_MISSING)
+                    kwargs['stdout'].flush()
+                    return server
+                def cleanup(*args):
+                    events.append('cleanup')
+                    server.poll.return_value = 0
+                    return ['UI_PROCESS_CLOSURE_FAILED'] if failing else []
+                scope.spawn.side_effect = spawn
+                original_print = print
+                def emit(*args, **kwargs):
+                    if kwargs.get('file') is None: events.append('diagnostic')
+                    original_print(*args, **kwargs)
+                with mock.patch.object(self.ui, 'publish_container', return_value=('a' * 64, {'qualification': self.ui.BLOCKED, 'cgroupCaps': 'not-observed'}, {})), mock.patch.object(self.ui, '_PROCESSES', scope), mock.patch.object(self.ui, 'release_attached', return_value=({'maintenance': {}, 'retirement': {}}, None)), mock.patch.object(self.ui, 'cleanup_owned', side_effect=cleanup), mock.patch.object(self.ui.time, 'monotonic', return_value=100), mock.patch('builtins.print', side_effect=emit), contextlib.redirect_stdout(io.StringIO()) as public, contextlib.redirect_stderr(io.StringIO()) as errors:
+                    with self.assertRaisesRegex(self.ui.UiError, '^UI_SERVER_START_FAILED$'):
+                        self.ui.local_server_start({}, {}, Path(directory))
+                self.assertEqual(events, ['diagnostic', 'cleanup'])
+                receipt = json.loads((Path(directory) / 'start-failure.private.json').read_text())
+                self.assertEqual(receipt['startDiagnostic'], json.loads(public.getvalue()))
+                self.assertEqual(receipt['startDiagnostic']['exitCode'], 2)
+                self.assertEqual(receipt['cleanupErrors'], ['UI_PROCESS_CLOSURE_FAILED'] if failing else [])
+                self.assertNotIn('PRIVATE', public.getvalue() + errors.getvalue())
+
+    def test_start_deadline_exit_signal_and_unknown_observation(self):
+        for code, now, state, exit_code in ((None, 111, 'deadline', None),
+                                           (-15, 105, 'exited', -15), (1, 105, 'exited', 1),
+                                           (None, 105, 'unclassified', None), ('PRIVATE', 120, 'unclassified', None)):
+            with self.subTest(code=code, now=now):
+                record = self.startup_record(b'', code, now)
+                self.assertEqual((record['processState'], record['exitCode']), (state, exit_code))
+                self.assertEqual(record['diagnosticStatus'], 'unqualified')
+                self.assertIsNone(record['phase'])
+                self.assertIsNone(record['category'])
+                self.assertTrue(0 <= record['elapsedMs'] <= 10000)
+                self.assertNotIn('PRIVATE', json.dumps(record))
+
+    def test_start_unknown_malformed_oversize_and_injected_lines_never_leak(self):
+        remote = b'Error: "remote normal startup refused (REMOTE_SCHEMA_GATE_REFUSED, gate GATE_VALIDATION_FAILED, settlement no-write-opened): remote startup gate refused: schema validation failed"\n'
+        for raw in (b'PRIVATE_TOKEN libsql://private.invalid/private\n', self.START_MISSING + b'PRIVATE_TOKEN\n',
+                    self.START_MISSING[:-1], self.START_MISSING + b'x' * self.ui.START_DIAGNOSTIC_INPUT_CAP,
+                    self.START_MISSING.replace(b' is not set', b' PRIVATE_TOKEN is not set'),
+                    self.START_MISSING.replace(b'\n', b'\v'), self.START_MISSING + b'\xff\n',
+                    remote.replace(b'GATE_VALIDATION_FAILED', b'PRIVATE_TOKEN'),
+                    remote.replace(b'no-write-opened', b'commit-unknown'),
+                    remote.replace(b'schema validation failed', b'schema validation failed PRIVATE_TOKEN'),
+                    remote + self.START_MISSING):
+            with self.subTest(raw=raw[:40]):
+                record = self.startup_record(raw)
+                self.assertEqual(record['diagnosticStatus'], 'unqualified')
+                self.assertIsNone(record['phase'])
+                self.assertIsNone(record['category'])
+                self.assertNotIn('PRIVATE', json.dumps(record))
+                self.assertNotIn('libsql://', json.dumps(record))
+
+    def test_start_closed_remote_codes_gates_settlements_and_full_display(self):
+        samples = (
+            ('REMOTE_CONNECT_REFUSED', 'GATE_ENDPOINT_SHAPE', 'no-write-opened', 'remote libSQL primary connect refused (TLS endpoint and token required)', 'remote-connect-refused'),
+            ('REMOTE_SCHEMA_GATE_REFUSED', 'GATE_VALIDATION_FAILED', 'no-write-opened', 'remote startup gate refused: schema validation failed', 'remote-schema-gate-refused'),
+            ('REMOTE_SCHEMA_GATE_REFUSED', 'GATE_CATALOG_DIFFERS', 'writes-may-have-committed', 'remote schema gate refused after migration steps committed: SQLite schema definitions differ from compiled capability; unmarked/populated or altered schema refused', 'remote-schema-gate-refused'),
+            ('REMOTE_MIGRATION_STEP_FAILED', 'none', 'rollback-confirmation-withheld', 'remote migration step 12 failed; rollback confirmation withheld: driver error withheld', 'remote-migration-step-failed'),
+            ('REMOTE_MIGRATION_STEP_FAILED', 'none', 'cleanup-unconfirmed', 'remote migration step 12 failed; cleanup unconfirmed, admission quarantined: driver error withheld', 'remote-migration-step-failed'),
+            ('REMOTE_MIGRATION_COMMIT_UNKNOWN', 'none', 'commit-unknown', 'remote migration step 12 commit outcome is unknown; settlement receipt retained; rerun resumes from the ledger', 'remote-migration-commit-unknown'),
+            ('REMOTE_MIGRATION_CANCELLED', 'none', 'cancel-checkpoint-settled', 'remote migration cancelled after 12 settled step(s)', 'remote-migration-cancelled'),
+            ('REMOTE_DRAIN_FAILED', 'none', 'drain-failed', 'remote stream drain failed at close', 'remote-drain-failed'),
+            ('REMOTE_SCHEMA_GATE_REFUSED', 'none', 'drain-failed', 'remote startup gate refused: driver error withheld; remote stream drain failed at close', 'remote-schema-gate-refused'),
+        )
+        for code, gate, settlement, display, category in samples:
+            for phase in ('prepare-remote', 'server-remote'):
+                with self.subTest(code=code, phase=phase):
+                    tuple_text = '(' + code + ', gate ' + gate + ', settlement ' + settlement + '): ' + display
+                    line = ('fvoci: preparation failed; the server does not start: remote preparation refused ' + tuple_text
+                            if phase == 'prepare-remote' else 'Error: "remote normal startup refused ' + tuple_text + '"')
+                    record = self.startup_record((line + '\n').encode())
+                    self.assertEqual((record['diagnosticStatus'], record['phase'], record['category']), ('qualified', phase, category))
+                    self.assertEqual(self.startup_record((line + ' PRIVATE_TOKEN\n').encode())['diagnosticStatus'], 'unqualified')
+        for gate, texts in self.ui.START_GATE_TEXTS.items():
+            for text in texts:
+                line = 'Error: "remote normal startup refused (REMOTE_SCHEMA_GATE_REFUSED, gate ' + gate + ', settlement no-write-opened): remote startup gate refused: ' + text + '"\n'
+                self.assertEqual(self.startup_record(line.encode())['category'], 'remote-schema-gate-refused')
+        for value in ('2147483648', '-2147483649', '0012', '-0'):
+            line = 'fvoci: preparation failed; the server does not start: remote preparation refused (REMOTE_MIGRATION_STEP_FAILED, gate none, settlement rollback-confirmation-withheld): remote migration step ' + value + ' failed; rollback confirmation withheld: driver error withheld\n'
+            self.assertEqual(self.startup_record(line.encode())['diagnosticStatus'], 'unqualified')
+        line = 'fvoci: preparation failed; the server does not start: remote preparation refused (REMOTE_MIGRATION_CANCELLED, gate none, settlement cancel-checkpoint-settled): remote migration cancelled after 18446744073709551616 settled step(s)\n'
+        self.assertEqual(self.startup_record(line.encode())['diagnosticStatus'], 'unqualified')
+
+    def test_start_diagnostic_precedes_cleanup_and_survives_cleanup_receipt_stdout_faults(self):
+        manifest = {'binaries': {'fvoci-migrate': {'path': '/never-executed'}}}
+        for fault in ('none', 'finish', 'receipt', 'stdout', 'all'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                events = []
+                server = mock.Mock(poll=mock.Mock(return_value=2))
+                scope = mock.Mock()
+                def spawn(*args, **kwargs):
+                    kwargs['stdout'].write(self.START_MISSING)
+                    kwargs['stdout'].flush()
+                    return server
+                def finish(*args):
+                    events.append('cleanup')
+                    server.poll.return_value = 0
+                    if fault in ('finish', 'all'): raise self.ui.UiError('UI_PROCESS_CLOSURE_FAILED')
+                scope.spawn.side_effect = spawn
+                scope.finish.side_effect = finish
+                original_write = self.ui.write
+                def write(path, value):
+                    events.append('receipt')
+                    if fault in ('receipt', 'all'): raise OSError('PRIVATE_RECEIPT')
+                    original_write(path, value)
+                original_print = print
+                def emit(*args, **kwargs):
+                    if kwargs.get('file') is None:
+                        events.append('diagnostic')
+                        if fault in ('stdout', 'all'): raise OSError('PRIVATE_STDOUT')
+                    original_print(*args, **kwargs)
+                with mock.patch.object(self.ui, '_PROCESSES', scope), mock.patch.object(self.ui, 'execution_mode', return_value='github-ci'), mock.patch.object(self.ui.time, 'monotonic', return_value=100), mock.patch.object(self.ui, 'write', side_effect=write), mock.patch('builtins.print', side_effect=emit), contextlib.redirect_stdout(io.StringIO()) as public, contextlib.redirect_stderr(io.StringIO()) as errors:
+                    with self.assertRaisesRegex(self.ui.UiError, '^UI_SERVER_START_FAILED$'):
+                        self.ui.start(manifest, {}, Path(directory))
+                self.assertEqual(events, ['diagnostic', 'cleanup', 'receipt'])
+                if fault not in ('stdout', 'all'):
+                    record = json.loads(public.getvalue())
+                    self.assertEqual((record['exitCode'], record['category']), (2, 'missing-encryption-keyring'))
+                    self.assertLessEqual(len(public.getvalue().encode()), 2048)
+                if fault not in ('receipt', 'all'):
+                    receipt = json.loads((Path(directory) / 'start-failure.private.json').read_text())
+                    self.assertEqual(receipt['startDiagnostic']['exitCode'], 2)
+                    self.assertEqual(receipt['originalFailure'], 'UI_SERVER_START_FAILED')
+                self.assertNotIn('PRIVATE', public.getvalue() + errors.getvalue())
+
     @contextlib.contextmanager
     def direct_browser_inputs(self):
         with tempfile.TemporaryDirectory(prefix="fvoci-turso-cli-pure-") as directory:

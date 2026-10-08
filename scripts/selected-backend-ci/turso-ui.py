@@ -9,6 +9,7 @@ import ctypes
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -1092,6 +1093,138 @@ def stop(server, base, directory):
     return stopped
 
 
+START_DIAGNOSTIC_INPUT_CAP = 16 * 1024
+# Canonical, redacted texts from db/migrate.rs GATE_TEXTS. No source/error
+# text is ever copied into the public record, including a recognized line.
+START_GATE_TEXTS = {
+    'none': ('driver error withheld',),
+    'GATE_AHEAD_INCOMPLETE_UNPREPARED': ('SQLite schema is ahead, incomplete or unprepared',),
+    'GATE_GAP_FOREIGN_DIGEST': ('SQLite schema has a gap, foreign lineage or changed digest',),
+    'GATE_CATALOG_DIFFERS': ('SQLite schema definitions differ from compiled capability; unmarked/populated or altered schema refused',),
+    'GATE_RETIRED_LINEAGE': ('SQLite schema carries the retired development lineage; install into an empty database',),
+    'GATE_STEP_GAP': ('SQLite migration gap',),
+    'GATE_REFERENCE_PIN': ('SQLite schema reference engine pin mismatch',),
+    'GATE_FAMILY_HANDLE': ('SQLite schema gate requires an actual SQLite-family handle', 'SQLite migrations require an actual SQLite-family handle'),
+    'GATE_BACKEND_KIND': ('remote migrator requires the libsql-remote backend', 'remote startup requires the libsql-remote backend'),
+    'GATE_ENDPOINT_SHAPE': ('remote libSQL requires a TLS primary endpoint and token',),
+    'GATE_CANCELLED': ('SQLite migration cancelled at a checkpoint',),
+    'GATE_VALIDATION_FAILED': ('schema validation failed',),
+}
+START_REMOTE_CATEGORIES = {
+    'REMOTE_CONNECT_REFUSED': 'remote-connect-refused',
+    'REMOTE_SCHEMA_GATE_REFUSED': 'remote-schema-gate-refused',
+    'REMOTE_MIGRATION_STEP_FAILED': 'remote-migration-step-failed',
+    'REMOTE_MIGRATION_COMMIT_UNKNOWN': 'remote-migration-commit-unknown',
+    'REMOTE_MIGRATION_CANCELLED': 'remote-migration-cancelled',
+    'REMOTE_DRAIN_FAILED': 'remote-drain-failed',
+}
+
+
+def startup_remote_cause(line):
+    # Rust main's boxed String error uses Debug (quoted); preparation uses
+    # Display. Match the whole producer line and its complete closed tuple.
+    wrappers = (
+        ('fvoci: preparation failed; the server does not start: remote preparation refused ', 'prepare-remote'),
+        ('Error: "remote normal startup refused ', 'server-remote'),
+    )
+    for prefix, phase in wrappers:
+        if not line.startswith(prefix):
+            continue
+        tail = line[len(prefix):]
+        if phase == 'server-remote':
+            if not tail.endswith('"'):
+                return None
+            tail = tail[:-1]
+        match = re.fullmatch(r'\(([A-Z_]+), gate ([A-Z_]+|none), settlement ([a-z-]+)\): (.+)', tail)
+        if match is None:
+            return None
+        code, gate, settlement, display = match.groups()
+        if code not in START_REMOTE_CATEGORIES or gate not in START_GATE_TEXTS:
+            return None
+        number = re.search(r'^remote migration (?:step (-?[0-9]+)|cancelled after ([0-9]+)) ', display)
+        if number is not None:
+            value = number[1] or number[2]
+            parsed = int(value)
+            if str(parsed) != value or not ((-(2**31) <= parsed < 2**31) if number[1] else (0 <= parsed < 2**64)):
+                return None
+        if code == 'REMOTE_CONNECT_REFUSED' and gate not in ('none', 'GATE_BACKEND_KIND', 'GATE_ENDPOINT_SHAPE'):
+            return None
+        if code == 'REMOTE_MIGRATION_CANCELLED' and settlement == 'cancel-checkpoint-settled' and gate != 'none':
+            return None
+        drain = '; remote stream drain failed at close'
+        patterns = []
+        if code == 'REMOTE_CONNECT_REFUSED' and settlement == 'no-write-opened':
+            patterns = [re.escape('remote libSQL primary connect refused (TLS endpoint and token required)')]
+        elif code == 'REMOTE_SCHEMA_GATE_REFUSED':
+            stages = {'no-write-opened': ('remote schema gate refused before any write', 'remote startup gate refused'),
+                      'writes-may-have-committed': ('remote schema gate refused after migration steps committed',),
+                      'drain-failed': ('remote schema gate refused before any write', 'remote startup gate refused', 'remote schema gate refused after migration steps committed')}
+            patterns = [re.escape(stage + ': ' + text + (drain if settlement == 'drain-failed' else ''))
+                        for stage in stages.get(settlement, ()) for text in START_GATE_TEXTS[gate]]
+        elif code == 'REMOTE_MIGRATION_STEP_FAILED':
+            details = {'rollback-confirmation-withheld': ('rollback confirmation withheld',),
+                       'cleanup-unconfirmed': ('cleanup unconfirmed, admission quarantined',),
+                       'drain-failed': ('rollback confirmation withheld', 'cleanup unconfirmed, admission quarantined')}
+            patterns = [r'remote migration step -?[0-9]{1,10} failed; ' + re.escape(detail + ': ' + text + (drain if settlement == 'drain-failed' else ''))
+                        for detail in details.get(settlement, ()) for text in START_GATE_TEXTS[gate]]
+        elif code == 'REMOTE_MIGRATION_COMMIT_UNKNOWN' and settlement in ('commit-unknown', 'drain-failed'):
+            patterns = [r'remote migration step -?[0-9]{1,10}' + re.escape(' commit outcome is unknown; settlement receipt retained; rerun resumes from the ledger' + (drain if settlement == 'drain-failed' else ''))]
+        elif code == 'REMOTE_MIGRATION_CANCELLED' and settlement in ('cancel-checkpoint-settled', 'drain-failed'):
+            patterns = [r'remote migration cancelled after [0-9]{1,20}' + re.escape(' settled step(s)' + (drain if settlement == 'drain-failed' else ''))]
+        elif code == 'REMOTE_DRAIN_FAILED' and settlement == 'drain-failed':
+            patterns = [re.escape('remote stream drain failed at close')]
+        if any(re.fullmatch(pattern, display) for pattern in patterns):
+            return phase, START_REMOTE_CATEGORIES[code]
+    return None
+
+
+def server_start_diagnostic(server, logpath, started, deadline):
+    record = {'originalFailure': 'UI_SERVER_START_FAILED', 'diagnosticStatus': 'unqualified',
+              'processState': 'unclassified', 'exitCode': None, 'elapsedMs': None,
+              'phase': None, 'category': None}
+    try:
+        code = server.poll() if server is not None else None
+        now = time.monotonic()
+        if type(code) is int and -255 <= code <= 255:
+            record.update(processState='exited', exitCode=code)
+        elif server is not None and code is None and deadline is not None and now >= deadline:
+            record['processState'] = 'deadline'
+        if started is not None and math.isfinite(now - started):
+            record['elapsedMs'] = max(0, min(SERVER_BUDGET * 1000, int((now - started) * 1000)))
+        with logpath.open('rb') as source:
+            raw = source.read(START_DIAGNOSTIC_INPUT_CAP + 1)
+        if len(raw) > START_DIAGNOSTIC_INPUT_CAP or not raw or not raw.endswith(b'\n'):
+            return record
+        lines = raw.decode('ascii').split('\n')[:-1]
+        causes = []
+        missing = {'fvoci: ENCRYPTION_KEYS is not set (see the env example)',
+                   'fvoci: ENCRYPTION_ACTIVE_KEY_ID is not set (see the env example)'}
+        for line in lines:
+            line = line[:-1] if line.endswith('\r') else line
+            if line in missing:
+                causes.append(('prepare-config', 'missing-encryption-keyring'))
+            elif line not in ('fvoci: not starting; fix .env and run docker compose up -d again',
+                              'fvoci: prepared; starting the server'):
+                cause = startup_remote_cause(line)
+                if cause is None:
+                    return record
+                causes.append(cause)
+        if causes and len(set(causes)) == 1:
+            record.update(diagnosticStatus='qualified', phase=causes[0][0], category=causes[0][1])
+    except BaseException:
+        pass
+    return record
+
+
+def publish_start_diagnostic(server, logpath, started, deadline):
+    record = server_start_diagnostic(server, logpath, started, deadline)
+    try:
+        print(json.dumps(record, separators=(',', ':')), flush=True)
+    except BaseException:
+        pass
+    return record
+
+
 def start(manifest, environment, directory, expected_setup=False):
     if execution_mode() == 'orca-local':
         return local_server_start(manifest, environment, directory, expected_setup)
@@ -1100,7 +1233,8 @@ def start(manifest, environment, directory, expected_setup=False):
     os.fchmod(log.fileno(), 0o600)
     server = _PROCESSES.spawn([manifest['binaries']['fvoci-migrate']['path'], '--start'], 'server',
                 env=environment, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
-    deadline = time.monotonic() + 10
+    started = time.monotonic()
+    deadline = started + 10
     try:
         while True:
             raw = logpath.read_bytes()
@@ -1121,6 +1255,8 @@ def start(manifest, environment, directory, expected_setup=False):
             require(response.status == 200 and json.loads(response.read())['needed'] is expected_setup, 'UI_INITIALIZED_SETUP_CHANGED')
         return server, base, log
     except BaseException as original:
+        diagnostic = (publish_start_diagnostic(server, logpath, started, deadline)
+                      if failure_code(original) == 'UI_SERVER_START_FAILED' else None)
         cleanup = []
         try:
             _PROCESSES.finish(server, True)
@@ -1131,7 +1267,10 @@ def start(manifest, environment, directory, expected_setup=False):
         except BaseException:
             cleanup.append('UI_SERVER_LOG_CLOSE_FAILED')
         try:
-            write(directory / 'start-failure.private.json', {'originalFailure': failure_code(original), 'cleanupErrors': cleanup})
+            receipt = {'originalFailure': failure_code(original), 'cleanupErrors': cleanup}
+            if diagnostic is not None:
+                receipt['startDiagnostic'] = diagnostic
+            write(directory / 'start-failure.private.json', receipt)
         except BaseException:
             print(json.dumps({'originalFailure': failure_code(original), 'cleanupErrors': cleanup, 'receiptWrite': 'failed'}), file=sys.stderr)
         raise
@@ -1867,6 +2006,7 @@ def local_server_start(manifest, environment, directory, expected_setup=False):
     log = None
     server = None
     go_fd = None
+    started = deadline = logpath = None
     try:
         require(creation['qualification'] == BLOCKED and creation['cgroupCaps'] == 'not-observed',
                 'UI_DAEMON_OBSERVATION_UNSUPPORTED')
@@ -1874,6 +2014,7 @@ def local_server_start(manifest, environment, directory, expected_setup=False):
         log = logpath.open('xb')
         os.fchmod(log.fileno(), 0o600)
         deadline = budget_deadline(SERVER_BUDGET)
+        started = deadline - SERVER_BUDGET
         server = _PROCESSES.spawn(['docker', 'start', '--attach', container_id], 'server',
                                   env=clean_env(), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         server.container_id = container_id
@@ -1896,6 +2037,8 @@ def local_server_start(manifest, environment, directory, expected_setup=False):
                     'UI_INITIALIZED_SETUP_CHANGED')
         return server, base, log
     except BaseException as original:
+        diagnostic = (publish_start_diagnostic(server, logpath, started, deadline)
+                      if failure_code(original) == 'UI_SERVER_START_FAILED' else None)
         held = [go_fd]
         if server is not None:
             held.append(getattr(server, 'go_fd', None))
@@ -1907,6 +2050,12 @@ def local_server_start(manifest, environment, directory, expected_setup=False):
                 log.close()
         except BaseException:
             errors.append('UI_SERVER_LOG_CLOSE_FAILED')
+        if diagnostic is not None:
+            try:
+                write(directory / 'start-failure.private.json', {'originalFailure': failure_code(original),
+                      'cleanupErrors': errors, 'startDiagnostic': diagnostic})
+            except BaseException:
+                errors.append('UI_PROCESS_RECEIPT_WRITE_FAILED')
         report_cleanup(original, errors)
         raise original
 
