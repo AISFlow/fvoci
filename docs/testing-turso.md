@@ -3,7 +3,8 @@
 The source consumers are prepared; Rust compilation and actual Turso execution are
 **NOT RUN**. Independent review and a separately allocated execution are still required.
 The integrator (통합) may publish the reviewed fixed source to the single hardcoded branch
-`fvoci/v060-turso-verified-connection`. Its push bootstrap runs **only pure
+`fvoci/v060-turso-verified-connection` under the same review and approval
+rules as the PR branch in AGENTS.md. Its push bootstrap runs **only pure
 fixtures/source admission**, with no Environment, credentials, build or probe.
 The secret job permits only manual dispatch on main or that exact same-repo
 reviewed branch, checking exact github.sha. No free-form checkout input, PR,
