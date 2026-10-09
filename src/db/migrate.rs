@@ -1064,11 +1064,8 @@ fn start_sqlite_migration_owned(
                     .build()
                     .map_err(sqlx::Error::Io)?;
                 #[cfg(feature = "db-tests")]
-                let ran = runtime.block_on(run_sqlite_migration_owned(
-                    &path,
-                    &owned_cancel,
-                    control,
-                ));
+                let ran =
+                    runtime.block_on(run_sqlite_migration_owned(&path, &owned_cancel, control));
                 #[cfg(not(feature = "db-tests"))]
                 let ran = runtime.block_on(run_sqlite_migration_owned(&path, &owned_cancel));
                 ran

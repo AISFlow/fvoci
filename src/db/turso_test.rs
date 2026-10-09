@@ -2072,9 +2072,9 @@ fn reset_user_data_count_sql_owned() -> String {
         let Some(name) = reset_user_data_table(statement) else {
             continue;
         };
-        debug_assert!(name.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
-        }));
+        debug_assert!(name
+            .bytes()
+            .all(|byte| { byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' }));
         if !first {
             sql.push('+');
         }
@@ -2472,10 +2472,7 @@ mod reset_policy_tests {
 
     #[test]
     fn reset_refuses_simulated_user_rows_without_admitting_drops() {
-        assert_eq!(
-            reset_user_data_admitted(1),
-            Err("RESET_USER_DATA_PRESENT")
-        );
+        assert_eq!(reset_user_data_admitted(1), Err("RESET_USER_DATA_PRESENT"));
         let refused = ResetOutcome::refused("RESET_USER_DATA_PRESENT");
         assert_eq!(refused.steps, 0);
         assert_eq!(refused.commit, "NOT_STARTED");
@@ -2483,7 +2480,8 @@ mod reset_policy_tests {
         let sql = reset_user_data_count_sql();
         for required in ["workspaces", "users", "documents", "sessions", "tasks"] {
             assert_eq!(
-                sql.matches(&format!("(SELECT count(*) FROM \"{required}\")")).count(),
+                sql.matches(&format!("(SELECT count(*) FROM \"{required}\")"))
+                    .count(),
                 1,
                 "{required}"
             );
@@ -2663,7 +2661,10 @@ mod reset_policy_tests {
             .unwrap();
         remote_family(&mut tx)
             .unwrap()
-            .execute("DELETE FROM workspaces WHERE id=?1", &[Cell::uuid(workspace)])
+            .execute(
+                "DELETE FROM workspaces WHERE id=?1",
+                &[Cell::uuid(workspace)],
+            )
             .await
             .unwrap();
         tx.commit_with_cleanup().await.unwrap();
