@@ -309,7 +309,8 @@ test("file drop keeps multi-file order and moving anchors, clipboard paste persi
       );
     });
     // Click the visible text, rather than the centre of the full-width block.
-    // Observe PM and the browser agreeing before delivering native paste.
+    // Parent text is already "끝" while the caret is still at its start.
+    // Wait until PM and the browser both collapse at that paragraph's end.
     await blockAt(a.page, 3).click({ position: { x: 8, y: 8 } });
     await a.page.keyboard.press("End");
     await expect
@@ -320,9 +321,14 @@ test("file drop keeps multi-file order and moving anchors, clipboard paste persi
               editor: {
                 state: {
                   selection: {
+                    empty: boolean;
+                    from: number;
                     $from: {
+                      parentOffset: number;
+                      end: () => number;
                       parent: {
                         textContent: string;
+                        content: { size: number };
                       };
                     };
                   };
@@ -330,13 +336,30 @@ test("file drop keeps multi-file order and moving anchors, clipboard paste persi
               };
             }
           ).editor;
+          const selection = editor.state.selection;
+          const parent = selection.$from.parent;
+          const native = window.getSelection();
+          const anchor = native?.anchorNode ?? null;
+          const anchorText = anchor?.textContent ?? null;
+          const collapsedAtEnd =
+            selection.empty &&
+            selection.from === selection.$from.end() &&
+            selection.$from.parentOffset === parent.content.size &&
+            native !== null &&
+            native.isCollapsed &&
+            anchor !== null &&
+            anchor.nodeType === Node.TEXT_NODE &&
+            anchorText !== null &&
+            anchorText === parent.textContent &&
+            native.anchorOffset === anchorText.length;
           return {
-            parent: editor.state.selection.$from.parent.textContent,
-            native: window.getSelection()?.anchorNode?.textContent,
+            parent: parent.textContent,
+            native: anchorText,
+            collapsedAtEnd,
           };
         }),
       )
-      .toEqual({ parent: "끝", native: "끝" });
+      .toEqual({ parent: "끝", native: "끝", collapsedAtEnd: true });
     await a.page.keyboard.press("Control+V"); // real browser paste -> FileHandler
     expect(await a.page.evaluate(() => (window as InputWindow).fvociInputPaste)).toEqual({
       trusted: true,
