@@ -1469,32 +1469,6 @@ async function rejectLikePython(group: RuleGroup) {
     rmSync(dir, { recursive: true, force: true });
   }
 }
-function passedPythonNames(stderr: string): string[] {
-  const names: string[] = [];
-  for (const line of stderr.split("\n")) {
-    const match = /^(test_[A-Za-z0-9_]+) \(.+\) \.\.\. ok$/.exec(line.trim());
-    if (match?.[1]) names.push(match[1]);
-  }
-  return names;
-}
-function passedBunNames(stdout: string, stderr: string): string[] {
-  const names: string[] = [];
-  const ansi = /\u001b\[[0-9;]*m/g;
-  for (const raw of `${stdout}\n${stderr}`.split("\n")) {
-    const line = raw.replace(ansi, "").trim();
-    const match = /^\(pass\) (test_[A-Za-z0-9_]+)(?:\s|$)/.exec(line);
-    if (match?.[1]) names.push(match[1]);
-  }
-  return names;
-}
-function assertSameNames(actual: string[], expected: string[], context: string) {
-  const left = actual.slice().sort();
-  const right = expected.slice().sort();
-  if (left.join("\n") !== right.join("\n")) {
-    fail(`${context}\nactual:\n${left.join("\n")}\nexpected:\n${right.join("\n")}`);
-  }
-}
-
 beforeAll(async () => {
   const verified = await run([process.execPath, "--bun", "scripts/verify-web-tools.mjs"]);
   if (verified.returncode !== 0) fail(outputOf(verified));
@@ -1562,40 +1536,6 @@ test.serial(
   },
   { timeout: proofTimeoutMs },
 );
-test.serial(
-  "parity: python and typescript suites pass the same test names",
-  async () => {
-    if (finishedPorted !== ported.length)
-      fail(`ported tests finished ${finishedPorted} of ${ported.length}`);
-    removeSuiteDirectory();
-    // Two spawns, measured about 210s each. 300s + 300s equals this test's 600s
-    // cap and is below the previous 360s spawn cap. This proof re-runs Python
-    // and is removed with Python in the B commit. It does not fit the 15-minute
-    // web-static job.
-    const py = await run(["python3", "scripts/test_eslint.py"], {
-      extraEnv: { PYTHONDONTWRITEBYTECODE: "1" },
-      timeout: 300,
-    });
-    const ts = await run(
-      [
-        process.execPath,
-        "test",
-        "scripts/ci/eslint-fixtures.test.ts",
-        "--test-name-pattern",
-        "^test_",
-      ],
-      { timeout: 300 },
-    );
-    if (py.returncode !== 0) fail(py.stderr.slice(-8000));
-    if (ts.returncode !== 0) fail((ts.stdout + ts.stderr).slice(-8000));
-    const expected = ported.map(([name]) => name);
-    assertSameNames(passedPythonNames(py.stderr), expected, "python");
-    assertSameNames(passedBunNames(ts.stdout, ts.stderr), expected, "typescript");
-  },
-  // Measured about 410–430s. 600s is unchanged.
-  { timeout: 600_000 },
-);
-
 afterAll(() => {
   reapLeftovers();
 }, proofTimeoutMs);
