@@ -79,7 +79,8 @@ jobs:
       - name: restore.sh env-file parsing and app password argv checks
         run: bash scripts/test-restore-env.sh
       - name: Restore Cargo downloads
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: cache_fast_5
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -205,6 +206,14 @@ jobs:
         with:
           path: target/db-lib
           key: ${{ steps.db_lib_cache.outputs.cache-primary-key }}
+      - name: Save Cargo downloads
+        if: github.ref == 'refs/heads/main' && steps.cache_fast_5.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
 
   # Default-feature build/policy previously ran only on PostgreSQL ARM A.
   # Give that same check its own budget so DB compilation/tests keep their 15m.
@@ -803,7 +812,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup toolchain install 1.98.1 --profile minimal
       - name: Restore Cargo downloads
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: cache_collaboration_3
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -849,7 +859,8 @@ jobs:
             --cache-fallback --expected-cache-identity "${{ steps.sqlite.outputs.cache_identity }}" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
       - name: Restore server build outputs
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: cache_collaboration_4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target
           key: v2-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-collaboration-db-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-${{ steps.sqlite.outputs.cache_identity }}
@@ -877,6 +888,20 @@ jobs:
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
           FVOCI_COLLAB_ENGINE: ${{ github.workspace }}/crates/collab-engine/target/debug/collab-engine
         run: bash scripts/run-rust-collaboration-ci-tests.sh
+      - name: Save Cargo downloads
+        if: github.ref == 'refs/heads/main' && steps.cache_collaboration_3.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: v1-cargo-collaboration-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/collab-engine/Cargo.lock', 'crates/collab-engine/Cargo.toml') }}
+      - name: Save server build outputs
+        if: github.ref == 'refs/heads/main' && steps.cache_collaboration_4.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: target
+          key: v2-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-collaboration-db-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-${{ steps.sqlite.outputs.cache_identity }}
 
   rust-ci-gate:
     name: rust-ci-gate

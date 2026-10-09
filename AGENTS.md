@@ -77,6 +77,16 @@ Environment secret은 사용자만 넣거나 바꾸며, 봇은 시크릿을 만�
 제출은 handoff의 SHA·변경·검사·남은 위험을 포함한다. 완료 메시지와 통합 수락을 구분하며, 통합 후 새 head에서 필요한 CI를 확인한다.
 PR 수락·머지는 전체 종료/릴리스/배포 완료가 아니다. 전체 종료는 handoff의 필수 검증·독립 검토·main 수락 조건으로만 판단하며 opt-in·후속 분류로 범위를 제외하지 않는다.
 
+## 승인 경로와 CI 예외
+
+아래 규칙은 일반 원격 반영 승인에도 적용한다.
+
+- A: 새 검증 wrapper는 금지하며, 손 절차를 대체하는 지정 task의 xtask 하위 명령만 명시적 예외로 허용한다. 무관 프레임워크나 새 Python(인라인·생성 포함)은 이 예외로 허용하지 않는다.
+- B: 진행 중 CI 직접 취소는 금지한다. 기존 workflow의 pull_request 이벤트 자동 취소(cancel-in-progress, group에 PR 번호)는 그대로 둔다. 새 예외는 `draft/*` push의 자동 취소뿐이며, main과 #347 브랜치 push에는 적용하지 않는다. 자동 취소된 run은 `CANCELLED(대체됨)`로 기록하고 판정 근거로 쓰지 않는다.
+- C: 승인 경로 커밋은 해당 독립 리뷰어 ACCEPT 후 영환님에게 적층 순서의 40자 SHA 목록으로 묶어 승인을 받는다. 목록의 검토·승인 동안 #347을 동결하며, 승인 후 SHA가 바뀌면 다시 승인을 받는다.
+- D: `docs/rewrite.md`는 승인 경로에서 제외하고 리뷰어 ACCEPT만으로 진행한다. `docs/testing-turso.md`, `.github/workflows/`, `xtask/**`, `AGENTS.md`, `.agents/`는 승인 경로로 유지하며, `scripts/ci_selection.py`의 기존 특수 보호도 유지한다.
+- E: Turso는 최종 head의 나머지 필수 CI가 모두 PASS한 뒤 통합 담당자가 정확한 40자 SHA로 한 번만 dispatch한다. run의 `head_sha`가 요청 SHA와 일치하는지 대조하며, head가 바뀌면 Turso 결과는 `MISSING`으로 처리한다.
+
 ## 대상 원격 반영 승인 범위
 
 최신 사용자 지시가 과거 승인보다 우선하며, 이 문서는 새 권한을 만들지 않는다.
