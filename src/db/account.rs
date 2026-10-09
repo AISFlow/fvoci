@@ -12,6 +12,9 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use super::backend::OperationTx;
+use super::codec::Cell;
+
 use crate::auth::token::{hash_token, new_token, token_hashes_eq};
 use crate::db::context::{
     clear_self_user, lock_membership_users, recheck_session, set_self_user, set_system, set_tenant,
@@ -730,21 +733,34 @@ pub async fn anonymize_withdrawn_user(
     cutoff: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    lock_account(&mut tx, user_id).await?;
-    let Some(current) = account_row(&mut tx, user_id).await? else {
+    let erased = anonymize_withdrawn_user_in_tx(&mut tx, user_id, now, cutoff).await?;
+    if erased {
+        tx.commit().await?;
+    } else {
         tx.rollback().await?;
+    }
+    Ok(erased)
+}
+
+async fn anonymize_withdrawn_user_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    now: DateTime<Utc>,
+    cutoff: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    lock_account(tx, user_id).await?;
+    let Some(current) = account_row(tx, user_id).await? else {
         return Ok(false);
     };
     match current.deleted_at {
         Some(deleted_at) if current.anonymized_at.is_none() && deleted_at <= cutoff => {}
         _ => {
-            tx.rollback().await?;
             return Ok(false);
         }
     }
     // Source `withdrawn.displayName`, read in this transaction; an override
     // the name limit would reject keeps the default.
-    let messages = crate::settings::messages::load(&mut *tx).await?;
+    let messages = crate::settings::messages::load(&mut **tx).await?;
     let display_name = messages.field(Message::WithdrawnDisplayName, |name| {
         crate::validate::validate_given_name(name).is_ok()
     });
@@ -755,43 +771,42 @@ pub async fn anonymize_withdrawn_user(
             .bind(anonymized_email())
             .bind(now)
             .bind(cutoff)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
     if !anonymized {
-        tx.rollback().await?;
         return Ok(false);
     }
-    let previous = set_system(&mut tx).await?;
+    let previous = set_system(tx).await?;
     sqlx::query("DELETE FROM fvoci.notifications WHERE user_id = $1")
         .bind(user_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    crate::db::context::restore_system(&mut tx, &previous).await?;
+    crate::db::context::restore_system(tx, &previous).await?;
     sqlx::query("SELECT fvoci.app_attachments_scrub_uploader($1, $2)")
         .bind(user_id)
         .bind(SCRUBBED_ATTACHMENT_NAME)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     sqlx::query("DELETE FROM fvoci.sessions WHERE user_id = $1")
         .bind(user_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     // Source: userMfa.remove + identityLinks.purgeAllByUserId. A pending
     // challenge of a withdrawn account never completes (deleted_at) and the
     // token GC removes it.
-    let previous = set_system(&mut tx).await?;
+    let previous = set_system(tx).await?;
     for sql in [
         "DELETE FROM fvoci.user_mfa WHERE user_id = $1",
         "DELETE FROM fvoci.identity_links WHERE user_id = $1",
     ] {
-        sqlx::query(sql).bind(user_id).execute(&mut *tx).await?;
+        sqlx::query(sql).bind(user_id).execute(&mut **tx).await?;
     }
-    crate::db::context::restore_system(&mut tx, &previous).await?;
+    crate::db::context::restore_system(tx, &previous).await?;
     if let Some(workspace_id) = current.personal_workspace_id {
-        mark_personal_workspace_deleted(&mut tx, workspace_id).await?;
+        mark_personal_workspace_deleted(tx, workspace_id).await?;
     }
     record_account_change(
-        &mut tx,
+        tx,
         user_record(
             "user.anonymized",
             None,
@@ -801,8 +816,142 @@ pub async fn anonymize_withdrawn_user(
         ),
     )
     .await?;
-    tx.commit().await?;
     Ok(true)
+}
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn maintenance_withdrawn_due(
+        &mut self,
+        cutoff: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<Uuid>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_scalar("SELECT id FROM fvoci.users WHERE deleted_at IS NOT NULL AND deleted_at <= $1 AND anonymized_at IS NULL ORDER BY deleted_at ASC, id ASC LIMIT $2")
+                .bind(cutoff).bind(limit).fetch_all(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_system_context()?;
+                tx.query("SELECT id FROM users WHERE deleted_at IS NOT NULL AND deleted_at <= ?1 AND anonymized_at IS NULL ORDER BY deleted_at, id LIMIT ?2", &[Cell::instant(cutoff)?, Cell::Integer(limit)])
+                    .await?.iter().map(|row| row.cell(0)?.id()).collect()
+            }
+        }
+    }
+
+    /// Same all-or-nothing per-user erasure as the PG wrapper, borrowing the
+    /// consumer's current writer so claim checks and COMMIT cannot drift.
+    pub(crate) async fn maintenance_anonymize_withdrawn(
+        &mut self,
+        user: Uuid,
+        now: DateTime<Utc>,
+        cutoff: DateTime<Utc>,
+    ) -> Result<bool, sqlx::Error> {
+        if let Self::Postgres(tx) = self {
+            return anonymize_withdrawn_user_in_tx(tx, user, now, cutoff).await;
+        }
+        let messages = crate::db::notifications::mail_messages(self).await?;
+        let display_name = messages.field(Message::WithdrawnDisplayName, |name| {
+            crate::validate::validate_given_name(name).is_ok()
+        });
+        let Self::SqliteFamily(tx) = self else {
+            unreachable!()
+        };
+        tx.require_writer()?;
+        tx.require_system_context()?;
+        // The writer reserves the actual current user and personal workspace.
+        // PG025 additionally caps the supplied cutoff at DB now minus 14 days.
+        let row = tx.query("SELECT personal_workspace_id FROM users WHERE id=?1 AND anonymized_at IS NULL AND deleted_at IS NOT NULL AND deleted_at <= min(?2,(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)-?3)", &[Cell::uuid(user), Cell::instant(cutoff)?, Cell::Integer(WITHDRAW_GRACE_DAYS*86_400_000_000)]).await?;
+        let Some(row) = row.first() else {
+            return Ok(false);
+        };
+        let personal_workspace = row.cell(0)?.optional(Cell::id)?;
+        let changed = tx.execute("UPDATE users SET given_name=?2,family_name=NULL,email=?3,password_hash=NULL,withdraw_cancel_token_hash=NULL,anonymized_at=?4,auth_generation=auth_generation+1,updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE id=?1 AND anonymized_at IS NULL AND deleted_at IS NOT NULL AND deleted_at <= min(?5,(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)-?6)", &[Cell::uuid(user), Cell::text(display_name), Cell::text(anonymized_email()), Cell::instant(now)?, Cell::instant(cutoff)?, Cell::Integer(WITHDRAW_GRACE_DAYS*86_400_000_000)]).await?;
+        if changed != 1 {
+            return Ok(false);
+        }
+        tx.execute(
+            "DELETE FROM notifications WHERE user_id=?1",
+            &[Cell::uuid(user)],
+        )
+        .await?;
+        tx.execute("UPDATE attachments SET name=?2 WHERE uploader_id=?1 AND EXISTS(SELECT 1 FROM users WHERE id=?1 AND anonymized_at IS NOT NULL)", &[Cell::uuid(user), Cell::text(SCRUBBED_ATTACHMENT_NAME)]).await?;
+        for sql in [
+            "DELETE FROM sessions WHERE user_id=?1",
+            "DELETE FROM user_mfa WHERE user_id=?1",
+            "DELETE FROM identity_links WHERE user_id=?1",
+        ] {
+            tx.execute(sql, &[Cell::uuid(user)]).await?;
+        }
+        if let Some(workspace) = personal_workspace {
+            let live = tx.query("SELECT 1 FROM workspaces WHERE id=?1 AND kind='personal' AND deleted_at IS NULL", &[Cell::uuid(workspace)]).await?;
+            if !live.is_empty() {
+                tx.set_tenant(workspace)?;
+                for sql in [
+                    "DELETE FROM invitations WHERE workspace_id=?1",
+                    "DELETE FROM ics_tokens WHERE workspace_id=?1",
+                    "DELETE FROM api_tokens WHERE workspace_id=?1",
+                    "DELETE FROM memberships WHERE workspace_id=?1",
+                ] {
+                    tx.execute(sql, &[Cell::uuid(workspace)]).await?;
+                }
+                tx.execute("UPDATE workspaces SET deleted_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000),updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE id=?1 AND kind='personal' AND deleted_at IS NULL", &[Cell::uuid(workspace)]).await?;
+                self.maintenance_account_record(AccountRecord {
+                    verb: "workspace.deleted",
+                    actor_user_id: None,
+                    target_id: workspace,
+                    payload: json!({}),
+                    audit_payload: None,
+                    ip: None,
+                    channel: "system",
+                    workspace_id: Some(workspace),
+                    target_type: "workspace",
+                })
+                .await?;
+            }
+        }
+        self.maintenance_account_record(user_record(
+            "user.anonymized",
+            None,
+            user,
+            json!({"userId":user.to_string()}),
+            None,
+        ))
+        .await?;
+        Ok(true)
+    }
+
+    async fn maintenance_account_record(
+        &mut self,
+        record: AccountRecord<'_>,
+    ) -> Result<(), sqlx::Error> {
+        if let Self::Postgres(tx) = self {
+            return record_account_change(tx, record).await;
+        }
+        let previous = self.set_system().await?;
+        self.append_event_channel(
+            crate::db::identity::EventAppend {
+                id: Uuid::now_v7(),
+                workspace_id: record.workspace_id,
+                actor_user_id: record.actor_user_id,
+                verb: record.verb.to_string(),
+                target_type: Some(record.target_type.to_string()),
+                target_id: Some(record.target_id),
+                payload: record.payload.clone(),
+            },
+            record.channel,
+        )
+        .await?;
+        self.append_audit(AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: record.workspace_id,
+            actor_user_id: record.actor_user_id,
+            verb: record.verb.to_string(),
+            target_type: Some(record.target_type.to_string()),
+            target_id: Some(record.target_id),
+            payload: record.audit_payload.unwrap_or(record.payload),
+            ip: record.ip.map(str::to_string),
+        })
+        .await?;
+        self.restore_system(previous).await
+    }
 }
 
 /// Source `changePassword` transaction. `expected_hash` is the hash the caller

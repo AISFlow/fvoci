@@ -30,6 +30,7 @@ import { workflowQuery } from "@/features/projects/queries";
 import { WORKSPACE_ITEM_PATH } from "@/vue/route-paths";
 import { VUE_ROUTE_PATHS } from "../../route-paths.ts";
 import { leaveTo } from "../../session/navigation.ts";
+import { useOffWikiBody } from "../../composables/useOffWikiBody";
 
 function queryClient(): QueryClient {
   return new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
@@ -322,7 +323,12 @@ async function detailGrants(options: {
     "../capture/personal-transfer-command": { taskTransferDocument, taskTransferPrepare },
     "@/features/documents/collab-model": { collabUserOf },
     "@/lib/href": { projectTasksPath },
-    "@/lib/queries": { meQuery: {}, workspacesQuery: { queryKey: ["workspaces"] } },
+    "@/lib/queries": {
+      meQuery: {},
+      setupStatusQuery: { queryKey: ["setup", "status"] },
+      workspacesQuery: { queryKey: ["workspaces"] },
+    },
+    "../../composables/useOffWikiBody": { useOffWikiBody },
     "@tanstack/vue-query": {
       // Controlled shapes only: the personal workspace and this task's single
       // origin when asked for, otherwise nothing loaded and no error.
@@ -331,13 +337,16 @@ async function detailGrants(options: {
           queryKey?: readonly unknown[];
         };
         const family = query.queryKey?.[0];
-        const data = !options.transferOrigin
-          ? null
-          : family === "workspaces"
-            ? { items: [{ id: "w", kind: "personal" }] }
-            : family === "task-origins"
-              ? { count: 1, items: [{ documentId: "d", taskId: "t" }] }
-              : null;
+        const data =
+          family === "setup"
+            ? { realtimeMode: "on" }
+            : !options.transferOrigin
+              ? null
+              : family === "workspaces"
+                ? { items: [{ id: "w", kind: "personal" }] }
+                : family === "task-origins"
+                  ? { count: 1, items: [{ documentId: "d", taskId: "t" }] }
+                  : null;
         return { data: Vue.ref(data), error: Vue.ref(null) };
       },
     },

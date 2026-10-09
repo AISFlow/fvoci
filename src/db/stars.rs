@@ -208,6 +208,109 @@ pub async fn list_stars(
     Ok(Ok(items))
 }
 
+/// Selected list consumer. PG retains its public read/RLS boundary; family
+/// authority and target hydration share one snapshot, released before return.
+pub async fn list_stars_backend(
+    backend: &crate::db::backend::Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    credential_id: Uuid,
+    kinds: Option<&[ContentKind]>,
+) -> Result<Result<Vec<StarItem>, StarDbError>, sqlx::Error> {
+    use crate::db::backend::{Backend, OperationTx};
+    use crate::db::codec::Cell;
+    use crate::projects::ProjectPermission;
+    if let Backend::Postgres(pool) = backend {
+        return list_stars(pool, workspace_id, actor_user_id, credential_id, kinds).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        if !op.session_is_live(actor_user_id, credential_id).await? {
+            return Ok(Err(StarDbError::Forbidden));
+        }
+        if !op.workspace_is_live(workspace_id).await? {
+            return Ok(Err(StarDbError::NotFound));
+        }
+        if op.membership_role(workspace_id, actor_user_id, false).await?.is_none() {
+            return Ok(Err(StarDbError::Forbidden));
+        }
+        let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+        let rows = family.query(
+            "SELECT id,type,target_id,title,project_id,number,created_at FROM (
+                SELECT s.id,'document' AS type,d.id AS target_id,d.title,d.project_id,d.number,s.created_at
+                FROM stars s JOIN documents d ON d.workspace_id=s.workspace_id AND d.id=s.document_id
+                WHERE s.workspace_id=?1 AND s.user_id=?2 AND ?3 AND d.deleted_at IS NULL
+                UNION ALL
+                SELECT s.id,'task' AS type,t.id AS target_id,t.title,t.project_id,t.number,s.created_at
+                FROM stars s JOIN tasks t ON t.workspace_id=s.workspace_id AND t.id=s.task_id
+                WHERE s.workspace_id=?1 AND s.user_id=?2 AND ?4 AND t.deleted_at IS NULL AND t.archived_at IS NULL
+             ) ORDER BY created_at DESC,id DESC",
+            &[Cell::uuid(workspace_id),Cell::uuid(actor_user_id),
+              Cell::Integer(kind_allowed(kinds,ContentKind::Document) as i64),
+              Cell::Integer(kind_allowed(kinds,ContentKind::Task) as i64)],
+        ).await?;
+        let mut projects = std::collections::HashMap::new();
+        let mut items = Vec::new();
+        for row in rows {
+            let kind = match row.cell(1)?.string()?.as_str() {
+                "document" => ContentKind::Document,
+                "task" => ContentKind::Task,
+                _ => return Err(sqlx::Error::Protocol("invalid star target kind".into())),
+            };
+            let target_id = row.cell(2)?.id()?;
+            let project_id = row.cell(4)?.optional(Cell::id)?;
+            let visible = if let Some(project) = project_id {
+                if let Some(visible) = projects.get(&project) {
+                    *visible
+                } else {
+                    let visible = op.project_permission_by_id(workspace_id,actor_user_id,project)
+                        .await?.is_some_and(|p| p.at_least(ProjectPermission::View));
+                    projects.insert(project,visible);
+                    visible
+                }
+            } else if kind == ContentKind::Document {
+                op.document_permission(workspace_id,actor_user_id,target_id,true)
+                    .await?.at_least(ProjectPermission::View)
+            } else { false };
+            if visible {
+                items.push(StarItem {id:row.cell(0)?.id()?,kind,target_id,
+                    title:row.cell(3)?.string()?,project_id,number:row.cell(5)?.int32()?,
+                    created_at:row.cell(6)?.datetime()?});
+            }
+        }
+        Ok(Ok(items))
+    }.await;
+    // This read has no writes to commit. Actual awaited rollback is its finish;
+    // failed cleanup cannot turn a collected row or denial into a success.
+    let cleanup = tx.rollback().await;
+    star_read_after_rollback(result, cleanup)
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("star list read refused: {0:?}")]
+struct StarReadRefusal(StarDbError);
+
+fn star_read_after_rollback(
+    result: Result<Result<Vec<StarItem>, StarDbError>, sqlx::Error>,
+    cleanup: Result<(), sqlx::Error>,
+) -> Result<Result<Vec<StarItem>, StarDbError>, sqlx::Error> {
+    match cleanup {
+        Ok(()) => result,
+        Err(cleanup) => {
+            let original: Option<Box<dyn std::error::Error + Send + Sync>> = match result {
+                Err(driver) => Some(Box::new(driver)),
+                Ok(Err(refusal)) => Some(Box::new(StarReadRefusal(refusal))),
+                Ok(Ok(_)) => None,
+            };
+            Err(crate::db::backend::rollback_cleanup_unknown(
+                original, cleanup,
+            ))
+        }
+    }
+}
+
 /// Idempotent: starring the same target again returns the existing star.
 pub async fn add_star(
     pool: &PgPool,
@@ -403,4 +506,51 @@ pub async fn list_recent(
             },
         )
         .collect()))
+}
+
+#[cfg(test)]
+mod selected_star_read_finish_tests {
+    use super::*;
+    #[test]
+    fn star_read_cleanup_retains_refusal_and_driver_without_returning_rows() {
+        for domain in [true, false] {
+            let result = if domain {
+                Ok(Err(StarDbError::Forbidden))
+            } else {
+                Err(sqlx::Error::Protocol("original star SQL fault".into()))
+            };
+            let error = star_read_after_rollback(
+                result,
+                Err(sqlx::Error::Protocol(
+                    "synthetic returned cleanup failure".into(),
+                )),
+            )
+            .unwrap_err();
+            let sqlx::Error::AnyDriverError(source) = error else {
+                panic!("typed cleanup receipt required")
+            };
+            let receipt = source
+                .downcast_ref::<crate::db::backend::RollbackCleanupUnknown>()
+                .unwrap();
+            let original = receipt.original.as_ref().unwrap();
+            if domain {
+                assert!(matches!(
+                    original.downcast_ref::<StarReadRefusal>().unwrap().0,
+                    StarDbError::Forbidden
+                ));
+            } else {
+                assert!(
+                    matches!(original.downcast_ref::<sqlx::Error>(),Some(sqlx::Error::Protocol(message)) if message=="original star SQL fault")
+                );
+            }
+        }
+        assert!(star_read_after_rollback(
+            Ok(Ok(Vec::new())),
+            Err(sqlx::Error::Protocol(
+                "synthetic returned cleanup failure".into()
+            ))
+        )
+        .is_err());
+        // Propagation only: does not claim remote failure/settlement execution.
+    }
 }

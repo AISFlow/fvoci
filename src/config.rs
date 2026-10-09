@@ -18,6 +18,26 @@ pub const DEFAULT_UPLOAD_INCOMPLETE_TTL_HOURS: u64 = 24;
 pub const DEFAULT_REVISION_KEEP: u32 = 200;
 pub const DEFAULT_REVISION_SNAPSHOT_INTERVAL_HOURS: u32 = 24;
 
+/// Server-wide writer policy, read once before startup. A request cannot toggle it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "api-schema", derive(utoipa::ToSchema))]
+pub enum RealtimeMode {
+    #[default]
+    On,
+    Off,
+}
+
+impl RealtimeMode {
+    pub fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value {
+            None | Some("on") => Ok(Self::On),
+            Some("off") => Ok(Self::Off),
+            Some(_) => Err("FVOCI_REALTIME_MODE must be on or off".into()),
+        }
+    }
+}
+
 /// Automatic revision policy (source `packages/config`).
 #[derive(Clone, Copy, Debug)]
 pub struct RevisionSettings {
@@ -94,9 +114,128 @@ pub enum StorageSettings {
     S3(S3Settings),
 }
 
+/// Explicit connection configuration. PostgreSQL remains the default when
+/// the selector is absent; a selected family never reads a PostgreSQL URL.
+#[derive(Clone)]
+pub enum DatabaseSettings {
+    Postgres {
+        app_url: String,
+    },
+    Sqlite {
+        path: PathBuf,
+    },
+    LibsqlRemote {
+        primary_url: String,
+        auth_token: String,
+    },
+}
+
+impl fmt::Debug for DatabaseSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // URLs may contain credentials, routing identifiers, or query tokens.
+        f.write_str(match self {
+            Self::Postgres { .. } => "Postgres(<configured>)",
+            Self::Sqlite { .. } => "Sqlite(<configured>)",
+            Self::LibsqlRemote { .. } => "LibsqlRemote(<configured>)",
+        })
+    }
+}
+
+impl DatabaseSettings {
+    pub fn from_env() -> Result<Self, String> {
+        let values = [
+            "FVOCI_DATABASE_BACKEND",
+            "DATABASE_APP_URL",
+            "FVOCI_APP_DATABASE_URL",
+            "FVOCI_SQLITE_PATH",
+            "FVOCI_LIBSQL_URL",
+            "FVOCI_LIBSQL_AUTH_TOKEN",
+        ]
+        .into_iter()
+        .map(|name| Ok((name, env_unicode(name)?)))
+        .collect::<Result<Vec<_>, String>>()?;
+        Self::from_lookup(|name| {
+            values
+                .iter()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value.clone())
+        })
+    }
+
+    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let selected = get("FVOCI_DATABASE_BACKEND").unwrap_or_else(|| "postgres".into());
+        let required = |name| {
+            get(name)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| format!("{name} is required"))
+        };
+        let refuse = |names: &[&str]| -> Result<(), String> {
+            for name in names {
+                if get(name).is_some() {
+                    return Err(format!("{name} conflicts with FVOCI_DATABASE_BACKEND"));
+                }
+            }
+            Ok(())
+        };
+        match selected.as_str() {
+            "postgres" => {
+                refuse(&[
+                    "FVOCI_SQLITE_PATH",
+                    "FVOCI_LIBSQL_URL",
+                    "FVOCI_LIBSQL_AUTH_TOKEN",
+                ])?;
+                let app_url = get("DATABASE_APP_URL")
+                    .or_else(|| get("FVOCI_APP_DATABASE_URL"))
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or("DATABASE_APP_URL is required")?;
+                Ok(Self::Postgres { app_url })
+            }
+            "sqlite" => {
+                refuse(&[
+                    "DATABASE_APP_URL",
+                    "FVOCI_APP_DATABASE_URL",
+                    "FVOCI_LIBSQL_URL",
+                    "FVOCI_LIBSQL_AUTH_TOKEN",
+                ])?;
+                let path = PathBuf::from(required("FVOCI_SQLITE_PATH")?);
+                if !path.is_absolute() || path.file_name().is_none() {
+                    return Err(
+                        "FVOCI_SQLITE_PATH must be an absolute persistent database file".into(),
+                    );
+                }
+                Ok(Self::Sqlite { path })
+            }
+            "libsql-remote" => {
+                refuse(&[
+                    "DATABASE_APP_URL",
+                    "FVOCI_APP_DATABASE_URL",
+                    "FVOCI_SQLITE_PATH",
+                ])?;
+                let primary_url = required("FVOCI_LIBSQL_URL")?;
+                let parsed = url::Url::parse(&primary_url)
+                    .map_err(|_| "FVOCI_LIBSQL_URL must be a TLS primary endpoint")?;
+                if !matches!(parsed.scheme(), "https" | "libsql")
+                    || parsed.host_str().is_none()
+                    || !parsed.username().is_empty()
+                    || parsed.password().is_some()
+                    || parsed.fragment().is_some()
+                {
+                    return Err("FVOCI_LIBSQL_URL must be a TLS primary endpoint without user credentials or fragment".into());
+                }
+                Ok(Self::LibsqlRemote {
+                    primary_url,
+                    auth_token: required("FVOCI_LIBSQL_AUTH_TOKEN")?,
+                })
+            }
+            _ => Err("FVOCI_DATABASE_BACKEND must be postgres, sqlite, or libsql-remote".into()),
+        }
+    }
+}
+
 pub struct Config {
+    pub realtime_mode: RealtimeMode,
     pub bind: SocketAddr,
-    pub app_database_url: String,
+    pub database: DatabaseSettings,
     pub password_keys: Keyring,
     pub branding_name: String,
     pub public_origin: String,
@@ -118,8 +257,9 @@ pub struct Config {
 impl Clone for Config {
     fn clone(&self) -> Self {
         Self {
+            realtime_mode: self.realtime_mode,
             bind: self.bind,
-            app_database_url: self.app_database_url.clone(),
+            database: self.database.clone(),
             password_keys: self.password_keys.clone(),
             branding_name: self.branding_name.clone(),
             public_origin: self.public_origin.clone(),
@@ -140,8 +280,9 @@ impl Clone for Config {
 impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
+            .field("realtime_mode", &self.realtime_mode)
             .field("bind", &self.bind)
-            .field("app_database_url", &"<redacted>")
+            .field("database", &self.database)
             .field("branding_name", &self.branding_name)
             .field("public_origin", &self.public_origin)
             .field("cookie_secure", &self.cookie_secure)
@@ -160,6 +301,7 @@ impl fmt::Debug for Config {
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
+        let realtime_mode = RealtimeMode::parse(env_unicode("FVOCI_REALTIME_MODE")?.as_deref())?;
         let bind = env::var("FVOCI_BIND")
             .unwrap_or_else(|_| "127.0.0.1:0".to_string())
             .parse()
@@ -171,9 +313,7 @@ impl Config {
             );
         }
 
-        let app_database_url = env::var("DATABASE_APP_URL")
-            .or_else(|_| env::var("FVOCI_APP_DATABASE_URL"))
-            .map_err(|_| "DATABASE_APP_URL is required".to_string())?;
+        let database = DatabaseSettings::from_env()?;
 
         let pepper_keys = env::var("PASSWORD_PEPPER_KEYS").map_err(|_| {
             "PASSWORD_PEPPER_KEYS is required (JSON map of key id to 64-char hex)".to_string()
@@ -223,8 +363,9 @@ impl Config {
         )?;
 
         Ok(Self {
+            realtime_mode,
             bind,
-            app_database_url,
+            database,
             password_keys,
             branding_name,
             public_origin,
@@ -629,6 +770,120 @@ fn parse_shutdown_deadline_ms(raw: Option<&str>) -> Result<Duration, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn database_settings(pairs: &[(&str, &str)]) -> Result<DatabaseSettings, String> {
+        DatabaseSettings::from_lookup(|name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        })
+    }
+
+    #[test]
+    fn selected_database_never_uses_another_backends_credentials() {
+        assert!(
+            matches!(database_settings(&[("DATABASE_APP_URL", "postgres://fixture")]).unwrap(),
+            DatabaseSettings::Postgres { app_url } if app_url == "postgres://fixture")
+        );
+        let sqlite = [
+            ("FVOCI_DATABASE_BACKEND", "sqlite"),
+            ("FVOCI_SQLITE_PATH", "/owned/wiki.sqlite"),
+        ];
+        assert!(
+            matches!(database_settings(&sqlite).unwrap(), DatabaseSettings::Sqlite { path }
+            if path.as_path() == std::path::Path::new("/owned/wiki.sqlite"))
+        );
+        for foreign in [
+            "DATABASE_APP_URL",
+            "FVOCI_APP_DATABASE_URL",
+            "FVOCI_LIBSQL_URL",
+            "FVOCI_LIBSQL_AUTH_TOKEN",
+        ] {
+            let mut mixed = sqlite.to_vec();
+            mixed.push((foreign, "synthetic-secret"));
+            let error = database_settings(&mixed).unwrap_err();
+            assert!(error.contains(foreign));
+            assert!(!error.contains("synthetic-secret"));
+        }
+        for path in ["", "relative.sqlite", ":memory:", "/"] {
+            assert!(database_settings(&[
+                ("FVOCI_DATABASE_BACKEND", "sqlite"),
+                ("FVOCI_SQLITE_PATH", path)
+            ])
+            .is_err());
+        }
+        for selector in ["", "sqlite ", "replica", "turso", "unknown-secret"] {
+            let error = database_settings(&[("FVOCI_DATABASE_BACKEND", selector)]).unwrap_err();
+            assert!(!error.contains("unknown-secret"));
+        }
+    }
+
+    #[test]
+    fn selected_remote_requires_tls_primary_and_redacts_all_connection_inputs() {
+        for endpoint in [
+            "https://primary.example.test",
+            "libsql://primary.example.test",
+        ] {
+            let remote = database_settings(&[
+                ("FVOCI_DATABASE_BACKEND", "libsql-remote"),
+                ("FVOCI_LIBSQL_URL", endpoint),
+                ("FVOCI_LIBSQL_AUTH_TOKEN", "synthetic-secret"),
+            ])
+            .unwrap();
+            let debug = format!("{remote:?}");
+            assert!(!debug.contains(endpoint));
+            assert!(!debug.contains("synthetic-secret"));
+        }
+        for endpoint in [
+            "http://localhost",
+            "file:/owned/db",
+            "https://user:synthetic-secret@primary.example.test",
+            "https://primary.example.test/#synthetic-secret",
+            "invalid-synthetic-secret",
+        ] {
+            let error = database_settings(&[
+                ("FVOCI_DATABASE_BACKEND", "libsql-remote"),
+                ("FVOCI_LIBSQL_URL", endpoint),
+                ("FVOCI_LIBSQL_AUTH_TOKEN", "synthetic-secret"),
+            ])
+            .unwrap_err();
+            assert!(!error.contains("synthetic-secret"));
+        }
+        assert!(database_settings(&[
+            ("FVOCI_DATABASE_BACKEND", "libsql-remote"),
+            ("FVOCI_LIBSQL_URL", "https://primary.example.test")
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn product_database_settings_do_not_read_turso_reset_env() {
+        let requested = std::cell::RefCell::new(Vec::new());
+        let settings = DatabaseSettings::from_lookup(|name| {
+            requested.borrow_mut().push(name.to_owned());
+            match name {
+                "FVOCI_DATABASE_BACKEND" => Some("libsql-remote".into()),
+                "FVOCI_LIBSQL_URL" => Some("https://primary.example.test".into()),
+                "FVOCI_LIBSQL_AUTH_TOKEN" => Some("synthetic-secret".into()),
+                _ => None,
+            }
+        })
+        .unwrap();
+        let requested = requested.into_inner();
+        assert!(
+            requested
+                .iter()
+                .all(|name| !name.starts_with("FVOCI_TEST_TURSO")),
+            "{requested:?}"
+        );
+        match settings {
+            DatabaseSettings::LibsqlRemote { primary_url, .. } => {
+                assert_eq!(primary_url, "https://primary.example.test");
+            }
+            other => panic!("product settings changed backend: {other:?}"),
+        }
+    }
 
     #[test]
     fn storage_root_requires_explicit_nonempty_path() {

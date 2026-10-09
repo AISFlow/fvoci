@@ -118,7 +118,7 @@ async fn wiki_and_project_office_and_markdown_exports_in_rust() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "회의록"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "회의록"})),
         Some(&cookie),
     )
     .await;

@@ -26,7 +26,8 @@ use uuid::Uuid;
 
 use crate::api::documents_dto::{
     BacklinkFromResponse, BacklinkItemResponse, BacklinkListResponse, BodyMdResponse,
-    DocumentBodyResponse, DuplicateDocumentInput, PatchBlockInput,
+    DocumentBodyResponse, DuplicateDocumentInput, PatchBlockInput, SaveVersionedBodyInput,
+    SaveVersionedBodyResponse, VersionedBodyResponse,
 };
 use crate::api::dto::{AncestorResponse, AncestorsResponse, BodyResponse, DocumentMetaResponse};
 use crate::api::dto::{TreeNodeResponse, TreeResponse};
@@ -37,8 +38,8 @@ use crate::collab::derived_body::{
 use crate::collab::room::BodyWriteError;
 use crate::collab::seed::{SeedEngine, SeedError};
 use crate::db::document_ops::{
-    authorize_document, commit_duplicate, list_document_backlinks, list_project_ancestors,
-    load_duplicate_sources, DocumentScope, DuplicateBody, SourceBody,
+    authorize_document, authorize_document_backend, commit_duplicate, list_document_backlinks,
+    list_project_ancestors, load_duplicate_sources, DocumentScope, DuplicateBody, SourceBody,
 };
 use crate::db::documents::{list_wiki_tree, DocumentDbError, TreeNode};
 use crate::db::project_documents::list_project_document_tree;
@@ -61,6 +62,34 @@ const PROJECT_DOC: &str =
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/api/v1/workspaces/{workspace_id}/documents/from-draft",
+            post(create_wiki_from_draft).layer(axum::extract::DefaultBodyLimit::max(
+                DOCUMENT_MAX_BODY_BYTES + 4096,
+            )),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/from-draft",
+            post(create_project_from_draft).layer(axum::extract::DefaultBodyLimit::max(
+                DOCUMENT_MAX_BODY_BYTES + 4096,
+            )),
+        )
+        .route(
+            &format!("{WS_DOC}/body/versioned"),
+            get(get_versioned_body).put(save_versioned_body).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    (crate::db::collab::MAX_COLLAB_UPDATE_BYTES * 4).div_ceil(3) + 4096,
+                ),
+            ),
+        )
+        .route(
+            &format!("{PROJECT_DOC}/body/versioned"),
+            get(get_project_versioned_body)
+                .put(save_project_versioned_body)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    (crate::db::collab::MAX_COLLAB_UPDATE_BYTES * 4).div_ceil(3) + 4096,
+                )),
+        )
         .route(&format!("{WS_DOC}/body"), axum::routing::put(put_body_wiki))
         .route(
             &format!("{WS_DOC}/blocks/{{block_id}}"),
@@ -259,18 +288,30 @@ pub(crate) async fn read_body(
         workspace_id,
     )
     .await?;
-    let meta = db_result(
-        authorize_document(
-            &state.auth.db.pool,
-            workspace_id,
-            auth.user_id,
-            auth.credential_id,
-            scope,
-            document_id,
-            ProjectPermission::View,
-        )
-        .await,
-    )?;
+    let meta = match scope {
+        DocumentScope::Wiki => db_result(
+            crate::db::documents::read_wiki_document_body_backend(
+                &state.auth.db.pool,
+                workspace_id,
+                auth.user_id,
+                auth.credential_id,
+                document_id,
+            )
+            .await,
+        )?,
+        DocumentScope::Project(_) => db_result(
+            authorize_document_backend(
+                &state.auth.db.pool,
+                workspace_id,
+                auth.user_id,
+                auth.credential_id,
+                scope,
+                document_id,
+                ProjectPermission::View,
+            )
+            .await,
+        )?,
+    };
     if !markdown {
         return Ok(Json(DocumentBodyResponse::Json(BodyResponse {
             content_json: meta.content_json,
@@ -380,6 +421,7 @@ async fn put_body(
     document_id: Uuid,
     bytes: &[u8],
 ) -> Result<Json<DocumentMetaResponse>, DocumentApiError> {
+    require_realtime_writer(state)?;
     check_origin(headers, &state.public_origin)?;
     let input = parse_body_input(bytes)?;
     let auth = auth(
@@ -392,7 +434,7 @@ async fn put_body(
     .await?;
     revision_write_limit(state, auth.user_id).await?;
     db_result(
-        authorize_document(
+        authorize_document_backend(
             &state.auth.db.pool,
             workspace_id,
             auth.user_id,
@@ -407,7 +449,7 @@ async fn put_body(
     let seed = seed_for(state, &content_json).await?;
     replace_live_body(state, workspace_id, document_id, &auth, seed, None).await?;
     let meta = db_result(
-        authorize_document(
+        authorize_document_backend(
             &state.auth.db.pool,
             workspace_id,
             auth.user_id,
@@ -493,6 +535,7 @@ async fn patch_block(
     block_id: &str,
     bytes: &[u8],
 ) -> Result<Json<DocumentMetaResponse>, DocumentApiError> {
+    require_realtime_writer(state)?;
     check_origin(headers, &state.public_origin)?;
     let node = parse_block_input(bytes, block_id)?;
     let auth = auth(
@@ -506,7 +549,12 @@ async fn patch_block(
     revision_write_limit(state, auth.user_id).await?;
     db_result(
         authorize_document(
-            &state.auth.db.pool,
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/document_body.rs")
+                .map_err(internal)?,
             workspace_id,
             auth.user_id,
             auth.credential_id,
@@ -564,7 +612,12 @@ async fn patch_block(
     }
     let meta = db_result(
         authorize_document(
-            &state.auth.db.pool,
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/document_body.rs")
+                .map_err(internal)?,
             workspace_id,
             auth.user_id,
             auth.credential_id,
@@ -659,7 +712,12 @@ async fn children(
         workspace_id,
     )
     .await?;
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/document_body.rs")
+        .map_err(internal)?;
     db_result(
         authorize_document(
             pool,
@@ -742,7 +800,12 @@ async fn backlinks(
     .await?;
     let items = db_result(
         list_document_backlinks(
-            &state.auth.db.pool,
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/document_body.rs")
+                .map_err(internal)?,
             workspace_id,
             auth.user_id,
             auth.credential_id,
@@ -817,7 +880,12 @@ async fn ancestors_project(
     .await?;
     let items = db_result(
         list_project_ancestors(
-            &state.auth.db.pool,
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/document_body.rs")
+                .map_err(internal)?,
             workspace_id,
             project_id,
             auth.user_id,
@@ -926,7 +994,12 @@ pub(crate) async fn duplicate(
 ) -> Result<Response, DocumentApiError> {
     let (title, include_children) = parse_duplicate_input(bytes)?;
     check_origin(headers, &state.public_origin)?;
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/document_body.rs")
+        .map_err(internal)?;
     let sources = db_result(
         load_duplicate_sources(
             pool,
@@ -1028,10 +1101,18 @@ async fn locate(
     document_id: Uuid,
 ) -> Result<(RequestAuth, Uuid, DocumentScope), DocumentApiError> {
     let auth = require_request_auth(state, headers, jar, Access::Session, None).await?;
-    let located =
-        crate::db::document_ops::locate_document(&state.auth.db.pool, auth.user_id, document_id)
-            .await
-            .map_err(internal)?;
+    let located = crate::db::document_ops::locate_document(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/document_body.rs")
+            .map_err(internal)?,
+        auth.user_id,
+        document_id,
+    )
+    .await
+    .map_err(internal)?;
     let Some((workspace_id, project_id)) = located else {
         return Err(AppError::from_code(ProblemCode::NotFound).into());
     };
@@ -1051,7 +1132,12 @@ async fn get_by_id(
     let (auth, workspace_id, scope) = locate(&state, &headers, &jar, document_id).await?;
     let meta = db_result(
         authorize_document(
-            &state.auth.db.pool,
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/document_body.rs")
+                .map_err(internal)?,
             workspace_id,
             auth.user_id,
             auth.credential_id,
@@ -1082,7 +1168,12 @@ async fn update_by_id(
         icon: body.icon.as_ref().map(|icon| icon.as_deref()),
         status: body.status.as_deref(),
     };
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/document_body.rs")
+        .map_err(internal)?;
     let meta = match scope {
         DocumentScope::Wiki => db_result(
             crate::db::documents::update_wiki_document_meta(
@@ -1130,7 +1221,12 @@ async fn remove_by_id(
     let children = crate::http::routes::documents::parse_trash_children(query.children.as_deref())?;
     let (auth, workspace_id, scope) = locate(&state, &headers, &jar, document_id).await?;
     let ip = peer_ip(peer.ip());
-    let pool = &state.auth.db.pool;
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("src/http/routes/document_body.rs")
+        .map_err(internal)?;
     match scope {
         DocumentScope::Wiki => db_result(
             crate::db::documents::trash_wiki_document(
@@ -1183,9 +1279,509 @@ async fn duplicate_by_id(
     .await
 }
 
+fn require_realtime_writer(state: &AppState) -> Result<(), DocumentApiError> {
+    if state.realtime_mode != crate::config::RealtimeMode::On {
+        return Err(coded(
+            StatusCode::CONFLICT,
+            "body_writer_mode_mismatch",
+            "body writer mode mismatch",
+        ));
+    }
+    Ok(())
+}
+fn require_off_writer(state: &AppState) -> Result<crate::collab::CollabConfig, DocumentApiError> {
+    if state.realtime_mode != crate::config::RealtimeMode::Off {
+        return Err(coded(
+            StatusCode::CONFLICT,
+            "body_writer_mode_mismatch",
+            "body writer mode mismatch",
+        ));
+    }
+    state.native_engine.clone().ok_or_else(collab_unavailable)
+}
+async fn create_wiki_from_draft(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(workspace): Path<Uuid>,
+    body: Bytes,
+) -> Result<Response, DocumentApiError> {
+    create_from_draft_inner(&state, peer, &headers, &jar, workspace, None, &body).await
+}
+async fn create_project_from_draft(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace, project)): Path<(Uuid, Uuid)>,
+    body: Bytes,
+) -> Result<Response, DocumentApiError> {
+    create_from_draft_inner(
+        &state,
+        peer,
+        &headers,
+        &jar,
+        workspace,
+        Some(project),
+        &body,
+    )
+    .await
+}
+async fn create_from_draft_inner(
+    state: &AppState,
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+    workspace: Uuid,
+    destination_project: Option<Uuid>,
+    body: &[u8],
+) -> Result<Response, DocumentApiError> {
+    let engine = require_off_writer(state)?;
+    check_origin(headers, &state.public_origin)?;
+    let input: crate::api::dto::OffDraftCreateBody =
+        serde_json::from_slice(body).map_err(|_| invalid_body())?;
+    let actor = auth(
+        state,
+        headers,
+        jar,
+        ApiTokenScope::DocumentsWrite,
+        workspace,
+    )
+    .await?;
+    if input.source_kind == "task" {
+        let reader = auth(state, headers, jar, ApiTokenScope::TasksRead, workspace).await?;
+        if reader.user_id != actor.user_id || reader.credential_id != actor.credential_id {
+            return Err(AppError::from_code(ProblemCode::AuthenticationRequired).into());
+        }
+    }
+    let request = parse_off_draft_request(
+        workspace,
+        destination_project,
+        actor.user_id,
+        actor.credential_id,
+        input,
+        Some(peer_ip(peer.ip())),
+    )?;
+    revision_write_limit(state, actor.user_id).await?;
+    let created = crate::db::body_save::create_off_draft(
+        &state.auth.db.pool,
+        state.realtime_mode,
+        engine,
+        request,
+    )
+    .await
+    .map_err(map_off_draft_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(crate::api::dto::OffDraftCreateResponse {
+            document: meta_response(&created.document, true),
+            command_id: created.command_id,
+            tail_seq: created.tail_seq,
+            revision_id: created.revision_id,
+        }),
+    )
+        .into_response())
+}
+fn map_off_draft_error(error: crate::db::body_save::OffDraftCreateError) -> DocumentApiError {
+    use crate::db::body_save::{BodySaveError, OffDraftCreateError};
+    match error {
+        OffDraftCreateError::Body(BodySaveError::RequestMismatch) => coded(
+            StatusCode::CONFLICT,
+            "request_mismatch",
+            "creation command does not match the original request",
+        ),
+        OffDraftCreateError::Body(error) => map_versioned_body_error(error),
+        OffDraftCreateError::Document(error) => map_document_error(error),
+        OffDraftCreateError::Attachment(_) => AppError::from_code(ProblemCode::NotFound).into(),
+        OffDraftCreateError::RollbackUnconfirmed { original, cleanup } => {
+            tracing::warn!(%original,%cleanup,"OFF draft rollback unconfirmed");
+            coded(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "body_save_unconfirmed",
+                "body save is unconfirmed",
+            )
+        }
+    }
+}
+
+/// Dedicated creation contract; ordinary strict wiki/project create DTOs and
+/// their command/hash domains are unchanged. Destination project is the route,
+/// while source project belongs only to the currently authorized source scope.
+fn parse_off_draft_request(
+    workspace: Uuid,
+    destination_project: Option<Uuid>,
+    actor: Uuid,
+    credential: Uuid,
+    body: crate::api::dto::OffDraftCreateBody,
+    client_ip: Option<String>,
+) -> Result<crate::db::body_save::OffDraftCreateRequest, DocumentApiError> {
+    use crate::api::dto::RequiredNullable;
+    use crate::db::revisions::{RevisionScope, RevisionTarget};
+    let parent = match body.parent_id {
+        RequiredNullable::Missing => {
+            return Err(AppError::from_code(ProblemCode::InvalidInput).into())
+        }
+        RequiredNullable::Null => None,
+        RequiredNullable::Value(id) => Some(id),
+    };
+    let source = match (body.source_kind.as_str(), body.source_project_id) {
+        ("document", Some(project)) if !project.is_nil() => {
+            RevisionScope::project_document(project, body.source_id)
+        }
+        ("document", None) => RevisionTarget::Document(body.source_id).into(),
+        ("task", None) => RevisionTarget::Task(body.source_id).into(),
+        _ => return Err(invalid_body()),
+    };
+    let title = body.title.trim();
+    let icon = body.icon.flatten();
+    if body.command_id.is_nil()
+        || body.source_id.is_nil()
+        || parent.is_some_and(|id| id.is_nil())
+        || destination_project.is_some_and(|id| id.is_nil())
+        || !crate::db::documents::title_is_valid(title)
+        || icon
+            .as_ref()
+            .is_some_and(|icon| !crate::db::documents::icon_is_valid(icon))
+    {
+        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+    }
+    crate::collab::derived_body::extract_stored_attachment_refs(&body.content_json).map_err(
+        |error| match error {
+            DerivedBodyError::TooLarge => too_large(),
+            DerivedBodyError::InvalidDocumentBody(_) => invalid_body(),
+        },
+    )?;
+    Ok(crate::db::body_save::OffDraftCreateRequest {
+        workspace,
+        source,
+        destination_project,
+        parent,
+        actor,
+        credential,
+        command: body.command_id,
+        title: title.to_string(),
+        icon,
+        content_json: body.content_json,
+        client_ip,
+    })
+}
+
+fn parse_body_tail(value: &str) -> Option<i64> {
+    if value.is_empty()
+        || (value.len() > 1 && value.starts_with('0'))
+        || !value.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    value.parse::<i64>().ok().filter(|seq| *seq < i64::MAX)
+}
+fn map_versioned_body_error(error: crate::db::body_save::BodySaveError) -> DocumentApiError {
+    use crate::db::body_save::BodySaveError;
+    use crate::db::collab::CollabDbError;
+    match error {
+        BodySaveError::Conflict | BodySaveError::RequestMismatch => coded(
+            StatusCode::CONFLICT,
+            "document_version_mismatch",
+            "document version mismatch",
+        ),
+        BodySaveError::Native(CollabDbError::StaleCutoff | CollabDbError::StaleWriter) => coded(
+            StatusCode::CONFLICT,
+            "document_version_mismatch",
+            "document version mismatch",
+        ),
+        BodySaveError::Native(
+            CollabDbError::PayloadTooLarge | CollabDbError::StateBudgetExceeded,
+        ) => too_large(),
+        BodySaveError::Native(_) | BodySaveError::Revision(_) => {
+            AppError::from_code(ProblemCode::NotFound).into()
+        }
+        BodySaveError::Invalid => invalid_body(),
+        BodySaveError::Unavailable | BodySaveError::Cancelled => collab_unavailable(),
+        BodySaveError::CommitUnconfirmed(error) => {
+            tracing::warn!(%error, settlement=?error.settlement,"OFF body finish unconfirmed");
+            coded(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "body_save_unconfirmed",
+                "body save is unconfirmed",
+            )
+        }
+        BodySaveError::RollbackUnconfirmed { original, cleanup } => {
+            tracing::warn!(%original,%cleanup,"OFF body rollback unconfirmed");
+            coded(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "body_save_unconfirmed",
+                "body save is unconfirmed",
+            )
+        }
+        BodySaveError::Database(error) => {
+            if matches!(&error, sqlx::Error::AnyDriverError(driver) if driver.downcast_ref::<crate::db::backend::RemoteSettlementUnconfirmed>().is_some())
+            {
+                coded(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "body_save_unconfirmed",
+                    "body save is unconfirmed",
+                )
+            } else {
+                internal(error).into()
+            }
+        }
+    }
+}
+async fn get_versioned_body(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace, document)): WikiPath,
+) -> Result<Json<VersionedBodyResponse>, DocumentApiError> {
+    read_versioned_body_inner(
+        state,
+        headers,
+        jar,
+        workspace,
+        crate::db::revisions::RevisionTarget::Document(document),
+        None,
+    )
+    .await
+}
+async fn get_project_versioned_body(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace, project, document)): ProjectPath,
+) -> Result<Json<VersionedBodyResponse>, DocumentApiError> {
+    read_versioned_body_inner(
+        state,
+        headers,
+        jar,
+        workspace,
+        crate::db::revisions::RevisionTarget::Document(document),
+        Some(project),
+    )
+    .await
+}
+pub(crate) async fn read_versioned_body_inner(
+    state: AppState,
+    headers: HeaderMap,
+    jar: CookieJar,
+    workspace: Uuid,
+    target: crate::db::revisions::RevisionTarget,
+    project: Option<Uuid>,
+) -> Result<Json<VersionedBodyResponse>, DocumentApiError> {
+    let engine = require_off_writer(&state)?;
+    let actor = auth(
+        &state,
+        &headers,
+        &jar,
+        match target {
+            crate::db::revisions::RevisionTarget::Document(_) => ApiTokenScope::DocumentsRead,
+            crate::db::revisions::RevisionTarget::Task(_) => ApiTokenScope::TasksRead,
+        },
+        workspace,
+    )
+    .await?;
+    let source = crate::db::body_save::read_off_body(
+        &state.auth.db.pool,
+        state.realtime_mode,
+        engine,
+        workspace,
+        match (target, project) {
+            (crate::db::revisions::RevisionTarget::Document(document), Some(project)) => {
+                crate::db::revisions::RevisionScope::project_document(project, document)
+            }
+            _ => target.into(),
+        },
+        actor.user_id,
+        actor.credential_id,
+    )
+    .await
+    .map_err(map_versioned_body_error)?;
+    Ok(Json(VersionedBodyResponse {
+        target_id: target.id(),
+        tail_seq: source.native.tail_seq.to_string(),
+        snapshot_v1: collab_engine::b64::encode(&source.native.snapshot),
+        tail_v1: source
+            .native
+            .tail
+            .iter()
+            .map(|row| collab_engine::b64::encode(&row.payload))
+            .collect(),
+        content_json: source.content_json,
+        writable: source.writable,
+    }))
+}
+async fn save_versioned_body(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path((workspace, document)): WikiPath,
+    body: Bytes,
+) -> Result<Json<SaveVersionedBodyResponse>, DocumentApiError> {
+    save_versioned_body_inner(
+        state,
+        headers,
+        jar,
+        peer,
+        workspace,
+        crate::db::revisions::RevisionTarget::Document(document),
+        None,
+        body,
+    )
+    .await
+}
+async fn save_project_versioned_body(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path((workspace, project, document)): ProjectPath,
+    body: Bytes,
+) -> Result<Json<SaveVersionedBodyResponse>, DocumentApiError> {
+    save_versioned_body_inner(
+        state,
+        headers,
+        jar,
+        peer,
+        workspace,
+        crate::db::revisions::RevisionTarget::Document(document),
+        Some(project),
+        body,
+    )
+    .await
+}
+pub(crate) async fn save_versioned_body_inner(
+    state: AppState,
+    headers: HeaderMap,
+    jar: CookieJar,
+    peer: SocketAddr,
+    workspace: Uuid,
+    target: crate::db::revisions::RevisionTarget,
+    project: Option<Uuid>,
+    body: Bytes,
+) -> Result<Json<SaveVersionedBodyResponse>, DocumentApiError> {
+    let engine = require_off_writer(&state)?;
+    check_origin(&headers, &state.public_origin)?;
+    let input: SaveVersionedBodyInput =
+        serde_json::from_slice(&body).map_err(|_| invalid_body())?;
+    let expected = parse_body_tail(&input.expected_tail_seq).ok_or_else(invalid_body)?;
+    if input.update_v1.len() > (crate::db::collab::MAX_COLLAB_UPDATE_BYTES * 4).div_ceil(3) + 4 {
+        return Err(too_large());
+    }
+    let update = collab_engine::b64::decode(&input.update_v1).map_err(|_| invalid_body())?;
+    let actor = auth(
+        &state,
+        &headers,
+        &jar,
+        match target {
+            crate::db::revisions::RevisionTarget::Document(_) => ApiTokenScope::DocumentsWrite,
+            crate::db::revisions::RevisionTarget::Task(_) => ApiTokenScope::TasksWrite,
+        },
+        workspace,
+    )
+    .await?;
+    revision_write_limit(&state, actor.user_id).await?;
+    let saved = crate::db::body_save::save_off_body(
+        &state.auth.db.pool,
+        state.realtime_mode,
+        engine,
+        crate::db::body_save::OffBodyRequest {
+            workspace,
+            target,
+            project,
+            actor: actor.user_id,
+            credential: actor.credential_id,
+            command: input.command_id,
+            expected_tail: expected,
+            update,
+            client_ip: Some(peer_ip(peer.ip())),
+        },
+    )
+    .await
+    .map_err(map_versioned_body_error)?;
+    Ok(Json(SaveVersionedBodyResponse {
+        command_id: saved.command_id,
+        target_id: saved.target_id,
+        tail_seq: saved.tail_seq,
+        revision_id: saved.revision_id,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dedicated_draft_route_keeps_source_destination_parent_and_current_create_limits() {
+        let workspace = Uuid::now_v7();
+        let actor = Uuid::now_v7();
+        let credential = Uuid::now_v7();
+        let source = Uuid::now_v7();
+        let source_project = Uuid::now_v7();
+        let destination_project = Uuid::now_v7();
+        let parent = Uuid::now_v7();
+        let raw = serde_json::json!({"commandId":Uuid::now_v7(),"sourceKind":"document","sourceId":source,
+            "sourceProjectId":source_project,"parentId":parent,"title":" private 😀 ","contentJson":{"type":"doc","content":[]}});
+        let request = parse_off_draft_request(
+            workspace,
+            Some(destination_project),
+            actor,
+            credential,
+            serde_json::from_value(raw.clone()).unwrap(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(request.source.project_id(), Some(source_project));
+        assert_eq!(
+            request.source.target(),
+            crate::db::revisions::RevisionTarget::Document(source)
+        );
+        assert_eq!(request.destination_project, Some(destination_project));
+        assert_eq!(request.parent, Some(parent));
+        assert_eq!(request.title, "private 😀");
+        for change in ["parent", "kind", "task_project", "nil", "title", "ref"] {
+            let mut refused = raw.clone();
+            match change {
+                "parent" => {
+                    refused.as_object_mut().unwrap().remove("parentId");
+                }
+                "kind" => refused["sourceKind"] = serde_json::json!("unregistered"),
+                "task_project" => refused["sourceKind"] = serde_json::json!("task"),
+                "nil" => refused["commandId"] = serde_json::json!(Uuid::nil()),
+                "title" => refused["title"] = serde_json::json!("x".repeat(301)),
+                _ => {
+                    refused["contentJson"] = serde_json::json!({"type":"doc","content":[{"type":"attachment","attrs":{"id":"bad-ref"}}]})
+                }
+            }
+            assert!(
+                parse_off_draft_request(
+                    workspace,
+                    Some(destination_project),
+                    actor,
+                    credential,
+                    serde_json::from_value(refused).unwrap(),
+                    None
+                )
+                .is_err(),
+                "{change} cannot become implicit create rights or content"
+            );
+        }
+        let task = serde_json::json!({"commandId":Uuid::now_v7(),"sourceKind":"task","sourceId":source,"parentId":null,"title":"Task private copy","contentJson":{"type":"doc","content":[]}});
+        let parsed = parse_off_draft_request(
+            workspace,
+            None,
+            actor,
+            credential,
+            serde_json::from_value(task).unwrap(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.source.target(),
+            crate::db::revisions::RevisionTarget::Task(source)
+        );
+        assert_eq!(parsed.source.project_id(), None);
+        assert_eq!(parsed.destination_project, None);
+    }
 
     #[test]
     fn body_input_requires_exactly_one_field() {

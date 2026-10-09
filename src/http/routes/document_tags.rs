@@ -21,8 +21,10 @@ use crate::api::dto::OkResponse;
 use crate::auth::scopes::ApiTokenScope;
 use crate::collections::{iso_millis, parse_name};
 use crate::db::document_tags::{
-    assign_tag, create_tag, delete_tag, list_document_tags, list_tags, unassign_tag, update_tag,
-    Affiliation, TagDbError, TagRow, TAG_POOL_LIMIT_DEFAULT, TAG_POOL_LIMIT_MAX, TAG_QUERY_MAX,
+    assign_tag_backend as assign_tag, create_tag_backend as create_tag, delete_tag,
+    list_document_tags_backend as list_document_tags, list_tags_backend as list_tags, unassign_tag,
+    update_tag, Affiliation, TagDbError, TagRow, TAG_POOL_LIMIT_DEFAULT, TAG_POOL_LIMIT_MAX,
+    TAG_QUERY_MAX,
 };
 use crate::db::labels::label_color_is_valid;
 use crate::error::{AppError, ProblemCode};
@@ -213,7 +215,12 @@ async fn update_route(
         return Err(invalid());
     }
     let tag = update_tag(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/document_tags.rs")
+            .map_err(internal)?,
         workspace_id,
         &actor,
         tag_id,
@@ -243,10 +250,20 @@ async fn delete_route(
         Some(peer),
     )
     .await?;
-    delete_tag(&state.auth.db.pool, workspace_id, &actor, tag_id)
-        .await
-        .map_err(internal)?
-        .map_err(map_tag_error)?;
+    delete_tag(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/document_tags.rs")
+            .map_err(internal)?,
+        workspace_id,
+        &actor,
+        tag_id,
+    )
+    .await
+    .map_err(internal)?
+    .map_err(map_tag_error)?;
     Ok(Json(OkResponse { ok: true }))
 }
 
@@ -337,7 +354,12 @@ async fn unassign_for(
     )
     .await?;
     unassign_tag(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/document_tags.rs")
+            .map_err(internal)?,
         workspace_id,
         &actor,
         document_id,

@@ -1,12 +1,17 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use super::backend::{Backend, OperationTx};
+use super::codec::{Cell, FamilyRow};
+
 use crate::db::context::{
-    begin_read, lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
+    lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
 };
 use crate::db::group_grants::{
     group_document_grant_roles_select_sql, group_members_join_sql,
@@ -14,9 +19,7 @@ use crate::db::group_grants::{
 };
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::projects::{lock_project, project_permission, visible_project_sql};
-use crate::db::workspace::{
-    membership_role, membership_role_for_update, workspace_is_live, WorkspaceRole,
-};
+use crate::db::workspace::{membership_role, workspace_is_live, WorkspaceRole};
 use crate::projects::{workspace_base_permission, ProjectMemberRole, ProjectPermission};
 
 pub const MAX_TREE_DEPTH: i32 = 20;
@@ -75,7 +78,7 @@ impl std::fmt::Display for FractionalError {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentMeta {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -236,30 +239,41 @@ pub async fn document_permission(
     document_id: Uuid,
     require_live: bool,
 ) -> Result<ProjectPermission, sqlx::Error> {
-    let role = membership_role(tx, workspace_id, user_id).await?;
-    let Some(role) = role else {
-        return Ok(ProjectPermission::None);
-    };
-    let row: Option<(Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(
-        r#"
-        SELECT project_id, deleted_at
-        FROM fvoci.documents
-        WHERE workspace_id = $1 AND id = $2
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some((project_id, deleted_at)) = row else {
-        return Ok(ProjectPermission::None);
-    };
-    if !wiki_document_eligible(project_id, deleted_at, require_live) {
-        return Ok(ProjectPermission::None);
+    OperationTx::Postgres(tx)
+        .document_permission(workspace_id, user_id, document_id, require_live)
+        .await
+}
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn document_permission(
+        &mut self,
+        workspace_id: Uuid,
+        user_id: Uuid,
+        document_id: Uuid,
+        require_live: bool,
+    ) -> Result<ProjectPermission, sqlx::Error> {
+        let role = self.membership_role(workspace_id, user_id, false).await?;
+        let Some(role) = role else {
+            return Ok(ProjectPermission::None);
+        };
+        let row = self.document_affiliation(workspace_id, document_id).await?;
+        let Some((project_id, deleted_at)) = row else {
+            return Ok(ProjectPermission::None);
+        };
+        if !wiki_document_eligible(project_id, deleted_at, require_live) {
+            return Ok(ProjectPermission::None);
+        }
+        let base = workspace_base_permission(role);
+        let roles = self
+            .wiki_group_roles(workspace_id, document_id, user_id)
+            .await?;
+        let granted = roles
+            .iter()
+            .map(|r| grant_role_permission(r))
+            .max()
+            .unwrap_or(ProjectPermission::None);
+        Ok(base.max(granted))
     }
-    let base = workspace_base_permission(role);
-    let granted = wiki_group_permission(tx, workspace_id, document_id, user_id).await?;
-    Ok(base.max(granted))
 }
 
 /// (document id, project id, deleted_at, one group-grant role or none).
@@ -339,12 +353,12 @@ fn grant_role_permission(role: &str) -> ProjectPermission {
         .unwrap_or(ProjectPermission::None)
 }
 
-async fn wiki_group_permission(
+async fn wiki_group_roles(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     document_id: Uuid,
     user_id: Uuid,
-) -> Result<ProjectPermission, sqlx::Error> {
+) -> Result<Vec<String>, sqlx::Error> {
     let rows = sqlx::query_as::<_, (String,)>(&format!(
         r#"
         {}
@@ -356,11 +370,7 @@ async fn wiki_group_permission(
     .bind(user_id)
     .fetch_all(&mut **tx)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(role,)| grant_role_permission(&role))
-        .max()
-        .unwrap_or(ProjectPermission::None))
+    Ok(rows.into_iter().map(|(role,)| role).collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -522,11 +532,393 @@ pub async fn create_wiki_document(
     Ok(created.map(|meta| meta.expect("unfenced create always returns the document")))
 }
 
+#[derive(Debug)]
+pub enum CreateCommandError {
+    Document(DocumentDbError),
+    RequestMismatch,
+}
+
+/// Ordinary wiki creation has a stable command identity. Import/template and
+/// personal-input callers keep their own command/fence and commit owner.
+pub async fn create_wiki_document_command(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    command_id: Uuid,
+    input: CreateDocumentInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<DocumentMeta, CreateCommandError>, sqlx::Error> {
+    create_wiki_document_command_backend(
+        &Backend::Postgres(pool.clone()),
+        workspace_id,
+        actor_user_id,
+        session_id,
+        command_id,
+        input,
+        client_ip,
+    )
+    .await
+}
+
+pub async fn create_wiki_document_command_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    command_id: Uuid,
+    input: CreateDocumentInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<DocumentMeta, CreateCommandError>, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    let mut operation = tx.operation();
+    operation.set_tenant(workspace_id).await?;
+    let result = create_wiki_command_in_tx(
+        &mut operation,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        command_id,
+        input,
+        client_ip,
+    )
+    .await?;
+    if result.is_ok() {
+        tx.commit()
+            .await
+            .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
+    } else {
+        tx.rollback().await?;
+    }
+    Ok(result)
+}
+
+async fn create_wiki_command_in_tx(
+    tx: &mut OperationTx<'_, '_>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    command_id: Uuid,
+    input: CreateDocumentInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<DocumentMeta, CreateCommandError>, sqlx::Error> {
+    // The current credential and membership precede even a successful receipt
+    // replay. The tenant tree lock serializes absence with all wiki creators.
+    tx.lock_membership_users(&[actor_user_id]).await?;
+    if !tx.recheck_session(actor_user_id, session_id).await? {
+        return Ok(Err(CreateCommandError::Document(
+            DocumentDbError::Forbidden,
+        )));
+    }
+    tx.lock_tree(workspace_id).await?;
+    if !tx.workspace_is_live(workspace_id).await? {
+        return Ok(Err(CreateCommandError::Document(DocumentDbError::NotFound)));
+    }
+    if !wiki_can_edit(
+        tx.membership_role(workspace_id, actor_user_id, true)
+            .await?,
+    ) {
+        return Ok(Err(CreateCommandError::Document(
+            DocumentDbError::Forbidden,
+        )));
+    }
+    let hash = wiki_create_command_hash(workspace_id, actor_user_id, &input)?;
+    let receipt = tx.wiki_create_receipt(workspace_id, command_id).await?;
+    if let Some((actor, original_hash, target_id, original_result)) = receipt {
+        if actor != actor_user_id || original_hash != hash {
+            return Ok(Err(CreateCommandError::RequestMismatch));
+        }
+        let Some(target_id) = target_id else {
+            return Ok(Err(CreateCommandError::Document(DocumentDbError::NotFound)));
+        };
+        let permission = tx
+            .document_permission(workspace_id, actor_user_id, target_id, true)
+            .await?;
+        let current = tx.document_row(workspace_id, target_id).await?;
+        if !permission_can_view(permission) || current.is_none() {
+            return Ok(Err(CreateCommandError::Document(DocumentDbError::NotFound)));
+        }
+        let original: DocumentMeta = serde_json::from_value(original_result)
+            .map_err(|err| sqlx::Error::Decode(Box::new(err)))?;
+        if original.id != target_id || original.workspace_id != workspace_id {
+            return Err(sqlx::Error::Protocol(
+                "invalid wiki creation receipt target".into(),
+            ));
+        }
+        return Ok(Ok(original));
+    }
+    let created = create_wiki_document_operation(
+        tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        input,
+        client_ip,
+        None,
+    )
+    .await?;
+    let meta = match created {
+        Ok(Some(meta)) => meta,
+        Ok(None) => {
+            return Err(sqlx::Error::Protocol(
+                "unfenced wiki create lost its target".into(),
+            ))
+        }
+        Err(err) => return Ok(Err(CreateCommandError::Document(err))),
+    };
+    let result = serde_json::to_value(&meta).map_err(|err| sqlx::Error::Encode(Box::new(err)))?;
+    tx.insert_wiki_create_receipt(
+        workspace_id,
+        command_id,
+        actor_user_id,
+        &hash,
+        meta.id,
+        &result,
+    )
+    .await?;
+    Ok(Ok(meta))
+}
+
+fn wiki_create_command_hash(
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    input: &CreateDocumentInput<'_>,
+) -> Result<String, sqlx::Error> {
+    // Only creation semantics are bound: omitted and null icons both create
+    // SQL NULL. Fixed tuple encoding avoids map order and concatenation aliases.
+    let bytes = serde_json::to_vec(&(
+        "wiki-create-v1",
+        workspace_id,
+        actor_user_id,
+        input.parent_id,
+        input.title,
+        input.icon.flatten(),
+    ))
+    .map_err(|err| sqlx::Error::Encode(Box::new(err)))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
 /// Lease of the import job a document is created for.
 #[derive(Debug, Clone, Copy)]
 pub struct ImportFence {
     pub job_id: Uuid,
     pub lease_token: Uuid,
+}
+
+/// Prepared by the existing isolated parser/seed consumers before acquiring
+/// the writer. The operation ID is chosen once for this logical publication.
+pub(crate) struct ImportNativeSeed<'a> {
+    pub op_id: Uuid,
+    pub update: &'a [u8],
+    pub prepared: crate::collab::derived_body::PreparedDerivedBody,
+}
+
+/// Closed current job owners: a synchronous pending job has no async lease.
+/// Both variants use the same publisher and native program on one writer.
+#[derive(Clone, Copy)]
+pub(crate) enum ImportDocumentOwner<'a> {
+    Async(&'a crate::db::import_jobs::ImportClaim),
+    Sync {
+        workspace: Uuid,
+        job: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+    },
+}
+
+impl ImportDocumentOwner<'_> {
+    pub(crate) fn workspace(self) -> Uuid {
+        match self {
+            Self::Async(claim) => claim.workspace_id,
+            Self::Sync { workspace, .. } => workspace,
+        }
+    }
+    pub(crate) fn actor(self) -> Uuid {
+        match self {
+            Self::Async(claim) => claim.created_by,
+            Self::Sync { actor, .. } => actor,
+        }
+    }
+    pub(crate) fn credential(self) -> Uuid {
+        match self {
+            Self::Async(claim) => claim.session_id,
+            Self::Sync { credential, .. } => credential,
+        }
+    }
+    pub(crate) async fn hold(self, op: &mut OperationTx<'_, '_>) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Async(claim) => op.hold_import_claim(claim).await,
+            Self::Sync {
+                workspace,
+                job,
+                actor,
+                ..
+            } => op.hold_sync_import_job(workspace, job, actor).await,
+        }
+    }
+    pub(crate) async fn contains_document(
+        self,
+        op: &mut OperationTx<'_, '_>,
+        document: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Async(claim) => {
+                op.import_claim_contains_ref(
+                    claim,
+                    crate::db::import_jobs::ImportRefKind::Document,
+                    &document.to_string(),
+                )
+                .await
+            }
+            Self::Sync {
+                workspace,
+                job,
+                actor,
+                ..
+            } => {
+                op.sync_import_contains_document_ref(workspace, job, actor, document)
+                    .await
+            }
+        }
+    }
+}
+
+pub(crate) struct ImportDocumentPublication<'a> {
+    pub owner: ImportDocumentOwner<'a>,
+    pub title: &'a str,
+    pub parent_id: Option<Uuid>,
+    pub native: Option<ImportNativeSeed<'a>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ImportPublicationError {
+    #[error("invalid imported document input")]
+    InvalidInput,
+    #[error("import publication cancelled")]
+    Cancelled,
+    #[error("import publication lease lost")]
+    Fenced,
+    #[error("import document refused: {0:?}")]
+    Document(DocumentDbError),
+    #[error("import native publication refused: {0:?}")]
+    Native(crate::db::collab::CollabDbError),
+    #[error(transparent)]
+    Sql(#[from] sqlx::Error),
+}
+
+/// One commit owner for current authorization, creation/ref, native seed,
+/// immutable op receipt and derived body. Finish uncertainty is returned with
+/// its original typed cleanup evidence; no observer/retry/compensation occurs.
+pub(crate) async fn publish_import_document_backend(
+    backend: &Backend,
+    input: ImportDocumentPublication<'_>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Uuid, ImportPublicationError> {
+    if !title_is_valid(input.title)
+        || input.native.as_ref().is_some_and(|native| {
+            native.update.is_empty()
+                || native.update.len() > crate::db::collab::MAX_COLLAB_UPDATE_BYTES
+        })
+    {
+        return Err(ImportPublicationError::InvalidInput);
+    }
+    if cancel.is_cancelled() {
+        return Err(ImportPublicationError::Cancelled);
+    }
+    let owner = input.owner;
+    let workspace = owner.workspace();
+    let actor = owner.actor();
+    let credential = owner.credential();
+    let mut tx = backend.begin_write().await?;
+    let result: Result<Uuid, ImportPublicationError> = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        op.require_import_admin(workspace, actor, credential)
+            .await?
+            .map_err(|error| {
+                ImportPublicationError::Document(match error {
+                    crate::db::import_jobs::ImportDbError::NotFound => DocumentDbError::NotFound,
+                    crate::db::import_jobs::ImportDbError::Forbidden => DocumentDbError::Forbidden,
+                })
+            })?;
+        op.lock_tree(workspace).await?;
+        if cancel.is_cancelled() {
+            return Err(ImportPublicationError::Cancelled);
+        }
+        if !owner.hold(&mut op).await? {
+            return Err(ImportPublicationError::Fenced);
+        }
+        let document = create_wiki_document_operation(
+            &mut op,
+            workspace,
+            actor,
+            credential,
+            CreateDocumentInput {
+                parent_id: input.parent_id,
+                title: input.title,
+                icon: None,
+            },
+            None,
+            match owner {
+                ImportDocumentOwner::Async(claim) => Some(ImportFence {
+                    job_id: claim.job_id,
+                    lease_token: claim.lease_token,
+                }),
+                ImportDocumentOwner::Sync { .. } => None,
+            },
+        )
+        .await?
+        .map_err(ImportPublicationError::Document)?
+        .ok_or(ImportPublicationError::Fenced)?;
+        if let ImportDocumentOwner::Sync { job, .. } = owner {
+            if !op
+                .append_sync_import_document_ref(workspace, job, actor, document.id)
+                .await?
+            {
+                return Err(ImportPublicationError::Fenced);
+            }
+        }
+        if let Some(native) = input.native {
+            op.initialize_import_document_native(
+                owner,
+                document.id,
+                native.op_id,
+                native.update,
+                native.prepared,
+            )
+            .await?
+            .map_err(ImportPublicationError::Native)?;
+        }
+        if cancel.is_cancelled() {
+            return Err(ImportPublicationError::Cancelled);
+        }
+        if !owner.hold(&mut op).await? || !owner.contains_document(&mut op, document.id).await? {
+            return Err(ImportPublicationError::Fenced);
+        }
+        op.require_import_admin(workspace, actor, credential)
+            .await?
+            .map_err(|_| ImportPublicationError::Document(DocumentDbError::Forbidden))?;
+        if cancel.is_cancelled() {
+            return Err(ImportPublicationError::Cancelled);
+        }
+        Ok(document.id)
+    }
+    .await;
+    let document = match result {
+        Ok(document) => document,
+        Err(error) => {
+            return Err(match tx.rollback().await {
+                Ok(()) => error,
+                Err(cleanup) => ImportPublicationError::Sql(
+                    super::backend::rollback_cleanup_unknown(Some(Box::new(error)), cleanup),
+                ),
+            });
+        }
+    };
+    tx.commit_with_cleanup().await.map_err(|unknown| {
+        ImportPublicationError::Sql(sqlx::Error::AnyDriverError(Box::new(unknown)))
+    })?;
+    Ok(document)
 }
 
 /// Async import variant: the creator must still be a workspace admin at
@@ -592,16 +984,39 @@ pub(crate) async fn create_wiki_document_tx(
     client_ip: Option<&str>,
     fence: Option<ImportFence>,
 ) -> Result<Result<Option<DocumentMeta>, DocumentDbError>, sqlx::Error> {
+    create_wiki_document_operation(
+        &mut OperationTx::Postgres(tx),
+        workspace_id,
+        actor_user_id,
+        session_id,
+        input,
+        client_ip,
+        fence,
+    )
+    .await
+}
+
+pub(crate) async fn create_wiki_document_operation(
+    tx: &mut OperationTx<'_, '_>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    input: CreateDocumentInput<'_>,
+    client_ip: Option<&str>,
+    fence: Option<ImportFence>,
+) -> Result<Result<Option<DocumentMeta>, DocumentDbError>, sqlx::Error> {
     let document_id = Uuid::now_v7();
-    lock_membership_users(tx, &[actor_user_id]).await?;
-    if !recheck_session(tx, actor_user_id, session_id).await? {
+    tx.lock_membership_users(&[actor_user_id]).await?;
+    if !tx.recheck_session(actor_user_id, session_id).await? {
         return Ok(Err(DocumentDbError::Forbidden));
     }
-    lock_tree(tx, workspace_id).await?;
-    if !workspace_is_live(tx, workspace_id).await? {
+    tx.lock_tree(workspace_id).await?;
+    if !tx.workspace_is_live(workspace_id).await? {
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let role = membership_role_for_update(tx, workspace_id, actor_user_id).await?;
+    let role = tx
+        .membership_role(workspace_id, actor_user_id, true)
+        .await?;
     if !wiki_can_edit(role) {
         return Ok(Err(DocumentDbError::Forbidden));
     }
@@ -611,17 +1026,7 @@ pub(crate) async fn create_wiki_document_tx(
 
     let mut parent_path = String::new();
     if let Some(parent_id) = input.parent_id {
-        let parent: Option<(Option<Uuid>, String, Option<DateTime<Utc>>)> = sqlx::query_as(
-            r#"
-            SELECT project_id, path, deleted_at
-            FROM fvoci.documents
-            WHERE workspace_id = $1 AND id = $2
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(parent_id)
-        .fetch_optional(&mut **tx)
-        .await?;
+        let parent = tx.wiki_parent(workspace_id, parent_id).await?;
         let Some((project_id, path, deleted_at)) = parent else {
             return Ok(Err(DocumentDbError::NotFound));
         };
@@ -643,22 +1048,8 @@ pub(crate) async fn create_wiki_document_tx(
         return Ok(Err(DocumentDbError::DepthLimit));
     }
 
-    let last_sort: Option<(String,)> = sqlx::query_as(
-        r#"
-        SELECT sort_key
-        FROM fvoci.documents
-        WHERE workspace_id = $1
-          AND parent_id IS NOT DISTINCT FROM $2
-          AND deleted_at IS NULL
-        ORDER BY sort_key COLLATE "C" DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(input.parent_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let sort_key = match between(last_sort.as_ref().map(|(k,)| k.as_str()), None) {
+    let last_sort = tx.last_wiki_sort_key(workspace_id, input.parent_id).await?;
+    let sort_key = match between(last_sort.as_deref(), None) {
         Ok(key) => key,
         Err(err) => {
             tracing::error!("{err}");
@@ -674,40 +1065,18 @@ pub(crate) async fn create_wiki_document_tx(
         Some(value) => value.map(str::to_string),
         None => None,
     };
-    let number: (i32,) = sqlx::query_as(
-        r#"
-        UPDATE fvoci.workspaces
-        SET next_document_number = next_document_number + 1, updated_at = now()
-        WHERE id = $1 AND deleted_at IS NULL
-        RETURNING next_document_number
-        "#,
+    let number = tx.allocate_wiki_number(workspace_id).await?;
+    tx.insert_wiki_document(
+        workspace_id,
+        document_id,
+        actor_user_id,
+        input.title,
+        icon.as_deref(),
+        &path,
+        input.parent_id,
+        &sort_key,
+        number,
     )
-    .bind(workspace_id)
-    .fetch_one(&mut **tx)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO fvoci.documents (
-            id, workspace_id, title, icon, path, parent_id, sort_key, project_id,
-            number, status, schema_version, content_json, created_by, kind
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, NULL,
-            $8, 'draft', $9, $10, $11, 'doc'
-        )
-        "#,
-    )
-    .bind(document_id)
-    .bind(workspace_id)
-    .bind(input.title)
-    .bind(icon)
-    .bind(&path)
-    .bind(input.parent_id)
-    .bind(&sort_key)
-    .bind(number.0)
-    .bind(DOCUMENT_SCHEMA_VERSION)
-    .bind(empty_document_json())
-    .bind(actor_user_id)
-    .execute(&mut **tx)
     .await?;
 
     let payload = json!({
@@ -716,32 +1085,59 @@ pub(crate) async fn create_wiki_document_tx(
         "title": input.title,
         "projectId": null,
     });
-    record_document_event_and_audit(
-        tx,
-        workspace_id,
-        actor_user_id,
-        "document.created",
-        document_id,
-        payload,
-        client_ip,
-    )
-    .await?;
+    if let (Some(fence), true) = (fence, matches!(tx, OperationTx::SqliteFamily(_))) {
+        if !tx
+            .park_import_event(
+                workspace_id,
+                fence,
+                EventAppend {
+                    id: Uuid::now_v7(),
+                    workspace_id: Some(workspace_id),
+                    actor_user_id: Some(actor_user_id),
+                    verb: "document.created".into(),
+                    target_type: Some("document".into()),
+                    target_id: Some(document_id),
+                    payload: payload.clone(),
+                },
+                "web",
+            )
+            .await?
+        {
+            return Ok(Ok(None));
+        }
+        tx.append_audit(AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace_id),
+            actor_user_id: Some(actor_user_id),
+            verb: "document.created".into(),
+            target_type: Some("document".into()),
+            target_id: Some(document_id),
+            payload,
+            ip: client_ip.map(str::to_string),
+        })
+        .await?;
+    } else {
+        tx.record_document_event_and_audit(
+            workspace_id,
+            actor_user_id,
+            "document.created",
+            document_id,
+            payload,
+            client_ip,
+        )
+        .await?;
+    }
 
     if let Some(fence) = fence {
-        if !crate::db::import_jobs::append_import_document_ref(
-            tx,
-            workspace_id,
-            fence.job_id,
-            fence.lease_token,
-            document_id,
-        )
-        .await?
+        if !tx
+            .append_import_document_ref(workspace_id, fence.job_id, fence.lease_token, document_id)
+            .await?
         {
             return Ok(Ok(None));
         }
     }
 
-    let row = fetch_document_row(tx, workspace_id, document_id).await?;
+    let row = tx.document_row(workspace_id, document_id).await?;
     match row {
         Some(row) => Ok(Ok(Some(row_to_meta(row, true)))),
         None => Ok(Err(DocumentDbError::NotFound)),
@@ -755,24 +1151,79 @@ pub async fn get_wiki_document(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
+    get_wiki_document_backend(
+        &Backend::Postgres(pool.clone()),
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+    )
+    .await
+}
+
+pub async fn get_wiki_document_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+    // Preserve the current PG route's READ COMMITTED transaction. Family reads
+    // use one snapshot for current credential, affiliation, grants and body.
+    let tx = match backend {
+        Backend::Postgres(pool) => super::backend::DbTransaction::Postgres(pool.begin().await?),
+        _ => backend.begin_read().await?,
+    };
+    get_wiki_document_in_tx(tx, workspace_id, actor_user_id, session_id, document_id).await
+}
+
+/// Body readers preserve the original read-only repeatable snapshot on PG;
+/// identity, current wiki ACL and derived body are read in that same snapshot.
+pub async fn read_wiki_document_body_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+    get_wiki_document_in_tx(
+        backend.begin_read().await?,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+    )
+    .await
+}
+
+async fn get_wiki_document_in_tx(
+    mut tx: super::backend::DbTx,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+    let mut operation = tx.operation();
+    operation.set_tenant(workspace_id).await?;
+    if !operation.session_is_live(actor_user_id, session_id).await? {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::Forbidden));
     }
-    if !workspace_is_live(&mut tx, workspace_id).await? {
+    if !operation.workspace_is_live(workspace_id).await? {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let permission =
-        document_permission(&mut tx, workspace_id, actor_user_id, document_id, true).await?;
+    let permission = operation
+        .document_permission(workspace_id, actor_user_id, document_id, true)
+        .await?;
     if !permission_can_view(permission) {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let row = fetch_document_row(&mut tx, workspace_id, document_id).await?;
-    tx.commit().await?;
+    let row = operation.document_row(workspace_id, document_id).await?;
+    tx.commit()
+        .await
+        .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
     match row {
         Some(row) if row.8.is_some() => Ok(Err(DocumentDbError::NotFound)),
         Some(row) => Ok(Ok(row_to_meta(row, false))),
@@ -789,38 +1240,115 @@ pub async fn list_workspace_wiki_discovery(
     credential_id: Uuid,
     tag: Option<Uuid>,
 ) -> Result<Result<Vec<TreeNode>, DocumentDbError>, sqlx::Error> {
-    let mut tx = begin_read(pool).await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    if !session_is_live(&mut tx, actor_user_id, credential_id).await? {
+    list_workspace_wiki_discovery_backend(
+        &Backend::Postgres(pool.clone()),
+        workspace_id,
+        actor_user_id,
+        credential_id,
+        tag,
+    )
+    .await
+}
+
+pub async fn list_workspace_wiki_discovery_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    credential_id: Uuid,
+    tag: Option<Uuid>,
+) -> Result<Result<Vec<TreeNode>, DocumentDbError>, sqlx::Error> {
+    let mut tx = backend.begin_read().await?;
+    let mut operation = tx.operation();
+    operation.set_tenant(workspace_id).await?;
+    if !operation
+        .session_is_live(actor_user_id, credential_id)
+        .await?
+    {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::Forbidden));
     }
-    if !workspace_is_live(&mut tx, workspace_id).await? {
+    if !operation.workspace_is_live(workspace_id).await? {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let Some(role) = membership_role(&mut tx, workspace_id, actor_user_id).await? else {
+    let Some(role) = operation
+        .membership_role(workspace_id, actor_user_id, false)
+        .await?
+    else {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::Forbidden));
     };
-    let guest_wiki = guest_wiki_document_ids_select_sql(1, 3);
-    let visible_project = visible_project_sql("p", 2, 3);
-    let rows = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            Uuid,
-            Option<Uuid>,
-            Option<Uuid>,
-            String,
-            Option<String>,
-            String,
-            String,
-            i32,
-            String,
-        ),
-    >(&format!(
-        r#"
+    let rows = operation
+        .wiki_discovery_rows(
+            workspace_id,
+            actor_user_id,
+            role == WorkspaceRole::Guest,
+            tag,
+        )
+        .await?;
+    tx.rollback().await?;
+    Ok(Ok(rows.into_iter().map(tree_node_from_row).collect()))
+}
+
+type TreeRow = (
+    Uuid,
+    Uuid,
+    Option<Uuid>,
+    Option<Uuid>,
+    String,
+    Option<String>,
+    String,
+    String,
+    i32,
+    String,
+);
+
+fn tree_node_from_row(row: TreeRow) -> TreeNode {
+    let (id, workspace_id, parent_id, project_id, title, icon, path, sort_key, number, status) =
+        row;
+    TreeNode {
+        id,
+        workspace_id,
+        parent_id,
+        project_id,
+        title,
+        icon,
+        path,
+        sort_key,
+        number,
+        status,
+    }
+}
+
+fn family_tree_row(row: &FamilyRow) -> Result<TreeRow, sqlx::Error> {
+    Ok((
+        row.cell(0)?.id()?,
+        row.cell(1)?.id()?,
+        row.cell(2)?.optional(Cell::id)?,
+        row.cell(3)?.optional(Cell::id)?,
+        row.cell(4)?.string()?,
+        row.cell(5)?.optional(Cell::string)?,
+        row.cell(6)?.string()?,
+        row.cell(7)?.string()?,
+        row.cell(8)?.int32()?,
+        row.cell(9)?.string()?,
+    ))
+}
+
+impl OperationTx<'_, '_> {
+    async fn wiki_discovery_rows(
+        &mut self,
+        workspace_id: Uuid,
+        actor_user_id: Uuid,
+        guest: bool,
+        tag: Option<Uuid>,
+    ) -> Result<Vec<TreeRow>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                let guest_wiki = guest_wiki_document_ids_select_sql(1, 3);
+                let visible_project = visible_project_sql("p", 2, 3);
+                sqlx::query_as::<_, TreeRow>(&format!(
+                    r#"
         SELECT d.id, d.workspace_id, d.parent_id, d.project_id, d.title,
                d.icon, d.path, d.sort_key, d.number, d.status
         FROM fvoci.documents d
@@ -840,42 +1368,21 @@ pub async fn list_workspace_wiki_discovery(
           ))
         ORDER BY d.sort_key COLLATE "C", d.id
         "#
-    ))
-    .bind(workspace_id)
-    .bind(role == WorkspaceRole::Guest)
-    .bind(actor_user_id)
-    .bind(tag)
-    .fetch_all(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(Ok(rows
-        .into_iter()
-        .map(
-            |(
-                id,
-                workspace_id,
-                parent_id,
-                project_id,
-                title,
-                icon,
-                path,
-                sort_key,
-                number,
-                status,
-            )| TreeNode {
-                id,
-                workspace_id,
-                parent_id,
-                project_id,
-                title,
-                icon,
-                path,
-                sort_key,
-                number,
-                status,
-            },
-        )
-        .collect()))
+                ))
+                .bind(workspace_id)
+                .bind(guest)
+                .bind(actor_user_id)
+                .bind(tag)
+                .fetch_all(&mut ***tx)
+                .await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace_id)?;
+                let rows=tx.query("SELECT d.id,d.workspace_id,d.parent_id,d.project_id,d.title,d.icon,d.path,d.sort_key,d.number,d.status FROM documents d WHERE d.workspace_id=?1 AND d.deleted_at IS NULL AND ((d.project_id IS NULL AND (?2=0 OR EXISTS(SELECT 1 FROM document_members dm JOIN group_members gm ON gm.workspace_id=dm.workspace_id AND gm.group_id=dm.group_id WHERE dm.workspace_id=d.workspace_id AND dm.document_id=d.id AND gm.user_id=?3 AND dm.group_id IS NOT NULL))) OR EXISTS(SELECT 1 FROM projects p WHERE p.workspace_id=d.workspace_id AND p.id=d.project_id AND p.deleted_at IS NULL AND ((p.visibility='workspace' AND ?2=0) OR EXISTS(SELECT 1 FROM project_members pm WHERE pm.workspace_id=p.workspace_id AND pm.project_id=p.id AND pm.user_id=?3) OR EXISTS(SELECT 1 FROM project_members pm JOIN group_members gm ON gm.workspace_id=pm.workspace_id AND gm.group_id=pm.group_id WHERE pm.workspace_id=p.workspace_id AND pm.project_id=p.id AND gm.user_id=?3 AND pm.group_id IS NOT NULL)))) AND (?4 IS NULL OR EXISTS(SELECT 1 FROM document_tag_assignments a WHERE a.workspace_id=d.workspace_id AND a.document_id=d.id AND a.tag_id=?4)) ORDER BY d.sort_key COLLATE BINARY,d.id", &[Cell::uuid(workspace_id),Cell::Integer(i64::from(guest)),Cell::uuid(actor_user_id),Cell::optional_uuid(tag)]).await?;
+                rows.iter().map(family_tree_row).collect()
+            }
+        }
+    }
 }
 
 pub async fn list_wiki_tree(
@@ -884,79 +1391,74 @@ pub async fn list_wiki_tree(
     actor_user_id: Uuid,
     session_id: Uuid,
 ) -> Result<Result<Vec<TreeNode>, DocumentDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
+    list_wiki_tree_backend(
+        &Backend::Postgres(pool.clone()),
+        workspace_id,
+        actor_user_id,
+        session_id,
+    )
+    .await
+}
+
+pub async fn list_wiki_tree_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<Vec<TreeNode>, DocumentDbError>, sqlx::Error> {
+    let mut tx = match backend {
+        Backend::Postgres(pool) => super::backend::DbTransaction::Postgres(pool.begin().await?),
+        _ => backend.begin_read().await?,
+    };
+    let mut operation = tx.operation();
+    operation.set_tenant(workspace_id).await?;
+    if !operation.session_is_live(actor_user_id, session_id).await? {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::Forbidden));
     }
-    if !workspace_is_live(&mut tx, workspace_id).await? {
+    if !operation.workspace_is_live(workspace_id).await? {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let role = membership_role(&mut tx, workspace_id, actor_user_id).await?;
+    let role = operation
+        .membership_role(workspace_id, actor_user_id, false)
+        .await?;
     let Some(role) = role else {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::Forbidden));
     };
     if role == WorkspaceRole::Guest {
-        tx.commit().await?;
+        tx.rollback().await?;
         return Ok(Ok(Vec::new()));
     }
-    let rows = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            Uuid,
-            Option<Uuid>,
-            Option<Uuid>,
-            String,
-            Option<String>,
-            String,
-            String,
-            i32,
-            String,
-        ),
-    >(
-        r#"
+    let rows = operation.wiki_tree_rows(workspace_id).await?;
+    tx.rollback().await?;
+    Ok(Ok(rows.into_iter().map(tree_node_from_row).collect()))
+}
+
+impl OperationTx<'_, '_> {
+    async fn wiki_tree_rows(&mut self, workspace_id: Uuid) -> Result<Vec<TreeRow>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query_as::<_, TreeRow>(
+                    r#"
         SELECT id, workspace_id, parent_id, project_id, title, icon, path, sort_key, number, status
         FROM fvoci.documents
         WHERE workspace_id = $1 AND deleted_at IS NULL AND project_id IS NULL
         ORDER BY sort_key COLLATE "C"
         "#,
-    )
-    .bind(workspace_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(Ok(rows
-        .into_iter()
-        .map(
-            |(
-                id,
-                workspace_id,
-                parent_id,
-                project_id,
-                title,
-                icon,
-                path,
-                sort_key,
-                number,
-                status,
-            )| TreeNode {
-                id,
-                workspace_id,
-                parent_id,
-                project_id,
-                title,
-                icon,
-                path,
-                sort_key,
-                number,
-                status,
-            },
-        )
-        .collect()))
+                )
+                .bind(workspace_id)
+                .fetch_all(&mut ***tx)
+                .await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace_id)?;
+                let rows=tx.query("SELECT id,workspace_id,parent_id,project_id,title,icon,path,sort_key,number,status FROM documents WHERE workspace_id=?1 AND deleted_at IS NULL AND project_id IS NULL ORDER BY sort_key COLLATE BINARY", &[Cell::uuid(workspace_id)]).await?;
+                rows.iter().map(family_tree_row).collect()
+            }
+        }
+    }
 }
 
 pub async fn list_wiki_ancestors(
@@ -966,23 +1468,45 @@ pub async fn list_wiki_ancestors(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<Result<Vec<AncestorCrumb>, DocumentDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
+    list_wiki_ancestors_backend(
+        &Backend::Postgres(pool.clone()),
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+    )
+    .await
+}
+
+pub async fn list_wiki_ancestors_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<Vec<AncestorCrumb>, DocumentDbError>, sqlx::Error> {
+    let mut tx = match backend {
+        Backend::Postgres(pool) => super::backend::DbTransaction::Postgres(pool.begin().await?),
+        _ => backend.begin_read().await?,
+    };
+    let mut operation = tx.operation();
+    operation.set_tenant(workspace_id).await?;
+    if !operation.session_is_live(actor_user_id, session_id).await? {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::Forbidden));
     }
-    if !workspace_is_live(&mut tx, workspace_id).await? {
+    if !operation.workspace_is_live(workspace_id).await? {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let permission =
-        document_permission(&mut tx, workspace_id, actor_user_id, document_id, true).await?;
+    let permission = operation
+        .document_permission(workspace_id, actor_user_id, document_id, true)
+        .await?;
     if !permission_can_view(permission) {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let current = fetch_document_row(&mut tx, workspace_id, document_id).await?;
+    let current = operation.document_row(workspace_id, document_id).await?;
     let Some(current) = current else {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
@@ -991,8 +1515,37 @@ pub async fn list_wiki_ancestors(
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let rows = sqlx::query_as::<_, (Uuid, String, Option<String>, String, Option<Uuid>, i32)>(
-        r#"
+    let rows = operation
+        .wiki_ancestor_rows(workspace_id, document_id)
+        .await?;
+    tx.rollback().await?;
+    Ok(Ok(rows
+        .into_iter()
+        .map(
+            |(id, title, icon, path, project_id, number)| AncestorCrumb {
+                id,
+                title,
+                icon,
+                path,
+                project_id,
+                number,
+            },
+        )
+        .collect()))
+}
+
+type AncestorRow = (Uuid, String, Option<String>, String, Option<Uuid>, i32);
+
+impl OperationTx<'_, '_> {
+    async fn wiki_ancestor_rows(
+        &mut self,
+        workspace_id: Uuid,
+        document_id: Uuid,
+    ) -> Result<Vec<AncestorRow>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query_as::<_, AncestorRow>(
+                    r#"
         WITH target AS (
             SELECT path FROM fvoci.documents
             WHERE workspace_id = $1 AND id = $2
@@ -1010,25 +1563,30 @@ pub async fn list_wiki_ancestors(
           )
         ORDER BY (length(ancestor.path) - length(replace(ancestor.path, '.', '')))
         "#,
-    )
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(Ok(rows
-        .into_iter()
-        .map(
-            |(id, title, icon, path, project_id, number)| AncestorCrumb {
-                id,
-                title,
-                icon,
-                path,
-                project_id,
-                number,
-            },
-        )
-        .collect()))
+                )
+                .bind(workspace_id)
+                .bind(document_id)
+                .fetch_all(&mut ***tx)
+                .await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace_id)?;
+                let rows=tx.query("WITH target AS(SELECT path FROM documents WHERE workspace_id=?1 AND id=?2) SELECT ancestor.id,ancestor.title,ancestor.icon,ancestor.path,ancestor.project_id,ancestor.number FROM documents ancestor CROSS JOIN target WHERE ancestor.workspace_id=?1 AND ancestor.id<>?2 AND target.path IS NOT NULL AND (target.path=ancestor.path OR substr(target.path,1,length(ancestor.path)+1)=ancestor.path||'.') ORDER BY (length(ancestor.path)-length(replace(ancestor.path,'.','')))", &[Cell::uuid(workspace_id),Cell::uuid(document_id)]).await?;
+                rows.iter()
+                    .map(|row| {
+                        Ok((
+                            row.cell(0)?.id()?,
+                            row.cell(1)?.string()?,
+                            row.cell(2)?.optional(Cell::string)?,
+                            row.cell(3)?.string()?,
+                            row.cell(4)?.optional(Cell::id)?,
+                            row.cell(5)?.int32()?,
+                        ))
+                    })
+                    .collect()
+            }
+        }
+    }
 }
 
 pub async fn update_wiki_document_meta(
@@ -1141,6 +1699,266 @@ pub(crate) async fn fetch_document_row(
     .bind(document_id)
     .fetch_optional(&mut **tx)
     .await
+}
+
+fn family_document_row(row: &FamilyRow) -> Result<DocumentRow, sqlx::Error> {
+    Ok((
+        row.cell(0)?.id()?,
+        row.cell(1)?.id()?,
+        row.cell(2)?.string()?,
+        row.cell(3)?.int32()?,
+        row.cell(4)?.optional(Cell::string)?,
+        row.cell(5)?.string()?,
+        row.cell(6)?.optional(Cell::id)?,
+        row.cell(7)?.string()?,
+        row.cell(8)?.optional(Cell::id)?,
+        row.cell(9)?.string()?,
+        row.cell(10)?.int32()?,
+        row.cell(11)?.int32()?,
+        row.cell(12)?.id()?,
+        row.cell(13)?.datetime()?,
+        row.cell(14)?.datetime()?,
+        row.cell(15)?.value()?,
+    ))
+}
+
+type WikiReceipt = (Uuid, String, Option<Uuid>, Value);
+type WikiParent = (Option<Uuid>, String, Option<DateTime<Utc>>);
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn document_row(
+        &mut self,
+        workspace: Uuid,
+        document: Uuid,
+    ) -> Result<Option<DocumentRow>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => fetch_document_row(tx, workspace, document).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let rows=tx.query("SELECT id,workspace_id,title,number,icon,path,parent_id,sort_key,project_id,status,schema_version,version,created_by,created_at,updated_at,content_json FROM documents WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL", &[Cell::uuid(workspace),Cell::uuid(document)]).await?;
+                rows.first().map(family_document_row).transpose()
+            }
+        }
+    }
+
+    async fn document_affiliation(
+        &mut self,
+        workspace: Uuid,
+        document: Uuid,
+    ) -> Result<Option<(Option<Uuid>, Option<DateTime<Utc>>)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_as(
+                "SELECT project_id,deleted_at FROM fvoci.documents WHERE workspace_id=$1 AND id=$2",
+            )
+            .bind(workspace)
+            .bind(document)
+            .fetch_optional(&mut ***tx)
+            .await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let rows=tx.query("SELECT project_id,deleted_at FROM documents WHERE workspace_id=?1 AND id=?2", &[Cell::uuid(workspace),Cell::uuid(document)]).await?;
+                rows.first()
+                    .map(|row| {
+                        Ok((
+                            row.cell(0)?.optional(Cell::id)?,
+                            row.cell(1)?.optional(Cell::datetime)?,
+                        ))
+                    })
+                    .transpose()
+            }
+        }
+    }
+
+    async fn wiki_group_roles(
+        &mut self,
+        workspace: Uuid,
+        document: Uuid,
+        user: Uuid,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => wiki_group_roles(tx, workspace, document, user).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let rows=tx.query("SELECT dm.role FROM document_members dm JOIN group_members gm ON gm.workspace_id=dm.workspace_id AND gm.group_id=dm.group_id WHERE dm.workspace_id=?1 AND dm.document_id=?2 AND gm.user_id=?3 AND dm.group_id IS NOT NULL", &[Cell::uuid(workspace),Cell::uuid(document),Cell::uuid(user)]).await?;
+                rows.iter().map(|row| row.cell(0)?.string()).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn wiki_parent(
+        &mut self,
+        workspace: Uuid,
+        parent: Uuid,
+    ) -> Result<Option<WikiParent>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_as("SELECT project_id,path::text,deleted_at FROM fvoci.documents WHERE workspace_id=$1 AND id=$2").bind(workspace).bind(parent).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let rows=tx.query("SELECT project_id,path,deleted_at FROM documents WHERE workspace_id=?1 AND id=?2", &[Cell::uuid(workspace),Cell::uuid(parent)]).await?;
+                rows.first().map(|row|Ok((row.cell(0)?.optional(Cell::id)?,row.cell(1)?.string()?,row.cell(2)?.optional(Cell::datetime)?))).transpose()
+            }
+        }
+    }
+
+    pub(crate) async fn last_wiki_sort_key(
+        &mut self,
+        workspace: Uuid,
+        parent: Option<Uuid>,
+    ) -> Result<Option<String>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_scalar("SELECT sort_key FROM fvoci.documents WHERE workspace_id=$1 AND parent_id IS NOT DISTINCT FROM $2 AND deleted_at IS NULL ORDER BY sort_key COLLATE \"C\" DESC LIMIT 1").bind(workspace).bind(parent).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let rows=tx.query("SELECT sort_key FROM documents WHERE workspace_id=?1 AND parent_id IS ?2 AND deleted_at IS NULL ORDER BY sort_key COLLATE BINARY DESC LIMIT 1", &[Cell::uuid(workspace),Cell::optional_uuid(parent)]).await?;
+                rows.first().map(|row|row.cell(0)?.string()).transpose()
+            }
+        }
+    }
+
+    async fn allocate_wiki_number(&mut self, workspace: Uuid) -> Result<i32, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_scalar("UPDATE fvoci.workspaces SET next_document_number=next_document_number+1,updated_at=now() WHERE id=$1 AND deleted_at IS NULL RETURNING next_document_number").bind(workspace).fetch_one(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                let rows=tx.query("UPDATE workspaces SET next_document_number=next_document_number+1,updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE id=?1 AND deleted_at IS NULL AND next_document_number<2147483647 RETURNING next_document_number", &[Cell::uuid(workspace)]).await?;
+                rows.first().ok_or(sqlx::Error::RowNotFound)?.cell(0)?.int32()
+            }
+        }
+    }
+
+    // The sole caller supplies the authorized workspace/actor and derived ID,
+    // path, sort key and allocated number under the same membership/tree lock.
+    // CreateDocumentInput covers only title/icon/parent; retain the explicit
+    // INSERT column inputs rather than introduce a second request contract.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one locked wiki creation supplies explicit INSERT columns for both backends"
+    )]
+    async fn insert_wiki_document(
+        &mut self,
+        workspace: Uuid,
+        document: Uuid,
+        actor: Uuid,
+        title: &str,
+        icon: Option<&str>,
+        path: &str,
+        parent: Option<Uuid>,
+        sort: &str,
+        number: i32,
+    ) -> Result<(), sqlx::Error> {
+        let body = empty_document_json();
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query("INSERT INTO fvoci.documents(id,workspace_id,title,icon,path,parent_id,sort_key,project_id,number,status,schema_version,content_json,created_by,kind) VALUES($1,$2,$3,$4,$5,$6,$7,NULL,$8,'draft',$9,$10,$11,'doc')")
+                    .bind(document).bind(workspace).bind(title).bind(icon).bind(path).bind(parent).bind(sort).bind(number).bind(DOCUMENT_SCHEMA_VERSION).bind(body).bind(actor).execute(&mut ***tx).await?;
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                tx.execute("INSERT INTO documents(id,workspace_id,title,icon,path,parent_id,sort_key,project_id,number,status,schema_version,content_json,created_by,kind) VALUES(?1,?2,?3,?4,?5,?6,?7,NULL,?8,'draft',?9,?10,?11,'doc')", &[Cell::uuid(document),Cell::uuid(workspace),Cell::text(title),Cell::optional_text(icon),Cell::text(path),Cell::optional_uuid(parent),Cell::text(sort),Cell::Integer(i64::from(number)),Cell::Integer(i64::from(DOCUMENT_SCHEMA_VERSION)),Cell::json(&body)?,Cell::uuid(actor)]).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn wiki_create_receipt(
+        &mut self,
+        workspace: Uuid,
+        command: Uuid,
+    ) -> Result<Option<WikiReceipt>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_as("SELECT actor_user_id,request_hash,document_id,result_json FROM fvoci.wiki_create_commands WHERE workspace_id=$1 AND command_id=$2").bind(workspace).bind(command).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let rows=tx.query("SELECT actor_user_id,request_hash,document_id,result_json FROM wiki_create_commands WHERE workspace_id=?1 AND command_id=?2", &[Cell::uuid(workspace),Cell::uuid(command)]).await?;
+                rows.first().map(|row|Ok((row.cell(0)?.id()?,row.cell(1)?.string()?,row.cell(2)?.optional(Cell::id)?,row.cell(3)?.value()?))).transpose()
+            }
+        }
+    }
+
+    pub(crate) async fn insert_wiki_create_receipt(
+        &mut self,
+        workspace: Uuid,
+        command: Uuid,
+        actor: Uuid,
+        hash: &str,
+        document: Uuid,
+        result: &Value,
+    ) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query("INSERT INTO fvoci.wiki_create_commands(workspace_id,command_id,actor_user_id,request_hash,document_id,result_json) VALUES($1,$2,$3,$4,$5,$6)").bind(workspace).bind(command).bind(actor).bind(hash).bind(document).bind(result).execute(&mut ***tx).await?;
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                tx.execute("INSERT INTO wiki_create_commands(workspace_id,command_id,actor_user_id,request_hash,document_id,result_json) VALUES(?1,?2,?3,?4,?5,?6)", &[Cell::uuid(workspace),Cell::uuid(command),Cell::uuid(actor),Cell::text(hash),Cell::uuid(document),Cell::json(result)?]).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn record_document_event_and_audit(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        verb: &str,
+        target: Uuid,
+        payload: Value,
+        ip: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        self.append_event(EventAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace),
+            actor_user_id: Some(actor),
+            verb: verb.into(),
+            target_type: Some("document".into()),
+            target_id: Some(target),
+            payload: payload.clone(),
+        })
+        .await?;
+        self.append_audit(AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace),
+            actor_user_id: Some(actor),
+            verb: verb.into(),
+            target_type: Some("document".into()),
+            target_id: Some(target),
+            payload,
+            ip: ip.map(str::to_string),
+        })
+        .await
+    }
+
+    async fn append_import_document_ref(
+        &mut self,
+        workspace: Uuid,
+        job: Uuid,
+        owner: Uuid,
+        document: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                crate::db::import_jobs::append_import_document_ref(
+                    tx, workspace, job, owner, document,
+                )
+                .await
+            }
+            Self::SqliteFamily(_) => {
+                self.append_import_ref(
+                    workspace,
+                    ImportFence {
+                        job_id: job,
+                        lease_token: owner,
+                    },
+                    crate::db::import_jobs::ImportRefKind::Document,
+                    &document.to_string(),
+                )
+                .await
+            }
+        }
+    }
 }
 
 fn alphabet_char(index: usize) -> char {

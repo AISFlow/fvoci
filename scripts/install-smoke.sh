@@ -175,9 +175,12 @@ log_assert "password login: ok"
 
 WORKSPACES="$(curl -fsS -b "$COOKIE_JAR" "$BASE_URL/api/v1/me/workspaces")"
 WORKSPACE_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["items"][0]["id"])' "$WORKSPACES")"
+# Choose the command/body once, preserving its identity on any replay.
+DOC_COMMAND_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+DOC_CREATE_BODY="{\"commandId\":\"${DOC_COMMAND_ID}\",\"parentId\":null,\"title\":\"Install doc\"}"
 DOC_CREATE="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $ORIGIN" \
   -X POST "$BASE_URL/api/v1/workspaces/${WORKSPACE_ID}/documents" \
-  -d '{"parentId":null,"title":"Install doc"}')"
+  -d "$DOC_CREATE_BODY")"
 DOCUMENT_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$DOC_CREATE")"
 log_assert "workspace document create: ok (${DOCUMENT_ID})"
 
@@ -212,8 +215,9 @@ UPLOAD_INIT="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H
   -d "{\"name\":\"sample.hwpx\",\"sizeBytes\":$(wc -c <"$FIXTURE_HWPX"),\"declaredMime\":\"application/x-hwp\"}")"
 ATTACHMENT_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["attachmentId"])' "$UPLOAD_INIT")"
 PART_URL="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["parts"][0]["url"])' "$UPLOAD_INIT")"
-ETAG="$(curl -fsS -b "$COOKIE_JAR" -H "origin: $ORIGIN" -X PUT "$BASE_URL${PART_URL}" \
-  --data-binary @"$FIXTURE_HWPX" -D - -o /dev/null | awk '/^[Ee]tag:/ { print $2; exit }' | tr -d '\r')"
+PART_HEADERS="$(curl -fsS -b "$COOKIE_JAR" -H "origin: $ORIGIN" -X PUT "$BASE_URL${PART_URL}" \
+  --data-binary @"$FIXTURE_HWPX" -D - -o /dev/null)"
+ETAG="$(awk '/^[Ee]tag:/ { print $2; exit }' <<<"$PART_HEADERS" | tr -d '\r')"
 curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $ORIGIN" \
   -X POST "$BASE_URL/api/v1/workspaces/${WORKSPACE_ID}/attachments/${ATTACHMENT_ID}/complete" \
   -d "{\"parts\":[{\"partNumber\":1,\"etag\":\"${ETAG}\"}]}" >/dev/null

@@ -174,6 +174,8 @@ async fn app_state_with_part_size(
 ) -> AppState {
     let pool = pool::connect_app(app_url).await.expect("app pool");
     AppState {
+        realtime_mode: fvoci_server::config::RealtimeMode::On,
+        native_engine: None,
         auth: Arc::new(AuthService {
             db: Db::new(pool),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
@@ -333,7 +335,7 @@ async fn create_document(app: &axum::Router, cookie: &str, workspace_id: Uuid) -
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Doc"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Doc"})),
         Some(cookie),
     )
     .await;
@@ -1376,7 +1378,247 @@ async fn s3_complete_with_too_small_part_is_a_client_error() {
     .await;
     assert_eq!(status, StatusCode::OK, "still resumable: {resume:?}");
     assert_eq!(resume["uploadedParts"].as_array().unwrap().len(), 2);
+    // Preserve the refused upload/session and its valid final part; replace
+    // only the undersized first part through the original upload URL.
+    let first = patterned(part_size, 3);
+    let (status, replacement_etag) =
+        put_part(&app, &cookie, parts[0]["url"].as_str().unwrap(), &first).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, completed, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+        Some(json!({ "parts": [
+            { "partNumber": 1, "etag": replacement_etag },
+            { "partNumber": 2, "etag": etag2 }
+        ] })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "valid replacement: {completed:?}");
+    let (status, downloaded, _) = request(
+        app,
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/download"),
+        None,
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut expected = first;
+    expected.extend_from_slice(&patterned(1000, 2));
+    assert_eq!(downloaded, expected, "literal replacement/final part bytes");
     harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn pg_refused_completion_cancelled_during_authority_lock_keeps_identity() {
+    use fvoci_server::db::attachments::{test_barrier, AttachmentDbError};
+    use tokio_util::sync::CancellationToken;
+
+    let harness = TestDb::bootstrap().await;
+    let root =
+        std::env::temp_dir().join(format!("fvoci-ctxe883-b055-pg-cancel-{}", Uuid::now_v7()));
+    std::fs::create_dir(&root).unwrap();
+    let storage = ObjectStorage::local(root.clone());
+    let (app, cookie, workspace) =
+        setup_session_with_part_size(&harness, storage.clone(), 24).await;
+    let document = create_document(&app, &cookie, workspace).await;
+    let payload = patterned(34, 4);
+    let (status, created, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace}/documents/{document}/uploads"),
+        Some(json!({"name":"cancelled-refusal.bin","sizeBytes":payload.len()})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = Uuid::parse_str(created["attachmentId"].as_str().unwrap()).unwrap();
+    let (status, first) = put_part(
+        &app,
+        &cookie,
+        created["parts"][0]["url"].as_str().unwrap(),
+        &payload[..24],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, last) = put_part(
+        &app,
+        &cookie,
+        created["parts"][1]["url"].as_str().unwrap(),
+        &payload[24..],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let submitted = vec![(1, first), (2, last)];
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let (credential, actor): (Uuid, Uuid) =
+        sqlx::query_as("SELECT id,user_id FROM fvoci.sessions WHERE revoked_at IS NULL")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let own = pool::connect_app(&harness.app_url).await.unwrap();
+    let role: (String, bool, bool) = sqlx::query_as(
+        "SELECT rolname,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user",
+    )
+    .fetch_one(&own)
+    .await
+    .unwrap();
+    assert_eq!(role, (harness.role_name.clone(), false, false));
+    println!(
+        "PG cancellation fixture role={} super=false bypassrls=false tenant={workspace}",
+        role.0
+    );
+    let mut assembly = test_barrier::arm_pre_assembly(id);
+    let mut refusal = test_barrier::arm_pre_refused_completion(id);
+    let cancel = CancellationToken::new();
+    let complete = tokio::spawn({
+        let (own, storage, submitted, cancel) = (
+            own.clone(),
+            storage.clone(),
+            submitted.clone(),
+            cancel.clone(),
+        );
+        async move {
+            test_barrier::complete_with_cancel(
+                &own,
+                &storage,
+                (workspace, id, actor, credential),
+                submitted,
+                &cancel,
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(30), assembly.wait_entered())
+        .await
+        .unwrap()
+        .unwrap();
+    let before: (String, String, Value) =
+        sqlx::query_as("SELECT status,storage_key,upload_meta FROM fvoci.attachments WHERE id=$1")
+            .bind(id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(before.0, "assembling");
+    assert!(before.2.get("_completion").is_some());
+    // Physically alter a verified part, causing the actual storage operation
+    // to return EtagMismatch before entering the refused-completion cleanup.
+    let part = root.join("tmp").join(&before.1).join("1");
+    std::fs::write(&part, [b'X'; 24]).unwrap();
+    assembly.proceed();
+    tokio::time::timeout(Duration::from_secs(30), refusal.wait_entered())
+        .await
+        .unwrap()
+        .unwrap();
+    let listed = storage.list_parts(&before.1, None).await.unwrap();
+    let mut blocked_by = own.begin().await.unwrap();
+    fvoci_server::db::context::set_tenant(&mut blocked_by, workspace)
+        .await
+        .unwrap();
+    fvoci_server::db::context::lock_membership_users(&mut blocked_by, &[actor])
+        .await
+        .unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocked_by)
+        .await
+        .unwrap();
+    refusal.proceed();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE usename=$1 AND wait_event_type='Lock' AND $2=ANY(pg_blocking_pids(pid)))")
+                .bind(&harness.role_name).bind(blocker).fetch_one(&admin).await.unwrap();
+            if waiting {break;}
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("cleanup must reach the actual current-authority lock wait");
+    assert!(!cancel.is_cancelled());
+    cancel.cancel();
+    blocked_by.rollback().await.unwrap();
+    assert_eq!(
+        complete.await.unwrap().unwrap().unwrap_err(),
+        AttachmentDbError::UploadState
+    );
+    let after: (String, String, Value) =
+        sqlx::query_as("SELECT status,storage_key,upload_meta FROM fvoci.attachments WHERE id=$1")
+            .bind(id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(
+        after, before,
+        "cancelled cleanup must retain exact prepared identity"
+    );
+    let still_listed = storage.list_parts(&before.1, None).await.unwrap();
+    assert_eq!(
+        still_listed
+            .iter()
+            .map(|p| (p.part_number, &p.etag, p.size_bytes))
+            .collect::<Vec<_>>(),
+        listed
+            .iter()
+            .map(|p| (p.part_number, &p.etag, p.size_bytes))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        fvoci_server::db::attachments::authorize_upload_part(
+            &own, workspace, id, actor, credential, 1
+        )
+        .await
+        .unwrap()
+        .unwrap_err(),
+        AttachmentDbError::UploadState
+    );
+    let mut conflicting = submitted.clone();
+    conflicting[0].1 = "conflicting-after-cancellation".into();
+    assert_eq!(
+        fvoci_server::db::attachments::complete_upload(
+            &own,
+            &storage,
+            workspace,
+            id,
+            actor,
+            credential,
+            conflicting,
+            None
+        )
+        .await
+        .unwrap()
+        .unwrap_err(),
+        AttachmentDbError::EtagMismatch
+    );
+    // Restore the original literal part. The same prepared completion can now
+    // retry successfully through the healthy operation, without a new receipt.
+    std::fs::write(&part, &payload[..24]).unwrap();
+    let completed = fvoci_server::db::attachments::complete_upload(
+        &own, &storage, workspace, id, actor, credential, submitted, None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(completed.status, "stored");
+    assert_eq!(completed.storage_key, before.1);
+    assert_eq!(
+        storage
+            .read_range(&before.1, 0, payload.len() as u64 - 1)
+            .await
+            .unwrap(),
+        payload
+    );
+    let effects: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM fvoci.events WHERE target_id=$1 AND verb='attachment.completed'),(SELECT count(*) FROM fvoci.audit_log WHERE target_id=$1 AND verb='attachment.completed')")
+        .bind(id).fetch_one(&admin).await.unwrap();
+    assert_eq!(effects, (1, 1));
+    own.close().await;
+    admin.close().await;
+    drop(app);
+    harness.cleanup().await;
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 /// Review N1, pinned semantics: with S3 the part bytes reach the multipart
@@ -1817,7 +2059,13 @@ async fn s3_image_preview_is_stored_served_and_reclaimed() {
         fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
     )
     .await;
-    let pool = state.auth.db.pool.clone();
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("PostgreSQL integration fixture")
+        .expect("actual PG fixture backend")
+        .clone();
     let (app, cookie, workspace_id) = setup_session_with_state(&harness, state).await;
     let document_id = create_document(&app, &cookie, workspace_id).await;
 
@@ -3553,7 +3801,7 @@ async fn transfer_mode_env_lock_restart_and_startup_refusals() {
         .call(
             reqwest::Method::POST,
             &format!("/api/v1/workspaces/{workspace_id}/documents"),
-            Some(json!({"parentId": null, "title": "Doc"})),
+            Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Doc"})),
         )
         .await;
     assert_eq!(status, 201, "{doc:?}");

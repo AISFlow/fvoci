@@ -145,6 +145,8 @@ pub async fn app_state_with_storage(app_url: &str, storage_root: PathBuf) -> App
     let pool = pool::connect_app(app_url).await.expect("app pool");
     std::fs::create_dir_all(&storage_root).expect("storage root");
     AppState {
+        realtime_mode: fvoci_server::config::RealtimeMode::On,
+        native_engine: None,
         auth: Arc::new(AuthService {
             db: Db::new(pool),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
@@ -297,7 +299,7 @@ pub async fn create_document(app: &Router, cookie: &str, workspace_id: Uuid) -> 
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Doc"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Doc"})),
         Some(cookie),
     )
     .await;

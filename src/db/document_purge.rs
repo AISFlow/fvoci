@@ -38,6 +38,8 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::attachments::ObjectStorage;
+use crate::db::backend::OperationTx;
+use crate::db::codec::Cell;
 use crate::db::context::{lock_tree, set_system, set_tenant};
 use crate::db::documents::{TRASH_PURGE_MARGIN_DAYS, TRASH_RETENTION_DAYS};
 use crate::db::identity::{append_event_channel, EventAppend};
@@ -63,6 +65,142 @@ pub enum TrashPurgeOutcome {
 
 fn purge_after_days() -> i32 {
     TRASH_RETENTION_DAYS + TRASH_PURGE_MARGIN_DAYS
+}
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn maintenance_live_workspace_ids(
+        &mut self,
+    ) -> Result<Vec<Uuid>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE deleted_at IS NULL ORDER BY created_at ASC, id ASC").fetch_all(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_system_context()?;
+                tx.query("SELECT id FROM workspaces WHERE deleted_at IS NULL ORDER BY created_at, id", &[]).await?
+                    .iter().map(|row| row.cell(0)?.id()).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn maintenance_expired_documents(
+        &mut self,
+        workspace: Uuid,
+        exclude: &[Uuid],
+        limit: i64,
+    ) -> Result<Vec<Uuid>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => sqlx::query_scalar("SELECT id FROM fvoci.documents WHERE workspace_id=$1 AND deleted_at IS NOT NULL AND deleted_at <= now()-make_interval(days=>$2) AND NOT (id=ANY($3)) ORDER BY (length(path)-length(replace(path,'.',''))) DESC,deleted_at ASC,id ASC LIMIT $4")
+                .bind(workspace).bind(purge_after_days()).bind(exclude).bind(limit).fetch_all(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_tenant(workspace)?;
+                let exclude = json!(exclude.iter().map(|id| id.simple().to_string()).collect::<Vec<_>>());
+                tx.query("SELECT id FROM documents WHERE workspace_id=?1 AND deleted_at IS NOT NULL AND deleted_at <= (unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)-?2 AND NOT EXISTS(SELECT 1 FROM json_each(?3) x WHERE x.value=lower(hex(documents.id))) ORDER BY (length(path)-length(replace(path,'.',''))) DESC,deleted_at,id LIMIT ?4", &[Cell::uuid(workspace), Cell::Integer(i64::from(purge_after_days())*86_400_000_000), Cell::json(&exclude)?, Cell::Integer(limit)])
+                    .await?.iter().map(|row| row.cell(0)?.id()).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn maintenance_document_purge_keys(
+        &mut self,
+        workspace: Uuid,
+        document: Uuid,
+    ) -> Result<Option<Vec<String>>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => lock_purgeable(tx, workspace, document).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                let expired = tx.query("SELECT 1 FROM documents WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NOT NULL AND deleted_at <= (unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)-?3 AND NOT EXISTS(SELECT 1 FROM documents c WHERE c.workspace_id=?1 AND c.parent_id=?2)", &[Cell::uuid(workspace), Cell::uuid(document), Cell::Integer(i64::from(purge_after_days())*86_400_000_000)]).await?;
+                if expired.is_empty() {
+                    return Ok(None);
+                }
+                let rows = tx.query("SELECT storage_key,status FROM attachments WHERE workspace_id=?1 AND document_id=?2 ORDER BY id", &[Cell::uuid(workspace), Cell::uuid(document)]).await?;
+                let mut keys = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let status = row.cell(1)?.string()?;
+                    if status == "uploading" || status == "assembling" {
+                        return Ok(None);
+                    }
+                    keys.push(row.cell(0)?.string()?);
+                }
+                Ok(Some(keys))
+            }
+        }
+    }
+
+    /// Call only after this same owning writer validated current purgeability.
+    /// Exact parent rows become the attachment owner's explicit exclusion set.
+    pub(crate) async fn maintenance_document_purge_attachment_ids(
+        &mut self,
+        workspace: Uuid,
+        document: Uuid,
+    ) -> Result<Vec<Uuid>, sqlx::Error> {
+        let Self::SqliteFamily(tx) = self else {
+            return Err(sqlx::Error::Protocol(
+                "family doomed-row reader requires its actual family writer".into(),
+            ));
+        };
+        tx.require_writer()?;
+        tx.require_tenant(workspace)?;
+        tx.query(
+            "SELECT id FROM attachments WHERE workspace_id=?1 AND document_id=?2 ORDER BY id",
+            &[Cell::uuid(workspace), Cell::uuid(document)],
+        )
+        .await?
+        .iter()
+        .map(|row| row.cell(0)?.id())
+        .collect()
+    }
+
+    pub(crate) async fn maintenance_delete_document(
+        &mut self,
+        workspace: Uuid,
+        document: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        let deleted = match self {
+            Self::Postgres(tx) => {
+                sqlx::query(
+                    "DELETE FROM fvoci.attachments WHERE workspace_id=$1 AND document_id=$2",
+                )
+                .bind(workspace)
+                .bind(document)
+                .execute(&mut ***tx)
+                .await?;
+                sqlx::query("DELETE FROM fvoci.revisions WHERE workspace_id=$1 AND target_kind='document' AND target_id=$2").bind(workspace).bind(document).execute(&mut ***tx).await?;
+                sqlx::query("DELETE FROM fvoci.documents WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NOT NULL").bind(workspace).bind(document).execute(&mut ***tx).await?.rows_affected()
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                let parameters = [Cell::uuid(workspace), Cell::uuid(document)];
+                tx.execute(
+                    "DELETE FROM attachments WHERE workspace_id=?1 AND document_id=?2",
+                    &parameters,
+                )
+                .await?;
+                tx.execute("DELETE FROM revisions WHERE workspace_id=?1 AND target_kind='document' AND target_id=?2", &parameters).await?;
+                tx.execute("DELETE FROM documents WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NOT NULL", &parameters).await?
+            }
+        };
+        if deleted != 1 {
+            return Err(sqlx::Error::Protocol(
+                "documents.purge: current document was not deleted; roll back attachment/history effects".into(),
+            ));
+        }
+        self.append_event_channel(
+            EventAppend {
+                id: Uuid::now_v7(),
+                workspace_id: Some(workspace),
+                actor_user_id: None,
+                verb: "document.purged".to_string(),
+                target_type: Some("document".to_string()),
+                target_id: Some(document),
+                payload: json!({"documentId":document.to_string()}),
+            },
+            "system",
+        )
+        .await?;
+        Ok(true)
+    }
 }
 
 /// Live workspaces, oldest first (tenant scans run per workspace: documents RLS

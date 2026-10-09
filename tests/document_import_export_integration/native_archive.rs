@@ -2539,12 +2539,12 @@ async fn native_archive_captures_and_publishes_selected_zotero_closure() {
     // Product wiki documents: an ancestor and the backing document under it.
     let ancestor = post(
         format!("/api/v1/workspaces/{ws}/documents"),
-        json!({"parentId":null,"title":"참고 문헌 🧪"}),
+        json!({"commandId": uuid::Uuid::now_v7(), "parentId":null,"title":"참고 문헌 🧪"}),
     )
     .await;
     let backing = post(
         format!("/api/v1/workspaces/{ws}/documents"),
-        json!({"parentId":ancestor,"title":"Zotero reference"}),
+        json!({"commandId": uuid::Uuid::now_v7(), "parentId":ancestor,"title":"Zotero reference"}),
     )
     .await;
     let task = post(
@@ -2963,7 +2963,7 @@ async fn native_archive_captures_and_publishes_selected_zotero_closure() {
     .expect("closure is capturable again");
     post(
         format!("/api/v1/workspaces/{ws}/documents"),
-        json!({"parentId":backing,"title":"하위 메모"}),
+        json!({"commandId": uuid::Uuid::now_v7(), "parentId":backing,"title":"하위 메모"}),
     )
     .await;
     let omitted = capture(
@@ -3173,7 +3173,7 @@ async fn native_archive_restores_personal_input_origin_and_retired_receipt() {
         fx.app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{ws}/documents"),
-        Some(json!({"parentId":origin,"title":"하위 메모"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId":origin,"title":"하위 메모"})),
         Some(&fx.cookie),
     )
     .await;
@@ -5430,7 +5430,10 @@ async fn native_archive_post053_command_only_guard_refuses_full_and_omitted_hist
             .fetch_all(&fx.admin)
             .await
             .unwrap();
-    assert_eq!(versions, (1..=54).collect::<Vec<_>>());
+    assert_eq!(
+        versions,
+        fvoci_server::db::migrate::compiled_migration_versions()
+    );
     let run = archive.graph.timer_runs[0].id;
     let task = archive.graph.timer_runs[0].task_id;
     let historical: Value = sqlx::query_scalar(
@@ -5947,7 +5950,7 @@ async fn native_archive_retained_guard_refuses_each_typed_branch_and_passes_unre
 #[tokio::test]
 async fn native_archive_retained_guard_cost_is_measured() {
     use fvoci_server::db::native_archive::RETAINED_PROVENANCE_SQL;
-    let harness = TestDb::bootstrap_through(53).await;
+    let harness = TestDb::bootstrap().await;
     let fx = fixture(&harness).await;
     let other =
         project_harness::add_workspace_user(&fx.admin, fx.workspace_id, "member", "cost-other")
@@ -6047,9 +6050,9 @@ async fn native_archive_retained_guard_cost_is_measured() {
         }
     };
     fill(fx.user_id, 2048).await;
-    // Current populated 053 -> 054: the only change is the scalar index.
-    // Immutable timer history and every data table retain their fingerprints;
-    // FK, RLS/policy, trigger and app-role grant catalogs remain identical.
+    // A rerun of the current installer and grant must leave the immutable timer
+    // history, every data table fingerprint and the FK/RLS/policy/trigger/grant
+    // catalogs identical; the ledger pairs each receipt with the compiled text.
     let role: String = sqlx::query_scalar("SELECT current_user")
         .fetch_one(&fx.pool)
         .await
@@ -6067,7 +6070,7 @@ async fn native_archive_retained_guard_cost_is_measured() {
         .unwrap();
     let before_data = restore_database_effects(&fx.admin).await;
     let migration_metadata_sql =
-        "SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM fvoci.schema_migrations m";
+        "SELECT jsonb_agg(jsonb_build_object('version',version,'lineage',lineage,'sql_sha256',sql_sha256) ORDER BY version) FROM fvoci.schema_migrations";
     let before_migration_metadata: Value = sqlx::query_scalar(migration_metadata_sql)
         .fetch_one(&fx.admin)
         .await
@@ -6078,11 +6081,14 @@ async fn native_archive_retained_guard_cost_is_measured() {
             .fetch_all(&fx.admin)
             .await
             .unwrap();
-    assert_eq!(before_versions, (1..=53).collect::<Vec<_>>());
-    let absent: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_class WHERE relnamespace='fvoci'::regnamespace AND relname='task_timer_audit_user_id_idx'")
-        .fetch_one(&fx.admin).await.unwrap();
-    assert_eq!(absent, 0);
+    assert_eq!(
+        before_versions,
+        fvoci_server::db::migrate::compiled_migration_versions()
+    );
     fvoci_server::db::migrate::run_migrations(&harness.admin_url)
+        .await
+        .unwrap();
+    fvoci_server::db::migrate::grant_app_role(&harness.admin_url, &role)
         .await
         .unwrap();
     fvoci_server::db::migrate::assert_schema_current(&fx.admin)
@@ -6113,7 +6119,7 @@ async fn native_archive_retained_guard_cost_is_measured() {
             .fetch_all(&fx.admin)
             .await
             .unwrap();
-    assert_eq!(versions, (1..=54).collect::<Vec<_>>());
+    assert_eq!(versions, before_versions);
     let index: Value = sqlx::query_scalar("SELECT jsonb_build_object('valid',i.indisvalid,'ready',i.indisready,'unique',i.indisunique,'keys',i.indnkeyatts,
         'attributes',(SELECT jsonb_agg(a.attname ORDER BY k.ord) FROM unnest(i.indkey) WITH ORDINALITY k(attnum,ord) JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum),
         'noPredicate',i.indpred IS NULL,'noExpression',i.indexprs IS NULL)
@@ -6127,11 +6133,12 @@ async fn native_archive_retained_guard_cost_is_measured() {
         .fetch_one(&fx.admin)
         .await
         .unwrap();
-    // schema_migrations stores versions/timestamps, not SQL checksums. Pair the
-    // actual database rows with source bytes from this frozen runner input.
+    assert_eq!(after_migration_metadata, before_migration_metadata);
+    // The ledger stores the SHA-256 of each compiled step text: pair the
+    // actual receipts with the source bytes of this frozen runner input.
     use sha2::{Digest, Sha256};
     let mut source_checksums: Vec<Value> = std::fs::read_dir(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations/postgres/060"),
     )
     .unwrap()
     .map(|entry| entry.unwrap().path())
@@ -6139,21 +6146,39 @@ async fn native_archive_retained_guard_cost_is_measured() {
     .map(|path| {
         let file = path.file_name().unwrap().to_str().unwrap();
         let version: i32 = file.split('_').next().unwrap().parse().unwrap();
-        json!({"version":version,"file":file,"sha256":format!("{:x}",Sha256::digest(std::fs::read(&path).unwrap()))})
+        json!({"version":version,"lineage":fvoci_server::db::migrate::POSTGRES_LINEAGE,"sql_sha256":format!("{:x}",Sha256::digest(std::fs::read(&path).unwrap()))})
     })
     .collect();
     source_checksums.sort_by_key(|row| row["version"].as_i64().unwrap());
-    assert_eq!(source_checksums.len(), 54);
+    assert_eq!(
+        source_checksums.len(),
+        fvoci_server::db::migrate::compiled_migration_count()
+    );
+    assert_eq!(after_migration_metadata, json!(source_checksums));
+    let wiki_security: (bool, bool, i64, i64) = sqlx::query_as(
+        "SELECT c.relrowsecurity,c.relforcerowsecurity,
+         (SELECT count(*) FROM pg_constraint WHERE conrelid=c.oid AND contype='f'),
+         (SELECT count(*) FROM pg_policy WHERE polrelid=c.oid AND polname='tenant_isolation'
+          AND pg_get_expr(polqual,polrelid)=pg_get_expr(polwithcheck,polrelid))
+         FROM pg_class c WHERE c.oid='fvoci.wiki_create_commands'::regclass",
+    )
+    .fetch_one(&fx.admin)
+    .await
+    .unwrap();
+    assert_eq!(wiki_security, (true, true, 3, 1));
+    let wiki_table = after_data
+        .iter()
+        .find(|row| row.0 == "wiki_create_commands")
+        .unwrap();
+    assert_eq!(wiki_table.1, 0);
+    assert_eq!(wiki_table.2, "d41d8cd98f00b204e9800998ecf8427e");
     println!(
-        "W8-CURRENT-054-FULL-SCHEMA {}",
+        "W8-CURRENT-060-FULL-SCHEMA {}",
         json!({"beforeSecurity":before_security,"afterSecurity":after_security,
             "beforeDataFingerprints":before_data,"afterDataFingerprints":after_data,
-            "beforeMigrationRows":before_migration_metadata,"afterMigrationRows":after_migration_metadata,
-            "frozenSourceChecksums":source_checksums,"databaseStoresChecksums":false})
-    );
-    println!(
-        "W8-CURRENT-054-CATALOG {}",
-        json!({"index":index,"role":role,"versions":versions,"securityUnchanged":true,"historyUnchanged":true})
+            "migrationRows":after_migration_metadata,"versions":versions,
+            "frozenSourceChecksums":source_checksums,"databaseStoresChecksums":true,
+            "securityUnchanged":true,"historyUnchanged":true,"index":index,"role":role})
     );
     measure("actor 2048, other 0").await;
     fill(fx.user_id, 20_000 - 2048).await;
@@ -7409,7 +7434,7 @@ fn storage_inventory(root: &std::path::Path) -> Vec<(String, u64)> {
 /// transaction. All records below are captured from ordinary writers; only the
 /// destination historical receipt is an explicitly labeled history-only seed.
 #[tokio::test]
-async fn native_archive_current54_collections_tags_and_command_guard_share_one_restore() {
+async fn native_archive_current55_collections_tags_and_command_guard_share_one_restore() {
     use fvoci_server::db::native_archive::{capture, publish, NativeDbError};
     let (harness, fx, timed) = timed_archive().await;
     let ws = fx.workspace_id;
@@ -7595,7 +7620,10 @@ async fn native_archive_current54_collections_tags_and_command_guard_share_one_r
                     .fetch_all(&inst.admin)
                     .await
                     .unwrap();
-            assert_eq!(versions, (1..=54).collect::<Vec<_>>());
+            assert_eq!(
+                versions,
+                fvoci_server::db::migrate::compiled_migration_versions()
+            );
             let owner = if foreign {
                 project_harness::add_workspace_user(
                     &inst.admin,
@@ -9014,14 +9042,41 @@ async fn native_archive_restores_a_wiki_collection_of_the_closure() {
     assert_eq!(restored, source);
     // Writers continue: a new wiki document joins the collection, the value is
     // edited, and both read back.
+    // Choose one command ID for this logical create, retaining the exact body
+    // on response loss just as the ordinary wiki client does.
+    let command_id = Uuid::now_v7();
+    let create_body = json!({"commandId":command_id,"parentId":null,"title":"새 위키 문서"});
     let added = call(
         dst.app.clone(),
         "POST",
         format!("{dw}/documents"),
-        Some(json!({"parentId":null,"title":"새 위키 문서"})),
+        Some(create_body.clone()),
         dst.cookie.clone(),
     )
     .await;
+    let replay = call(
+        dst.app.clone(),
+        "POST",
+        format!("{dw}/documents"),
+        Some(create_body),
+        dst.cookie.clone(),
+    )
+    .await;
+    assert_eq!(
+        replay, added,
+        "a lost-response retry keeps the creation receipt"
+    );
+    let binding: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM fvoci.wiki_create_commands WHERE workspace_id=$1 AND command_id=$2 AND document_id=$3),
+         (SELECT count(*) FROM fvoci.documents WHERE workspace_id=$1 AND id=$3)",
+    )
+    .bind(destination)
+    .bind(command_id)
+    .bind(Uuid::parse_str(added["id"].as_str().unwrap()).unwrap())
+    .fetch_one(&dst.admin)
+    .await
+    .unwrap();
+    assert_eq!(binding, (1, 1));
     call(
         dst.app.clone(),
         "POST",
@@ -9053,11 +9108,12 @@ async fn native_archive_restores_a_wiki_collection_of_the_closure() {
 
     // A wiki collection that also holds a wiki document outside the closure
     // is the typed collections refusal at capture, never pruned.
+    let other_command_id = Uuid::now_v7();
     let other = call(
         fx.app.clone(),
         "POST",
         format!("{w}/documents"),
-        Some(json!({"parentId":null,"title":"모음 밖 문서"})),
+        Some(json!({"commandId":other_command_id,"parentId":null,"title":"모음 밖 문서"})),
         fx.cookie.clone(),
     )
     .await;

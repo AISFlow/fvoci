@@ -480,63 +480,63 @@ pub async fn revoke_user_api_token(
     Ok(Ok(()))
 }
 
+type ApiTokenIdentityRow = (
+    Uuid,
+    Uuid,
+    Option<Uuid>,
+    Vec<String>,
+    Option<DateTime<Utc>>,
+    Uuid,
+    String,
+    String,
+    Option<String>,
+    i16,
+    Option<DateTime<Utc>>,
+    bool,
+    String,
+    String,
+    i32,
+    bool,
+);
+
 pub async fn resolve_api_token_session(
     pool: &PgPool,
     token_hash: &str,
 ) -> Result<Option<ApiTokenSession>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let previous = set_system(&mut tx).await?;
-    let row = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            Uuid,
-            Option<Uuid>,
-            Vec<String>,
-            Option<DateTime<Utc>>,
-            Uuid,
-            String,
-            String,
-            Option<String>,
-            i16,
-            Option<DateTime<Utc>>,
-            bool,
-            String,
-            String,
-            i32,
-            bool,
-        ),
-    >(
-        r#"
-        SELECT
-            t.id,
-            t.workspace_id,
-            t.user_id,
-            t.scopes,
-            t.expires_at,
-            u.id,
-            u.email,
-            u.given_name,
-            u.family_name,
-            u.text_scale,
-            u.email_verified_at,
-            u.is_instance_admin,
-            u.locale,
-            u.timezone,
-            u.week_starts_on,
-            (fvoci.app_user_password_hash(u.id) IS NOT NULL)
-        FROM fvoci.api_tokens t
-        INNER JOIN fvoci.users u ON u.id = t.user_id
-        WHERE t.token_hash = $1
-        "#,
-    )
-    .bind(token_hash)
-    .fetch_optional(&mut *tx)
-    .await?;
+    resolve_api_token_session_backend(&super::backend::Backend::Postgres(pool.clone()), token_hash)
+        .await
+}
 
-    let Some(row) = row else {
-        restore_system(&mut tx, &previous).await?;
-        tx.commit().await?;
+pub async fn resolve_api_token_session_backend(
+    backend: &super::backend::Backend,
+    token_hash: &str,
+) -> Result<Option<ApiTokenSession>, sqlx::Error> {
+    // last_used_at is a real write: a family writer is reserved before reading
+    // current authority, and the identity and usage update share one stream.
+    let mut tx = backend.begin_write().await?;
+    let mut operation = tx.operation();
+    let previous = operation.set_system().await?;
+    let result = resolve_api_token_in(&mut operation, token_hash).await;
+    operation.restore_system(previous).await?;
+    match result {
+        Ok(session) => {
+            tx.commit()
+                .await
+                .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
+            Ok(session)
+        }
+        Err(error) => {
+            tx.rollback().await?;
+            Err(error)
+        }
+    }
+}
+
+async fn resolve_api_token_in(
+    tx: &mut super::backend::OperationTx<'_, '_>,
+    token_hash: &str,
+) -> Result<Option<ApiTokenSession>, sqlx::Error> {
+    let Some(row) = tx.api_token_identity(token_hash).await? else {
         return Ok(None);
     };
     let (
@@ -557,47 +557,24 @@ pub async fn resolve_api_token_session(
         week_starts_on,
         has_password,
     ) = row;
-    if user_id.is_none() {
-        restore_system(&mut tx, &previous).await?;
-        tx.commit().await?;
+    if user_id.is_none() || expires_at.is_some_and(|at| at <= Utc::now()) {
         return Ok(None);
     }
-    if expires_at.is_some_and(|at| at <= Utc::now()) {
-        restore_system(&mut tx, &previous).await?;
-        tx.commit().await?;
+    if tx
+        .api_token_user_inactive(resolved_user_id)
+        .await?
+        .unwrap_or(true)
+    {
         return Ok(None);
     }
-    let inactive: Option<bool> = sqlx::query_scalar(
-        "SELECT (deleted_at IS NOT NULL OR suspended_at IS NOT NULL) FROM fvoci.users WHERE id = $1",
-    )
-    .bind(resolved_user_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if inactive.unwrap_or(true) {
-        restore_system(&mut tx, &previous).await?;
-        tx.commit().await?;
-        return Ok(None);
-    }
-
-    let mut parsed_scopes = Vec::new();
-    for scope in scopes {
-        if let Some(parsed) = parse_api_token_scope(&scope) {
-            parsed_scopes.push(parsed);
-        }
-    }
+    let parsed_scopes: Vec<_> = scopes
+        .iter()
+        .filter_map(|scope| parse_api_token_scope(scope))
+        .collect();
     if parsed_scopes.is_empty() {
-        restore_system(&mut tx, &previous).await?;
-        tx.commit().await?;
         return Ok(None);
     }
-
-    sqlx::query("UPDATE fvoci.api_tokens SET last_used_at = clock_timestamp() WHERE id = $1")
-        .bind(token_id)
-        .execute(&mut *tx)
-        .await?;
-    restore_system(&mut tx, &previous).await?;
-    tx.commit().await?;
-
+    tx.touch_api_token(token_id).await?;
     Ok(Some(ApiTokenSession {
         token_id,
         workspace_id,
@@ -613,16 +590,69 @@ pub async fn resolve_api_token_session(
             has_password,
             is_instance_admin,
             locale: if locale.is_empty() {
-                "ko".to_string()
+                "ko".into()
             } else {
                 locale
             },
             timezone: if timezone.is_empty() {
-                "Asia/Seoul".to_string()
+                "Asia/Seoul".into()
             } else {
                 timezone
             },
             week_starts_on: as_week_starts_on(week_starts_on),
         },
     }))
+}
+
+impl super::backend::OperationTx<'_, '_> {
+    async fn api_token_identity(
+        &mut self,
+        hash: &str,
+    ) -> Result<Option<ApiTokenIdentityRow>, sqlx::Error> {
+        use super::codec::Cell;
+        match self {
+            Self::Postgres(tx) => sqlx::query_as::<_,ApiTokenIdentityRow>(
+                "SELECT t.id,t.workspace_id,t.user_id,t.scopes,t.expires_at,u.id,u.email,u.given_name,u.family_name,u.text_scale,u.email_verified_at,u.is_instance_admin,u.locale,u.timezone,u.week_starts_on,(fvoci.app_user_password_hash(u.id) IS NOT NULL) FROM fvoci.api_tokens t INNER JOIN fvoci.users u ON u.id=t.user_id WHERE t.token_hash=$1"
+            ).bind(hash).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?; tx.require_system_context()?;
+                let rows=tx.query("SELECT t.id,t.workspace_id,t.user_id,t.scopes,t.expires_at,u.id,u.email,u.given_name,u.family_name,u.text_scale,u.email_verified_at,u.is_instance_admin,u.locale,u.timezone,u.week_starts_on,(u.password_hash IS NOT NULL) FROM api_tokens t INNER JOIN users u ON u.id=t.user_id WHERE t.token_hash=?1", &[Cell::text(hash)]).await?;
+                rows.first().map(|row| {
+                    let scopes:Vec<String>=serde_json::from_value(row.cell(3)?.value()?).map_err(|e|sqlx::Error::Decode(Box::new(e)))?;
+                    let scale=i16::try_from(row.cell(9)?.integer()?).map_err(|_|sqlx::Error::Protocol("token identity text scale exceeds i16".into()))?;
+                    Ok((row.cell(0)?.id()?,row.cell(1)?.id()?,row.cell(2)?.optional(Cell::id)?,scopes,row.cell(4)?.optional(Cell::datetime)?,row.cell(5)?.id()?,row.cell(6)?.string()?,row.cell(7)?.string()?,row.cell(8)?.optional(Cell::string)?,scale,row.cell(10)?.optional(Cell::datetime)?,row.cell(11)?.boolean()?,row.cell(12)?.string()?,row.cell(13)?.string()?,row.cell(14)?.int32()?,row.cell(15)?.boolean()?))
+                }).transpose()
+            }
+        }
+    }
+    async fn api_token_user_inactive(&mut self, user: Uuid) -> Result<Option<bool>, sqlx::Error> {
+        use super::codec::Cell;
+        match self {
+            Self::Postgres(tx) => sqlx::query_scalar("SELECT deleted_at IS NOT NULL OR suspended_at IS NOT NULL FROM fvoci.users WHERE id=$1").bind(user).fetch_optional(&mut ***tx).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_system_context()?;
+                let rows=tx.query("SELECT deleted_at IS NOT NULL OR suspended_at IS NOT NULL FROM users WHERE id=?1", &[Cell::uuid(user)]).await?;
+                rows.first().map(|row|row.cell(0)?.boolean()).transpose()
+            }
+        }
+    }
+    async fn touch_api_token(&mut self, token: Uuid) -> Result<(), sqlx::Error> {
+        use super::codec::Cell;
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query(
+                    "UPDATE fvoci.api_tokens SET last_used_at=clock_timestamp() WHERE id=$1",
+                )
+                .bind(token)
+                .execute(&mut ***tx)
+                .await?;
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_system_context()?;
+                tx.execute("UPDATE api_tokens SET last_used_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE id=?1", &[Cell::uuid(token)]).await?;
+            }
+        }
+        Ok(())
+    }
 }

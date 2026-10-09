@@ -33,24 +33,25 @@ use crate::api::dto::{
     CommentReactionBody, CommentReactionSummary, CompleteAttachmentUploadBody, ConsentItemBody,
     ConsentsPendingResponse, ConsentsSubmitBody, CreateAttachmentUploadBody,
     CreateAttachmentUploadResponse, CreateCommentBody, CreateDocumentBody, CreateGroupBody,
-    CreateHolidayBody, CreateLabelBody, CreateMilestoneBody, CreateProjectBody, CreateTaskBody,
-    CreateTaskDependencyBody, CreateWorkspaceBody, DeleteWorkspaceBody, DocumentMetaResponse,
-    DocumentShareLinkCreateBody, ExpectedDatesBody, GroupListResponse, GroupMemberBody,
-    GroupMemberListResponse, GroupMemberOutput, GroupOutput, HolidaysListResponse,
-    IcsTokenResponse, ImportJobResponse, InstanceAdminBody, InstanceSettingsOutput,
-    InstanceSettingsPatchSchema, InvitationAcceptBody, InvitationConsentItem, InvitationCreateBody,
-    InvitationCreateResponse, InvitationLegalDocument, InvitationPublicResponse, LabelListResponse,
-    LabelOutput, LegalDocumentOutput, LegalPublishBody, LegalVersionMetaOutput,
-    LegalVersionsResponse, LoginBody, LoginResponse, LogoutBody, LookupItemOutput,
-    LookupListResponse, MeApiTokenCreateBody, MemberConsentOutput, MemberResponse, MemberRoleBody,
-    MembersResponse, MilestoneListResponse, MilestoneOutput, MoveDocumentBody, MoveTaskBody,
-    NotificationItemOutput, NotificationListResponse, NotificationPatchBody, NotificationPrefsBody,
-    NotificationReadAllResponse, NotificationUnreadCountResponse, OkResponse, PasswordResetBody,
-    PasswordResetConfirmBody, PatchCommentBody, PatchDocumentBody, PatchLabelBody, PatchMeBody,
-    PatchMilestoneBody, PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse,
-    ProjectGroupGrantBody, ProjectGroupGrantListResponse, ProjectGroupGrantOutput,
-    ProjectGroupRevokeBody, ProjectListResponse, ProjectMembersResponse, ProjectOutput,
-    PublicBrandingOutput, PublicSettingsValues, PushSubscriptionBody, PushSubscriptionKeysBody,
+    CreateHolidayBody, CreateLabelBody, CreateMilestoneBody, CreateProjectBody,
+    CreateProjectDocumentBody, CreateTaskBody, CreateTaskDependencyBody, CreateWorkspaceBody,
+    DeleteWorkspaceBody, DocumentMetaResponse, DocumentShareLinkCreateBody, ExpectedDatesBody,
+    GroupListResponse, GroupMemberBody, GroupMemberListResponse, GroupMemberOutput, GroupOutput,
+    HolidaysListResponse, IcsTokenResponse, ImportJobResponse, InstanceAdminBody,
+    InstanceSettingsOutput, InstanceSettingsPatchSchema, InvitationAcceptBody,
+    InvitationConsentItem, InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
+    InvitationPublicResponse, LabelListResponse, LabelOutput, LegalDocumentOutput,
+    LegalPublishBody, LegalVersionMetaOutput, LegalVersionsResponse, LoginBody, LoginResponse,
+    LogoutBody, LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberConsentOutput,
+    MemberResponse, MemberRoleBody, MembersResponse, MilestoneListResponse, MilestoneOutput,
+    MoveDocumentBody, MoveTaskBody, NotificationItemOutput, NotificationListResponse,
+    NotificationPatchBody, NotificationPrefsBody, NotificationReadAllResponse,
+    NotificationUnreadCountResponse, OkResponse, PasswordResetBody, PasswordResetConfirmBody,
+    PatchCommentBody, PatchDocumentBody, PatchLabelBody, PatchMeBody, PatchMilestoneBody,
+    PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectGroupGrantBody,
+    ProjectGroupGrantListResponse, ProjectGroupGrantOutput, ProjectGroupRevokeBody,
+    ProjectListResponse, ProjectMembersResponse, ProjectOutput, PublicBrandingOutput,
+    PublicSettingsValues, PushSubscriptionBody, PushSubscriptionKeysBody,
     PutAttachmentPartResponse, RecentItemOutput, RecentListResponse,
     ResumeAttachmentUploadResponse, RevisionCreateResponse, RevisionDetailResponse,
     RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody,
@@ -390,6 +391,7 @@ impl Modify for CookieSecurityAddon {
             AiSuggestLinksOutput,
             AiSuggestedDocument,
             SetupStatusResponse,
+            crate::config::RealtimeMode,
             BrandingOutput,
             SetupBody,
             SetupResponse,
@@ -491,6 +493,7 @@ impl Modify for CookieSecurityAddon {
             PushSubscriptionKeysBody,
             LogoutBody,
             CreateDocumentBody,
+            CreateProjectDocumentBody,
             PatchDocumentBody,
             DocumentMetaResponse,
             TreeResponse,
@@ -2926,6 +2929,7 @@ fn download_share_attachment() {}
     request_body = CreateDocumentBody,
     responses(
         (status = 201, description = "Created", body = DocumentMetaResponse),
+        (status = 409, description = "Creation command content or actor differs", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
         (status = 400, description = "Invalid input", body = ProblemResponse),
     )
@@ -2959,7 +2963,7 @@ fn list_project_documents() {}
         ("workspace_id" = String, description = "Workspace id"),
         ("project_id" = String, description = "Project id"),
     ),
-    request_body = CreateDocumentBody,
+    request_body = CreateProjectDocumentBody,
     responses(
         (status = 201, description = "Created project document", body = DocumentMetaResponse),
         (status = 400, description = "Invalid input", body = ProblemResponse),
@@ -5083,6 +5087,9 @@ mod tests {
         }
         assert_required_non_nullable(schemas, "ApiTokenCreatedOutput", "token");
         let create = &schemas["CreateDocumentBody"];
+        assert_required_non_nullable(schemas, "CreateDocumentBody", "commandId");
+        assert_eq!(create["properties"]["commandId"]["format"], "uuid");
+        assert!(schemas["CreateProjectDocumentBody"]["properties"]["commandId"].is_null());
         assert!(create["required"]
             .as_array()
             .unwrap()

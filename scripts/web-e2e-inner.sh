@@ -34,6 +34,16 @@ cleanup_server() {
 }
 trap cleanup_server EXIT
 
+startup_failure() {
+  echo "$1" >&2
+  sed -E -e 's#postgres(ql)?://[^[:space:]]+#postgres://redacted#g' \
+    -e 's#libsql://[^[:space:]]+#libsql://redacted#g' \
+    -e 's#https://[^[:space:]]*\.turso\.io[^[:space:]]*#https://redacted#g' \
+    -e 's#(DATABASE_URL|DATABASE_APP_URL|FVOCI_E2E_ADMIN_DATABASE_URL|TEST_DATABASE_URL|FVOCI_LIBSQL_URL|FVOCI_LIBSQL_AUTH_TOKEN|FVOCI_TEST_TURSO_[A-Z0-9_]*URL|FVOCI_TEST_TURSO_AUTH_TOKEN|MEILI[A-Z_]*KEY|PASSWORD[A-Z_]*|ENCRYPTION_KEYS)=[^[:space:]]+#\1=redacted#g' \
+    "$SERVER_LOG" >&2
+  exit 1
+}
+
 # Markers for the group's netlink event log (see web-e2e-run-group.sh).
 net_mark() {
   [[ -n "${NET_MARKS_LOG:-}" ]] || return 0
@@ -203,6 +213,7 @@ export FVOCI_BIND="127.0.0.1:0"
 # group's retained server.log shows which requests the browser made. Other
 # crates stay at warn; the server adds fvoci_server=info itself.
 export RUST_LOG="${RUST_LOG:-warn,tower_http=debug}"
+export FVOCI_EXTRACT_POLL_SECS=2
 export FVOCI_PUBLIC_ORIGIN="http://127.0.0.1:0"
 export FVOCI_STATIC_DIR="${FVOCI_STATIC_DIR:?run-web-e2e.sh must provide isolated static assets}"
 # A run-owned directory is stable across server restarts and removed by the
@@ -266,22 +277,22 @@ export FVOCI_E2E_SERVER_ENV_NAMES="$SERVER_ENV_NAMES"
 SERVER_PID=$!
 
 BASE_URL=""
+SERVER_READY=0
 for _ in $(seq 1 120); do
   BASE_URL="$(grep -m1 'fvoci-server listening on ' "$SERVER_LOG" 2>/dev/null | sed 's/.*listening on //' | tr -d '\r' || true)"
-  if [[ -n "$BASE_URL" ]] && curl -fsS "$BASE_URL/api/v1/setup" >/dev/null 2>&1; then
-    break
-  fi
   if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    cat "$SERVER_LOG" >&2
-    exit 1
+    startup_failure "server exited during startup"
+  fi
+  if [[ -n "$BASE_URL" ]] && curl -fsS "$BASE_URL/api/v1/setup" >/dev/null 2>&1; then
+    SERVER_READY=1
+    break
   fi
   sleep 0.25
 done
 
-if [[ -z "$BASE_URL" ]]; then
-  echo "server did not become ready within 30s" >&2
-  cat "$SERVER_LOG" >&2
-  exit 1
+# Discovering the endpoint is separate from a successful setup request.
+if (( SERVER_READY == 0 )); then
+  startup_failure "server did not become ready within 30s (GET /api/v1/setup never succeeded)"
 fi
 
 net_mark "server ready"

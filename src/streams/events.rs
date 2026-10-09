@@ -117,6 +117,165 @@ pub async fn workspace_stream_access(
     Ok(access)
 }
 
+/// Access-stream cursor only: PG transaction ordering and family committed
+/// sequence are distinct; neither is exposed as a client/transport credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BackendAccessCursor {
+    Postgres(EventCursor),
+    SqliteFamily { seq: i64 },
+}
+
+pub(crate) async fn workspace_stream_access_backend(
+    backend: &crate::db::backend::Backend,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    credential_id: Uuid,
+) -> Result<StreamAccess, sqlx::Error> {
+    if let crate::db::backend::Backend::Postgres(pool) = backend {
+        return workspace_stream_access(pool, workspace_id, user_id, credential_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        family_workspace_access(&mut op, workspace_id, user_id, credential_id).await
+    }
+    .await;
+    let cleanup = tx.rollback().await;
+    access_read_after_rollback(result, cleanup)
+}
+
+async fn family_workspace_access(
+    op: &mut crate::db::backend::OperationTx<'_, '_>,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    credential_id: Uuid,
+) -> Result<StreamAccess, sqlx::Error> {
+    if !op.session_is_live(user_id, credential_id).await? {
+        return Ok(StreamAccess::CredentialDead);
+    }
+    if !op.workspace_is_live(workspace_id).await?
+        || op
+            .membership_role(workspace_id, user_id, false)
+            .await?
+            .is_none()
+    {
+        return Ok(StreamAccess::Denied);
+    }
+    Ok(StreamAccess::Allowed)
+}
+
+pub(crate) async fn initial_access_cursor_backend(
+    backend: &crate::db::backend::Backend,
+) -> Result<BackendAccessCursor, sqlx::Error> {
+    if let crate::db::backend::Backend::Postgres(pool) = backend {
+        return initial_cursor(pool)
+            .await
+            .map(BackendAccessCursor::Postgres);
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let crate::db::backend::DbTransaction::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        Ok(BackendAccessCursor::SqliteFamily {
+            seq: family_access_horizon(family).await?,
+        })
+    }
+    .await;
+    let cleanup = tx.rollback().await;
+    access_read_after_rollback(result, cleanup)
+}
+
+/// Same snapshot as authority and event query. The counter survives event
+/// retention, and a serialized writer rolls its allocation back with its event.
+async fn family_access_horizon(
+    family: &mut crate::db::backend::FamilyTx,
+) -> Result<i64, sqlx::Error> {
+    let rows = family
+        .query("SELECT last_seq FROM event_sequence WHERE id=1", &[])
+        .await?;
+    let seq = rows
+        .first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .cell(0)?
+        .integer()?;
+    if seq < 0 {
+        return Err(sqlx::Error::Protocol("invalid access event horizon".into()));
+    }
+    Ok(seq)
+}
+
+pub(crate) async fn poll_access_events_backend(
+    backend: &crate::db::backend::Backend,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    credential_id: Uuid,
+    cursor: &BackendAccessCursor,
+) -> Result<Option<BackendAccessCursor>, sqlx::Error> {
+    use crate::db::backend::{Backend, OperationTx};
+    use crate::db::codec::Cell;
+    match (backend, cursor) {
+        (Backend::Postgres(pool), BackendAccessCursor::Postgres(cursor)) => {
+            return poll_access_events(pool, workspace_id, user_id, credential_id, cursor)
+                .await
+                .map(|next| next.map(BackendAccessCursor::Postgres));
+        }
+        (
+            Backend::Sqlite(_) | Backend::LibsqlRemote(_),
+            BackendAccessCursor::SqliteFamily { seq },
+        ) if *seq >= 0 => {}
+        _ => {
+            return Err(sqlx::Error::Protocol(
+                "access cursor belongs to a different backend or is invalid".into(),
+            ))
+        }
+    }
+    let BackendAccessCursor::SqliteFamily { seq } = cursor else {
+        unreachable!()
+    };
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        if family_workspace_access(&mut op,workspace_id,user_id,credential_id).await? != StreamAccess::Allowed {
+            return Ok(None);
+        }
+        let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+        let horizon = family_access_horizon(family).await?;
+        if *seq > horizon {
+            return Err(sqlx::Error::Protocol("access cursor is ahead of committed horizon".into()));
+        }
+        let rows = family.query(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE workspace_id=?1 AND seq>?2 AND seq<=?3
+              AND ((verb IN ('workspace_member.removed','workspace_member.role_changed') AND target_id=?4)
+                   OR verb='workspace.deleted'))",
+            &[Cell::uuid(workspace_id),Cell::Integer(*seq),Cell::Integer(horizon),Cell::uuid(user_id)],
+        ).await?;
+        let changed = rows.first().ok_or(sqlx::Error::RowNotFound)?.cell(0)?.boolean()?;
+        Ok((!changed).then_some(BackendAccessCursor::SqliteFamily {seq:horizon}))
+    }.await;
+    let cleanup = tx.rollback().await;
+    access_read_after_rollback(result, cleanup)
+}
+
+// Narrow access-reader finish, not a new backend cleanup mechanism. Only an
+// actual awaited rollback permits returning observations from this snapshot.
+fn access_read_after_rollback<T>(
+    result: Result<T, sqlx::Error>,
+    cleanup: Result<(), sqlx::Error>,
+) -> Result<T, sqlx::Error> {
+    match cleanup {
+        Ok(()) => result,
+        Err(cleanup) => Err(crate::db::backend::rollback_cleanup_unknown(
+            result
+                .err()
+                .map(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
+            cleanup,
+        )),
+    }
+}
+
 async fn workspace_access_in(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -480,5 +639,278 @@ mod tests {
         };
         let (verb, _) = task_stream_wire_hint(&row).expect("hint");
         assert_eq!(verb, "task.updated");
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod selected_access_read_tests {
+    use super::*;
+    use crate::db::backend::Backend;
+    use crate::db::notifications::family_runtime_fixture::Fixture;
+
+    async fn append(f: &Fixture, verb: &str, target: Uuid, workspace: Uuid, commit: bool) {
+        let mut tx = f.backend.begin_write().await.unwrap();
+        tx.operation().set_tenant(workspace).await.unwrap();
+        tx.operation()
+            .append_event(crate::db::identity::EventAppend {
+                id: Uuid::now_v7(),
+                workspace_id: Some(workspace),
+                actor_user_id: Some(f.actor),
+                verb: verb.into(),
+                target_type: Some("workspace_member".into()),
+                target_id: Some(target),
+                payload: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        if commit {
+            tx.commit().await.unwrap()
+        } else {
+            tx.rollback().await.unwrap()
+        }
+    }
+    async fn tick(f: &Fixture, cursor: &BackendAccessCursor) -> Option<BackendAccessCursor> {
+        poll_access_events_backend(&f.backend, f.workspace, f.user, f.credential, cursor)
+            .await
+            .unwrap()
+    }
+    async fn close(f: Fixture) {
+        f.backend.close().await.unwrap();
+        std::fs::remove_dir_all(f.dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn sqlite_access_role_change_targets_and_wrong_workspace() {
+        let f = Fixture::new().await;
+        let mut cursor = initial_access_cursor_backend(&f.backend).await.unwrap();
+        append(
+            &f,
+            "workspace_member.role_changed",
+            f.actor,
+            f.workspace,
+            true,
+        )
+        .await;
+        cursor = tick(&f, &cursor)
+            .await
+            .expect("bystander role change must not close");
+        append(
+            &f,
+            "workspace_member.role_changed",
+            f.user,
+            f.other_workspace,
+            true,
+        )
+        .await;
+        cursor = tick(&f, &cursor)
+            .await
+            .expect("other tenant event must not close");
+        append(
+            &f,
+            "workspace_member.role_changed",
+            f.user,
+            f.workspace,
+            true,
+        )
+        .await;
+        assert!(
+            tick(&f, &cursor).await.is_none(),
+            "targeted role change closes even with membership still live"
+        );
+        assert_eq!(
+            workspace_stream_access_backend(&f.backend, f.workspace, f.user, f.credential)
+                .await
+                .unwrap(),
+            StreamAccess::Allowed
+        );
+        close(f).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_access_counter_retention_rollback_and_inflight_writer() {
+        let f = Fixture::new().await;
+        append(&f, "unrelated", f.user, f.workspace, true).await;
+        let cursor = initial_access_cursor_backend(&f.backend).await.unwrap();
+        assert_eq!(cursor, BackendAccessCursor::SqliteFamily { seq: 1 });
+        sqlx::query("DELETE FROM events")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            initial_access_cursor_backend(&f.backend).await.unwrap(),
+            cursor,
+            "counter survives empty retained log"
+        );
+        append(
+            &f,
+            "workspace_member.role_changed",
+            f.user,
+            f.workspace,
+            false,
+        )
+        .await;
+        assert_eq!(
+            tick(&f, &cursor).await,
+            Some(cursor.clone()),
+            "rolled-back event and allocation stay invisible"
+        );
+        let fresh_pool = crate::db::pool::connect_sqlite_app(&f.dir.join("test.sqlite"), 1)
+            .await
+            .unwrap();
+        let fresh = Backend::Sqlite(fresh_pool);
+        let mut writer = f.backend.begin_write().await.unwrap();
+        writer.operation().set_tenant(f.workspace).await.unwrap();
+        writer
+            .operation()
+            .append_event(crate::db::identity::EventAppend {
+                id: Uuid::now_v7(),
+                workspace_id: Some(f.workspace),
+                actor_user_id: Some(f.actor),
+                verb: "workspace_member.role_changed".into(),
+                target_type: Some("workspace_member".into()),
+                target_id: Some(f.user),
+                payload: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        let during = initial_access_cursor_backend(&fresh).await.unwrap();
+        assert_eq!(during, cursor, "reader cannot jump past uncommitted writer");
+        writer.commit().await.unwrap();
+        assert!(
+            poll_access_events_backend(&fresh, f.workspace, f.user, f.credential, &during)
+                .await
+                .unwrap()
+                .is_none(),
+            "event committed after cursor is observed"
+        );
+        fresh.close().await.unwrap();
+        close(f).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_access_current_credential_membership_workspace_and_cursor_denials() {
+        let f = Fixture::new().await;
+        let cursor = initial_access_cursor_backend(&f.backend).await.unwrap();
+        assert_eq!(
+            workspace_stream_access_backend(&f.backend, f.other_workspace, f.user, f.credential)
+                .await
+                .unwrap(),
+            StreamAccess::Denied
+        );
+        for sql in [
+            "UPDATE users SET suspended_at=1 WHERE id=?1",
+            "UPDATE users SET deleted_at=1 WHERE id=?1",
+        ] {
+            sqlx::query(sql)
+                .bind(f.user.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                workspace_stream_access_backend(&f.backend, f.workspace, f.user, f.credential)
+                    .await
+                    .unwrap(),
+                StreamAccess::CredentialDead
+            );
+            assert!(tick(&f, &cursor).await.is_none());
+            sqlx::query("UPDATE users SET suspended_at=NULL,deleted_at=NULL WHERE id=?1")
+                .bind(f.user.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(f.credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(tick(&f, &cursor).await.is_none());
+        sqlx::query("UPDATE sessions SET revoked_at=NULL,expires_at=1 WHERE id=?1")
+            .bind(f.credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(tick(&f, &cursor).await.is_none());
+        sqlx::query("UPDATE sessions SET expires_at=?2 WHERE id=?1")
+            .bind(f.credential.as_bytes().as_slice())
+            .bind(chrono::Utc::now().timestamp_micros() + 3_600_000_000i64)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(poll_access_events_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            f.credential,
+            &BackendAccessCursor::Postgres(EventCursor::default())
+        )
+        .await
+        .is_err());
+        assert!(poll_access_events_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            f.credential,
+            &BackendAccessCursor::SqliteFamily { seq: -1 }
+        )
+        .await
+        .is_err());
+        assert!(poll_access_events_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            f.credential,
+            &BackendAccessCursor::SqliteFamily { seq: 1 }
+        )
+        .await
+        .is_err());
+        sqlx::query("UPDATE workspaces SET deleted_at=1 WHERE id=?1")
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(tick(&f, &cursor).await.is_none());
+        sqlx::query("UPDATE workspaces SET deleted_at=NULL WHERE id=?1")
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(tick(&f, &cursor).await.is_none());
+        close(f).await;
+    }
+
+    #[test]
+    fn access_cleanup_uncertainty_withholds_observation_and_retains_driver_cause() {
+        let error = access_read_after_rollback(
+            Ok(StreamAccess::Allowed),
+            Err(sqlx::Error::Protocol(
+                "synthetic returned cleanup failure".into(),
+            )),
+        )
+        .unwrap_err();
+        assert!(crate::db::backend::is_rollback_cleanup_unknown(&error));
+        let error = access_read_after_rollback::<StreamAccess>(
+            Err(sqlx::Error::Protocol("original read fault".into())),
+            Err(sqlx::Error::Protocol(
+                "synthetic returned cleanup failure".into(),
+            )),
+        )
+        .unwrap_err();
+        let sqlx::Error::AnyDriverError(source) = error else {
+            panic!("typed cleanup required")
+        };
+        let receipt = source
+            .downcast_ref::<crate::db::backend::RollbackCleanupUnknown>()
+            .unwrap();
+        assert!(
+            matches!(receipt.original.as_ref().unwrap().downcast_ref::<sqlx::Error>(),Some(sqlx::Error::Protocol(message)) if message=="original read fault")
+        );
+        // Pure propagation seam only: not an actual remote rollback/settlement.
     }
 }

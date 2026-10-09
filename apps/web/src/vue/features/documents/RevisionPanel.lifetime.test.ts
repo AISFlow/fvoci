@@ -49,6 +49,7 @@ function harness() {
     targetKind: "document",
     readOnly: false,
     sourceDirty: false,
+    afterRestore: undefined as (() => Promise<void>) | undefined,
     persistNow: () => {
       persists++;
       return ack.promise;
@@ -397,6 +398,68 @@ await test("restore requires preview after ACK and sends captured opaque tail wi
   }
 });
 
+await test("OFF confirmed restore waits for its owned native refresh and refuses late ABA completion", async () => {
+  const h = harness();
+  try {
+    const refresh = deferred();
+    let reads = 0;
+    h.props.afterRestore = () => {
+      reads++;
+      return refresh.promise.then(() => undefined);
+    };
+    await readyRestore(h, "revision-A");
+    const response = h.queue();
+    h.call("confirmRestore");
+    await settle();
+    response.resolve({ restored: true, revisionId: "new-revision" });
+    await settle();
+    assert.equal(reads, 1, "fresh read follows a confirmed restore response");
+    assert.equal(h.value("restorePending"), true, "the owned refresh remains part of the barrier");
+    h.props.documentId = "document-B";
+    h.props.documentId = "document-A";
+    refresh.resolve();
+    await settle();
+    assert.equal(h.value("notice"), null);
+    assert.equal(h.calls.filter((call) => call.method === "invalidate").length, 0);
+  } finally {
+    h.stop();
+  }
+});
+
+await test("OFF unconfirmed finish never refreshes or claims restore success and retries the exact correlation", async () => {
+  const h = harness();
+  try {
+    let reads = 0;
+    h.props.afterRestore = () =>
+      new Promise<void>((resolve) => {
+        reads++;
+        resolve(undefined);
+      });
+    await readyRestore(h, "revision-A");
+    const response = h.queue();
+    h.call("confirmRestore");
+    await settle();
+    const first = required(h.calls.find((call) => call.method === "restore"));
+    response.reject(new ProblemError(503));
+    await settle();
+    assert.equal(reads, 0);
+    assert.equal(h.calls.filter((call) => call.method === "invalidate").length, 0);
+    assert.notEqual(h.value("notice"), "version.restore.done");
+    const retry = h.queue();
+    h.call("confirmRestore");
+    await settle();
+    const second = required(h.calls.filter((call) => call.method === "restore").at(-1));
+    assert.equal(second.args[5], first.args[5]);
+    assert.equal(second.args[6], first.args[6]);
+    retry.resolve({ restored: true, revisionId: "new-revision" });
+    await settle();
+    assert.equal(reads, 1);
+    assert.equal(h.value("notice"), "version.restore.done");
+  } finally {
+    h.stop();
+  }
+});
+
 await test("dirty source and failed persist ACK cannot fetch preview or enqueue restore", async () => {
   for (const dirty of [true, false]) {
     const h = harness();
@@ -578,3 +641,8 @@ await test("SFC value previews expose empty table structure and added/removed re
   }
   h.stop();
 });
+
+function required<T>(value: T | null | undefined): T {
+  if (value == null) throw new Error("Missing required test fixture value");
+  return value;
+}

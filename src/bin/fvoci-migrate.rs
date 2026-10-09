@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use futures_util::FutureExt;
+
 use fvoci_server::attachments::{verify_stored_objects, ObjectStorage};
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::config::storage_settings_from_env;
@@ -60,27 +62,62 @@ fn start(server_args: &[String]) -> ! {
                 std::process::exit(1);
             }
         };
-        let outcome = runtime.block_on(async {
-            use tokio::signal::unix::{signal, SignalKind};
-            let (mut term, mut int) = match (
-                signal(SignalKind::terminate()),
-                signal(SignalKind::interrupt()),
-            ) {
-                (Ok(term), Ok(int)) => (term, int),
-                (Err(e), _) | (_, Err(e)) => return Err(e.to_string()),
-            };
-            tokio::select! {
-                result = prepare::prepare() => result.map(|()| None),
-                _ = term.recv() => Ok(Some(143)),
-                _ = int.recv() => Ok(Some(130)),
-            }
-        });
+        enum PreparationOutcome {
+            Prepared,
+            Signalled {
+                code: i32,
+                result: Result<(), prepare::PreparationError>,
+            },
+        }
+        let outcome: Result<PreparationOutcome, Box<dyn std::error::Error>> =
+            runtime.block_on(async {
+                use tokio::signal::unix::{signal, SignalKind};
+                let (mut term, mut int) = match (
+                    signal(SignalKind::terminate()),
+                    signal(SignalKind::interrupt()),
+                ) {
+                    (Ok(term), Ok(int)) => (term, int),
+                    (Err(e), _) | (_, Err(e)) => return Err(e.into()),
+                };
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let preparation = prepare::prepare_with_cancel(&cancel);
+                tokio::pin!(preparation);
+                // Signal arms first and biased inside the arbitration; after a
+                // completion the streams are probed once more so a signal that
+                // was delivered together with the completion never lets the
+                // server start. The original future is always awaited.
+                let (selected, result) = prepare::arbitrate_signals(
+                    preparation.as_mut(),
+                    &cancel,
+                    term.recv().map(|_| ()),
+                    int.recv().map(|_| ()),
+                )
+                .await;
+                let observation = prepare::SignalObservation {
+                    selected,
+                    pending_after_completion: if selected.is_none() {
+                        prepare::pending_signal_code(&mut term, &mut int)
+                    } else {
+                        None
+                    },
+                };
+                match prepare::preparation_signal_decision(observation) {
+                    Some(code) => {
+                        eprintln!("fvoci: preparation signal (exit {code}) observed; original owner awaited, settled result kept, no server exec");
+                        Ok(PreparationOutcome::Signalled { code, result })
+                    }
+                    None => {
+                        result?;
+                        Ok(PreparationOutcome::Prepared)
+                    }
+                }
+            });
         // Every preparation connection is closed before the server exists.
         runtime.shutdown_timeout(std::time::Duration::from_secs(5));
         match outcome {
-            Ok(None) => eprintln!("fvoci: prepared; starting the server"),
-            Ok(Some(code)) => {
-                eprintln!("fvoci: stopped by a signal during preparation");
+            Ok(PreparationOutcome::Prepared) => eprintln!("fvoci: prepared; starting the server"),
+            Ok(PreparationOutcome::Signalled { code, result }) => {
+                eprintln!("fvoci: signal during preparation; original result and owned drain: {result:?}; no server exec");
                 std::process::exit(code);
             }
             Err(error) => {
@@ -125,10 +162,65 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             println!("{snapshot} {since}");
         }
-        [] => {
-            let url = migration_url()?;
-            migrate::run_migrations(&url).await?;
-        }
+        [] => match std::env::var("FVOCI_DATABASE_BACKEND").as_deref() {
+            Err(std::env::VarError::NotPresent) | Ok("postgres") => {
+                let url = migration_url()?;
+                migrate::run_migrations(&url).await?;
+            }
+            Ok("sqlite") => {
+                let fvoci_server::config::DatabaseSettings::Sqlite { path } =
+                    fvoci_server::config::DatabaseSettings::from_env()?
+                else {
+                    unreachable!()
+                };
+                migrate::run_sqlite_migrations(&path).await?;
+            }
+            Ok("libsql-remote") => {
+                let settings = fvoci_server::config::DatabaseSettings::from_env()?;
+                // Cancellation owner analogous to the preparation launcher: the
+                // original helper future is pinned and, after a signal, awaited
+                // to its settlement (never dropped); the settled result is
+                // printed, the signal code is the exit, nothing is retried and
+                // no server starts from here.
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut term = signal(SignalKind::terminate())?;
+                let mut int = signal(SignalKind::interrupt())?;
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let migration = migrate::run_remote_migrations(&settings, &cancel);
+                tokio::pin!(migration);
+                // Biased arbitration (SIGTERM, SIGINT, then completion); a signal
+                // cancels and the original future is awaited to settlement; after
+                // a completion the streams are probed once more so a signal
+                // delivered together with the completion is never exit 0.
+                let (selected, result) = fvoci_server::prepare::arbitrate_signals(
+                    migration.as_mut(),
+                    &cancel,
+                    term.recv().map(|_| ()),
+                    int.recv().map(|_| ()),
+                )
+                .await;
+                if let Some(code) = selected {
+                    eprintln!("fvoci-migrate: signal (exit {code}) cancellation requested; remote migration settlement awaited");
+                }
+                let observation = fvoci_server::prepare::SignalObservation {
+                    selected,
+                    pending_after_completion: if selected.is_none() {
+                        fvoci_server::prepare::pending_signal_code(&mut term, &mut int)
+                    } else {
+                        None
+                    },
+                };
+                let (code, text) =
+                    fvoci_server::prepare::remote_migrator_exit(observation, &result);
+                eprintln!("fvoci-migrate: {text}");
+                std::process::exit(code);
+            }
+            _ => {
+                return Err(
+                    "FVOCI_DATABASE_BACKEND must be postgres, sqlite, or libsql-remote".into(),
+                )
+            }
+        },
         [flag, role] if flag == "--grant-app-role" => {
             let url = migration_url()?;
             migrate::grant_app_role(&url, role).await?;

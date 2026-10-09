@@ -114,6 +114,9 @@ impl CollabEngine {
             }
             Request::ReplaceFromUpdate { update_b64, .. } => self.replace_from_update(update_b64),
             Request::SeedFromTiptap { content_json, .. } => self.seed_from_tiptap(content_json),
+            Request::SeedIndependentFromTiptap { content_json, .. } => {
+                self.seed_independent_from_tiptap(content_json)
+            }
         }
     }
 
@@ -584,6 +587,15 @@ impl CollabEngine {
     /// the product body size (`max_project_json_bytes`, compact serde_json, as
     /// the parent's `prepare_derived_body` measures it).
     pub fn seed_from_tiptap(&mut self, content_json: &str) -> EngineStatus {
+        self.seed_from_tiptap_mode(content_json, false)
+    }
+
+    /// Independent new-document copy, never a live/history replacement.
+    pub fn seed_independent_from_tiptap(&mut self, content_json: &str) -> EngineStatus {
+        self.seed_from_tiptap_mode(content_json, true)
+    }
+
+    fn seed_from_tiptap_mode(&mut self, content_json: &str, independent: bool) -> EngineStatus {
         if let Err(st) = self.bump_op() {
             return st;
         }
@@ -605,7 +617,12 @@ impl CollabEngine {
                 };
             }
         };
-        match crate::seed::tiptap_to_yjs_update(&json, &self.limits) {
+        let seeded = if independent {
+            crate::seed::tiptap_to_independent_yjs_update(&json, &self.limits)
+        } else {
+            crate::seed::tiptap_to_yjs_update(&json, &self.limits)
+        };
+        match seeded {
             Ok(bytes) => EngineStatus::Ok {
                 applied: false,
                 pending: false,
@@ -915,6 +932,142 @@ fn status_detail(status: &EngineStatus) -> String {
         | EngineStatus::ResourceLimit { detail, .. }
         | EngineStatus::WorkerFailure { detail, .. } => detail.clone(),
         EngineStatus::Ok { .. } => "ok".into(),
+    }
+}
+
+#[cfg(test)]
+mod independent_seed_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn independent_request_leaves_loaded_session_history_untouched() {
+        let source = json!({"content":[{"type":"paragraph","attrs":{"id":"source-block"},"content":[{"type":"text","text":"retained"}]}]});
+        let update =
+            crate::seed::tiptap_to_yjs_update(&source, &Limits::for_tests()).expect("source");
+        let mut engine = CollabEngine::new(Limits::for_tests());
+        assert!(engine
+            .handle(&Request::Load {
+                snapshot_b64: Some(update),
+                tail_b64: vec![],
+                encoding: 1
+            })
+            .is_applied_ok());
+        // A real deletion makes source history observably different from a fresh copy.
+        let fragment = engine.doc.get_or_insert_xml_fragment(FRAGMENT);
+        fragment.remove_range(&mut engine.doc.transact_mut(), 0, 1);
+        let before = engine.doc.transact().snapshot();
+        assert!(!before.delete_set.is_empty());
+        let native_before = engine
+            .doc
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        let reply = engine.handle(&Request::SeedIndependentFromTiptap {
+            content_json: source.to_string(),
+            encoding: 1,
+        });
+        let bytes = match reply {
+            EngineStatus::Ok {
+                applied: false,
+                pending: false,
+                durable: false,
+                update_b64: Some(bytes),
+                ..
+            } => b64::decode(&bytes).expect("seed bytes"),
+            other => panic!("independent reply: {other:?}"),
+        };
+        let copy = new_doc();
+        copy.transact_mut()
+            .apply_update(Update::decode_v1(&bytes).expect("decode"))
+            .expect("apply");
+        let snapshot = copy.transact().snapshot();
+        assert!(snapshot.delete_set.is_empty());
+        assert_eq!(snapshot.state_map.len(), 1);
+        for (client, _) in snapshot.state_map.iter() {
+            assert!(
+                !before.state_map.contains_client(client),
+                "copy retained source client"
+            );
+        }
+        let projected = crate::project::project_prosemirror(&copy.transact(), &Limits::for_tests())
+            .expect("project");
+        assert_eq!(projected["content"][0]["content"][0]["text"], "retained");
+        assert_ne!(projected["content"][0]["attrs"]["id"], "source-block");
+        assert_eq!(engine.doc.transact().snapshot(), before);
+        assert_eq!(
+            engine
+                .doc
+                .transact()
+                .encode_state_as_update_v1(&StateVector::default()),
+            native_before
+        );
+        assert!(
+            engine.mutated,
+            "loaded session mutation bookkeeping retained"
+        );
+    }
+
+    #[test]
+    fn independent_request_obeys_encoding_body_output_and_operation_limits() {
+        let request = Request::SeedIndependentFromTiptap {
+            content_json:json!({"content":[{"type":"paragraph","content":[{"type":"text","text":"x".repeat(4096)}]}]}).to_string(), encoding:1,
+        };
+        let mut body = CollabEngine::new(Limits {
+            max_project_json_bytes: 128,
+            ..Limits::for_tests()
+        });
+        assert!(matches!(
+            body.handle(&request),
+            EngineStatus::ResourceLimit {
+                kind: LimitKind::Input,
+                ..
+            }
+        ));
+        let mut output = CollabEngine::new(Limits {
+            max_input_bytes: 1024,
+            max_output_bytes: 1024,
+            ..Limits::for_tests()
+        });
+        assert!(matches!(
+            output.handle(&request),
+            EngineStatus::ResourceLimit {
+                kind: LimitKind::Output,
+                ..
+            }
+        ));
+        let mut ops = CollabEngine::new(Limits {
+            max_ops: 1,
+            ..Limits::for_tests()
+        });
+        let small = Request::SeedIndependentFromTiptap {
+            content_json: "{}".into(),
+            encoding: 1,
+        };
+        assert!(matches!(ops.handle(&small), EngineStatus::Ok { .. }));
+        assert!(matches!(
+            ops.handle(&small),
+            EngineStatus::ResourceLimit {
+                kind: LimitKind::Ops,
+                ..
+            }
+        ));
+        assert!(matches!(
+            CollabEngine::new(Limits::for_tests()).handle(&Request::SeedIndependentFromTiptap {
+                content_json: "{}".into(),
+                encoding: 2
+            }),
+            EngineStatus::Unsupported {
+                reason: UnsupportedReason::EncodingV2,
+                ..
+            }
+        ));
+        assert!(matches!(
+            CollabEngine::new(Limits::for_tests()).handle(&Request::SeedIndependentFromTiptap {
+                content_json: "{".into(),
+                encoding: 1
+            }),
+            EngineStatus::Malformed { .. }
+        ));
     }
 }
 

@@ -1,10 +1,11 @@
 //! Outbox search indexer. Each event re-reads the current rows and upserts or
 //! deletes their Meili documents, so the outbox's at-least-once replay is
-//! harmless. A per-workspace transaction-scoped advisory lock
-//! (`with_workspace_lock`) makes read-then-enqueue one step: Meili applies an
-//! index's tasks in enqueue order, so the index ends at the newest read, also
-//! against rebuild pages, which take the same lock. An outbox batch awaits its
-//! Meili tasks after releasing the lock.
+//! harmless. `Backend::begin_search_refresh` reserves the caller transaction
+//! through current-source reads and ordered enqueue: a per-workspace advisory
+//! lock on PostgreSQL, an actual writer reservation on the SQLite family.
+//! PostgreSQL rebuild pages take the same advisory lock. Meili applies an
+//! index's tasks in enqueue order. The outbox batch releases each reservation
+//! before awaiting task confirmation.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -15,13 +16,14 @@ use std::time::Duration;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::db::backend::{Backend, DbTx};
 use crate::db::context::{
     lock_key_from_uuid, SEARCH_INDEX_LOCK_NAMESPACE, SEARCH_REBUILD_LOCK_KEY,
 };
-use crate::db::outbox::OutboxEvent;
+use crate::db::outbox::{BackendOutboxEvent, OutboxEvent};
 use crate::db::search_index::{
-    cursor_of, list_live_workspace_ids, list_sources, load_sources, related_page_limit,
-    SearchIndexCursor, SearchIndexRow, SourceScope,
+    cursor_of, list_live_workspace_ids, list_sources, related_page_limit, SearchIndexCursor,
+    SearchIndexRow, SourceScope,
 };
 use crate::outbox::{DeliveryMode, OutboxConsumer, OutboxProcessError};
 use crate::search::meili::{
@@ -81,9 +83,43 @@ impl OutboxConsumer for SearchIndexConsumer {
         events: &'a [OutboxEvent],
     ) -> Pin<Box<dyn Future<Output = (usize, Option<OutboxProcessError>)> + Send + 'a>> {
         Box::pin(async move {
-            match deliver_search_index_batch(pool, &self.meili, events).await {
+            let events: Vec<_> = events.iter().cloned().map(Into::into).collect();
+            match deliver_search_index_batch_backend(
+                &Backend::Postgres(pool.clone()),
+                &self.meili,
+                &events,
+            )
+            .await
+            {
                 Ok(()) => (events.len(), None),
                 Err(err) => (0, Some(OutboxProcessError::Delivery(err.to_string()))),
+            }
+        })
+    }
+
+    fn deliver_backend<'a>(
+        &'a self,
+        backend: &'a Backend,
+        _lease_owner: Uuid,
+        event: &'a BackendOutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(async move {
+            process_search_index_event_backend(backend, &self.meili, event)
+                .await
+                .map_err(|err| OutboxProcessError::Delivery(err.to_string()))
+        })
+    }
+
+    fn deliver_batch_backend<'a>(
+        &'a self,
+        backend: &'a Backend,
+        _lease_owner: Uuid,
+        events: &'a [BackendOutboxEvent],
+    ) -> Pin<Box<dyn Future<Output = (usize, Option<OutboxProcessError>)> + Send + 'a>> {
+        Box::pin(async move {
+            match deliver_search_index_batch_backend(backend, &self.meili, events).await {
+                Ok(()) => (events.len(), None),
+                Err(error) => (0, Some(OutboxProcessError::Delivery(error.to_string()))),
             }
         })
     }
@@ -158,7 +194,7 @@ enum BatchCoalesceKey {
     Resource(SearchResourceRef),
 }
 
-fn batch_coalesce_key(event: &OutboxEvent) -> Option<BatchCoalesceKey> {
+fn batch_coalesce_key(event: &BackendOutboxEvent) -> Option<BatchCoalesceKey> {
     if event.verb == "workspace.deleted" {
         return event.workspace_id.map(BatchCoalesceKey::WorkspaceDelete);
     }
@@ -175,12 +211,12 @@ fn batch_coalesce_key(event: &OutboxEvent) -> Option<BatchCoalesceKey> {
 }
 
 struct CoalescedSearchEvent {
-    event: OutboxEvent,
+    event: BackendOutboxEvent,
     subtree: bool,
     body_only: bool,
 }
 
-fn event_refresh_flags(event: &OutboxEvent) -> (bool, bool) {
+fn event_refresh_flags(event: &BackendOutboxEvent) -> (bool, bool) {
     let subtree = moved_across_project(event);
     let body_only = resource_from_event(event)
         .is_some_and(|resource| resource.kind == SearchSourceKind::Document)
@@ -188,7 +224,7 @@ fn event_refresh_flags(event: &OutboxEvent) -> (bool, bool) {
     (subtree, body_only)
 }
 
-fn coalesce_search_index_events(events: &[OutboxEvent]) -> Vec<CoalescedSearchEvent> {
+fn coalesce_search_index_events(events: &[BackendOutboxEvent]) -> Vec<CoalescedSearchEvent> {
     let mut order: Vec<BatchCoalesceKey> = Vec::new();
     let mut latest: HashMap<BatchCoalesceKey, CoalescedSearchEvent> = HashMap::new();
     for event in events {
@@ -236,10 +272,10 @@ fn coalesce_search_index_events(events: &[OutboxEvent]) -> Vec<CoalescedSearchEv
         .collect()
 }
 
-async fn deliver_search_index_batch(
-    pool: &PgPool,
+async fn deliver_search_index_batch_backend(
+    backend: &Backend,
     meili: &MeiliConfig,
-    events: &[OutboxEvent],
+    events: &[BackendOutboxEvent],
 ) -> Result<(), SearchIndexError> {
     if events.is_empty() {
         return Ok(());
@@ -263,13 +299,20 @@ async fn deliver_search_index_batch(
                 .take_while(|item| item.event.workspace_id == Some(workspace_id))
                 .count();
         // Preserve A -> B -> A order; do not bucket by workspace or kind.
-        with_workspace_lock(pool, workspace_id, || async {
+        let mut tx = backend.begin_search_refresh(workspace_id).await?;
+        // The same caller transaction reads and enqueues. In particular a
+        // family refresh never waits on a nested BEGIN IMMEDIATE.
+        let result = async {
             for item in &coalesced[offset..end] {
-                apply_search_index_event_locked(pool, &mut sink, item).await?;
+                apply_search_index_event_locked(&mut tx, &mut sink, item).await?;
             }
             sink.flush_upserts().await
-        })
-        .await?;
+        }
+        .await;
+        // Reservation ends before task confirmation. Cancellation instead drops
+        // this owned transaction into the driver's rollback/quarantine path.
+        tx.rollback().await?;
+        result?;
         offset = end;
     }
     sink.finish().await?;
@@ -277,7 +320,7 @@ async fn deliver_search_index_batch(
 }
 
 async fn apply_search_index_event_locked(
-    pool: &PgPool,
+    tx: &mut DbTx,
     sink: &mut MeiliBatchSink<'_>,
     item: &CoalescedSearchEvent,
 ) -> Result<(), SearchIndexError> {
@@ -294,7 +337,7 @@ async fn apply_search_index_event_locked(
             sink.delete_by_filter(&meili_eq("projectId", &project_id.to_string())?)
                 .await?;
             upsert_pages_batch(
-                pool,
+                tx,
                 sink,
                 workspace_id,
                 SourceScope {
@@ -309,16 +352,16 @@ async fn apply_search_index_event_locked(
     }
     if let Some(resource) = resource_from_event(event) {
         if resource.kind == SearchSourceKind::Document && item.body_only {
-            refresh_document_body_only_locked(pool, sink, resource).await?;
+            refresh_document_body_only_locked(tx, sink, resource).await?;
         } else {
-            refresh_search_resource_locked(pool, sink, resource, item.subtree).await?;
+            refresh_search_resource_locked(tx, sink, resource, item.subtree).await?;
         }
     }
     Ok(())
 }
 
 async fn upsert_pages_batch(
-    pool: &PgPool,
+    tx: &mut DbTx,
     sink: &mut MeiliBatchSink<'_>,
     workspace_id: Uuid,
     scope: SourceScope,
@@ -327,14 +370,10 @@ async fn upsert_pages_batch(
     let mut after: Option<SearchIndexCursor> = None;
     let mut any = false;
     loop {
-        let batch = list_sources(
-            pool,
-            workspace_id,
-            after.as_ref(),
-            related_page_limit(),
-            &scope,
-        )
-        .await?;
+        let batch = tx
+            .operation()
+            .list_search_sources(workspace_id, after.as_ref(), related_page_limit(), &scope)
+            .await?;
         if batch.is_empty() {
             return Ok(if any { "ok" } else { "empty" });
         }
@@ -342,7 +381,10 @@ async fn upsert_pages_batch(
         let docs: Vec<SearchSource> = batch.iter().map(to_meili).collect();
         sink.upsert_sources(&docs).await?;
         if let Some(parent) = parent {
-            let live = load_sources(pool, parent.workspace_id, parent.kind, parent.id).await?;
+            let live = tx
+                .operation()
+                .load_search_sources(parent.workspace_id, parent.kind, parent.id)
+                .await?;
             if live.is_empty() {
                 delete_absent_batch(sink, parent).await?;
                 return Ok("gone");
@@ -374,17 +416,18 @@ async fn delete_absent_batch(
 }
 
 async fn refresh_document_body_only_locked(
-    pool: &PgPool,
+    tx: &mut DbTx,
     sink: &mut MeiliBatchSink<'_>,
     resource: SearchResourceRef,
 ) -> Result<(), SearchIndexError> {
-    let current = load_sources(
-        pool,
-        resource.workspace_id,
-        SearchSourceKind::Document,
-        resource.id,
-    )
-    .await?;
+    let current = tx
+        .operation()
+        .load_search_sources(
+            resource.workspace_id,
+            SearchSourceKind::Document,
+            resource.id,
+        )
+        .await?;
     if current.is_empty() {
         delete_absent_batch(sink, resource).await?;
         return Ok(());
@@ -395,7 +438,7 @@ async fn refresh_document_body_only_locked(
 }
 
 async fn refresh_search_resource_locked(
-    pool: &PgPool,
+    tx: &mut DbTx,
     sink: &mut MeiliBatchSink<'_>,
     resource: SearchResourceRef,
     subtree: bool,
@@ -414,13 +457,16 @@ async fn refresh_search_resource_locked(
             }
         };
         let outcome =
-            upsert_pages_batch(pool, sink, resource.workspace_id, scope, Some(resource)).await?;
+            upsert_pages_batch(tx, sink, resource.workspace_id, scope, Some(resource)).await?;
         if outcome == "empty" {
             delete_absent_batch(sink, resource).await?;
         }
         return Ok(());
     }
-    let current = load_sources(pool, resource.workspace_id, resource.kind, resource.id).await?;
+    let current = tx
+        .operation()
+        .load_search_sources(resource.workspace_id, resource.kind, resource.id)
+        .await?;
     if current.is_empty() {
         delete_absent_batch(sink, resource).await?;
         return Ok(());
@@ -451,7 +497,10 @@ async fn refresh_search_resource_locked(
         );
         sink.delete_by_filter(&filter).await?;
     }
-    let again = load_sources(pool, resource.workspace_id, resource.kind, resource.id).await?;
+    let again = tx
+        .operation()
+        .load_search_sources(resource.workspace_id, resource.kind, resource.id)
+        .await?;
     if again.is_empty() {
         delete_absent_batch(sink, resource).await?;
     }
@@ -516,7 +565,7 @@ fn absence_filter(resource: SearchResourceRef) -> Result<String, MeiliError> {
     }
 }
 
-fn resource_from_event(event: &OutboxEvent) -> Option<SearchResourceRef> {
+fn resource_from_event(event: &BackendOutboxEvent) -> Option<SearchResourceRef> {
     let workspace_id = event.workspace_id?;
     let id = event.target_id?;
     let prefix = event.verb.split('.').next()?;
@@ -534,7 +583,7 @@ fn resource_from_event(event: &OutboxEvent) -> Option<SearchResourceRef> {
     })
 }
 
-fn moved_across_project(event: &OutboxEvent) -> bool {
+fn moved_across_project(event: &BackendOutboxEvent) -> bool {
     if event.verb != "document.moved" {
         return false;
     }
@@ -570,7 +619,7 @@ where
     result
 }
 
-fn document_body_only(event: &OutboxEvent) -> bool {
+fn document_body_only(event: &BackendOutboxEvent) -> bool {
     if event.verb == "document.collab_update_appended"
         || event.verb == "document.collab_snapshot_compacted"
     {
@@ -593,8 +642,22 @@ pub async fn process_search_index_event(
     meili: &MeiliConfig,
     event: &OutboxEvent,
 ) -> Result<(), SearchIndexError> {
-    // One refresh implementation: a single event is a batch of one.
-    deliver_search_index_batch(pool, meili, std::slice::from_ref(event)).await
+    process_search_index_event_backend(
+        &Backend::Postgres(pool.clone()),
+        meili,
+        &event.clone().into(),
+    )
+    .await
+}
+
+/// Normal backend outbox consumer entrypoint; a single event uses the exact
+/// same ordered batch/confirmation path, not a separate search producer.
+pub async fn process_search_index_event_backend(
+    backend: &Backend,
+    meili: &MeiliConfig,
+    event: &BackendOutboxEvent,
+) -> Result<(), SearchIndexError> {
+    deliver_search_index_batch_backend(backend, meili, std::slice::from_ref(event)).await
 }
 
 pub struct RebuildOutcome {
@@ -715,7 +778,7 @@ mod tests {
         payload: Value,
         resource_id: Uuid,
         workspace_id: Uuid,
-    ) -> OutboxEvent {
+    ) -> BackendOutboxEvent {
         OutboxEvent {
             snapshot_xmin: "1".into(),
             id: Uuid::now_v7(),
@@ -730,6 +793,39 @@ mod tests {
             channel: "system".into(),
             created_at: Utc::now(),
         }
+        .into()
+    }
+
+    #[test]
+    fn family_saved_events_keep_coalescing_without_pg_visibility() {
+        let workspace = Uuid::now_v7();
+        let document = Uuid::now_v7();
+        let mut metadata = test_event(
+            "document.updated",
+            json!({"title":"새 제목"}),
+            document,
+            workspace,
+        );
+        metadata.visibility = crate::db::outbox::EventVisibility::SqliteFamily;
+        metadata.seq = 10;
+        let mut saved = test_event(
+            "document.collab_update_appended",
+            json!({}),
+            document,
+            workspace,
+        );
+        saved.visibility = crate::db::outbox::EventVisibility::SqliteFamily;
+        saved.seq = 11;
+        let coalesced = coalesce_search_index_events(&[metadata, saved]);
+        assert_eq!(coalesced.len(), 1);
+        assert_eq!(coalesced[0].event.seq, 11);
+        // The later body save cannot erase the earlier metadata refresh,
+        // otherwise comments/attachment parent titles would remain stale.
+        assert!(!coalesced[0].body_only);
+        assert!(matches!(
+            coalesced[0].event.cursor(),
+            crate::db::outbox::OutboxCursor::SqliteFamily { seq: 11 }
+        ));
     }
 
     #[tokio::test]

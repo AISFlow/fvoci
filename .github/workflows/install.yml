@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       run_upgrade_smoke_arm:
-        description: Also run the image-to-image upgrade smoke on native ubuntu-24.04-arm (two cold image builds)
+        description: Also run the image-to-image upgrade smoke on native ubuntu-26.04-arm (two cold image builds)
         type: boolean
         default: false
 
@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   ci-plan:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
@@ -55,9 +55,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
+          - runner: ubuntu-26.04
             check: install-smoke
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-26.04-arm
             check: install-smoke-arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -70,7 +70,7 @@ jobs:
       - name: Run container install smoke
         run: bash scripts/install-smoke.sh
 
-  # Native GitHub-hosted ubuntu-24.04 and ubuntu-24.04-arm (not a cross-build).
+  # Native GitHub-hosted ubuntu-26.04 and ubuntu-26.04-arm (not a cross-build).
   backup-restore-smoke:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_backup_restore_smoke == 'true'
@@ -79,9 +79,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
+          - runner: ubuntu-26.04
             check: backup-restore-smoke
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-26.04-arm
             check: backup-restore-smoke-arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -100,7 +100,7 @@ jobs:
   upgrade-smoke-arm64:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_upgrade_smoke_arm64 == 'true'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 60
     env:
       UPGRADE_OLD: d0942f10f89248b385eeb3f83475dfa4cd441388
@@ -158,7 +158,7 @@ jobs:
     name: install-ci-gate
     needs: [ci-plan, install-smoke, backup-restore-smoke, upgrade-smoke-arm64]
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

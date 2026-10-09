@@ -30,16 +30,18 @@ use crate::collab::derived_body::prepare_derived_body;
 use crate::collab::engine_bridge::{
     warn_engine_not_applied, BridgeError, EngineBridge, RecycleError,
 };
-use crate::collab::guard::RoomGuard;
+use crate::collab::guard::{BackendRoomGuard, RoomGuard};
 use crate::collab::revision::{capture_revision_offline, prepare_revision_text};
 use crate::collab::validation::{
     classify_admission_load, validate_recovery_bundle, validate_snapshot_only, BundleValidation,
     ValidateStageTimings,
 };
+use crate::db::backend::Backend;
 use crate::db::revisions::{
-    create_system_revision, latest_revision_y_snapshot, load_durable_collab_for_system,
-    lookup_restored_revision, CreateRevisionInput, RestoreRevisionAppend, RestoreRevisionInput,
-    RevisionDbError, RevisionTarget, SystemRevisionHead, SYSTEM_REVISION_HEAD_RETRIES,
+    create_system_revision_for_room_backend, latest_revision_y_snapshot_for_room_backend,
+    load_durable_collab_for_room_backend, lookup_restored_revision, CreateRevisionInput,
+    RestoreRevisionAppend, RestoreRevisionInput, RevisionDbError, RevisionTarget,
+    SystemRevisionHead, SYSTEM_REVISION_HEAD_RETRIES,
 };
 
 const MAX_REJECTED_CANDIDATES_PER_USER: usize = 8;
@@ -54,13 +56,15 @@ use crate::collab::wire::CollabKind;
 use crate::collab::wire::{encode, AuthMessage, DocumentMessage, SyncStep, WireFrame};
 use crate::collab::y_sync::{encode_sync_payload, is_empty_update, parse_sync_payload};
 use crate::db::collab::{
-    append_collab_restore_kind, append_collab_update_kind, append_collab_update_on_conn_timed,
-    claim_writer_and_load_kind, compact_collab_snapshot_kind, load_collab_readonly_kind,
-    project_derived_body_kind, resolve_collab_admission_kind, verify_collab_operation_kind,
-    AppendCollabInput, AppendCollabResult, CollabDbError, CompactCollabInput,
-    ProjectDerivedBodyInput, ProjectDerivedBodyResult, VerifyCollabInput,
+    append_collab_restore_kind,
+    compact_collab_snapshot_in_room as compact_collab_snapshot_kind_backend,
+    load_room_collab_readonly, project_derived_body_in_room as project_derived_body_kind_backend,
+    resolve_collab_admission_kind_backend, verify_room_collab_operation,
+    verify_room_native_consumer, AppendCollabInput, AppendCollabResult, ClaimWriterResult,
+    CollabDbError, CompactCollabInput, FamilyNativeConsumerProof, FamilyNativeRoomFence,
+    FamilyRoomDeliveryFence, ProjectDerivedBodyInput, ProjectDerivedBodyResult, VerifyCollabInput,
 };
-use crate::db::collab_delivery::{check_delivery_admission_kind, DeliveryAdmission};
+use crate::db::collab_delivery::{check_delivery_admission_kind_backend, DeliveryAdmission};
 use crate::db::identity::LiveSession;
 
 #[cfg(feature = "db-tests")]
@@ -152,6 +156,52 @@ async fn pause_for_join_barrier(document_id: Uuid) {
         if consume_actor_panic_after_join_barrier(document_id).await {
             panic!("db-tests collab actor panic after join barrier");
         }
+    }
+}
+
+/// Pause after isolated native work or capture, before its final authority proof.
+/// A fixture mutates the actual database fence while this await is suspended.
+#[cfg(feature = "db-tests")]
+static NATIVE_CONSUMER_BARRIERS: std::sync::LazyLock<
+    tokio::sync::Mutex<HashMap<(Uuid, u8), AppendRevokeBarrier>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+#[cfg(feature = "db-tests")]
+pub const NATIVE_CAPTURE_FINAL_PROOF: u8 = 0;
+#[cfg(feature = "db-tests")]
+pub const NATIVE_PROJECT_FINAL_PROOF: u8 = 1;
+#[cfg(feature = "db-tests")]
+pub const MANUAL_REVISION_BEFORE_WRITE: u8 = 2;
+#[cfg(feature = "db-tests")]
+pub const NATIVE_FORWARD_FINAL_PROOF: u8 = 3;
+#[cfg(feature = "db-tests")]
+pub async fn arm_native_consumer_barrier(
+    document: Uuid,
+    point: u8,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (proceed_tx, proceed_rx) = oneshot::channel();
+    assert!(NATIVE_CONSUMER_BARRIERS
+        .lock()
+        .await
+        .insert(
+            (document, point),
+            AppendRevokeBarrier {
+                reached_tx,
+                proceed_rx
+            }
+        )
+        .is_none());
+    (reached_rx, proceed_tx)
+}
+#[cfg(feature = "db-tests")]
+pub(crate) async fn pause_native_consumer_barrier(document: Uuid, point: u8) {
+    let barrier = NATIVE_CONSUMER_BARRIERS
+        .lock()
+        .await
+        .remove(&(document, point));
+    if let Some(barrier) = barrier {
+        let _ = barrier.reached_tx.send(());
+        let _ = barrier.proceed_rx.await;
     }
 }
 
@@ -773,6 +823,7 @@ pub struct RoomJoin {
 pub struct ConnectionLease {
     pub conn_id: Uuid,
     _hold: oneshot::Sender<Infallible>,
+    pub(crate) family_room_delivery: Option<FamilyRoomDeliveryFence>,
 }
 
 struct JoinAdmission {
@@ -818,7 +869,7 @@ enum RoomCommand {
     CaptureRevision {
         actor_user_id: Uuid,
         session_id: Uuid,
-        reply: oneshot::Sender<Result<CapturedRevision, RevisionCaptureError>>,
+        reply: oneshot::Sender<Result<GuardedCapturedRevision, RevisionCaptureError>>,
     },
     Restore {
         actor_user_id: Uuid,
@@ -842,6 +893,17 @@ enum RoomCommand {
         session_id: Uuid,
         reply: oneshot::Sender<Result<LiveProjection, BodyWriteError>>,
     },
+    // Test-only entry into the existing receipt/readback consumer on the actual
+    // hub-owned actor; errors still come from the original SDK transaction.
+    #[cfg(all(test, feature = "db-tests"))]
+    ReconcileForTest {
+        actor: Uuid,
+        credential: Uuid,
+        op_id: Uuid,
+        expected_tail: i64,
+        payload: Vec<u8>,
+        reply: oneshot::Sender<(Option<AppendCollabResult>, bool)>,
+    },
     Shutdown,
     #[cfg(feature = "db-tests")]
     Probe(oneshot::Sender<ActorProbe>),
@@ -863,6 +925,10 @@ fn reject_room_command(cmd: RoomCommand) {
         }
         RoomCommand::ProjectLive { reply, .. } => {
             let _ = reply.send(Err(BodyWriteError::Unavailable));
+        }
+        #[cfg(all(test, feature = "db-tests"))]
+        RoomCommand::ReconcileForTest { reply, .. } => {
+            let _ = reply.send((None, false));
         }
         RoomCommand::Leave(_) | RoomCommand::Frame { .. } | RoomCommand::Shutdown => {}
         #[cfg(feature = "db-tests")]
@@ -1021,6 +1087,30 @@ impl RoomHandle {
         let _ = self.tx.send(RoomCommand::Frame { conn_id, bytes }).await;
     }
 
+    #[cfg(all(test, feature = "db-tests"))]
+    async fn reconcile_for_test(
+        &self,
+        actor: Uuid,
+        credential: Uuid,
+        op_id: Uuid,
+        expected_tail: i64,
+        payload: Vec<u8>,
+    ) -> (Option<AppendCollabResult>, bool) {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(RoomCommand::ReconcileForTest {
+                actor,
+                credential,
+                op_id,
+                expected_tail,
+                payload,
+                reply,
+            })
+            .await
+            .expect("live actor test command");
+        receive.await.expect("actual consumer completed")
+    }
+
     pub async fn shutdown(&self) {
         let _ = self.session_cancel.send(true);
         let _ = self.tx.send(RoomCommand::Shutdown).await;
@@ -1039,6 +1129,16 @@ impl RoomHandle {
         actor_user_id: Uuid,
         session_id: Uuid,
     ) -> Result<CapturedRevision, RevisionCaptureError> {
+        self.capture_revision_guarded(actor_user_id, session_id)
+            .await
+            .map(|result| result.captured)
+    }
+
+    pub(crate) async fn capture_revision_guarded(
+        &self,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<GuardedCapturedRevision, RevisionCaptureError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RoomCommand::CaptureRevision {
@@ -1140,6 +1240,11 @@ impl RoomHandle {
     }
 }
 
+pub(crate) struct GuardedCapturedRevision {
+    pub(crate) captured: CapturedRevision,
+    pub(crate) proof: Option<FamilyNativeConsumerProof>,
+}
+
 struct CommittedBundle {
     snapshot: Vec<u8>,
     tail_payloads: Vec<Vec<u8>>,
@@ -1194,11 +1299,13 @@ struct RoomActor {
     document_id: Uuid,
     kind: CollabKind,
     config: CollabConfig,
-    pool: PgPool,
+    backend: Backend,
     engine: EngineBridge,
-    room_guard: Option<RoomGuard>,
+    room_guard: Option<BackendRoomGuard>,
+    guard_cleanup_failed: bool,
     writer_generation: Option<i64>,
     committed: CommittedBundle,
+    committed_writer_generation: i64,
     connections: HashMap<Uuid, ConnectionState>,
     connection_lease_drops: FuturesUnordered<ConnectionLeaseDrop>,
     pending_lease_drops: Vec<PendingLeaseDrop>,
@@ -1244,23 +1351,56 @@ pub async fn spawn_room(
     live_conns: Arc<AtomicUsize>,
     admission_reservation: MemoryReservation,
 ) -> Result<(RoomHandle, oneshot::Receiver<()>), JoinError> {
+    spawn_room_backend(
+        key,
+        config,
+        Backend::Postgres(pool),
+        BackendRoomGuard::Postgres(room_guard),
+        None,
+        live_conns,
+        admission_reservation,
+    )
+    .await
+}
+
+pub(crate) async fn spawn_room_backend(
+    key: RoomKey,
+    config: CollabConfig,
+    backend: Backend,
+    room_guard: BackendRoomGuard,
+    initial_load: Option<crate::db::collab::CollabLoadState>,
+    live_conns: Arc<AtomicUsize>,
+    admission_reservation: MemoryReservation,
+) -> Result<(RoomHandle, oneshot::Receiver<()>), JoinError> {
     let RoomKey(workspace_id, document_id, kind) = key;
     wait_spawn_room_block(document_id).await;
     // Starts only the bridge thread (it fails only if the OS refuses a thread);
     // the helper spawns on the actor's first reload.
-    let engine = EngineBridge::spawn(config.engine_bin.clone(), config.limits)
-        .map_err(|_| JoinError::EngineUnavailable)?;
+    let engine = match EngineBridge::spawn(config.engine_bin.clone(), config.limits) {
+        Ok(engine) => engine,
+        Err(_) => {
+            if let Err(error) = room_guard
+                .release_bounded(Duration::from_millis(config.rpc_timeout_ms))
+                .await
+            {
+                tracing::error!(%document_id, %error, "room startup guard cleanup unconfirmed");
+                return Err(JoinError::DbError);
+            }
+            return Err(JoinError::EngineUnavailable);
+        }
+    };
     let (tx, mut rx) = mpsc::channel(config.max_queued_room_ops);
     let (session_cancel_tx, session_cancel_rx) = watch::channel(false);
     let (finished_tx, finished_rx) = oneshot::channel();
-    let actor = RoomActor {
+    let mut actor = RoomActor {
         workspace_id,
         document_id,
         kind,
         config,
-        pool,
+        backend,
         engine,
         room_guard: Some(room_guard),
+        guard_cleanup_failed: false,
         writer_generation: None,
         committed: CommittedBundle {
             snapshot: vec![0, 0],
@@ -1268,6 +1408,7 @@ pub async fn spawn_room(
             tail_seq: 0,
             snapshot_cutoff_seq: 0,
         },
+        committed_writer_generation: 0,
         connections: HashMap::new(),
         connection_lease_drops: FuturesUnordered::new(),
         pending_lease_drops: Vec::new(),
@@ -1288,6 +1429,9 @@ pub async fn spawn_room(
         session_revision: None,
         admission_reservation: Some(admission_reservation),
     };
+    if let Some(load) = initial_load {
+        actor.set_committed_from_load(&load);
+    }
     tokio::spawn(async move {
         let mut actor = actor;
         let document_id = actor.document_id;
@@ -1409,6 +1553,13 @@ impl RoomActor {
     async fn run_loop(&mut self, rx: &mut mpsc::Receiver<RoomCommand>) -> RoomExit {
         let mut acl_tick = tokio::time::interval(Duration::from_millis(self.config.revoke_poll_ms));
         acl_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let renew_interval = self
+            .room_guard
+            .as_ref()
+            .and_then(BackendRoomGuard::renew_interval);
+        let mut renew_tick =
+            tokio::time::interval(renew_interval.unwrap_or(Duration::from_secs(1)));
+        renew_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             #[cfg(feature = "db-tests")]
             if consume_lease_drop_priority(self.document_id).await {
@@ -1487,6 +1638,21 @@ impl RoomActor {
                             let _ = reply
                                 .send(self.handle_project_live(actor_user_id, session_id).await);
                         }
+                        #[cfg(all(test, feature = "db-tests"))]
+                        Some(RoomCommand::ReconcileForTest {
+                            actor, credential, op_id, expected_tail, payload, reply,
+                        }) => {
+                            eprintln!("P102 diagnostic handler before kind={:?} proof_present={} guard_present={} fence_lost={} connections={} writer_generation={:?} committed_generation={} committed_tail={} expected_tail={}", self.kind, self.native_consumer_proof().is_some(), self.room_guard.is_some(), self.fence_lost, self.connections.len(), self.writer_generation, self.committed_writer_generation, self.committed.tail_seq, expected_tail);
+                            let digest = payload_digest(&payload);
+                            let result = self.reconcile_ambiguous_append(
+                                actor, credential, op_id, expected_tail, &payload, &digest,
+                            ).await;
+                            let reload = if result.is_none() {
+                                self.reload_primary_or_close_room().await
+                            } else { true };
+                            eprintln!("P102 diagnostic handler after ack_present={} reloaded={} proof_present={} guard_present={} fence_lost={} connections={}", result.is_some(), reload, self.native_consumer_proof().is_some(), self.room_guard.is_some(), self.fence_lost, self.connections.len());
+                            let _ = reply.send((result, reload));
+                        }
                         Some(RoomCommand::Shutdown) => {
                             self.abort_session_revision_work();
                             break;
@@ -1507,6 +1673,17 @@ impl RoomActor {
                 }
                 _ = acl_tick.tick() => {
                     self.poll_acl().await;
+                }
+                _ = renew_tick.tick(), if renew_interval.is_some() && !self.fence_lost => {
+                    let renewal = if let Some(guard) = self.room_guard.as_mut() {
+                        Some(tokio::time::timeout(Duration::from_millis(self.config.rpc_timeout_ms), guard.renew()).await)
+                    } else { None };
+                    match renewal {
+                        Some(Ok(Ok(true))) => {},
+                        Some(Ok(Err(error))) if self.is_remote_task_room() => self.fatal_remote_write_unconfirmed(error).await,
+                        Some(Err(_)) if self.is_remote_task_room() => self.fatal_remote_write_unconfirmed(sqlx::Error::Protocol("Task lease renewal deadline expired; original finish unconfirmed".into())).await,
+                        _ => self.fatal_fence_lost().await,
+                    }
                 }
             }
             self.finish_pending_lease_drops().await;
@@ -1553,11 +1730,21 @@ impl RoomActor {
         #[cfg(feature = "db-tests")]
         pause_before_guard_release(self.document_id).await;
 
-        if let Some(guard) = self.room_guard.take() {
-            guard.release().await;
-        }
+        let guard_clean = match self.room_guard.take() {
+            Some(guard) => match guard
+                .release_bounded(Duration::from_millis(self.config.rpc_timeout_ms))
+                .await
+            {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::error!(%error, document_id=%self.document_id, "room guard cleanup failed");
+                    false
+                }
+            },
+            None => !self.guard_cleanup_failed,
+        };
 
-        matches!(exit, RoomExit::Clean) && engine_stop_ok
+        matches!(exit, RoomExit::Clean) && engine_stop_ok && guard_clean
     }
 
     /// Called on every tick of the room's `revoke_poll_ms` interval (the only
@@ -1571,13 +1758,14 @@ impl RoomActor {
             .map(|(id, c)| (*id, c.session.clone(), c.read_only))
             .collect::<Vec<_>>();
         for (conn_id, session, read_only) in snapshots {
-            match check_delivery_admission_kind(
-                &self.pool,
+            match check_delivery_admission_kind_backend(
+                &self.backend,
                 self.kind,
                 self.workspace_id,
                 session.user_id,
                 session.session_id,
                 self.document_id,
+                self.delivery_fence(),
             )
             .await
             {
@@ -1609,8 +1797,8 @@ impl RoomActor {
         session_id: Uuid,
         read_only: bool,
     ) -> LockingAuth {
-        match resolve_collab_admission_kind(
-            &self.pool,
+        match resolve_collab_admission_kind_backend(
+            &self.backend,
             self.kind,
             self.workspace_id,
             user_id,
@@ -1705,10 +1893,22 @@ impl RoomActor {
     async fn capture_committed_revision_primary(
         &mut self,
     ) -> Result<CapturedRevision, RevisionCaptureError> {
-        let durable =
-            load_durable_collab_for_system(&self.pool, self.workspace_id, self.revision_target())
-                .await
-                .map_err(|_| RevisionCaptureError::Unavailable)?;
+        let durable = match load_durable_collab_for_room_backend(
+            &self.backend,
+            self.workspace_id,
+            self.revision_target(),
+            self.family_fence(),
+        )
+        .await
+        {
+            Ok(durable) => durable,
+            Err(error) => {
+                if self.is_remote_task_room() {
+                    self.fatal_remote_write_unconfirmed(error).await;
+                }
+                return Err(RevisionCaptureError::Unavailable);
+            }
+        };
         let durable = durable.map_err(|_| RevisionCaptureError::Unavailable)?;
         self.committed.snapshot = durable.snapshot;
         self.committed.tail_payloads = durable.tail;
@@ -1821,7 +2021,8 @@ impl RoomActor {
         };
         let workspace_id = self.workspace_id;
         let target = self.revision_target();
-        let pool = self.pool.clone();
+        let backend = self.backend.clone();
+        let room_fence = self.family_fence();
 
         if work.captured.is_none() {
             match self.capture_committed_revision_primary().await {
@@ -1845,7 +2046,14 @@ impl RoomActor {
             return true;
         }
 
-        let latest = match latest_revision_y_snapshot(&pool, workspace_id, target).await {
+        let latest = match latest_revision_y_snapshot_for_room_backend(
+            &backend,
+            workspace_id,
+            target,
+            room_fence,
+        )
+        .await
+        {
             Ok(row) => row,
             Err(err) => {
                 tracing::warn!(
@@ -1855,7 +2063,11 @@ impl RoomActor {
                     error = %err,
                     "collab.session_revision_head_read_failed"
                 );
-                self.abort_session_revision_work();
+                if self.is_remote_task_room() {
+                    self.fatal_remote_write_unconfirmed(err).await;
+                } else {
+                    self.abort_session_revision_work();
+                }
                 return true;
             }
         };
@@ -1918,13 +2130,14 @@ impl RoomActor {
             self.abort_session_revision_work();
             return true;
         }
-        let done = match create_system_revision(
-            &pool,
+        let done = match create_system_revision_for_room_backend(
+            &backend,
             workspace_id,
             target,
             input,
             work.writer_generation,
             head_fence,
+            room_fence,
         )
         .await
         {
@@ -1953,6 +2166,9 @@ impl RoomActor {
                     error = %err,
                     "collab.session_revision_persist_failed"
                 );
+                if self.is_remote_task_room() {
+                    self.fatal_remote_write_unconfirmed(err).await;
+                }
                 true
             }
         };
@@ -2007,6 +2223,86 @@ impl RoomActor {
         }
     }
 
+    fn native_consumer_proof(&self) -> Option<FamilyNativeConsumerProof> {
+        self.family_fence().map(|room| FamilyNativeConsumerProof {
+            room,
+            generation: self.committed_writer_generation,
+            tail: self.committed.tail_seq,
+        })
+    }
+
+    async fn check_cached_native_consumer(
+        &mut self,
+        actor: Uuid,
+        credential: Uuid,
+    ) -> Result<Option<FamilyNativeConsumerProof>, ()> {
+        let proof = self.native_consumer_proof();
+        let checked = verify_room_native_consumer(
+            &self.backend,
+            self.kind,
+            self.workspace_id,
+            actor,
+            credential,
+            self.document_id,
+            proof,
+        )
+        .await;
+        match checked {
+            Ok(Ok(())) => return Ok(proof),
+            Err(error) if self.is_remote_task_room() => {
+                self.fatal_remote_write_unconfirmed(error).await;
+            }
+            _ => self.fatal_fence_lost().await,
+        }
+        Err(())
+    }
+
+    fn family_fence(&self) -> Option<FamilyNativeRoomFence> {
+        self.room_guard
+            .as_ref()
+            .and_then(BackendRoomGuard::family_fence)
+    }
+
+    fn delivery_fence(&self) -> Option<FamilyRoomDeliveryFence> {
+        self.room_guard
+            .as_ref()
+            .and_then(BackendRoomGuard::delivery_fence)
+    }
+
+    async fn claim_writer(
+        &mut self,
+        actor: Uuid,
+        credential: Uuid,
+    ) -> Result<Result<ClaimWriterResult, CollabDbError>, sqlx::Error> {
+        let Some(guard) = self.room_guard.as_mut() else {
+            return Ok(Err(CollabDbError::StaleWriter));
+        };
+        let result = guard
+            .claim_writer(
+                &self.backend,
+                self.kind,
+                self.workspace_id,
+                actor,
+                credential,
+                self.document_id,
+            )
+            .await;
+        if self.is_remote_task_room() {
+            match result {
+                Err(error) => {
+                    // Preserve the original writer's failure in the hub and
+                    // stop this room. A new reader is not a finish receipt.
+                    self.fatal_remote_write_unconfirmed(error).await;
+                    return Err(sqlx::Error::Protocol(
+                        "Task native activation outcome remains unconfirmed".into(),
+                    ));
+                }
+                confirmed => return confirmed,
+            }
+        }
+        result
+    }
+
     async fn handle_join(&mut self, join: RoomJoin) -> Result<JoinAdmission, JoinError> {
         if self.fence_lost {
             return Err(JoinError::EngineUnavailable);
@@ -2016,8 +2312,8 @@ impl RoomActor {
         if self.connections.len() >= self.config.max_connections_per_room {
             return Err(JoinError::RoomFull);
         }
-        let admission = resolve_collab_admission_kind(
-            &self.pool,
+        let admission = resolve_collab_admission_kind_backend(
+            &self.backend,
             self.kind,
             self.workspace_id,
             join.conn.session.user_id,
@@ -2037,24 +2333,18 @@ impl RoomActor {
         let admission = admission.map_err(|_| JoinError::AdmissionDenied)?;
         let read_only = join.conn.read_only || admission.read_only;
         if self.writer_generation.is_none() && !read_only {
-            let claim = claim_writer_and_load_kind(
-                &self.pool,
-                self.kind,
-                self.workspace_id,
-                join.conn.session.user_id,
-                join.conn.session.session_id,
-                self.document_id,
-            )
-            .await
-            .map_err(|err| {
-                warn_join_db_error(
-                    "room.handle_join.claim_writer",
-                    self.workspace_id,
-                    self.document_id,
-                    &err,
-                );
-                JoinError::DbError
-            })?;
+            let claim = self
+                .claim_writer(join.conn.session.user_id, join.conn.session.session_id)
+                .await
+                .map_err(|err| {
+                    warn_join_db_error(
+                        "room.handle_join.claim_writer",
+                        self.workspace_id,
+                        self.document_id,
+                        &err,
+                    );
+                    JoinError::DbError
+                })?;
             let claim = claim.map_err(|e| match e {
                 CollabDbError::StaleWriter => JoinError::WriterStale,
                 _ => JoinError::AdmissionDenied,
@@ -2067,24 +2357,31 @@ impl RoomActor {
             }
             self.writer_generation = Some(claim.writer_generation);
         } else if self.writer_generation.is_none() && read_only {
-            let load = load_collab_readonly_kind(
-                &self.pool,
+            let load = match load_room_collab_readonly(
+                &self.backend,
                 self.kind,
                 self.workspace_id,
                 join.conn.session.user_id,
                 join.conn.session.session_id,
                 self.document_id,
+                self.family_fence(),
             )
             .await
-            .map_err(|err| {
-                warn_join_db_error(
-                    "room.handle_join.load_readonly",
-                    self.workspace_id,
-                    self.document_id,
-                    &err,
-                );
-                JoinError::DbError
-            })?;
+            {
+                Ok(load) => load,
+                Err(err) => {
+                    warn_join_db_error(
+                        "room.handle_join.load_readonly",
+                        self.workspace_id,
+                        self.document_id,
+                        &err,
+                    );
+                    if self.is_remote_task_room() {
+                        self.fatal_remote_write_unconfirmed(err).await;
+                    }
+                    return Err(JoinError::DbError);
+                }
+            };
             let load = load.map_err(|_| JoinError::AdmissionDenied)?;
             self.set_committed_from_load(&load);
             if let Err(err) = self.reload_primary_from_committed().await {
@@ -2172,6 +2469,7 @@ impl RoomActor {
             lease: ConnectionLease {
                 conn_id,
                 _hold: lease_tx,
+                family_room_delivery: self.delivery_fence(),
             },
             drop_rx,
             conn_generation,
@@ -2179,6 +2477,7 @@ impl RoomActor {
     }
 
     fn set_committed_from_load(&mut self, load: &crate::db::collab::CollabLoadState) {
+        self.committed_writer_generation = load.writer_generation;
         self.committed.snapshot = load.snapshot.clone();
         self.committed.tail_payloads = load.tail.iter().map(|r| r.payload.clone()).collect();
         self.committed.tail_seq = load.tail_seq;
@@ -2192,16 +2491,59 @@ impl RoomActor {
         }
     }
 
+    fn is_remote_task_room(&self) -> bool {
+        self.kind == CollabKind::Task && matches!(self.backend, Backend::LibsqlRemote(_))
+    }
+
+    async fn fatal_remote_write_unconfirmed(&mut self, error: sqlx::Error) {
+        self.fence_lost = true;
+        self.writer_generation = None;
+        self.primary_loaded = false;
+        self.primary_dirty = true;
+        self.guard_cleanup_failed = true;
+        self.abort_session_revision_work();
+        for (_, conn) in self.connections.drain() {
+            Self::enqueue_close(&conn.events, &conn.cancel, 1013, "try again later");
+        }
+        self.pending_awareness.clear();
+        self.publish_live_conns();
+        if let Some(guard) = self.room_guard.take() {
+            // The original transaction owns its tracked cleanup/quarantine.
+            // Neither this failure nor a later rollback is a stream receipt.
+            guard.retain_remote_write_unknown(error);
+        }
+    }
+
     async fn fatal_fence_lost(&mut self) {
         self.fence_lost = true;
         self.writer_generation = None;
         self.primary_loaded = false;
         self.primary_dirty = true;
-        self.room_guard = None;
-        self.close_all_connections(1013, "try again later").await;
+        self.abort_session_revision_work();
+        // Publish transport cancellation for every socket before any cleanup
+        // I/O or awareness/helper work can block this terminal failure path.
+        for (_, conn) in self.connections.drain() {
+            Self::enqueue_close(&conn.events, &conn.cancel, 1013, "try again later");
+        }
+        self.pending_awareness.clear();
+        self.publish_live_conns();
+        if let Some(guard) = self.room_guard.take() {
+            if let Err(error) = guard
+                .release_bounded(Duration::from_millis(self.config.rpc_timeout_ms))
+                .await
+            {
+                self.guard_cleanup_failed = true;
+                tracing::error!(%error, document_id=%self.document_id, "lost room guard cleanup unconfirmed");
+            }
+        }
     }
 
     async fn reload_primary_or_close_room(&mut self) -> bool {
+        if self.is_remote_task_room() && self.guard_cleanup_failed {
+            // An uncertain original stream has already transferred its guard
+            // to the hub. A cache reload cannot supply its settlement receipt.
+            return false;
+        }
         match self.reload_primary_from_committed().await {
             Ok(()) => true,
             Err(err) => {
@@ -2357,13 +2699,14 @@ impl RoomActor {
                     self.close_connection(conn_id, 1008, "invalid room").await;
                     return;
                 }
-                match check_delivery_admission_kind(
-                    &self.pool,
+                match check_delivery_admission_kind_backend(
+                    &self.backend,
                     self.kind,
                     self.workspace_id,
                     session.user_id,
                     session.session_id,
                     self.document_id,
+                    self.delivery_fence(),
                 )
                 .await
                 {
@@ -2430,13 +2773,14 @@ impl RoomActor {
                     .await;
             }
             DocumentMessage::Awareness(payload) => {
-                match check_delivery_admission_kind(
-                    &self.pool,
+                match check_delivery_admission_kind_backend(
+                    &self.backend,
                     self.kind,
                     self.workspace_id,
                     session.user_id,
                     session.session_id,
                     self.document_id,
+                    self.delivery_fence(),
                 )
                 .await
                 {
@@ -2680,7 +3024,6 @@ impl RoomActor {
                     self.fatal_fence_lost().await;
                     return;
                 };
-                let room_conn = room_guard.connection_mut();
 
                 #[cfg(feature = "db-tests")]
                 pause_for_append_in_tx_reject_barrier(self.document_id).await;
@@ -2689,22 +3032,22 @@ impl RoomActor {
                 let expected_tail = self.committed.tail_seq;
                 let digest = payload_digest(&payload);
                 let append_started = std::time::Instant::now();
-                let timed_append = append_collab_update_on_conn_timed(
-                    room_conn,
-                    self.kind,
-                    AppendCollabInput {
-                        workspace_id: self.workspace_id,
-                        actor_user_id,
-                        session_id,
-                        document_id: self.document_id,
-                        writer_generation,
-                        expected_tail_seq: expected_tail,
-                        op_id,
-                        payload: &payload,
-                        client_ip: None,
-                    },
-                )
-                .await;
+                let timed_append = room_guard
+                    .append(
+                        self.kind,
+                        AppendCollabInput {
+                            workspace_id: self.workspace_id,
+                            actor_user_id,
+                            session_id,
+                            document_id: self.document_id,
+                            writer_generation,
+                            expected_tail_seq: expected_tail,
+                            op_id,
+                            payload: &payload,
+                            client_ip: None,
+                        },
+                    )
+                    .await;
                 let append_tx = timed_append
                     .as_ref()
                     .ok()
@@ -2728,7 +3071,11 @@ impl RoomActor {
                             error = %err,
                             "room fence connection lost during append"
                         );
-                        self.fatal_fence_lost().await;
+                        if self.is_remote_task_room() {
+                            self.fatal_remote_write_unconfirmed(err).await;
+                        } else {
+                            self.fatal_fence_lost().await;
+                        }
                         return;
                     }
                     Ok((result, _timings)) => result,
@@ -2898,8 +3245,8 @@ impl RoomActor {
         payload: &[u8],
         digest: &[u8],
     ) -> Option<AppendCollabResult> {
-        match verify_collab_operation_kind(
-            &self.pool,
+        match verify_room_collab_operation(
+            &self.backend,
             self.kind,
             VerifyCollabInput {
                 workspace_id: self.workspace_id,
@@ -2911,18 +3258,20 @@ impl RoomActor {
                 expected_payload_sha256: digest,
                 expected_actor_user_id: actor_user_id,
             },
+            self.native_consumer_proof(),
         )
         .await
         {
             Ok(Ok(lookup)) => Some(AppendCollabResult::DuplicateAck { seq: lookup.seq }),
             Ok(Err(CollabDbError::NotFound)) => {
-                match load_collab_readonly_kind(
-                    &self.pool,
+                match load_room_collab_readonly(
+                    &self.backend,
                     self.kind,
                     self.workspace_id,
                     actor_user_id,
                     session_id,
                     self.document_id,
+                    self.family_fence(),
                 )
                 .await
                 {
@@ -2939,6 +3288,10 @@ impl RoomActor {
                         }
                         None
                     }
+                    Err(error) if self.is_remote_task_room() => {
+                        self.fatal_remote_write_unconfirmed(error).await;
+                        None
+                    }
                     _ => {
                         self.fatal_room_divergence(actor_user_id, session_id).await;
                         None
@@ -2949,6 +3302,10 @@ impl RoomActor {
                 self.fatal_room_divergence(actor_user_id, session_id).await;
                 None
             }
+            Err(error) if self.is_remote_task_room() => {
+                self.fatal_remote_write_unconfirmed(error).await;
+                None
+            }
             Ok(Err(_)) | Err(_) => {
                 self.fatal_room_divergence(actor_user_id, session_id).await;
                 None
@@ -2957,6 +3314,10 @@ impl RoomActor {
     }
 
     async fn fatal_writer_stale(&mut self, order: CloseOrder) {
+        if !matches!(self.backend, Backend::Postgres(_)) {
+            self.fatal_fence_lost().await;
+            return;
+        }
         self.writer_generation = None;
         // A newer writer owns durable state; `committed` may lag it, so the next
         // capture/join must reload instead of trusting the in-memory bundle.
@@ -2968,13 +3329,18 @@ impl RoomActor {
     }
 
     async fn fatal_room_divergence(&mut self, actor_user_id: Uuid, session_id: Uuid) {
-        if let Ok(Ok(load)) = load_collab_readonly_kind(
-            &self.pool,
+        if !matches!(self.backend, Backend::Postgres(_)) {
+            self.fatal_fence_lost().await;
+            return;
+        }
+        if let Ok(Ok(load)) = load_room_collab_readonly(
+            &self.backend,
             self.kind,
             self.workspace_id,
             actor_user_id,
             session_id,
             self.document_id,
+            self.family_fence(),
         )
         .await
         {
@@ -2989,13 +3355,14 @@ impl RoomActor {
     }
 
     async fn fatal_primary_unhealthy(&mut self, actor_user_id: Uuid, session_id: Uuid) {
-        if let Ok(Ok(load)) = load_collab_readonly_kind(
-            &self.pool,
+        if let Ok(Ok(load)) = load_room_collab_readonly(
+            &self.backend,
             self.kind,
             self.workspace_id,
             actor_user_id,
             session_id,
             self.document_id,
+            self.family_fence(),
         )
         .await
         {
@@ -3233,8 +3600,8 @@ impl RoomActor {
             }
         };
 
-        match project_derived_body_kind(
-            &self.pool,
+        match project_derived_body_kind_backend(
+            &self.backend,
             self.kind,
             ProjectDerivedBodyInput::new(
                 self.workspace_id,
@@ -3245,6 +3612,7 @@ impl RoomActor {
                 seq,
                 prepared,
             ),
+            self.family_fence(),
         )
         .await
         {
@@ -3305,6 +3673,9 @@ impl RoomActor {
                     error = %err,
                     "collab derived body db failure"
                 );
+                if self.is_remote_task_room() {
+                    self.fatal_remote_write_unconfirmed(err).await;
+                }
                 ProjectDerivedOutcome::DbFailed
             }
         }
@@ -3625,8 +3996,8 @@ impl RoomActor {
         self.persist_step("validated", started);
         if let Some(writer_generation) = self.writer_generation {
             let cutoff = self.committed.tail_seq;
-            let compact = compact_collab_snapshot_kind(
-                &self.pool,
+            let compact = compact_collab_snapshot_kind_backend(
+                &self.backend,
                 self.kind,
                 CompactCollabInput {
                     workspace_id: self.workspace_id,
@@ -3639,6 +4010,7 @@ impl RoomActor {
                     new_snapshot: &snapshot,
                     client_ip: None,
                 },
+                self.family_fence(),
             )
             .await;
             self.persist_step("compacted", started);
@@ -3671,6 +4043,10 @@ impl RoomActor {
                 }
                 Ok(Err(CollabDbError::StaleCutoff | CollabDbError::StaleWriter)) => {
                     self.fatal_room_divergence(actor_user_id, session_id).await;
+                    format!("persist-failed:{request_id}")
+                }
+                Err(error) if self.is_remote_task_room() => {
+                    self.fatal_remote_write_unconfirmed(error).await;
                     format!("persist-failed:{request_id}")
                 }
                 _ => {
@@ -3719,20 +4095,29 @@ impl RoomActor {
         &mut self,
         actor_user_id: Uuid,
         session_id: Uuid,
-    ) -> Result<CapturedRevision, RevisionCaptureError> {
+    ) -> Result<GuardedCapturedRevision, RevisionCaptureError> {
         // Without a writer generation nothing fences out-of-room appends
         // (import, a newer writer), so the committed tail may be behind.
         if !self.committed_loaded || self.writer_generation.is_none() {
-            let load = load_collab_readonly_kind(
-                &self.pool,
+            let load = match load_room_collab_readonly(
+                &self.backend,
                 self.kind,
                 self.workspace_id,
                 actor_user_id,
                 session_id,
                 self.document_id,
+                self.family_fence(),
             )
             .await
-            .map_err(|_| RevisionCaptureError::Unavailable)?;
+            {
+                Ok(load) => load,
+                Err(error) => {
+                    if self.is_remote_task_room() {
+                        self.fatal_remote_write_unconfirmed(error).await;
+                    }
+                    return Err(RevisionCaptureError::Unavailable);
+                }
+            };
             let load = load.map_err(|_| RevisionCaptureError::Unavailable)?;
             self.set_committed_from_load(&load);
             self.reload_primary_from_committed()
@@ -3742,6 +4127,9 @@ impl RoomActor {
         if self.ensure_primary_capacity().await.is_err() {
             return Err(RevisionCaptureError::Unavailable);
         }
+        self.check_cached_native_consumer(actor_user_id, session_id)
+            .await
+            .map_err(|_| RevisionCaptureError::Unavailable)?;
         let snap = match self.engine.call(Request::RevisionSnapshot).await {
             Ok(report) => match report.outcome {
                 EngineStatus::Ok {
@@ -3763,9 +4151,18 @@ impl RoomActor {
             },
             Err(_) => return Err(RevisionCaptureError::Unavailable),
         };
-        Ok(CapturedRevision {
-            y_snapshot: snap,
-            content_json,
+        #[cfg(feature = "db-tests")]
+        pause_native_consumer_barrier(self.document_id, NATIVE_CAPTURE_FINAL_PROOF).await;
+        let proof = self
+            .check_cached_native_consumer(actor_user_id, session_id)
+            .await
+            .map_err(|_| RevisionCaptureError::Unavailable)?;
+        Ok(GuardedCapturedRevision {
+            captured: CapturedRevision {
+                y_snapshot: snap,
+                content_json,
+            },
+            proof,
         })
     }
 
@@ -3786,7 +4183,9 @@ impl RoomActor {
         // Recovery precedes the old tail comparison: our own committed restore
         // must not invalidate a response-loss retry of that exact operation.
         if let Some(restored) = lookup_restored_revision(
-            &self.pool,
+            self.backend
+                .postgres("native revision restore")
+                .map_err(|_| RevisionRestoreError::Unavailable)?,
             self.workspace_id,
             actor_user_id,
             session_id,
@@ -3903,6 +4302,11 @@ impl RoomActor {
             },
             Err(_) => return Err(BodyWriteError::Unavailable),
         };
+        #[cfg(feature = "db-tests")]
+        pause_native_consumer_barrier(self.document_id, NATIVE_PROJECT_FINAL_PROOF).await;
+        self.check_cached_native_consumer(actor_user_id, session_id)
+            .await
+            .map_err(|_| BodyWriteError::Unavailable)?;
         Ok(LiveProjection {
             content_json,
             tail_seq: self.committed.tail_seq,
@@ -3917,16 +4321,10 @@ impl RoomActor {
         session_id: Uuid,
     ) -> Result<(), ForwardWriteError> {
         if self.writer_generation.is_none() {
-            let claim = claim_writer_and_load_kind(
-                &self.pool,
-                self.kind,
-                self.workspace_id,
-                actor_user_id,
-                session_id,
-                self.document_id,
-            )
-            .await
-            .map_err(|_| ForwardWriteError::Unavailable)?;
+            let claim = self
+                .claim_writer(actor_user_id, session_id)
+                .await
+                .map_err(|_| ForwardWriteError::Unavailable)?;
             let claim = claim.map_err(|err| match err {
                 CollabDbError::Forbidden | CollabDbError::NotFound => ForwardWriteError::Rejected,
                 _ => ForwardWriteError::Unavailable,
@@ -3947,7 +4345,11 @@ impl RoomActor {
             .locking_session_auth_by_ids(actor_user_id, session_id, false)
             .await
         {
-            LockingAuth::Allow => Ok(()),
+            LockingAuth::Allow => self
+                .check_cached_native_consumer(actor_user_id, session_id)
+                .await
+                .map(|_| ())
+                .map_err(|_| ForwardWriteError::Unavailable),
             LockingAuth::Deny => Err(ForwardWriteError::Rejected),
             LockingAuth::DbError => Err(ForwardWriteError::Unavailable),
         }
@@ -3985,6 +4387,11 @@ impl RoomActor {
             Err(_) => return Err(ForwardWriteError::Unavailable),
         };
         if is_empty_update(&payload) && restore.is_none() {
+            #[cfg(feature = "db-tests")]
+            pause_native_consumer_barrier(self.document_id, NATIVE_FORWARD_FINAL_PROOF).await;
+            self.check_cached_native_consumer(actor_user_id, session_id)
+                .await
+                .map_err(|_| ForwardWriteError::Unavailable)?;
             return Ok((None, None));
         }
 
@@ -4047,13 +4454,19 @@ impl RoomActor {
             client_ip: None,
         };
         let append = if let Some(capture) = capture.as_ref() {
-            append_collab_restore_kind(&self.pool, self.kind, input, capture)
-                .await
-                .map(|result| result.map(|(append, revision_id)| (append, Some(revision_id))))
+            match self.backend.postgres("native revision restore") {
+                Ok(pool) => append_collab_restore_kind(pool, self.kind, input, capture).await,
+                Err(error) => Err(error),
+            }
+            .map(|result| result.map(|(append, revision_id)| (append, Some(revision_id))))
         } else {
-            append_collab_update_kind(&self.pool, self.kind, input)
-                .await
-                .map(|result| result.map(|append| (append, None)))
+            match self.room_guard.as_mut() {
+                Some(guard) => guard
+                    .append(self.kind, input)
+                    .await
+                    .map(|(result, _)| result.map(|append| (append, None))),
+                None => Ok(Err(CollabDbError::StaleWriter)),
+            }
         };
 
         let mut own_receipt_verified = false;
@@ -4073,6 +4486,10 @@ impl RoomActor {
             }
             Ok(Err(err)) if Self::is_definite_append_rejection(&err) => {
                 return Err(ForwardWriteError::Rejected);
+            }
+            Err(error) if matches!(self.backend, Backend::LibsqlRemote(_)) => {
+                self.fatal_remote_write_unconfirmed(error).await;
+                return Err(ForwardWriteError::Unavailable);
             }
             Ok(Err(CollabDbError::StaleCutoff)) | Ok(Err(_)) | Err(_) => {
                 match self
@@ -4102,13 +4519,14 @@ impl RoomActor {
             if let AppendCollabResult::DuplicateAck { seq } = committed {
                 // A concurrently recovered replay already owns its exact payload.
                 // Reload durable bytes; do not broadcast our speculative payload.
-                let load = load_collab_readonly_kind(
-                    &self.pool,
+                let load = load_room_collab_readonly(
+                    &self.backend,
                     self.kind,
                     self.workspace_id,
                     actor_user_id,
                     session_id,
                     self.document_id,
+                    self.family_fence(),
                 )
                 .await
                 .map_err(|_| ForwardWriteError::Unavailable)?
@@ -4154,7 +4572,9 @@ impl RoomActor {
                 // existing room read policy. It is not current write permission:
                 // a demoted/revoked actor must not receive restore success.
                 let recovered = lookup_restored_revision(
-                    &self.pool,
+                    self.backend
+                        .postgres("native revision restore")
+                        .map_err(|_| ForwardWriteError::Unavailable)?,
                     self.workspace_id,
                     actor_user_id,
                     session_id,
@@ -4373,5 +4793,498 @@ mod project_limit_tests {
                 "{kind:?} must stay operational"
             );
         }
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod remote_task_finish_tests {
+    use super::*;
+    use crate::collab::config::FamilyRoomTimings;
+    use crate::collab::guard::FamilyRoomOwnerRecord;
+    use crate::collab::hub::CollabHub;
+    use crate::collab::seed::SeedEngine;
+    use crate::collab::wire::{decode, SyncMessage};
+    use crate::db::attachment_preview::tests::Fixture;
+    use crate::db::backend::{
+        maintenance_claim_driver_tests::Fixture as DriverFixture, CommitCleanupUnknown,
+        CommitSettlement,
+    };
+    use crate::db::tasks::selected_task_detail_tests::setup;
+
+    // The pinned SDK describes the original SQL, then executes its maintained
+    // parser's canonical SQL. Match only that actual execution representation,
+    // with the complete projection, target and predicates; never Describe.
+    const RELEASE: &str = "UPDATE task_collab_room_fences SET expires_at = ?5 WHERE workspace_id = ?1 AND task_id = ?2 AND owner_token = ?3 AND fence = ?4;";
+    const RECEIPT: &str = "SELECT seq, payload_len, payload_sha256, actor_user_id FROM task_collab_op_receipts WHERE workspace_id = ?1 AND task_id = ?2 AND op_id = ?3;";
+    const LOAD: &str = "SELECT state, encoding, writer_generation, snapshot_cutoff_seq, tail_seq, updated_at FROM task_states WHERE workspace_id = ?1 AND task_id = ?2;";
+
+    #[test]
+    fn task_finish_selectors_match_exact_sdk_execution_and_refuse_other_statements() {
+        // Immutable 46da diagnostic cursor272, with original-stream COMMIT+Close283.
+        let observed_receipt = "SELECT seq, payload_len, payload_sha256, actor_user_id FROM task_collab_op_receipts WHERE workspace_id = ?1 AND task_id = ?2 AND op_id = ?3;";
+        assert!(observed_receipt.contains(RECEIPT));
+        assert!(!"SELECT seq,payload_len,payload_sha256,actor_user_id FROM task_collab_op_receipts WHERE workspace_id=?1 AND task_id=?2 AND op_id=?3".contains(RECEIPT), "Describe is not executed receipt SQL");
+        for other in [
+            observed_receipt.replace("task_collab_op_receipts", "document_collab_op_receipts"),
+            observed_receipt.replace("task_collab_op_receipts", "task_collab_op_receipts_extra"),
+            observed_receipt.replace("seq, payload_len", "payload_len, seq"),
+            observed_receipt.replace("op_id = ?3", "op_id = ?4"),
+            observed_receipt.replace("AND op_id = ?3", "AND op_id != ?3"),
+        ] {
+            assert!(
+                !other.contains(RECEIPT),
+                "different receipt operation cannot arm this fault"
+            );
+        }
+        // Same pinned parser rendering of the existing full Task load and release
+        // SQL; their actual runtime paths still require separate allocation.
+        let canonical_load = "SELECT state, encoding, writer_generation, snapshot_cutoff_seq, tail_seq, updated_at FROM task_states WHERE workspace_id = ?1 AND task_id = ?2;";
+        assert!(canonical_load.contains(LOAD));
+        assert!(!canonical_load
+            .replace("task_states", "document_states")
+            .contains(LOAD));
+        assert!(!canonical_load
+            .replace("task_id = ?2", "task_id = ?3")
+            .contains(LOAD));
+        assert!(!canonical_load
+            .replace("AND task_id = ?2", "AND task_id != ?2")
+            .contains(LOAD));
+        let canonical_release = "UPDATE task_collab_room_fences SET expires_at = ?5 WHERE workspace_id = ?1 AND task_id = ?2 AND owner_token = ?3 AND fence = ?4;";
+        assert_eq!(canonical_release, RELEASE);
+        assert_ne!(
+            canonical_release.replace("owner_token = ?3", "owner_token = ?6"),
+            RELEASE
+        );
+        // Observed 46da renewal has an extra DB-clock live-owner predicate and is
+        // not a release. Exact equality keeps the no-fresh-release oracle specific.
+        assert_ne!("UPDATE task_collab_room_fences SET expires_at = ?5 WHERE workspace_id = ?1 AND task_id = ?2 AND owner_token = ?3 AND fence = ?4 AND expires_at > ?6;", RELEASE);
+    }
+
+    // Concrete normal Task consumer fixture. SQL is executed by the maintained
+    // SQLite engine through the pinned SDK, native bytes by the actual child.
+    // This is not production TLS or an actual external Turso qualification.
+    struct TaskRoom {
+        f: Fixture,
+        driver: DriverFixture,
+        hub: CollabHub,
+        credential: Uuid,
+        key: RoomKey,
+        conn: Uuid,
+        lease: ConnectionLease,
+        handle: RoomHandle,
+        events: mpsc::Receiver<RoomClientEvent>,
+        cancel: watch::Receiver<Option<ConnectionCancel>>,
+        payload: Vec<u8>,
+        body: serde_json::Value,
+    }
+
+    async fn join(
+        hub: &CollabHub,
+        f: &Fixture,
+        credential: Uuid,
+        key: RoomKey,
+    ) -> (
+        Uuid,
+        ConnectionLease,
+        mpsc::Receiver<RoomClientEvent>,
+        watch::Receiver<Option<ConnectionCancel>>,
+    ) {
+        let conn = Uuid::now_v7();
+        let (events, receive) = mpsc::channel(64);
+        let (cancel, cancelled) = watch::channel(None);
+        let lease = hub
+            .join_room(
+                key,
+                RoomJoin {
+                    conn: AuthenticatedConnection {
+                        conn_id: conn,
+                        session: CollabSession {
+                            session_id: credential,
+                            user_id: f.user,
+                            given_name: "Task writer".into(),
+                            family_name: None,
+                            locale: "en".into(),
+                        },
+                        client_id: 701,
+                        read_only: false,
+                        routing_key: format!("{}:task:{}", key.0, key.1),
+                    },
+                    events,
+                    cancel: Some(cancel),
+                },
+            )
+            .await
+            .expect("actual current Task admission");
+        (conn, lease, receive, cancelled)
+    }
+
+    impl TaskRoom {
+        async fn new() -> Self {
+            let (f, credential, _, _, task) = setup().await;
+            let driver = DriverFixture::for_existing_path(&f.path).await;
+            let config = CollabConfig::from_env()
+                .expect("root must allocate the freshly qualified native engine; no fallback/skip");
+            let hub = CollabHub::new_backend(
+                config,
+                driver.backend(),
+                Some(FamilyRoomTimings::new(30_000, 5_000).unwrap()),
+            )
+            .unwrap();
+            let key = RoomKey::task(f.workspace, task);
+            let body = serde_json::json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":"89b4972a-8e36-4989-8899-23375f632fa1"},"content":[{"type":"text","text":"원래 Task 中 😀","marks":[{"type":"bold","attrs":{}}]}]}]});
+            let payload = SeedEngine::from_hub(&hub)
+                .tiptap_to_yjs_update(&body)
+                .await
+                .unwrap();
+            assert!(!is_empty_update(&payload));
+            let (conn, lease, mut events, cancel) = join(&hub, &f, credential, key).await;
+            let handle = hub.ensure_live_room(key).await.unwrap();
+            while events.try_recv().is_ok() {}
+            Self {
+                f,
+                driver,
+                hub,
+                credential,
+                key,
+                conn,
+                lease,
+                handle,
+                events,
+                cancel,
+                payload,
+                body,
+            }
+        }
+        async fn sync(&mut self) {
+            let frame = encode(&WireFrame::Document {
+                routing_key: format!("{}:task:{}", self.key.0, self.key.1),
+                room: None,
+                message: DocumentMessage::Sync(SyncMessage {
+                    step: SyncStep::Update,
+                    y_protocol: encode_sync_payload(SyncStep::Update, &self.payload),
+                }),
+            })
+            .unwrap();
+            self.handle.frame(self.conn, frame).await;
+            self.handle.probe().await; // Actual actor mailbox barrier, no polling retry.
+        }
+        fn drain_status(&mut self) -> (usize, usize) {
+            let (mut applied, mut rejected) = (0, 0);
+            while let Ok(event) = self.events.try_recv() {
+                let RoomClientEvent::Outbound(frame) = event else {
+                    continue;
+                };
+                let WireFrame::Document {
+                    message: DocumentMessage::SyncStatus { applied: ok },
+                    ..
+                } = decode(&frame.bytes).unwrap()
+                else {
+                    continue;
+                };
+                if ok {
+                    applied += 1;
+                } else {
+                    rejected += 1;
+                }
+            }
+            (applied, rejected)
+        }
+        async fn durable(&self) -> (i64, i64, i64) {
+            sqlx::query_as("SELECT (SELECT tail_seq FROM task_states WHERE workspace_id=?1 AND task_id=?2),(SELECT count(*) FROM task_collab_updates WHERE workspace_id=?1 AND task_id=?2),(SELECT count(*) FROM task_collab_op_receipts WHERE workspace_id=?1 AND task_id=?2)")
+                .bind(self.key.0.as_bytes().as_slice()).bind(self.key.1.as_bytes().as_slice()).fetch_one(&self.f.pool).await.unwrap()
+        }
+        fn assert_retained(&self, active: bool, fk: bool) -> Arc<sqlx::Error> {
+            let expected = self.lease.family_room_delivery.expect("actual typed lease");
+            let expected = if active {
+                expected.original.with_owner(expected.writer_owner)
+            } else {
+                expected.original
+            };
+            let records = self.hub.family_owner_records_for_test();
+            let records = records.lock().unwrap();
+            assert_eq!(records.len(), 1);
+            let FamilyRoomOwnerRecord::NativeWrite { fence, error } = records
+                .get(&self.key)
+                .expect("same hub retains this uncertain original owner")
+            else {
+                panic!("native uncertainty is not fabricated startup ownership")
+            };
+            assert_eq!(*fence, expected);
+            assert_eq!(fence.kind(), CollabKind::Task);
+            assert_eq!(
+                (fence.workspace(), fence.resource()),
+                (self.key.0, self.key.1)
+            );
+            let sqlx::Error::AnyDriverError(original) = error.as_ref() else {
+                panic!("original SDK finish error retained")
+            };
+            let unknown = original
+                .downcast_ref::<CommitCleanupUnknown>()
+                .expect("typed original COMMIT error, not a replacement protocol error");
+            assert_eq!(unknown.settlement, CommitSettlement::RemoteUnconfirmed);
+            assert!(!unknown.permits_reconciliation());
+            assert!(unknown.cleanup_error.is_none());
+            let sqlx::Error::AnyDriverError(source) = &unknown.source.source else {
+                panic!("SDK original source retained")
+            };
+            assert!(source.downcast_ref::<libsql::Error>().is_some());
+            if fk {
+                assert!(source.to_string().contains("FOREIGN KEY constraint failed"));
+            }
+            error.clone()
+        }
+        async fn assert_blocked(&mut self, active: bool, fk: bool) {
+            assert_eq!(
+                self.drain_status().0,
+                0,
+                "uncertain COMMIT cannot send success acknowledgement"
+            );
+            assert_eq!(
+                self.cancel
+                    .borrow()
+                    .as_ref()
+                    .expect("transport cancelled")
+                    .code,
+                1013
+            );
+            let original = self.assert_retained(active, fk);
+            assert!(
+                !self.driver.sql_log().await.iter().any(|sql| sql == RELEASE),
+                "no fresh lease release after unknown original finish"
+            );
+            self.handle.shutdown_after_queued().await;
+            self.handle.probe().await;
+            assert!(
+                matches!(
+                    self.hub.ensure_live_room(self.key).await,
+                    Err(JoinError::CapacityRetry)
+                ),
+                "actual same-hub successor remains refused by retained owner"
+            );
+            assert!(
+                Arc::ptr_eq(&original, &self.assert_retained(active, fk)),
+                "successor attempt cannot replace original error evidence"
+            );
+            assert!(!self.driver.sql_log().await.iter().any(|sql| sql == RELEASE));
+            assert!(
+                !self.hub.shutdown().await.is_clean(),
+                "unconfirmed owner is not a successful drain"
+            );
+            assert!(Arc::ptr_eq(&original, &self.assert_retained(active, fk)));
+            assert!(!self.driver.sql_log().await.iter().any(|sql| sql == RELEASE));
+        }
+        async fn close(self, uncertain: bool, fk: bool) {
+            drop(self.lease);
+            self.driver.shutdown(uncertain, fk).await;
+            self.f.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_task_normal_sync_fk_failed_and_lost_commit_retain_original_owner() {
+        // Real deferred-FK failure, HTTP error after a real COMMIT, and lost
+        // original COMMIT reply all retain uncertainty. None supplies a receipt.
+        for mode in [0, 1, 3] {
+            let mut room = TaskRoom::new().await;
+            if mode == 0 {
+                sqlx::query("CREATE TABLE on_task_sync_probe(workspace_id BLOB REFERENCES workspaces(id) DEFERRABLE INITIALLY DEFERRED)").execute(&room.f.pool).await.unwrap();
+                sqlx::query("CREATE TRIGGER reject_on_task_sync AFTER INSERT ON task_collab_op_receipts BEGIN INSERT INTO on_task_sync_probe VALUES(zeroblob(16)); END;").execute(&room.f.pool).await.unwrap();
+            } else {
+                room.driver
+                    .fail_finish_for("INSERT INTO task_collab_op_receipts", mode)
+                    .await;
+            }
+            room.sync().await;
+            room.driver
+                .assert_original_finish_for("INSERT INTO task_collab_op_receipts")
+                .await;
+            assert_eq!(room.durable().await, if mode == 0 { (0,0,0) } else { (1,1,1) }, "actual SQLite original transaction result is distinct from a deliverable confirmation");
+            room.assert_blocked(true, mode == 0).await;
+            room.close(true, mode == 0).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_task_ambiguous_receipt_and_readback_finish_retain_original_owner() {
+        for (receipt, mode) in [(true, 1), (true, 3), (false, 1), (false, 3)] {
+            let mut room = TaskRoom::new().await;
+            // Writable join confirms activation before any Sync or receipt.
+            // Witness that exact owner before arming an uncertain finish;
+            // no fresh observer may settle or replace it after the failure.
+            let delivery = room.lease.family_room_delivery.expect("actual typed lease");
+            let (workspace, task, owner, fence, generation): (
+                Vec<u8>, Vec<u8>, Vec<u8>, i64, i64,
+            ) = sqlx::query_as(
+                "SELECT f.workspace_id, f.task_id, f.owner_token, f.fence, s.writer_generation FROM task_collab_room_fences AS f JOIN task_states AS s ON s.workspace_id = f.workspace_id AND s.task_id = f.task_id WHERE f.workspace_id = ?1 AND f.task_id = ?2",
+            )
+            .bind(room.key.0.as_bytes().as_slice())
+            .bind(room.key.1.as_bytes().as_slice())
+            .fetch_one(&room.f.pool)
+            .await
+            .unwrap();
+            let workspace = Uuid::from_slice(&workspace).unwrap();
+            let task = Uuid::from_slice(&task).unwrap();
+            let owner = Uuid::from_slice(&owner).unwrap();
+            assert_eq!(delivery.original.kind(), CollabKind::Task);
+            assert!(workspace == room.key.0 && workspace == delivery.original.workspace());
+            assert!(task == room.key.1 && task == delivery.original.resource());
+            assert!(
+                owner == delivery.writer_owner,
+                "confirmed join activation owner"
+            );
+            assert_eq!(fence, delivery.original.sequence());
+            assert_eq!(generation, 1, "one confirmed writable join activation");
+            let witnessed = delivery.original.with_owner(owner);
+            assert!(witnessed == delivery.original.with_owner(delivery.writer_owner));
+            assert_eq!(witnessed.sequence(), delivery.original.sequence());
+            assert!(
+                witnessed != delivery.original,
+                "original owner is wrong even with the same Task scope and fence sequence"
+            );
+            eprintln!("P102 diagnostic subcase receipt={receipt} mode={mode}");
+            let op_id = if receipt {
+                room.sync().await;
+                assert_eq!(
+                    room.drain_status().0,
+                    1,
+                    "healthy initial confirmed operation"
+                );
+                let (bytes,payload): (Vec<u8>,Vec<u8>) = sqlx::query_as("SELECT op_id,payload FROM task_collab_updates WHERE workspace_id=?1 AND task_id=?2 AND seq=1")
+                    .bind(room.key.0.as_bytes().as_slice()).bind(room.key.1.as_bytes().as_slice()).fetch_one(&room.f.pool).await.unwrap();
+                assert_eq!(payload, room.payload);
+                Uuid::from_slice(&bytes).unwrap()
+            } else {
+                Uuid::now_v7()
+            };
+            room.driver
+                .fail_finish_for(if receipt { RECEIPT } else { LOAD }, mode)
+                .await;
+            let (ack, reloaded) = room
+                .handle
+                .reconcile_for_test(room.f.user, room.credential, op_id, 0, room.payload.clone())
+                .await;
+            eprintln!("P102 diagnostic returned receipt={receipt} mode={mode} ack_present={} reloaded={reloaded}", ack.is_some());
+            room.driver
+                .assert_original_finish_for(if receipt { RECEIPT } else { LOAD })
+                .await;
+            assert!(
+                ack.is_none(),
+                "uncertain original receipt/load COMMIT cannot be an acknowledgement"
+            );
+            assert!(
+                !reloaded,
+                "cache reload is not settlement proof and cannot trigger fresh cleanup"
+            );
+            assert_eq!(
+                room.durable().await,
+                if receipt { (1, 1, 1) } else { (0, 0, 0) }
+            );
+            room.assert_blocked(true, false).await;
+            room.close(true, false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_task_definite_refusal_confirmed_cleanup_and_healthy_successor() {
+        let mut room = TaskRoom::new().await;
+        let original = room.lease.family_room_delivery.unwrap().original;
+        let (entered, continue_append) = arm_append_in_tx_reject_barrier(room.key.1).await;
+        let frame = encode(&WireFrame::Document {
+            routing_key: format!("{}:task:{}", room.key.0, room.key.1),
+            room: None,
+            message: DocumentMessage::Sync(SyncMessage {
+                step: SyncStep::Update,
+                y_protocol: encode_sync_payload(SyncStep::Update, &room.payload),
+            }),
+        })
+        .unwrap();
+        room.handle.frame(room.conn, frame).await;
+        entered.await.unwrap();
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(room.credential.as_bytes().as_slice())
+            .execute(&room.f.pool)
+            .await
+            .unwrap();
+        continue_append.send(()).unwrap();
+        room.handle.probe().await;
+        assert_eq!(
+            room.durable().await,
+            (0, 0, 0),
+            "current-session refusal has no durable update or receipt"
+        );
+        // Definite refusal queues Close after the rejection status. Observe
+        // the same event channel as transport; the preemptive watch is only
+        // signalled if that ordered enqueue fails.
+        #[derive(Debug, PartialEq, Eq)]
+        enum RefusalEvent {
+            Status(bool),
+            Close(u16),
+        }
+        let mut refusal = Vec::new();
+        while let Ok(event) = room.events.try_recv() {
+            match event {
+                RoomClientEvent::Outbound(frame) => {
+                    if let WireFrame::Document {
+                        message: DocumentMessage::SyncStatus { applied },
+                        ..
+                    } = decode(&frame.bytes).unwrap()
+                    {
+                        refusal.push(RefusalEvent::Status(applied));
+                    }
+                }
+                RoomClientEvent::Close { code, .. } => {
+                    refusal.push(RefusalEvent::Close(code));
+                }
+            }
+        }
+        assert_eq!(
+            refusal,
+            [RefusalEvent::Status(false), RefusalEvent::Close(1008)],
+            "actual rejection before exactly one Close1008, with no success acknowledgement"
+        );
+        assert!(
+            room.hub.unresolved_family_owner(room.key).is_none(),
+            "definite domain refusal cannot become remote uncertainty"
+        );
+        room.handle.shutdown_after_queued().await;
+        room.handle.probe().await;
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(room.credential.as_bytes().as_slice())
+            .execute(&room.f.pool)
+            .await
+            .unwrap();
+        // Actual hub cleanup settles the first guard before admitting a new
+        // authenticated owner; no unknown record is manually cleared.
+        let (conn, lease, events, cancel) =
+            join(&room.hub, &room.f, room.credential, room.key).await;
+        let next = lease.family_room_delivery.unwrap().original;
+        assert_ne!(next.owner(), original.owner());
+        assert!(next.sequence() > original.sequence());
+        drop(room.lease);
+        room.lease = lease;
+        room.conn = conn;
+        room.events = events;
+        room.cancel = cancel;
+        room.handle = room.hub.ensure_live_room(room.key).await.unwrap();
+        room.sync().await;
+        assert_eq!(room.drain_status().0, 1);
+        assert_eq!(room.durable().await, (1, 1, 1));
+        let projected = room
+            .hub
+            .project_live(room.key, room.f.user, room.credential)
+            .await
+            .unwrap();
+        assert_eq!(projected.tail_seq, 1);
+        assert_eq!(
+            projected.content_json, room.body,
+            "same literal IDs, formatted text and native projection"
+        );
+        assert!(room.hub.unresolved_family_owner(room.key).is_none());
+        assert!(room.hub.shutdown().await.is_clean());
+        assert!(
+            room.driver.sql_log().await.iter().any(|sql| sql == RELEASE),
+            "confirmed healthy/domain paths still release their exact guard"
+        );
+        room.close(false, false).await;
     }
 }

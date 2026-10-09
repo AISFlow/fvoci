@@ -112,8 +112,19 @@ pub async fn validate_password_setting(
     pool: &sqlx::PgPool,
     password: &str,
 ) -> Result<(), AppError> {
+    validate_password_setting_backend(
+        &crate::db::backend::Backend::Postgres(pool.clone()),
+        password,
+    )
+    .await
+}
+
+pub async fn validate_password_setting_backend(
+    backend: &crate::db::backend::Backend,
+    password: &str,
+) -> Result<(), AppError> {
     validate_password_length(password)?;
-    let min = crate::settings::current_values(pool, "FVOCI")
+    let min = crate::settings::current_values_backend(backend, "FVOCI")
         .await
         .map_err(|err| {
             tracing::error!("settings read failed: {}", err);

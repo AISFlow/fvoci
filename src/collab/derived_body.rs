@@ -112,7 +112,7 @@ pub fn prepare_derived_body_with_cap(
 pub fn extract_internal_refs(root: &Value) -> Vec<InternalRef> {
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
-    walk_tiptap(root, 0, &mut |node| {
+    walk_tiptap(root, 0, &mut |node, _depth| {
         let node_type = node.get("type").and_then(Value::as_str);
         let attrs = node.get("attrs").and_then(Value::as_object);
         match node_type {
@@ -134,6 +134,82 @@ pub fn extract_internal_refs(root: &Value) -> Vec<InternalRef> {
         }
     });
     out
+}
+
+/// Current attachment entity IDs for same-writer stored-reference admission.
+/// A truncated or malformed body must never become a partial authorization list.
+pub(crate) fn extract_stored_attachment_refs(root: &Value) -> Result<Vec<Uuid>, DerivedBodyError> {
+    prepare_derived_body(root.clone())?;
+    let mut ids = std::collections::BTreeSet::new();
+    let mut invalid = false;
+    let mut nodes = 0;
+    walk_tiptap(root, 0, &mut |node, depth| {
+        nodes += 1;
+        if nodes > 20_000 {
+            invalid = true;
+        }
+        if node.get("type").and_then(Value::as_str).is_none() {
+            invalid = true;
+        }
+        if let Some(content) = node.get("content") {
+            if !content.is_array()
+                || content
+                    .as_array()
+                    .is_some_and(|children| children.iter().any(|child| !child.is_object()))
+                || (depth == TIPTAP_WALK_MAX_DEPTH
+                    && content
+                        .as_array()
+                        .is_some_and(|children| !children.is_empty()))
+            {
+                invalid = true;
+            }
+        }
+        // The caller also uses the maintained internal-reference extractor.
+        // Refuse malformed recognized refs here instead of letting its legacy
+        // best-effort behavior silently omit them from draft admission.
+        let attrs = node.get("attrs").and_then(Value::as_object);
+        if attrs
+            .and_then(|attrs| attrs.get("entity"))
+            .and_then(Value::as_str)
+            .is_some_and(|entity| matches!(entity, "document" | "task"))
+        {
+            let key = match node.get("type").and_then(Value::as_str) {
+                Some("mention") => Some("id"),
+                Some("embed") => Some("ref"),
+                _ => None,
+            };
+            if let Some(key) = key {
+                if !attrs
+                    .and_then(|attrs| attrs.get(key))
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| {
+                        is_uuid(id) && Uuid::parse_str(id).is_ok_and(|id| !id.is_nil())
+                    })
+                {
+                    invalid = true;
+                }
+            }
+        }
+        if node.get("type").and_then(Value::as_str) == Some("attachment") {
+            let id = node
+                .get("attrs")
+                .and_then(|attrs| attrs.get("id"))
+                .and_then(Value::as_str)
+                .and_then(|id| Uuid::parse_str(id).ok())
+                .filter(|id| !id.is_nil());
+            if let Some(id) = id {
+                ids.insert(id);
+            } else {
+                invalid = true;
+            }
+        }
+    });
+    if invalid {
+        return Err(DerivedBodyError::InvalidDocumentBody(
+            "attachment reference body is malformed or exceeds structural bounds".into(),
+        ));
+    }
+    Ok(ids.into_iter().collect())
 }
 
 fn add_internal_ref(
@@ -332,14 +408,14 @@ pub fn to_chosung(text: &str) -> String {
         .collect()
 }
 
-fn walk_tiptap(node: &Value, depth: u32, visit: &mut dyn FnMut(&Value)) {
+fn walk_tiptap(node: &Value, depth: u32, visit: &mut dyn FnMut(&Value, u32)) {
     if depth > TIPTAP_WALK_MAX_DEPTH {
         return;
     }
     if !node.is_object() {
         return;
     }
-    visit(node);
+    visit(node, depth);
     if let Some(content) = node.get("content").and_then(Value::as_array) {
         for child in content {
             walk_tiptap(child, depth + 1, visit);
@@ -350,6 +426,77 @@ fn walk_tiptap(node: &Value, depth: u32, visit: &mut dyn FnMut(&Value)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stored_attachment_refs_keep_entity_ids_and_deduplicate_without_internal_ref_rewriting() {
+        let attachment = Uuid::now_v7();
+        let document = Uuid::now_v7();
+        let body = serde_json::json!({"type":"doc","content":[
+            {"type":"attachment","attrs":{"id":attachment,"name":"literal 😀"}},
+            {"type":"attachment","attrs":{"id":attachment}},
+            {"type":"embed","attrs":{"id":"block-id","entity":"document","ref":document}},
+        ]});
+        let original = body.clone();
+        assert_eq!(
+            extract_stored_attachment_refs(&body).unwrap(),
+            vec![attachment]
+        );
+        let internal = extract_internal_refs(&body);
+        assert_eq!(internal.len(), 1);
+        assert_eq!(internal[0].id, document.to_string());
+        assert_eq!(body, original);
+    }
+    #[test]
+    fn stored_attachment_refs_reject_malformed_ids_and_hidden_over_depth_references() {
+        for id in [
+            serde_json::Value::Null,
+            serde_json::json!("not-an-id"),
+            serde_json::json!(Uuid::nil()),
+        ] {
+            let body = serde_json::json!({"type":"doc","content":[{"type":"attachment","attrs":{"id":id}}]});
+            assert!(matches!(
+                extract_stored_attachment_refs(&body),
+                Err(DerivedBodyError::InvalidDocumentBody(_))
+            ));
+        }
+        for content in [
+            serde_json::json!([null]),
+            serde_json::json!([{}]),
+            serde_json::json!({"hidden":{"type":"attachment","attrs":{"id":Uuid::now_v7()}}}),
+        ] {
+            let body = serde_json::json!({"type":"doc","content":content});
+            assert!(
+                matches!(
+                    extract_stored_attachment_refs(&body),
+                    Err(DerivedBodyError::InvalidDocumentBody(_))
+                ),
+                "malformed structure cannot be admitted as a partial empty reference list"
+            );
+        }
+        for node in [
+            serde_json::json!({"type":"mention","attrs":{"entity":"task","id":"bad-task"}}),
+            serde_json::json!({"type":"embed","attrs":{"entity":"document","ref":null}}),
+        ] {
+            let body = serde_json::json!({"type":"doc","content":[node]});
+            assert!(matches!(extract_stored_attachment_refs(&body), Err(DerivedBodyError::InvalidDocumentBody(_))), "recognized malformed internal refs cannot be silently omitted from draft authorization");
+        }
+        let mut node = serde_json::json!({"type":"attachment","attrs":{"id":Uuid::now_v7()}});
+        for _ in 0..65 {
+            node = serde_json::json!({"type":"blockquote","content":[node]});
+        }
+        let body = serde_json::json!({"type":"doc","content":[node]});
+        assert!(
+            matches!(
+                extract_stored_attachment_refs(&body),
+                Err(DerivedBodyError::InvalidDocumentBody(_))
+            ),
+            "partial depth-truncated admission is forbidden"
+        );
+        let oversized = serde_json::json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"한".repeat(DOCUMENT_MAX_BODY_BYTES)}]}]});
+        assert_eq!(
+            extract_stored_attachment_refs(&oversized),
+            Err(DerivedBodyError::TooLarge)
+        );
+    }
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;

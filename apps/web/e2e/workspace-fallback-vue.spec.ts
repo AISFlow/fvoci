@@ -41,7 +41,7 @@ test("generic workspace refs keep the real setup gate before canonicalization", 
   expect(
     (
       await page.request.post(`/api/v1/workspaces/${workspaceId}/documents`, {
-        data: { title: "Canonical wiki", parentId: null },
+        data: { commandId: crypto.randomUUID(), title: "Canonical wiki", parentId: null },
       })
     ).status(),
   ).toBe(201);

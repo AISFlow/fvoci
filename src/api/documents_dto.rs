@@ -5,6 +5,40 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct SaveVersionedBodyInput {
+    pub command_id: Uuid,
+    /// Opaque native sequence; never a JavaScript floating-point number.
+    pub expected_tail_seq: String,
+    /// Forward updateV1 from the editor's original native history.
+    pub update_v1: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct VersionedBodyResponse {
+    pub target_id: Uuid,
+    pub tail_seq: String,
+    pub snapshot_v1: String,
+    pub tail_v1: Vec<String>,
+    pub content_json: Value,
+    pub writable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct SaveVersionedBodyResponse {
+    pub command_id: Uuid,
+    pub target_id: Uuid,
+    pub tail_seq: String,
+    pub revision_id: Uuid,
+}
 
 #[cfg(feature = "api-schema")]
 use utoipa::ToSchema;

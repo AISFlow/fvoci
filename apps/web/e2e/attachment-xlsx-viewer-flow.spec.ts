@@ -135,7 +135,7 @@ test("XLSX attachment: sheets, paging, zoom, cached values, bounds, failures, st
   }
   const wsId = required2.id;
   const docRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
-    data: { parentId: null, title: "XLSX 첨부" },
+    data: { commandId: crypto.randomUUID(), parentId: null, title: "XLSX 첨부" },
   });
   expect(docRes.ok(), await docRes.text()).toBeTruthy();
   const documentId = (

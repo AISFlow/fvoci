@@ -193,9 +193,10 @@ async fn export_native(
         project,
         zotero_connectors: &connectors,
     };
-    let mut capture = db::capture(&state.auth.db.pool, workspace, actor, session, &selection)
-        .await
-        .map_err(db_error)?;
+    let mut capture =
+        db::capture_backend(&state.auth.db.pool, workspace, actor, session, &selection)
+            .await
+            .map_err(db_error)?;
     let mut total = capture
         .archive
         .entries
@@ -216,7 +217,7 @@ async fn export_native(
         let bytes = native::read_file(&state.storage, key, file.size_bytes)
             .await
             .map_err(archive_error)?;
-        db::recheck_file(
+        db::recheck_file_backend(
             &state.auth.db.pool,
             workspace,
             actor,
@@ -246,7 +247,7 @@ async fn export_native(
             .map_err(archive_error)?,
     )
     .map_err(archive_error)?;
-    db::recheck_delivery(
+    db::recheck_delivery_backend(
         &state.auth.db.pool,
         workspace,
         actor,
@@ -269,7 +270,7 @@ async fn export_native(
                 if offset == bytes.len() {
                     return Ok::<_, std::io::Error>(None);
                 }
-                db::recheck_delivery(&pool, workspace, actor, session, &graph, &keys)
+                db::recheck_delivery_backend(&pool, workspace, actor, session, &graph, &keys)
                     .await
                     .map_err(|_| std::io::Error::other("archive delivery authorization"))?;
                 let end = (offset + 64 * 1024).min(bytes.len());
@@ -302,7 +303,7 @@ async fn preflight(
     check_origin(&headers, &state.public_origin)?;
     let (actor, session) = authenticate(&state, &headers, &jar, workspace).await?;
     let _permit = admission(&state, actor).await?;
-    db::preflight_destination(&state.auth.db.pool, workspace, actor, session)
+    db::preflight_destination_backend(&state.auth.db.pool, workspace, actor, session)
         .await
         .map_err(db_error)?;
     let body: NativePreflightBody = read_body(request).await?;
@@ -317,7 +318,7 @@ async fn preflight(
     let archive = native::validate_native(archive, config(&state)?, &cancel)
         .await
         .map_err(archive_error)?;
-    db::preflight_destination(&state.auth.db.pool, workspace, actor, session)
+    db::preflight_destination_backend(&state.auth.db.pool, workspace, actor, session)
         .await
         .map_err(db_error)?;
     let graph = &archive.graph;
@@ -349,7 +350,7 @@ async fn restore(
     check_origin(&headers, &state.public_origin)?;
     let (actor, session) = authenticate(&state, &headers, &jar, workspace).await?;
     let _permit = admission(&state, actor).await?;
-    db::authorize_destination(&state.auth.db.pool, workspace, actor, session)
+    db::authorize_destination_backend(&state.auth.db.pool, workspace, actor, session)
         .await
         .map_err(db_error)?;
     let body: NativeRestoreBody = read_body(request).await?;
@@ -376,7 +377,7 @@ async fn restore(
         .map_err(archive_error)?;
     // A replay may target a nonempty workspace after the original job committed;
     // queue_restore reauthorizes the actor and checks the durable command first.
-    let id = db::queue_restore(
+    let id = db::queue_restore_backend(
         &state.auth.db.pool,
         workspace,
         actor,
@@ -388,7 +389,7 @@ async fn restore(
     .await
     .map_err(db_error)?;
     state.import_wake.as_ref().expect("checked").notify_one();
-    let output = db::status(&state.auth.db.pool, workspace, actor, session, id)
+    let output = db::status_backend(&state.auth.db.pool, workspace, actor, session, id)
         .await
         .map_err(db_error)?;
     if output.status == "failed" && output.diagnostic.as_deref() == Some("conflict") {
@@ -403,7 +404,7 @@ async fn status(
     jar: CookieJar,
 ) -> Result<Json<NativeJobOutput>, AppError> {
     let (actor, session) = authenticate(&state, &headers, &jar, workspace).await?;
-    let output = db::status(&state.auth.db.pool, workspace, actor, session, id)
+    let output = db::status_backend(&state.auth.db.pool, workspace, actor, session, id)
         .await
         .map_err(db_error)?;
     if output.status == "failed" && output.diagnostic.as_deref() == Some("conflict") {

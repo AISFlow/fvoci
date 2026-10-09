@@ -22,18 +22,21 @@ use crate::api::dto::{
 };
 use crate::auth::session::SessionUser;
 use crate::db::labels::{
-    create_label, list_project_labels, list_workspace_labels, purge_label, update_label,
+    create_label, list_project_labels_backend as list_project_labels, list_workspace_labels,
+    purge_label, update_label,
 };
 use crate::db::milestones::{
-    create_milestone, list_project_milestones, purge_milestone, update_milestone,
+    create_milestone, list_project_milestones_backend as list_project_milestones, purge_milestone,
+    update_milestone,
 };
 use crate::db::projects::ProjectDbError;
 use crate::db::task_activity::{
     list_task_activity, TaskActivityDbError, TaskActivityListPage, TaskActivityOutputItem,
 };
 use crate::db::tasks::{
-    add_task_dependency, create_task, get_task, list_project_dependencies, list_project_tasks,
-    move_task, patch_task_meta, remove_task_dependency, restore_task, trash_task, CreateTaskInput,
+    add_task_dependency, create_task, get_task_backend as get_task, list_project_dependencies,
+    list_project_tasks_backend, move_task, patch_task_meta, remove_task_dependency, restore_task,
+    trash_task, CreateTaskInput,
 };
 use crate::error::{AppError, ProblemCode};
 use crate::http::guard::check_origin;
@@ -159,7 +162,12 @@ async fn create_task_route(
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = create_task(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/tasks.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         actor_user_id,
@@ -274,7 +282,12 @@ async fn patch_task_route(
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = patch_task_meta(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/tasks.rs")
+            .map_err(internal)?,
         workspace_id,
         task_id,
         actor_user_id,
@@ -315,7 +328,12 @@ async fn move_task_route(
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = move_task(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/tasks.rs")
+            .map_err(internal)?,
         workspace_id,
         task_id,
         actor_user_id,
@@ -356,7 +374,12 @@ async fn trash_task_route(
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = trash_task(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/tasks.rs")
+            .map_err(internal)?,
         workspace_id,
         task_id,
         actor_user_id,
@@ -390,7 +413,12 @@ async fn restore_task_route(
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = restore_task(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/tasks.rs")
+            .map_err(internal)?,
         workspace_id,
         task_id,
         actor_user_id,
@@ -420,10 +448,19 @@ async fn list_workspace_labels_route(
     )
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
-    let result =
-        list_workspace_labels(&state.auth.db.pool, workspace_id, actor_user_id, session_id)
-            .await
-            .map_err(internal)?;
+    let result = list_workspace_labels(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/tasks.rs")
+            .map_err(internal)?,
+        workspace_id,
+        actor_user_id,
+        session_id,
+    )
+    .await
+    .map_err(internal)?;
     match result {
         Ok(labels) => Ok(Json(LabelListResponse {
             items: labels.into_iter().map(label_output).collect(),
@@ -483,7 +520,12 @@ async fn create_label_route(
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = create_label(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/tasks.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         actor_user_id,
@@ -518,7 +560,12 @@ async fn update_label_route(
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = update_label(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/tasks.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         label_id,
@@ -552,7 +599,12 @@ async fn delete_label_route(
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = purge_label(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/tasks.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         label_id,
@@ -618,7 +670,12 @@ async fn create_milestone_route(
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = create_milestone(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/tasks.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         actor_user_id,
@@ -653,7 +710,12 @@ async fn update_milestone_route(
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = update_milestone(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/tasks.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         milestone_id,
@@ -687,7 +749,12 @@ async fn delete_milestone_route(
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = purge_milestone(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/tasks.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         milestone_id,
@@ -718,7 +785,12 @@ async fn list_project_dependencies_route(
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = list_project_dependencies(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/tasks.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         actor_user_id,
@@ -763,7 +835,12 @@ async fn add_dependency_route(
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = add_task_dependency(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/tasks.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,
@@ -797,7 +874,12 @@ async fn remove_dependency_route(
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = remove_task_dependency(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/tasks.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,
@@ -1010,7 +1092,7 @@ async fn list_tasks(
     )
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
-    let result = list_project_tasks(
+    let result = list_project_tasks_backend(
         &state.auth.db.pool,
         workspace_id,
         project_id,
@@ -1192,7 +1274,12 @@ async fn list_task_activity_route(
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = list_task_activity(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/tasks.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,
@@ -1326,4 +1413,193 @@ pub(crate) fn parse_user_id(value: &str) -> Result<Uuid, AppError> {
 pub(crate) fn internal(err: sqlx::Error) -> AppError {
     tracing::error!("database error: {}", err);
     AppError::internal()
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod selected_task_detail_http_tests {
+    use super::*;
+    use crate::db::attachment_preview::tests::Fixture;
+    use crate::db::lookup::selected_lookup_tests::session;
+    use crate::db::tasks::selected_task_detail_tests::setup;
+    use serde_json::Value;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn state(f: &Fixture) -> AppState {
+        AppState {
+            realtime_mode: crate::config::RealtimeMode::On,
+            native_engine: None,
+            auth:Arc::new(crate::auth::AuthService{db:crate::db::Db::from_backend(f.backend.clone()),password_keys:crate::auth::password::Keyring::parse(r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,"test").unwrap()}),
+            branding_name:"FVOCI".into(),public_origin:"http://localhost".into(),cookie_secure:false,rate_limiter:crate::http::rate_limit::RateLimiter::new(),storage:crate::attachments::ObjectStorage::local(f.root.join("task-detail-http-storage")),
+            upload:crate::attachments::UploadLimits{part_size_bytes:24,max_file_size_bytes:1024,create_rate_per_5min:20,part_put_slots:crate::attachments::PartPutSlots::new(2)},
+            collab:None,meili:None,search_embedder:None,markdown:None,import_wake:None,import_extractor_available:false,preview_extract:None,quota:Default::default(),mailer:Arc::new(crate::mail::Mailer::disabled()),streams:AppState::fresh_streams(),
+        }
+    }
+
+    async fn get(
+        app: Router,
+        path: &str,
+        cookie: Option<&str>,
+        bearer: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let mut request = axum::http::Request::builder().method("GET").uri(path);
+        if let Some(cookie) = cookie {
+            request = request.header("cookie", format!("fvoci_session={cookie}"));
+        }
+        if let Some(token) = bearer {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        let response = app
+            .oneshot(request.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let code = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 16384)
+            .await
+            .unwrap();
+        (code, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn wiki_aux_task_detail_http_current_wire_body_scopes_cookie_and_private_denial() {
+        let (f, credential, cookie, project, task) = setup().await;
+        let app = router().with_state(state(&f));
+        let path = format!("/api/v1/workspaces/{}/tasks/{task}", f.workspace);
+        let (code, body) = get(app.clone(), &path, Some(&cookie), None).await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        assert_eq!(body["id"], task.to_string());
+        assert_eq!(body["workspaceId"], f.workspace.to_string());
+        assert_eq!(body["projectId"], project.to_string());
+        assert_eq!(body["title"], "실제 원본 작업 中 😀");
+        assert_eq!(body["number"], 2);
+        assert_eq!(body["type"], "task");
+        assert_eq!(body["priority"], "none");
+        assert_eq!(
+            body["schemaVersion"],
+            crate::db::documents::DOCUMENT_SCHEMA_VERSION
+        );
+        assert_eq!(body["version"], 1);
+        assert_eq!(body["createdBy"], f.user.to_string());
+        assert_eq!(
+            body["contentJson"],
+            crate::db::documents::empty_document_json()
+        );
+        assert_eq!(body["canEdit"], true);
+        assert_eq!(body["childProgress"], json!({"done":0,"total":0}));
+        assert_eq!(body["children"], json!([]));
+        assert_eq!(body["parent"], Value::Null);
+        for field in ["assigneeIds", "labelIds", "dependencies"] {
+            assert_eq!(body[field], json!([]));
+        }
+        for field in [
+            "startDate",
+            "dueDate",
+            "dueAt",
+            "estimate",
+            "parentId",
+            "milestoneId",
+            "recurrence",
+            "archivedAt",
+        ] {
+            assert_eq!(body[field], Value::Null);
+        }
+        assert!(body["statusId"]
+            .as_str()
+            .is_some_and(|s| Uuid::parse_str(s).is_ok()));
+        assert!(body["createdAt"]
+            .as_str()
+            .is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok()));
+        assert!(body["updatedAt"]
+            .as_str()
+            .is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok()));
+        let (code, problem) = get(app.clone(), &path, None, None).await;
+        assert_eq!(code, StatusCode::UNAUTHORIZED);
+        assert_eq!(problem["code"], "authentication_required");
+        let insufficient = crate::auth::token::new_token();
+        let capable = crate::auth::token::new_token();
+        for (token, scope) in [(&insufficient, "documents.read"), (&capable, "tasks.read")] {
+            sqlx::query("INSERT INTO api_tokens(id,workspace_id,user_id,token_hash,name,scopes) VALUES(?1,?2,?3,?4,'Task detail',?5)")
+                .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(&token.hash).bind(json!([scope]).to_string()).execute(&f.pool).await.unwrap();
+        }
+        let (code, problem) = get(app.clone(), &path, None, Some(&insufficient.token)).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert_eq!(problem["code"], "not_found");
+        let (code, pat) = get(app.clone(), &path, None, Some(&capable.token)).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(pat, body);
+        let (code, cookie_first) =
+            get(app.clone(), &path, Some(&cookie), Some(&insufficient.token)).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(cookie_first, body);
+        let (code, problem) = get(
+            app.clone(),
+            &path,
+            Some("stale-cookie"),
+            Some(&capable.token),
+        )
+        .await;
+        assert_eq!(code, StatusCode::UNAUTHORIZED);
+        assert_eq!(problem["code"], "authentication_required");
+        let wrong = format!("/api/v1/workspaces/{}/tasks/{task}", Uuid::now_v7());
+        let (code, problem) = get(app.clone(), &wrong, None, Some(&capable.token)).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert_eq!(problem["code"], "not_found");
+        let other = Uuid::now_v7();
+        sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,?2,'Other')")
+            .bind(other.as_bytes().as_slice())
+            .bind(format!("{other}@example.test"))
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(other.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let (_, other_cookie) = session(&f, other).await;
+        let (code, problem) = get(app.clone(), &path, Some(&other_cookie), None).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert_eq!(problem["code"], "not_found");
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let (code, problem) = get(app.clone(), &path, Some(&cookie), None).await;
+        assert_eq!(code, StatusCode::UNAUTHORIZED);
+        assert_eq!(problem["code"], "authentication_required");
+        let literal = json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"개인 본문 中 😀"}]}]});
+        sqlx::query("UPDATE tasks SET content_json=?1,version=2 WHERE id=?2")
+            .bind(literal.to_string())
+            .bind(task.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE workspaces SET kind='personal' WHERE id=?1")
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET personal_workspace_id=?1 WHERE id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let (code, personal) = get(
+            router().with_state(state(&f)),
+            &path,
+            None,
+            Some(&capable.token),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(personal["id"], task.to_string());
+        assert_eq!(personal["projectId"], project.to_string());
+        assert_eq!(personal["contentJson"], literal);
+        assert_eq!(personal["version"], 2);
+        f.pool.close().await;
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
 }

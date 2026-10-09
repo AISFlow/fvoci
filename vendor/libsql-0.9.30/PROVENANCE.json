@@ -1,0 +1,56 @@
+{
+  "crate": "/home/kinesis/orca/toolchains/fvoci-rust/cargo/registry/cache/index.crates.io-1949cf8c6b5b557f/libsql-0.9.30.crate",
+  "crateSha256": "30fe980ac5693ed1f3db490559fb578885e913a018df64af8a1a46e1959a78df",
+  "lockChecksum": "30fe980ac5693ed1f3db490559fb578885e913a018df64af8a1a46e1959a78df",
+  "version": "0.9.30",
+  "source": "registry+https://github.com/rust-lang/crates.io-index",
+  "archiveBytes": 121536,
+  "fileCount": 70,
+  "extractedBytes": 625890,
+  "allOriginalFilesEqualToCachedSource": true,
+  "cachedOnlyFiles": [
+    ".cargo-ok"
+  ],
+  "licenseFiles": [],
+  "vcs": {
+    "git": {
+      "sha1": "0653c5788d77ef16a97c56ff3e9fdc11717a72d9"
+    },
+    "path_in_vcs": "libsql"
+  },
+  "proposalOnly": false,
+  "upstreamAccepted": false,
+  "actualModel": "gpt-6.1-sol",
+  "actualEffort": "high",
+  "turnContext": "2026-10-05T23:28:12.182Z",
+  "acceptedConsumerHead": "d42cffbb36e38b044ec40955be3388b96e320d3e",
+  "acceptedConsumerTree": "fa574ad849fbe13c3e7476e96185bef582655a18",
+  "rootPermissionMessage": "msg_337917efa4b0",
+  "sdkProductionChangedFiles": [
+    "src/errors.rs"
+  ],
+  "sdkVersionOrFeaturesChanged": false,
+  "fullLicenseTextStatus": "RESOLVED_EXACT_ROOT_RECOVERED_SAME_VCS_TEXT",
+  "buildAndTests": "NOTRUN",
+  "network": "NOTRUN",
+  "license": {
+    "utc": "2026-10-05T23:04:25.661320+00:00",
+    "url": "https://raw.githubusercontent.com/tursodatabase/libsql/0653c5788d77ef16a97c56ff3e9fdc11717a72d9/LICENSE.md",
+    "vcs": "0653c5788d77ef16a97c56ff3e9fdc11717a72d9",
+    "bytes": 1069,
+    "sha256": "cecf589818a56c2da8a0a6cc82c8a215c9770988c033b6016c2b74bf79f38152",
+    "source": "actual official pinned repository root license; crate metadata MIT, cached crate omitted license text",
+    "adoption": "NOT RUN"
+  },
+  "licenseAuthority": "ROOT msg_f93c3f88ca47; author performed no network fetch",
+  "addedOriginalArchiveOmittedFile": {
+    "path": "LICENSE.md",
+    "sha256": "cecf589818a56c2da8a0a6cc82c8a215c9770988c033b6016c2b74bf79f38152",
+    "sourceUrl": "https://raw.githubusercontent.com/tursodatabase/libsql/0653c5788d77ef16a97c56ff3e9fdc11717a72d9/LICENSE.md"
+  },
+  "adoption": "SOURCE_ONLY_LOCAL_VENDOR_COPY; ROOT_WIRING_AND_RUNTIME_PENDING",
+  "sourceBase": "d42cffbb36e38b044ec40955be3388b96e320d3e",
+  "sdkSourcePatchSha256": "1951f784663a166617c09fc45f9981104b3f59a28f39c2e67328c961efb513dc",
+  "patchedErrorsSha256": "b2ecacec1b74417f5886ea3ad0726589bba641e057149d416eacbacf82808e14",
+  "independentSourceVerdict": "ACCEPT_SOURCE_SDK_PROPOSAL_ONLY; sdk-source-verdict.json"
+}

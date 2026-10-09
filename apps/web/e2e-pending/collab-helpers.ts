@@ -61,17 +61,32 @@ export async function newCollabContext(browser: Browser, baseUrl: string): Promi
   });
 }
 
+// Hosted remote runs allocate a new namespace before any fixture write. The
+// existing local fixtures retain their literal actors and setup expectations.
+const remoteNamespace =
+  process.env.FVOCI_E2E_SELECTED_BACKEND === "libsql-remote"
+    ? process.env.FVOCI_E2E_TURSO_NAMESPACE
+    : undefined;
+if (
+  process.env.FVOCI_E2E_SELECTED_BACKEND === "libsql-remote" &&
+  !/^tui-[a-f0-9]{20}$/.test(remoteNamespace ?? "")
+) {
+  throw new Error("remote selected actors require an allocated synthetic namespace");
+}
+
 export const admin = {
-  email: "Admin@Example.COM",
+  email: remoteNamespace ? `${remoteNamespace}-owner@example.invalid` : "Admin@Example.COM",
   password: "supersecret1",
   familyName: "김",
   givenName: "관리자",
   workspaceName: "Acme 워크스페이스",
-  workspaceSlug: "acme",
+  workspaceSlug: remoteNamespace ?? "acme",
 };
 
 export const member = {
-  email: "collab-member@example.com",
+  email: remoteNamespace
+    ? `${remoteNamespace}-member@example.invalid`
+    : "collab-member@example.com",
   password: "memberpass1",
   givenName: "협업",
   familyName: "멤버",
@@ -246,10 +261,16 @@ export type WikiDoc = {
   workspaceId: string;
 };
 
-export async function createWikiDoc(page: Page, title: string): Promise<WikiDoc> {
+// One invocation is one logical create. A caller replaying after response loss
+// must retain and supply the original commandId.
+export async function createWikiDoc(
+  page: Page,
+  title: string,
+  commandId: string = crypto.randomUUID(),
+): Promise<WikiDoc> {
   const id = await workspaceId(page, admin.workspaceSlug);
   const res = await page.request.post(`/api/v1/workspaces/${id}/documents`, {
-    data: { parentId: null, title },
+    data: { commandId, parentId: null, title },
   });
   expect(res.ok()).toBe(true);
   const body = (await res.json()) as components["schemas"]["DocumentMetaResponse"];

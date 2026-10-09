@@ -19,7 +19,7 @@ if ! openapi_typescript --version >/dev/null 2>&1; then
   exit 1
 fi
 
-cargo build --locked --offline --bin fvoci-export-openapi --features api-schema
+bash "$ROOT/scripts/prepare-sqlite-ci.sh" -- cargo build --locked --offline --bin fvoci-export-openapi --features api-schema
 "$CARGO_TARGET_DIR/debug/fvoci-export-openapi" >"$OPENAPI_JSON"
 
 openapi_typescript "$OPENAPI_JSON" -o "$GENERATED_TS"

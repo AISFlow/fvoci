@@ -7,6 +7,7 @@ const out = process.env.FVOCI_KC_E2E_OUT;
 const mode = process.env.FVOCI_KC_E2E_MODE ?? "unset";
 
 export default defineConfig({
+  forbidOnly: !!process.env.CI,
   testDir: ".",
   testMatch: "oidc-keycloak-flow.spec.ts",
   workers: 1,

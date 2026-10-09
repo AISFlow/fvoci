@@ -41,9 +41,11 @@ const props = withDefaults(
     targetKind?: "document" | "task";
     readOnly: boolean;
     persistNow?: (() => Promise<void>) | undefined;
+    /** OFF refreshes the confirmed native body through the owned draft lifetime. */
+    afterRestore?: (() => Promise<void>) | undefined;
     sourceDirty?: boolean;
   }>(),
-  { targetKind: "document", persistNow: undefined, sourceDirty: false },
+  { targetKind: "document", persistNow: undefined, afterRestore: undefined, sourceDirty: false },
 );
 const queryClient = useQueryClient();
 const me = useQuery(meQuery);
@@ -396,6 +398,7 @@ type RestoreOperation = RevisionScope & {
   expectedTailSeq: string;
   dialogVersion: number;
   persist: (() => Promise<void>) | undefined;
+  afterRestore: (() => Promise<void>) | undefined;
 };
 const restore = useMutation({
   mutationFn: (scope: RestoreOperation) =>
@@ -420,6 +423,10 @@ const restore = useMutation({
     }),
   onSuccess: async (_data, scope) => {
     if (!currentScope(scope)) return;
+    if (scope.afterRestore) {
+      await scope.afterRestore();
+      if (!currentScope(scope)) return;
+    }
     if (correlations.get(scope.revisionId)?.correlationId === scope.correlationId)
       correlations.delete(scope.revisionId);
     if (scope.dialogVersion === dialogVersion) {
@@ -529,6 +536,7 @@ function confirmRestore(): void {
     ...captured,
     dialogVersion,
     persist: props.persistNow,
+    afterRestore: props.afterRestore,
   });
 }
 </script>

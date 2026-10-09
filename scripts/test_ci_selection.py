@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import ast
+import copy
 import importlib.util
 import json
 import os
@@ -88,6 +90,197 @@ def configure_git(repo: Path) -> None:
     git(repo, "config", "user.email", "ci@test")
     git(repo, "config", "user.name", "ci")
     git(repo, "config", "commit.gpgsign", "false")
+
+
+X64_APT_MIRROR_SETUP = r"""# Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
+. /etc/os-release
+[[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
+case "$(dpkg --print-architecture)" in
+  amd64)
+    test -f /etc/apt/apt-mirrors.txt
+    grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
+    grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
+    test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
+    printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+    ;;
+  arm64) ;;
+  *) exit 1 ;;
+esac
+"""
+
+
+class UbuntuPrimaryMirrorTest(unittest.TestCase):
+    def preparation_steps(self):
+        result = {}
+        for workflow in ('web',):
+            data, error = SEL._load_yaml_mapping(ROOT / '.github/workflows' / (workflow + '.yml'))
+            self.assertIsNone(error)
+            for name, job in data['jobs'].items():
+                for step in job.get('steps', []):
+                    if step.get('id') == 'sqlite' and name != 'native-arm64':
+                        result[(workflow, name)] = step
+        return result
+
+    def test_every_x64_root_preparation_selects_signed_primary_before_apt(self):
+        steps = self.preparation_steps()
+        self.assertEqual(set(steps), {('web', 'web-checks'), ('web', 'web-native-checks'), ('web', 'workspace-browser-build'), ('web', 'workspace-browser-shard'),
+            ('web', 'collaboration-build'), ('web', 'collaboration-install-on'),
+            ('web', 'collaboration-postgres-on'), ('web', 'collaboration-sqlite-on'),
+            ('web', 'collaboration-postgres-off'), ('web', 'collaboration-sqlite-off')})
+        for name, step in steps.items():
+            with self.subTest(consumer=name):
+                run = step['run']
+                self.assertEqual(run.count(X64_APT_MIRROR_SETUP), 1)
+                self.assertLess(run.index(X64_APT_MIRROR_SETUP), run.index('sudo apt-get update'))
+                self.assertLess(run.index('sudo apt-get update'), run.index('sudo apt-get install'))
+                self.assertIn('sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8', run)
+                self.assertEqual(step['env'], {'LIBCLANG_PATH': '/usr/lib/llvm-18/lib'})
+
+    def probe(self, arch='amd64', *, os_id='ubuntu', version='26.04', missing=None, source=None, apt_exit=0):
+        # Execute the actual workflow shell prefix against owned files and
+        # explicit dpkg/sudo stubs; never alter host APT or make network calls.
+        with tempfile.TemporaryDirectory(prefix='fvoci-apt-mirror-control-') as directory:
+            root = Path(directory); fake_bin = root / 'bin'; fake_bin.mkdir()
+            release = root / 'os-release'; release.write_text(f'ID={os_id}\nVERSION_ID={version}\n')
+            mirrors = root / 'apt-mirrors.txt'; mirrors.write_text('original ARM/Azure mirror\n')
+            sources = root / 'ubuntu.sources'
+            sources.write_text(source if source is not None else 'URIs: mirror+file:/etc/apt/apt-mirrors.txt\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n')
+            keyring = root / 'ubuntu-archive-keyring.gpg'; keyring.write_bytes(b'fixture keyring, not cryptographic verification')
+            foreign = root / 'foreign.sources'; foreign.write_text('foreign repository preserved\n')
+            before = (sources.read_bytes(), foreign.read_bytes())
+            if missing: {'mirrors':mirrors, 'sources':sources, 'keyring':keyring}[missing].unlink()
+            (fake_bin / 'dpkg').write_text('#!/bin/bash\n[[ "$*" == --print-architecture ]] || exit 90\nprintf "%s\n" "$FIXTURE_ARCH"\n')
+            (fake_bin / 'sudo').write_text('''#!/bin/bash
+set -euo pipefail
+if [[ "$1" == tee && "$2" == "$FIXTURE_MIRRORS" && $# == 2 ]]; then
+  exec /usr/bin/tee "$2"
+elif [[ "$1" == apt-get ]]; then
+  printf '%s\n' "$*" >> "$FIXTURE_TRACE"
+  exit "$FIXTURE_APT_EXIT"
+else
+  exit 91
+fi
+''')
+            for path in fake_bin.iterdir(): path.chmod(0o755)
+            trace = root / 'trace'
+            step = self.preparation_steps()[('web', 'collaboration-build')]['run']
+            prefix = step[:step.index('mkdir "$RUNNER_TEMP/fvoci-sqlite"')]
+            for old, new in [('/etc/os-release', release),
+                ('/etc/apt/sources.list.d/ubuntu.sources', sources),
+                ('/usr/share/keyrings/ubuntu-archive-keyring.gpg', keyring),
+                ('/etc/apt/apt-mirrors.txt', mirrors)]:
+                # Replace only known literal filesystem paths in this harness.
+                prefix = prefix.replace(old, str(new))
+                if sources.exists(): sources.write_text(sources.read_text().replace(old, str(new)))
+            if sources.exists(): before = (sources.read_bytes(), foreign.read_bytes())
+            result = subprocess.run(['bash', '-c', prefix], env={'PATH':str(fake_bin)+':/usr/bin:/bin',
+                'FIXTURE_ARCH':arch, 'FIXTURE_MIRRORS':str(mirrors), 'FIXTURE_TRACE':str(trace),
+                'FIXTURE_APT_EXIT':str(apt_exit)}, capture_output=True, text=True, timeout=10)
+            calls = trace.read_text().splitlines() if trace.exists() else []
+            self.assertEqual(foreign.read_bytes(), before[1])
+            if sources.exists(): self.assertEqual(sources.read_bytes(), before[0])
+            return result.returncode, calls, mirrors.read_text() if mirrors.exists() else None
+
+    def test_x64_primary_and_arm_mirror_preservation(self):
+        calls = ['apt-get update', 'apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8']
+        self.assertEqual(self.probe(), (0, calls, 'https://archive.ubuntu.com/ubuntu/\n'))
+        self.assertEqual(self.probe('arm64'), (0, calls, 'original ARM/Azure mirror\n'))
+
+    def test_wrong_platform_or_unsigned_missing_sources_stop_before_apt(self):
+        cases = [dict(arch='riscv64'), dict(os_id='debian'), dict(version='24.04'),
+            dict(missing='mirrors'), dict(missing='sources'), dict(missing='keyring'),
+            dict(source='URIs: https://foreign.example/ubuntu\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n'),
+            dict(source='URIs: mirror+file:/etc/apt/apt-mirrors.txt\nSigned-By: /foreign/keyring.gpg\n')]
+        for case in cases:
+            with self.subTest(case=case):
+                code, calls, mirror = self.probe(**case)
+                self.assertNotEqual(code, 0)
+                self.assertEqual(calls, [])
+                self.assertIn(mirror, (None, 'original ARM/Azure mirror\n'))
+
+    def test_apt_failure_propagates_without_retry(self):
+        code, calls, mirror = self.probe(apt_exit=7)
+        self.assertEqual(code, 7)
+        self.assertEqual(calls, ['apt-get update'])
+        self.assertEqual(mirror, 'https://archive.ubuntu.com/ubuntu/\n')
+
+
+
+class SchemaCatalogLifecycleTest(unittest.TestCase):
+    """Actual inline control flow, private data-only subprocess boundaries.
+    These controls do not qualify PostgreSQL/SQLite/catalog execution.
+    """
+    def execute(self, defect=None):
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/rust.yml")
+        self.assertIsNone(error)
+        run = next(s["run"] for s in data["jobs"]["postgres"]["steps"] if s.get("name") == SEL.RUST_SCHEMA_BASELINE_STEP)
+        source = run.split("<<'PYSCHEMA'\n", 1)[1].rsplit("\nPYSCHEMA", 1)[0]
+        code = compile(source, "schema-baseline-inline-ci", "exec")
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "target/schema-default/debug/fvoci-migrate"; binary.parent.mkdir(parents=True); binary.write_bytes(b"fixture, not ELF")
+            env = {"CI":"true", "GITHUB_ACTIONS":"true", "GITHUB_SHA":"a"*40,
+                   "PG_CONTAINER":"b"*64, "RUNNER_TEMP":str(root),
+                   "PREPARATION_DATABASE_URL":"postgres://postgres:fixture-only@127.0.0.1:5432/postgres"}
+            if defect == "foreign": env["PREPARATION_DATABASE_URL"] = "postgres://postgres:fixture-only@foreign.invalid:5432/postgres"
+            def child(args, *, env=None, input=None, capture_output):
+                self.assertTrue(capture_output)
+                calls.append((args, input))
+                if args[0] == "docker":
+                    self.assertEqual(args[:4], ["docker", "exec", "-i", "b"*64])
+                    sql = input.decode()
+                    self.assertRegex(sql, r'^(CREATE ROLE|CREATE DATABASE|DROP DATABASE|DROP ROLE) "fvoci_schema_(app|ci)_[a-f0-9]{16}"')
+                    if defect == "collision" and sql.startswith("CREATE ROLE"):
+                        return subprocess.CompletedProcess(args, 7, b"", b"owned fixture collision")
+                    return subprocess.CompletedProcess(args, 0, b"", b"")
+                if args[0] == str(binary):
+                    self.assertEqual(env["FVOCI_DATABASE_BACKEND"], "postgres")
+                    self.assertRegex(env["DATABASE_URL"], r'/fvoci_schema_ci_[a-f0-9]{16}$')
+                    self.assertNotIn("FVOCI_SCHEMA_CATALOG_DATABASE_URL", env)
+                    return subprocess.CompletedProcess(args, 0, b"", b"")
+                self.assertEqual(args, ["python3","scripts/ci_selection.py","rust-binaries","run","--directory",
+                                       str(root) + "/rust-binaries","--test","schema_baseline_integration","--nocapture"])
+                self.assertNotIn("DATABASE_URL", env)
+                self.assertEqual(env["TEST_DATABASE_URL"], "postgres://postgres:fixture-only@127.0.0.1:5432/postgres")
+                self.assertNotIn("PREPARATION_DATABASE_URL", env)
+                attrs = {"exists":True,"login":True,"member_of":[], **{k:False for k in ("superuser","createdb","createrole","replication","bypassrls")}}
+                if defect == "elevated": attrs["bypassrls"] = True
+                facts = {"tables":[{"name":"fixture"}],"ledger":[{}]*12,
+                         "app_role":{"role":env["FVOCI_SCHEMA_CATALOG_APP_ROLE"],"attributes":attrs}}
+                Path(env["FVOCI_SCHEMA_CATALOG_OUT"]).write_text(json.dumps(facts))
+                count = 3 if defect == "count" else 4
+                return subprocess.CompletedProcess(args, 0,
+                    f"test result: ok. {count} passed; 0 failed; 0 ignored;".encode(),
+                    b"SKIP postgres_catalog_dump" if defect == "skip" else b"")
+            old = Path.cwd()
+            try:
+                os.chdir(root)
+                with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(subprocess, "check_output", return_value="a"*40), mock.patch.object(subprocess, "run", side_effect=child):
+                    if defect:
+                        with self.assertRaises((AssertionError, RuntimeError)): exec(code, {})
+                    else: exec(code, {})
+            finally: os.chdir(old)
+            outputs = list(root.glob("fvoci-schema-ci-*/*"))
+            for file in outputs: self.assertEqual(file.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(bool(list(root.glob("fvoci-schema-ci-*/scope.json"))), defect is None)
+        return [sql.decode() for _, sql in calls if sql is not None]
+
+    def test_success_retires_only_owned_database_and_role(self):
+        sql = self.execute()
+        self.assertEqual(len(sql), 4)
+        self.assertEqual(sql[0].split('"')[1], sql[3].split('"')[1])
+        self.assertEqual(sql[1].split('"')[1], sql[2].split('"')[1])
+
+    def test_count_skip_or_elevated_role_failure_keeps_private_evidence_and_retires_owned(self):
+        for defect in ("count", "skip", "elevated"):
+            with self.subTest(defect=defect):
+                self.assertEqual(len(self.execute(defect)), 4)
+
+    def test_foreign_connection_and_collision_never_adopt_or_delete_resources(self):
+        self.assertEqual(self.execute("foreign"), [])
+        sql = self.execute("collision")
+        self.assertEqual(len(sql), 1); self.assertTrue(sql[0].startswith("CREATE ROLE"))
 
 
 class GitRepoFixture:
@@ -495,6 +688,29 @@ class PrCheckoutBindingTest(unittest.TestCase):
 
 
 class GateSchemaTest(unittest.TestCase):
+    def test_postgres_budget_matrix_aggregate_is_required_by_gate(self) -> None:
+        plan = self._plan("rust", {job: True for job in SEL.WORKFLOW_JOBS["rust"]})
+        results = {job: "success" for job in SEL.WORKFLOW_JOBS["rust"]}
+        self.assertEqual(self._gate(plan, "rust", results), 0)
+        for result in ("failure", "cancelled", "skipped"):
+            with self.subTest(result=result):
+                self.assertEqual(self._gate(plan, "rust", {**results, "postgres": result}), 1)
+        self.assertEqual(self._gate(plan, "rust", results, omit_jobs=frozenset({"postgres"})), 1)
+
+    def test_web_budget_lanes_require_both_selected_success(self) -> None:
+        selected = {"web-checks": True, "web-native-checks": True}
+        plan = self._plan("web", selected)
+        results = {job: "success" for job in selected}
+        self.assertEqual(self._gate(plan, "web", results), 0)
+        for job in selected:
+            for result in ("failure", "cancelled", "skipped"):
+                with self.subTest(job=job, result=result):
+                    self.assertEqual(self._gate(plan, "web", {**results, job: result}), 1)
+        self.assertEqual(self._gate(plan, "web", results,
+                                   omit_jobs=frozenset({"web-native-checks"})), 1)
+        self.assertEqual(self._gate(self._plan("web", {}), "web"), 0)
+
+
     def _plan(self, workflow: str, selected: dict[str, bool], plan_ok: bool = True) -> dict:
         jobs = {job: {"selected": selected.get(job, False)} for job in SEL.WORKFLOW_JOBS[workflow]}
         return {
@@ -582,6 +798,17 @@ class GateSchemaTest(unittest.TestCase):
                     ]
                 )
 
+    def test_rust_native_arm64_gate_rejects_incomplete_results(self) -> None:
+        plan = self._plan("rust", {job: True for job in SEL.WORKFLOW_JOBS["rust"]})
+        results = {job: "success" for job in SEL.WORKFLOW_JOBS["rust"]}
+        self.assertEqual(self._gate(plan, "rust", results), 0)
+        for result in ("failure", "cancelled", "skipped"):
+            with self.subTest(result=result):
+                self.assertEqual(self._gate(plan, "rust", {**results, "native-arm64": result}), 1)
+        self.assertEqual(
+            self._gate(plan, "rust", results, omit_jobs=frozenset({"native-arm64"})), 1
+        )
+
     def test_unselected_must_be_skipped(self) -> None:
         plan = self._plan("web", {"web-checks": False})
         rc = self._gate(
@@ -590,7 +817,7 @@ class GateSchemaTest(unittest.TestCase):
             {
                 "web-checks": "success",
                 "workspace-browser-shard": "skipped",
-                "collaboration-flow": "skipped",
+                "collaboration-install-on": "skipped",
             },
         )
         self.assertEqual(rc, 1)
@@ -666,7 +893,7 @@ class GateSchemaTest(unittest.TestCase):
             {
                 "web-checks": "success",
                 "workspace-browser-shard": "skipped",
-                "collaboration-flow": "skipped",
+                "collaboration-install-on": "skipped",
             },
         )
         self.assertEqual(rc, 1)
@@ -860,6 +1087,177 @@ class OptInSelectionTest(unittest.TestCase):
 
 
 class WorkflowRegistryTest(unittest.TestCase):
+    def test_turso_ui_cache_paths_are_exported_from_the_runner(self) -> None:
+        path = ROOT / ".github" / "workflows" / "turso-test.yml"
+        self.assertEqual(SEL.verify_turso_workflow(path), [])
+        data, error = SEL._load_yaml_mapping(path)
+        self.assertIsNone(error)
+        ui = data["jobs"]["turso-ui"]
+        # runner is unavailable in job.env; these values must reach subsequent
+        # Bun/browser steps through the runner's environment file instead.
+        for name in ("BUN_INSTALL_CACHE_DIR", "PLAYWRIGHT_BROWSERS_PATH"):
+            self.assertNotIn(name, ui["env"])
+        preparation = ui["steps"][1]["run"].split("rustup toolchain install", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            runner_temp = Path(directory) / "runner temp with spaces"
+            env_file = Path(directory) / "environment file with spaces"
+            proc = subprocess.run(
+                ["bash", "-euo", "pipefail"], input=preparation, text=True,
+                capture_output=True, check=False,
+                env={"PATH": "/usr/bin:/bin", "RUNNER_TEMP": str(runner_temp),
+                     "GITHUB_ENV": str(env_file)},
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(env_file.read_text().splitlines(), [
+                f"CARGO_TARGET_DIR={runner_temp}/turso-ui-target",
+                f"BUN_INSTALL_CACHE_DIR={runner_temp}/turso-bun-cache",
+                f"PLAYWRIGHT_BROWSERS_PATH={runner_temp}/turso-browsers",
+            ])
+
+    def test_normal_browser_job_budget_is_measured_and_fail_closed(self) -> None:
+        import copy
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/web.yml")
+        self.assertIsNone(error)
+        jobs = data["jobs"]
+        self.assertEqual(SEL._verify_web_browser_budget(jobs), [])
+        self.assertEqual(jobs["workspace-browser-shard"]["strategy"], {
+            "fail-fast": False, "matrix": {"shard": list(range(8))},
+        })
+        self.assertIn("workspace-browser-shard", jobs["web-ci-gate"]["needs"])
+        self.assertEqual(jobs["web-checks"]["timeout-minutes"], 23)
+        for job in ("web-static", "web-native-checks", "collaboration-build",
+                    *(name for name, _token, _needs, _extra, _count, _withs in SEL._WEB_COLLAB_LANES)):
+            self.assertEqual(jobs[job]["timeout-minutes"], 15)
+        for value in (None, 0, 15, 16, 19, 21, 30, "20", 20.0, True):
+            bad = copy.deepcopy(jobs)
+            bad["workspace-browser-shard"]["timeout-minutes"] = value
+            with self.subTest(budget=value):
+                self.assertTrue(SEL._verify_web_browser_budget(bad))
+        for value in (None, [], "20"):
+            bad = copy.deepcopy(jobs)
+            bad["workspace-browser-shard"] = value
+            with self.subTest(job=value):
+                self.assertTrue(SEL._verify_web_browser_budget(bad))
+        missing = copy.deepcopy(jobs)
+        del missing["workspace-browser-shard"]
+        self.assertTrue(SEL._verify_web_browser_budget(missing))
+
+    def test_web_current_build_handoff_positive_and_fail_closed(self) -> None:
+        import copy
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/web.yml")
+        self.assertIsNone(error)
+        jobs = data["jobs"]
+        self.assertEqual(SEL._verify_web_build_handoff(jobs), [])
+        mutations = []
+        bad = copy.deepcopy(jobs); bad["collaboration-install-on"]["needs"] = "ci-plan"; mutations.append(bad)
+        bad = copy.deepcopy(jobs); bad["collaboration-build"]["timeout-minutes"] = 16; mutations.append(bad)
+        for job, key in (("collaboration-build", "prepare"), ("collaboration-build", "publish"), ("collaboration-install-on", "browser")):
+            bad = copy.deepcopy(jobs); step = next(s for s in bad[job]["steps"] if s.get("id") == key)
+            step["continue-on-error"] = True; mutations.append(bad)
+        bad = copy.deepcopy(jobs)
+        step = next(s for s in bad["collaboration-postgres-on"]["steps"] if str(s.get("uses", "")).startswith("actions/download-artifact@"))
+        step["with"]["run-id"] = "foreign"; mutations.append(bad)
+        bad = copy.deepcopy(jobs); bad["collaboration-build"]["outputs"]["handoff_sha256"] = ""; mutations.append(bad)
+        bad = copy.deepcopy(jobs)
+        next(s for s in bad["collaboration-sqlite-off"]["steps"] if s.get("id") == "browser")["run"] = "bash scripts/run-web-e2e.sh --ci-use-committed-api --with-selected-backends"; mutations.append(bad)
+        bad = copy.deepcopy(jobs); bad["collaboration-postgres-off"]["steps"].append({"uses": "actions/cache@anything", "with": {"path": "target"}}); mutations.append(bad)
+        bad = copy.deepcopy(jobs)
+        bad["collaboration-postgres-on"]["steps"].append({
+            "name": "Foreign download",
+            "uses": "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+            "with": {
+                "artifact-ids": "${{ needs.collaboration-build.outputs.artifact_id }}",
+                "merge-multiple": True,
+                "path": "${{ runner.temp }}/foreign",
+                "run-id": "999999",
+                "github-token": "${{ secrets.GITHUB_TOKEN }}",
+            },
+        })
+        mutations.append(bad)
+        bad = copy.deepcopy(jobs)
+        bad["collaboration-sqlite-on"]["steps"] = [step for step in bad["collaboration-sqlite-on"]["steps"]
+            if step.get("with", {}).get("path") != "${{ runner.temp }}/fvoci-closed-install"]
+        mutations.append(bad)
+        for i, bad in enumerate(mutations):
+            with self.subTest(mutation=i): self.assertTrue(SEL._verify_web_build_handoff(bad))
+
+
+    def test_selected_registration_commands_cannot_be_missing_or_masked(self) -> None:
+        import copy
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/web.yml")
+        self.assertIsNone(error)
+        jobs = data["jobs"]
+        for command in ("(cd apps/web && bun test e2e-pending/collab-playwright.config.test.ts --timeout 60000)",
+                        "python3 scripts/selected-backend-ci/test_off_registration.py"):
+            with self.subTest(command=command):
+                bad = copy.deepcopy(jobs)
+                step = next(s for s in bad["web-checks"]["steps"]
+                            if s.get("name") == "Web and editor unit regressions")
+                self.assertIn(command + "\n", step["run"])
+                step["run"] = step["run"].replace(command + "\n", "", 1)
+                self.assertNotEqual(step["run"], next(s for s in jobs["web-checks"]["steps"]
+                    if s.get("name") == "Web and editor unit regressions")["run"])
+                self.assertTrue(SEL._verify_web_build_handoff(bad))
+        for key, value in (("if", "false"), ("continue-on-error", True)):
+            bad = copy.deepcopy(jobs)
+            next(s for s in bad["web-checks"]["steps"]
+                 if s.get("name") == "Web and editor unit regressions")[key] = value
+            self.assertTrue(SEL._verify_web_build_handoff(bad))
+
+    def test_web_budget_split_preserves_commands_and_selection(self) -> None:
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/web.yml")
+        self.assertIsNone(error)
+        jobs = data["jobs"]
+        commands = {
+            "web-checks": [
+                "bash scripts/generate-api.sh",
+                "git diff --exit-code -- apps/web/openapi.json apps/web/src/generated/api.ts",
+                "cargo test --locked --offline --lib --features api-schema api::openapi::tests",
+                "(cd apps/web && bun run test)",
+                "(cd packages/editor && bun run test)",
+                "(cd apps/web && bun test e2e-pending/collab-playwright.config.test.ts --timeout 60000)",
+                "python3 scripts/selected-backend-ci/test_off_registration.py",
+                "bash scripts/test-web-e2e-groups.sh",
+                "python3 scripts/fixtures/web-e2e/test-build-handoff.py",
+            ],
+            "web-native-checks": [
+                "cargo clippy --locked --offline --all-targets --features db-tests,api-schema -- -D warnings",
+                "cargo test --locked --offline --test static_api",
+            ],
+        }
+        target_keys = []
+        for job, required in commands.items():
+            with self.subTest(job=job):
+                spec = jobs[job]
+                self.assertEqual(spec["needs"], "ci-plan")
+                self.assertEqual(spec["if"], "needs.ci-plan.outputs.select_web_checks == 'true'")
+                self.assertEqual(spec["runs-on"], "ubuntu-26.04")
+                self.assertEqual(spec["timeout-minutes"], 23 if job == "web-checks" else 15)
+                self.assertIn(job, jobs["web-ci-gate"]["needs"])
+                lines = [line for step in SEL._run_steps(spec) for line in step["run"].splitlines()]
+                actual = [line for line in lines if line in sum(commands.values(), [])]
+                self.assertEqual(actual, required)
+                for step in spec["steps"]:
+                    self.assertNotIn("continue-on-error", step)
+                    self.assertNotIn("if", step)
+                cache = next(step["with"] for step in spec["steps"]
+                             if step.get("with", {}).get("path") == "target")
+                key = cache["key"]
+                self.assertIn(job + "-ubuntu-26.04-${{ runner.arch }}-1.98.1-", key)
+                self.assertIn("devdebug0-testdebug0", key)
+                self.assertIn("${{ github.sha }}", key)
+                self.assertIn("'crates/**'", key)
+                self.assertIn("${{ steps.sqlite.outputs.cache_identity }}", key)
+                self.assertNotIn("restore-keys", cache)
+                target_keys.append(key)
+        self.assertNotEqual(*target_keys)
+        for mode, families in (("full", set()), ("narrow", {"web_tests"}),
+                               ("narrow", {"frontend_web_install"}), ("narrow", set())):
+            decision = SEL.SelectionDecision(mode, "TEST", frozenset(families))
+            self.assertEqual(SEL.workflow_job_selected("web", "web-checks", decision),
+                             SEL.workflow_job_selected("web", "web-native-checks", decision))
+
+
     def test_eslint_prettier_run_once_in_lightweight_locked_web_static(self) -> None:
         data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/web.yml")
         self.assertIsNone(error)
@@ -886,6 +1284,81 @@ class WorkflowRegistryTest(unittest.TestCase):
         self.assertFalse(any("cargo" in entry.get("run", "") or "rustup" in entry.get("run", "") for entry in steps))
         self.assertFalse(any("format:check" in entry.get("run", "") for jid, job in jobs.items() if jid != job_id for entry in SEL._run_steps(job)))
 
+    def test_native_arm64_split_preserves_default_commands_and_build_inputs(self) -> None:
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/rust.yml")
+        self.assertIsNone(error)
+        jobs = data["jobs"]
+        native = jobs["native-arm64"]
+        self.assertEqual(native["runs-on"], "ubuntu-26.04-arm")
+        self.assertEqual(native["timeout-minutes"], 15)
+        self.assertEqual(native["needs"], "ci-plan")
+        self.assertEqual(native["if"], "needs.ci-plan.outputs.select_native_arm64 == 'true'")
+        self.assertNotIn("services", native)
+        self.assertNotIn("env", native)
+        self.assertNotIn("strategy", native)
+        self.assertNotIn("continue-on-error", native)
+        steps = native["steps"]
+        check = steps[-1]
+        self.assertEqual(check, {
+            "name": "Native server build and policy tests (ARM64)",
+            "run": "cargo build --locked --offline --bins\ncargo test --locked --offline --lib\n",
+        })
+        # Preserve every build input/cache step, with only the exact ARM mirror
+        # override needed for the stalled Azure download. Signing stays intact.
+        pg_steps = jobs["postgres"]["steps"]
+        expected_setup = [copy.deepcopy(step) for step in jobs["postgres-build"]["steps"][:4]]
+        mirror_setup = (
+            "# This runner's Azure mirror stalled the pinned ARM libclang download.\n"
+            "# Change only its mirror list; keep the Ubuntu archive Signed-By policy.\n"
+            ". /etc/os-release\n"
+            '[[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]\n'
+            '[[ "$(dpkg --print-architecture)" == arm64 ]]\n'
+            "test -f /etc/apt/apt-mirrors.txt\n"
+            "grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources\n"
+            "grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources\n"
+            "test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
+            "printf '%s\\n' 'https://ports.ubuntu.com/ubuntu-ports/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null\n"
+        )
+        prepare = next(step for step in expected_setup if step.get("id") == "sqlite")
+        self.assertIn(X64_APT_MIRROR_SETUP, prepare["run"])
+        prepare["run"] = prepare["run"].replace(X64_APT_MIRROR_SETUP, "", 1)
+        prepare["run"] = prepare["run"].replace("set -euo pipefail\n", "set -euo pipefail\n" + mirror_setup, 1)
+        self.assertEqual(steps[:4], expected_setup)
+        cache = next(step for step in steps if step.get("name") == "Restore server build outputs")
+        self.assertEqual(cache["with"]["path"], "target")
+        self.assertIn("native-default-dev-test-nodebug", cache["with"]["key"])
+        self.assertIn("steps.sqlite.outputs.cache_identity", cache["with"]["key"])
+        self.assertNotIn("restore-keys", cache["with"])
+        self.assertFalse(any(step.get("name") == check["name"] for step in pg_steps))
+        self.assertEqual(jobs["postgres"]["timeout-minutes"], "${{ matrix.shard == 'b' && (matrix.runner == 'ubuntu-26.04-arm' && 25 || 20) || 15 }}")
+        self.assertIn("native-arm64", SEL.WORKFLOW_JOBS["rust"])
+        self.assertIn("native-arm64", jobs["rust-ci-gate"]["needs"])
+        self.assertEqual(jobs["rust-ci-gate"]["if"], "always()")
+
+    def test_native_arm64_selection_matches_former_postgres_arm_a_domain(self) -> None:
+        for event, paths, selected in (
+            ("pull_request", ["docs/rewrite.md"], False),
+            ("pull_request", ["apps/web/src/x.ts"], False),
+            ("pull_request", ["apps/web/e2e/navigation.spec.ts"], False),
+            ("pull_request", ["src/main.rs"], True),
+            ("pull_request", [".github/workflows/rust.yml"], True),
+            ("push", None, True),
+            ("merge_group", None, True),
+            ("workflow_dispatch", None, True),
+            ("unknown", None, True),
+        ):
+            with self.subTest(event=event, paths=paths):
+                plan = SEL.build_plan(workflow="rust", event_name=event, base_sha=None,
+                                      head_sha=None, merge_base_sha=None, tested_sha="a" * 40,
+                                      paths=paths)
+                self.assertEqual(plan["jobs"]["native-arm64"]["selected"], selected)
+                self.assertEqual(plan["jobs"]["native-arm64"], plan["jobs"]["postgres"])
+        plan = SEL.build_plan(workflow="rust", event_name="pull_request", base_sha=None,
+                              head_sha=None, merge_base_sha=None, tested_sha="a" * 40,
+                              paths=None, fatal_error="TESTED_SHA_MISMATCH")
+        self.assertFalse(plan["plan_ok"])
+        self.assertTrue(plan["jobs"]["native-arm64"]["selected"])
+
     def test_workflows_match_planner(self) -> None:
         errors = SEL.verify_workflow_registry()
         self.assertEqual(errors, [], msg="\n".join(errors))
@@ -897,6 +1370,127 @@ class WorkflowRegistryTest(unittest.TestCase):
     def test_requirements_pin_pyyaml(self) -> None:
         text = (ROOT / "scripts" / "ci_selection_requirements.txt").read_text(encoding="utf-8")
         self.assertIn("PyYAML==6.0.3", text)
+
+
+class RustBinaryArtifactTest(unittest.TestCase):
+    def test_all_enabled_child_binaries_are_inventoried(self):
+        self.assertEqual(SEL.rust_product_binary_targets(ROOT),
+                         ["fvoci-e2e-fixture", "fvoci-mcp", "fvoci-migrate", "fvoci-server"])
+
+    def fixture(self, directory, *, failure=False):
+        root = Path(directory)
+        context = {"sha": "a" * 40, "arch": "X64", "workspace": str(root), "sqlite": "b" * 64,
+                   "rustc": "pinned fixture", "profile": "dev-test-nodebug"}
+        records = []
+        for name in ("first", "second"):
+            path = root / "target/db-tests/debug/deps" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("#!/bin/sh\nexit " + ("7" if failure and name == "first" else "0") + "\n")
+            path.chmod(0o755)
+            records.append({"reason": "compiler-artifact", "target": {"name": name, "kind": ["test"]},
+                            "profile": {"test": True, "opt_level": "0", "debuginfo": 0},
+                            "features": ["db-tests"], "executable": str(path)})
+        entries = SEL.rust_binary_entries(records, ["first", "second"], "test", ["db-tests"], root)
+        return root, context, entries
+
+    def test_roundtrip_and_no_fail_fast_execute_actual_transferred_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, context, entries = self.fixture(directory, failure=True)
+            archive = root / "postgres.tar"
+            SEL.rust_binary_pack(archive, context, entries)
+            shutil.rmtree(root / "target")
+            manifest = SEL.rust_binary_unpack(archive, context, set(entries), root)
+            with mock.patch.object(SEL.subprocess, "run", wraps=subprocess.run) as run:
+                self.assertEqual(SEL.rust_binary_run(manifest, ["first", "second"], []), 7)
+                self.assertEqual(run.call_count, 2)
+                self.assertFalse(any("cargo" in call.args[0] for call in run.call_args_list))
+
+    def test_missing_archive_and_source_platform_native_context_refuse_before_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, context, entries = self.fixture(directory)
+            archive = root / "postgres.tar"
+            with self.assertRaises(FileNotFoundError):
+                SEL.rust_binary_unpack(archive, context, set(entries), root)
+            SEL.rust_binary_pack(archive, context, entries)
+            shutil.rmtree(root / "target")
+            for key in ("sha", "arch", "workspace", "sqlite", "profile", "rustc"):
+                with self.subTest(key=key), self.assertRaisesRegex(ValueError, "inputs mismatch"):
+                    SEL.rust_binary_unpack(archive, {**context, key: "foreign"}, set(entries), root)
+                self.assertFalse((root / "target").exists())
+
+    def test_digest_feature_profile_cohort_and_path_corruption_refuse_before_writing(self):
+        for defect in ("digest", "feature", "profile", "missing", "escape", "duplicate-path"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
+                root, context, entries = self.fixture(directory)
+                expected = set(entries)
+                if defect == "digest": entries["first"]["sha256"] = "0" * 64
+                elif defect == "feature": entries["first"]["record"]["features"] = ["extract-native-tests", "db-tests"]
+                elif defect == "profile": entries["first"]["record"]["profile"]["debuginfo"] = 2
+                elif defect == "missing": entries.pop("first")
+                elif defect == "escape":
+                    entries["first"]["path"] = "target/../target/db-tests/debug/deps/first"
+                else: entries["second"]["path"] = entries["first"]["path"]
+                archive = root / "postgres.tar"
+                SEL.rust_binary_pack(archive, context, entries)
+                shutil.rmtree(root / "target")
+                with self.assertRaises(ValueError):
+                    SEL.rust_binary_unpack(archive, context, expected, root)
+                self.assertFalse((root / "target").exists())
+
+    def test_producer_rejects_missing_ambiguous_features_and_profiles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, _, entries = self.fixture(directory)
+            record = entries["first"]["record"]
+            for records in ([], [record, record], [{**record, "features": []}],
+                            [{**record, "profile": {**record["profile"], "opt_level": "3"}}]):
+                with self.assertRaises(ValueError):
+                    SEL.rust_binary_entries(records, ["first"], "test", ["db-tests"], root)
+
+    def test_run_refuses_changed_executable_and_filters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, context, entries = self.fixture(directory)
+            manifest = {"context": context, "entries": entries}
+            with self.assertRaises(ValueError):
+                SEL.rust_binary_run(manifest, ["first"], ["nonexistent_filter"])
+            (root / entries["first"]["path"]).write_bytes(b"changed")
+            with self.assertRaises(ValueError):
+                SEL.rust_binary_run(manifest, ["first"], [])
+
+    def test_workflow_missing_producer_download_validation_and_cache_fallback_fail(self):
+        jobs, error = SEL._rust_workflow_jobs(ROOT)
+        self.assertIsNone(error)
+        self.assertEqual(SEL.verify_rust_binary_handoff(jobs), [])
+        for defect in ("producer", "needs", "download", "validate", "skip", "rebuild", "fallback", "clippy"):
+            bad = copy.deepcopy(jobs)
+            if defect == "producer": bad["postgres-build"]["strategy"]["matrix"]["include"].pop()
+            elif defect == "needs": bad["postgres"]["needs"] = "ci-plan"
+            elif defect in ("download", "validate", "skip"):
+                match = next(s for s in bad["postgres"]["steps"] if s.get("name", "").startswith("Download required" if defect == "download" else "Validate and restore"))
+                if defect == "skip": match["continue-on-error"] = True
+                else: bad["postgres"]["steps"].remove(match)
+            elif defect == "rebuild": bad["postgres"]["steps"].append({"run": "cargo test --features db-tests"})
+            elif defect == "fallback":
+                next(s for s in bad["postgres-build"]["steps"] if s.get("name") == "Restore server build outputs")["with"]["restore-keys"] = "v3-server-"
+            else:
+                next(s for s in bad["fast"]["steps"] if s.get("name") == "Restore clippy build outputs")["with"]["path"] = "target/default"
+            with self.subTest(defect=defect): self.assertTrue(SEL.verify_rust_binary_handoff(bad))
+
+    def test_registered_producer_selection_matches_pg_and_is_required_by_gate(self):
+        self.assertIn("postgres-build", SEL.WORKFLOW_JOBS["rust"])
+        self.assertEqual(SEL.select_output_key("postgres-build"), "select_postgres")
+        self.assertEqual(SEL.select_output_key("workspace-browser-build"), "select_workspace_browser_shard")
+        gate = GateSchemaTest()
+        plan = gate._plan("rust", {j: True for j in SEL.WORKFLOW_JOBS["rust"]})
+        results = {j: "success" for j in SEL.WORKFLOW_JOBS["rust"]}
+        for result in ("failure", "cancelled", "skipped"):
+            self.assertEqual(gate._gate(plan, "rust", {**results, "postgres-build": result}), 1)
+        self.assertEqual(gate._gate(plan, "rust", results, omit_jobs=frozenset({"postgres-build"})), 1)
+        inconsistent = copy.deepcopy(plan)
+        inconsistent["jobs"]["postgres-build"]["selected"] = False
+        self.assertEqual(gate._gate(inconsistent, "rust", {**results, "postgres-build": "skipped"}), 1)
+        web = gate._plan("web", {j: True for j in SEL.WORKFLOW_JOBS["web"]})
+        web["jobs"]["workspace-browser-build"]["selected"] = False
+        self.assertEqual(gate._gate(web, "web", {j: "skipped" if j == "workspace-browser-build" else "success" for j in SEL.WORKFLOW_JOBS["web"]}), 1)
 
 
 class RustSuiteRegistryFixture:
@@ -951,6 +1545,313 @@ class RustSuiteRegistryFixture:
 
 
 class RustSuiteRegistryTest(unittest.TestCase):
+    def test_postgres_budget_exact_measured_split_and_isolation(self) -> None:
+        original_a = {
+            "db_integration", "task_integration", "collab_integration", "invitation_integration",
+            "search_index", "comment_integration", "api_token_integration", "mail_integration",
+            "task_labels_integration", "workspace_lifecycle", "search_query", "notification_integration",
+            "push_integration", "schedule_ics_integration", "search_meili", "secret_maintenance_integration",
+            "outbox_reset_integration", "pool_release_integration",
+        }
+        moved = {"task_integration", "comment_integration"}
+        jobs, err = SEL._rust_workflow_jobs(ROOT)
+        self.assertIsNone(err)
+        self.assertEqual(SEL.verify_postgres_budget_matrix(jobs), [])
+        job = jobs["postgres"]
+        rows = job["strategy"]["matrix"]["include"]
+        self.assertEqual(len(rows), 12)
+        for runner, major in (("ubuntu-26.04", "16"), ("ubuntu-26.04", "17"),
+                              ("ubuntu-26.04", "18"), ("ubuntu-26.04-arm", "18")):
+            selected = {row["shard"]: row for row in rows if (row["runner"], row["pg_major"]) == (runner, major)}
+            with self.subTest(runner=runner, major=major):
+                self.assertEqual(set(selected), {"a", "b", "c"})
+                a = SEL.cargo_test_flags_in_text(selected["a"]["tests"])
+                b = SEL.cargo_test_flags_in_text(selected["b"]["tests"])
+                c = SEL.cargo_test_flags_in_text(selected["c"]["tests"])
+                self.assertEqual(a, original_a - moved)
+                self.assertEqual(c, moved)
+                self.assertEqual(len(b), 26)
+                self.assertEqual(len(a | b | c), 44)
+                self.assertFalse(a & b or a & c or b & c)
+                self.assertEqual(selected["a"]["postgres_image"], selected["c"]["postgres_image"])
+        self.assertEqual(job["services"]["postgres"]["image"], "${{ matrix.postgres_image }}")
+        self.assertEqual(job["services"]["postgres"]["ports"], ["5432/tcp"])
+        step = next(step for step in job["steps"] if step.get("name") == SEL.RUST_POSTGRES_INTEGRATION_STEP)
+        self.assertEqual(step["run"], SEL.RUST_POSTGRES_INTEGRATION_RUN_CANONICAL)
+        self.assertEqual(step["env"]["FVOCI_COLLAB_ENGINE"], "${{ matrix.shard == 'b' && format('{0}/crates/collab-engine/target/debug/collab-engine', github.workspace) || '' }}")
+
+    def test_postgres_arm64_b_budget_rejects_scope_and_limit_drift(self) -> None:
+        jobs, error = SEL._rust_workflow_jobs(ROOT)
+        self.assertIsNone(error)
+        expected = "${{ matrix.shard == 'b' && (matrix.runner == 'ubuntu-26.04-arm' && 25 || 20) || 15 }}"
+        self.assertEqual(jobs["postgres"]["timeout-minutes"], expected)
+        self.assertEqual(SEL.verify_postgres_budget_matrix(jobs), [])
+        # Refuse the old budget, a global increase, other ARM shards, x64
+        # increases and larger limits before the planner emits selections.
+        for budget in (
+            None, 15, 20, 25, 30,
+            "${{ matrix.shard == 'b' && 20 || 15 }}",
+            "${{ matrix.shard == 'b' && 25 || 15 }}",
+            "${{ matrix.runner == 'ubuntu-26.04-arm' && 25 || 20 }}",
+            expected.replace("ubuntu-26.04-arm", "ubuntu-26.04"),
+            expected.replace("&& 25", "&& 26"),
+            expected.replace("|| 20", "|| 25"),
+            expected.replace("|| 15", "|| 20"),
+        ):
+            with self.subTest(budget=budget):
+                bad = copy.deepcopy(jobs)
+                if budget is None:
+                    del bad["postgres"]["timeout-minutes"]
+                else:
+                    bad["postgres"]["timeout-minutes"] = budget
+                self.assertIn(
+                    "rust: PostgreSQL budget must retain A/C15m, x64 B20m and ARM64 B25m",
+                    SEL.verify_postgres_budget_matrix(bad),
+                )
+
+    def test_postgres_budget_row_and_coverage_mutations_fail(self) -> None:
+        mutations = ("missing-c", "duplicate-row", "unknown-shard", "wrong-major", "wrong-pin", "duplicate-check",
+                     "extra-dimension", "duplicate-target", "duplicate-across-shards", "missing-pg16-target", "c-filter", "extra-row-field")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), RustSuiteRegistryFixture() as fx:
+                fx.write_cargo()
+                def change(data: dict) -> None:
+                    matrix = data["jobs"]["postgres"]["strategy"]["matrix"]
+                    rows = matrix["include"]
+                    c = next(row for row in rows if row["shard"] == "c" and row["pg_major"] == "16")
+                    a = next(row for row in rows if row["shard"] == "a" and row["pg_major"] == "16")
+                    if mutation == "missing-c": rows.remove(c)
+                    elif mutation == "duplicate-row": rows.append(dict(c))
+                    elif mutation == "unknown-shard": c["shard"] = "d"
+                    elif mutation == "wrong-major": c["pg_major"] = "17"
+                    elif mutation == "wrong-pin": c["postgres_image"] = "postgres:16"
+                    elif mutation == "duplicate-check": c["check"] = a["check"]
+                    elif mutation == "extra-dimension": matrix["exclude"] = [dict(c)]
+                    elif mutation == "duplicate-target": c["tests"] += " --test task_integration"
+                    elif mutation == "duplicate-across-shards": a["tests"] += " --test task_integration"
+                    elif mutation == "missing-pg16-target": a["tests"] = a["tests"].replace("--test db_integration ", "")
+                    elif mutation == "c-filter": c["tests"] += " -- --skip failing"
+                    else: c["continue-on-error"] = True
+                fx.mutate_rust_workflow(change)
+                self.assertTrue(SEL.verify_postgres_budget_matrix(SEL._rust_workflow_jobs(fx.root)[0]))
+
+    def test_postgres_budget_limits_and_strict_cache_mutations_fail(self) -> None:
+        for mutation in ("timeout", "fail-fast", "mask", "runner", "cache-fallback", "cache-key", "cache-path", "missing-cache"):
+            with self.subTest(mutation=mutation), RustSuiteRegistryFixture() as fx:
+                fx.write_cargo()
+                def change(data: dict) -> None:
+                    job = data["jobs"]["postgres"]
+                    producer = data["jobs"]["postgres-build"]
+                    cache = next(step for step in producer["steps"] if step.get("name") == "Restore server build outputs")
+                    if mutation == "timeout": job["timeout-minutes"] = 20
+                    elif mutation == "fail-fast": job["strategy"]["fail-fast"] = True
+                    elif mutation == "mask": job["continue-on-error"] = True
+                    elif mutation == "runner": job["runs-on"] = "ubuntu-26.04"
+                    elif mutation == "cache-fallback": cache["with"]["restore-keys"] = "v2-server-"
+                    elif mutation == "cache-key": cache["with"]["key"] = "v2-server-ubuntu-26.04-incomplete"
+                    elif mutation == "cache-path": cache["with"]["path"] = "/foreign/target"
+                    else: producer["steps"].remove(cache)
+                fx.mutate_rust_workflow(change)
+                self.assertTrue(SEL.verify_postgres_budget_matrix(SEL._rust_workflow_jobs(fx.root)[0]))
+
+    def test_schema_baseline_configured_target_mapping_refuses_omissions_and_masking(self) -> None:
+        import copy
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/rust.yml")
+        self.assertIsNone(error)
+        jobs = data["jobs"]
+        self.assertEqual(SEL.schema_baseline_inventory(jobs), ({"schema_baseline_integration"}, None))
+        original = next(s for s in jobs["postgres"]["steps"] if s.get("name") == SEL.RUST_SCHEMA_BASELINE_STEP)
+        # Independent target contract: two SQLite controls, a configured PG catalog
+        # extractor and a separately owned PG app-role gate, all four actual tests.
+        self.assertIn("'FVOCI_SCHEMA_CATALOG_DATABASE_URL':owner_url", original["run"])
+        self.assertIn("'FVOCI_SCHEMA_CATALOG_APP_ROLE':role", original["run"])
+        self.assertIn("'FVOCI_SCHEMA_CATALOG_OUT':str(catalog)", original["run"])
+        self.assertIn("4 passed; 0 failed; 0 ignored;", original["run"])
+        self.assertIn("observer['TEST_DATABASE_URL'] = os.environ['PREPARATION_DATABASE_URL']", original["run"])
+        self.assertIn("'sqlite_controls':2,'postgres_catalog_reads':1,'postgres_app_role_gate_controls':1", original["run"])
+        self.assertIn("'SKIP postgres_catalog_dump' not in", original["run"])
+        for mutation in ("missing", "masked", "wrong-row", "missing-url", "skip", "count", "owner-in-tests", "missing-gate-url"):
+            with self.subTest(mutation=mutation):
+                bad = copy.deepcopy(jobs)
+                step = next(s for s in bad["postgres"]["steps"] if s.get("name") == SEL.RUST_SCHEMA_BASELINE_STEP)
+                if mutation == "missing": bad["postgres"]["steps"].remove(step)
+                elif mutation == "masked": step["continue-on-error"] = True
+                elif mutation == "wrong-row": step["if"] = "matrix.shard == 'b'"
+                elif mutation == "missing-url": step["env"].pop("PREPARATION_DATABASE_URL")
+                elif mutation == "skip": step["run"] = step["run"].replace("'--nocapture'", "'--skip','postgres_catalog_dump'")
+                elif mutation == "count": step["run"] = step["run"].replace("4 passed; 0 failed; 0 ignored;", "3 passed; 0 failed; 0 ignored;")
+                elif mutation == "missing-gate-url": step["run"] = step["run"].replace("observer['TEST_DATABASE_URL'] = os.environ['PREPARATION_DATABASE_URL']", "observer.pop('TEST_DATABASE_URL', None)")
+                else: step["run"] = step["run"].replace("'DATABASE_URL':owner_url", "'TEST_DATABASE_URL':owner_url")
+                self.assertNotEqual(bad, jobs)
+                names, err = SEL.schema_baseline_inventory(bad)
+                self.assertEqual(names, set()); self.assertIsNotNone(err)
+        for runner, major in (("ubuntu-26.04", "16"), ("ubuntu-26.04-arm", "18")):
+            bad = copy.deepcopy(jobs)
+            bad["postgres"]["strategy"]["matrix"]["include"] = [row for row in bad["postgres"]["strategy"]["matrix"]["include"]
+                if not (row.get("runner") == runner and row.get("pg_major") == major and row.get("shard") == "a")]
+            self.assertIsNotNone(SEL.schema_baseline_inventory(bad)[1])
+
+    def test_schema_target_omission_is_a_registry_failure(self) -> None:
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo(extra_targets=["schema_baseline_integration"])
+            fx.mutate_rust_workflow(lambda data: data["jobs"]["postgres"].update(
+                steps=[step for step in data["jobs"]["postgres"]["steps"] if step.get("name") != SEL.RUST_SCHEMA_BASELINE_STEP]))
+            self.assertIn(SEL.RUST_SCHEMA_BASELINE_STEP, "\n".join(SEL.verify_rust_suite_registry(fx.root)))
+
+
+    def test_native_arm64_wrong_scheduler_and_check_weakening_fail(self) -> None:
+        def mutate_native(data: dict, field: str, value: object) -> None:
+            job = data["jobs"]["native-arm64"]
+            if field in ("runs-on", "timeout-minutes", "continue-on-error", "strategy"):
+                job[field] = value
+            else:
+                job["steps"][-1][field] = value
+
+        for field, value, expected in (
+            ("runs-on", "ubuntu-26.04", "run once on ubuntu-26.04-arm"),
+            ("strategy", {"matrix": {"shard": ["a", "b"]}}, "run once"),
+            ("timeout-minutes", 20, "15 minute budget"),
+            ("continue-on-error", True, "fail on build/policy errors"),
+            ("if", "false", "exact unconditional"),
+            ("env", {"CARGO_TARGET_DIR": "other"}, "exact unconditional"),
+            ("run", "cargo test --locked --offline --lib --features db-tests", "exact unconditional"),
+            ("run", "cargo build --locked --offline --bins\ncargo test --locked --offline --lib some_filter", "exact unconditional"),
+        ):
+            with self.subTest(field=field, value=value), RustSuiteRegistryFixture() as fx:
+                fx.write_cargo()
+                fx.mutate_rust_workflow(lambda data: mutate_native(data, field, value))
+                errors = SEL.verify_workflow_registry(fx.root)
+                self.assertIn(expected, "\n".join(errors))
+
+    def test_old_combined_arm_scheduler_is_rejected(self) -> None:
+        def restore_old_scheduler(data: dict) -> None:
+            native = data["jobs"].pop("native-arm64")
+            step = native["steps"][-1]
+            step["if"] = "runner.arch == 'ARM64' && matrix.shard == 'a'"
+            data["jobs"]["postgres"]["steps"].insert(7, step)
+            data["jobs"]["rust-ci-gate"]["needs"].remove("native-arm64")
+            data["jobs"]["ci-plan"]["outputs"].pop("select_native_arm64")
+
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo()
+            fx.mutate_rust_workflow(restore_old_scheduler)
+            errors = SEL.verify_workflow_registry(fx.root)
+        self.assertIn("native-arm64 job missing", "\n".join(errors))
+        self.assertIn("every registered job", "\n".join(errors))
+
+    def test_native_arm64_must_share_selection_and_gate_requirements(self) -> None:
+        for mutate, expected in (
+            (lambda data: data["jobs"]["native-arm64"].update({"if": "false"}), "if must be"),
+            (lambda data: data["jobs"]["rust-ci-gate"]["needs"].remove("native-arm64"), "every registered job"),
+            (lambda data: data["jobs"]["ci-plan"]["outputs"].pop("select_native_arm64"), "missing selector output"),
+            (lambda data: data["jobs"]["native-arm64"]["steps"].pop(), "exactly once"),
+        ):
+            with self.subTest(expected=expected), RustSuiteRegistryFixture() as fx:
+                fx.write_cargo()
+                fx.mutate_rust_workflow(mutate)
+                errors = SEL.verify_workflow_registry(fx.root)
+                self.assertIn(expected, "\n".join(errors))
+
+    def _execute_selected_install_artifact_prefix(self, migrate_parent: str) -> dict:
+        jobs, err = SEL._rust_workflow_jobs(ROOT)
+        self.assertIsNone(err)
+        step = next(item for item in jobs["postgres"]["steps"] if item.get("name") == SEL.RUST_SELECTED_INSTALL_STEP)
+        body = step["run"].split("<<'PYINSTALL'\n", 1)[1].rsplit("\nPYINSTALL", 1)[0]
+        # Execute actual artifact parsing through its first top-level assertion.
+        # Stop before filesystem ownership/setup or any product child launch.
+        assertion = next(node for node in ast.parse(body).body if isinstance(node, ast.Assert))
+        prefix = "\n".join(body.splitlines()[:assertion.end_lineno])
+        records = [
+            {
+                "reason": "compiler-artifact", "target": {"name": name, "kind": [kind]},
+                "profile": {"test": is_test}, "features": ["db-tests"],
+                "executable": str(Path(parent) / name),
+            }
+            for name, kind, is_test, parent in (
+                ("fvoci-server", "bin", False, "/fixture/bin"),
+                ("fvoci-migrate", "bin", False, migrate_parent),
+                ("selected_install_lifetime", "test", True, "/fixture/bin/deps"),
+            )
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "compiler-artifacts.jsonl"
+            artifact_path.write_text("\n".join(json.dumps(record) for record in records))
+            namespace: dict = {}
+            with mock.patch.object(sys, "argv", ["selected-install-extracted.py", str(artifact_path)]):
+                exec(compile(prefix, "selected-install-workflow-prefix.py", "exec"), namespace)
+            return namespace
+
+    def test_selected_install_actual_artifact_paths_reach_healthy_assertion(self) -> None:
+        namespace = self._execute_selected_install_artifact_prefix("/fixture/bin")
+        self.assertEqual(namespace["server"], Path("/fixture/bin/fvoci-server"))
+        self.assertEqual(namespace["migrate"], Path("/fixture/bin/fvoci-migrate"))
+
+    def test_selected_install_actual_artifact_paths_reject_unequal_parent(self) -> None:
+        with self.assertRaises(AssertionError):
+            self._execute_selected_install_artifact_prefix("/fixture/other-bin")
+
+    def test_selected_install_exact_supported_execution_scope(self) -> None:
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo(["selected_install_lifetime"])
+            self.assertEqual(SEL.verify_rust_suite_registry(fx.root), [])
+            jobs, err = SEL._rust_workflow_jobs(fx.root)
+            self.assertIsNone(err)
+            assigned, err = SEL.selected_install_inventory(jobs)
+            self.assertIsNone(err)
+            self.assertEqual(assigned, {"selected_install_lifetime"})
+            step = next(item for item in jobs["postgres"]["steps"] if item.get("name") == SEL.RUST_SELECTED_INSTALL_STEP)
+            self.assertIn('prefix="fvoci-selected-install-", dir="/run"', step["run"])
+            self.assertEqual(jobs["native-arm64"]["steps"][-1]["run"].strip(), SEL.RUST_NATIVE_ARM64_RUN)
+            rows = jobs["postgres"]["strategy"]["matrix"]["include"]
+            self.assertEqual(
+                sorted(row["runner"] for row in rows if row["shard"] == "b" and row["pg_major"] == "18"),
+                ["ubuntu-26.04", "ubuntu-26.04-arm"],
+            )
+
+    def test_selected_install_missing_or_masked_execution_fails(self) -> None:
+        for mutation in ("missing", "duplicate", "disabled", "masked", "no-run-only", "filtered", "zero-count", "wrong-helper-feature", "missing-arm"):
+            with self.subTest(mutation=mutation), RustSuiteRegistryFixture() as fx:
+                fx.write_cargo(["selected_install_lifetime"])
+                def weaken(data: dict) -> None:
+                    job = data["jobs"]["postgres"]
+                    steps = job["steps"]
+                    step = next(item for item in steps if item.get("name") == SEL.RUST_SELECTED_INSTALL_STEP)
+                    if mutation == "missing":
+                        steps.remove(step)
+                    elif mutation == "duplicate":
+                        steps.append(dict(step))
+                    elif mutation == "disabled":
+                        step["if"] = "false"
+                    elif mutation == "masked":
+                        step["continue-on-error"] = True
+                    elif mutation == "no-run-only":
+                        step["run"] = 'cargo test --features db-tests --test selected_install_lifetime --no-run'
+                    elif mutation == "filtered":
+                        step["run"] = step["run"].replace('"--test-threads=1", "--nocapture"', '"nonexistent_filter", "--nocapture"')
+                    elif mutation == "zero-count":
+                        step["run"] = step["run"].replace('4 passed;', '0 passed;')
+                    elif mutation == "wrong-helper-feature":
+                        helper = next(item for item in steps if item.get("name") == "Validate and restore finished postgres executables (no rebuild fallback)")
+                        helper["run"] = helper["run"].replace('--cohort postgres ', '--cohort helper ')
+                    else:
+                        row = next(row for row in job["strategy"]["matrix"]["include"] if row["runner"] == "ubuntu-26.04-arm" and row["shard"] == "b")
+                        row["pg_major"] = "17"
+                fx.mutate_rust_workflow(weaken)
+                errors = SEL.verify_rust_suite_registry(fx.root)
+                self.assertTrue(errors, "selected install actual execution must be mandatory")
+                self.assertIn("selected install" if mutation not in ("missing", "duplicate") else SEL.RUST_SELECTED_INSTALL_STEP, "\n".join(errors))
+
+    def test_selected_install_cannot_be_double_assigned_as_pg_fixture(self) -> None:
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo(["selected_install_lifetime"])
+            def duplicate(data: dict) -> None:
+                for row in data["jobs"]["postgres"]["strategy"]["matrix"]["include"]:
+                    if row["shard"] == "b":
+                        row["tests"] += " --test selected_install_lifetime"
+            fx.mutate_rust_workflow(duplicate)
+            errors = SEL.verify_rust_suite_registry(fx.root)
+        self.assertIn("assigned to multiple CI buckets: selected_install_lifetime", "\n".join(errors))
+
     def test_new_cargo_target_without_ci_row_fails(self) -> None:
         with RustSuiteRegistryFixture() as fx:
             fx.write_cargo(["missing_db_target_probe"])
@@ -964,7 +1865,7 @@ class RustSuiteRegistryTest(unittest.TestCase):
         def drop_search_meili_on_arm(data: dict) -> None:
             rows = data["jobs"]["postgres"]["strategy"]["matrix"]["include"]
             for row in rows:
-                if row.get("runner") == "ubuntu-24.04-arm":
+                if row.get("runner") == "ubuntu-26.04-arm":
                     row["tests"] = row["tests"].replace(" --test search_meili", "")
 
         with RustSuiteRegistryFixture() as fx:
@@ -1064,8 +1965,8 @@ class RustSuiteRegistryTest(unittest.TestCase):
                 1,
             )
             text = text.replace(
-                "        run: cargo test --locked --offline --no-fail-fast --features db-tests ${{ matrix.tests }}\n",
-                "        run: cargo test --locked --offline --no-fail-fast --features db-tests\n",
+                '        run: python3 scripts/ci_selection.py rust-binaries run --directory "$RUNNER_TEMP/rust-binaries" ${{ matrix.tests }}\n',
+                '        run: python3 scripts/ci_selection.py rust-binaries run --directory "$RUNNER_TEMP/rust-binaries"\n',
                 1,
             )
             rust.write_text(text, encoding="utf-8")
@@ -1245,7 +2146,462 @@ class RustSuiteRegistryTest(unittest.TestCase):
         self.assertTrue(any("continue-on-error" in err for err in errors))
 
 
+class SelectedLibraryExecutionTest(unittest.TestCase):
+    ORIGINAL_FILTERS = (
+        'db::stars::selected_star_read_finish_tests::star_read_cleanup_retains_refusal_and_driver_without_returning_rows',
+        'db::groups::selected_group_read_finish_tests::group_read_cleanup_retains_refusal_and_driver_without_returning_rows',
+        'streams::events::selected_access_read_tests::sqlite_access_role_change_targets_and_wrong_workspace',
+        'streams::events::selected_access_read_tests::sqlite_access_counter_retention_rollback_and_inflight_writer',
+        'streams::events::selected_access_read_tests::sqlite_access_current_credential_membership_workspace_and_cursor_denials',
+        'streams::events::selected_access_read_tests::access_cleanup_uncertainty_withholds_observation_and_retains_driver_cause',
+        'http::routes::stars::selected_list_access_http_tests::sqlite_http_stars_nonempty_dtos_order_current_acl_and_pat_kinds',
+        'http::routes::stars::selected_list_access_http_tests::sqlite_http_groups_order_member_authority_pat_and_cross_tenant',
+        'http::routes::stars::selected_list_access_http_tests::sqlite_http_lists_recheck_current_credential_and_propagate_sql_fault',
+        'http::routes::stars::selected_list_access_http_tests::sqlite_http_access_role_change_bystander_and_read_error_end_real_body',
+        'http::routes::stars::selected_list_access_http_tests::sqlite_http_access_stream_current_revocation_close_drop_and_guard',
+        'db::project_documents::selected_create_finish_tests::project_create_rollback_retains_domain_and_driver_causes',
+        'db::project_documents::selected_create_backend_tests::sqlite_project_create_current_authority_and_parent_denials',
+        'db::project_documents::selected_create_backend_tests::sqlite_project_create_queued_writer_rechecks_credential_and_permission',
+        'db::project_documents::selected_create_backend_tests::sqlite_project_create_fk_publication_and_commit_failures_then_healthy_create',
+        'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_create_literal_request_metadata_number_order_and_publication',
+        'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_create_input_origin_current_authority_and_pat_scope_denials',
+        'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_create_real_fk_refusal_is_500_without_partial_effects',
+    )
+    GET_FILTERS = (
+        'db::projects::selected_project_read_tests::sqlite_project_reads_literal_counts_workflow_and_binary_order',
+        'db::projects::selected_project_read_tests::sqlite_project_reads_private_group_guest_and_current_authority',
+        'db::projects::selected_project_read_tests::sqlite_project_reads_driver_failure_rolls_back_and_healthy_retry',
+        'db::projects::selected_project_read_tests::project_read_cleanup_failure_withholds_rows_and_retains_typed_causes',
+        'db::document_tags::selected_tag_pool_tests::sqlite_tag_pool_unicode_search_past_page_limit_and_assignment_counts',
+        'db::document_tags::selected_tag_pool_tests::sqlite_tag_pool_current_authority_fault_and_healthy_retry',
+        'db::document_tags::selected_tag_pool_tests::tag_pool_cleanup_failure_withholds_rows_and_retains_typed_causes',
+        'http::routes::projects::selected_pending_get_http_tests::sqlite_http_pending_gets_literal_project_workflow_tag_and_members',
+        'http::routes::projects::selected_pending_get_http_tests::sqlite_http_pending_gets_pat_scopes_tenant_and_document_count_disclosure',
+        'http::routes::projects::selected_pending_get_http_tests::sqlite_http_pending_gets_current_denials_fault_and_healthy_retry',
+    )
+
+    METADATA_FILTERS = (
+        'db::project_documents::selected_metadata_backend_tests::sqlite_project_metadata_literal_status_and_archived_view',
+        'db::project_documents::selected_metadata_backend_tests::sqlite_project_metadata_current_grants_tenant_and_credential_denials',
+        'db::project_documents::selected_metadata_backend_tests::sqlite_project_metadata_driver_error_and_healthy_retry',
+        'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_metadata_cookie_pat_literal_and_current_denials',
+        'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_metadata_driver_error_and_healthy_retry',
+    )
+
+    AUX_FILTERS = (
+        'db::labels::selected_project_read_tests::selected_labels_read_nonempty_order_current_grants_and_credential_refusals',
+        'db::milestones::selected_project_read_tests::selected_milestones_read_nonempty_order_current_grants_and_credential_refusals',
+    )
+
+    BOOTSTRAP_FILTERS = (
+    'db::workspace::selected_personal_workspace_tests::sqlite_personal_bootstrap_stable_concurrent_mapping_and_private_slug_collision',
+    'db::workspace::selected_personal_workspace_tests::sqlite_personal_bootstrap_current_credentials_mapping_and_queued_writer_denials',
+    'db::workspace::selected_personal_workspace_tests::sqlite_personal_bootstrap_event_audit_and_commit_fk_failures_then_healthy_retry',
+    'db::workspace::selected_personal_workspace_tests::personal_bootstrap_rollback_cleanup_retains_domain_and_driver_causes',
+    'db::quota::selected_seat_admission_tests::sqlite_seat_admission_exact_billable_predicate_limit_existing_and_unlimited',
+    'db::quota::selected_seat_admission_tests::sqlite_seat_admission_writer_context_driver_failure_and_healthy_retry',
+    'db::quota::selected_seat_admission_tests::quota_context_restore_failure_retains_original_refusal_or_driver',
+    'http::routes::workspaces::selected_personal_bootstrap_http_tests::sqlite_http_personal_bootstrap_cookie_origin_session_only_and_stable_replay',
+    'http::routes::workspaces::selected_personal_bootstrap_http_tests::sqlite_http_personal_bootstrap_seat_limit_and_publication_failure_then_healthy_retry',
+    )
+
+    MEMBER_FILTERS = (
+        'db::workspace::selected_member_removal_tests::sqlite_member_removal_literal_effects_current_access_and_healthy_owner',
+        'db::workspace::selected_member_removal_tests::sqlite_member_removal_domain_matrix_tenant_and_queued_actor_revocation',
+        'db::workspace::selected_member_removal_tests::sqlite_member_removal_event_audit_deferred_fk_rollback_and_healthy_progress',
+        'db::workspace::selected_member_removal_tests::sqlite_member_removal_concurrent_owners_private_leads_single_winner',
+        'db::workspace::selected_member_removal_tests::member_removal_rollback_cleanup_retains_domain_and_driver_causes',
+        'db::projects::selected_member_removal_lead_tests::sqlite_workspace_removal_private_archived_direct_group_and_writer_scope',
+        'db::invitations::selected_member_removal_invitation_tests::sqlite_pending_inviter_roles_scope_accepted_and_empty_set',
+        'db::collections::selected_member_removal_view_tests::sqlite_shared_view_transfer_scope_version_overflow_rollback_and_healthy_progress',
+        'http::routes::workspaces::selected_personal_bootstrap_http_tests::member_removal::sqlite_http_member_delete_cookie_origin_pat_tenant_and_literal_success',
+        'http::routes::workspaces::selected_personal_bootstrap_http_tests::member_removal::sqlite_http_member_delete_audit_rollback_private_lead_refusal_and_healthy_progress',
+    )
+
+    def success(self, name: str) -> str:
+        return ("running 1 test\n" + f"test {name} ... ok\n"
+                + "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 99 filtered out; finished in 0.01s\n")
+
+    def test_exact54_filter_registry_preserves_original44_and_existing_default_command(self) -> None:
+        import hashlib
+        self.assertEqual(len(SEL.RUST_SELECTED_LIBRARY_FILTERS), 54)
+        self.assertEqual(SEL.RUST_SELECTED_LIBRARY_FILTERS[:18], self.ORIGINAL_FILTERS)
+        self.assertEqual(SEL.RUST_SELECTED_LIBRARY_FILTERS[18:28], self.GET_FILTERS)
+        self.assertEqual(len(self.ORIGINAL_FILTERS), 18)
+        self.assertEqual(len(self.GET_FILTERS), 10)
+        self.assertEqual(SEL.RUST_SELECTED_LIBRARY_FILTERS[28:33], self.METADATA_FILTERS)
+        self.assertEqual(len(self.METADATA_FILTERS), 5)
+        self.assertEqual(SEL.RUST_SELECTED_LIBRARY_FILTERS[33:35], self.AUX_FILTERS)
+        self.assertEqual(len(self.AUX_FILTERS), 2)
+        self.assertEqual(SEL.RUST_SELECTED_LIBRARY_FILTERS[35:44], self.BOOTSTRAP_FILTERS)
+        self.assertEqual(len(self.BOOTSTRAP_FILTERS), 9)
+        self.assertEqual(SEL.RUST_SELECTED_LIBRARY_FILTERS[44:], self.MEMBER_FILTERS)
+        self.assertEqual(len(self.MEMBER_FILTERS), 10)
+        self.assertEqual(hashlib.sha256("\n".join(SEL.RUST_SELECTED_LIBRARY_FILTERS[:44]).encode()).hexdigest(),
+                         "b1d7fff1c44346a300454eff3b0721e1a2078842308a1847b9e9411e23741cb1")
+        self.assertEqual(hashlib.sha256("\n".join(SEL.RUST_SELECTED_LIBRARY_FILTERS[:35]).encode()).hexdigest(),
+                         "479c869c1734119e7ee091d490dbda12d1df5f59fcd73eea78478649f23b1c87")
+        self.assertEqual(len(set(SEL.RUST_SELECTED_LIBRARY_FILTERS)), 54)
+        self.assertEqual(len(set(SEL.RUST_SELECTED_LIBRARY_FILTERS[:18])), 18)
+        self.assertEqual(hashlib.sha256("\n".join(SEL.RUST_SELECTED_LIBRARY_FILTERS[:18]).encode()).hexdigest(),
+                         "f9221b4d6b32402a3e125643d3fc67dfb600df8ef27b8e76013bb8b46ade7c80")
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/rust.yml")
+        self.assertIsNone(error)
+        self.assertEqual(SEL.verify_selected_library_execution(data["jobs"]), [])
+        for name in SEL.RUST_SELECTED_LIBRARY_FILTERS:
+            self.assertIsNone(SEL.selected_library_result_error(name, 0, self.success(name)))
+
+    def test_missing_duplicate_skip_env_features_filter_and_command_mutations_fail(self) -> None:
+        mutations = ("missing", "duplicate", "skip", "masked", "env", "job-env", "wrong-feature",
+                     "no-exact", "no-lib", "missing-loop-filter", "swallow-command", "missing-default")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), RustSuiteRegistryFixture() as fx:
+                fx.write_cargo()
+                path = fx.root / ".github/workflows/rust.yml"
+                data, error = SEL._load_yaml_mapping(path)
+                self.assertIsNone(error)
+                fast = data["jobs"]["fast"]
+                steps = fast["steps"]
+                step = next(x for x in steps if x.get("name") == SEL.RUST_SELECTED_LIBRARY_STEP)
+                if mutation == "missing":
+                    steps.remove(step)
+                elif mutation == "duplicate":
+                    steps.append(dict(step))
+                elif mutation == "skip":
+                    step["if"] = "false"
+                elif mutation == "masked":
+                    step["continue-on-error"] = True
+                elif mutation == "env":
+                    step["env"] = {"RUST_TEST_THREADS": "0"}
+                elif mutation == "job-env":
+                    fast["env"] = {"FVOCI_DATABASE_BACKEND": "libsql-remote"}
+                elif mutation == "wrong-feature":
+                    step["run"] = step["run"].replace('"db-tests"', '"api-schema"')
+                elif mutation == "no-exact":
+                    step["run"] = step["run"].replace(', "--exact"', '')
+                elif mutation == "no-lib":
+                    step["run"] = step["run"].replace('"--lib", ', '')
+                elif mutation == "missing-loop-filter":
+                    step["run"] = step["run"].replace('in RUST_SELECTED_LIBRARY_FILTERS:', 'in RUST_SELECTED_LIBRARY_FILTERS[:-1]:')
+                elif mutation == "swallow-command":
+                    step["run"] += "true\n"
+                else:
+                    steps.remove({"run": "cargo test --locked --offline --lib --bin fvoci-server", "env": {"CARGO_TARGET_DIR": "target/default"}})
+                fx.mutate_rust_workflow(lambda original: original.update(data))
+                errors = SEL.verify_workflow_registry(fx.root)
+                self.assertTrue(any("selected library" in e for e in errors), errors)
+        with RustSuiteRegistryFixture() as fx, mock.patch.object(
+            SEL, "RUST_SELECTED_LIBRARY_FILTERS", SEL.RUST_SELECTED_LIBRARY_FILTERS[:-1]
+        ):
+            fx.write_cargo()
+            errors = SEL.verify_rust_suite_registry(fx.root)
+            self.assertTrue(any("all54 exact filters" in e for e in errors), errors)
+
+    def test_zero_ignored_wrong_extra_and_failed_results_are_not_pass(self) -> None:
+        name = SEL.RUST_SELECTED_LIBRARY_FILTERS[0]
+        good = self.success(name)
+        cases = [
+            (0, ""),
+            (0, "running 1 test\n"),
+            (0, good.split("test result:", 1)[0]),
+            (0, good.replace(f"test {name} ... ok\n", "")),
+            (1, good),
+            (0, good.replace("running 1 test", "running 0 tests").replace("1 passed", "0 passed")),
+            (0, good.replace("... ok", "... ignored").replace("1 passed", "0 passed").replace("0 ignored", "1 ignored")),
+            (0, good.replace(name, "different::test")),
+            (0, good.replace("running 1 test", "running 2 tests").replace("1 passed", "2 passed")),
+            (0, good + f"test different::test ... ok\n"),
+            (0, good + good),
+            (0, good.replace("0 measured", "1 measured")),
+            (0, good.replace("0 failed", "1 failed")),
+        ]
+        for expected_name in self.ORIGINAL_FILTERS + self.GET_FILTERS + self.METADATA_FILTERS + self.AUX_FILTERS + self.BOOTSTRAP_FILTERS + self.MEMBER_FILTERS:
+            for exit_code, output in cases:
+                with self.subTest(name=expected_name, exit=exit_code, output=output):
+                    self.assertIsNotNone(SEL.selected_library_result_error(expected_name, exit_code, output.replace(name, expected_name)))
+        self.assertIsNotNone(SEL.selected_library_result_error("missing::filter", 0, self.success("missing::filter")))
+
+    def run_workflow_fixture(self, output_kind: str, fail_index: int = 0):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/rust.yml")
+        self.assertIsNone(error)
+        step = next(x for x in data["jobs"]["fast"]["steps"] if x.get("name") == SEL.RUST_SELECTED_LIBRARY_STEP)
+        run = step["run"]
+        prefix = "set -euo pipefail\npython3 - <<'PYLIB'\n"
+        self.assertTrue(run.startswith(prefix))
+        self.assertTrue(run.endswith("\nPYLIB\n"))
+        code = run[len(prefix):-len("\nPYLIB\n")]
+        calls = []
+        def fake_run(argv, **kwargs):
+            expected_filter = (self.ORIGINAL_FILTERS + self.GET_FILTERS + self.METADATA_FILTERS + self.AUX_FILTERS + self.BOOTSTRAP_FILTERS + self.MEMBER_FILTERS)[len(calls)]
+            self.assertEqual(argv, ["cargo", "test", "--locked", "--offline", "--features", "db-tests",
+                                    "--lib", expected_filter, "--", "--exact"])
+            self.assertEqual(kwargs, {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True})
+            calls.append(argv)
+            output = self.success(expected_filter)
+            kind = output_kind if len(calls) - 1 == fail_index else "ok"
+            if kind == "zero":
+                output = output.replace("running 1 test", "running 0 tests").replace("1 passed", "0 passed")
+            elif kind == "ignored":
+                output = output.replace("... ok", "... ignored").replace("1 passed", "0 passed").replace("0 ignored", "1 ignored")
+            elif kind == "wrong":
+                output = output.replace(expected_filter, "wrong::test")
+            elif kind == "missing":
+                output = ""
+            elif kind == "truncated":
+                output = output.split("test result:", 1)[0]
+            elif kind == "failed":
+                output = output.replace("... ok", "... FAILED").replace("0 failed", "1 failed")
+            elif kind == "count":
+                output = output.replace("running 1 test", "running 2 tests")
+            return SimpleNamespace(returncode=1 if kind == "command-failed" else 0, stdout=output)
+        with mock.patch("subprocess.run", side_effect=fake_run), contextlib.redirect_stdout(io.StringIO()):
+            if output_kind == "ok":
+                exec(compile(code, "maintained-rust-selected-library-step", "exec"), {})
+            else:
+                with self.assertRaises(SystemExit):
+                    exec(compile(code, "maintained-rust-selected-library-step", "exec"), {})
+        return calls
+
+    def test_actual_workflow_script_executes54_canonical_commands_without_env_override(self) -> None:
+        self.assertEqual(len(self.run_workflow_fixture("ok")), 54)
+
+    def test_actual_workflow_script_fails_first_refusal_without_retry_or_later_execution(self) -> None:
+        for kind in ("zero", "ignored", "wrong", "command-failed"):
+            with self.subTest(kind=kind):
+                self.assertEqual(len(self.run_workflow_fixture(kind)), 1)
+
+    def test_registry_original_removal_reorder_and_get_omission_duplicate_unknown_fail(self) -> None:
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/rust.yml")
+        self.assertIsNone(error)
+        expected = self.ORIGINAL_FILTERS + self.GET_FILTERS + self.METADATA_FILTERS + self.AUX_FILTERS + self.BOOTSTRAP_FILTERS + self.MEMBER_FILTERS
+        variants = [("original-reordered", (expected[1], expected[0]) + expected[2:]),
+                    ("get-reordered", expected[:18] + (expected[19], expected[18]) + expected[20:]),
+                    ("all-get-missing", self.ORIGINAL_FILTERS),
+                    ("metadata-reordered", expected[:28] + (expected[29], expected[28]) + expected[30:]),
+                    ("all-metadata-missing", expected[:28]),
+                    ("aux-reordered", expected[:33] + (expected[34], expected[33])),
+                    ("all-aux-missing", expected[:33]),
+                    ("all-bootstrap-missing", expected[:35]),
+                    ("bootstrap-reordered", expected[:35] + (expected[36], expected[35]) + expected[37:]),
+                    ("all-member-missing", expected[:44]),
+                    ("member-reordered", expected[:44] + (expected[45], expected[44]) + expected[46:])]
+        for index, name in enumerate(expected):
+            variants.append(("missing:" + name, expected[:index] + expected[index + 1:]))
+        for index, name in enumerate(self.GET_FILTERS + self.METADATA_FILTERS + self.AUX_FILTERS + self.BOOTSTRAP_FILTERS + self.MEMBER_FILTERS, 18):
+            variants.append(("duplicate:" + name, expected[:index] + (expected[index - 1],) + expected[index + 1:]))
+            variants.append(("unknown:" + name, expected[:index] + ("unknown::filter",) + expected[index + 1:]))
+        for mutation, filters in variants:
+            with self.subTest(mutation=mutation), mock.patch.object(SEL, "RUST_SELECTED_LIBRARY_FILTERS", filters):
+                errors = SEL.verify_selected_library_execution(data["jobs"])
+                self.assertTrue(any("all54 exact filters" in error for error in errors), errors)
+
+    def test_actual_workflow_script_refuses_each_new_get_result_without_retry(self) -> None:
+        for fail_index in range(18, 28):
+            for kind in ("missing", "zero", "ignored", "wrong", "count", "truncated", "failed", "command-failed"):
+                with self.subTest(filter=self.GET_FILTERS[fail_index - 18], kind=kind):
+                    self.assertEqual(len(self.run_workflow_fixture(kind, fail_index)), fail_index + 1)
+
+
+    def test_actual_workflow_script_refuses_each_metadata_result_without_retry(self) -> None:
+        for fail_index in range(28, 33):
+            for kind in ("missing", "zero", "ignored", "wrong", "count", "truncated", "failed", "command-failed"):
+                with self.subTest(filter=self.METADATA_FILTERS[fail_index - 28], kind=kind):
+                    self.assertEqual(len(self.run_workflow_fixture(kind, fail_index)), fail_index + 1)
+
+    def test_actual_workflow_script_refuses_each_aux_result_without_retry(self) -> None:
+        for fail_index in range(33, 35):
+            for kind in ("missing", "zero", "ignored", "wrong", "count", "truncated", "failed", "command-failed"):
+                with self.subTest(filter=self.AUX_FILTERS[fail_index - 33], kind=kind):
+                    self.assertEqual(len(self.run_workflow_fixture(kind, fail_index)), fail_index + 1)
+
+    def test_actual_workflow_script_refuses_each_bootstrap_result_without_retry(self) -> None:
+        for fail_index in range(35, 44):
+            for kind in ("missing", "zero", "ignored", "wrong", "count", "truncated", "failed", "command-failed"):
+                with self.subTest(filter=self.BOOTSTRAP_FILTERS[fail_index - 35], kind=kind):
+                    self.assertEqual(len(self.run_workflow_fixture(kind, fail_index)), fail_index + 1)
+
+    def test_actual_workflow_script_refuses_each_member_result_without_retry(self) -> None:
+        for fail_index in range(44, 54):
+            for kind in ("missing", "zero", "ignored", "wrong", "count", "truncated", "failed", "command-failed"):
+                with self.subTest(filter=self.MEMBER_FILTERS[fail_index - 44], kind=kind):
+                    self.assertEqual(len(self.run_workflow_fixture(kind, fail_index)), fail_index + 1)
+
 class RegistryMutationCliTest(unittest.TestCase):
+    def test_sqlite_prefix_cache_mutations_fail_closed_for_every_consumer(self) -> None:
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/rust.yml")
+        self.assertIsNone(error)
+        self.assertEqual(SEL.verify_sqlite_prefix_cache(data["jobs"]), [])
+        for job in ("fast", "native-arm64", "postgres-build", "postgres", "collaboration"):
+            for mutation in ("pin", "key", "path", "restore-fallback", "save-consumer", "skip-verify",
+                             "missing-verify", "reorder", "expected-identity", "skip-preflight", "packages", "early-consumer"):
+                with self.subTest(job=job, mutation=mutation):
+                    jobs = copy.deepcopy(data["jobs"])
+                    steps = jobs[job]["steps"]
+                    restore, verify = (next(s for s in steps if s.get("name") == name) for name in
+                                       ("Restore prepared SQLite prefix", "Verify cached SQLite prefix or build"))
+                    prep = next(s for s in steps if s.get("id") == "sqlite")
+                    if mutation == "pin": restore["uses"] = "actions/cache/restore@v4"
+                    elif mutation == "key": restore["with"]["key"] = "unqualified"
+                    elif mutation == "path": restore["with"]["path"] = "target"
+                    elif mutation == "restore-fallback": restore["with"]["restore-keys"] = "v1-sqlite"
+                    elif mutation == "save-consumer": steps.append(copy.deepcopy(SEL.sqlite_prefix_cache_steps(True)[2]))
+                    elif mutation == "skip-verify": verify["if"] = "steps.sqlite_prefix_cache.outputs.cache-hit != 'true'"
+                    elif mutation == "missing-verify": steps.remove(verify)
+                    elif mutation == "reorder": steps.remove(verify);steps.insert(0, verify)
+                    elif mutation == "expected-identity": verify["run"] = verify["run"].replace("--expected-cache-identity", "--foreign-identity")
+                    elif mutation == "skip-preflight": prep["continue-on-error"] = True
+                    elif mutation == "packages": prep["run"] = prep["run"].replace(SEL.SQLITE_PACKAGES, "dpkg-query -W")
+                    else: steps.insert(0, {"run": "cargo build --locked"})
+                    self.assertTrue(SEL.verify_sqlite_prefix_cache(jobs))
+
+    def test_sqlite_prefix_missing_verification_prevents_green_plan(self) -> None:
+        root = self._mutated_root()
+        path = root / ".github/workflows/rust.yml"
+        data, error = SEL._load_yaml_mapping(path)
+        self.assertIsNone(error)
+        data["jobs"]["postgres"]["steps"] = [step for step in data["jobs"]["postgres"]["steps"]
+                                               if step.get("name") != "Verify cached SQLite prefix or build"]
+        import yaml
+        path.write_text(yaml.safe_dump(data, sort_keys=False))
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "SQLite prefix cache must retain exact preflight/restore/verify")
+
+    def test_extra_cache_steps_require_exact_safe_download_shape(self) -> None:
+        cases = [(family, path) for family in ("save", "restore", "combined")
+                 for path in ("tar?et/**", "tar*/**", "**/target", "${{ github.workspace }}/**", "~/.cargo/registry\n~/.cargo/git\n../target")]
+        cases.append(("restore", "target"))
+        for family, target in cases:
+            with self.subTest(family=family, target=target):
+                root = self._mutated_root()
+                path = root / ".github/workflows/rust.yml"
+                data, err = SEL._load_yaml_mapping(path)
+                self.assertIsNone(err)
+                step = copy.deepcopy(next(step for step in data["jobs"]["fast"]["steps"] if step.get("name") == "Restore server build outputs"))
+                step["name"] = "Extra cache with uncertain qualification"
+                step["uses"] = step["uses"].replace("cache/restore@", "cache@" if family == "combined" else "cache/" + family + "@")
+                step["with"]["path"] = target
+                if target == "target":
+                    step["with"]["key"] = "v2-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-unqualified"
+                data["jobs"]["fast"]["steps"].append(step)
+                import yaml
+                path.write_text(yaml.safe_dump(data, sort_keys=False))
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, "only the exact qualified target restore/save and safe Cargo downloads")
+
+    def test_differently_named_fast_target_writers_cannot_bypass_exact_save_pairs(self) -> None:
+        for family in ("save", "combined"):
+            for target in ("target", "./target", "target/debug", "${{ github.workspace }}/target", ".", "~/.cargo/registry\ntarget"):
+                with self.subTest(family=family, target=target):
+                    root = self._mutated_root()
+                    path = root / ".github/workflows/rust.yml"
+                    data, err = SEL._load_yaml_mapping(path)
+                    self.assertIsNone(err)
+                    step = copy.deepcopy(next(step for step in data["jobs"]["fast"]["steps"] if step.get("name") == "Restore server build outputs"))
+                    step["name"] = "Differently named optional save"
+                    step["uses"] = step["uses"].replace("cache/restore@", "cache/save@" if family == "save" else "cache@")
+                    step["with"]["path"] = target
+                    data["jobs"]["fast"]["steps"].append(step)
+                    import yaml
+                    path.write_text(yaml.safe_dump(data, sort_keys=False))
+                    proc, output = self._plan_against(root)
+                    self._assert_no_green_outputs(proc, output, "only the exact qualified target restore/save and safe Cargo downloads")
+
+    def test_fast_cache_retains_explicit_restore_save_pins_and_complete_inputs(self) -> None:
+        for mutation in ("combined-post", "wrong-pin", "path", "architecture", "toolchain", "sqlite", "source", "fallback", "skip"):
+            with self.subTest(mutation=mutation):
+                root = self._mutated_root()
+                path = root / ".github/workflows/rust.yml"
+                data, err = SEL._load_yaml_mapping(path)
+                self.assertIsNone(err)
+                cache = next(step for step in data["jobs"]["fast"]["steps"] if step.get("name") == "Restore server build outputs")
+                if mutation == "combined-post":cache["uses"] = cache["uses"].replace("cache/restore@", "cache@")
+                elif mutation == "wrong-pin":cache["uses"] = "actions/cache/restore@v4"
+                elif mutation == "path":cache["with"]["path"] = "/foreign/target"
+                elif mutation == "architecture":cache["with"]["key"] = cache["with"]["key"].replace("${{ runner.arch }}", "fixed")
+                elif mutation == "toolchain":cache["with"]["key"] = cache["with"]["key"].replace("1.98.1", "old")
+                elif mutation == "sqlite":cache["with"]["key"] = cache["with"]["key"].replace("${{ steps.sqlite.outputs.cache_identity }}", "")
+                elif mutation == "source":cache["with"]["key"] = cache["with"]["key"].replace("'src/**', ", "")
+                elif mutation == "fallback":cache["with"]["restore-keys"] = "v2-server-"
+                else:cache["if"] = "false"
+                import yaml
+                path.write_text(yaml.safe_dump(data, sort_keys=False))
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, "fast server cache must retain exact pinned restore/save")
+
+    def test_official_separate_cache_families_keep_architecture_and_toolchain_qualification(self) -> None:
+        for family in ("restore", "save"):
+            with self.subTest(family=family):
+                root = self._mutated_root()
+                path = root / ".github/workflows/rust.yml"
+                data, err = SEL._load_yaml_mapping(path)
+                self.assertIsNone(err)
+                cache = next(step for step in data["jobs"]["fast"]["steps"] if step.get("name") == "Restore Cargo downloads")
+                cache["uses"] = cache["uses"].replace("cache@", "cache/" + family + "@")
+                cache["with"]["key"] = "unqualified-downloads"
+                import yaml
+                path.write_text(yaml.safe_dump(data, sort_keys=False))
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, "cache key must bind Ubuntu 26.04, architecture and toolchain")
+
+    def test_postgres_budget_mutations_rejected_before_plan_outputs(self) -> None:
+        for mutation in ("missing-c", "missing-gate", "wrong-selection", "longer-budget", "cache-fallback"):
+            with self.subTest(mutation=mutation):
+                root = self._mutated_root()
+                path = root / ".github/workflows/rust.yml"
+                data, err = SEL._load_yaml_mapping(path)
+                self.assertIsNone(err)
+                job = data["jobs"]["postgres"]
+                if mutation == "missing-c":
+                    rows = job["strategy"]["matrix"]["include"]
+                    rows.remove(next(row for row in rows if row["shard"] == "c"))
+                    needle = "all twelve"
+                elif mutation == "missing-gate":
+                    data["jobs"]["rust-ci-gate"]["needs"].remove("postgres")
+                    needle = "every registered job"
+                elif mutation == "wrong-selection":
+                    job["if"] = "false"
+                    needle = "postgres if must be"
+                elif mutation == "longer-budget":
+                    job["timeout-minutes"] = 30
+                    needle = "A/C15m, x64 B20m and ARM64 B25m"
+                else:
+                    cache = next(step for step in data["jobs"]["postgres-build"]["steps"] if step.get("name") == "Restore server build outputs")
+                    cache["with"]["restore-keys"] = "v2-server-"
+                    needle = "strict complete-input server cache"
+                import yaml
+                path.write_text(yaml.safe_dump(data, sort_keys=False))
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, needle)
+
+    def test_native_budget_registry_mutations_rejected_before_outputs(self) -> None:
+        for mutation in ("missing-job", "missing-gate-need", "wrong-condition"):
+            with self.subTest(mutation=mutation):
+                root = self._mutated_root()
+                web = root / ".github/workflows/web.yml"
+                text = web.read_text(encoding="utf-8")
+                if mutation == "missing-job":
+                    start = text.index("  web-native-checks:")
+                    end = text.index("  workspace-browser-shard:", start)
+                    changed = text[:start] + text[end:]
+                    needle = "web-native-checks"
+                elif mutation == "missing-gate-need":
+                    changed = text.replace("        web-native-checks,\n", "", 1)
+                    needle = "needs must be ci-plan and every registered job"
+                else:
+                    start = text.index("  web-native-checks:")
+                    changed = text[:start] + text[start:].replace(
+                        "needs.ci-plan.outputs.select_web_checks == 'true'",
+                        "needs.ci-plan.outputs.select_web_static == 'true'", 1)
+                    needle = "web-native-checks if must be"
+                self.assertNotEqual(text, changed, "negative control must mutate the workflow")
+                web.write_text(changed, encoding="utf-8")
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, needle)
+
+
     def _mutated_root(self) -> Path:
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -1314,7 +2670,7 @@ class RegistryMutationCliTest(unittest.TestCase):
   new-suite:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_new_suite == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - run: echo new
 """
@@ -1338,9 +2694,9 @@ class RegistryMutationCliTest(unittest.TestCase):
                 "workflow_dispatch inputs must be exactly",
             ),
             (
-                "  upgrade-smoke-arm64:\n    needs: ci-plan\n    if: needs.ci-plan.outputs.select_upgrade_smoke_arm64 == 'true'\n    runs-on: ubuntu-24.04-arm\n",
-                "  upgrade-smoke-arm64:\n    needs: ci-plan\n    if: needs.ci-plan.outputs.select_upgrade_smoke_arm64 == 'true'\n    runs-on: ubuntu-24.04\n",
-                "upgrade-smoke-arm64 runs-on must be ubuntu-24.04-arm",
+                "  upgrade-smoke-arm64:\n    needs: ci-plan\n    if: needs.ci-plan.outputs.select_upgrade_smoke_arm64 == 'true'\n    runs-on: ubuntu-26.04-arm\n",
+                "  upgrade-smoke-arm64:\n    needs: ci-plan\n    if: needs.ci-plan.outputs.select_upgrade_smoke_arm64 == 'true'\n    runs-on: ubuntu-26.04\n",
+                "upgrade-smoke-arm64 runs-on must be ubuntu-26.04-arm",
             ),
             (
                 "    if: needs.ci-plan.outputs.select_upgrade_smoke_arm64 == 'true'\n",
@@ -1387,7 +2743,7 @@ class RegistryMutationCliTest(unittest.TestCase):
   sneaky-ci-gate:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_sneaky_ci_gate == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - run: echo sneaky
 """
@@ -1470,9 +2826,229 @@ class RegistryMutationCliTest(unittest.TestCase):
     def test_new_workflow_rejected_before_outputs(self) -> None:
         root = self._mutated_root()
         extra = root / ".github" / "workflows" / "extra.yml"
-        extra.write_text("name: Extra\non: push\njobs:\n  extra-job:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo x\n", encoding="utf-8")
+        extra.write_text("name: Extra\non: push\njobs:\n  extra-job:\n    runs-on: ubuntu-26.04\n    steps:\n      - run: echo x\n", encoding="utf-8")
         proc, output = self._plan_against(root)
         self._assert_no_green_outputs(proc, output, "unknown workflow file extra.yml")
+
+    def test_turso_manual_workflow_security_boundaries_before_outputs(self) -> None:
+        target_init = "          printf 'CARGO_TARGET_DIR=%s/turso-target\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"\n"
+        cases = [
+            ("  workflow_dispatch:\n", "  pull_request_target:\n", "manual dispatch only"),
+            ("      destructive:\n", "      checkout_sha:\n", "fixed phase inputs"),
+            ("default: connection", "default: migration", "fixed phase inputs"),
+            ("default: false", "default: true", "fixed phase inputs"),
+            ("Connection, inventory and ui-baseline read-only; migration, reset and ui-ack require both destructive gates; others NOT IMPLEMENTED", "All phases implemented", "fixed phase inputs"),
+            ("  contents: read\n", "  contents: write\n", "contents read only"),
+            ("  cancel-in-progress: false\n", "  cancel-in-progress: true\n", "fixed database concurrency"),
+            ("github.repository == 'AISFlow/fvoci'", "github.repository == 'attacker/fvoci'", "trusted admission"),
+            ("ref: ${{ github.sha }}", "ref: ${{ inputs.checkout_sha }}", "pre-Environment admission steps"),
+            ("persist-credentials: false", "persist-credentials: true", "pre-Environment admission steps"),
+            ("    needs: admission\n", "    needs: []\n", "runtime needs successful trusted admission"),
+            ("    environment: fvoci-turso-test\n", "    environment: production\n", "fixed Environment"),
+            (" --admit\n", " --consume\n", "pre-Environment admission steps"),
+            ("--no-run --message-format=json", "--message-format=json", "fixed fresh compilation"),
+            ("      CARGO_INCREMENTAL: 0\n", "      TOKEN: ${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}\n", "credential-free compiler environment"),
+            (" --consume\n", " --consume || true\n", "only one sanitized runtime step"),
+            ("branches: [fvoci/v060-turso-verified-connection]", "branches: ['*']", "fixed credential-free bootstrap"),
+            ("    if: github.event_name == 'workflow_dispatch'", "    if: github.event_name == 'push'", "runtime needs successful trusted admission"),
+            ("      CARGO_INCREMENTAL: 0\n", "      CARGO_INCREMENTAL: 0\n      CARGO_TARGET_DIR: ${{ runner.temp }}/turso-target\n", "credential-free compiler environment"),
+            (target_init, "", "maintained pinned compiler/native preparation"),
+            (target_init, target_init.replace("$RUNNER_TEMP", "/foreign"), "maintained pinned compiler/native preparation"),
+            (target_init + "          rustup toolchain install 1.98.1 --profile minimal\n", "          rustup toolchain install 1.98.1 --profile minimal\n" + target_init, "maintained pinned compiler/native preparation"),
+        ]
+        for old, new, needle in cases:
+            with self.subTest(boundary=needle):
+                root = self._mutated_root()
+                path = root / ".github" / "workflows" / "turso-test.yml"
+                text = path.read_text(encoding="utf-8")
+                self.assertIn(old, text)
+                path.write_text(text.replace(old, new, 1), encoding="utf-8")
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, needle)
+
+    def test_turso_ui_allocation_cannot_expand_credentials_or_bypass_current_binding(self) -> None:
+        bun_cache_export = "          printf 'BUN_INSTALL_CACHE_DIR=%s/turso-bun-cache\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"\n"
+        browser_cache_export = "          printf 'PLAYWRIGHT_BROWSERS_PATH=%s/turso-browsers\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"\n"
+        cases = [
+            ("    needs: admission\n", "    needs: []\n"),
+            ("github.event.inputs.phase == 'ui-ack'", "github.event.inputs.phase != 'ui-ack'"),
+            ("github.repository == 'AISFlow/fvoci'", "github.repository == 'attacker/fvoci'"),
+            ("github.ref == 'refs/heads/main'", "startsWith(github.ref, 'refs/heads/')"),
+            ("    environment: fvoci-turso-test\n", "    environment: production\n"),
+            ("    timeout-minutes: 40\n", "    timeout-minutes: 90\n"),
+            ("      FVOCI_BUILD_SHA: ${{ github.sha }}\n", "      FVOCI_BUILD_SHA: stale9202\n"),
+            ("      CARGO_BUILD_JOBS: 2\n", "      CARGO_BUILD_JOBS: 12\n"),
+            ("      CARGO_INCREMENTAL: 0\n", "      TOKEN: ${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}\n"),
+            ("      PYTHONDONTWRITEBYTECODE: '1'\n", "      BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/turso-bun-cache\n      PYTHONDONTWRITEBYTECODE: '1'\n"),
+            ("      PYTHONDONTWRITEBYTECODE: '1'\n", "      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/turso-browsers\n      PYTHONDONTWRITEBYTECODE: '1'\n"),
+            (bun_cache_export, ""),
+            (browser_cache_export, ""),
+            (bun_cache_export, bun_cache_export.replace("$RUNNER_TEMP", "/foreign")),
+            (browser_cache_export, browser_cache_export.replace("$GITHUB_ENV", "$GITHUB_OUTPUT")),
+            ("          ref: ${{ github.sha }}\n", "          ref: main\n"),
+            ("          persist-credentials: false\n", "          persist-credentials: true\n"),
+            ("          cargo fetch --locked\n", "          cargo fetch\n"),
+            ("          cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml\n", ""),
+            ("          cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml\n",
+             "          cargo fetch --manifest-path crates/collab-engine/Cargo.toml\n"),
+            ("          cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml\n",
+             "          cargo fetch --locked --manifest-path Cargo.toml\n"),
+            ("          bun-version: 1.4.2\n", "          bun-version: latest\n"),
+            ("          bun install --frozen-lockfile\n", "          bun install\n"),
+            ("          python3 scripts/selected-backend-ci/turso-ui.py --record-before\n", ""),
+            ("          bun --bun run --cwd apps/web build\n", "          cp -r /stale9202/dist apps/web/dist\n"),
+            ("          bun --bun run --cwd apps/web build\n", "          bun run --cwd apps/web build\n"),
+            ("--features api-schema,db-tests --jobs 2", "--features db-tests --jobs 2"),
+            ("--features worker --jobs 2", "--jobs 2"),
+            ("          python3 scripts/selected-backend-ci/turso-ui.py --freeze\n", ""),
+            ("      - name: Actual current primary UI baseline or guarded ON restart OFF consumer\n",
+             "      - name: Actual current primary UI baseline or guarded ON restart OFF consumer\n        if: false\n"),
+            ("${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}", "true"),
+            ("${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}", "${{ secrets.PRODUCTION_TOKEN }}"),
+            ("        run: python3 scripts/selected-backend-ci/turso-test-guard.py --consume\n",
+             "        run: python3 scripts/selected-backend-ci/turso-ui.py --actor\n"),
+        ]
+        for old, new in cases:
+            with self.subTest(mutation=new):
+                root = self._mutated_root()
+                path = root / ".github" / "workflows" / "turso-test.yml"
+                prefix, ui = path.read_text(encoding="utf-8").split("  turso-ui:\n", 1)
+                self.assertIn(old, ui)
+                path.write_text(prefix + "  turso-ui:\n" + ui.replace(old, new, 1), encoding="utf-8")
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, "fixed private Turso UI job and current source baseline consumer")
+        root = self._mutated_root()
+        path = root / ".github" / "workflows" / "turso-test.yml"
+        path.write_text(path.read_text() + "    extra-step: {uses: actions/upload-artifact@v4}\n")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "fixed private Turso UI job and current source baseline consumer")
+
+    def test_turso_ui_inputs_cannot_accept_an_unreviewed_source_or_dataset(self) -> None:
+        for old, new in (("      ui_source_sha:\n", "      arbitrary_source:\n"),
+                         ("      ui_baseline_sha256:\n", "      arbitrary_dataset:\n"),
+                         ("      ui_target_sha256:\n", "      arbitrary_target:\n"),
+                         ("options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline]",
+                          "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack]")):
+            with self.subTest(mutation=new):
+                root = self._mutated_root()
+                path = root / ".github" / "workflows" / "turso-test.yml"
+                text = path.read_text()
+                self.assertIn(old, text)
+                path.write_text(text.replace(old, new, 1))
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, "fixed phase inputs and non-destructive default")
+
+    def test_turso_inventory_phase_registration_is_closed_before_outputs(self) -> None:
+        phases = "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline]"
+        cases = [
+            phases.replace(", inventory", ""),
+            phases.replace("inventory", "unapproved-phase"),
+            phases.replace("inventory", "inventory, unapproved-phase"),
+            phases.replace("inventory", "inventory, inventory"),
+            phases.replace("migration, inventory", "inventory, migration"),
+        ]
+        for mutated in cases:
+            with self.subTest(phases=mutated):
+                root = self._mutated_root()
+                path = root / ".github" / "workflows" / "turso-test.yml"
+                text = path.read_text(encoding="utf-8")
+                self.assertEqual(text.count(phases), 1)
+                path.write_text(text.replace(phases, mutated, 1), encoding="utf-8")
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(
+                    proc, output, "turso-test.yml: fixed phase inputs and non-destructive default"
+                )
+
+    def test_turso_reset_phase_registration_is_closed_before_outputs(self) -> None:
+        phases = "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline]"
+        for mutated in (phases.replace(", reset", ""), phases.replace("reset", "unapproved-phase"),
+                        phases.replace("reset", "reset, reset"), phases.replace("reset", "reset, unapproved-phase")):
+            with self.subTest(phases=mutated):
+                root = self._mutated_root()
+                path = root / ".github" / "workflows" / "turso-test.yml"
+                text = path.read_text(encoding="utf-8")
+                self.assertEqual(text.count(phases), 1)
+                path.write_text(text.replace(phases, mutated, 1), encoding="utf-8")
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, "turso-test.yml: fixed phase inputs and non-destructive default")
+
+    def test_turso_diagnostic_unit_registration_is_exact_and_before_secrets(self) -> None:
+        unit = ("      - name: Credential-free frozen diagnostic unit (exactly one test)\n"
+                "        run: python3 scripts/selected-backend-ci/turso-test-guard.py --diagnostic-unit\n")
+        needle = "credential-free exact frozen diagnostic unit before secret consumption"
+        cases = [
+            (unit, "", "fixed credential-free build then single consuming step"),
+            (unit, unit + unit, "fixed credential-free build then single consuming step"),
+            (unit, unit.replace("--diagnostic-unit", "--consume"), needle),
+            (unit, unit.replace("--diagnostic-unit", "--diagnostic-unit --ignored"), needle),
+            (unit, unit.replace("--diagnostic-unit", "--diagnostic-unit || true"), needle),
+            (unit, unit.replace("frozen diagnostic unit", "arbitrary unit"), needle),
+            (unit, unit.replace("        run:", "        env:\n          TOKEN: ${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}\n        run:"), needle),
+            (unit, unit.replace("        run:", "        env:\n          EXTRA: value\n        run:"), needle),
+            (unit, unit.replace("        run:", "        if: false\n        run:"), needle),
+        ]
+        for old, new, expected in cases:
+            with self.subTest(boundary=expected, mutation=new):
+                root = self._mutated_root()
+                path = root / ".github" / "workflows" / "turso-test.yml"
+                text = path.read_text(encoding="utf-8")
+                self.assertEqual(text.count(old), 1)
+                path.write_text(text.replace(old, new, 1), encoding="utf-8")
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, expected)
+        for placement in ("before_compile", "after_secret"):
+            with self.subTest(placement=placement):
+                root = self._mutated_root()
+                path = root / ".github" / "workflows" / "turso-test.yml"
+                text = path.read_text(encoding="utf-8")
+                self.assertEqual(text.count(unit), 1)
+                text = text.replace(unit, "", 1)
+                if placement == "before_compile":
+                    marker = "      - name: Credential-free current library test compilation\n"
+                    self.assertIn(marker, text)
+                    text = text.replace(marker, unit + marker, 1)
+                else:
+                    marker = "        run: python3 scripts/selected-backend-ci/turso-test-guard.py --consume\n"
+                    self.assertIn(marker, text)
+                    text = text.replace(marker, marker + unit, 1)
+                path.write_text(text, encoding="utf-8")
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, needle)
+
+    def test_turso_target_initialization_moved_to_compile_rejected_before_outputs(self) -> None:
+        root = self._mutated_root()
+        path = root / ".github" / "workflows" / "turso-test.yml"
+        text = path.read_text(encoding="utf-8")
+        target_init = "          printf 'CARGO_TARGET_DIR=%s/turso-target\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"\n"
+        self.assertIn(target_init, text)
+        self.assertIn("          cargo test --locked", text)
+        text = text.replace(target_init, "", 1).replace("          cargo test --locked", target_init + "          cargo test --locked", 1)
+        path.write_text(text, encoding="utf-8")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "maintained pinned compiler/native preparation")
+        self.assertIn("fixed fresh compilation", proc.stderr)
+
+    def test_old_runner_labels_rejected_before_outputs(self) -> None:
+        for filename in (*SEL.WORKFLOW_YAML.values(), SEL.RELEASE_WORKFLOW_FILE, SEL.TURSO_MANUAL_WORKFLOW_FILE):
+            for old_label in ("ubuntu-24.04", "ubuntu-22.04", "ubuntu-latest"):
+                with self.subTest(workflow=filename, runner=old_label):
+                    root = self._mutated_root()
+                    path = root / ".github" / "workflows" / filename
+                    text = path.read_text(encoding="utf-8")
+                    self.assertIn("runs-on: ubuntu-26.04", text)
+                    path.write_text(text.replace("runs-on: ubuntu-26.04", "runs-on: " + old_label, 1), encoding="utf-8")
+                    proc, output = self._plan_against(root)
+                    self._assert_no_green_outputs(proc, output, "requires explicit Ubuntu 26.04 runners")
+
+    def test_old_os_cache_prefix_rejected_before_outputs(self) -> None:
+        root = self._mutated_root()
+        path = root / ".github" / "workflows" / "collab-engine.yml"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("restore-keys: v1-collab-engine-ubuntu-26.04-", text)
+        path.write_text(text.replace("restore-keys: v1-collab-engine-ubuntu-26.04-",
+                                     "restore-keys: v1-collab-engine-ubuntu-24.04-"), encoding="utf-8")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "cache restore-keys must bind Ubuntu 26.04")
 
     def test_missing_selector_output_rejected_before_outputs(self) -> None:
         root = self._mutated_root()
@@ -1486,15 +3062,30 @@ class RegistryMutationCliTest(unittest.TestCase):
         root = self._mutated_root()
         web = root / ".github" / "workflows" / "web.yml"
         text = web.read_text(encoding="utf-8")
-        web.write_text(
-            text.replace(
-                "    needs: [ci-plan, web-static, web-checks, workspace-browser-shard, collaboration-flow]",
-                "    needs: [ci-plan, web-checks]",
-            ),
-            encoding="utf-8",
-        )
+        gate_start = text.index("  web-ci-gate:")
+        before_gate, gate = text[:gate_start], text[gate_start:]
+        original_needs = """    needs:
+      [
+        ci-plan,
+        web-static,
+        web-checks,
+        web-native-checks,
+        workspace-browser-build,
+        workspace-browser-shard,
+        collaboration-build,
+        collaboration-install-on,
+        collaboration-postgres-on,
+        collaboration-sqlite-on,
+        collaboration-postgres-off,
+        collaboration-sqlite-off,
+      ]"""
+        self.assertIn(original_needs, gate)
+        mutated = before_gate + gate.replace(original_needs, "    needs: [ci-plan, web-checks]", 1)
+        self.assertNotEqual(text, mutated, "negative control must mutate the actual gate")
+        web.write_text(mutated, encoding="utf-8")
         proc, output = self._plan_against(root)
         self._assert_no_green_outputs(proc, output, "needs must be ci-plan and every registered job")
+
 
     def test_swapped_needs_json_expr_rejected_before_outputs(self) -> None:
         root = self._mutated_root()

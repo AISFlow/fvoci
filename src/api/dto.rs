@@ -124,6 +124,7 @@ use utoipa::ToSchema;
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct SetupStatusResponse {
+    pub realtime_mode: crate::config::RealtimeMode,
     pub needed: bool,
     pub branding: BrandingOutput,
     pub mail_enabled: bool,
@@ -659,6 +660,8 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for RequiredNullable<T> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct CreateDocumentBody {
+    /// Chosen once per logical ordinary wiki create, retained on response loss.
+    pub command_id: Uuid,
     #[cfg_attr(feature = "api-schema", schema(value_type = Option<Uuid>, required = true, nullable = true))]
     #[serde(default)]
     pub parent_id: RequiredNullable<Uuid>,
@@ -666,6 +669,49 @@ pub struct CreateDocumentBody {
     #[serde(default, deserialize_with = "deserialize_double_option")]
     #[cfg_attr(feature = "api-schema", schema(nullable = true))]
     pub icon: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateProjectDocumentBody {
+    #[cfg_attr(feature = "api-schema", schema(value_type = Option<Uuid>, required = true, nullable = true))]
+    #[serde(default)]
+    pub parent_id: RequiredNullable<Uuid>,
+    pub title: String,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    #[cfg_attr(feature = "api-schema", schema(nullable = true))]
+    pub icon: Option<Option<String>>,
+}
+
+/// Dedicated OFF draft publication. Ordinary create bodies remain unchanged.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct OffDraftCreateBody {
+    pub command_id: Uuid,
+    pub source_kind: String,
+    pub source_id: Uuid,
+    #[serde(default)]
+    pub source_project_id: Option<Uuid>,
+    #[cfg_attr(feature = "api-schema", schema(value_type = Option<Uuid>, required = true, nullable = true))]
+    #[serde(default)]
+    pub parent_id: RequiredNullable<Uuid>,
+    pub title: String,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    #[cfg_attr(feature = "api-schema", schema(nullable = true))]
+    pub icon: Option<Option<String>>,
+    pub content_json: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct OffDraftCreateResponse {
+    pub document: DocumentMetaResponse,
+    pub command_id: Uuid,
+    pub tail_seq: String,
+    pub revision_id: Uuid,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1743,6 +1789,40 @@ impl From<crate::auth::session::SessionUser> for SessionUserOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn off_draft_creation_has_its_own_strict_command_and_required_parent_contract() {
+        let body = serde_json::json!({
+            "commandId": Uuid::now_v7(), "sourceKind":"task", "sourceId":Uuid::now_v7(),
+            "parentId":null, "title":"private draft", "contentJson":{"type":"doc","content":[]}
+        });
+        let parsed: OffDraftCreateBody = serde_json::from_value(body.clone()).unwrap();
+        assert!(matches!(parsed.parent_id, RequiredNullable::Null));
+        assert_eq!(parsed.source_kind, "task");
+        let mut missing_parent = body.clone();
+        missing_parent.as_object_mut().unwrap().remove("parentId");
+        assert!(matches!(
+            serde_json::from_value::<OffDraftCreateBody>(missing_parent)
+                .unwrap()
+                .parent_id,
+            RequiredNullable::Missing
+        ));
+        for field in ["commandId", "sourceKind", "sourceId", "contentJson"] {
+            let mut missing = body.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<OffDraftCreateBody>(missing).is_err(),
+                "missing {field} cannot become an implicit create or body"
+            );
+        }
+        let mut mixed = body.clone();
+        mixed["expectedTail"] = serde_json::json!("1");
+        assert!(serde_json::from_value::<OffDraftCreateBody>(mixed).is_err());
+        assert!(
+            serde_json::from_value::<CreateDocumentBody>(body).is_err(),
+            "ordinary strict creation must not accept the new source/body contract"
+        );
+    }
 
     #[test]
     fn project_document_count_serializes_number_and_explicit_null() {

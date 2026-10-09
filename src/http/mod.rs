@@ -71,7 +71,11 @@ async fn consent_gate(
     if consent_exempt(req.uri().path()) {
         return next.run(req).await;
     }
-    match crate::db::legal::session_consent_pending(&state.auth.db.pool, &hash_token(&cookie)).await
+    match crate::db::legal::session_consent_pending_backend(
+        &state.auth.db.pool,
+        &hash_token(&cookie),
+    )
+    .await
     {
         Ok(false) => next.run(req).await,
         Ok(true) => AppError::from_code(ProblemCode::ConsentRequired).into_response(),
@@ -291,6 +295,8 @@ mod trace_tests {
             .connect_lazy("postgres://fvoci:fvoci@127.0.0.1:1/none")
             .expect("lazy pool");
         AppState {
+            realtime_mode: crate::config::RealtimeMode::On,
+            native_engine: None,
             auth: Arc::new(crate::auth::AuthService {
                 db: crate::db::Db::new(pool),
                 password_keys: crate::auth::password::Keyring::parse(

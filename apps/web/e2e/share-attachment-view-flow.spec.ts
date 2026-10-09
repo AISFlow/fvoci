@@ -99,7 +99,7 @@ test("anonymous share attachment view: text, image and download inside the share
   const wsId = required2.id;
   const createDoc = async (title: string, parentId: string | null) => {
     const res = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
-      data: { parentId, title },
+      data: { commandId: crypto.randomUUID(), parentId, title },
     });
     expect(res.status()).toBe(201);
     return (

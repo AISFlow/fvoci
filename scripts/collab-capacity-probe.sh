@@ -42,7 +42,7 @@ set +e
   export COLLAB_PROBE_DURATION_SECS='$COLLAB_PROBE_DURATION_SECS'
   export FVOCI_COLLAB_MAX_ROOMS='$FVOCI_COLLAB_MAX_ROOMS'
   export RUST_LOG='$RUST_LOG'
-  cargo test --release --features db-tests --test collab_capacity_probe -- --nocapture
+  cargo test --release --features db-tests --test collab_capacity_probe --color never -- --include-ignored --nocapture
 " 2>&1 | tee "$LOG_PATH"
 PROBE_EXIT=${PIPESTATUS[0]}
 set -e
@@ -50,6 +50,27 @@ set -e
 if [[ "$PROBE_EXIT" -ne 0 ]]; then
   echo "collab capacity probe failed (exit $PROBE_EXIT); log: $LOG_PATH" >&2
   exit "$PROBE_EXIT"
+fi
+
+if ! awk '
+  /^[[:space:]]*Running / {
+    running = 1
+    target = ($0 ~ /^[[:space:]]*Running tests\/collab_capacity_probe\.rs[[:space:]]+\(/)
+    if (target) runs++
+  }
+  /^test result: / {
+    if (!running) unattributed = 1
+    if (target) {
+      summaries++
+      summary = $0
+    }
+  }
+  END {
+    exit !(runs == 1 && summaries == 1 && !unattributed && summary ~ /^test result: ok\. 1 passed; 0 failed; 0 ignored; [0-9]+ measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$/)
+  }
+' "$LOG_PATH"; then
+  echo "collab capacity probe must report exactly 1 passed, 0 failed, 0 ignored; log: $LOG_PATH" >&2
+  exit 1
 fi
 
 echo "collab capacity probe passed; log: $LOG_PATH"

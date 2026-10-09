@@ -388,7 +388,11 @@ test("private input survives lost response, keeps one source block/task UUID and
   const statusOption = workflow.statuses.find((status) => status.category === "in_progress")?.id;
   if (!statusOption) throw new Error("missing non-final workflow status");
   expect(statusOption).not.toBe(await detail.getByTestId("task-edit-status").inputValue());
+  const moveDone = detail.waitForResponse(
+    (r) => /\/move/.test(r.url()) && r.request().method() === "POST",
+  );
   await detail.getByTestId("task-edit-status").selectOption(statusOption);
+  await moveDone;
   await expect
     .poll(
       async () =>

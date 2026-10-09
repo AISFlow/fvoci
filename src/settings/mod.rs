@@ -21,6 +21,7 @@ pub mod messages;
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
+use crate::db::backend::{Backend, OperationTx};
 use serde_json::{json, Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -189,10 +190,19 @@ pub async fn load(
     boot: &SettingsBoot,
     brand_default: &str,
 ) -> Result<SettingsSnapshot, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let revision = load_revision(&mut *tx).await?;
-    let rows = load_rows(&mut *tx).await?;
-    tx.commit().await?;
+    load_backend(&Backend::Postgres(pool.clone()), boot, brand_default).await
+}
+
+pub async fn load_backend(
+    backend: &Backend,
+    boot: &SettingsBoot,
+    brand_default: &str,
+) -> Result<SettingsSnapshot, sqlx::Error> {
+    let mut tx = backend.begin_read().await?;
+    let mut operation = tx.operation();
+    let revision = operation.settings_revision().await?;
+    let rows = operation.settings_rows().await?;
+    tx.rollback().await?;
     let snapshot = resolve(rows, revision, brand_default, &boot.license);
     let _ = boot.values.get_or_init(|| snapshot.values.clone());
     Ok(snapshot)
@@ -291,6 +301,60 @@ pub async fn attachment_transfer(
     Ok(effective_transfer(&snapshot, unavailable))
 }
 
+/// Startup reads the same current stored policy on the selected connection,
+/// including the blocked/unavailable reason; it does not populate boot state.
+pub async fn attachment_transfer_backend(
+    backend: &Backend,
+    unavailable: Option<TransferUnavailable>,
+) -> Result<EffectiveTransfer, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return attachment_transfer(pool, unavailable).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let rows = tx.operation().settings_rows().await;
+    let rollback = tx.rollback().await;
+    let rows = match (rows, rollback) {
+        (Ok(rows), Ok(())) => rows,
+        (Err(error), Ok(())) => return Err(error),
+        (Err(error), Err(cleanup)) => {
+            return Err(crate::db::backend::rollback_cleanup_unknown(
+                Some(Box::new(error)),
+                cleanup,
+            ))
+        }
+        (Ok(_), Err(cleanup)) => {
+            return Err(crate::db::backend::rollback_cleanup_unknown(None, cleanup))
+        }
+    };
+    let snapshot = resolve(rows, 0, "FVOCI", &crate::license::absent());
+    Ok(effective_transfer(&snapshot, unavailable))
+}
+
+/// Startup must stop on an unconfirmed finish before admitting consumers.
+/// This is the shared concrete marker, not classification by display text.
+pub fn attachment_transfer_finish_is_unknown(error: &sqlx::Error) -> bool {
+    crate::db::backend::is_rollback_cleanup_unknown(error)
+        || matches!(error, sqlx::Error::AnyDriverError(source)
+            if source.downcast_ref::<crate::db::backend::CommitUnknown>().is_some()
+                || source.downcast_ref::<crate::db::backend::CommitCleanupUnknown>().is_some())
+}
+
+/// Synthetic propagation control after an actual acknowledged settings read.
+/// It does not simulate driver loss or prove a remote stream's settlement.
+#[cfg(feature = "db-tests")]
+pub async fn attachment_transfer_rollback_propagation_control_backend(
+    backend: &Backend,
+    unavailable: Option<TransferUnavailable>,
+) -> Result<EffectiveTransfer, sqlx::Error> {
+    attachment_transfer_backend(backend, unavailable).await?;
+    Err(crate::db::backend::rollback_cleanup_unknown(
+        Some(Box::new(sqlx::Error::Protocol(
+            "synthetic original after acknowledged settings read".into(),
+        ))),
+        sqlx::Error::Protocol("synthetic unconfirmed rollback propagation control".into()),
+    ))
+}
+
 /// Read API for upload creation and original downloads: the mode in effect
 /// now, read per request so an admin change reaches every process on its next
 /// request. Storage that cannot presign is always `proxy`, without a read.
@@ -298,10 +362,23 @@ pub async fn attachment_transfer_mode(
     pool: &PgPool,
     unavailable: Option<TransferUnavailable>,
 ) -> Result<TransferMode, sqlx::Error> {
+    attachment_transfer_mode_backend(&Backend::Postgres(pool.clone()), unavailable).await
+}
+
+/// The current selected-backend request mode. Unavailable storage remains a
+/// fast proxy decision; a fresh boot holder cannot cache a previous request.
+pub async fn attachment_transfer_mode_backend(
+    backend: &Backend,
+    unavailable: Option<TransferUnavailable>,
+) -> Result<TransferMode, sqlx::Error> {
     if unavailable.is_some() {
         return Ok(TransferMode::Proxy);
     }
-    Ok(attachment_transfer(pool, None).await?.mode)
+    if let Backend::Postgres(pool) = backend {
+        return Ok(attachment_transfer(pool, None).await?.mode);
+    }
+    let snapshot = load_backend(backend, &SettingsBoot::default(), "FVOCI").await?;
+    Ok(effective_transfer(&snapshot, None).mode)
 }
 
 /// Effective values without touching the boot snapshot.
@@ -332,7 +409,25 @@ pub async fn current_values_with_license(
     brand_default: &str,
     license: &crate::license::Entitlements,
 ) -> Result<SettingsValues, sqlx::Error> {
-    let rows = load_rows(pool).await?;
+    current_values_with_license_backend(&Backend::Postgres(pool.clone()), brand_default, license)
+        .await
+}
+
+pub async fn current_values_backend(
+    backend: &Backend,
+    brand_default: &str,
+) -> Result<SettingsValues, sqlx::Error> {
+    current_values_with_license_backend(backend, brand_default, &crate::license::absent()).await
+}
+
+pub async fn current_values_with_license_backend(
+    backend: &Backend,
+    brand_default: &str,
+    license: &crate::license::Entitlements,
+) -> Result<SettingsValues, sqlx::Error> {
+    let mut tx = backend.begin_read().await?;
+    let rows = tx.operation().settings_rows().await?;
+    tx.rollback().await?;
     Ok(resolve(rows, 0, brand_default, license).values)
 }
 
@@ -572,6 +667,35 @@ pub async fn apply_change(
         previous_asset,
         snapshot,
     }))
+}
+
+impl OperationTx<'_, '_> {
+    async fn settings_rows(&mut self) -> Result<Vec<(String, Value)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => load_rows(&mut ***tx).await,
+            Self::SqliteFamily(tx) => tx
+                .query("SELECT key,value FROM instance_settings", &[])
+                .await?
+                .into_iter()
+                .map(|row| Ok((row.cell(0)?.string()?, row.cell(1)?.value()?)))
+                .collect(),
+        }
+    }
+    async fn settings_revision(&mut self) -> Result<i64, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => load_revision(&mut ***tx).await,
+            Self::SqliteFamily(tx) => tx
+                .query(
+                    "SELECT revision FROM instance_settings_meta WHERE id=1",
+                    &[],
+                )
+                .await?
+                .first()
+                .ok_or(sqlx::Error::RowNotFound)?
+                .cell(0)?
+                .integer(),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -148,6 +148,8 @@ async fn app_state(
 ) -> AppState {
     let pool = pool::connect_app(app_url).await.expect("app pool");
     AppState {
+        realtime_mode: fvoci_server::config::RealtimeMode::On,
+        native_engine: None,
         auth: Arc::new(AuthService {
             db: Db::with_license(pool, license),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
@@ -1920,7 +1922,7 @@ async fn share_policy_setting_governs_share_links() {
         &h.app,
         "POST",
         &format!("/api/v1/workspaces/{ws}/documents"),
-        json!({"parentId": null, "title": "공유 문서"}),
+        json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "공유 문서"}),
         Some(&h.admin_cookie),
     )
     .await;

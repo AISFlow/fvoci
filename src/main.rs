@@ -9,25 +9,27 @@ use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
 use fvoci_server::attachments::{
-    spawn_extract_job_with_embedder, spawn_preview_job, ExtractJobHandle, ExtractJobSettings,
+    spawn_extract_job_backend, spawn_preview_job_backend, ExtractJobHandle, ExtractJobSettings,
     ObjectStorage, PreviewJobHandle, PreviewJobSettings,
 };
 use fvoci_server::auth::AuthService;
 use fvoci_server::collab::hub::ShutdownStatus;
 use fvoci_server::collab::{CollabConfig, CollabHub};
-use fvoci_server::config::Config;
+use fvoci_server::config::{Config, DatabaseSettings};
+use fvoci_server::db::backend::Backend;
+use fvoci_server::db::maintenance_claim::FamilyMaintenanceLeasePolicy;
 use fvoci_server::db::{migrate, pool, Db};
 use fvoci_server::http::probes::{MetricsAllowList, Observability, ObservabilitySettings};
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::{router_with_observability, state::AppState};
-use fvoci_server::import_job::{spawn_import_job, ImportJobHandle, ImportJobSettings};
+use fvoci_server::import_job::{spawn_import_job_backend, ImportJobHandle, ImportJobSettings};
 use fvoci_server::integrations::webhooks::WebhookSenderHandle;
 use fvoci_server::jobs::{
-    spawn_maintenance, MaintenanceHandle, MaintenanceSettings, RevisionMaintenanceEngine,
+    spawn_maintenance_backend, MaintenanceHandle, MaintenanceSettings, RevisionMaintenanceEngine,
     RevisionMaintenanceParams,
 };
 use fvoci_server::outbox::{
-    spawn_outbox_dispatcher, OutboxDispatcherHandle, OutboxDispatcherSettings,
+    spawn_outbox_dispatcher_backend, OutboxDispatcherHandle, OutboxDispatcherSettings,
 };
 
 #[derive(Debug)]
@@ -97,6 +99,62 @@ struct DrainOutcome {
     outbox: Result<(), String>,
     maintenance: Result<(), String>,
     import: Result<(), String>,
+    database: Result<(), String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("attachment transfer startup read has unknown settlement; owned backend close: {close:?}")]
+struct StartupTransferUnknown {
+    #[source]
+    original: sqlx::Error,
+    close: Result<(), sqlx::Error>,
+}
+
+async fn read_startup_attachment_transfer(
+    backend: &Backend,
+    unavailable: Option<fvoci_server::attachments::TransferUnavailable>,
+) -> Result<(), StartupTransferUnknown> {
+    #[cfg(feature = "db-tests")]
+    if std::env::var_os("FVOCI_TEST_STARTUP_TRANSFER_FINISH_CONTROL").is_some() {
+        let result =
+            fvoci_server::settings::attachment_transfer_rollback_propagation_control_backend(
+                backend,
+                unavailable,
+            )
+            .await;
+        tracing::warn!(
+            synthetic = true,
+            "settings finish propagation control after actual acknowledged read; not driver loss"
+        );
+        return finish_startup_attachment_transfer(backend, result).await;
+    }
+    let result = fvoci_server::settings::attachment_transfer_backend(backend, unavailable).await;
+    finish_startup_attachment_transfer(backend, result).await
+}
+
+async fn finish_startup_attachment_transfer(
+    backend: &Backend,
+    result: Result<fvoci_server::settings::EffectiveTransfer, sqlx::Error>,
+) -> Result<(), StartupTransferUnknown> {
+    match result {
+        Ok(transfer) if transfer.blocked => tracing::warn!(
+            reason = transfer.unavailable.map(|r| r.as_str()),
+            "attachment.transfer_mode_unavailable: stored presigned mode cannot apply; using proxy"
+        ),
+        Ok(transfer) => tracing::info!(mode = transfer.mode.as_str(), "attachment transfer mode"),
+        Err(original)
+            if fvoci_server::settings::attachment_transfer_finish_is_unknown(&original) =>
+        {
+            return Err(StartupTransferUnknown {
+                original,
+                // This closes the owned backend; it cannot certify settlement
+                // of the original failed stream, which remains in `original`.
+                close: backend.close().await,
+            });
+        }
+        Err(err) => tracing::warn!(%err, "attachment transfer mode not read at startup"),
+    }
+    Ok(())
 }
 
 // Remembers a null allocation so the office child can report a panic caused
@@ -155,22 +213,59 @@ async fn server_main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics_allow = MetricsAllowList::from_env()?;
     // Read once: the pool size, the hub and the revision engine follow it.
     let collab_config = CollabConfig::from_env();
+    if config.realtime_mode == fvoci_server::config::RealtimeMode::Off && collab_config.is_none() {
+        return Err("FVOCI_REALTIME_MODE=off requires the isolated native engine".into());
+    }
     if collab_config.is_none() {
         log_collab_disabled();
     }
     let app_pool_max = collab_config
         .as_ref()
+        .filter(|_| config.realtime_mode == fvoci_server::config::RealtimeMode::On)
         .map(|cfg| fvoci_server::collab::config::derive_app_pool_max_connections(cfg.max_rooms))
         .unwrap_or(fvoci_server::collab::config::APP_POOL_MAX_CONNECTIONS);
-    let pool = pool::connect_app_with_max(&config.app_database_url, app_pool_max).await?;
-    if let Err(message) = migrate::assert_app_role(&pool).await {
-        pool.close().await;
-        return Err(message.into());
-    }
-    if let Err(message) = migrate::assert_schema_current(&pool).await {
-        pool.close().await;
-        return Err(message.into());
-    }
+    // The local inode admission outlives the entire joined server runtime.
+    // Normal startup neither creates a missing file nor applies schema steps.
+    let _sqlite_admission = match &config.database {
+        DatabaseSettings::Sqlite { path } => Some(migrate::SqliteAdmission::server(path)?),
+        _ => None,
+    };
+    let backend = match &config.database {
+        DatabaseSettings::Postgres { app_url } => {
+            let pool = pool::connect_app_with_max(app_url, app_pool_max).await?;
+            if let Err(message) = migrate::assert_app_role(&pool).await {
+                pool.close().await;
+                return Err(message.into());
+            }
+            if let Err(message) = migrate::assert_schema_current(&pool).await {
+                pool.close().await;
+                return Err(message.into());
+            }
+            Backend::Postgres(pool)
+        }
+        DatabaseSettings::Sqlite { path } => {
+            let backend = Backend::Sqlite(pool::connect_sqlite_app(path, app_pool_max).await?);
+            if let Err(error) = migrate::assert_sqlite_schema_current(&backend).await {
+                backend.close().await?;
+                return Err(error.into());
+            }
+            backend
+        }
+        // Remote normal startup: connect with the app pool size and admit the
+        // backend only when the existing gate reports the exact compiled
+        // lineage (current only). Nothing is migrated or repaired here; every
+        // other ledger state closes the handle and refuses, and the refusal
+        // text repeats only the closed gate texts and codes, never the
+        // settings, endpoint, token or raw driver text.
+        DatabaseSettings::LibsqlRemote { .. } => {
+            match migrate::connect_remote_app(&config.database, app_pool_max).await {
+                Ok(backend) => backend,
+                Err(error) => {
+                    return Err(fvoci_server::prepare::remote_startup_refusal(&error).into());
+                }
+            }
+        }
+    };
     if let Some(meili) = config.meili.as_ref() {
         use fvoci_server::search::meili::MeiliError;
         match fvoci_server::search::meili::ensure_meili_index(meili).await {
@@ -179,7 +274,7 @@ async fn server_main() -> Result<(), Box<dyn std::error::Error>> {
             }
             // A rejected key is a configuration error: refuse to start.
             Err(error @ (MeiliError::Http(401) | MeiliError::Http(403) | MeiliError::Config)) => {
-                pool.close().await;
+                backend.close().await?;
                 return Err(format!("meilisearch configuration rejected: {error}").into());
             }
             // Like the source, an unavailable Meili must not take documents and
@@ -192,7 +287,7 @@ async fn server_main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         tracing::info!("meilisearch disabled (FVOCI_MEILI_URL unset)");
     }
-    run_server(config, metrics_allow, pool, collab_config).await
+    run_server(config, metrics_allow, backend, collab_config).await
 }
 
 /// A disabled collaboration engine must be visible at startup: `/ready` still
@@ -286,7 +381,7 @@ where
 async fn run_server(
     config: Config,
     metrics_allow: MetricsAllowList,
-    pool: sqlx::PgPool,
+    backend: Backend,
     collab_config: Option<CollabConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let license = Arc::new(fvoci_server::license::from_env());
@@ -294,37 +389,46 @@ async fn run_server(
     // advertisement. Tokio buffers signals received between install and recv.
     let shutdown_signals = install_shutdown_signals()?;
 
+    fvoci_server::config::ensure_storage_root(&config.storage)?;
+    let storage = ObjectStorage::from_settings(&config.storage)?
+        .with_presign_ttls(config.attachment_transfer.ttls);
+    storage.probe().await?;
+    read_startup_attachment_transfer(&backend, storage.presign_unavailable()).await?;
+
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     let addr = listener.local_addr()?;
     let public_origin =
         fvoci_server::http::guard::resolve_public_origin(&config.public_origin, addr)?;
 
-    let collab = match collab_config {
+    let native_engine = collab_config.clone();
+    let collab = match collab_config
+        .filter(|_| config.realtime_mode == fvoci_server::config::RealtimeMode::On)
+    {
         Some(mut cfg) => {
             cfg.revision_session_snapshot = config.revision.session_snapshot_enabled;
-            if let Err(message) =
-                fvoci_server::collab::config::assert_collab_fits_postgres(&pool, cfg.max_rooms)
+            let family_timings = match &backend {
+                Backend::Postgres(pool) => {
+                    if let Err(message) = fvoci_server::collab::config::assert_collab_fits_postgres(
+                        pool,
+                        cfg.max_rooms,
+                    )
                     .await
-            {
-                pool.close().await;
-                return Err(message.into());
-            }
-            Some(Arc::new(CollabHub::new(cfg, pool.clone())))
+                    {
+                        backend.close().await?;
+                        return Err(message.into());
+                    }
+                    None
+                }
+                _ => Some(fvoci_server::collab::config::FamilyRoomTimings::from_env()?),
+            };
+            Some(Arc::new(CollabHub::new_backend(
+                cfg,
+                backend.clone(),
+                family_timings,
+            )?))
         }
         None => None,
     };
-    fvoci_server::config::ensure_storage_root(&config.storage)?;
-    let storage = ObjectStorage::from_settings(&config.storage)?
-        .with_presign_ttls(config.attachment_transfer.ttls);
-    storage.probe().await?;
-    match fvoci_server::settings::attachment_transfer(&pool, storage.presign_unavailable()).await {
-        Ok(transfer) if transfer.blocked => tracing::warn!(
-            reason = transfer.unavailable.map(|r| r.as_str()),
-            "attachment.transfer_mode_unavailable: stored presigned mode cannot apply; using proxy"
-        ),
-        Ok(transfer) => tracing::info!(mode = transfer.mode.as_str(), "attachment transfer mode"),
-        Err(err) => tracing::warn!(%err, "attachment transfer mode not read at startup"),
-    }
     let search_embedder = fvoci_server::search::embed::Embedder::from_env()?;
     match search_embedder.as_ref() {
         Some(embedder) => tracing::info!(
@@ -356,9 +460,9 @@ async fn run_server(
                 office = settings.office_helper.is_some(),
                 "attachment office/text extraction configured"
             );
-            Some(spawn_extract_job_with_embedder(
+            Some(spawn_extract_job_backend(
                 settings,
-                pool.clone(),
+                backend.clone(),
                 storage.clone(),
                 search_embedder.clone(),
             ))
@@ -374,9 +478,9 @@ async fn run_server(
         }
     };
     let preview_job = match fvoci_server::attachments::preview::default_helper_path() {
-        Some(helper) => Some(spawn_preview_job(
+        Some(helper) => Some(spawn_preview_job_backend(
             PreviewJobSettings::new(helper),
-            pool.clone(),
+            backend.clone(),
             storage.clone(),
         )),
         None => {
@@ -399,8 +503,11 @@ async fn run_server(
         "integrations configured"
     );
     let identity = Arc::new(fvoci_server::identity::Identity::from_env(&public_origin)?);
-    if let Err(err) =
-        fvoci_server::push::ensure_vapid_keys(&pool, identity.encryption_keys.as_deref()).await
+    if let Err(err) = fvoci_server::push::vapid::ensure_vapid_keys_backend(
+        &backend,
+        identity.encryption_keys.as_deref(),
+    )
+    .await
     {
         tracing::warn!(%err, event = "push.skipped", reason = "vapid_keys_missing");
     }
@@ -412,8 +519,8 @@ async fn run_server(
     let mut consumers: Vec<std::sync::Arc<dyn fvoci_server::outbox::OutboxConsumer>> = Vec::new();
     consumers.push(fvoci_server::notifications::notifications_consumer());
     consumers.push(fvoci_server::mail::mail_consumer(mailer.clone()));
-    let push_sender = fvoci_server::push::spawn_push_sender(
-        pool.clone(),
+    let push_sender = fvoci_server::push::spawn_push_sender_backend(
+        backend.clone(),
         integrations.outbound.without_allow_list(),
         identity.encryption_keys.clone(),
         public_origin.clone(),
@@ -426,12 +533,14 @@ async fn run_server(
         consumers.push(fvoci_server::search::index::search_index_consumer(meili));
     }
     consumers.push(fvoci_server::integrations::webhooks::webhooks_consumer());
-    let webhook_sender = Some(fvoci_server::integrations::webhooks::spawn_webhook_sender(
-        pool.clone(),
-        integrations.outbound.clone(),
-        integrations.encryption_keys.clone(),
-        fvoci_server::integrations::webhooks::WebhookDeliverySettings::default(),
-    ));
+    let webhook_sender = Some(
+        fvoci_server::integrations::webhooks::spawn_webhook_sender_backend(
+            backend.clone(),
+            integrations.outbound.clone(),
+            integrations.encryption_keys.clone(),
+            fvoci_server::integrations::webhooks::WebhookDeliverySettings::default(),
+        ),
+    );
     consumers.push(fvoci_server::integrations::github::github_sync_consumer(
         integrations.github.clone(),
     ));
@@ -439,9 +548,9 @@ async fn run_server(
         .iter()
         .map(|consumer| consumer.name().to_string())
         .collect();
-    let outbox_dispatcher = spawn_outbox_dispatcher(
+    let outbox_dispatcher = spawn_outbox_dispatcher_backend(
         OutboxDispatcherSettings::from_env(),
-        pool.clone(),
+        backend.clone(),
         consumers,
     );
     if outbox_dispatcher.is_some() {
@@ -471,11 +580,17 @@ async fn run_server(
         revision_keep = maintenance_settings.revision.settings.keep,
         "maintenance scheduler configured"
     );
-    let maintenance = Some(spawn_maintenance(
+    let maintenance = Some(spawn_maintenance_backend(
         maintenance_settings,
-        pool.clone(),
+        backend.clone(),
         storage.clone(),
         mailer.clone(),
+        // Explicit selected-development policy authorized by the root. These
+        // values are not inferred primary/provider production lifetime bounds.
+        FamilyMaintenanceLeasePolicy::new(
+            std::time::Duration::from_secs(300),
+            std::time::Duration::from_secs(60),
+        )?,
     ));
     let markdown = match fvoci_server::documents::markdown_helper::MarkdownHelper::current_exe() {
         Ok(helper) => Some(helper),
@@ -498,13 +613,15 @@ async fn run_server(
     let import_extractor_available = import_settings
         .as_ref()
         .is_some_and(|settings| settings.extractor_bin.is_some());
-    let import_job =
-        import_settings.map(|settings| spawn_import_job(pool.clone(), settings, storage.clone()));
+    let import_job = import_settings
+        .map(|settings| spawn_import_job_backend(backend.clone(), settings, storage.clone()));
     let import_wake = import_job.as_ref().map(|job| job.wake.clone());
     let stream_hub = AppState::fresh_streams();
     let state = AppState {
+        realtime_mode: config.realtime_mode,
+        native_engine,
         auth: Arc::new(AuthService {
-            db: Db::with_license(pool.clone(), license.clone()),
+            db: Db::with_backend_license(backend.clone(), license.clone()),
             password_keys: config.password_keys.clone(),
         }),
         branding_name: config.branding_name.clone(),
@@ -534,6 +651,7 @@ async fn run_server(
     let webhook_task = Arc::new(tokio::sync::Mutex::new(webhook_sender));
     let push_task = Arc::new(tokio::sync::Mutex::new(Some(push_sender)));
     let maintenance_task = Arc::new(tokio::sync::Mutex::new(maintenance));
+    let maintenance_ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let import_task = Arc::new(tokio::sync::Mutex::new(import_job));
     let collab_for_signal = collab.clone();
     let hub_task_for_signal = hub_task.clone();
@@ -543,6 +661,7 @@ async fn run_server(
     let webhook_task_for_signal = webhook_task.clone();
     let push_task_for_signal = push_task.clone();
     let maintenance_task_for_signal = maintenance_task.clone();
+    let maintenance_ended_for_signal = maintenance_ended.clone();
     let import_task_for_signal = import_task.clone();
     let streams_for_signal = stream_hub.clone();
 
@@ -563,7 +682,13 @@ async fn run_server(
             .into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(async move {
-            wait_installed_shutdown_signals(shutdown_signals).await;
+            tokio::select! {
+                () = wait_installed_shutdown_signals(shutdown_signals) => {},
+                () = wait_for_maintenance_completion(&maintenance_task_for_signal) => {
+                    maintenance_ended_for_signal.store(true, std::sync::atomic::Ordering::SeqCst);
+                    tracing::error!("maintenance ended; draining the server before another unit can run");
+                }
+            }
             let started = Instant::now();
             if let Some(job) = extract_task_for_signal.lock().await.as_ref() {
                 job.request_shutdown();
@@ -625,15 +750,16 @@ async fn run_server(
                 .take()
                 .and_then(|mut rx| rx.try_recv().ok())
                 .unwrap_or_else(Instant::now);
-            let drain_pool = pool.clone();
+            let drain_pool = backend.clone();
             wait_for_deadline(
                 async {
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
                     let extract = join_extract_finished(&extract_task, &preview_task).await;
                     let outbox = join_outbox_finished(&outbox_task, &webhook_task, &push_task).await;
-                    let maintenance = join_maintenance_finished(&maintenance_task).await;
+                    let maintenance = join_maintenance_finished(&maintenance_task,
+                        maintenance_ended.load(std::sync::atomic::Ordering::SeqCst)).await;
                     let import = join_import_finished(&import_task).await;
-                    drain_pool.close().await;
+                    let database = drain_pool.close().await.map_err(|error| error.to_string());
                     DrainOutcome {
                         serve: map_serve_result(serve_result),
                         hub,
@@ -641,6 +767,7 @@ async fn run_server(
                         outbox,
                         maintenance,
                         import,
+                        database,
                     }
                 },
                 Some(started),
@@ -657,16 +784,17 @@ async fn run_server(
             }
         } => {
             let _ = signaled_rx.take();
-            let drain_pool = pool.clone();
+            let drain_pool = backend.clone();
             wait_for_deadline(
                 async {
                     let serve = map_serve_result(serve_task.await);
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
                     let extract = join_extract_finished(&extract_task, &preview_task).await;
                     let outbox = join_outbox_finished(&outbox_task, &webhook_task, &push_task).await;
-                    let maintenance = join_maintenance_finished(&maintenance_task).await;
+                    let maintenance = join_maintenance_finished(&maintenance_task,
+                        maintenance_ended.load(std::sync::atomic::Ordering::SeqCst)).await;
                     let import = join_import_finished(&import_task).await;
-                    drain_pool.close().await;
+                    let database = drain_pool.close().await.map_err(|error| error.to_string());
                     DrainOutcome {
                         serve,
                         hub,
@@ -674,6 +802,7 @@ async fn run_server(
                         outbox,
                         maintenance,
                         import,
+                        database,
                     }
                 },
                 started,
@@ -732,12 +861,35 @@ async fn join_outbox_finished(
 
 async fn join_maintenance_finished(
     maintenance_task: &tokio::sync::Mutex<Option<MaintenanceHandle>>,
+    unexpected_completion: bool,
 ) -> Result<(), String> {
     if let Some(job) = maintenance_task.lock().await.take() {
         job.request_shutdown();
         job.join().await?;
     }
+    if unexpected_completion {
+        return Err("maintenance ended before the server received its shutdown signal".into());
+    }
     Ok(())
+}
+
+/// Observe only the actual owned task completion, inside the existing HTTP
+/// graceful-shutdown future. No database probe, lease expiry assumption, or
+/// detached watchdog is introduced; the drain consumes the original join.
+async fn wait_for_maintenance_completion(
+    maintenance_task: &tokio::sync::Mutex<Option<MaintenanceHandle>>,
+) {
+    loop {
+        if maintenance_task
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(MaintenanceHandle::is_finished)
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 }
 
 async fn join_import_finished(
@@ -817,6 +969,7 @@ where
                 .or_else(|| extract_failure_error(outcome.outbox))
                 .or_else(|| extract_failure_error(outcome.maintenance))
                 .or_else(|| extract_failure_error(outcome.import))
+                .or_else(|| extract_failure_error(outcome.database))
             {
                 return Err(error);
             }
@@ -911,6 +1064,62 @@ fn shutdown_panic_error() -> Box<dyn std::error::Error> {
 mod shutdown_outcome_tests {
     use super::*;
 
+    #[cfg(feature = "db-tests")]
+    #[tokio::test]
+    async fn startup_transfer_after_acknowledged_read_propagation_control() {
+        use fvoci_server::attachments::{TransferMode, TransferUnavailable};
+        let root =
+            std::env::temp_dir().join(format!("fvoci-startup-transfer-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("app.sqlite");
+        migrate::run_sqlite_migrations(&file).await.unwrap();
+        let pool = pool::connect_sqlite_app(&file, 1).await.unwrap();
+        let backend = Backend::Sqlite(pool.clone());
+        let default = fvoci_server::settings::attachment_transfer_backend(&backend, None)
+            .await
+            .unwrap();
+        assert_eq!(default.mode, TransferMode::Proxy);
+        assert!(!default.blocked);
+        finish_startup_attachment_transfer(&backend, Ok(default))
+            .await
+            .unwrap();
+        assert!(!pool.is_closed());
+        sqlx::query("INSERT INTO instance_settings(key,value) VALUES('attachmentTransfer','{\"mode\":\"presigned\"}')")
+            .execute(&pool).await.unwrap();
+        let stored = fvoci_server::settings::attachment_transfer_backend(
+            &backend,
+            Some(TransferUnavailable::StorageLocal),
+        )
+        .await
+        .unwrap();
+        assert!(stored.blocked);
+        assert_eq!(stored.mode, TransferMode::Proxy);
+        assert_eq!(stored.unavailable, Some(TransferUnavailable::StorageLocal));
+        finish_startup_attachment_transfer(&backend, Ok(stored))
+            .await
+            .unwrap();
+        assert!(!pool.is_closed());
+        // Real app connection/read/rollback ACK precedes this explicitly
+        // synthetic propagation marker. This is not provider-loss evidence.
+        let controlled =
+            fvoci_server::settings::attachment_transfer_rollback_propagation_control_backend(
+                &backend,
+                Some(TransferUnavailable::StorageLocal),
+            )
+            .await;
+        let error = finish_startup_attachment_transfer(&backend, controlled)
+            .await
+            .unwrap_err();
+        assert!(fvoci_server::settings::attachment_transfer_finish_is_unknown(&error.original));
+        assert!(error.close.is_ok());
+        assert!(pool.is_closed());
+        assert!(format!("{:?}", error.original)
+            .contains("synthetic original after acknowledged settings read"));
+        assert!(format!("{:?}", error.original)
+            .contains("synthetic unconfirmed rollback propagation control"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn final_task_join_cannot_escape_shutdown_deadline() {
         let (release, pending) = tokio::sync::oneshot::channel();
@@ -935,6 +1144,7 @@ mod shutdown_outcome_tests {
                         outbox: Ok(()),
                         maintenance: Ok(()),
                         import: Ok(()),
+                        database: Ok(()),
                     }
                 },
                 Some(Instant::now()),

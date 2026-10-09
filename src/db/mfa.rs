@@ -5,6 +5,8 @@
 //! with MFA enabled gets a 5-minute challenge token instead of a session, and
 //! only [`complete_challenge`] turns it into one.
 
+use super::backend::{Backend, OperationTx};
+use super::codec::Cell;
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -13,7 +15,7 @@ use uuid::Uuid;
 use crate::auth::token::{new_token, SESSION_TTL_SECS};
 use crate::db::account::{record_account_change, AccountRecord};
 use crate::db::context::{clear_self_user, recheck_session, set_self_user};
-use crate::db::identity::{append_event, create_session, lock_sign_in, EventAppend};
+use crate::db::identity::{lock_sign_in, EventAppend};
 
 /// Source `MFA_PENDING_TTL_SECONDS`.
 pub const MFA_CHALLENGE_TTL_SECS: i64 = 300;
@@ -326,38 +328,55 @@ pub(crate) async fn issue_session_in_tx(
     user_id: Uuid,
     method: &str,
 ) -> Result<String, sqlx::Error> {
+    issue_session_operation(&mut OperationTx::Postgres(tx), user_id, method).await
+}
+
+async fn issue_session_operation(
+    tx: &mut OperationTx<'_, '_>,
+    user_id: Uuid,
+    method: &str,
+) -> Result<String, sqlx::Error> {
     let token = new_token();
-    let expires_at = Utc::now() + Duration::seconds(SESSION_TTL_SECS);
-    create_session(tx, Uuid::now_v7(), user_id, &token.hash, expires_at).await?;
-    let previous = crate::db::context::set_system(tx).await?;
-    append_event(
-        tx,
-        EventAppend {
-            id: Uuid::now_v7(),
-            workspace_id: None,
-            actor_user_id: Some(user_id),
-            verb: "auth.login".to_string(),
-            target_type: Some("user".to_string()),
-            target_id: Some(user_id),
-            payload: json!({ "userId": user_id.to_string(), "method": method }),
-        },
-    )
+    let expires_at = crate::db::identity::stored_now() + Duration::seconds(SESSION_TTL_SECS);
+    tx.create_session(Uuid::now_v7(), user_id, &token.hash, expires_at)
+        .await?;
+    let previous = tx.set_system().await?;
+    tx.append_event(EventAppend {
+        id: Uuid::now_v7(),
+        workspace_id: None,
+        actor_user_id: Some(user_id),
+        verb: "auth.login".into(),
+        target_type: Some("user".into()),
+        target_id: Some(user_id),
+        payload: json!({"userId":user_id.to_string(),"method":method}),
+    })
     .await?;
-    crate::db::context::restore_system(tx, &previous).await?;
+    tx.restore_system(previous).await?;
     Ok(token.token)
 }
 
-/// Source `issueSessionOrChallenge`. None when the account is gone,
-/// suspended, or (magic link) its generation moved on.
+/// Shared current-account/MFA first-factor gate, with the reservation/lock
+/// acquired before reading auth_generation or the enabled MFA state.
 pub async fn issue_session_or_challenge(
     pool: &PgPool,
     user_id: Uuid,
     method: &str,
     opts: IssueOptions,
 ) -> Result<Option<Issued>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    lock_sign_in(&mut tx, user_id).await?;
-    let Some(generation) = live_generation(&mut tx, user_id).await? else {
+    issue_session_or_challenge_backend(&Backend::Postgres(pool.clone()), user_id, method, opts)
+        .await
+}
+
+pub async fn issue_session_or_challenge_backend(
+    backend: &Backend,
+    user_id: Uuid,
+    method: &str,
+    opts: IssueOptions,
+) -> Result<Option<Issued>, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    let mut operation = tx.operation();
+    operation.lock_sign_in(user_id).await?;
+    let Some(generation) = operation.live_auth_generation(user_id).await? else {
         tx.rollback().await?;
         return Ok(None);
     };
@@ -368,31 +387,25 @@ pub async fn issue_session_or_challenge(
         tx.rollback().await?;
         return Ok(None);
     }
-    if opts.mark_email_verified {
-        let verified: bool = sqlx::query_scalar("SELECT fvoci.app_user_mark_email_verified($1)")
-            .bind(user_id)
-            .fetch_one(&mut *tx)
-            .await?;
-        if !verified {
-            tx.rollback().await?;
-            return Ok(None);
-        }
+    if opts.mark_email_verified && !operation.mark_email_verified(user_id).await? {
+        tx.rollback().await?;
+        return Ok(None);
     }
-    let mfa = find_in_tx(&mut tx, user_id).await?;
-    if mfa.is_none_or(|row| row.enabled_at.is_none()) {
-        let token = issue_session_in_tx(&mut tx, user_id, method).await?;
-        tx.commit().await?;
+    if !operation.mfa_is_enabled(user_id).await? {
+        let token = issue_session_operation(&mut operation, user_id, method).await?;
+        tx.commit().await.map_err(|unknown| unknown.source)?;
         return Ok(Some(Issued::Session { user_id, token }));
     }
     let challenge = new_token();
-    sqlx::query("SELECT fvoci.app_mfa_challenge_issue($1, $2, $3, $4)")
-        .bind(&challenge.hash)
-        .bind(user_id)
-        .bind(generation)
-        .bind(Utc::now() + Duration::seconds(MFA_CHALLENGE_TTL_SECS))
-        .execute(&mut *tx)
+    operation
+        .issue_mfa_challenge(
+            &challenge.hash,
+            user_id,
+            generation,
+            crate::db::identity::stored_now() + Duration::seconds(MFA_CHALLENGE_TTL_SECS),
+        )
         .await?;
-    tx.commit().await?;
+    tx.commit().await.map_err(|unknown| unknown.source)?;
     Ok(Some(Issued::Challenge {
         mfa_token: challenge.token,
     }))
@@ -528,4 +541,72 @@ pub async fn complete_challenge(
     let token = issue_session_in_tx(&mut tx, check.user_id, check.factor.method()).await?;
     tx.commit().await?;
     Ok(Some((check.user_id, token)))
+}
+
+impl OperationTx<'_, '_> {
+    async fn live_auth_generation(&mut self, user: Uuid) -> Result<Option<i32>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => live_generation(tx, user).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                let rows=tx.query("SELECT auth_generation FROM users WHERE id=?1 AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1", &[Cell::uuid(user)]).await?;
+                rows.first()
+                    .map(|row| {
+                        i32::try_from(row.cell(0)?.integer()?).map_err(|_| {
+                            sqlx::Error::Protocol("stored auth generation exceeds i32".into())
+                        })
+                    })
+                    .transpose()
+            }
+        }
+    }
+    async fn mark_email_verified(&mut self, user: Uuid) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query_scalar("SELECT fvoci.app_user_mark_email_verified($1)")
+                    .bind(user)
+                    .fetch_one(&mut ***tx)
+                    .await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                Ok(tx.execute("UPDATE users SET email_verified_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000),updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE id=?1 AND deleted_at IS NULL", &[Cell::uuid(user)]).await?==1)
+            }
+        }
+    }
+    async fn mfa_is_enabled(&mut self, user: Uuid) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => Ok(find_in_tx(tx, user)
+                .await?
+                .is_some_and(|row| row.enabled_at.is_some())),
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.query("SELECT EXISTS(SELECT 1 FROM user_mfa WHERE user_id=?1 AND enabled_at IS NOT NULL)", &[Cell::uuid(user)]).await?.first().ok_or(sqlx::Error::RowNotFound)?.cell(0)?.boolean()
+            }
+        }
+    }
+    async fn issue_mfa_challenge(
+        &mut self,
+        hash: &str,
+        user: Uuid,
+        generation: i32,
+        expires: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query("SELECT fvoci.app_mfa_challenge_issue($1,$2,$3,$4)")
+                    .bind(hash)
+                    .bind(user)
+                    .bind(generation)
+                    .bind(expires)
+                    .execute(&mut ***tx)
+                    .await?;
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.execute("INSERT INTO mfa_challenges (token_hash,user_id,generation,expires_at) VALUES (?1,?2,?3,?4)", &[Cell::text(hash),Cell::uuid(user),Cell::Integer(i64::from(generation)),Cell::instant(expires)?]).await?;
+            }
+        }
+        Ok(())
+    }
 }

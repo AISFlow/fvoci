@@ -163,6 +163,20 @@ pub fn install_env(
 ) -> Result<Vec<(&'static str, String)>, String> {
     let set = |name: &str| get(name).is_some();
     let mut out = Vec::new();
+    let selected = get("FVOCI_DATABASE_BACKEND").unwrap_or_else(|| "postgres".into());
+    if selected != "postgres" {
+        crate::config::DatabaseSettings::from_lookup(&get)?;
+        for name in [
+            "POSTGRES_PASSWORD",
+            "FVOCI_APP_PASSWORD",
+            "DATABASE_URL",
+            "FVOCI_MIGRATION_URL",
+        ] {
+            if set(name) {
+                return Err(format!("{name} conflicts with FVOCI_DATABASE_BACKEND"));
+            }
+        }
+    }
     if let Some(password) = get("POSTGRES_PASSWORD") {
         if let Some(var) = ["DATABASE_URL", "FVOCI_MIGRATION_URL"]
             .into_iter()
@@ -204,7 +218,19 @@ pub fn load_install_env() -> Result<(), String> {
 /// Every problem with the required settings, naming variables only.
 pub fn validate(get: impl Fn(&str) -> Option<String>) -> Vec<String> {
     let mut problems = Vec::new();
+    let postgres = get("FVOCI_DATABASE_BACKEND").is_none_or(|kind| kind == "postgres");
+    if !postgres {
+        if let Err(error) = crate::config::DatabaseSettings::from_lookup(&get) {
+            problems.push(error);
+        }
+    }
     for name in REQUIRED {
+        if !postgres
+            && (matches!(*name, "POSTGRES_PASSWORD" | "FVOCI_APP_PASSWORD")
+                || (*name == "MEILI_MASTER_KEY" && get("FVOCI_MEILI_URL").is_none()))
+        {
+            continue;
+        }
         let Some(value) = get(name) else {
             problems.push(format!("{name} is not set (see the env example)"));
             continue;
@@ -239,13 +265,19 @@ pub fn validate(get: impl Fn(&str) -> Option<String>) -> Vec<String> {
         "FVOCI_APP_PASSWORD",
         "MEILI_MASTER_KEY",
     ] {
+        if !postgres
+            && (matches!(name, "POSTGRES_PASSWORD" | "FVOCI_APP_PASSWORD")
+                || (name == "MEILI_MASTER_KEY" && get("FVOCI_MEILI_URL").is_none()))
+        {
+            continue;
+        }
         if value(name).trim().chars().count() < MIN_SECRET_LEN {
             problems.push(format!(
                 "{name} must be at least {MIN_SECRET_LEN} characters (e.g. openssl rand -hex 32)"
             ));
         }
     }
-    if value("POSTGRES_PASSWORD") == value("FVOCI_APP_PASSWORD") {
+    if postgres && value("POSTGRES_PASSWORD") == value("FVOCI_APP_PASSWORD") {
         problems.push("FVOCI_APP_PASSWORD must differ from POSTGRES_PASSWORD".into());
     }
     if let Err(e) = crate::auth::password::Keyring::parse(
@@ -300,22 +332,1120 @@ pub fn retired_secret_files(get: impl Fn(&str) -> Option<String>) -> Vec<String>
 /// Whether this start prepares the install (the owner password is given).
 pub fn wants_prepare() -> bool {
     std::env::var_os("POSTGRES_PASSWORD").is_some()
+        || std::env::var_os("FVOCI_DATABASE_BACKEND").is_some_and(|kind| kind != "postgres")
 }
 
-/// Steps 2-3. Runs inside a runtime; the caller races it against signals.
+#[derive(Debug, thiserror::Error)]
+pub enum PreparationError {
+    #[error("{0}")]
+    Ordinary(String),
+    #[error("SQLite preparation original result {original:?}; owned drain/thread join {drain:?}; test control {control:?}")]
+    Sqlite {
+        #[source]
+        original: Option<sqlx::Error>,
+        drain: Option<Result<migrate::SqliteMigrationDrain, sqlx::Error>>,
+        control: Option<String>,
+    },
+    #[error("preparation cancelled; SQLite owned drain/thread join: {sqlite_drain:?}")]
+    Cancelled {
+        sqlite_drain: Option<migrate::SqliteMigrationDrain>,
+    },
+    /// The qualified remote helper refused or failed. The bounded error keeps
+    /// its closed code, gate, stage, settlement and drain meaning; its Display
+    /// and Debug never carry the settings, endpoint, token or raw driver text.
+    #[error("remote preparation refused ({code}, gate {gate}, settlement {settlement}): {0}", code = .0.code(), gate = .0.gate().unwrap_or("none"), settlement = .0.settlement())]
+    Remote(#[source] migrate::RemoteMigrationError),
+    /// A signal arrived after the remote migration settled: the settled
+    /// result stays truthful and the server is not started.
+    #[error(
+        "preparation cancelled after the remote migration settled; no server start: {outcome:?}"
+    )]
+    RemoteCancelledAfterSettlement {
+        outcome: migrate::RemoteMigrationOutcome,
+    },
+}
+
+/// Startup refusal text of the remote lane for `fvoci-server`: the bounded
+/// error display with its closed codes; never the settings, endpoint, token
+/// or raw driver text.
+pub fn remote_startup_refusal(error: &migrate::RemoteMigrationError) -> String {
+    format!(
+        "remote normal startup refused ({}, gate {}, settlement {}): {error}",
+        error.code(),
+        error.gate().unwrap_or("none"),
+        error.settlement()
+    )
+}
+
+/// What the signal owner observed around one awaited original future.
+///
+/// `selected` is the signal arm the owner took before the future completed
+/// (the future was then cancelled and awaited to settlement).
+/// `pending_after_completion` is a signal that was already ready when the
+/// completion arm won: `tokio::select!` picks a ready branch at random unless
+/// biased, so a SIGTERM/SIGINT that arrives together with the completion can
+/// lose the race. The owner therefore probes the signal streams once more
+/// after a completion and records the result here; a pending signal is as
+/// decisive as a selected one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SignalObservation {
+    pub selected: Option<i32>,
+    pub pending_after_completion: Option<i32>,
+}
+
+impl SignalObservation {
+    /// No signal selected or pending: the settled result alone decides.
+    pub const NONE: Self = Self {
+        selected: None,
+        pending_after_completion: None,
+    };
+    /// The exit code that must decide, if any signal was selected or found
+    /// pending after the completion; `None` means a plain completion.
+    pub fn decisive(self) -> Option<i32> {
+        self.selected.or(self.pending_after_completion)
+    }
+}
+
+/// Probes the SIGTERM and SIGINT streams once, without waiting, after an
+/// original future completed: `Some(143)` or `Some(130)` when that signal
+/// was already delivered. The owner calls this before deciding on exit `0`
+/// or a server exec; the probe never consumes a signal that did not arrive.
+pub fn pending_signal_code(
+    term: &mut tokio::signal::unix::Signal,
+    int: &mut tokio::signal::unix::Signal,
+) -> Option<i32> {
+    use std::task::{Context, Poll, Waker};
+    let mut context = Context::from_waker(Waker::noop());
+    if matches!(term.poll_recv(&mut context), Poll::Ready(Some(()))) {
+        return Some(143);
+    }
+    if matches!(int.poll_recv(&mut context), Poll::Ready(Some(()))) {
+        return Some(130);
+    }
+    None
+}
+
+/// The preparation launcher decision after the preparation future settled:
+/// `Some(code)` means a signal was selected or found pending, the settled
+/// result is reported and the server is NOT executed; `None` means a plain
+/// completion that may continue to the server exec.
+pub fn preparation_signal_decision(observation: SignalObservation) -> Option<i32> {
+    observation.decisive()
+}
+
+/// Exit code and operator text of the bare remote migrator. `0` only for a
+/// settled `Current`, `Installed` or `Resumed` with no signal selected and
+/// none pending after the completion (the helper has already drained its
+/// stream, otherwise it returns `Drain`); a signal exits with its own code
+/// after the original future settled and keeps the settled result in the
+/// text; every error is non-zero with the bounded display (an unknown commit
+/// already carries the same-command rerun guidance). Nothing is retried here.
+pub fn remote_migrator_exit(
+    observation: SignalObservation,
+    result: &Result<migrate::RemoteMigrationOutcome, migrate::RemoteMigrationError>,
+) -> (i32, String) {
+    let signal_code = observation.decisive();
+    let settled = match result {
+        Ok(outcome) => format!("remote migration settled: {outcome:?}"),
+        Err(error) => format!(
+            "remote migration failed ({}, gate {}, settlement {}): {error}",
+            error.code(),
+            error.gate().unwrap_or("none"),
+            error.settlement()
+        ),
+    };
+    match (signal_code, result) {
+        (Some(code), _) => (
+            code,
+            format!("signal during the remote migration; original result kept, no server start: {settled}"),
+        ),
+        (None, Ok(_)) => (0, settled),
+        (None, Err(_)) => (1, settled),
+    }
+}
+
+#[cfg(feature = "db-tests")]
+async fn start_preparation_migration_with_test_gate(
+    path: &Path,
+) -> Result<
+    (
+        migrate::SqliteMigration,
+        Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>,
+    ),
+    PreparationError,
+> {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let Some(socket) = std::env::var_os("FVOCI_TEST_SQLITE_GATE_SOCKET") else {
+        return migrate::start_sqlite_migration(path)
+            .map(|migration| (migration, None))
+            .map_err(|error| PreparationError::Sqlite {
+                original: Some(error),
+                drain: None,
+                control: None,
+            });
+    };
+    let socket = PathBuf::from(socket);
+    let parent = socket
+        .parent()
+        .ok_or("isolated migration gate parent missing")?;
+    let parent_meta = std::fs::symlink_metadata(parent).map_err(|error| error.to_string())?;
+    let socket_meta = std::fs::symlink_metadata(&socket).map_err(|error| error.to_string())?;
+    let own_uid = std::fs::metadata("/proc/self")
+        .map_err(|error| error.to_string())?
+        .uid();
+    if !socket.is_absolute()
+        || !parent_meta.is_dir()
+        || parent_meta.uid() != own_uid
+        || parent_meta.mode() & 0o077 != 0
+        || !socket_meta.file_type().is_socket()
+        || socket_meta.uid() != own_uid
+    {
+        return Err(
+            "migration gate requires an existing socket in this UID's private isolated directory"
+                .into(),
+        );
+    }
+    let phase = std::env::var("FVOCI_TEST_SQLITE_GATE_PHASE")
+        .map_err(|_| "migration gate phase missing")?;
+    if !matches!(phase.as_str(), "commit" | "close") {
+        return Err("migration gate phase must be commit or close".into());
+    }
+    let mut stream =
+        std::os::unix::net::UnixStream::connect(socket).map_err(|error| error.to_string())?;
+    let (connected, connection) = tokio::sync::oneshot::channel();
+    let (proceed, start) = tokio::sync::oneshot::channel();
+    let (cleanup_started, cleanup) = tokio::sync::oneshot::channel();
+    let migration = migrate::start_sqlite_migration_controlled(
+        path,
+        migrate::SqliteMigrationTestControl {
+            connected,
+            proceed: start,
+            cleanup_started: Some(cleanup_started),
+        },
+    )
+    .map_err(|error| PreparationError::Sqlite {
+        original: Some(error),
+        drain: None,
+        control: None,
+    })?;
+    let setup: Result<Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>, String> =
+        async {
+            let connected = connection
+                .await
+                .map_err(|_| "migration gate owner ended before connection")?;
+            let mut held = connected
+                .acquire()
+                .await
+                .map_err(|error| error.to_string())?;
+            if phase == "commit" {
+                {
+                    let mut native = held
+                        .lock_handle()
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let mut first = true;
+                    native.set_commit_hook(move || {
+                        if !first {
+                            return true;
+                        }
+                        first = false;
+                        let mut release = [0];
+                        // Supported SQLx hook pauses the actual SQLite worker's
+                        // first real DDL/marker COMMIT. No fabricated SQL result.
+                        stream.write_all(b"C").is_ok()
+                            && stream.read_exact(&mut release).is_ok()
+                            && release == *b"R"
+                    });
+                }
+                drop(held);
+                let _ = proceed.send(());
+                Ok(None)
+            } else {
+                // Cancel the actual owner while holding its original pool connection;
+                // it enters real explicit close, which cannot acquire that connection.
+                // External SIGTERM must still await this owner instead of exiting.
+                migration.cancel();
+                let _ = proceed.send(());
+                stream
+                    .set_nonblocking(true)
+                    .map_err(|error| error.to_string())?;
+                let mut stream =
+                    tokio::net::UnixStream::from_std(stream).map_err(|error| error.to_string())?;
+                let helper = tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let result = async {
+                        cleanup.await.map_err(|_| {
+                            std::io::Error::other("migration gate owner ended before close")
+                        })?;
+                        stream.write_all(b"L").await?;
+                        let mut release = [0];
+                        stream.read_exact(&mut release).await?;
+                        if release != *b"R" {
+                            return Err(std::io::Error::other("migration gate release invalid"));
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    drop(held);
+                    result
+                });
+                Ok(Some(helper))
+            }
+        }
+        .await;
+    match setup {
+        Ok(helper) => Ok((migration, helper)),
+        Err(control) => {
+            migration.cancel();
+            let outcome = migration
+                .wait_with_cancel(&tokio_util::sync::CancellationToken::new())
+                .await;
+            Err(PreparationError::Sqlite {
+                original: outcome.result.err(),
+                drain: Some(outcome.drain),
+                control: Some(control),
+            })
+        }
+    }
+}
+impl From<String> for PreparationError {
+    fn from(value: String) -> Self {
+        Self::Ordinary(value)
+    }
+}
+impl From<&str> for PreparationError {
+    fn from(value: &str) -> Self {
+        Self::Ordinary(value.to_owned())
+    }
+}
+
+/// Root installation uses a dedicated directory. Protect it before any
+/// root migration; hand it to the service only after the original owner joins.
+struct SqliteInstallDirectory {
+    directory: PathBuf,
+    ancestors: Vec<(PathBuf, std::fs::File)>,
+    existing_inode: Option<(u64, u64)>,
+}
+impl SqliteInstallDirectory {
+    fn protect(path: &Path) -> Result<Self, String> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+        let directory = path
+            .parent()
+            .filter(|parent| parent.parent().is_some())
+            .ok_or("SQLite installation requires a dedicated existing parent directory")?
+            .to_path_buf();
+        let mut ancestors = Vec::new();
+        let mut literal = PathBuf::new();
+        for component in directory.components() {
+            match component {
+                std::path::Component::RootDir | std::path::Component::Normal(_) => {
+                    literal.push(component)
+                }
+                _ => return Err("SQLite installation rejects nonliteral parent components".into()),
+            }
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(migrate::SQLITE_NOFOLLOW)
+                .open(&literal)
+                .map_err(|error| format!("SQLite installation parent open: {error}"))?;
+            let meta = file.metadata().map_err(|error| error.to_string())?;
+            let parent = literal == directory;
+            if !meta.is_dir()
+                || meta.mode() & 0o022 != 0
+                || if parent {
+                    !matches!(meta.uid(), 0 | SERVER_UID)
+                } else {
+                    meta.uid() != 0
+                        || (meta.mode() & 0o001 == 0
+                            && !(meta.gid() == SERVER_GID && meta.mode() & 0o010 != 0))
+                }
+            {
+                return Err("SQLite installation requires root-controlled ancestors and an owned dedicated parent".into());
+            }
+            ancestors.push((literal.clone(), file));
+        }
+        let mut install = Self {
+            directory,
+            ancestors,
+            existing_inode: None,
+        };
+        install.verify_literal()?;
+        install.owned_entries(path)?;
+        let admission = match std::fs::symlink_metadata(path) {
+            Ok(_) => Some(
+                migrate::SqliteAdmission::installation_handoff(path)
+                    .map_err(|error| format!("SQLite installation admission: {error}"))?,
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        if let Some(admission) = &admission {
+            let meta = admission
+                .admitted_file()
+                .metadata()
+                .map_err(|error| error.to_string())?;
+            install.existing_inode = Some((meta.dev(), meta.ino()));
+            install.verify_admitted_file(path, admission.admitted_file())?;
+        }
+        // Admission refusal above leaves a live server's directory unchanged.
+        // Root takes this exact open directory, never a path-based chown.
+        let parent = &install.ancestors.last().expect("dedicated directory").1;
+        std::os::unix::fs::fchown(parent, Some(0), Some(0)).map_err(|error| error.to_string())?;
+        parent
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+        install.verify_literal()?;
+        install.owned_entries(path)?;
+        if let Some(admission) = &admission {
+            install.verify_admitted_file(path, admission.admitted_file())?;
+        }
+        // Parent is now root/private. Actual migration reuses the same inode
+        // and admission policy; no service process can swap an entry here.
+        drop(admission);
+        Ok(install)
+    }
+
+    fn verify_literal(&self) -> Result<(), String> {
+        use std::os::unix::fs::MetadataExt;
+        for (path, file) in &self.ancestors {
+            let actual = file.metadata().map_err(|error| error.to_string())?;
+            let named = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+            if !named.is_dir() || named.dev() != actual.dev() || named.ino() != actual.ino() {
+                return Err("SQLite installation ancestor/parent inode changed".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn owned_entries(&self, path: &Path) -> Result<Vec<std::fs::File>, String> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let name = path
+            .file_name()
+            .ok_or("SQLite installation file name missing")?;
+        let mut wal = name.to_os_string();
+        wal.push("-wal");
+        let mut shm = name.to_os_string();
+        shm.push("-shm");
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(&self.directory).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            if entry.file_name() != name && entry.file_name() != wal && entry.file_name() != shm {
+                return Err("SQLite installation parent contains unrelated entries".into());
+            }
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(migrate::SQLITE_NOFOLLOW)
+                .open(entry.path())
+                .map_err(|error| format!("SQLite installation DB entry no-follow open: {error}"))?;
+            let meta = file.metadata().map_err(|error| error.to_string())?;
+            let named =
+                std::fs::symlink_metadata(entry.path()).map_err(|error| error.to_string())?;
+            if !meta.is_file()
+                || meta.nlink() != 1
+                || !matches!(meta.uid(), 0 | SERVER_UID)
+                || meta.mode() & 0o077 != 0
+                || !named.is_file()
+                || (named.dev(), named.ino()) != (meta.dev(), meta.ino())
+            {
+                return Err(
+                    "SQLite installation refuses foreign/symlink/hardlinked/nonprivate DB entries"
+                        .into(),
+                );
+            }
+            files.push(file);
+        }
+        Ok(files)
+    }
+
+    fn verify_admitted_file(&self, path: &Path, file: &std::fs::File) -> Result<(), String> {
+        use std::os::unix::fs::MetadataExt;
+        self.verify_literal()?;
+        let actual = file.metadata().map_err(|error| error.to_string())?;
+        let named = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+        if !named.is_file()
+            || actual.nlink() != 1
+            || !matches!(actual.uid(), 0 | SERVER_UID)
+            || (named.dev(), named.ino()) != (actual.dev(), actual.ino())
+            || self
+                .existing_inode
+                .is_some_and(|inode| inode != (actual.dev(), actual.ino()))
+        {
+            return Err("SQLite installation admitted DB inode/owner differs".into());
+        }
+        Ok(())
+    }
+
+    fn handoff(self, path: &Path) -> Result<(), String> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let admission = migrate::SqliteAdmission::installation_handoff(path)
+            .map_err(|error| format!("SQLite installation final admission: {error}"))?;
+        self.verify_admitted_file(path, admission.admitted_file())?;
+        let files = self.owned_entries(path)?;
+        self.verify_literal()?;
+        for file in files {
+            std::os::unix::fs::fchown(&file, Some(SERVER_UID), Some(SERVER_GID))
+                .map_err(|error| error.to_string())?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| error.to_string())?;
+            let meta = file.metadata().map_err(|error| error.to_string())?;
+            if meta.uid() != SERVER_UID || meta.gid() != SERVER_GID || meta.mode() & 0o777 != 0o600
+            {
+                return Err("SQLite installation file handoff unconfirmed".into());
+            }
+        }
+        self.verify_admitted_file(path, admission.admitted_file())?;
+        let parent = &self.ancestors.last().expect("dedicated directory").1;
+        parent
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+        std::os::unix::fs::fchown(parent, Some(SERVER_UID), Some(SERVER_GID))
+            .map_err(|error| error.to_string())?;
+        let meta = parent.metadata().map_err(|error| error.to_string())?;
+        if meta.uid() != SERVER_UID || meta.gid() != SERVER_GID || meta.mode() & 0o777 != 0o700 {
+            return Err("SQLite installation directory handoff unconfirmed".into());
+        }
+        self.verify_literal()?;
+        // Same exclusive admission is retained through the confirmed handoff.
+        drop(admission);
+        Ok(())
+    }
+}
+
+/// Steps 2-3 for explicit preparation without a signal cancellation owner.
 pub async fn prepare() -> Result<(), String> {
-    let owner_url = std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is not derived")?;
-    let names = DbNames::from_lookup(|k| std::env::var(k).ok())?;
-    let deadline = tokio::time::Instant::now()
+    prepare_with_cancel(&tokio_util::sync::CancellationToken::new())
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// The signal owner keeps this future alive until cancellation has joined
+/// the actual SQLite migration owner. Dropping it is not an exit receipt.
+pub async fn prepare_with_cancel(
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<(), PreparationError> {
+    // Preserve the owner-only PostgreSQL preparation entry: it does not need
+    // to parse a normal app connection before deriving/checking that role.
+    match std::env::var("FVOCI_DATABASE_BACKEND").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("postgres") => {
+            return tokio::select! {
+                result = prepare_postgres() => result.map_err(PreparationError::Ordinary),
+                _ = cancel.cancelled() => Err(PreparationError::Cancelled { sqlite_drain: None }),
+            };
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("FVOCI_DATABASE_BACKEND must be Unicode".into())
+        }
+        _ => {}
+    }
+    match crate::config::DatabaseSettings::from_env()? {
+        crate::config::DatabaseSettings::Postgres { .. } => unreachable!(),
+        crate::config::DatabaseSettings::Sqlite { path } => {
+            // Preparation owns creation and the controlled migration actor;
+            // normal server startup opens only this prepared existing file.
+            let deadline = prepare_deadline()?;
+            let meili = std::env::var("FVOCI_MEILI_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty());
+            if let Some(url) = &meili {
+                tokio::select! {
+                    result = wait_for_meili(url.trim(), deadline) => result?,
+                    _ = cancel.cancelled() => return Err(PreparationError::Cancelled { sqlite_drain: None }),
+                }
+            }
+            if cancel.is_cancelled() {
+                return Err(PreparationError::Cancelled { sqlite_drain: None });
+            }
+            let install = if running_as_root()? {
+                Some(SqliteInstallDirectory::protect(&path)?)
+            } else {
+                None
+            };
+            #[cfg(not(feature = "db-tests"))]
+            let migration = migrate::start_sqlite_migration(&path).map_err(|error| {
+                PreparationError::Sqlite {
+                    original: Some(error),
+                    // No owner started; no invented close/join receipt.
+                    drain: None,
+                    control: None,
+                }
+            })?;
+            #[cfg(feature = "db-tests")]
+            let (migration, control) = start_preparation_migration_with_test_gate(&path).await?;
+            let outcome = migration.wait_with_cancel(cancel).await;
+            #[cfg(feature = "db-tests")]
+            let control_error = match control {
+                Some(helper) => match helper.await {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(error.to_string()),
+                    Err(error) => Some(error.to_string()),
+                },
+                None => None,
+            };
+            #[cfg(not(feature = "db-tests"))]
+            let control_error = None;
+            if outcome.result.is_err()
+                || !matches!(
+                    outcome.drain.as_ref(),
+                    Ok(migrate::SqliteMigrationDrain::Closed)
+                )
+                || control_error.is_some()
+            {
+                return Err(PreparationError::Sqlite {
+                    original: outcome.result.err(),
+                    drain: Some(outcome.drain),
+                    control: control_error,
+                });
+            }
+            tracing::info!(
+                drain = "Closed",
+                thread_joined = true,
+                "SQLite preparation owner finished"
+            );
+            if cancel.is_cancelled() {
+                return Err(PreparationError::Cancelled {
+                    sqlite_drain: Some(migrate::SqliteMigrationDrain::Closed),
+                });
+            }
+            if let Some(install) = install {
+                install.handoff(&path)?;
+            }
+            if meili.is_some() {
+                let key_file = std::env::var("FVOCI_MEILI_KEY_FILE")
+                    .unwrap_or_else(|_| DEFAULT_MEILI_KEY_FILE.to_string());
+                tokio::select! {
+                    result = ensure_meili_key_file(Path::new(&key_file)) => result?,
+                    _ = cancel.cancelled() => return Err(PreparationError::Cancelled {
+                        sqlite_drain: Some(migrate::SqliteMigrationDrain::Closed),
+                    }),
+                }
+            }
+            Ok(())
+        }
+        settings @ crate::config::DatabaseSettings::LibsqlRemote { .. } => {
+            // Remote primary preparation through the qualified helper: one
+            // admitted stream, blank or exact-prefix states installed or
+            // resumed, current left untouched, every other state refused
+            // before any write, always closed and drained. There is no
+            // file-system install directory or handoff for a remote primary,
+            // and preparation never advertises readiness: the server start
+            // after it goes through its own current-only startup gate.
+            let deadline = prepare_deadline()?;
+            let meili = std::env::var("FVOCI_MEILI_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty());
+            if let Some(url) = &meili {
+                tokio::select! {
+                    result = wait_for_meili(url.trim(), deadline) => result?,
+                    _ = cancel.cancelled() => return Err(PreparationError::Cancelled { sqlite_drain: None }),
+                }
+            }
+            if cancel.is_cancelled() {
+                return Err(PreparationError::Cancelled { sqlite_drain: None });
+            }
+            let outcome = migrate::run_remote_migrations(&settings, cancel)
+                .await
+                .map_err(PreparationError::Remote)?;
+            tracing::info!(outcome = ?outcome, "remote primary preparation settled");
+            let key_file = std::env::var("FVOCI_MEILI_KEY_FILE")
+                .unwrap_or_else(|_| DEFAULT_MEILI_KEY_FILE.to_string());
+            let key_file_step = meili
+                .is_some()
+                .then(|| ensure_meili_key_file(Path::new(&key_file)));
+            finish_remote_preparation(outcome, cancel, key_file_step).await
+        }
+    }
+}
+
+/// Post-settlement tail of the remote preparation: the cancellation observed
+/// right after the settlement, the optional Meili key-file step under a
+/// biased select that prefers the cancellation, and a final cancellation
+/// check before `Ok`. A cancellation seen at any of these points returns
+/// `RemoteCancelledAfterSettlement` with the settled outcome kept, so the
+/// launcher never execs the server after a signal; a key-file failure is
+/// propagated as an ordinary preparation error. There is no install
+/// directory or handoff for a remote primary.
+pub(crate) async fn finish_remote_preparation(
+    outcome: migrate::RemoteMigrationOutcome,
+    cancel: &tokio_util::sync::CancellationToken,
+    key_file: Option<impl std::future::Future<Output = Result<(), String>>>,
+) -> Result<(), PreparationError> {
+    if cancel.is_cancelled() {
+        return Err(PreparationError::RemoteCancelledAfterSettlement { outcome });
+    }
+    if let Some(step) = key_file {
+        tokio::pin!(step);
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(PreparationError::RemoteCancelledAfterSettlement { outcome }),
+            result = &mut step => result?,
+        }
+    }
+    // A cancellation that became ready together with the key-file completion
+    // (or after it) must still refuse before Ok: the launcher would otherwise
+    // exec the server. The settled outcome stays truthful in the error.
+    if cancel.is_cancelled() {
+        return Err(PreparationError::RemoteCancelledAfterSettlement { outcome });
+    }
+    Ok(())
+}
+
+/// Signal arbitration around one original future for the launcher and the
+/// bare remote migrator: biased, SIGTERM then SIGINT before the completion
+/// arm. When a signal wins, the token is cancelled and the original future
+/// is awaited to its settlement (never dropped), returning the signal code
+/// with the settled output. When the completion wins, `None` is returned and
+/// the caller must probe the signal streams once more
+/// ([`pending_signal_code`]) before deciding on exit `0` or a server exec,
+/// because a signal delivered together with the completion is not visible
+/// here. No timeout, no retry, no replacement of the original future.
+pub async fn arbitrate_signals<T>(
+    original: std::pin::Pin<&mut impl std::future::Future<Output = T>>,
+    cancel: &tokio_util::sync::CancellationToken,
+    term: impl std::future::Future<Output = ()>,
+    int: impl std::future::Future<Output = ()>,
+) -> (Option<i32>, T) {
+    let mut original = original;
+    tokio::pin!(term);
+    tokio::pin!(int);
+    tokio::select! {
+        biased;
+        _ = &mut term => {
+            cancel.cancel();
+            (Some(143), original.await)
+        },
+        _ = &mut int => {
+            cancel.cancel();
+            (Some(130), original.await)
+        },
+        output = &mut original => (None, output),
+    }
+}
+
+#[cfg(test)]
+mod remote_caller_tests {
+    use super::*;
+    use crate::db::migrate::{GateStage, RemoteMigrationError, RemoteMigrationOutcome};
+
+    const SECRET: &str = "https://primary.secret.example/?authToken=TOKEN-VALUE";
+
+    fn driver_secret() -> sqlx::Error {
+        sqlx::Error::AnyDriverError(SECRET.into())
+    }
+    fn protocol_secret() -> sqlx::Error {
+        sqlx::Error::Protocol(format!("gate text leaking {SECRET}"))
+    }
+    fn assert_secret_free(text: &str) {
+        for needle in ["secret.example", "TOKEN-VALUE", "authToken", "leaking"] {
+            assert!(!text.contains(needle), "{needle} leaked: {text}");
+        }
+    }
+    fn selected(code: i32) -> SignalObservation {
+        SignalObservation {
+            selected: Some(code),
+            pending_after_completion: None,
+        }
+    }
+    fn pending(code: i32) -> SignalObservation {
+        SignalObservation {
+            selected: None,
+            pending_after_completion: Some(code),
+        }
+    }
+
+    /// Deterministic control of the race the unbiased select allows: the
+    /// completion arm won although SIGTERM was already ready. The old policy
+    /// (signal code taken only from the selected arm) returned 0 and let the
+    /// launcher continue to the server exec; both must now be refused.
+    #[test]
+    fn simultaneously_ready_signal_decides_over_a_completed_run() {
+        let observation = pending(143);
+        assert_eq!(observation.decisive(), Some(143));
+        assert_eq!(preparation_signal_decision(observation), Some(143));
+        let (code, text) = remote_migrator_exit(
+            observation,
+            &Ok(RemoteMigrationOutcome::Installed { steps: 12 }),
+        );
+        assert_eq!(code, 143);
+        assert!(
+            text.contains("no server start") && text.contains("Installed { steps: 12 }"),
+            "{text}"
+        );
+        let (code, _) = remote_migrator_exit(pending(130), &Ok(RemoteMigrationOutcome::Current));
+        assert_eq!(code, 130);
+        // A pending signal over a failed run keeps the failure text under the signal code.
+        let (code, text) = remote_migrator_exit(
+            pending(130),
+            &Err(RemoteMigrationError::Drain {
+                source: driver_secret(),
+            }),
+        );
+        assert_eq!(code, 130);
+        assert_secret_free(&text);
+        assert!(text.contains("REMOTE_DRAIN_FAILED"), "{text}");
+    }
+
+    /// Completion-triggered late cancellation: the signal arrived only once
+    /// the future had completed (observed by the post-completion probe). The
+    /// settled result is kept and reported, the signal code still exits and
+    /// the server is not started.
+    #[test]
+    fn late_signal_after_completion_keeps_the_settled_result_and_refuses_exec() {
+        let observation = SignalObservation {
+            selected: None,
+            pending_after_completion: Some(143),
+        };
+        assert_eq!(preparation_signal_decision(observation), Some(143));
+        let (code, text) = remote_migrator_exit(
+            observation,
+            &Ok(RemoteMigrationOutcome::Resumed { from: 11, to: 12 }),
+        );
+        assert_eq!(code, 143);
+        assert!(
+            text.contains("original result kept") && text.contains("Resumed { from: 11, to: 12 }"),
+            "{text}"
+        );
+        // A selected signal keeps precedence over a later pending one.
+        let both = SignalObservation {
+            selected: Some(130),
+            pending_after_completion: Some(143),
+        };
+        assert_eq!(both.decisive(), Some(130));
+    }
+
+    /// Controllable futures: the original future and SIGTERM are both ready
+    /// at the first poll. The biased arbitration must take the signal, cancel
+    /// the token and still await the original to its settled output.
+    #[tokio::test]
+    async fn arbitration_prefers_a_simultaneously_ready_signal_and_keeps_the_output() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let original = async { 7 };
+        tokio::pin!(original);
+        let (selected, output) = arbitrate_signals(
+            original.as_mut(),
+            &cancel,
+            std::future::ready(()),
+            std::future::pending::<()>(),
+        )
+        .await;
+        assert_eq!((selected, output), (Some(143), 7));
+        assert!(cancel.is_cancelled());
+        // SIGINT alone ready together with the completion: 130.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let original = async { 8 };
+        tokio::pin!(original);
+        let (selected, output) = arbitrate_signals(
+            original.as_mut(),
+            &cancel,
+            std::future::pending::<()>(),
+            std::future::ready(()),
+        )
+        .await;
+        assert_eq!((selected, output), (Some(130), 8));
+    }
+
+    /// Controllable futures: the original is pending until it observes the
+    /// cancellation; the signal arrives while it is pending. The original
+    /// must be awaited after the cancel and its settled output retained.
+    #[tokio::test]
+    async fn arbitration_cancels_then_awaits_the_pending_original_to_settlement() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let observed = cancel.clone();
+        let original = async move {
+            observed.cancelled().await;
+            "settled after cancel"
+        };
+        tokio::pin!(original);
+        let (fire, armed) = tokio::sync::oneshot::channel::<()>();
+        let term = async move {
+            let _ = armed.await;
+        };
+        let fire_task = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            let _ = fire.send(());
+        });
+        let (selected, output) = arbitrate_signals(
+            original.as_mut(),
+            &cancel,
+            term,
+            std::future::pending::<()>(),
+        )
+        .await;
+        fire_task.await.unwrap();
+        assert_eq!((selected, output), (Some(143), "settled after cancel"));
+        assert!(cancel.is_cancelled());
+    }
+
+    /// Controllable futures: no signal at all; the completion wins, the token
+    /// stays uncancelled and the caller is told to probe (None).
+    #[tokio::test]
+    async fn arbitration_reports_a_plain_completion_without_cancelling() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let original = async { Ok::<u8, ()>(1) };
+        tokio::pin!(original);
+        let (selected, output) = arbitrate_signals(
+            original.as_mut(),
+            &cancel,
+            std::future::pending::<()>(),
+            std::future::pending::<()>(),
+        )
+        .await;
+        assert_eq!((selected, output), (None, Ok(1)));
+        assert!(!cancel.is_cancelled());
+    }
+
+    /// The preparation tail: a cancellation that becomes ready only when the
+    /// key-file step completes (completion-triggered late cancellation) must
+    /// still refuse before Ok with the settled outcome kept. An omitted final
+    /// check returns Ok here and fails this test.
+    #[tokio::test]
+    async fn remote_preparation_tail_refuses_a_cancellation_that_arrives_with_the_key_file() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let late = cancel.clone();
+        let key_file = async move {
+            late.cancel();
+            Ok::<(), String>(())
+        };
+        let outcome = RemoteMigrationOutcome::Installed { steps: 12 };
+        let error = finish_remote_preparation(outcome, &cancel, Some(key_file))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PreparationError::RemoteCancelledAfterSettlement {
+                    outcome: RemoteMigrationOutcome::Installed { steps: 12 }
+                }
+            ),
+            "{error}"
+        );
+        // Cancellation already pending before the tail: refused before the key file runs.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = ran.clone();
+        let key_file = async move {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok::<(), String>(())
+        };
+        let error =
+            finish_remote_preparation(RemoteMigrationOutcome::Current, &cancel, Some(key_file))
+                .await
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            PreparationError::RemoteCancelledAfterSettlement {
+                outcome: RemoteMigrationOutcome::Current
+            }
+        ));
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "key file must not run after a cancellation"
+        );
+    }
+
+    /// Positive and error controls of the tail: no key file and no signal is
+    /// Ok; a successful key file without a signal is Ok; a failed key file is
+    /// an ordinary preparation error and never an exec.
+    #[tokio::test]
+    async fn remote_preparation_tail_completes_or_reports_the_key_file_without_a_signal() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let none: Option<std::future::Ready<Result<(), String>>> = None;
+        finish_remote_preparation(
+            RemoteMigrationOutcome::Resumed { from: 11, to: 12 },
+            &cancel,
+            none,
+        )
+        .await
+        .unwrap();
+        finish_remote_preparation(
+            RemoteMigrationOutcome::Current,
+            &cancel,
+            Some(std::future::ready(Ok::<(), String>(()))),
+        )
+        .await
+        .unwrap();
+        assert!(!cancel.is_cancelled());
+        let error = finish_remote_preparation(
+            RemoteMigrationOutcome::Current,
+            &cancel,
+            Some(std::future::ready(Err::<(), String>(
+                "key file unwritable".into(),
+            ))),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, PreparationError::Ordinary(ref text) if text == "key file unwritable"),
+            "{error}"
+        );
+    }
+
+    /// Positive control: a plain completion with no signal selected and none
+    /// pending exits 0 and lets the launcher continue; a fresh run is never
+    /// treated as cancelled by the absence of a signal.
+    #[test]
+    fn plain_completion_without_any_signal_is_not_over_cancelled() {
+        assert_eq!(SignalObservation::NONE.decisive(), None);
+        assert_eq!(preparation_signal_decision(SignalObservation::NONE), None);
+        let (code, text) = remote_migrator_exit(
+            SignalObservation::NONE,
+            &Ok(RemoteMigrationOutcome::Current),
+        );
+        assert_eq!(
+            (code, text.as_str()),
+            (0, "remote migration settled: Current")
+        );
+        // A plain failure is 1, never a signal code.
+        let (code, _) = remote_migrator_exit(
+            SignalObservation::NONE,
+            &Err(RemoteMigrationError::Cancelled {
+                last_settled: 0,
+                drain: None,
+            }),
+        );
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn startup_refusal_repeats_only_closed_codes_and_bounded_text() {
+        let error = RemoteMigrationError::Gate {
+            stage: GateStage::StartupGate,
+            source: driver_secret(),
+            drain: Some(protocol_secret()),
+        };
+        let text = remote_startup_refusal(&error);
+        assert_secret_free(&text);
+        assert!(text.starts_with("remote normal startup refused (REMOTE_SCHEMA_GATE_REFUSED, gate none, settlement drain-failed): remote startup gate refused"), "{text}");
+        let ahead = RemoteMigrationError::Gate {
+            stage: GateStage::StartupGate,
+            source: sqlx::Error::Protocol(
+                "SQLite schema is ahead, incomplete or unprepared".into(),
+            ),
+            drain: None,
+        };
+        let text = remote_startup_refusal(&ahead);
+        assert!(
+            text.contains("gate GATE_AHEAD_INCOMPLETE_UNPREPARED")
+                && text.contains("settlement no-write-opened"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn migrator_exit_is_zero_only_for_a_settled_outcome_without_a_signal() {
+        let (code, text) = remote_migrator_exit(
+            SignalObservation::NONE,
+            &Ok(RemoteMigrationOutcome::Current),
+        );
+        assert_eq!(code, 0);
+        assert_eq!(text, "remote migration settled: Current");
+        let (code, text) = remote_migrator_exit(
+            SignalObservation::NONE,
+            &Ok(RemoteMigrationOutcome::Installed { steps: 12 }),
+        );
+        assert_eq!(
+            (code, text.as_str()),
+            (0, "remote migration settled: Installed { steps: 12 }")
+        );
+        let (code, text) = remote_migrator_exit(
+            SignalObservation::NONE,
+            &Ok(RemoteMigrationOutcome::Resumed { from: 1, to: 12 }),
+        );
+        assert_eq!(
+            (code, text.as_str()),
+            (0, "remote migration settled: Resumed { from: 1, to: 12 }")
+        );
+        // A signal after settlement keeps the truthful result and exits with the signal code.
+        let (code, text) = remote_migrator_exit(
+            selected(143),
+            &Ok(RemoteMigrationOutcome::Installed { steps: 12 }),
+        );
+        assert_eq!(code, 143);
+        assert!(
+            text.contains("no server start") && text.contains("Installed { steps: 12 }"),
+            "{text}"
+        );
+        // Unknown commit: non-zero, closed code, rerun guidance, no secret.
+        let unknown = RemoteMigrationError::CommitUnknown {
+            version: 3,
+            source: driver_secret(),
+            drain: None,
+        };
+        let (code, text) = remote_migrator_exit(SignalObservation::NONE, &Err(unknown));
+        assert_eq!(code, 1);
+        assert_secret_free(&text);
+        assert!(
+            text.contains("REMOTE_MIGRATION_COMMIT_UNKNOWN")
+                && text.contains("settlement commit-unknown")
+                && text.contains("rerun resumes from the ledger"),
+            "{text}"
+        );
+        // A signal during a failing run still reports the failure, never zero.
+        let cancelled = RemoteMigrationError::Cancelled {
+            last_settled: 2,
+            drain: Some(protocol_secret()),
+        };
+        let (code, text) = remote_migrator_exit(selected(130), &Err(cancelled));
+        assert_eq!(code, 130);
+        assert_secret_free(&text);
+        assert!(
+            text.contains("REMOTE_MIGRATION_CANCELLED") && text.contains("settlement drain-failed"),
+            "{text}"
+        );
+        let (code, _) = remote_migrator_exit(
+            SignalObservation::NONE,
+            &Err(RemoteMigrationError::Drain {
+                source: driver_secret(),
+            }),
+        );
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn preparation_error_variants_keep_meaning_without_secrets() {
+        let error = PreparationError::Remote(RemoteMigrationError::Step {
+            version: 7,
+            source: protocol_secret(),
+            drain: Some(driver_secret()),
+        });
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+        assert_secret_free(&display);
+        assert_secret_free(&debug);
+        assert!(display.starts_with("remote preparation refused (REMOTE_MIGRATION_STEP_FAILED, gate none, settlement drain-failed): remote migration step 7 failed"), "{display}");
+        assert!(
+            debug.contains("REMOTE_MIGRATION_STEP_FAILED") && debug.contains("<withheld>"),
+            "{debug}"
+        );
+        assert!(std::error::Error::source(&error).is_some());
+        let settled = PreparationError::RemoteCancelledAfterSettlement {
+            outcome: RemoteMigrationOutcome::Resumed { from: 4, to: 12 },
+        };
+        assert_eq!(
+            settled.to_string(),
+            "preparation cancelled after the remote migration settled; no server start: Resumed { from: 4, to: 12 }"
+        );
+    }
+}
+
+fn prepare_deadline() -> Result<tokio::time::Instant, String> {
+    Ok(tokio::time::Instant::now()
         + Duration::from_secs(match std::env::var("FVOCI_PREPARE_TIMEOUT_SECS") {
             Ok(raw) => raw
                 .trim()
                 .parse::<u64>()
                 .ok()
-                .filter(|s| *s > 0)
+                .filter(|value| *value > 0)
                 .ok_or("FVOCI_PREPARE_TIMEOUT_SECS must be a positive number of seconds")?,
             Err(_) => DEFAULT_PREPARE_TIMEOUT_SECS,
-        });
+        }))
+}
+
+async fn prepare_postgres() -> Result<(), String> {
+    let owner_url = std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is not derived")?;
+    let names = DbNames::from_lookup(|k| std::env::var(k).ok())?;
+    let deadline = prepare_deadline()?;
 
     let mut conn = wait_for_postgres(&owner_url, &names, deadline).await?;
     let meili_url = std::env::var("FVOCI_MEILI_URL")
@@ -456,34 +1586,30 @@ async fn refuse_upgrade_with_live_writers(
     names: &DbNames,
 ) -> Result<(), String> {
     let db = |e: sqlx::Error| e.to_string();
-    let bootstrapped: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.tables
-                        WHERE table_schema = 'fvoci' AND table_name = 'schema_migrations')",
-    )
-    .fetch_one(&mut *conn)
-    .await
-    .map_err(db)?;
-    if !bootstrapped {
-        return Ok(());
-    }
+    // The ledger is read on the owner connection: a retired development lineage
+    // or any receipt set that is not an exact prefix of the compiled lineage is
+    // refused here, before pending steps are counted.
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(owner_url)
         .await
         .map_err(db)?;
-    let applied: Vec<i32> =
-        sqlx::query_scalar("SELECT version FROM fvoci.schema_migrations ORDER BY version")
-            .fetch_all(&pool)
-            .await
-            .map_err(db)?;
-    pool.close().await;
-    let compiled = migrate::compiled_migration_versions();
-    if applied.iter().any(|v| !compiled.contains(v)) {
-        return Err(migrate::schema_gate(&applied, &compiled)
-            .err()
-            .unwrap_or_default());
+    let ledger = async {
+        let mut owner = pool.acquire().await?;
+        migrate::read_postgres_ledger(&mut owner).await
     }
-    let pending = compiled.iter().filter(|v| !applied.contains(v)).count();
+    .await;
+    pool.close().await;
+    let compiled = migrate::compiled_postgres_steps();
+    let pending = match ledger.map_err(db)? {
+        migrate::LedgerState::Unprepared => return Ok(()),
+        retired @ migrate::LedgerState::Retired { .. } => {
+            return Err(migrate::schema_gate(&retired, &compiled)
+                .err()
+                .unwrap_or_default());
+        }
+        migrate::LedgerState::Applied(applied) => migrate::pending_steps(&applied, &compiled)?,
+    };
     if pending == 0 {
         return Ok(());
     }
@@ -587,6 +1713,43 @@ mod tests {
             ("ENCRYPTION_ACTIVE_KEY_ID", "install".into()),
             ("FVOCI_PUBLIC_ORIGIN", "http://localhost:8080".into()),
         ]
+    }
+
+    #[test]
+    fn sqlite_preparation_validates_keys_without_deriving_postgres_credentials() {
+        let mut selected = valid();
+        selected.retain(|(name, _)| {
+            !matches!(
+                *name,
+                "POSTGRES_PASSWORD" | "FVOCI_APP_PASSWORD" | "MEILI_MASTER_KEY"
+            )
+        });
+        selected.extend([
+            ("FVOCI_DATABASE_BACKEND", "sqlite".into()),
+            ("FVOCI_SQLITE_PATH", "/owned/wiki.sqlite".into()),
+        ]);
+        assert!(validate(get(&selected)).is_empty());
+        assert!(install_env(get(&selected)).unwrap().is_empty());
+        for name in [
+            "POSTGRES_PASSWORD",
+            "FVOCI_APP_PASSWORD",
+            "DATABASE_URL",
+            "FVOCI_MIGRATION_URL",
+        ] {
+            let mut mixed = selected.clone();
+            mixed.push((name, "synthetic-owner-secret".into()));
+            let error = install_env(get(&mixed)).unwrap_err();
+            assert!(error.contains(name));
+            assert!(!error.contains("synthetic-owner-secret"));
+        }
+        selected.retain(|(name, _)| *name != "ENCRYPTION_KEYS");
+        assert!(validate(get(&selected))
+            .iter()
+            .any(|error| error.contains("ENCRYPTION_KEYS")));
+        selected.push(("FVOCI_MEILI_URL", "http://127.0.0.1:1".into()));
+        assert!(validate(get(&selected))
+            .iter()
+            .any(|error| error.contains("MEILI_MASTER_KEY")));
     }
 
     fn get<'a>(env: &'a [(&'static str, String)]) -> impl Fn(&str) -> Option<String> + 'a {

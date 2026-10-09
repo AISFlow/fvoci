@@ -65,6 +65,8 @@ pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         )
     });
     let state = AppState {
+        realtime_mode: fvoci_server::config::RealtimeMode::On,
+        native_engine: None,
         auth: Arc::new(AuthService {
             db: Db::new(pool.clone()),
             password_keys: keys.clone(),

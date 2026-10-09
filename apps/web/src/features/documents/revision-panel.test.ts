@@ -101,7 +101,7 @@ function hostPersist(file: string, available: boolean, delayed = false) {
     generation: 0,
   });
   const session = Vue.shallowRef(current);
-  const props = Vue.reactive({
+  const props = Vue.shallowReactive({
     session: current,
     workspaceId: "ws",
     taskId: "task",
@@ -113,6 +113,8 @@ function hostPersist(file: string, available: boolean, delayed = false) {
   const readOnly = Vue.ref(false);
   const persisting = Vue.ref(false);
   const persistError = Vue.ref<string | null>(null);
+  const realtimeOff = Vue.ref(false);
+  const offBody = { doc: Vue.shallowRef({}), generation: Vue.ref(1) };
   const context = {
     ...Vue,
     session,
@@ -124,12 +126,24 @@ function hostPersist(file: string, available: boolean, delayed = false) {
     me: { data: actor, error: meError },
     ProblemError,
     canPersist: Vue.ref(available),
+    realtimeOff,
+    offBody,
     t: (key: string) => key,
     Error,
   };
   // Execute only the actual persist owner and its retirement subscriptions.
   // Unrelated source-draft/export helpers between these declarations are not
   // dependencies of persistBody and must not become accidental VM imports.
+  const bodyIdentity = parsed.statements.filter(
+    (node) =>
+      ts.isVariableStatement(node) &&
+      node.declarationList.declarations.some(
+        (declaration) =>
+          ts.isIdentifier(declaration.name) &&
+          ["bodyDoc", "bodyGeneration"].includes(declaration.name.text),
+      ),
+  );
+  assert.equal(bodyIdentity.length, 2, "actual selected body identity and generation");
   const lifetime = parsed.statements.filter((node) => {
     if (ts.isVariableStatement(node))
       return node.declarationList.declarations.some(
@@ -150,14 +164,20 @@ function hostPersist(file: string, available: boolean, delayed = false) {
   const callable: unknown = owner.run((): unknown =>
     runInNewContext(
       new Bun.Transpiler({ loader: "ts" }).transformSync(
-        `(() => {${lifetime.map((node) => node.getText(parsed)).join("\n")};${fn.getText(parsed)}; return persistBody;})()`,
+        `(() => {${[...bodyIdentity, ...lifetime].map((node) => node.getText(parsed)).join("\n")};${fn.getText(parsed)}; return {persistBody, persistLifecycle};})()`,
       ),
       context,
     ),
   );
-  assert.ok(typeof callable === "function");
+  assert.ok(callable !== null && typeof callable === "object");
+  const callbacks = callable as {
+    persistBody: () => Promise<void>;
+    persistLifecycle: Vue.Ref<number>;
+  };
+  assert.ok(typeof callbacks.persistBody === "function");
   return {
-    run: callable as () => Promise<void>,
+    run: callbacks.persistBody,
+    lifetime: () => callbacks.persistLifecycle.value,
     calls: () => called,
     resolve,
     reject,
@@ -167,6 +187,27 @@ function hostPersist(file: string, available: boolean, delayed = false) {
       owner.stop();
     },
     retire(change: string) {
+      if (change === "actor-aba") {
+        actor.value = { ...actor.value, userId: "other" };
+        actor.value = { ...actor.value, userId: "actor" };
+        props.collabUser = { id: "other" };
+        props.collabUser = { id: "actor" };
+      }
+      if (change === "on-doc" || change === "on-generation") {
+        const replacement = Vue.markRaw({
+          ...session.value,
+          doc: change === "on-doc" ? {} : session.value.doc,
+          generation: session.value.generation + (change === "on-generation" ? 1 : 0),
+        });
+        session.value = replacement;
+        props.session = replacement;
+      }
+      if (change === "off") {
+        realtimeOff.value = true;
+        Object.assign(props, { offBody });
+      }
+      if (change === "off-doc") offBody.doc.value = {};
+      if (change === "off-generation") offBody.generation.value++;
       if (change === "aba") {
         resource.value = { ...resource.value, documentId: "other" };
         resource.value = { ...resource.value, documentId: "doc" };
@@ -224,7 +265,16 @@ await test("actual host lifetime watchers reject late persist success/error acro
     "../../vue/features/documents/ProjectDocumentView.vue",
     "../../vue/features/tasks/TaskBodyEditor.vue",
   ])
-    for (const change of ["aba", "session-aba", "signed-out", "readonly", "dispose"])
+    for (const change of [
+      "aba",
+      "session-aba",
+      "actor-aba",
+      "on-doc",
+      "on-generation",
+      "signed-out",
+      "readonly",
+      "dispose",
+    ])
       for (const failure of [false, true]) {
         const h = hostPersist(file, true, true);
         try {
@@ -242,6 +292,36 @@ await test("actual host lifetime watchers reject late persist success/error acro
           h.stop();
         }
       }
+});
+
+await test("actual ON/OFF body owner transitions retire host watchers while stable snapshots do not", () => {
+  for (const file of [
+    "../../vue/features/documents/WikiDocumentView.vue",
+    "../../vue/features/documents/ProjectDocumentView.vue",
+    "../../vue/features/tasks/TaskBodyEditor.vue",
+  ]) {
+    const h = hostPersist(file, true);
+    try {
+      const initial = h.lifetime();
+      h.retire("snapshot");
+      assert.equal(h.lifetime(), initial);
+      for (const change of [
+        "on-doc",
+        "on-generation",
+        "off",
+        "off-doc",
+        "off-generation",
+        "actor-aba",
+        "signed-out",
+      ]) {
+        const previous = h.lifetime();
+        h.retire(change);
+        assert.ok(h.lifetime() > previous, `${file}/${change}`);
+      }
+    } finally {
+      h.stop();
+    }
+  }
 });
 
 await test("ordinary host session snapshot replacements do not retire a valid persist ACK", async () => {

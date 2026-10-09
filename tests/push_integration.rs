@@ -795,7 +795,7 @@ async fn comment_event(
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "푸시 문서"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "푸시 문서"})),
         Some(owner_cookie),
     )
     .await;

@@ -70,10 +70,20 @@ async fn list_route(
         None,
     )
     .await?;
-    let rows = list_views(&state.auth.db.pool, workspace_id, &actor, project_id)
-        .await
-        .map_err(internal)?
-        .map_err(map_view_error)?;
+    let rows = list_views(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/project_views.rs")
+            .map_err(internal)?,
+        workspace_id,
+        &actor,
+        project_id,
+    )
+    .await
+    .map_err(internal)?
+    .map_err(map_view_error)?;
     Ok(Json(ProjectViewListResponse {
         items: rows.into_iter().map(output).collect(),
     }))
@@ -98,7 +108,12 @@ async fn create_route(
     .await?;
     let input = parse_project_view_create(&json_body(body)?).map_err(|_| invalid())?;
     let row = create_view(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/project_views.rs")
+            .map_err(internal)?,
         workspace_id,
         &actor,
         project_id,
@@ -128,10 +143,21 @@ async fn update_route(
     )
     .await?;
     let input = parse_project_view_patch(&json_body(body)?).map_err(|_| invalid())?;
-    update_view(&state.auth.db.pool, workspace_id, &actor, view_id, &input)
-        .await
-        .map_err(internal)?
-        .map_err(map_view_error)?;
+    update_view(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/project_views.rs")
+            .map_err(internal)?,
+        workspace_id,
+        &actor,
+        view_id,
+        &input,
+    )
+    .await
+    .map_err(internal)?
+    .map_err(map_view_error)?;
     Ok(Json(OkResponse { ok: true }))
 }
 
@@ -151,9 +177,19 @@ async fn delete_route(
         None,
     )
     .await?;
-    delete_view(&state.auth.db.pool, workspace_id, &actor, view_id)
-        .await
-        .map_err(internal)?
-        .map_err(map_view_error)?;
+    delete_view(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/project_views.rs")
+            .map_err(internal)?,
+        workspace_id,
+        &actor,
+        view_id,
+    )
+    .await
+    .map_err(internal)?
+    .map_err(map_view_error)?;
     Ok(Json(OkResponse { ok: true }))
 }

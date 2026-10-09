@@ -32,7 +32,7 @@ jobs:
   # Tag -> main commit that CI already accepted; version policy; cheap preflight
   # of everything the smoke needs; existing state. Nothing is pushed before it.
   verify:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -115,10 +115,10 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-24.04
+            runner: ubuntu-26.04
             machine: x86_64
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
             machine: aarch64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
@@ -170,7 +170,7 @@ jobs:
   index:
     needs: [verify, build]
     if: always() && needs.verify.result == 'success' && (needs.build.result == 'success' || (needs.build.result == 'skipped' && needs.verify.outputs.existing_digest != ''))
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -218,7 +218,7 @@ jobs:
   dist:
     needs: [verify, index]
     if: always() && needs.index.result == 'success'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -272,9 +272,9 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-24.04
+            runner: ubuntu-26.04
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
@@ -305,7 +305,7 @@ jobs:
   publish:
     needs: [verify, index, smoke]
     if: always() && needs.smoke.result == 'success'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -341,7 +341,7 @@ jobs:
   release:
     needs: [verify, dist, publish]
     if: always() && needs.publish.result == 'success'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: write

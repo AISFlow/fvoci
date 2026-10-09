@@ -151,6 +151,8 @@ async fn app_state_with_storage(app_url: &str, storage_root: PathBuf) -> AppStat
     let pool = pool::connect_app(app_url).await.expect("app pool");
     std::fs::create_dir_all(&storage_root).expect("storage root");
     AppState {
+        realtime_mode: fvoci_server::config::RealtimeMode::On,
+        native_engine: None,
         auth: Arc::new(AuthService {
             db: Db::new(pool),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
@@ -311,7 +313,7 @@ async fn create_document(app: &axum::Router, cookie: &str, workspace_id: Uuid) -
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Doc"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Doc"})),
         Some(cookie),
     )
     .await;
@@ -1541,92 +1543,6 @@ async fn fresh_migration_006_adds_attachments_table() {
 }
 
 #[tokio::test]
-async fn migration_005_upgrades_to_006_attachments() {
-    let admin_base = std::env::var("TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))
-        .expect("TEST_DATABASE_URL missing");
-    let db_name = format!("fvoci_att_upg_{}", Uuid::now_v7().simple());
-    let server_url = server_db_url(&admin_base);
-    let admin_pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&server_url)
-        .await
-        .unwrap();
-    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
-        .execute(&admin_pool)
-        .await
-        .unwrap();
-    admin_pool.close().await;
-
-    let admin_url = join_db_url(&server_url, &db_name);
-    let migration_pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&admin_url)
-        .await
-        .unwrap();
-    for sql in [
-        include_str!("../migrations/001_schema.sql"),
-        include_str!("../migrations/002_functions.sql"),
-        include_str!("../migrations/003_workspace.sql"),
-        include_str!("../migrations/004_documents.sql"),
-        include_str!("../migrations/005_collab_updates.sql"),
-    ] {
-        sqlx::raw_sql(sql).execute(&migration_pool).await.unwrap();
-    }
-    sqlx::query("INSERT INTO fvoci.schema_migrations (version) VALUES (1), (2), (3), (4), (5)")
-        .execute(&migration_pool)
-        .await
-        .unwrap();
-    let has_attachments: (bool,) = sqlx::query_as(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'fvoci' AND table_name = 'attachments')",
-    )
-    .fetch_one(&migration_pool)
-    .await
-    .unwrap();
-    assert!(!has_attachments.0);
-    migration_pool.close().await;
-
-    migrate::run_migrations(&admin_url).await.unwrap();
-    let migration_pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&admin_url)
-        .await
-        .unwrap();
-    let versions: (i64,) = sqlx::query_as("SELECT count(*) FROM fvoci.schema_migrations")
-        .fetch_one(&migration_pool)
-        .await
-        .unwrap();
-    assert_eq!(
-        versions.0,
-        fvoci_server::db::migrate::compiled_migration_count() as i64
-    );
-    let has_attachments: (bool,) = sqlx::query_as(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'fvoci' AND table_name = 'attachments')",
-    )
-    .fetch_one(&migration_pool)
-    .await
-    .unwrap();
-    assert!(has_attachments.0);
-    migration_pool.close().await;
-
-    let server_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&server_url)
-        .await
-        .unwrap();
-    let _ = sqlx::query(&format!(
-        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}'",
-        db_name
-    ))
-    .execute(&server_pool)
-    .await;
-    let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", db_name))
-        .execute(&server_pool)
-        .await;
-    server_pool.close().await;
-}
-
-#[tokio::test]
 async fn stored_original_survives_service_recreation() {
     let harness = TestDb::bootstrap().await;
     let storage_root = std::env::temp_dir().join(format!("fvoci-att-persist-{}", Uuid::now_v7()));
@@ -2170,7 +2086,13 @@ async fn stale_upload_gc_removes_expired_uploading_and_is_idempotent() {
     let storage_root = std::env::temp_dir().join(format!("fvoci-att-gc-{}", Uuid::now_v7()));
     let state = app_state_with_storage(&harness.app_url, storage_root.clone()).await;
     let storage = state.storage.clone();
-    let pool = state.auth.db.pool.clone();
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("PostgreSQL integration fixture")
+        .expect("actual PG fixture backend")
+        .clone();
     let app = app_router(state);
     let (_, _, cookie_hdr) = json_request(
         app.clone(),
@@ -2260,7 +2182,13 @@ async fn stale_upload_gc_skips_stored_and_yields_to_in_flight_complete() {
     let storage_root = std::env::temp_dir().join(format!("fvoci-att-gc-stored-{}", Uuid::now_v7()));
     let state = app_state_with_storage(&harness.app_url, storage_root.clone()).await;
     let storage = state.storage.clone();
-    let pool = state.auth.db.pool.clone();
+    let pool = state
+        .auth
+        .db
+        .pool
+        .postgres("PostgreSQL integration fixture")
+        .expect("actual PG fixture backend")
+        .clone();
     let app = app_router(state);
     let (_, _, cookie_hdr) = json_request(
         app.clone(),

@@ -11,3 +11,4 @@
 
 # vendored crate build outputs (tests run with --target-dir)
 /vendor/*/target/
+__pycache__/

@@ -43,7 +43,7 @@ test("home counts and owner deletes a team workspace", async ({ page }) => {
   if (acme === undefined) throw new Error("Missing fixture value: acme");
   expect(acme).toBeTruthy();
   const created = await page.request.post(`/api/v1/workspaces/${acme.id}/documents`, {
-    data: { title: "수명주기 문서", parentId: null },
+    data: { commandId: crypto.randomUUID(), title: "수명주기 문서", parentId: null },
   });
   expect(created.ok()).toBe(true);
 

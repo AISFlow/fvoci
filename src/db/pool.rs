@@ -1,8 +1,172 @@
 use sqlx::postgres::{PgConnection, PgPoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Executor, PgPool, Row};
+use sqlx::{SqliteConnection, SqlitePool};
+use std::path::Path;
 
 pub async fn connect_app(url: &str) -> Result<PgPool, sqlx::Error> {
     connect_app_with_max(url, crate::collab::config::APP_POOL_MAX_CONNECTIONS).await
+}
+
+pub const SQLITE_VERSION: &str = "3.53.4";
+pub const SQLITE_SOURCE_ID: &str =
+    "2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc";
+
+pub async fn connect_sqlite_app(
+    path: &Path,
+    max_connections: u32,
+) -> Result<SqlitePool, sqlx::Error> {
+    connect_sqlite(path, max_connections, false).await
+}
+
+/// Preparation alone may create a database. Normal startup never interprets
+/// a misspelled path as a new, empty installation.
+pub(crate) struct SqlitePreparationPool {
+    pub(crate) pool: SqlitePool,
+    opened: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+impl SqlitePreparationPool {
+    /// Pool::close suppresses raw shutdown errors. Close the sole preparation
+    /// connection explicitly and retain its worker-shutdown result instead.
+    /// A silently retired/replaced connection has no such receipt: fail closed.
+    pub(crate) async fn close_confirmed(self) -> Result<(), sqlx::Error> {
+        let result = match self.pool.acquire().await {
+            Ok(connection) => connection.close().await,
+            Err(error) => Err(error),
+        };
+        self.pool.close().await;
+        result?;
+        if self.opened.load(std::sync::atomic::Ordering::SeqCst) != 1 {
+            return Err(sqlx::Error::Protocol(
+                "preparation connection replaced without an explicit shutdown receipt".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+pub(crate) async fn connect_sqlite_prepare(
+    path: &Path,
+) -> Result<SqlitePreparationPool, sqlx::Error> {
+    if !path.is_absolute() || path.file_name().is_none() {
+        return Err(sqlx::Error::Protocol(
+            "SQLite requires an absolute persistent database file".into(),
+        ));
+    }
+    let opened = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let connect_count = opened.clone();
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Full)
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .test_before_acquire(false)
+        .after_connect(move |conn, _| {
+            connect_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(assert_sqlite_runtime(conn))
+        })
+        .before_acquire(|conn, _| Box::pin(sqlite_idle_clean(conn)))
+        .connect_with(options)
+        .await?;
+    Ok(SqlitePreparationPool { pool, opened })
+}
+
+async fn connect_sqlite(
+    path: &Path,
+    max_connections: u32,
+    create: bool,
+) -> Result<SqlitePool, sqlx::Error> {
+    if !path.is_absolute() || path.file_name().is_none() {
+        return Err(sqlx::Error::Protocol(
+            "SQLite requires an absolute persistent database file".into(),
+        ));
+    }
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(create)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Full)
+        .foreign_keys(true);
+    SqlitePoolOptions::new()
+        .max_connections(max_connections.max(1))
+        .test_before_acquire(false)
+        .after_connect(|conn, _| Box::pin(assert_sqlite_runtime(conn)))
+        .before_acquire(|conn, _| Box::pin(sqlite_idle_clean(conn)))
+        .connect_with(options)
+        .await
+}
+
+async fn sqlite_idle_clean(conn: &mut SqliteConnection) -> Result<bool, sqlx::Error> {
+    let outside = {
+        let mut handle = conn.lock_handle().await?;
+        // SAFETY: SQLx holds its exclusive native-handle guard, so the worker
+        // cannot access SQLite concurrently; the pinned ABI matches SQLx.
+        unsafe { libsqlite3_sys::sqlite3_get_autocommit(handle.as_raw_handle().as_ptr()) != 0 }
+    };
+    if !outside {
+        tracing::warn!(event = "db.sqlite.release_in_transaction");
+        // Reject/close the idle connection. Closing SQLite rolls back its own
+        // uncommitted transaction; no subsequent actor receives that handle.
+        return Ok(false);
+    }
+    assert_sqlite_connection_settings(conn).await?;
+    Ok(true)
+}
+
+async fn assert_sqlite_runtime(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+    let (version, source): (String, String) =
+        sqlx::query_as("SELECT sqlite_version(), sqlite_source_id()")
+            .fetch_one(&mut *conn)
+            .await?;
+    if version != SQLITE_VERSION || source != SQLITE_SOURCE_ID {
+        return Err(sqlx::Error::Protocol(
+            "SQLite runtime does not match the compiled supported engine pin".into(),
+        ));
+    }
+    let flags: Vec<String> = sqlx::query_scalar("PRAGMA compile_options")
+        .fetch_all(&mut *conn)
+        .await?;
+    for required in [
+        "THREADSAFE=1",
+        "ENABLE_COLUMN_METADATA",
+        "ENABLE_UNLOCK_NOTIFY",
+    ] {
+        if !flags.iter().any(|flag| flag == required) {
+            return Err(sqlx::Error::Protocol(format!(
+                "SQLite runtime missing required option {required}"
+            )));
+        }
+    }
+    for forbidden in ["OMIT_FOREIGN_KEY", "OMIT_TRIGGER", "OMIT_WAL"] {
+        if flags.iter().any(|flag| flag == forbidden) {
+            return Err(sqlx::Error::Protocol(format!(
+                "SQLite runtime has forbidden option {forbidden}"
+            )));
+        }
+    }
+    assert_sqlite_connection_settings(conn).await
+}
+
+async fn assert_sqlite_connection_settings(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+    let fk: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+        .fetch_one(&mut *conn)
+        .await?;
+    let sync: i64 = sqlx::query_scalar("PRAGMA synchronous")
+        .fetch_one(&mut *conn)
+        .await?;
+    let journal: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(&mut *conn)
+        .await?;
+    if fk != 1 || sync != 2 || !journal.eq_ignore_ascii_case("wal") {
+        return Err(sqlx::Error::Protocol(
+            "SQLite app connection requires FK ON, WAL and synchronous FULL".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// The app pool. An idle connection that its last user released inside a

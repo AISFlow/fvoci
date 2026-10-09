@@ -13,6 +13,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  LIBCLANG_PATH: /usr/lib/llvm-18/lib
   CARGO_BUILD_JOBS: 2
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 0
@@ -23,7 +24,7 @@ permissions:
 
 jobs:
   ci-plan:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
@@ -55,12 +56,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
+          - runner: ubuntu-26.04
             check: native-extraction
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-26.04-arm
             check: native-extraction-arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    # x64 113019003045 cancelled in apt after the extract crate had passed.
+    # 30m is the 914s wall, 183s to finish the last 28.8MB at the observed
+    # rate, 44s sqlite, 460s cross-feature compile analogue, 120s unmeasured
+    # test bodies, and 60s. ARM has no shortage evidence and stays 15m.
+    timeout-minutes: ${{ matrix.check == 'native-extraction' && 30 || 15 }}
     services:
       postgres:
         image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
@@ -82,7 +87,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cargo/registry
-          key: v3-cargo-documents-${{ runner.os }}-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock') }}
+          key: v3-cargo-documents-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock') }}
       - name: Restore document build outputs
         id: cache_native_extraction_4
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -90,8 +95,8 @@ jobs:
           path: |
             crates/document-extract/target
             crates/document-extract-client/target
-          key: v2-documents-${{ runner.os }}-${{ runner.arch }}-1.98.1-test-hang-default-nodebug-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('crates/document-extract/src/**', 'crates/document-extract-client/src/**', 'crates/document-extract/tests/**', 'crates/document-extract/fetch-rhwp.sh') }}
-          restore-keys: v2-documents-${{ runner.os }}-${{ runner.arch }}-1.98.1-test-hang-default-nodebug-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock', 'rust-toolchain.toml') }}-
+          key: v2-documents-ubuntu-26.04-${{ runner.arch }}-1.98.1-test-hang-default-nodebug-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('crates/document-extract/src/**', 'crates/document-extract-client/src/**', 'crates/document-extract/tests/**', 'crates/document-extract/fetch-rhwp.sh') }}
+          restore-keys: v2-documents-ubuntu-26.04-${{ runner.arch }}-1.98.1-test-hang-default-nodebug-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock', 'rust-toolchain.toml') }}-
       - name: Thin process client without native parser dependencies
         working-directory: crates/document-extract-client
         run: |
@@ -131,13 +136,39 @@ jobs:
           cp target/debug/document-extract "$RUNNER_TEMP/document-extract-production"
           cargo build --locked --offline --bin document-extract --features test-hang
           cp target/debug/document-extract "$RUNNER_TEMP/document-extract-test-hang"
+      - name: Prepare pinned SQLite root build inputs
+        id: sqlite
+        env:
+          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+        working-directory: .
+        run: |
+          set -euo pipefail
+          # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
+          . /etc/os-release
+          [[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
+          case "$(dpkg --print-architecture)" in
+            amd64)
+              test -f /etc/apt/apt-mirrors.txt
+              grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
+              grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
+              test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
+              printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+              ;;
+            arm64) ;;
+            *) exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          mkdir "$RUNNER_TEMP/fvoci-sqlite"
+          dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
+          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+            --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
       - name: Restore attachment product build outputs
         id: cache_native_extraction_15
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target
-          key: v1-extract-product-${{ runner.os }}-${{ runner.arch }}-1.98.1-extract-native-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'crates/document-extract-client/src/**', 'crates/collab-engine/src/**') }}
-          restore-keys: v1-extract-product-${{ runner.os }}-${{ runner.arch }}-1.98.1-extract-native-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-
+          key: v1-extract-product-ubuntu-26.04-${{ runner.arch }}-1.98.1-extract-native-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'crates/document-extract-client/src/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - name: Prepare locked server dependencies
         working-directory: .
         run: cargo fetch --locked
@@ -164,7 +195,7 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cargo/registry
-          key: v3-cargo-documents-${{ runner.os }}-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock') }}
+          key: v3-cargo-documents-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock') }}
       - name: Save document build outputs
         if: github.ref == 'refs/heads/main' && steps.cache_native_extraction_4.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -172,7 +203,7 @@ jobs:
           path: |
             crates/document-extract/target
             crates/document-extract-client/target
-          key: v2-documents-${{ runner.os }}-${{ runner.arch }}-1.98.1-test-hang-default-nodebug-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('crates/document-extract/src/**', 'crates/document-extract-client/src/**', 'crates/document-extract/tests/**', 'crates/document-extract/fetch-rhwp.sh') }}
+          key: v2-documents-ubuntu-26.04-${{ runner.arch }}-1.98.1-test-hang-default-nodebug-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('crates/document-extract/src/**', 'crates/document-extract-client/src/**', 'crates/document-extract/tests/**', 'crates/document-extract/fetch-rhwp.sh') }}
       - name: Save pinned public rhwp source
         if: github.ref == 'refs/heads/main' && steps.cache_native_extraction_6.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -184,13 +215,13 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target
-          key: v1-extract-product-${{ runner.os }}-${{ runner.arch }}-1.98.1-extract-native-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'crates/document-extract-client/src/**', 'crates/collab-engine/src/**') }}
+          key: v1-extract-product-ubuntu-26.04-${{ runner.arch }}-1.98.1-extract-native-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'crates/document-extract-client/src/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
 
   documents-ci-gate:
     name: documents-ci-gate
     needs: [ci-plan, native-extraction]
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

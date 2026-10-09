@@ -30,10 +30,6 @@ pub struct TestDb {
 
 impl TestDb {
     pub async fn bootstrap() -> Self {
-        Self::bootstrap_through(migrate::latest_migration_version()).await
-    }
-
-    pub async fn bootstrap_through(max_migration_version: i32) -> Self {
         let admin_base = std::env::var("TEST_DATABASE_URL")
             .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))
             .expect("TEST_DATABASE_URL missing");
@@ -54,9 +50,7 @@ impl TestDb {
             .expect("create database");
         admin_pool.close().await;
         let admin_url = join_db_url(&server_url, &db_name);
-        migrate::run_migrations_through(&admin_url, max_migration_version)
-            .await
-            .expect("migrate");
+        migrate::run_migrations(&admin_url).await.expect("migrate");
         let migration_pool = PgPoolOptions::new()
             .max_connections(2)
             .connect(&admin_url)
@@ -69,7 +63,7 @@ impl TestDb {
         .execute(&migration_pool)
         .await
         .expect("create role");
-        apply_grants_through(&migration_pool, &role_name, max_migration_version).await;
+        apply_grants(&migration_pool, &role_name).await;
         migration_pool.close().await;
         let mut app = url::Url::parse(&admin_url).expect("database url");
         app.set_username(&role_name).ok();
@@ -121,74 +115,9 @@ fn join_db_url(server_url: &str, db_name: &str) -> String {
 }
 
 async fn apply_grants(pool: &PgPool, role_name: &str) {
-    apply_grants_through(pool, role_name, migrate::latest_migration_version()).await;
-}
-
-async fn apply_grants_through(pool: &PgPool, role_name: &str, max_migration_version: i32) {
-    if max_migration_version >= fvoci_server::db::migrate::latest_migration_version() {
-        fvoci_server::db::migrate::apply_app_role_grants(pool, role_name)
-            .await
-            .expect("grant");
-        return;
-    }
-    // Seeding an older installation: skip grant statements that name fvoci/public
-    // objects which do not exist at this schema version, and apply the rest
-    // atomically like the real command. Existence-based, so new migrations need
-    // no edits here.
-    let existing: std::collections::HashSet<String> = sqlx::query_scalar(
-        r#"
-        SELECT n.nspname || '.' || c.relname FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname IN ('fvoci', 'public')
-        UNION
-        SELECT n.nspname || '.' || p.proname FROM pg_proc p
-        JOIN pg_namespace n ON n.oid = p.pronamespace
-        WHERE n.nspname IN ('fvoci', 'public')
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .expect("list schema objects")
-    .into_iter()
-    .collect();
-    let grants: Vec<String> = fvoci_server::db::migrate::app_role_grant_sql(role_name)
-        .split(';')
-        .map(str::trim)
-        .filter(|statement| {
-            !statement.is_empty()
-                && referenced_objects(statement)
-                    .iter()
-                    .all(|name| existing.contains(name))
-        })
-        .map(|statement| format!("{statement};"))
-        .collect();
-    let mut tx = pool.begin().await.expect("grant tx");
-    sqlx::raw_sql(&grants.join("\n"))
-        .execute(&mut *tx)
+    migrate::apply_app_role_grants(pool, role_name)
         .await
-        .expect("grant through partial schema");
-    tx.commit().await.expect("commit grants");
-}
-
-/// Schema-qualified `fvoci.*` / `public.*` identifiers named by a statement,
-/// ignoring the schema-wide `ALL TABLES IN SCHEMA fvoci` form.
-fn referenced_objects(statement: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    for schema in ["fvoci.", "public."] {
-        let mut rest = statement;
-        while let Some(index) = rest.find(schema) {
-            let after = &rest[index + schema.len()..];
-            let ident: String = after
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect();
-            if !ident.is_empty() {
-                names.push(format!("{schema}{ident}"));
-            }
-            rest = after;
-        }
-    }
-    names
+        .expect("grant");
 }
 
 pub async fn app_state(app_url: &str) -> AppState {
@@ -196,6 +125,8 @@ pub async fn app_state(app_url: &str) -> AppState {
     let storage_root = std::env::temp_dir().join(format!("fvoci-proj-test-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
     AppState {
+        realtime_mode: fvoci_server::config::RealtimeMode::On,
+        native_engine: None,
         auth: Arc::new(AuthService {
             db: Db::new(pool),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),

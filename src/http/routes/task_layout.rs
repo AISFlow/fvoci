@@ -75,7 +75,12 @@ async fn get_task_layout_route(
     )
     .await?;
     let result = get_project_task_layout(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/task_layout.rs")
+            .map_err(internal)?,
         workspace_id,
         project_id,
         actor_user_id,

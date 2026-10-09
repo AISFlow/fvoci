@@ -535,7 +535,7 @@ for (const phase of ["cold", "restart"] as const) {
       try {
         const ws = await workspaceId(current.page);
         const response = await current.page.request.post(`/api/v1/workspaces/${ws}/documents`, {
-          data: { parentId: null, title: `TB-A wiki ${phase}` },
+          data: { commandId: crypto.randomUUID(), parentId: null, title: `TB-A wiki ${phase}` },
         });
         expect(response.status()).toBe(201);
         const doc = resourceSchema.parse(await response.json());

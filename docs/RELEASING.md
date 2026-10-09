@@ -60,13 +60,13 @@ verify-workflows` rejects other triggers or write scopes outside the jobs below.
 
 | Job | Runner | Permissions | Does |
 | --- | --- | --- | --- |
-| verify | ubuntu-24.04 | contents, checks, packages: read | tag format, first-parent `main`, CI gates, version policy, preflight, existing release/image |
-| build-amd64 / build-arm64 | ubuntu-24.04 / ubuntu-24.04-arm | contents: read, packages: write | native build of the tagged SHA, OCI labels, push by digest; skipped when the version already has a tagged image |
-| index | ubuntu-24.04 | contents: read, packages: write | pushes the two-platform index **by digest, without a tag** (`scripts/release-api.py push-index`), records the index and per-arch digests |
-| dist | ubuntu-24.04 | contents: read | `scripts/release-dist.sh` at the tag: `compose.yml`, `env.example`, `INSTALL.md`, `release.json`, `RELEASE-NOTES.md`, and `SHA256SUMS` over those five; then `scripts/release-provenance.py` from the workflow ref records the smoke tooling commit |
-| smoke-amd64 / smoke-arm64 | ubuntu-24.04 / ubuntu-24.04-arm | contents: read | `scripts/release-smoke.sh` from the workflow ref against the digest, no registry login |
-| publish | ubuntu-24.04 | contents: read, packages: write | tags the smoked index `:0.y.z` (never moved), then `:0.y` when this is the newest `v0.y.*` tag |
-| release | ubuntu-24.04 | contents: write | `scripts/release-publish.sh`: pre-release for the existing git tag |
+| verify | ubuntu-26.04 | contents, checks, packages: read | tag format, first-parent `main`, CI gates, version policy, preflight, existing release/image |
+| build-amd64 / build-arm64 | ubuntu-26.04 / ubuntu-26.04-arm | contents: read, packages: write | native build of the tagged SHA, OCI labels, push by digest; skipped when the version already has a tagged image |
+| index | ubuntu-26.04 | contents: read, packages: write | pushes the two-platform index **by digest, without a tag** (`scripts/release-api.py push-index`), records the index and per-arch digests |
+| dist | ubuntu-26.04 | contents: read | `scripts/release-dist.sh` at the tag: `compose.yml`, `env.example`, `INSTALL.md`, `release.json`, `RELEASE-NOTES.md`, and `SHA256SUMS` over those five; then `scripts/release-provenance.py` from the workflow ref records the smoke tooling commit |
+| smoke-amd64 / smoke-arm64 | ubuntu-26.04 / ubuntu-26.04-arm | contents: read | `scripts/release-smoke.sh` from the workflow ref against the digest, no registry login |
+| publish | ubuntu-26.04 | contents: read, packages: write | tags the smoked index `:0.y.z` (never moved), then `:0.y` when this is the newest `v0.y.*` tag |
+| release | ubuntu-26.04 | contents: write | `scripts/release-publish.sh`: pre-release for the existing git tag |
 
 Only `publish` and `release` run after both smoke jobs passed, and they are the
 only jobs that create a tag or a release. Order:

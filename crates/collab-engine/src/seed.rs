@@ -24,7 +24,7 @@
 //! Byte equality with Yjs is not a goal (client ids and clocks differ); the decoded
 //! `prosemirror` tree is (compat/fixtures/yjs-seed).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -40,6 +40,27 @@ use crate::outcome::{EngineStatus, LimitKind};
 /// Stack guard for the recursive writer. Inputs arrive through a serde_json
 /// parse (recursion limit 128), so this is never reached in practice.
 const MAX_SEED_DEPTH: u32 = 256;
+
+/// Exact current packages/editor/src/extract.ts UNIQUE_ID_NODE_TYPES.
+/// `embed.id` is a block identity; `embed.ref` is a resource reference.
+const UNIQUE_ID_NODE_TYPES: &[&str] = &[
+    "heading",
+    "paragraph",
+    "blockquote",
+    "codeBlock",
+    "embed",
+    "listItem",
+    "table",
+    "horizontalRule",
+    "callout",
+    "mermaid",
+    "math",
+    "details",
+    "detailsContent",
+    "detailsSummary",
+    "taskList",
+    "taskItem",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AttrDefault {
@@ -212,13 +233,32 @@ enum PChild {
 /// doc object (the parent checks `isTiptapDoc`); the top-level `type` is ignored
 /// like the source, which always rebuilds `{type: "doc", content}`.
 pub fn tiptap_to_yjs_update(json: &Value, limits: &Limits) -> Result<Vec<u8>, EngineStatus> {
+    seed_tiptap(json, limits, false)
+}
+
+/// Independent body for a NEW document: use the canonical validated tree and
+/// fresh native Doc, refreshing only configured block ids. No source update,
+/// history, resource identity or caller-owned document identity is reused.
+pub fn tiptap_to_independent_yjs_update(
+    json: &Value,
+    limits: &Limits,
+) -> Result<Vec<u8>, EngineStatus> {
+    seed_tiptap(json, limits, true)
+}
+
+fn seed_tiptap(json: &Value, limits: &Limits, independent: bool) -> Result<Vec<u8>, EngineStatus> {
     let Some(obj) = json.as_object() else {
         return Err(malformed("contentJson is not an object"));
     };
-    let children = match obj.get("content") {
+    let mut children = match obj.get("content") {
         None => Vec::new(),
         Some(content) => fragment_from_json(content, 1)?,
     };
+    if independent {
+        let mut used_ids = HashSet::new();
+        collect_block_ids(&children, &mut used_ids);
+        refresh_block_ids(&mut children, &mut used_ids);
+    }
     let doc = crate::engine::new_doc();
     let frag = doc.get_or_insert_xml_fragment(crate::FRAGMENT);
     let bytes = {
@@ -239,6 +279,43 @@ pub fn tiptap_to_yjs_update(json: &Value, limits: &Limits) -> Result<Vec<u8>, En
         });
     }
     Ok(bytes)
+}
+
+fn collect_block_ids(children: &[PChild], ids: &mut HashSet<Arc<str>>) {
+    for child in children {
+        if let PChild::Element(element) = child {
+            if UNIQUE_ID_NODE_TYPES.contains(&element.tag) {
+                for (name, value) in &element.attrs {
+                    if let ("id", Any::String(id)) = (*name, value) {
+                        ids.insert(id.clone());
+                    }
+                }
+            }
+            collect_block_ids(&element.children, ids);
+        }
+    }
+}
+
+fn refresh_block_ids(children: &mut [PChild], used: &mut HashSet<Arc<str>>) {
+    for child in children {
+        if let PChild::Element(element) = child {
+            if UNIQUE_ID_NODE_TYPES.contains(&element.tag) {
+                // Reuse the maintained Yrs UUID generator. Avoid source ids
+                // and any ids already assigned in this seed; child time limits
+                // still bound the whole operation, including collision retry.
+                let id = loop {
+                    let id = yrs::uuid_v4();
+                    if used.insert(id.clone()) {
+                        break id;
+                    }
+                };
+                element.attrs.retain(|(name, _)| *name != "id");
+                // id is the first schema attribute for every configured type.
+                element.attrs.insert(0, ("id", Any::String(id)));
+            }
+            refresh_block_ids(&mut element.children, used);
+        }
+    }
 }
 
 fn check_depth(depth: u32) -> Result<(), EngineStatus> {
@@ -487,6 +564,185 @@ mod tests {
 
     fn seed(json: &Value) -> Vec<u8> {
         tiptap_to_yjs_update(json, &Limits::for_tests()).expect("seed")
+    }
+
+    fn independent(json: &Value) -> Vec<u8> {
+        tiptap_to_independent_yjs_update(json, &Limits::for_tests()).expect("independent seed")
+    }
+
+    #[test]
+    fn independent_seed_refreshes_exact_editor_block_types_and_native_identity() {
+        use yrs::updates::decoder::Decode;
+
+        let expected = [
+            "heading",
+            "paragraph",
+            "blockquote",
+            "codeBlock",
+            "embed",
+            "listItem",
+            "table",
+            "horizontalRule",
+            "callout",
+            "mermaid",
+            "math",
+            "details",
+            "detailsContent",
+            "detailsSummary",
+            "taskList",
+            "taskItem",
+        ];
+        assert_eq!(UNIQUE_ID_NODE_TYPES, expected);
+        let editor = include_str!("../../../packages/editor/src/extract.ts");
+        let policy = editor
+            .split("export const UNIQUE_ID_NODE_TYPES = [")
+            .nth(1)
+            .expect("editor policy")
+            .split(']')
+            .next()
+            .expect("policy end");
+        let actual: Vec<_> = policy
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix('"')
+                    .and_then(|s| s.split('"').next())
+            })
+            .collect();
+        assert_eq!(actual, expected);
+        let input = json!({"type":"doc","content": expected.iter().enumerate().map(|(i, name)| {
+            json!({"type":name,"attrs":{"id":format!("source-{i}")}})
+        }).collect::<Vec<_>>()});
+        let original = input.clone();
+        let old = seed(&input);
+        let mut all_ids = HashSet::new();
+        let mut clients = HashSet::new();
+        for (index, bytes) in [old, independent(&input), independent(&input)]
+            .iter()
+            .enumerate()
+        {
+            let projected = project(bytes);
+            for (i, name) in expected.iter().enumerate() {
+                assert_eq!(projected["content"][i]["type"], *name);
+                let id = projected["content"][i]["attrs"]["id"]
+                    .as_str()
+                    .expect("block id");
+                if index == 0 {
+                    assert_eq!(id, format!("source-{i}"));
+                } else {
+                    assert!(!id.starts_with("source-"));
+                    assert_eq!(id.len(), 36);
+                    assert_eq!(&id[14..15], "4");
+                    assert!(all_ids.insert(id.to_owned()), "duplicate copied block id");
+                }
+            }
+            let doc = crate::engine::new_doc();
+            doc.transact_mut()
+                .apply_update(yrs::Update::decode_v1(bytes).expect("update"))
+                .expect("integrate");
+            let snapshot = doc.transact().snapshot();
+            assert!(
+                snapshot.delete_set.is_empty(),
+                "fresh seed imported deletions"
+            );
+            assert_eq!(
+                snapshot.state_map.len(),
+                1,
+                "fresh seed imported other clients"
+            );
+            let client = *snapshot.state_map.iter().next().expect("seed client").0;
+            assert!(clients.insert(client), "observed reused native client");
+        }
+        assert_eq!(input, original, "borrowed input changed");
+    }
+
+    #[test]
+    fn independent_seed_preserves_literal_nested_content_marks_and_resource_targets() {
+        let input = json!({"type":"doc","content":[
+            {"type":"table","attrs":{"id":"source-table"},"content":[
+                {"type":"tableRow","content":[{"type":"tableCell","attrs":{
+                    "colspan":2,"rowspan":3,"colwidth":[120,80],"background":"red","align":"right"
+                },"content":[{"type":"paragraph","attrs":{"id":"source-p"},"content":[
+                    {"type":"text","text":"한글😀","marks":[{"type":"bold"},{"type":"link","attrs":{"href":"https://example.invalid/a#b"}}]},
+                    {"type":"mathInline","attrs":{"latex":"x^2"}},
+                    {"type":"mention","attrs":{"entity":"document","id":"resource-document","label":"Doc"}}
+                ]}]}]}
+            ]},
+            {"type":"attachment","attrs":{"id":"resource-attachment","name":"image.png","image":true}},
+            {"type":"embed","attrs":{"id":"source-embed","entity":"document","ref":"resource-embed"}},
+            {"type":"orderedList","attrs":{"start":7},"content":[{"type":"listItem","attrs":{"id":"source-item"},"content":[{"type":"math","attrs":{"id":"source-math","latex":"\\frac{1}{2}"}}]}]},
+            {"type":"taskList","attrs":{"id":"source-tasks"},"content":[{"type":"taskItem","attrs":{"id":"source-task","checked":true}}]}
+        ]});
+        let original = input.clone();
+        let expected = json!({"type":"doc","content":[
+            {"type":"table","attrs":{"id":"<fresh>"},"content":[
+                {"type":"tableRow","content":[{"type":"tableCell","attrs":{
+                    "colspan":2,"rowspan":3,"colwidth":[120,80],"background":"red","align":"right"
+                },"content":[{"type":"paragraph","attrs":{"id":"<fresh>"},"content":[
+                    {"type":"text","text":"한글😀","marks":[{"type":"bold","attrs":{}},{"type":"link","attrs":{"href":"https://example.invalid/a#b","target":"_blank","rel":"noopener noreferrer nofollow","class":null,"title":null}}]},
+                    {"type":"mathInline","attrs":{"latex":"x^2"}},
+                    {"type":"mention","attrs":{"entity":"document","id":"resource-document","label":"Doc"}}
+                ]}]}]}
+            ]},
+            {"type":"attachment","attrs":{"id":"resource-attachment","name":"image.png","image":true}},
+            {"type":"embed","attrs":{"id":"<fresh>","entity":"document","ref":"resource-embed"}},
+            {"type":"orderedList","attrs":{"start":7},"content":[{"type":"listItem","attrs":{"id":"<fresh>"},"content":[{"type":"math","attrs":{"id":"<fresh>","latex":"\\frac{1}{2}"}}]}]},
+            {"type":"taskList","attrs":{"id":"<fresh>"},"content":[{"type":"taskItem","attrs":{"id":"<fresh>","checked":true}}]}
+        ]});
+        fn normalize_blocks(node: &mut Value) {
+            // Fixture types only; resource id/ref fields are never normalized.
+            if matches!(
+                node["type"].as_str(),
+                Some(
+                    "table" | "paragraph" | "embed" | "listItem" | "math" | "taskList" | "taskItem"
+                )
+            ) {
+                let id = node["attrs"]["id"].as_str().expect("fresh id");
+                assert!(!id.starts_with("source-"));
+                node["attrs"]["id"] = json!("<fresh>");
+            }
+            if let Some(children) = node.get_mut("content").and_then(Value::as_array_mut) {
+                for child in children {
+                    normalize_blocks(child);
+                }
+            }
+        }
+        let mut observed = project(&independent(&input));
+        normalize_blocks(&mut observed);
+        assert_eq!(observed, expected, "literal semantic oracle");
+        assert_eq!(input, original);
+        let legacy = project(&seed(&input));
+        assert_eq!(legacy["content"][0]["attrs"]["id"], "source-table");
+        assert_eq!(legacy["content"][2]["attrs"]["id"], "source-embed");
+        assert_eq!(legacy["content"][2]["attrs"]["ref"], "resource-embed");
+    }
+
+    #[test]
+    fn independent_seed_rejects_malformed_and_oversize_without_truncation() {
+        for input in [
+            json!(null),
+            json!({"content":{}}),
+            json!({"content":[{"type":"nope"}]}),
+            json!({"content":[{"type":"text","text":""}]}),
+            json!({"content":[{"type":"paragraph","marks":[{"type":"nope"}]}]}),
+        ] {
+            assert!(matches!(
+                tiptap_to_independent_yjs_update(&input, &Limits::for_tests()),
+                Err(EngineStatus::Malformed { .. })
+            ));
+        }
+        let input = json!({"content":[{"type":"paragraph","content":[{"type":"text","text":"x".repeat(4096)}]}]});
+        let limits = Limits {
+            max_output_bytes: 1024,
+            ..Limits::for_tests()
+        };
+        assert!(matches!(
+            tiptap_to_independent_yjs_update(&input, &limits),
+            Err(EngineStatus::ResourceLimit {
+                kind: LimitKind::Output,
+                ..
+            })
+        ));
     }
 
     #[test]

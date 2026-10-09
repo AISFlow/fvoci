@@ -73,11 +73,23 @@ async fn create_invitation(
     }
     let ip = peer_ip(peer.ip());
     // Read before the invite commits so a failed read leaves no invitation.
-    let messages = crate::settings::messages::load(&state.auth.db.pool)
-        .await
-        .map_err(internal)?;
+    let messages = crate::settings::messages::load(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/invitations.rs")
+            .map_err(internal)?,
+    )
+    .await
+    .map_err(internal)?;
     let result = crate::db::invitations::create_invitation(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/invitations.rs")
+            .map_err(internal)?,
         workspace_id,
         user_id,
         session_id,
@@ -133,9 +145,17 @@ async fn get_invitation(
     {
         return Err(AppError::rate_limited(retry_after));
     }
-    let result = crate::db::invitations::get_invitation_public(&state.auth.db.pool, &token)
-        .await
-        .map_err(internal)?;
+    let result = crate::db::invitations::get_invitation_public(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/invitations.rs")
+            .map_err(internal)?,
+        &token,
+    )
+    .await
+    .map_err(internal)?;
     match result {
         Ok(preview) => Ok(Json(InvitationPublicResponse {
             workspace_name: preview.workspace_name,
@@ -190,10 +210,24 @@ async fn accept_invitation(
         return Err(AppError::rate_limited(retry_after));
     }
     if let Some(password) = body.password.as_deref() {
-        crate::validate::validate_password_setting(&state.auth.db.pool, password).await?;
+        crate::validate::validate_password_setting(
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/invitations.rs")
+                .map_err(internal)?,
+            password,
+        )
+        .await?;
     }
     let settings = crate::settings::current_values_with_license(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/invitations.rs")
+            .map_err(internal)?,
         &state.branding_name,
         &state.auth.db.license,
     )
@@ -217,7 +251,12 @@ async fn accept_invitation(
         validate_family_name(family_name)?;
     }
     let result = crate::db::invitations::accept_invitation(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/invitations.rs")
+            .map_err(internal)?,
         &state.auth.db.license,
         &state.auth.password_keys,
         &token,

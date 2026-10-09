@@ -252,7 +252,7 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
   }
   const wsId = required10.id;
   const docRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
-    data: { parentId: null, title: "PDF 첨부" },
+    data: { commandId: crypto.randomUUID(), parentId: null, title: "PDF 첨부" },
   });
   expect(docRes.ok(), await docRes.text()).toBeTruthy();
   const documentId = (

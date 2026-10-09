@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import test from "node:test";
-import { effectScope, ref } from "vue";
+import ts from "typescript";
+import { computed, effectScope, ref, shallowReactive, shallowRef } from "vue";
 import { compileScript, parse } from "vue/compiler-sfc";
 import type { components } from "@/generated/api";
 import type { EditorEntityTransport } from "@/features/workspace/editor-entities";
@@ -164,10 +166,104 @@ await test("all three compiled consumers supply callbacks before their one exist
     assert.match(compiled, /"mention-items": _unref\(mentionItems\)/);
     assert.match(compiled, /"entity-resolver": _unref\(entityResolver\)/);
     assert.equal(source.match(/<FvociEditor\b/g)?.length, 1);
-    assert.match(source, /:key="session.generation"/);
-    assert.match(source, /:ydoc="session.doc"/);
-    assert.match(source, /:provider="session.provider"/);
+    assert.match(source, /:key="bodyGeneration"/);
+    assert.match(source, /:ydoc="bodyDoc"/);
+    assert.match(source, /:provider="session\?\.provider"/);
     assert.equal(source.includes("new Y.Doc"), false);
+    assertBodyIdentity(source);
+  }
+});
+
+function bodyIdentityDeclarations(source: string) {
+  const { descriptor } = parse(source);
+  assert.ok(descriptor.scriptSetup);
+  const script = ts.createSourceFile(
+    "host.ts",
+    descriptor.scriptSetup.content,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const declarations = script.statements.filter(
+    (node) =>
+      ts.isVariableStatement(node) &&
+      node.declarationList.declarations.some(
+        (declaration) =>
+          ts.isIdentifier(declaration.name) &&
+          ["bodyDoc", "bodyGeneration"].includes(declaration.name.text),
+      ),
+  );
+  assert.equal(declarations.length, 2);
+  return declarations.map((node) => node.getText(script));
+}
+
+// Execute the real selectors: session snapshot replacement is not retirement,
+// while document identity and body generation select the current ON/OFF owner.
+function assertBodyIdentity(source: string) {
+  const onDoc = {},
+    offDoc = {};
+  const session = shallowRef<{ doc: object; generation: number } | null>({
+    doc: onDoc,
+    generation: 7,
+  });
+  const offBody = { doc: shallowRef(offDoc), generation: ref(3) };
+  const realtimeOff = ref(false);
+  const props = shallowReactive({ session: session.value, offBody: null as typeof offBody | null });
+  const selectors = runInNewContext(
+    new Bun.Transpiler({ loader: "ts" }).transformSync(
+      `(() => {${bodyIdentityDeclarations(source).join("\n")}; return {bodyDoc, bodyGeneration};})()`,
+    ),
+    { computed, session, offBody, realtimeOff, props },
+  ) as { bodyDoc: { value: unknown }; bodyGeneration: { value: unknown } };
+  assert.equal(selectors.bodyDoc.value, onDoc);
+  assert.equal(selectors.bodyGeneration.value, 7);
+  session.value = { doc: onDoc, generation: 7 };
+  props.session = session.value;
+  assert.equal(selectors.bodyDoc.value, onDoc);
+  assert.equal(selectors.bodyGeneration.value, 7);
+  const nextOnDoc = {};
+  session.value = { doc: nextOnDoc, generation: 8 };
+  props.session = session.value;
+  assert.equal(selectors.bodyDoc.value, nextOnDoc);
+  assert.equal(selectors.bodyGeneration.value, 8);
+  realtimeOff.value = true;
+  props.offBody = offBody;
+  session.value = null;
+  props.session = null;
+  assert.equal(selectors.bodyDoc.value, offDoc);
+  assert.equal(selectors.bodyGeneration.value, "off:3");
+  const nextOffDoc = {};
+  offBody.doc.value = nextOffDoc;
+  offBody.generation.value = 4;
+  assert.equal(selectors.bodyDoc.value, nextOffDoc);
+  assert.equal(selectors.bodyGeneration.value, "off:4");
+}
+
+await test("all three actual body selector oracles reject session-only identity and frozen generations", () => {
+  for (const rel of [
+    "../documents/WikiDocumentView.vue",
+    "../documents/ProjectDocumentView.vue",
+    "../tasks/TaskBodyEditor.vue",
+  ]) {
+    const source = readFileSync(new URL(rel, import.meta.url), "utf8");
+    for (const name of ["bodyDoc", "bodyGeneration"]) {
+      const original = required(
+        bodyIdentityDeclarations(source).find((text) => text.startsWith(`const ${name} =`)),
+      );
+      const wrong =
+        name === "bodyDoc"
+          ? "const bodyDoc = computed(() => props.session?.doc ?? session.value?.doc);"
+          : "const bodyGeneration = computed(() => 7);";
+      const mutated = source.replace(original, wrong);
+      assert.notEqual(mutated, source);
+      assert.throws(
+        () => {
+          assertBodyIdentity(mutated);
+        },
+        assert.AssertionError,
+        `${rel}/${name}`,
+      );
+    }
   }
 });
 

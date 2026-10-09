@@ -15,6 +15,19 @@ cleanup() {
 trap cleanup EXIT
 
 psql_admin() { docker exec -i "$PG_CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 "$@"; }
+redact_server_log() {
+  sed -E -e 's#postgres(ql)?://[^[:space:]]+#postgres://redacted#g' \
+    -e 's#libsql://[^[:space:]]+#libsql://redacted#g' \
+    -e 's#https://[^[:space:]]*\.turso\.io[^[:space:]]*#https://redacted#g' \
+    -e 's#(DATABASE_URL|DATABASE_APP_URL|FVOCI_E2E_ADMIN_DATABASE_URL|TEST_DATABASE_URL|FVOCI_LIBSQL_URL|FVOCI_LIBSQL_AUTH_TOKEN|FVOCI_TEST_TURSO_[A-Z0-9_]*URL|FVOCI_TEST_TURSO_AUTH_TOKEN|MEILI[A-Z_]*KEY|PASSWORD[A-Z_]*|ENCRYPTION_KEYS)=[^[:space:]]+#\1=redacted#g' \
+    "$SERVER_LOG"
+}
+# The outer runner removes RUN_DIR, so preserve startup diagnostics on stderr.
+startup_failure() {
+  echo "$1" >&2
+  redact_server_log >&2
+  exit 1
+}
 
 DB_NAME="fvoci_perf_$(openssl rand -hex 8)"
 ROLE_NAME="fvoci_app_${DB_NAME}"
@@ -49,13 +62,18 @@ unset DATABASE_URL FVOCI_MIGRATION_URL
 "$RELEASE/fvoci-server" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 BASE_URL=""
+SERVER_READY=0
 for _ in $(seq 1 120); do
   BASE_URL="$(grep -m1 'fvoci-server listening on ' "$SERVER_LOG" 2>/dev/null | sed 's/.*listening on //' | tr -d '\r' || true)"
-  if [[ -n "$BASE_URL" ]] && curl -fsS "$BASE_URL/api/v1/setup" >/dev/null 2>&1; then break; fi
-  kill -0 "$SERVER_PID" 2>/dev/null || { echo "server exited during startup" >&2; exit 1; }
+  kill -0 "$SERVER_PID" 2>/dev/null || startup_failure "server exited during startup"
+  if [[ -n "$BASE_URL" ]] && curl -fsS "$BASE_URL/api/v1/setup" >/dev/null 2>&1; then
+    SERVER_READY=1
+    break
+  fi
   sleep 0.25
 done
-[[ -n "$BASE_URL" ]] || { echo "server did not become ready" >&2; exit 1; }
+# Discovering the endpoint is separate from a successful setup request.
+((SERVER_READY == 1)) || startup_failure "server did not become ready within 30s (GET /api/v1/setup never succeeded)"
 
 TAG="$(printf '%s' "${FVOCI_PERF_TAG:-}" | tr -cd 'A-Za-z0-9-')"
 GREP_ARGS=()
@@ -80,8 +98,6 @@ set -e
 # unless FVOCI_PERF_KEEP_SERVER_LOG=1 asks for a redacted copy (diagnosis only).
 grep -cE ' (WARN|ERROR) ' "$SERVER_LOG" >"$FVOCI_PERF_OUT/server-warn-error-count-$FVOCI_PERF_DATASET$TAG.txt" || true
 if [[ "${FVOCI_PERF_KEEP_SERVER_LOG:-}" == "1" ]]; then
-  sed -E -e 's#postgres://[^[:space:]]+#postgres://redacted#g' \
-    -e 's#(DATABASE_URL|DATABASE_APP_URL|FVOCI_E2E_ADMIN_DATABASE_URL|TEST_DATABASE_URL|MEILI[A-Z_]*KEY|PASSWORD[A-Z_]*|ENCRYPTION_KEYS)=[^[:space:]]+#\1=redacted#g' \
-    "$SERVER_LOG" >"$FVOCI_PERF_OUT/server-log-$FVOCI_PERF_DATASET$TAG.txt"
+  redact_server_log >"$FVOCI_PERF_OUT/server-log-$FVOCI_PERF_DATASET$TAG.txt"
 fi
 exit "$status"

@@ -4,6 +4,9 @@ pub mod api_tokens;
 pub mod attachment_extract;
 pub mod attachment_preview;
 pub mod attachments;
+pub mod backend;
+pub mod body_save;
+pub(crate) mod codec;
 pub mod collab;
 pub mod collab_delivery;
 pub mod collection_query;
@@ -15,6 +18,8 @@ pub mod document_ops;
 pub mod document_purge;
 pub mod document_tags;
 pub mod documents;
+#[cfg(feature = "db-tests")]
+pub mod e2e_fixture;
 pub mod group_grants;
 pub mod groups;
 pub mod holidays;
@@ -25,8 +30,13 @@ pub mod integrations;
 pub mod invitations;
 pub mod labels;
 pub mod legal;
+#[cfg(all(test, feature = "db-tests"))]
+#[path = "../../tests/support/libsql_finish_fixture.rs"]
+pub(crate) mod libsql_finish_fixture;
 pub mod lookup;
 pub mod magic;
+pub(crate) mod mail_digest;
+pub mod maintenance_claim;
 pub mod mfa;
 pub mod migrate;
 pub mod milestones;
@@ -44,6 +54,7 @@ pub mod project_clone;
 pub mod project_documents;
 pub mod project_views;
 pub mod projects;
+pub(crate) mod push;
 pub mod quota;
 pub mod revisions;
 pub mod search_index;
@@ -56,7 +67,10 @@ pub mod task_origins;
 pub mod task_timer;
 pub mod tasks;
 pub mod templates;
+#[cfg(all(test, feature = "db-tests"))]
+mod turso_test;
 pub mod user_export;
+pub(crate) mod vapid;
 pub mod view_query;
 pub mod workflow_statuses;
 pub mod workspace;
@@ -68,7 +82,7 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Db {
-    pub pool: PgPool,
+    pub pool: backend::Backend,
     pub license: Arc<crate::license::Entitlements>,
     /// Instance settings as first resolved by this process (restart badges).
     pub settings_boot: crate::settings::SettingsBoot,
@@ -80,6 +94,17 @@ impl Db {
     }
 
     pub fn with_license(pool: PgPool, license: Arc<crate::license::Entitlements>) -> Self {
+        Self::with_backend_license(backend::Backend::Postgres(pool), license)
+    }
+
+    pub fn from_backend(pool: backend::Backend) -> Self {
+        Self::with_backend_license(pool, Arc::new(crate::license::absent()))
+    }
+
+    pub fn with_backend_license(
+        pool: backend::Backend,
+        license: Arc<crate::license::Entitlements>,
+    ) -> Self {
         Self {
             pool,
             settings_boot: crate::settings::SettingsBoot::with_license(license.clone()),

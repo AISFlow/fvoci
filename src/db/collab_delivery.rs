@@ -43,6 +43,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::collab::wire::CollabKind;
+use crate::db::backend::{Backend, DbTransaction};
+use crate::db::codec::Cell;
+use crate::db::collab::FamilyRoomDeliveryFence;
 use crate::db::context::set_tenant;
 use crate::db::workspace::WorkspaceRole;
 use crate::projects::{
@@ -331,6 +334,10 @@ async fn check_task_delivery_admission(
     .await?;
     tx.commit().await?;
 
+    task_delivery_policy(row)
+}
+
+fn task_delivery_policy(row: Option<TaskDeliveryRow>) -> Result<DeliveryAdmission, sqlx::Error> {
     let Some((
         session_live,
         workspace_live,
@@ -475,6 +482,10 @@ async fn check_delivery_admission_inner(
     .await?;
     tx.commit().await?;
 
+    document_delivery_policy(row)
+}
+
+fn document_delivery_policy(row: Option<DeliveryRow>) -> Result<DeliveryAdmission, sqlx::Error> {
     let Some((
         session_live,
         workspace_live,
@@ -618,5 +629,403 @@ pub async fn authorize_outbound_delivery_kind(
         Ok(DeliveryAdmission::Allowed { read_only }) => OutboundDeliveryAuth::Allowed { read_only },
         Ok(DeliveryAdmission::Denied) => OutboundDeliveryAuth::Denied,
         Err(_) => OutboundDeliveryAuth::DbError,
+    }
+}
+
+/// Actual room consumers select a concrete driver. PostgreSQL retains the
+/// existing READ COMMITTED statement and barriers. Family reads never reserve
+/// the writer; current authority and room expiry share one primary snapshot.
+pub(crate) async fn check_delivery_admission_kind_backend(
+    backend: &Backend,
+    kind: CollabKind,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    resource: Uuid,
+    fence: Option<FamilyRoomDeliveryFence>,
+) -> Result<DeliveryAdmission, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return check_delivery_admission_kind(pool, kind, workspace, actor, credential, resource)
+            .await;
+    }
+    family_delivery_admission(
+        backend,
+        kind,
+        workspace,
+        actor,
+        credential,
+        resource,
+        fence,
+        #[cfg(feature = "db-tests")]
+        false,
+    )
+    .await
+}
+
+pub(crate) async fn authorize_outbound_delivery_kind_backend(
+    backend: &Backend,
+    kind: CollabKind,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    resource: Uuid,
+    fence: Option<FamilyRoomDeliveryFence>,
+) -> OutboundDeliveryAuth {
+    if let Backend::Postgres(pool) = backend {
+        return authorize_outbound_delivery_kind(
+            pool, kind, workspace, actor, credential, resource,
+        )
+        .await;
+    }
+    #[cfg(feature = "db-tests")]
+    {
+        if let Ok(mut counts) = DELIVERY_READ_COUNTS.lock() {
+            *counts.entry(resource).or_insert(0) += 1;
+        }
+        if FORCE_DELIVERY_READ_FAIL
+            .lock()
+            .map(|set| set.contains(&resource))
+            .unwrap_or(true)
+        {
+            return OutboundDeliveryAuth::DbError;
+        }
+    }
+    match family_delivery_admission(
+        backend,
+        kind,
+        workspace,
+        actor,
+        credential,
+        resource,
+        fence,
+        #[cfg(feature = "db-tests")]
+        true,
+    )
+    .await
+    {
+        Ok(DeliveryAdmission::Allowed { read_only }) => OutboundDeliveryAuth::Allowed { read_only },
+        Ok(DeliveryAdmission::Denied) => OutboundDeliveryAuth::Denied,
+        Err(_) => OutboundDeliveryAuth::DbError,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn family_delivery_admission(
+    backend: &Backend,
+    kind: CollabKind,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    resource: Uuid,
+    fence: Option<FamilyRoomDeliveryFence>,
+    #[cfg(feature = "db-tests")] outbound_barrier: bool,
+) -> Result<DeliveryAdmission, sqlx::Error> {
+    let Some(fence) = fence else {
+        return Ok(DeliveryAdmission::Denied);
+    };
+    if !fence.original.matches(kind, workspace, resource) {
+        return Ok(DeliveryAdmission::Denied);
+    }
+    let mut tx = backend.begin_read().await?;
+    tx.operation().set_tenant(workspace).await?;
+    #[cfg(feature = "db-tests")]
+    if outbound_barrier {
+        pause_for_delivery_read_barrier(credential).await;
+    }
+    #[cfg(feature = "db-tests")]
+    if take_force_delivery_tx_error(credential) {
+        tx.rollback().await?;
+        return Err(sqlx::Error::Protocol(
+            "forced delivery transaction failure".into(),
+        ));
+    }
+    let DbTransaction::SqliteFamily(family) = &mut tx else {
+        return Err(sqlx::Error::Protocol(
+            "family delivery requires family transaction".into(),
+        ));
+    };
+    family.require_tenant(workspace)?;
+    if kind == CollabKind::Task {
+        let rows=family.query(r#"
+            SELECT
+                (s.revoked_at IS NULL AND s.expires_at>unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000
+                 AND u.deleted_at IS NULL AND u.suspended_at IS NULL),
+                (w.deleted_at IS NULL),m.role,t.project_id,(t.archived_at IS NOT NULL),t.deleted_at,
+                (p.deleted_at IS NULL),p.visibility,p.status,
+                (SELECT max(CASE pm.role WHEN 'lead' THEN 3 WHEN 'member' THEN 2 WHEN 'viewer' THEN 1 ELSE 0 END)
+                 FROM project_members pm WHERE pm.workspace_id=?3 AND pm.project_id=t.project_id
+                 AND (pm.user_id=u.id OR EXISTS(SELECT 1 FROM group_members gm
+                   WHERE gm.workspace_id=pm.workspace_id AND gm.group_id=pm.group_id AND gm.user_id=u.id)))
+            FROM users u INNER JOIN sessions s ON s.id=?2 AND s.user_id=u.id
+            INNER JOIN workspaces w ON w.id=?3
+            LEFT JOIN memberships m ON m.workspace_id=?3 AND m.user_id=u.id
+            LEFT JOIN tasks t ON t.workspace_id=?3 AND t.id=?4
+            LEFT JOIN projects p ON p.workspace_id=?3 AND p.id=t.project_id
+            WHERE u.id=?1 AND EXISTS(SELECT 1 FROM task_collab_room_fences f
+              WHERE f.workspace_id=?3 AND f.task_id=?4 AND f.fence=?5
+                AND f.owner_token IN (?6,?7)
+                AND f.expires_at>unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)
+        "#,&[Cell::uuid(actor),Cell::uuid(credential),Cell::uuid(workspace),Cell::uuid(resource),
+            Cell::Integer(fence.original.sequence()),Cell::uuid(fence.original.owner()),Cell::uuid(fence.writer_owner)]).await?;
+        let row = rows
+            .first()
+            .map(|row| -> Result<TaskDeliveryRow, sqlx::Error> {
+                Ok((
+                    row.cell(0)?.boolean()?,
+                    row.cell(1)?.boolean()?,
+                    row.cell(2)?.optional(Cell::string)?,
+                    row.cell(3)?.optional(Cell::id)?,
+                    row.cell(4)?.optional(Cell::boolean)?,
+                    row.cell(5)?.optional(Cell::datetime)?,
+                    row.cell(6)?.optional(Cell::boolean)?,
+                    row.cell(7)?.optional(Cell::string)?,
+                    row.cell(8)?.optional(Cell::string)?,
+                    row.cell(9)?.optional(Cell::int32)?,
+                ))
+            })
+            .transpose()?;
+        tx.commit_with_cleanup()
+            .await
+            .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+        return task_delivery_policy(row);
+    }
+    // No owner token is guessed after ambiguity. Only this room's original and
+    // once-chosen activation tokens can pass, under its unchanged global fence.
+    let rows = family.query(r#"
+        SELECT
+            (s.revoked_at IS NULL AND s.expires_at > unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000
+             AND u.deleted_at IS NULL AND u.suspended_at IS NULL),
+            (w.deleted_at IS NULL), m.role, d.project_id, d.status, d.deleted_at,
+            (SELECT max(CASE dm.role WHEN 'lead' THEN 3 WHEN 'member' THEN 2 WHEN 'viewer' THEN 1 ELSE 0 END)
+             FROM document_members dm INNER JOIN group_members gm
+               ON gm.workspace_id=dm.workspace_id AND gm.group_id=dm.group_id
+             WHERE dm.workspace_id=?3 AND dm.document_id=?4 AND gm.user_id=u.id AND dm.group_id IS NOT NULL),
+            (p.deleted_at IS NULL), p.visibility, p.status,
+            (SELECT max(CASE pm.role WHEN 'lead' THEN 3 WHEN 'member' THEN 2 WHEN 'viewer' THEN 1 ELSE 0 END)
+             FROM project_members pm WHERE pm.workspace_id=?3 AND pm.project_id=d.project_id
+             AND (pm.user_id=u.id OR EXISTS(SELECT 1 FROM group_members gm
+               WHERE gm.workspace_id=pm.workspace_id AND gm.group_id=pm.group_id AND gm.user_id=u.id)))
+        FROM users u INNER JOIN sessions s ON s.id=?2 AND s.user_id=u.id
+        INNER JOIN workspaces w ON w.id=?3
+        LEFT JOIN memberships m ON m.workspace_id=?3 AND m.user_id=u.id
+        LEFT JOIN documents d ON d.workspace_id=?3 AND d.id=?4
+        LEFT JOIN projects p ON p.workspace_id=?3 AND p.id=d.project_id
+        WHERE u.id=?1 AND EXISTS(SELECT 1 FROM collab_room_fences f
+          WHERE f.workspace_id=?3 AND f.document_id=?4 AND f.fence=?5
+            AND f.owner_token IN (?6,?7)
+            AND f.expires_at>unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)
+        "#,
+        &[Cell::uuid(actor),Cell::uuid(credential),Cell::uuid(workspace),Cell::uuid(resource),
+          Cell::Integer(fence.original.sequence()),Cell::uuid(fence.original.owner()),Cell::uuid(fence.writer_owner)]).await?;
+    let row = rows
+        .first()
+        .map(|row| -> Result<DeliveryRow, sqlx::Error> {
+            Ok((
+                row.cell(0)?.boolean()?,
+                row.cell(1)?.boolean()?,
+                row.cell(2)?.optional(Cell::string)?,
+                row.cell(3)?.optional(Cell::id)?,
+                row.cell(4)?.optional(Cell::string)?,
+                row.cell(5)?.optional(Cell::datetime)?,
+                row.cell(6)?.optional(Cell::int32)?,
+                row.cell(7)?.optional(Cell::boolean)?,
+                row.cell(8)?.optional(Cell::string)?,
+                row.cell(9)?.optional(Cell::string)?,
+                row.cell(10)?.optional(Cell::int32)?,
+            ))
+        })
+        .transpose()?;
+    tx.commit().await.map_err(|unknown| unknown.source)?;
+    document_delivery_policy(row)
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod selected_on_task_delivery_tests {
+    use super::*;
+    use crate::db::collab::{
+        acquire_family_native_room_for_start, FamilyNativeRoomFence, FamilyRoomFence,
+    };
+    use crate::db::tasks::selected_task_detail_tests::setup;
+
+    #[tokio::test]
+    async fn on_task_delivery_typed_target_revoke_after_await_archive_and_healthy_reader() {
+        let (f, credential, _, _, task) = setup().await;
+        let claim = acquire_family_native_room_for_start(
+            &f.backend,
+            (CollabKind::Task, f.workspace, task),
+            (f.user, credential),
+            Uuid::now_v7(),
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let delivery = FamilyRoomDeliveryFence {
+            original: claim.fence,
+            writer_owner: Uuid::now_v7(),
+        };
+        assert!(matches!(
+            check_delivery_admission_kind_backend(
+                &f.backend,
+                CollabKind::Task,
+                f.workspace,
+                f.user,
+                credential,
+                task,
+                Some(delivery)
+            )
+            .await
+            .unwrap(),
+            DeliveryAdmission::Allowed { read_only: false }
+        ));
+        let wrong = FamilyRoomDeliveryFence {
+            original: FamilyNativeRoomFence::Document(FamilyRoomFence {
+                workspace_id: f.workspace,
+                document_id: task,
+                owner_token: claim.fence.owner(),
+                fence: claim.fence.sequence(),
+            }),
+            ..delivery
+        };
+        assert!(matches!(
+            check_delivery_admission_kind_backend(
+                &f.backend,
+                CollabKind::Task,
+                f.workspace,
+                f.user,
+                credential,
+                task,
+                Some(wrong)
+            )
+            .await
+            .unwrap(),
+            DeliveryAdmission::Denied
+        ));
+        let wrong = FamilyRoomDeliveryFence {
+            original: claim.fence.with_owner(Uuid::now_v7()),
+            ..delivery
+        };
+        assert!(matches!(
+            check_delivery_admission_kind_backend(
+                &f.backend,
+                CollabKind::Task,
+                f.workspace,
+                f.user,
+                credential,
+                task,
+                Some(wrong)
+            )
+            .await
+            .unwrap(),
+            DeliveryAdmission::Denied
+        ));
+        let (paused, resume) = arm_delivery_read_barrier(credential);
+        let backend = f.backend.clone();
+        let workspace = f.workspace;
+        let actor = f.user;
+        let pending = tokio::spawn(async move {
+            authorize_outbound_delivery_kind_backend(
+                &backend,
+                CollabKind::Task,
+                workspace,
+                actor,
+                credential,
+                task,
+                Some(delivery),
+            )
+            .await
+        });
+        paused.await.unwrap();
+        let revoker = crate::db::pool::connect_sqlite_app(&f.path, 1)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&revoker)
+            .await
+            .unwrap();
+        resume.send(()).unwrap();
+        assert!(
+            matches!(pending.await.unwrap(), OutboundDeliveryAuth::Denied),
+            "current session revocation commits before the real outbound primary snapshot"
+        );
+        sqlx::query("UPDATE sessions SET revoked_at=NULL WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&revoker)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE tasks SET archived_at=1 WHERE workspace_id=?1 AND id=?2")
+            .bind(workspace.as_bytes().as_slice())
+            .bind(task.as_bytes().as_slice())
+            .execute(&revoker)
+            .await
+            .unwrap();
+        assert!(matches!(
+            check_delivery_admission_kind_backend(
+                &f.backend,
+                CollabKind::Task,
+                workspace,
+                actor,
+                credential,
+                task,
+                Some(delivery)
+            )
+            .await
+            .unwrap(),
+            DeliveryAdmission::Allowed { read_only: true }
+        ));
+        sqlx::query("UPDATE tasks SET archived_at=NULL WHERE workspace_id=?1 AND id=?2")
+            .bind(workspace.as_bytes().as_slice())
+            .bind(task.as_bytes().as_slice())
+            .execute(&revoker)
+            .await
+            .unwrap();
+        assert!(matches!(
+            authorize_outbound_delivery_kind_backend(
+                &f.backend,
+                CollabKind::Task,
+                workspace,
+                actor,
+                credential,
+                task,
+                Some(delivery)
+            )
+            .await,
+            OutboundDeliveryAuth::Allowed { read_only: false }
+        ));
+        sqlx::query(
+            "UPDATE task_collab_room_fences SET expires_at=1 WHERE workspace_id=?1 AND task_id=?2",
+        )
+        .bind(workspace.as_bytes().as_slice())
+        .bind(task.as_bytes().as_slice())
+        .execute(&revoker)
+        .await
+        .unwrap();
+        assert!(matches!(
+            authorize_outbound_delivery_kind_backend(
+                &f.backend,
+                CollabKind::Task,
+                workspace,
+                actor,
+                credential,
+                task,
+                Some(delivery)
+            )
+            .await,
+            OutboundDeliveryAuth::Denied
+        ));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM task_collab_updates WHERE workspace_id=?1 AND task_id=?2"
+            )
+            .bind(workspace.as_bytes().as_slice())
+            .bind(task.as_bytes().as_slice())
+            .fetch_one(&revoker)
+            .await
+            .unwrap(),
+            0
+        );
+        revoker.close().await;
+        f.close().await;
     }
 }

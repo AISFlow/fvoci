@@ -208,7 +208,7 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   }
   const wsId = required5.id;
   const docRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
-    data: { parentId: null, title: "HWP 편집" },
+    data: { commandId: crypto.randomUUID(), parentId: null, title: "HWP 편집" },
   });
   expect(docRes.ok(), await docRes.text()).toBeTruthy();
   const documentId = (

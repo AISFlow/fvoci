@@ -84,7 +84,7 @@ test("workspace and global search find a document, task, comment, and attachment
   const attachmentName = `${token}-note.txt`;
 
   const docRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
-    data: { parentId: null, title: documentTitle },
+    data: { commandId: crypto.randomUUID(), parentId: null, title: documentTitle },
   });
   expect(docRes.ok(), await docRes.text()).toBeTruthy();
   const createdDoc = (await readJson(docRes, flowSchemas.createdDocument)) as {

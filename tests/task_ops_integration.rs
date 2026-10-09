@@ -812,7 +812,7 @@ async fn backlinks_list_only_live_items_the_actor_can_view() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
-        Some(json!({"parentId": null, "title": "Wiki page"})),
+        Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId": null, "title": "Wiki page"})),
         Some(&cookie),
     )
     .await;

@@ -97,7 +97,7 @@ test("public Vue document URL renders readonly content, hands off attachments an
   const ws = await setup(page);
   const create = async (title: string, parentId: string | null = null) => {
     const response = await page.request.post(`/api/v1/workspaces/${ws}/documents`, {
-      data: { title, parentId },
+      data: { commandId: crypto.randomUUID(), title, parentId },
     });
     expect(response.status()).toBe(201);
     return (await readJson(response, flowSchemas.document)).id;
@@ -226,6 +226,11 @@ test("public Vue document URL renders readonly content, hands off attachments an
   );
   await reader.getByRole("button", { name: "다시 시도", exact: true }).click();
   await expect(body).toContainText("본문 한글 ✅");
+  // Settle the recovery tree/body reads before revocation can deny the tree.
+  await expect(
+    reader.getByRole("navigation").getByRole("button", { name: "공유 하위 문서" }),
+  ).toBeVisible();
+  await expect(reader.getByRole("button", { name: "다시 시도", exact: true })).toBeEnabled();
   expect((await page.request.delete(`/api/v1/workspaces/${ws}/share-links/${share.id}`)).ok()).toBe(
     true,
   );

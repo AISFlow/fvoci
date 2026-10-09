@@ -938,7 +938,13 @@ mod task_timer {
             let pool = fvoci_server::db::pool::connect_app_with_max(&harness.app_url, 1)
                 .await
                 .unwrap();
-            let old_pool = state.auth.db.pool.clone();
+            let old_pool = state
+                .auth
+                .db
+                .pool
+                .postgres("PostgreSQL integration fixture")
+                .expect("actual PG fixture backend")
+                .clone();
             let password_keys = state.auth.password_keys.clone();
             state.auth = std::sync::Arc::new(fvoci_server::auth::AuthService {
                 db: fvoci_server::db::Db::new(pool.clone()),
@@ -4234,7 +4240,7 @@ mod task_timer {
             app.clone(),
             "POST",
             &format!("/api/v1/workspaces/{workspace}/documents"),
-            Some(json!({"parentId":null,"title":"Goal and research notes"})),
+            Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId":null,"title":"Goal and research notes"})),
             Some(&cookie),
         )
         .await;
@@ -4244,7 +4250,7 @@ mod task_timer {
             app.clone(),
             "POST",
             &format!("/api/v1/workspaces/{workspace}/documents"),
-            Some(json!({"parentId":null,"title":"Reading material"})),
+            Some(json!({"commandId": uuid::Uuid::now_v7(), "parentId":null,"title":"Reading material"})),
             Some(&cookie),
         )
         .await;
@@ -5241,8 +5247,8 @@ mod task_timer {
     }
 
     #[tokio::test]
-    async fn timer_historical_schema_upgrade_preserves_receipts_and_security() {
-        let harness = TestDb::bootstrap_through(52).await;
+    async fn timer_receipts_and_security_survive_installer_rerun_and_purge() {
+        let harness = TestDb::bootstrap().await;
         let (app, cookie, actor, workspace) = setup_session(&harness).await;
         let admin = admin_pool(&harness).await;
         let project = create_project(app.clone(), &cookie, workspace, "UPHIST", "workspace").await;
@@ -5251,7 +5257,7 @@ mod task_timer {
             &cookie,
             workspace,
             project["id"].as_str().unwrap(),
-            json!({"title":"Current populated 052"}),
+            json!({"title":"Current populated receipts"}),
         )
         .await;
         let task_id = Uuid::parse_str(task["id"].as_str().unwrap()).unwrap();
@@ -5280,27 +5286,40 @@ mod task_timer {
             .fetch_one(&admin)
             .await
             .unwrap();
-        let fk:String=sqlx::query_scalar("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='fvoci.task_timer_commands'::regclass AND conname='task_timer_commands_run_id_fkey'").fetch_one(&admin).await.unwrap();
-        assert!(
-            fk.contains("FOREIGN KEY (run_id)") && fk.contains("ON DELETE SET NULL"),
-            "{fk}"
-        );
+        // run_id is an immutable actor-private locator, never an FK: the
+        // baseline has no task_timer_commands_run_id_fkey.
+        let fk_count:i64=sqlx::query_scalar("SELECT count(*) FROM pg_constraint WHERE conrelid='fvoci.task_timer_commands'::regclass AND conname='task_timer_commands_run_id_fkey'").fetch_one(&admin).await.unwrap();
+        assert_eq!(fk_count, 0);
+        // The declared wiki command FKs are part of the baseline catalog.
+        for expected in [
+            json!({"table":"fvoci.wiki_create_commands","name":"wiki_create_commands_actor_user_id_fkey","definition":"FOREIGN KEY (actor_user_id) REFERENCES fvoci.users(id) ON DELETE CASCADE"}),
+            json!({"table":"fvoci.wiki_create_commands","name":"wiki_create_commands_workspace_id_document_id_fkey","definition":"FOREIGN KEY (workspace_id, document_id) REFERENCES fvoci.documents(workspace_id, id) ON DELETE SET NULL (document_id)"}),
+            json!({"table":"fvoci.wiki_create_commands","name":"wiki_create_commands_workspace_id_fkey","definition":"FOREIGN KEY (workspace_id) REFERENCES fvoci.workspaces(id) ON DELETE CASCADE"}),
+        ] {
+            assert!(
+                constraints.as_array().unwrap().contains(&expected),
+                "{expected} missing from {constraints}"
+            );
+        }
+
+        // A rerun of the current installer preserves receipts and the entire FK
+        // catalog; unexpected catalog additions, removals or changes fail here.
         fvoci_server::db::migrate::run_migrations(&harness.admin_url)
             .await
             .unwrap();
         fvoci_server::db::migrate::assert_schema_current(&admin)
             .await
             .unwrap();
-        let after: Value = sqlx::query_scalar(receipts_sql)
-            .fetch_one(&admin)
-            .await
-            .unwrap();
-        assert_eq!(after, before);
         let after_constraints: Value = sqlx::query_scalar(constraints_sql)
             .fetch_one(&admin)
             .await
             .unwrap();
         assert_eq!(after_constraints, constraints);
+        let after_current: Value = sqlx::query_scalar(receipts_sql)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+        assert_eq!(after_current, before);
         let fk_count:i64=sqlx::query_scalar("SELECT count(*) FROM pg_constraint WHERE conrelid='fvoci.task_timer_commands'::regclass AND conname='task_timer_commands_run_id_fkey'").fetch_one(&admin).await.unwrap();
         assert_eq!(fk_count, 0);
         let restricted = sqlx::postgres::PgPoolOptions::new()

@@ -326,8 +326,10 @@ curl -fsS -c "$JAR" -b "$JAR" -H 'content-type: application/json' -H "origin: $O
   -d '{"email":"owner@install.test","password":"installpass1","givenName":"Owner","workspaceSlug":"install","workspaceName":"Install"}' >/dev/null
 login
 WS="$(curl -fsS -b "$JAR" "$BASE/api/v1/me/workspaces" | jq -er '.items[0].id')"
+DOC_COMMAND_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+DOC_CREATE_BODY="{\"commandId\":\"${DOC_COMMAND_ID}\",\"parentId\":null,\"title\":\"Install doc\"}"
 DOC="$(curl -fsS -b "$JAR" -H 'content-type: application/json' -H "origin: $ORIGIN" \
-  -X POST "$BASE/api/v1/workspaces/${WS}/documents" -d '{"parentId":null,"title":"Install doc"}' | jq -er .id)"
+  -X POST "$BASE/api/v1/workspaces/${WS}/documents" -d "$DOC_CREATE_BODY" | jq -er .id)"
 curl -fsS "$BASE/" | grep -qi '<!doctype html' || fail "web root"
 deadline=$((SECONDS + 60))
 until curl -fsS -b "$JAR" "$BASE/api/v1/workspaces/${WS}/search?q=Install%20doc" \
@@ -404,12 +406,14 @@ echo "failed preparation: not healthy, /ready refused; after the fix the restart
 
 step "pending migrations while the server is live: preparation refuses"
 LATEST="$(psql_owner 'SELECT max(version) FROM fvoci.schema_migrations' fvoci)"
+# The receipt carries lineage and digest; hold the exact row aside instead of re-inserting a bare version.
+psql_owner "CREATE TABLE public.smoke_held_receipt AS SELECT * FROM fvoci.schema_migrations WHERE version = ${LATEST}" fvoci
 psql_owner "DELETE FROM fvoci.schema_migrations WHERE version = ${LATEST}" fvoci
 set +e
 OUT="$(docker compose run --rm --no-deps -T --entrypoint /opt/fvoci/bin/fvoci-migrate fvoci --prepare 2>&1)"
 STATUS=$?
 set -e
-psql_owner "INSERT INTO fvoci.schema_migrations (version) VALUES (${LATEST})" fvoci
+psql_owner "INSERT INTO fvoci.schema_migrations SELECT * FROM public.smoke_held_receipt; DROP TABLE public.smoke_held_receipt" fvoci
 grep 'migration(s) are pending' <<<"$OUT" | cut -c1-220
 if (( STATUS == 0 )) || ! grep -q 'another FVOCI server is still running' <<<"$OUT"; then
   fail "live-writer upgrade not refused"

@@ -138,6 +138,8 @@ async fn app_state(app_url: &str) -> AppState {
     let storage_root = std::env::temp_dir().join(format!("fvoci-db-test-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
     AppState {
+        realtime_mode: fvoci_server::config::RealtimeMode::On,
+        native_engine: None,
         auth: Arc::new(AuthService {
             db: Db::new(pool),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
@@ -1294,7 +1296,7 @@ async fn app_role_cannot_read_secret_columns() {
             .expect("app role may read migration version");
     assert_eq!(max_version, migrate::latest_migration_version());
     for sql in [
-        "INSERT INTO fvoci.schema_migrations (version) VALUES (999)",
+        "INSERT INTO fvoci.schema_migrations (version, lineage, sql_sha256) VALUES (999, 'fvoci-postgres-060', repeat('0', 64))",
         "UPDATE fvoci.schema_migrations SET version = version",
         "DELETE FROM fvoci.schema_migrations",
     ] {
@@ -3950,7 +3952,7 @@ async fn assert_forbidden_app_access_denied(app_url: &str) {
         ),
         (
             "migrations insert",
-            "INSERT INTO fvoci.schema_migrations (version) VALUES (999)",
+            "INSERT INTO fvoci.schema_migrations (version, lineage, sql_sha256) VALUES (999, 'fvoci-postgres-060', repeat('0', 64))",
         ),
         (
             "migrations update",
@@ -4244,6 +4246,99 @@ fn assert_schema_gate_process_failure(output: &std::process::Output, expected_ph
 }
 
 #[tokio::test]
+async fn server_exits_when_a_step_was_applied_from_a_different_text() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE fvoci.schema_migrations SET sql_sha256 = repeat('f', 64) WHERE version = 4",
+    )
+    .execute(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+
+    let storage_root = std::env::temp_dir().join(format!("fvoci-schema-gate-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&storage_root).expect("storage root");
+    let output = run_gated_server(server_process_env(&harness.app_url, &storage_root));
+    assert_schema_gate_process_failure(
+        &output,
+        &[
+            "step 4 (04_events) was applied from a different text",
+            "deploy the fvoci-server that applied it",
+        ],
+    );
+    let _ = std::fs::remove_dir_all(storage_root);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn migrate_and_server_refuse_the_retired_development_lineage_without_rewriting_it() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    // The retired development ledger shape: bare versions, no lineage or digest.
+    sqlx::query("ALTER TABLE fvoci.schema_migrations DROP COLUMN lineage, DROP COLUMN sql_sha256")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM fvoci.schema_migrations")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO fvoci.schema_migrations (version) SELECT generate_series(1, 55)")
+        .execute(&admin)
+        .await
+        .unwrap();
+    const LEDGER: &str =
+        "SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM fvoci.schema_migrations m";
+    let before: Value = sqlx::query_scalar(LEDGER).fetch_one(&admin).await.unwrap();
+
+    let error = migrate::run_migrations(&harness.admin_url)
+        .await
+        .expect_err("the retired lineage is refused")
+        .to_string();
+    assert!(error.contains("development migrations [1, 2"), "{error}");
+    assert!(error.contains(migrate::RETIRED_LINEAGE_HINT), "{error}");
+    let after: Value = sqlx::query_scalar(LEDGER).fetch_one(&admin).await.unwrap();
+    assert_eq!(after, before, "the retired ledger is never rewritten");
+    let still_retired: bool = sqlx::query_scalar(
+        "SELECT NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'fvoci'
+             AND table_name = 'schema_migrations' AND column_name = 'lineage')",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(still_retired);
+    admin.close().await;
+
+    let storage_root = std::env::temp_dir().join(format!("fvoci-schema-gate-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&storage_root).expect("storage root");
+    let output = run_gated_server(server_process_env(&harness.app_url, &storage_root));
+    assert_schema_gate_process_failure(
+        &output,
+        &["development migrations", migrate::RETIRED_LINEAGE_HINT],
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        !combined.contains("fvoci-migrate --grant-app-role"),
+        "a retired lineage must not be told to migrate in place: {combined}"
+    );
+    let _ = std::fs::remove_dir_all(storage_root);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
 async fn server_exits_when_schema_is_behind() {
     let harness = TestDb::bootstrap().await;
     let admin = PgPoolOptions::new()
@@ -4273,9 +4368,9 @@ async fn server_exits_when_schema_is_behind() {
 }
 
 #[tokio::test]
-async fn server_exits_when_a_lower_migration_is_missing_behind_the_latest() {
-    // A migration numbered below the latest one can merge after it (031 after
-    // 032). max(version) then matches the binary, but the set does not.
+async fn server_exits_when_a_receipt_is_missing_in_the_middle() {
+    // A receipt set that is not a contiguous prefix of the lineage is never a
+    // "behind" count: the server refuses it as not contiguous.
     let harness = TestDb::bootstrap().await;
     let compiled = migrate::compiled_migration_versions();
     let missing = compiled[compiled.len() - 2];
@@ -4297,8 +4392,10 @@ async fn server_exits_when_a_lower_migration_is_missing_behind_the_latest() {
     assert_schema_gate_process_failure(
         &output,
         &[
-            &format!("missing migrations [{missing}]"),
-            "behind compiled version",
+            &format!(
+                "not contiguous (receipt {} at position {missing})",
+                missing + 1
+            ),
             migrate::SCHEMA_GATE_OPERATOR_HINT,
         ],
     );
@@ -4314,10 +4411,15 @@ async fn server_exits_when_schema_is_newer_than_binary() {
         .connect(&harness.admin_url)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO fvoci.schema_migrations (version) VALUES (999)")
-        .execute(&admin)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.schema_migrations (version, lineage, sql_sha256)
+         VALUES ($1, $2, repeat('0', 64))",
+    )
+    .bind(migrate::latest_migration_version() + 1)
+    .bind(migrate::POSTGRES_LINEAGE)
+    .execute(&admin)
+    .await
+    .unwrap();
     admin.close().await;
 
     let storage_root = std::env::temp_dir().join(format!("fvoci-schema-gate-{}", Uuid::now_v7()));
@@ -4410,7 +4512,7 @@ async fn server_exits_on_unmigrated_database() {
     assert_schema_gate_process_failure(
         &output,
         &[
-            "cannot read fvoci.schema_migrations",
+            "database has no applied migrations",
             migrate::SCHEMA_GATE_OPERATOR_HINT,
         ],
     );
@@ -4760,95 +4862,45 @@ async fn uuidv7_compat_shim_matches_server_major_and_serves_app_defaults() {
 }
 
 #[tokio::test]
-async fn uuidv7_compat_upgrades_pre_016_database_and_reruns_idempotently() {
+async fn uuidv7_compat_shim_is_created_by_the_preflight_and_reruns_idempotently() {
     let db = EmptyDb::create().await;
-    migrate::run_migrations_through(&db.admin_url, 15)
+    // The preflight runs before step 01 and creates the shim only below PG18;
+    // it applies no step.
+    migrate::run_migrations_through(&db.admin_url, 0)
         .await
-        .expect("migrate through 015");
+        .expect("preflight only");
     let admin = PgPoolOptions::new()
         .max_connections(1)
         .connect(&db.admin_url)
         .await
         .unwrap();
     let major = server_version_num(&admin).await / 10_000;
-    if major >= 18 {
-        assert_eq!(public_uuidv7(&admin).await, None);
-    } else {
-        // A 015 database written by a binary without the shim.
-        assert!(public_uuidv7(&admin).await.is_some());
-        sqlx::query("DROP FUNCTION public.uuidv7()")
-            .execute(&admin)
-            .await
-            .unwrap();
-    }
-    let (user_a, user_b, workspace, project) = (
-        Uuid::now_v7(),
-        Uuid::now_v7(),
-        Uuid::now_v7(),
-        Uuid::now_v7(),
-    );
-    sqlx::query(
-        "INSERT INTO fvoci.users (id, email, given_name)
-         VALUES ($1, 'a@example.test', 'A'), ($2, 'b@example.test', 'B')",
+    let shim = public_uuidv7(&admin).await;
+    assert_eq!(shim.is_some(), major < 18, "PG{major} shim presence");
+    let bootstrapped: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables
+             WHERE table_schema = 'fvoci' AND table_name = 'schema_migrations')",
     )
-    .bind(user_a)
-    .bind(user_b)
-    .execute(&admin)
+    .fetch_one(&admin)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO fvoci.workspaces (id, slug, name) VALUES ($1, 'uuid-compat', 'U')")
-        .bind(workspace)
-        .execute(&admin)
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO fvoci.memberships (workspace_id, user_id, role)
-         VALUES ($1, $2, 'owner'), ($1, $3, 'member')",
-    )
-    .bind(workspace)
-    .bind(user_a)
-    .bind(user_b)
-    .execute(&admin)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO fvoci.projects (id, workspace_id, key, name, visibility, created_by)
-         VALUES ($1, $2, 'UC', 'U', 'workspace', $3)",
-    )
-    .bind(project)
-    .bind(workspace)
-    .bind(user_a)
-    .execute(&admin)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO fvoci.project_members (workspace_id, project_id, user_id, role)
-         VALUES ($1, $2, $3, 'lead'), ($1, $2, $4, 'member')",
-    )
-    .bind(workspace)
-    .bind(project)
-    .bind(user_a)
-    .bind(user_b)
-    .execute(&admin)
-    .await
-    .unwrap();
+    assert!(!bootstrapped, "the preflight applies no step");
 
     let lower = db_clock_ms(&admin).await;
     migrate::run_migrations(&db.admin_url)
         .await
-        .expect("upgrade 015 database");
-    let upper = db_clock_ms(&admin).await;
-    let backfilled: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM fvoci.project_members")
-        .fetch_all(&admin)
+        .expect("install");
+    let id: Uuid = sqlx::query_scalar("SELECT uuidv7()")
+        .fetch_one(&admin)
         .await
         .unwrap();
-    assert_eq!(backfilled.len(), 2);
-    assert_ne!(backfilled[0], backfilled[1]);
-    for id in &backfilled {
-        assert_rfc_uuidv7(*id, lower, upper);
-    }
-    let shim = public_uuidv7(&admin).await;
-    assert_eq!(shim.is_some(), major < 18, "PG{major} shim presence");
+    let upper = db_clock_ms(&admin).await;
+    assert_rfc_uuidv7(id, lower, upper);
+    assert_eq!(
+        public_uuidv7(&admin).await,
+        shim,
+        "the install keeps the preflight shim"
+    );
 
     migrate::run_migrations(&db.admin_url).await.expect("rerun");
     assert_eq!(

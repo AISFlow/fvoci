@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::auth::scopes::{grants_api_token_scope, ApiTokenScope};
 use crate::auth::session::SessionUser;
 use crate::auth::token::hash_token;
-use crate::db::api_tokens::{resolve_api_token_session, ApiTokenSession};
+use crate::db::api_tokens::{resolve_api_token_session_backend, ApiTokenSession};
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::state::AppState;
 
@@ -145,7 +145,7 @@ pub async fn require_request_auth(
     let Some(raw) = bearer_token(headers) else {
         return Err(AppError::from_code(ProblemCode::AuthenticationRequired));
     };
-    let resolved = resolve_api_token_session(&state.auth.db.pool, &hash_token(raw))
+    let resolved = resolve_api_token_session_backend(&state.auth.db.pool, &hash_token(raw))
         .await
         .map_err(internal)?;
     apply_token_access(resolved, access, workspace_id)

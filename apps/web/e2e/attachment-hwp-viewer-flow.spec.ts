@@ -278,7 +278,7 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   }
   const wsId = required7.id;
   const docRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
-    data: { parentId: null, title: "HWP 첨부" },
+    data: { commandId: crypto.randomUUID(), parentId: null, title: "HWP 첨부" },
   });
   expect(docRes.ok(), await docRes.text()).toBeTruthy();
   const documentId = (

@@ -4,11 +4,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import time
+import shutil
+import stat
+import tarfile
+import io
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,8 +28,8 @@ NarrowFamily = Literal["docs", "frontend_web_install", "web_tests"]
 PLAN_VERSION = 3
 
 WORKFLOW_JOBS: dict[str, tuple[str, ...]] = {
-    "web": ("web-static", "web-checks", "workspace-browser-shard", "collaboration-flow"),
-    "rust": ("fast", "postgres", "collaboration"),
+    "web": ("web-static", "web-checks", "web-native-checks", "workspace-browser-build", "workspace-browser-shard", "collaboration-build", "collaboration-install-on", "collaboration-postgres-on", "collaboration-sqlite-on", "collaboration-postgres-off", "collaboration-sqlite-off"),
+    "rust": ("fast", "native-arm64", "postgres-build", "postgres", "collaboration"),
     "documents": ("native-extraction",),
     "collab-engine": ("native-collab-engine",),
     "install": ("install-smoke", "backup-restore-smoke", "upgrade-smoke-arm64"),
@@ -35,7 +41,7 @@ WORKFLOW_JOBS: dict[str, tuple[str, ...]] = {
 OPT_IN_JOBS: dict[str, dict[str, str]] = {
     "install": {"upgrade-smoke-arm64": "run_upgrade_smoke_arm"},
 }
-OPT_IN_RUNNER: dict[str, str] = {"upgrade-smoke-arm64": "ubuntu-24.04-arm"}
+OPT_IN_RUNNER: dict[str, str] = {"upgrade-smoke-arm64": "ubuntu-26.04-arm"}
 
 WORKFLOW_YAML: dict[str, str] = {
     "web": "web.yml",
@@ -49,6 +55,7 @@ WORKFLOW_YAML: dict[str, str] = {
 # selection workflow, so it has no ci-plan/gate; it is allowed only while it
 # cannot run for untrusted refs and write scopes stay in the listed jobs.
 RELEASE_WORKFLOW_FILE = "release.yml"
+TURSO_MANUAL_WORKFLOW_FILE = "turso-test.yml"
 RELEASE_WRITE_SCOPES: dict[str, frozenset[str]] = {
     "build": frozenset({"packages"}),
     "index": frozenset({"packages"}),
@@ -207,6 +214,13 @@ def sanitize_reason_code(code: str) -> str:
 
 
 def select_output_key(job: str) -> str:
+    # Both mandatory web budget lanes use the same existing selection output.
+    if job == "web-native-checks":
+        job = "web-checks"
+    if job == "workspace-browser-build":
+        job = "workspace-browser-shard"
+    if job == "postgres-build":
+        job = "postgres"
     return f"select_{job.replace('-', '_')}"
 
 
@@ -747,16 +761,171 @@ RUST_WORKFLOW_FILE = "rust.yml"
 RUST_COLLAB_CI_SCRIPT = Path("scripts/run-rust-collaboration-ci-tests.sh")
 RUST_CAPACITY_PROBE_SCRIPT = Path("scripts/collab-capacity-probe.sh")
 RUST_POSTGRES_RUNNER_ARCH: dict[str, str] = {
-    "ubuntu-24.04": "x64",
-    "ubuntu-24.04-arm": "arm64",
+    "ubuntu-26.04": "x64",
+    "ubuntu-26.04-arm": "arm64",
 }
 RUST_INTEGRATION_MANUAL_TARGETS: frozenset[str] = frozenset({"collab_capacity_probe"})
+RUST_NATIVE_ARM64_STEP = "Native server build and policy tests (ARM64)"
+RUST_NATIVE_ARM64_RUN = "cargo build --locked --offline --bins\ncargo test --locked --offline --lib"
 RUST_DB_TESTS_FEATURE = "db-tests"
+# Exact maintained SQLite/library cohort; a successful zero-match Cargo
+# invocation or ignored test is not execution. The default plain run stays.
+RUST_SELECTED_LIBRARY_STEP = "Selected SQLite library controls (54 exact tests)"
+RUST_SELECTED_LIBRARY_FILTERS: tuple[str, ...] = (
+    'db::stars::selected_star_read_finish_tests::star_read_cleanup_retains_refusal_and_driver_without_returning_rows',
+    'db::groups::selected_group_read_finish_tests::group_read_cleanup_retains_refusal_and_driver_without_returning_rows',
+    'streams::events::selected_access_read_tests::sqlite_access_role_change_targets_and_wrong_workspace',
+    'streams::events::selected_access_read_tests::sqlite_access_counter_retention_rollback_and_inflight_writer',
+    'streams::events::selected_access_read_tests::sqlite_access_current_credential_membership_workspace_and_cursor_denials',
+    'streams::events::selected_access_read_tests::access_cleanup_uncertainty_withholds_observation_and_retains_driver_cause',
+    'http::routes::stars::selected_list_access_http_tests::sqlite_http_stars_nonempty_dtos_order_current_acl_and_pat_kinds',
+    'http::routes::stars::selected_list_access_http_tests::sqlite_http_groups_order_member_authority_pat_and_cross_tenant',
+    'http::routes::stars::selected_list_access_http_tests::sqlite_http_lists_recheck_current_credential_and_propagate_sql_fault',
+    'http::routes::stars::selected_list_access_http_tests::sqlite_http_access_role_change_bystander_and_read_error_end_real_body',
+    'http::routes::stars::selected_list_access_http_tests::sqlite_http_access_stream_current_revocation_close_drop_and_guard',
+    'db::project_documents::selected_create_finish_tests::project_create_rollback_retains_domain_and_driver_causes',
+    'db::project_documents::selected_create_backend_tests::sqlite_project_create_current_authority_and_parent_denials',
+    'db::project_documents::selected_create_backend_tests::sqlite_project_create_queued_writer_rechecks_credential_and_permission',
+    'db::project_documents::selected_create_backend_tests::sqlite_project_create_fk_publication_and_commit_failures_then_healthy_create',
+    'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_create_literal_request_metadata_number_order_and_publication',
+    'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_create_input_origin_current_authority_and_pat_scope_denials',
+    'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_create_real_fk_refusal_is_500_without_partial_effects',
+    'db::projects::selected_project_read_tests::sqlite_project_reads_literal_counts_workflow_and_binary_order',
+    'db::projects::selected_project_read_tests::sqlite_project_reads_private_group_guest_and_current_authority',
+    'db::projects::selected_project_read_tests::sqlite_project_reads_driver_failure_rolls_back_and_healthy_retry',
+    'db::projects::selected_project_read_tests::project_read_cleanup_failure_withholds_rows_and_retains_typed_causes',
+    'db::document_tags::selected_tag_pool_tests::sqlite_tag_pool_unicode_search_past_page_limit_and_assignment_counts',
+    'db::document_tags::selected_tag_pool_tests::sqlite_tag_pool_current_authority_fault_and_healthy_retry',
+    'db::document_tags::selected_tag_pool_tests::tag_pool_cleanup_failure_withholds_rows_and_retains_typed_causes',
+    'http::routes::projects::selected_pending_get_http_tests::sqlite_http_pending_gets_literal_project_workflow_tag_and_members',
+    'http::routes::projects::selected_pending_get_http_tests::sqlite_http_pending_gets_pat_scopes_tenant_and_document_count_disclosure',
+    'http::routes::projects::selected_pending_get_http_tests::sqlite_http_pending_gets_current_denials_fault_and_healthy_retry',
+    'db::project_documents::selected_metadata_backend_tests::sqlite_project_metadata_literal_status_and_archived_view',
+    'db::project_documents::selected_metadata_backend_tests::sqlite_project_metadata_current_grants_tenant_and_credential_denials',
+    'db::project_documents::selected_metadata_backend_tests::sqlite_project_metadata_driver_error_and_healthy_retry',
+    'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_metadata_cookie_pat_literal_and_current_denials',
+    'http::routes::project_documents::selected_create_http_tests::sqlite_http_project_metadata_driver_error_and_healthy_retry',
+    'db::labels::selected_project_read_tests::selected_labels_read_nonempty_order_current_grants_and_credential_refusals',
+    'db::milestones::selected_project_read_tests::selected_milestones_read_nonempty_order_current_grants_and_credential_refusals',
+    'db::workspace::selected_personal_workspace_tests::sqlite_personal_bootstrap_stable_concurrent_mapping_and_private_slug_collision',
+    'db::workspace::selected_personal_workspace_tests::sqlite_personal_bootstrap_current_credentials_mapping_and_queued_writer_denials',
+    'db::workspace::selected_personal_workspace_tests::sqlite_personal_bootstrap_event_audit_and_commit_fk_failures_then_healthy_retry',
+    'db::workspace::selected_personal_workspace_tests::personal_bootstrap_rollback_cleanup_retains_domain_and_driver_causes',
+    'db::quota::selected_seat_admission_tests::sqlite_seat_admission_exact_billable_predicate_limit_existing_and_unlimited',
+    'db::quota::selected_seat_admission_tests::sqlite_seat_admission_writer_context_driver_failure_and_healthy_retry',
+    'db::quota::selected_seat_admission_tests::quota_context_restore_failure_retains_original_refusal_or_driver',
+    'http::routes::workspaces::selected_personal_bootstrap_http_tests::sqlite_http_personal_bootstrap_cookie_origin_session_only_and_stable_replay',
+    'http::routes::workspaces::selected_personal_bootstrap_http_tests::sqlite_http_personal_bootstrap_seat_limit_and_publication_failure_then_healthy_retry',
+    'db::workspace::selected_member_removal_tests::sqlite_member_removal_literal_effects_current_access_and_healthy_owner',
+    'db::workspace::selected_member_removal_tests::sqlite_member_removal_domain_matrix_tenant_and_queued_actor_revocation',
+    'db::workspace::selected_member_removal_tests::sqlite_member_removal_event_audit_deferred_fk_rollback_and_healthy_progress',
+    'db::workspace::selected_member_removal_tests::sqlite_member_removal_concurrent_owners_private_leads_single_winner',
+    'db::workspace::selected_member_removal_tests::member_removal_rollback_cleanup_retains_domain_and_driver_causes',
+    'db::projects::selected_member_removal_lead_tests::sqlite_workspace_removal_private_archived_direct_group_and_writer_scope',
+    'db::invitations::selected_member_removal_invitation_tests::sqlite_pending_inviter_roles_scope_accepted_and_empty_set',
+    'db::collections::selected_member_removal_view_tests::sqlite_shared_view_transfer_scope_version_overflow_rollback_and_healthy_progress',
+    'http::routes::workspaces::selected_personal_bootstrap_http_tests::member_removal::sqlite_http_member_delete_cookie_origin_pat_tenant_and_literal_success',
+    'http::routes::workspaces::selected_personal_bootstrap_http_tests::member_removal::sqlite_http_member_delete_audit_rollback_private_lead_refusal_and_healthy_progress',
+)
+# Preserve the accepted original18 prefix separately from the GET extension.
+RUST_SELECTED_LIBRARY_ORIGINAL_FILTERS_SHA256 = 'f9221b4d6b32402a3e125643d3fc67dfb600df8ef27b8e76013bb8b46ade7c80'
+RUST_SELECTED_LIBRARY_GET_FILTERS_SHA256 = '157c4dc2ec55fbece3f7aeb85433c6e6552c8e2e91075f191dea15cab8c37e86'
+RUST_SELECTED_LIBRARY_METADATA_FILTERS_SHA256 = '8c8191b4b26800b5ed8980bc75e8c3ac6b1f6df55611dc9a3665c16db139ae46'
+RUST_SELECTED_LIBRARY_AUX_FILTERS_SHA256 = '7e7702addc4c016b2e885adb2447d0324da4c857dfa874fb8bc0e9dddc88a71d'
+RUST_SELECTED_LIBRARY_ORIGINAL35_FILTERS_SHA256 = '479c869c1734119e7ee091d490dbda12d1df5f59fcd73eea78478649f23b1c87'
+RUST_SELECTED_LIBRARY_BOOTSTRAP_FILTERS_SHA256 = '1baee892b0bc67c4289d4e6ee57b801963d08793f9107f99f72d0e41bc7a18a0'
+RUST_SELECTED_LIBRARY_ORIGINAL44_FILTERS_SHA256 = 'b1d7fff1c44346a300454eff3b0721e1a2078842308a1847b9e9411e23741cb1'
+RUST_SELECTED_LIBRARY_MEMBER_FILTERS_SHA256 = 'a77024442b3b63a39a70012a251fe5ed4948543b8a10156a09ace6d31d7ff09c'
+RUST_SELECTED_LIBRARY_FILTERS_SHA256 = 'aa10daa88b6f9860b43bfb628edb535f185cd4dacd7f1faad27f7d2178ab7498'
+RUST_SELECTED_LIBRARY_RUN = """set -euo pipefail
+python3 - <<'PYLIB'
+import subprocess
+from scripts.ci_selection import RUST_SELECTED_LIBRARY_FILTERS, selected_library_result_error
+
+for test_filter in RUST_SELECTED_LIBRARY_FILTERS:
+    result = subprocess.run(
+        ["cargo", "test", "--locked", "--offline", "--features", "db-tests", "--lib", test_filter, "--", "--exact"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    print(result.stdout, end="", flush=True)
+    error = selected_library_result_error(test_filter, result.returncode, result.stdout)
+    if error:
+        raise SystemExit(error)
+PYLIB"""
+
+
+def selected_library_result_error(test_filter: str, returncode: int, output: str) -> str | None:
+    """Accept exactly the requested, nonignored library test, never compilation."""
+    if test_filter not in RUST_SELECTED_LIBRARY_FILTERS:
+        return "rust: unregistered selected library filter"
+    if returncode != 0:
+        return "rust: selected library test command failed"
+    if re.findall(r"^running ([0-9]+) tests?$", output, re.MULTILINE) != ["1"]:
+        return "rust: selected library command must run exactly one test"
+    executed = re.findall(r"^test (\S+) \.\.\. (\S+).*$", output, re.MULTILINE)
+    if executed != [(test_filter, "ok")]:
+        return "rust: selected library result must be the exact requested test and ok"
+    summaries = re.findall(r"^test result: (.*)$", output, re.MULTILINE)
+    if len(summaries) != 1 or not re.fullmatch(
+        r"ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+(?:\.[0-9]+)?s",
+        summaries[0],
+    ):
+        return "rust: selected library result must pass one test without failure or ignore"
+    return None
+
+
+def verify_selected_library_execution(jobs: dict) -> list[str]:
+    """Bind the maintained step, features and original44 plus member10 exact filter cohort."""
+    errors: list[str] = []
+    if (
+        len(RUST_SELECTED_LIBRARY_FILTERS) != 54
+        or len(set(RUST_SELECTED_LIBRARY_FILTERS)) != 54
+        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[:18]).encode()).hexdigest()
+        != RUST_SELECTED_LIBRARY_ORIGINAL_FILTERS_SHA256
+        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[18:28]).encode()).hexdigest()
+        != RUST_SELECTED_LIBRARY_GET_FILTERS_SHA256
+        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[28:33]).encode()).hexdigest()
+        != RUST_SELECTED_LIBRARY_METADATA_FILTERS_SHA256
+        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[33:35]).encode()).hexdigest()
+        != RUST_SELECTED_LIBRARY_AUX_FILTERS_SHA256
+        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[:35]).encode()).hexdigest()
+        != RUST_SELECTED_LIBRARY_ORIGINAL35_FILTERS_SHA256
+        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[35:44]).encode()).hexdigest()
+        != RUST_SELECTED_LIBRARY_BOOTSTRAP_FILTERS_SHA256
+        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[:44]).encode()).hexdigest()
+        != RUST_SELECTED_LIBRARY_ORIGINAL44_FILTERS_SHA256
+        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS[44:]).encode()).hexdigest()
+        != RUST_SELECTED_LIBRARY_MEMBER_FILTERS_SHA256
+        or hashlib.sha256("\n".join(RUST_SELECTED_LIBRARY_FILTERS).encode()).hexdigest()
+        != RUST_SELECTED_LIBRARY_FILTERS_SHA256
+    ):
+        errors.append("rust: selected library registry must retain all54 exact filters (original44 prefix and member10)")
+    fast = jobs.get("fast", {})
+    steps = fast.get("steps", [])
+    matches = [s for s in steps if isinstance(s, dict) and s.get("name") == RUST_SELECTED_LIBRARY_STEP]
+    if len(matches) != 1:
+        errors.append("rust: selected library step must appear exactly once in fast")
+        return errors
+    if matches[0] != {"name": RUST_SELECTED_LIBRARY_STEP, "env": {"CARGO_TARGET_DIR": "target/db-lib"}, "run": RUST_SELECTED_LIBRARY_RUN + "\n"}:
+        errors.append("rust: selected library step must keep exact unconditional command without extra env or flags")
+    plain = {"run": "cargo test --locked --offline --lib --bin fvoci-server", "env": {"CARGO_TARGET_DIR": "target/default"}}
+    plain_indices = [i for i, s in enumerate(steps) if s == plain]
+    if len(plain_indices) != 1 or plain_indices[0] >= steps.index(matches[0]):
+        errors.append("rust: selected library step must preserve preceding default plain library command")
+    if "env" in fast:
+        errors.append("rust: selected library fast job must not add an environment override")
+    return errors
+
+RUST_SELECTED_INSTALL_STEP = "Selected SQLite install lifetime controls"
+RUST_SELECTED_INSTALL_TARGET = "selected_install_lifetime"
+RUST_SELECTED_INSTALL_IF = "matrix.shard == 'b' && matrix.pg_major == '18'"
+# Bind the actual owned setup, compiler artifact selection and execution/count gate.
+RUST_SELECTED_INSTALL_RUN_SHA256 = "cc1a88016e90b5aa59944736c9690a454a2c98e7fe1aa5cb201a47d8afbc29ee"
 RUST_POSTGRES_INTEGRATION_STEP = "PostgreSQL integration tests"
 RUST_S3_INTEGRATION_STEP = "S3-compatible storage integration tests (pinned test server)"
 RUST_COLLAB_INTEGRATION_STEP = "WebSocket, PostgreSQL and native helper integration tests"
 RUST_COLLAB_INTEGRATION_RUN = "bash scripts/run-rust-collaboration-ci-tests.sh"
-RUST_COLLAB_MATRIX_RUNNERS = frozenset({"ubuntu-24.04", "ubuntu-24.04-arm"})
+RUST_COLLAB_MATRIX_RUNNERS = frozenset({"ubuntu-26.04", "ubuntu-26.04-arm"})
 RUST_S3_INTEGRATION_STEP_IF = "matrix.shard == 'b'"
 RUST_AUTOTEST_FAST_NATIVE_EXCLUSIONS: frozenset[str] = frozenset(
     {
@@ -773,11 +942,10 @@ RUST_AUTOTEST_FAST_NATIVE_EXCLUSIONS: frozenset[str] = frozenset(
 CARGO_TEST_FLAG_RE = re.compile(r"(?:^|\s)--test\s+([A-Za-z0-9_-]+)")
 CARGO_TEST_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 RUST_POSTGRES_INTEGRATION_RUN_CANONICAL = (
-    "cargo test --locked --offline --no-fail-fast --features db-tests ${{ matrix.tests }}"
+    'python3 scripts/ci_selection.py rust-binaries run --directory "$RUNNER_TEMP/rust-binaries" ${{ matrix.tests }}'
 )
 RUST_S3_INTEGRATION_RUN_CANONICAL = (
-    "bash scripts/start-test-minio.sh cargo test --locked --offline --no-fail-fast "
-    "--features db-tests --test attachment_s3_integration"
+    'bash scripts/start-test-minio.sh python3 scripts/ci_selection.py rust-binaries run --directory "$RUNNER_TEMP/rust-binaries" --test attachment_s3_integration'
 )
 
 
@@ -909,6 +1077,220 @@ def postgres_matrix_inventory(jobs: dict) -> tuple[dict[str, set[str]], str | No
     return per_arch, None
 
 
+# Finite PG16 A budget split; these two complete targets alone move to C.
+RUST_POSTGRES_C_TARGETS = frozenset({"task_integration", "comment_integration"})
+RUST_POSTGRES_BUDGET = "${{ matrix.shard == 'b' && (matrix.runner == 'ubuntu-26.04-arm' && 25 || 20) || 15 }}"
+RUST_POSTGRES_IMAGES = {
+    "16": "postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54",
+    "17": "postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f",
+    "18": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
+}
+RUST_POSTGRES_BUILD_CACHE_KEY = (
+    "v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-postgres-db-tests-test-nodebug-"
+    "${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-"
+    "${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-"
+    "${{ steps.sqlite.outputs.cache_identity }}"
+)
+
+CACHE_PIN = "0057852bfaa89a56745cba8c7296529d2fc39830"
+RUST_HELPER_CACHE_KEY = (
+    "v2-collab-product-helper-ubuntu-26.04-${{ runner.arch }}-1.98.1-worker-dev-nodebug-"
+    "${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock', 'rust-toolchain.toml') }}-"
+    "${{ hashFiles('crates/collab-engine/**', 'crates/vendor/**', '.cargo/**') }}"
+)
+
+
+SQLITE_PREFIX_PATH = "${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}"
+SQLITE_PREFIX_KEY = "v1-sqlite-prefix-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ steps.sqlite.outputs.cache_identity }}"
+SQLITE_PACKAGES = 'dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev python3 curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"'
+
+
+def sqlite_prefix_cache_steps(saver=False) -> list[dict]:
+    steps = [
+        {"name": "Restore prepared SQLite prefix", "id": "sqlite_prefix_cache",
+         "uses": "actions/cache/restore@" + CACHE_PIN,
+         "with": {"path": SQLITE_PREFIX_PATH, "key": SQLITE_PREFIX_KEY}},
+        {"name": "Verify cached SQLite prefix or build", "env": {"LIBCLANG_PATH": "/usr/lib/llvm-18/lib"},
+         "run": 'bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \\\n'
+                '  --cache-fallback --expected-cache-identity "${{ steps.sqlite.outputs.cache_identity }}" \\\n'
+                '  --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"\n'},
+    ]
+    if saver:
+        steps.append({"name": "Save verified SQLite prefix",
+                      "if": "steps.sqlite_prefix_cache.outputs.cache-hit != 'true'",
+                      "uses": "actions/cache/save@" + CACHE_PIN,
+                      "with": {"path": SQLITE_PREFIX_PATH,
+                               "key": "${{ steps.sqlite_prefix_cache.outputs.cache-primary-key }}"}})
+    return steps
+
+
+def verify_sqlite_prefix_cache(jobs: dict) -> list[str]:
+    errors = []
+    for name in ("fast", "native-arm64", "postgres-build", "postgres", "collaboration"):
+        steps = jobs.get(name, {}).get("steps", [])
+        expected = sqlite_prefix_cache_steps(name == "postgres-build")
+        actual = [step for step in steps if step.get("name") in {s["name"] for s in sqlite_prefix_cache_steps(True)}
+                  or step.get("id") == "sqlite_prefix_cache"
+                  or "fvoci-sqlite" in str(step.get("with", {}).get("path", ""))]
+        prep = [step for step in steps if step.get("id") == "sqlite"]
+        preflight = ('bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \\\n'
+                     '  --identity-only --github-output "$GITHUB_OUTPUT"\n')
+        if (actual != expected or len(prep) != 1 or set(prep[0]) != {"name", "id", "env", "run"}
+                or prep[0].get("env") != {"LIBCLANG_PATH": "/usr/lib/llvm-18/lib"}
+                or not prep[0].get("run", "").endswith(preflight)
+                or SQLITE_PACKAGES not in prep[0].get("run", "")):
+            errors.append(f"rust: {name} SQLite prefix cache must retain exact preflight/restore/verify and producer-only save")
+            continue
+        positions = [steps.index(prep[0]), *(steps.index(step) for step in expected)]
+        if positions != sorted(positions):
+            errors.append(f"rust: {name} SQLite prefix verification must precede save and all consumers")
+        verify_pos = steps.index(expected[1])
+        for index, step in enumerate(steps):
+            if step in expected or step == prep[0]:
+                continue
+            if (step.get("with", {}).get("path", "").startswith(("target", "${{ runner.temp }}/rust-binaries"))
+                    or "cargo " in step.get("run", "")
+                    or "rust-binaries unpack" in step.get("run", "")) and index < verify_pos:
+                errors.append(f"rust: {name} SQLite prefix verification must precede save and all consumers")
+    return errors
+
+
+def rust_fast_cache_steps() -> list[dict]:
+    steps = []
+    for name, directory, identity, step_id in (
+        ("server", "target/default", "fast-default-test", "default_cache"),
+        ("clippy", "target/clippy", "fast-db-tests-clippy", "clippy_cache"),
+        ("SQLite library", "target/db-lib", "fast-db-tests-lib-test", "db_lib_cache"),
+    ):
+        steps.append({"name": "Restore " + name + " build outputs", "id": step_id,
+                      "uses": "actions/cache/restore@" + CACHE_PIN,
+                      "with": {"path": directory, "key": RUST_POSTGRES_BUILD_CACHE_KEY.replace("postgres-db-tests-test", identity)}})
+        steps.append({"name": "Save " + name + " build outputs after validation",
+                      "if": f"steps.{step_id}.outputs.cache-hit != 'true'", "uses": "actions/cache/save@" + CACHE_PIN,
+                      "with": {"path": directory, "key": "${{ steps." + step_id + ".outputs.cache-primary-key }}"}})
+    return steps
+
+
+def verify_rust_binary_handoff(jobs: dict) -> list[str]:
+    errors = verify_sqlite_prefix_cache(jobs)
+    def require(condition, message):
+        if not condition:
+            errors.append("rust: " + message)
+    fast_steps = jobs.get("fast", {}).get("steps", [])
+    expected = rust_fast_cache_steps()
+    actual = [s for s in fast_steps if s.get("name") in {e["name"] for e in expected}]
+    require(len(actual) == len(expected) and all(e in actual for e in expected),
+            "fast server cache must retain exact pinned restore/save pairs and complete inputs")
+    safe_download = {"path": "~/.cargo/registry\n~/.cargo/git\n",
+                     "key": "v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}"}
+    for step in fast_steps:
+        if str(step.get("uses", "")).startswith("actions/cache") and step not in expected and step not in sqlite_prefix_cache_steps():
+            require(set(step) <= {"name", "uses", "with"} and step.get("with") == safe_download,
+                    "only the exact qualified target restore/save and safe Cargo downloads are allowed")
+    for save in expected[1::2]:
+        if save in fast_steps:
+            require(fast_steps.index(save) > max((i for i, s in enumerate(fast_steps) if "cargo test" in s.get("run", "")), default=-1),
+                    "fast cache saves must follow all validation")
+    native_cache = [s for s in jobs.get("native-arm64", {}).get("steps", []) if s.get("name") == "Restore server build outputs"]
+    require(len(native_cache) == 1 and native_cache[0].get("with") == {"path": "target", "key": RUST_POSTGRES_BUILD_CACHE_KEY.replace("postgres-db-tests-test", "native-default-dev-test")},
+            "native default-feature cache must be distinct from DB test outputs")
+    producer = jobs.get("postgres-build", {})
+    require(producer.get("needs") == "ci-plan" and producer.get("if") == expected_select_if("postgres-build"), "binary producer must use registered selection")
+    require(producer.get("runs-on") == "${{ matrix.runner }}" and producer.get("strategy") == {"fail-fast": False, "matrix": {"include": [{"runner": "ubuntu-26.04"}, {"runner": "ubuntu-26.04-arm"}]}}, "binary producer must run once per architecture")
+    require("services" not in producer and "env" not in producer and "continue-on-error" not in producer, "binary producer must remain credential-free and fail closed")
+    producer_steps = producer.get("steps", [])
+    for name, path, key in (("server", "target/db-tests", RUST_POSTGRES_BUILD_CACHE_KEY),
+                            ("schema default", "target/schema-default", RUST_POSTGRES_BUILD_CACHE_KEY.replace("postgres-db-tests-test", "schema-default-dev")),
+                            ("production helper", "crates/collab-engine/target", RUST_HELPER_CACHE_KEY)):
+        matching = [s for s in producer_steps if s.get("name") == "Restore " + name + " build outputs"]
+        require(matching == [{"name": "Restore " + name + " build outputs", "uses": "actions/cache@" + CACHE_PIN, "with": {"path": path, "key": key}}], "producer cache must have one exact writer and complete inputs")
+    build = [s for s in producer_steps if s.get("name") == "Build all PostgreSQL test executables once per architecture"]
+    require(build == [{"name": "Build all PostgreSQL test executables once per architecture", "env": {"CARGO_TARGET_DIR": "${{ github.workspace }}/target/db-tests"}, "run": 'mkdir "$RUNNER_TEMP/rust-binaries"\npython3 scripts/ci_selection.py rust-binaries build --directory "$RUNNER_TEMP/rust-binaries"\n'}], "binary producer must build the complete registered cohort")
+    for job_name, cohort in (("postgres", "postgres"), ("collaboration", "helper")):
+        job = jobs.get(job_name, {})
+        require(job.get("needs") == ["ci-plan", "postgres-build"], "binary consumers must need the successful producer")
+        steps = job.get("steps", [])
+        download = [s for s in steps if s.get("name") == f"Download required {cohort} executables for this SHA and architecture"]
+        require(download == [{"name": f"Download required {cohort} executables for this SHA and architecture", "uses": "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093", "with": {"name": "rust-" + cohort + "-${{ runner.arch }}-${{ github.sha }}-${{ github.run_attempt }}", "path": "${{ runner.temp }}/rust-binaries"}}], "binary consumers must download the exact SHA/architecture/attempt artifact")
+        validate = [s for s in steps if s.get("name") == f"Validate and restore finished {cohort} executables (no rebuild fallback)"]
+        require(validate == [{"name": f"Validate and restore finished {cohort} executables (no rebuild fallback)", "run": 'python3 scripts/ci_selection.py rust-binaries unpack --cohort ' + cohort + ' --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"'}], "binary consumers must validate all inputs and hashes unconditionally")
+        if download and validate:
+            require(steps.index(download[0]) < steps.index(validate[0]), "download must precede binary validation")
+        if job_name == "postgres":
+            require(not any(any(word in s.get("run", "") for word in ("cargo ", "\"cargo\"", "'cargo'")) or (str(s.get("uses", "")).startswith("actions/cache") and s not in sqlite_prefix_cache_steps()) for s in steps), "PostgreSQL consumers must never restore build caches or rebuild")
+        else:
+            require(not any("--bin collab-engine" in s.get("run", "") or s.get("with", {}).get("path") == "crates/collab-engine/target" for s in steps), "collaboration must reuse helper without build/cache fallback")
+    return errors
+
+
+def verify_postgres_budget_matrix(jobs: dict) -> list[str]:
+    """Keep twelve isolated A/B/C rows and equal complete coverage per pair."""
+    job = jobs.get("postgres")
+    if not isinstance(job, dict):
+        return ["rust: PostgreSQL budget job missing"]
+    errors: list[str] = []
+    if job.get("timeout-minutes") != RUST_POSTGRES_BUDGET:
+        errors.append("rust: PostgreSQL budget must retain A/C15m, x64 B20m and ARM64 B25m")
+    if job.get("runs-on") != "${{ matrix.runner }}" or "continue-on-error" in job:
+        errors.append("rust: PostgreSQL budget requires isolated matrix runners without error masking")
+    strategy = job.get("strategy", {})
+    if not isinstance(strategy, dict) or strategy.get("fail-fast") is not False:
+        errors.append("rust: PostgreSQL budget must run every selected matrix row")
+    matrix = strategy.get("matrix", {}) if isinstance(strategy, dict) else {}
+    if not isinstance(matrix, dict) or set(matrix) != {"include"}:
+        errors.append("rust: PostgreSQL budget matrix must use only explicit include rows")
+    rows, err = _postgres_matrix_rows(job)
+    if err:
+        return errors + [err]
+    expected = {
+        (runner, major, shard): "postgres" + suffix + ("" if shard == "a" else "-" + shard)
+        for runner, major, suffix in (
+            ("ubuntu-26.04", "18", ""),
+            ("ubuntu-26.04-arm", "18", "-arm64"),
+            ("ubuntu-26.04", "16", "-pg16"),
+            ("ubuntu-26.04", "17", "-pg17"),
+        )
+        for shard in ("a", "b", "c")
+    }
+    seen: set[tuple[str, str, str]] = set()
+    per_pair: dict[tuple[str, str], set[str]] = {}
+    for row in rows:
+        key = (row.get("runner"), row.get("pg_major"), row.get("shard"))
+        if any(not isinstance(value, str) for value in key) or key not in expected:
+            errors.append("rust: PostgreSQL budget has an unsupported platform/major/shard row")
+            continue
+        if key in seen:
+            errors.append("rust: PostgreSQL budget has a duplicate matrix row")
+        seen.add(key)
+        if set(row) != {"runner", "pg_major", "postgres_image", "check", "shard", "tests"}:
+            errors.append("rust: PostgreSQL budget row must keep exact execution fields")
+        if row.get("check") != expected[key] or row.get("postgres_image") != RUST_POSTGRES_IMAGES[key[1]]:
+            errors.append("rust: PostgreSQL budget must retain check names and signed image pins")
+        fragment = row.get("tests")
+        if not isinstance(fragment, str) or _validate_matrix_tests_fragment(fragment):
+            errors.append("rust: PostgreSQL budget requires complete --test target pairs")
+            continue
+        names = fragment.split()[1::2]
+        targets = set(names)
+        pair = key[:2]
+        assigned = per_pair.setdefault(pair, set())
+        if len(names) != len(targets) or assigned & targets:
+            errors.append("rust: PostgreSQL budget duplicates a target within a platform/major pair")
+        assigned.update(targets)
+        if key[2] == "c" and targets != RUST_POSTGRES_C_TARGETS:
+            errors.append("rust: PostgreSQL budget C must run exactly task/comment targets")
+    if seen != set(expected):
+        errors.append("rust: PostgreSQL budget requires all twelve A/B/C rows")
+    baseline = per_pair.get(("ubuntu-26.04", "18"), set())
+    if any(targets != baseline for targets in per_pair.values()):
+        errors.append("rust: PostgreSQL budget must retain equal target coverage on every platform/major pair")
+    producer = jobs.get("postgres-build", {})
+    cache = [step for step in producer.get("steps", []) if isinstance(step, dict) and step.get("name") == "Restore server build outputs"]
+    if len(cache) != 1 or cache[0].get("with") != {"path": "target/db-tests", "key": RUST_POSTGRES_BUILD_CACHE_KEY}:
+        errors.append("rust: PostgreSQL producer must retain strict complete-input server cache without restore fallback")
+    return errors
+
+
 def _postgres_job_steps(jobs: dict) -> tuple[list[dict] | None, str | None]:
     postgres_job = jobs.get("postgres")
     if not isinstance(postgres_job, dict):
@@ -1038,7 +1420,7 @@ def _verify_postgres_integration_run(run: str) -> str | None:
     if norm.startswith("echo "):
         return (
             "rust: PostgreSQL integration step must execute "
-            "cargo test with --features db-tests and ${{ matrix.tests }}"
+            "validated db-tests binaries for ${{ matrix.tests }}"
         )
     suppression = _cargo_command_suppression_error(norm, "PostgreSQL integration step")
     if suppression:
@@ -1047,7 +1429,7 @@ def _verify_postgres_integration_run(run: str) -> str | None:
     if collapsed != RUST_POSTGRES_INTEGRATION_RUN_CANONICAL:
         return (
             "rust: PostgreSQL integration step must execute "
-            "cargo test with --features db-tests and ${{ matrix.tests }}"
+            "validated db-tests binaries for ${{ matrix.tests }}"
         )
     return None
 
@@ -1056,7 +1438,7 @@ def _verify_s3_integration_run(run: str) -> str | None:
     norm = _normalize_run_script(run).strip()
     if norm.startswith("echo "):
         return (
-            "rust: S3 integration step must invoke start-test-minio.sh with a db-tests cargo test"
+            "rust: S3 integration step must invoke start-test-minio.sh with the validated db-tests binary"
         )
     suppression = _cargo_command_suppression_error(norm, "S3 integration step")
     if suppression:
@@ -1064,7 +1446,7 @@ def _verify_s3_integration_run(run: str) -> str | None:
     collapsed = _collapse_shell_words(norm)
     if collapsed != RUST_S3_INTEGRATION_RUN_CANONICAL:
         return (
-            "rust: S3 integration step must invoke start-test-minio.sh with a db-tests cargo test"
+            "rust: S3 integration step must invoke start-test-minio.sh with the validated db-tests binary"
         )
     return None
 
@@ -1243,6 +1625,112 @@ def collaboration_script_inventory(repo_root: Path) -> tuple[set[str], str | Non
     return tests, None
 
 
+def verify_native_arm64_execution(jobs: dict) -> list[str]:
+    """Keep the former ARM A default-feature check mandatory after the job split."""
+    job = jobs.get("native-arm64")
+    if not isinstance(job, dict):
+        return ["rust: native-arm64 job missing"]
+    errors: list[str] = []
+    if job.get("runs-on") != "ubuntu-26.04-arm" or "strategy" in job:
+        errors.append("rust: native-arm64 must run once on ubuntu-26.04-arm")
+    if job.get("timeout-minutes") != 15:
+        errors.append("rust: native-arm64 must keep the 15 minute budget")
+    if "continue-on-error" in job:
+        errors.append("rust: native-arm64 must fail on build/policy errors")
+    steps = [step for step in _run_steps(job) if step.get("name") == RUST_NATIVE_ARM64_STEP]
+    if len(steps) != 1:
+        errors.append("rust: native-arm64 must execute the default build/policy step exactly once")
+    elif (
+        steps[0]["run"].strip() != RUST_NATIVE_ARM64_RUN
+        or "if" in steps[0]
+        or "continue-on-error" in steps[0]
+        or "env" in steps[0]
+    ):
+        errors.append("rust: native-arm64 must execute the exact unconditional default build/policy commands")
+    if any(step.get("name") == RUST_NATIVE_ARM64_STEP for step in _run_steps(jobs.get("postgres", {}))):
+        errors.append("rust: default ARM build/policy must not share the PostgreSQL job budget")
+    return errors
+
+
+def selected_install_inventory(jobs: dict) -> tuple[set[str], str | None]:
+    """Require the privileged SQLite fixture on both actual PG18 B runners."""
+    steps, err = _postgres_job_steps(jobs)
+    if err:
+        return set(), err
+    assert steps is not None
+    step, err = _unique_named_step(steps, RUST_SELECTED_INSTALL_STEP, job="postgres")
+    if err:
+        return set(), err
+    assert step is not None
+    if "continue-on-error" in step or step.get("if") != RUST_SELECTED_INSTALL_IF:
+        return set(), "rust: selected install step must execute on PG18 B without error masking"
+    expected_env = {
+        "FVOCI_COLLAB_ENGINE": "${{ github.workspace }}/crates/collab-engine/target/debug/collab-engine"
+    }
+    run = step.get("run")
+    if (
+        step.get("env") != expected_env
+        or not isinstance(run, str)
+        or hashlib.sha256(run.strip().encode()).hexdigest() != RUST_SELECTED_INSTALL_RUN_SHA256
+    ):
+        return set(), (
+            "rust: selected install step must keep exact db-tests build, root inputs, "
+            "unfiltered execution and count gate"
+        )
+    helper, err = _unique_named_step(
+        steps, "Validate and restore finished postgres executables (no rebuild fallback)", job="postgres"
+    )
+    if err:
+        return set(), err
+    expected_run = 'python3 scripts/ci_selection.py rust-binaries unpack --cohort postgres --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"'
+    if "if" in helper or "continue-on-error" in helper or helper.get("run") != expected_run or steps.index(helper) >= steps.index(step):
+        return set(), "rust: selected install requires preceding mandatory validated production helper artifact"
+    rows, err = _postgres_matrix_rows(jobs["postgres"])
+    if err:
+        return set(), err
+    assert rows is not None
+    runners = [
+        row.get("runner") for row in rows
+        if row.get("shard") == "b" and row.get("pg_major") == "18"
+    ]
+    if set(runners) != set(RUST_POSTGRES_RUNNER_ARCH) or len(runners) != 2:
+        return set(), "rust: selected install requires exactly one PG18 B execution on x64 and arm64"
+    return {RUST_SELECTED_INSTALL_TARGET}, None
+
+
+RUST_SCHEMA_BASELINE_STEP = "Schema baseline SQLite controls and prepared PostgreSQL catalog"
+RUST_SCHEMA_BASELINE_RUN_SHA256 = "919415320553e025982e0a41708b202c1fa159a0019de7d3e3b100680ed59c52"
+
+
+def schema_baseline_inventory(jobs: dict) -> tuple[set[str], str | None]:
+    """Two local SDK controls, the configured PG catalog tool and PG app-role gate.
+    The catalog uses an owned prepared DB/owner, not a normal-server credential.
+    """
+    steps, err = _postgres_job_steps(jobs)
+    if err:
+        return set(), err
+    step, err = _unique_named_step(steps, RUST_SCHEMA_BASELINE_STEP, job="postgres")
+    if err:
+        return set(), err
+    expected_env = {
+        "PG_CONTAINER": "${{ job.services.postgres.id }}",
+        "PREPARATION_DATABASE_URL": "postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres",
+    }
+    if (step.get("if") != "matrix.shard == 'a'" or "continue-on-error" in step
+            or step.get("env") != expected_env
+            or hashlib.sha256(str(step.get("run", "")).strip().encode()).hexdigest() != RUST_SCHEMA_BASELINE_RUN_SHA256):
+        return set(), "rust: schema baseline requires exact configured extraction, 2+1+1 actual controls and owned cleanup"
+    rows, err = _postgres_matrix_rows(jobs["postgres"])
+    if err:
+        return set(), err
+    actual = [(row.get("runner"), row.get("pg_major")) for row in rows if row.get("shard") == "a"]
+    expected = [("ubuntu-26.04", "16"), ("ubuntu-26.04", "17"),
+                ("ubuntu-26.04", "18"), ("ubuntu-26.04-arm", "18")]
+    if sorted(actual) != sorted(expected):
+        return set(), "rust: schema baseline requires PG16/17/18 x64 and PG18 arm64 A execution"
+    return {"schema_baseline_integration"}, None
+
+
 def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
     """Ensure explicit root [[test]] db-tests targets map to rust.yml execution rows."""
     errors: list[str] = []
@@ -1266,6 +1754,9 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
         return errors
     assert jobs is not None
 
+    errors.extend(verify_selected_library_execution(jobs))
+    errors.extend(verify_native_arm64_execution(jobs))
+    errors.extend(verify_postgres_budget_matrix(jobs))
     errors.extend(verify_postgres_integration_execution(jobs))
 
     per_arch, matrix_err = postgres_matrix_inventory(jobs)
@@ -1297,8 +1788,23 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
                 "rust: postgres matrix missing on x64: " + ", ".join(only_arm)
             )
 
+    install_tests, install_err = selected_install_inventory(jobs)
+    if install_err:
+        errors.append(install_err)
+        return errors
+
+    schema_tests, schema_err = schema_baseline_inventory(jobs)
+    if schema_err:
+        errors.append(schema_err)
+        return errors
+
     postgres_union = per_arch["x64"]
-    overlap = (postgres_union & collab_tests) | (postgres_union & s3_tests) | (collab_tests & s3_tests)
+    overlap = (
+        (postgres_union & collab_tests) | (postgres_union & s3_tests)
+        | (collab_tests & s3_tests)
+        | (install_tests & (postgres_union | collab_tests | s3_tests))
+        | (schema_tests & (postgres_union | collab_tests | s3_tests | install_tests))
+    )
     if overlap:
         errors.append(
             "rust: integration target assigned to multiple CI buckets: "
@@ -1310,7 +1816,7 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
         if not probe_script.is_file():
             errors.append(f"rust: missing manual probe script {RUST_CAPACITY_PROBE_SCRIPT}")
 
-    assigned = postgres_union | collab_tests | s3_tests | RUST_INTEGRATION_MANUAL_TARGETS
+    assigned = postgres_union | collab_tests | s3_tests | install_tests | schema_tests | RUST_INTEGRATION_MANUAL_TARGETS
     required = cargo_targets - RUST_INTEGRATION_MANUAL_TARGETS
     missing = sorted(required - assigned)
     if missing:
@@ -1322,10 +1828,108 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
     return errors
 
 
+def _verify_web_browser_budget(jobs: dict) -> list[str]:
+    """Bound the measured cold-build budget without changing testcase limits."""
+    job = jobs.get("workspace-browser-shard")
+    if not isinstance(job, dict):
+        return ["web: normal browser shard must be a mapping"]
+    budget = job.get("timeout-minutes")
+    if type(budget) is not int or budget != 20:
+        return ["web: normal browser shard requires the measured 20 minute job budget"]
+    return []
+
+
+_CLOSED_INSTALL_RECEIPT = "${{ runner.temp }}/fvoci-closed-install/closed-install-receipt.json"
+_PRODUCER_DOWNLOAD_WITH = {
+    "artifact-ids": "${{ needs.collaboration-build.outputs.artifact_id }}",
+    "merge-multiple": True,
+    "path": "${{ runner.temp }}/fvoci-web-build-handoff",
+}
+_RECEIPT_DOWNLOAD_WITH = {
+    "artifact-ids": "${{ needs.collaboration-install-on.outputs.install_receipt_artifact_id }}",
+    "merge-multiple": True,
+    "path": "${{ runner.temp }}/fvoci-closed-install",
+}
+_DOWNLOAD_PIN = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
+_WEB_COLLAB_LANES = (
+    ("collaboration-install-on", "install/on", ["ci-plan", "collaboration-build"], {}, 1, (_PRODUCER_DOWNLOAD_WITH,)),
+    ("collaboration-postgres-on", "postgres/on", ["ci-plan", "collaboration-build", "collaboration-install-on"],
+     {"FVOCI_CLOSED_INSTALL_RECEIPT": _CLOSED_INSTALL_RECEIPT}, 2, (_PRODUCER_DOWNLOAD_WITH, _RECEIPT_DOWNLOAD_WITH)),
+    ("collaboration-sqlite-on", "sqlite/on", ["ci-plan", "collaboration-build", "collaboration-install-on"],
+     {"FVOCI_CLOSED_INSTALL_RECEIPT": _CLOSED_INSTALL_RECEIPT}, 2, (_PRODUCER_DOWNLOAD_WITH, _RECEIPT_DOWNLOAD_WITH)),
+    ("collaboration-postgres-off", "postgres/off", ["ci-plan", "collaboration-build", "collaboration-install-on"],
+     {"FVOCI_CLOSED_INSTALL_RECEIPT": _CLOSED_INSTALL_RECEIPT}, 2, (_PRODUCER_DOWNLOAD_WITH, _RECEIPT_DOWNLOAD_WITH)),
+    ("collaboration-sqlite-off", "sqlite/off", ["ci-plan", "collaboration-build", "collaboration-install-on"],
+     {"FVOCI_CLOSED_INSTALL_RECEIPT": _CLOSED_INSTALL_RECEIPT}, 2, (_PRODUCER_DOWNLOAD_WITH, _RECEIPT_DOWNLOAD_WITH)),
+)
+
+
+def _verify_web_build_handoff(jobs: dict) -> list[str]:
+    """The only admitted cross-job native consumer, bound to this run's producer."""
+    errors = []
+    def require(ok, message):
+        if not ok: errors.append("web: current build handoff " + message)
+    producer = jobs.get("collaboration-build", {})
+    require(producer.get("needs") == "ci-plan", "producer needs ci-plan")
+    lane_jobs = [(name, jobs.get(name, {}), token, needs, extra, count, expected_withs)
+                 for name, token, needs, extra, count, expected_withs in _WEB_COLLAB_LANES]
+    for _name, job, _token, needs, _extra, _count, _expected_withs in lane_jobs:
+        require(job.get("needs") == needs, "consumer needs successful registered producer")
+    for name, job in (("collaboration-build", producer), *((name, job) for name, job, _token, _needs, _extra, _count, _expected_withs in lane_jobs)):
+        require(job.get("runs-on") == "ubuntu-26.04" and job.get("timeout-minutes") == 15, "fixed runner/budget")
+        require(not any(k in job for k in ("continue-on-error", "strategy", "env", "permissions")), "no masked/alternate authority")
+        checkout = [step for step in job.get("steps", []) if str(step.get("uses", "")).startswith("actions/checkout@")]
+        require(len(checkout) == 1 and checkout[0].get("with") == {"persist-credentials": False}, "default exact checkout without stored credentials")
+        require(job.get("if") == "needs.ci-plan.outputs.select_" + name.replace("-", "_") + " == 'true'", "selection only by registered plan")
+    # Pending registration controls are DB-free, but not part of apps/web's
+    # default src-only unit discovery. Require their explicit mandatory consumer.
+    unit = [step for step in jobs.get("web-checks", {}).get("steps", [])
+            if step.get("name") == "Web and editor unit regressions"]
+    required = ("(cd apps/web && bun run test)", "(cd packages/editor && bun run test)",
+                "(cd apps/web && bun test e2e-pending/collab-playwright.config.test.ts --timeout 60000)",
+                "python3 scripts/selected-backend-ci/test_off_registration.py")
+    require(len(unit) == 1 and unit[0].get("run", "").splitlines() == list(required)
+            and not any(k in unit[0] for k in ("if", "continue-on-error")),
+            "mandatory complete web/editor and selected registration fixtures")
+    steps = producer.get("steps", [])
+    prepare = [step for step in steps if step.get("id") == "prepare"]
+    require(len(prepare) == 1 and prepare[0].get("env") == {"FVOCI_E2E_PENDING": "1"}
+            and "bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-prepare-selected" in prepare[0].get("run", "")
+            and not any(k in prepare[0] for k in ("if", "continue-on-error")), "unconditional qualified producer")
+    publish = [step for step in steps if step.get("id") == "publish"]
+    require(len(publish) == 1 and publish[0].get("uses") == "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+            and publish[0].get("with") == {"name": "web-current-build-${{ github.run_attempt }}",
+                "path": "${{ runner.temp }}/fvoci-web-build-handoff/handoff.json\n${{ runner.temp }}/fvoci-web-build-handoff/payload.tar\n",
+                "if-no-files-found": "error", "retention-days": 1}
+            and not any(k in publish[0] for k in ("if", "continue-on-error")), "publish only successful complete packet")
+    require(producer.get("outputs") == {"artifact_id": "${{ steps.publish.outputs.artifact-id }}",
+            "handoff_sha256": "${{ steps.prepare.outputs.handoff_sha256 }}"}, "producer artifact identity and digest outputs")
+    for name, job, token, _needs, extra, count, expected_withs in lane_jobs:
+        steps = job.get("steps", [])
+        downloads = [step for step in steps if str(step.get("uses", "")).startswith("actions/download-artifact@")]
+        exact = []
+        for expected_with in expected_withs:
+            matched = [step for step in downloads if step.get("with") == expected_with
+                       and step.get("uses") == _DOWNLOAD_PIN
+                       and not any(k in step for k in ("if", "continue-on-error"))]
+            exact.extend(matched[:1])
+        require(len(downloads) == count and len(exact) == len(expected_withs),
+                "current-run exact artifact ID without foreign token/ref/run")
+        runtime = [step for step in steps if step.get("id") == "browser"]
+        require(len(runtime) == 1 and runtime[0].get("env") == {"FVOCI_E2E_PENDING": "1",
+                    "FVOCI_WEB_BUILD_HANDOFF_SHA256": "${{ needs.collaboration-build.outputs.handoff_sha256 }}",
+                    "FVOCI_COLLAB_LANE": token, **extra}
+                and "bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected" in runtime[0].get("run", "")
+                and not any(k in runtime[0] for k in ("if", "continue-on-error")), "mandatory full original runtime after qualification")
+        require(not any(step.get("with", {}).get("path") in ("target", "crates/collab-engine/target")
+                for step in steps if str(step.get("uses", "")).startswith("actions/cache@")), "consumer cannot borrow target cache")
+    return errors
+
+
 def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     workflows_dir = repo_root / ".github" / "workflows"
-    allowed_files = {*WORKFLOW_YAML.values(), RELEASE_WORKFLOW_FILE, CI_BASE_WORKFLOW_FILE}
+    allowed_files = {*WORKFLOW_YAML.values(), RELEASE_WORKFLOW_FILE, CI_BASE_WORKFLOW_FILE, TURSO_MANUAL_WORKFLOW_FILE}
     discovered_files = list_workflow_files(repo_root)
     if not workflows_dir.is_dir():
         errors.append("missing .github/workflows directory")
@@ -1334,6 +1938,36 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
     for path in discovered_files:
         if path.name not in allowed_files:
             errors.append(f"unknown workflow file {path.name}")
+        if path.name in allowed_files:
+            data, parse_err = _load_yaml_mapping(path)
+            if parse_err:
+                continue  # The workflow-specific validator reports parse errors.
+            jobs = data.get("jobs")
+            if not isinstance(jobs, dict):
+                continue
+            for job_id, job in jobs.items():
+                if not isinstance(job, dict):
+                    continue
+                runner = job.get("runs-on")
+                runners = [runner]
+                if runner == "${{ matrix.runner }}":
+                    strategy = job.get("strategy")
+                    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+                    rows = matrix.get("include", []) if isinstance(matrix, dict) else []
+                    runners = [row.get("runner") for row in rows if isinstance(row, dict)]
+                if not runners or any(not isinstance(label, str) or label not in RUST_POSTGRES_RUNNER_ARCH for label in runners):
+                    errors.append(f"{path.name}: {job_id} requires explicit Ubuntu 26.04 runners")
+                for step in job.get("steps", []):
+                    if not isinstance(step, dict) or not str(step.get("uses", "")).startswith((
+                            "actions/cache@", "actions/cache/restore@", "actions/cache/save@")):
+                        continue
+                    cache = step.get("with", {})
+                    # This source-only cache is revalidated by fetch-rhwp.sh.
+                    if cache.get("path") == "crates/document-extract/.vendor-src/rhwp":
+                        continue
+                    for field in ("key", "restore-keys"):
+                        if (field in cache and not (path.name == "rust.yml" and job_id == "fast" and step in rust_fast_cache_steps()[1::2]) and not (path.name == "rust.yml" and job_id == "postgres-build" and step == sqlite_prefix_cache_steps(True)[2])) and any("ubuntu-26.04-${{ runner.arch }}-1.98.1-" not in line for line in str(cache[field]).splitlines()):
+                            errors.append(f"{path.name}: {job_id} cache {field} must bind Ubuntu 26.04, architecture and toolchain")
 
     for workflow, filename in WORKFLOW_YAML.items():
         path = workflows_dir / filename
@@ -1356,6 +1990,9 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
         if any(not isinstance(job_id, str) or not JOB_ID_RE.match(job_id) for job_id in jobs):
             errors.append(f"{workflow}: invalid job id")
             continue
+
+        if workflow == "rust":
+            errors.extend(verify_rust_binary_handoff(jobs))
 
         reserved_gate = gate_job_id(workflow)
         if PLAN_JOB_ID not in jobs:
@@ -1496,6 +2133,9 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
             errors.append(f"{workflow}: {reserved_gate} must be a mapping")
 
         errors.extend(_verify_opt_in_wiring(workflow, data, jobs))
+        if workflow == "web":
+            errors.extend(_verify_web_browser_budget(jobs))
+            errors.extend(_verify_web_build_handoff(jobs))
 
     release_path = workflows_dir / RELEASE_WORKFLOW_FILE
     if release_path.is_file():
@@ -1509,7 +2149,131 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
         else:
             errors.extend(verify_workflow_write_scopes(data, image_path.name, CI_BASE_WRITE_SCOPES))
 
+    turso_path = workflows_dir / TURSO_MANUAL_WORKFLOW_FILE
+    if turso_path.is_file():
+        errors.extend(verify_turso_workflow(turso_path))
+
     errors.extend(verify_rust_suite_registry(repo_root))
+    return errors
+
+
+def verify_turso_workflow(path: Path) -> list[str]:
+    """Named manual-only exception; never changes PR selection or stable gates."""
+    data, parse_err = _load_yaml_mapping(path)
+    if parse_err:
+        return [f"{path.name}: {parse_err}"]
+    errors: list[str] = []
+
+    def require(condition: bool, boundary: str) -> None:
+        if not condition:
+            errors.append(f"{path.name}: {boundary}")
+
+    triggers = data.get("on", data.get(True))
+    require(isinstance(triggers, dict) and set(triggers) == {"push", "workflow_dispatch"} and triggers.get("push") == {"branches": ["fvoci/v060-turso-verified-connection"]}, "manual dispatch only with fixed credential-free bootstrap")
+    dispatch = triggers.get("workflow_dispatch", {}) if isinstance(triggers, dict) else {}
+    require(dispatch.get("inputs") == {
+        "phase": {"description": "Connection, inventory and ui-baseline read-only; migration, reset and ui-ack require both destructive gates; others NOT IMPLEMENTED", "type": "choice", "default": "connection", "options": ["connection", "crud", "transactions", "migration", "inventory", "reset", "persistence", "restore", "ui-ack", "ui-baseline"]},
+        "destructive": {"description": "Explicit isolated test DB mutation confirmation (connection, inventory and ui-baseline must be false)", "type": "boolean", "default": False},
+        "ui_source_sha": {"description": "ROOT reviewed exact UI source SHA (ui-baseline and ui-ack only)", "type": "string", "default": ""},
+        "ui_baseline_sha256": {"description": "ROOT verified just-observed current dataset digest (ui-ack only)", "type": "string", "default": ""},
+        "ui_target_sha256": {"description": "ROOT verified just-observed primary target digest (ui-ack only)", "type": "string", "default": ""},
+    } if isinstance(dispatch, dict) else False, "fixed phase inputs and non-destructive default")
+    require(data.get("permissions") == {"contents": "read"}, "contents read only")
+    require("env" not in data, "no global credential environment")
+    require(data.get("concurrency") == {"group": "fvoci-turso-test-database", "cancel-in-progress": False}, "fixed database concurrency without cancellation")
+    jobs = data.get("jobs")
+    if not isinstance(jobs, dict) or set(jobs) != {"admission", "turso-connection", "turso-ui"}:
+        return [*errors, f"{path.name}: exactly admission, turso-connection and turso-ui jobs required"]
+    trusted = "github.event_name == 'workflow_dispatch' && github.repository == 'AISFlow/fvoci' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection')"
+    bootstrap_admission = "github.repository == 'AISFlow/fvoci' && ((github.event_name == 'push' && github.ref == 'refs/heads/fvoci/v060-turso-verified-connection') || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/fvoci/v060-product-integration-20261005' && (github.event.inputs.phase == 'ui-baseline' || github.event.inputs.phase == 'ui-ack')))"
+    checkout = {"uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262", "with": {"ref": "${{ github.sha }}", "persist-credentials": False}}
+    admission = jobs["admission"]
+    runtime = jobs["turso-connection"]
+    if not isinstance(admission, dict) or not isinstance(runtime, dict):
+        return [*errors, f"{path.name}: job mappings required"]
+    require(set(admission) == {"if", "runs-on", "timeout-minutes", "outputs", "steps"}, "admission has no Environment or credentials")
+    require(admission.get("if") == bootstrap_admission and admission.get("outputs") == {"environment_id": "${{ steps.admit.outputs.environment_id }}"}, "trusted admission and existence output")
+    require(admission.get("steps") == [checkout,
+        {"name": "Pure admission fixtures (no credentials or network)", "run": "python3 scripts/selected-backend-ci/turso-test-fixtures.py"},
+        {"name": "Verify preexisting Environment (no configuration writes)", "id": "admit", "run": "python3 scripts/selected-backend-ci/turso-test-guard.py --admit"}], "pre-Environment admission steps")
+    require(set(runtime) == {"needs", "if", "environment", "runs-on", "timeout-minutes", "env", "steps"}, "runtime job cannot add unchecked execution or permissions")
+    require(runtime.get("needs") == "admission" and runtime.get("if") == trusted.replace("github.event_name == 'workflow_dispatch'", "github.event_name == 'workflow_dispatch' && github.event.inputs.phase != 'ui-baseline' && github.event.inputs.phase != 'ui-ack'", 1) + " && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''", "runtime needs successful trusted admission")
+    require(runtime.get("environment") == "fvoci-turso-test", "fixed Environment")
+    require(runtime.get("env") == {"LIBCLANG_PATH": "/usr/lib/llvm-18/lib", "CARGO_BUILD_JOBS": 4, "CARGO_INCREMENTAL": 0, "CARGO_PROFILE_DEV_DEBUG": 0, "CARGO_PROFILE_TEST_DEBUG": 0}, "credential-free compiler environment")
+    require(admission.get("runs-on") == runtime.get("runs-on") == "ubuntu-26.04" and admission.get("timeout-minutes") == 5 and runtime.get("timeout-minutes") == 15, "fixed runner and budgets")
+    steps = runtime.get("steps")
+    if not isinstance(steps, list) or len(steps) != 5 or not all(isinstance(step, dict) for step in steps):
+        return [*errors, f"{path.name}: fixed credential-free build then single consuming step"]
+    require(steps[0] == checkout, "exact SHA checkout with stripped credentials")
+    require(set(steps[1]) == set(steps[2]) == {"name", "run"}, "no compilation credentials")
+    require(steps[1].get("run") == "set -euo pipefail\nprintf 'CARGO_TARGET_DIR=%s/turso-target\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"\nrustup toolchain install 1.98.1 --profile minimal\nsudo apt-get update\nsudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8\nmkdir \"$RUNNER_TEMP/fvoci-sqlite\"\ndpkg-query -W > \"$RUNNER_TEMP/fvoci-sqlite/build-packages.txt\"\nbash scripts/prepare-sqlite-ci.sh --parent \"$RUNNER_TEMP/fvoci-sqlite\" \\\n  --github-env \"$GITHUB_ENV\" --github-output \"$GITHUB_OUTPUT\"\ncargo fetch --locked\n", "maintained pinned compiler/native preparation")
+    require(steps[2].get("run") == "set -euo pipefail\ncargo test --locked --offline --lib --features db-tests --jobs 4 --no-run --message-format=json > \"$RUNNER_TEMP/turso-compile.json\"\npython3 scripts/selected-backend-ci/turso-test-guard.py --freeze\n", "fixed fresh compilation and ELF binding")
+    require(steps[3] == {"name": "Credential-free frozen diagnostic unit (exactly one test)",
+        "run": "python3 scripts/selected-backend-ci/turso-test-guard.py --diagnostic-unit"}, "credential-free exact frozen diagnostic unit before secret consumption")
+    require(steps[4] == {"name": "Real primary selected phase (exactly one test)", "env": {
+        "FVOCI_DATABASE_BACKEND": "libsql-remote",
+        "FVOCI_TEST_TURSO_DATABASE_URL": "${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}",
+        "FVOCI_TEST_TURSO_AUTH_TOKEN": "${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}",
+        "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}",
+    }, "run": "python3 scripts/selected-backend-ci/turso-test-guard.py --consume"}, "only one sanitized runtime step consumes two secrets")
+    # Entire private UI allocation is closed: no extra unchecked step, secret
+    # in preparation, artifact upload, mutable source, bypass or other target.
+    require(jobs["turso-ui"] == {'needs': 'admission',
+     'if': "github.event_name == 'workflow_dispatch' && (github.event.inputs.phase == 'ui-baseline' || "
+           "github.event.inputs.phase == 'ui-ack') && github.repository == 'AISFlow/fvoci' && (github.ref == "
+           "'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection' || "
+           "github.ref == 'refs/heads/fvoci/v060-product-integration-20261005') && "
+           "needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''",
+     'environment': 'fvoci-turso-test',
+     'runs-on': 'ubuntu-26.04',
+     'timeout-minutes': 40,
+     'env': {'FVOCI_BUILD_SHA': '${{ github.sha }}',
+             'LIBCLANG_PATH': '/usr/lib/llvm-18/lib',
+             'CARGO_BUILD_JOBS': 2,
+             'CARGO_INCREMENTAL': 0,
+             'CARGO_PROFILE_DEV_DEBUG': 0,
+             'CARGO_PROFILE_TEST_DEBUG': 0,
+             'PYTHONDONTWRITEBYTECODE': '1'},
+     'steps': [{'uses': 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
+                'with': {'ref': '${{ github.sha }}', 'persist-credentials': False}},
+               {'name': 'Credential-free current UI input preparation',
+                'run': 'set -euo pipefail\n'
+                       'printf \'CARGO_TARGET_DIR=%s/turso-ui-target\\n\' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n'
+                       'printf \'BUN_INSTALL_CACHE_DIR=%s/turso-bun-cache\\n\' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n'
+                       'printf \'PLAYWRIGHT_BROWSERS_PATH=%s/turso-browsers\\n\' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n'
+                       'rustup toolchain install 1.98.1 --profile minimal\n'
+                       'sudo apt-get update\n'
+                       'sudo apt-get install -y --no-install-recommends python3 gcc binutils curl '
+                       'libclang-18-dev=1:18.1.8-20ubuntu8\n'
+                       'mkdir "$RUNNER_TEMP/fvoci-sqlite"\n'
+                       'dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"\n'
+                       'bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \\\n'
+                       '  --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"\n'
+                       'cargo fetch --locked\n'
+                       'cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml\n'},
+               {'uses': 'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6',
+                'with': {'bun-version': '1.4.2'}},
+               {'name': 'Credential-free fixed dependencies and fresh browser assets',
+                'run': 'set -euo pipefail\n'
+                       'bun install --frozen-lockfile\n'
+                       'bun --bun x playwright install --with-deps chromium\n'
+                       'python3 scripts/selected-backend-ci/turso-ui.py --record-before\n'
+                       'bun --bun run --cwd apps/web build\n'},
+               {'name': 'Credential-free current native UI cohort and freeze',
+                'run': 'set -euo pipefail\n'
+                       'cargo build --locked --offline --features api-schema,db-tests --jobs 2 --bin '
+                       'fvoci-server --bin fvoci-migrate --bin fvoci-e2e-fixture --message-format=json > '
+                       '"$RUNNER_TEMP/ui-compile.json"\n'
+                       'cargo build --locked --offline --manifest-path crates/collab-engine/Cargo.toml '
+                       '--features worker --jobs 2 --bin collab-engine --message-format=json > '
+                       '"$RUNNER_TEMP/ui-engine-compile.json"\n'
+                       'python3 scripts/selected-backend-ci/turso-ui.py --freeze\n'},
+               {'name': 'Actual current primary UI baseline or guarded ON restart OFF consumer',
+                'env': {'FVOCI_DATABASE_BACKEND': 'libsql-remote',
+                        'FVOCI_LIBSQL_URL': '${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}',
+                        'FVOCI_LIBSQL_AUTH_TOKEN': '${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}',
+                        'FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE': '${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}'},
+                'run': 'python3 scripts/selected-backend-ci/turso-test-guard.py --consume'}]}, "fixed private Turso UI job and current source baseline consumer")
     return errors
 
 
@@ -1696,6 +2460,13 @@ def _validate_plan_schema(plan: object, workflow: str) -> str | None:
         selected = entry.get("selected")
         if type(selected) is not bool:
             return "PLAN_SELECTED_TYPE"
+    if workflow == "rust" and (
+        jobs["postgres-build"] != jobs["postgres"]
+        or (jobs["collaboration"]["selected"] and not jobs["postgres-build"]["selected"])
+    ):
+        return "PLAN_BINARY_PRODUCER_SELECTION"
+    if workflow == "web" and jobs["workspace-browser-build"] != jobs["workspace-browser-shard"]:
+        return "PLAN_BROWSER_PRODUCER_SELECTION"
     return None
 
 
@@ -1855,6 +2626,201 @@ def cmd_verify_workflows(argv: list[str] | None = None) -> int:
     return 1 if errors else 0
 
 
+def rust_binary_targets(jobs: dict) -> list[str]:
+    """Only the existing PostgreSQL, S3, schema and install execution cohorts."""
+    rows, error = _postgres_matrix_rows(jobs["postgres"])
+    if error:
+        raise ValueError(error)
+    return sorted({name for row in rows for name in cargo_test_flags_in_text(row["tests"])} |
+                  {"attachment_s3_integration", "schema_baseline_integration", "selected_install_lifetime"})
+
+
+def rust_product_binary_targets(repo_root: Path = ROOT) -> list[str]:
+    cargo = tomllib.loads((repo_root / "Cargo.toml").read_text())
+    return sorted(entry["name"] for entry in cargo.get("bin", [])
+                  if set(entry.get("required-features", [])) <= {"db-tests"})
+
+
+def rust_binary_context(sqlite_identity: str) -> dict:
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    if not validate_sha(head) or head != os.environ.get("GITHUB_SHA"):
+        raise ValueError("Rust binary checkout SHA mismatch")
+    arch = os.environ.get("RUNNER_ARCH")
+    if arch not in {"X64", "ARM64"} or not re.fullmatch(r"[0-9a-f]{64}", sqlite_identity):
+        raise ValueError("Rust binary platform/SQLite identity invalid")
+    rustc = subprocess.check_output(["rustc", "-vV"], text=True)
+    host = "x86_64-unknown-linux-gnu" if arch == "X64" else "aarch64-unknown-linux-gnu"
+    if not rustc.startswith("rustc 1.98.1 ") or f"host: {host}" not in rustc.splitlines():
+        raise ValueError("Rust binary pinned toolchain mismatch")
+    return {"sha": head, "workspace": str(Path.cwd().resolve()), "arch": arch,
+            "os": Path("/etc/os-release").read_text(), "rustc": rustc,
+            "sqlite": sqlite_identity, "profile": "dev-test-nodebug",
+            "build_environment": {key: os.environ.get(key) for key in (
+                "CARGO_INCREMENTAL", "CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG",
+                "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET")}}
+
+
+def rust_binary_records(path: Path) -> list[dict]:
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    if not records or records[-1] != {"reason": "build-finished", "success": True}:
+        raise ValueError("Rust binary producer did not finish successfully")
+    return [record for record in records if record.get("reason") == "compiler-artifact" and record.get("executable")]
+
+
+def rust_binary_entries(records: list[dict], names: list[str], kind: str, features: list[str], root: Path) -> dict:
+    entries = {}
+    for name in names:
+        matches = [r for r in records if r["target"]["name"] == name and r["target"]["kind"] == [kind]
+                   and r["profile"]["test"] is (kind == "test")]
+        if len(matches) != 1:
+            raise ValueError("Rust binary executable missing or ambiguous: " + name)
+        record = matches[0]
+        if sorted(record["features"]) != features or record["profile"]["opt_level"] != "0" or record["profile"]["debuginfo"] not in (0, None):
+            raise ValueError("Rust binary feature/profile mismatch: " + name)
+        path = Path(record["executable"])
+        relative = path.relative_to(root).as_posix()
+        if not path.is_absolute() or path.resolve() != path or not stat.S_ISREG(path.lstat().st_mode):
+            raise ValueError("Rust binary executable is not physical regular file")
+        entries[name] = {"path": relative, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                         "record": record}
+    return entries
+
+
+def rust_binary_pack(output: Path, context: dict, entries: dict) -> None:
+    manifest = {"version": 1, "context": context, "entries": entries}
+    raw = json.dumps(manifest, sort_keys=True).encode()
+    with tarfile.open(output, "x:") as archive:
+        info = tarfile.TarInfo("manifest.json"); info.size = len(raw)
+        archive.addfile(info, io.BytesIO(raw))
+        for entry in entries.values():
+            archive.add(Path(context["workspace"]) / entry["path"], arcname=entry["path"], recursive=False)
+
+
+def rust_binary_unpack(archive_path: Path, context: dict, names: set[str], root: Path) -> dict:
+    """Validate every member before writing; no cache/rebuild fallback exists."""
+    with tarfile.open(archive_path, "r:") as archive:
+        members = archive.getmembers()
+        if not members or len({m.name for m in members}) != len(members) or any(not m.isfile() for m in members):
+            raise ValueError("Rust binary archive has duplicate or nonregular members")
+        member = archive.getmember("manifest.json")
+        if member.size > 4 * 1024 * 1024:
+            raise ValueError("Rust binary manifest too large")
+        manifest = json.load(archive.extractfile(member))
+        if manifest.get("version") != 1 or manifest.get("context") != context:
+            raise ValueError("Rust binary source/platform/native inputs mismatch")
+        entries = manifest.get("entries", {})
+        if set(entries) != names:
+            raise ValueError("Rust binary cohort missing or foreign executable")
+        paths = {entry["path"] for entry in entries.values()}
+        if len(paths) != len(entries) or {m.name for m in members} != paths | {"manifest.json"}:
+            raise ValueError("Rust binary archive member inventory mismatch")
+        for name, entry in entries.items():
+            relative = Path(entry["path"])
+            if relative.is_absolute() or ".." in relative.parts or not str(relative).startswith(("target/", "crates/collab-engine/target/")):
+                raise ValueError("Rust binary archive path escape")
+            destination = root / relative
+            if any(p.is_symlink() for p in (destination, *destination.parents)) or destination.exists():
+                raise ValueError("Rust binary destination occupied or symlinked")
+            raw = archive.extractfile(entry["path"]).read()
+            record = entry["record"]
+            features = ["default", "worker"] if name == "collab-engine" else ([] if name == "schema-migrate" else ["db-tests"])
+            kind = "bin" if name in {*rust_product_binary_targets(), "schema-migrate", "collab-engine"} else "test"
+            target_name = "fvoci-migrate" if name == "schema-migrate" else name
+            if (hashlib.sha256(raw).hexdigest() != entry["sha256"] or sorted(record["features"]) != features
+                    or record["profile"]["opt_level"] != "0" or record["profile"]["debuginfo"] not in (0, None)
+                    or record["profile"]["test"] is not (kind == "test")
+                    or record["target"]["kind"] != [kind] or record["target"]["name"] != target_name
+                    or record["executable"] != str(destination)):
+                raise ValueError("Rust binary digest/feature/profile/path mismatch")
+        for entry in entries.values():
+            destination = root / entry["path"]
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open("xb") as handle:
+                shutil.copyfileobj(archive.extractfile(entry["path"]), handle)
+            destination.chmod(0o755)
+    return manifest
+
+
+def rust_binary_run(manifest: dict, names: list[str], libtest_args: list[str]) -> int:
+    if not names or len(names) != len(set(names)) or set(libtest_args) - {"--nocapture", "--test-threads=1"}:
+        raise ValueError("Rust binary run must name unique targets without test filters")
+    status = 0
+    for name in names:
+        entry = manifest["entries"][name]
+        path = Path(manifest["context"]["workspace"]) / entry["path"]
+        if (not stat.S_ISREG(path.lstat().st_mode) or path.is_symlink()
+                or hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]
+                or entry["record"]["target"]["kind"] != ["test"]):
+            raise ValueError("Rust binary changed after validation")
+        # Preserve Cargo --no-fail-fast across executables; libtest failures propagate.
+        result = subprocess.run([str(path), *libtest_args]).returncode
+        if result and not status:
+            status = result if result > 0 else 1
+    return status
+
+
+def cmd_rust_binaries(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Rust workflow's PostgreSQL executable handoff (never rebuilds consumers)")
+    parser.add_argument("action", choices=("build", "pack", "unpack", "run"))
+    parser.add_argument("--sqlite-identity")
+    parser.add_argument("--directory", type=Path)
+    parser.add_argument("--cohort", choices=("postgres", "helper"), default="postgres")
+    parser.add_argument("--test", action="append", default=[])
+    parser.add_argument("--nocapture", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        jobs, error = _rust_workflow_jobs(ROOT)
+        if error:
+            raise ValueError(error)
+        names = rust_binary_targets(jobs)
+        if args.action == "build":
+            command = ["cargo", "test", "--locked", "--offline", "--features", "db-tests", "--no-run", "--message-format=json"]
+            for name in names:
+                command.extend(["--test", name])
+            with (args.directory / "tests.jsonl").open("x") as output:
+                if os.environ.get("GITHUB_JOB") != "postgres-build" or os.environ.get("RUNNER_ARCH") != "X64":
+                    return subprocess.run(command, stdout=output).returncode
+                started = time.monotonic()
+                status = -1
+                print("rust-binaries stage=postgres-tests started at=" + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), file=sys.stderr, flush=True)
+                try:
+                    status = subprocess.run(command, stdout=output).returncode
+                    return status
+                finally:
+                    print("rust-binaries stage=postgres-tests finished at=" + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) +
+                          f" elapsed_seconds={round(time.monotonic() - started)} exit={status}", file=sys.stderr, flush=True)
+        if args.action == "run":
+            manifest = json.loads((args.directory / "postgres-manifest.json").read_text())
+            if (manifest["context"]["sha"] != os.environ.get("GITHUB_SHA")
+                    or manifest["context"]["arch"] != os.environ.get("RUNNER_ARCH")
+                    or manifest["context"]["workspace"] != str(Path.cwd().resolve())):
+                raise ValueError("Rust binary execution source/path mismatch")
+            return rust_binary_run(manifest, args.test, ["--nocapture"] if args.nocapture else [])
+        context = rust_binary_context(args.sqlite_identity)
+        root = Path(context["workspace"])
+        if args.action == "pack":
+            helper = rust_binary_entries(rust_binary_records(args.directory / "helper.jsonl"), ["collab-engine"], "bin", ["default", "worker"], root)
+            rust_binary_pack(args.directory / "helper.tar", context, helper)
+            records = rust_binary_records(args.directory / "tests.jsonl")
+            entries = rust_binary_entries(records, names, "test", ["db-tests"], root)
+            entries.update(rust_binary_entries(records, rust_product_binary_targets(), "bin", ["db-tests"], root))
+            schema = rust_binary_entries(rust_binary_records(args.directory / "schema.jsonl"), ["fvoci-migrate"], "bin", [], root)
+            entries["schema-migrate"] = schema["fvoci-migrate"]
+            entries.update(helper)
+            rust_binary_pack(args.directory / "postgres.tar", context, entries)
+        else:
+            expected = {"collab-engine"} if args.cohort == "helper" else set(names) | set(rust_product_binary_targets()) | {"schema-migrate", "collab-engine"}
+            manifest = rust_binary_unpack(args.directory / (args.cohort + ".tar"), context, expected, root)
+            (args.directory / (args.cohort + "-manifest.json")).write_text(json.dumps(manifest))
+            if args.cohort == "postgres":
+                records = [entry["record"] for entry in manifest["entries"].values() if entry["record"]["features"] == ["db-tests"]]
+                (args.directory / "selected-install-build.jsonl").write_text("\n".join(json.dumps(record) for record in records))
+        return 0
+    except (OSError, ValueError, KeyError, tarfile.TarError) as error:
+        print("Rust binary handoff refused: " + str(error), file=sys.stderr)
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
@@ -1862,6 +2828,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     command = argv[0]
     rest = argv[1:]
+    if command == "rust-binaries":
+        return cmd_rust_binaries(rest)
     if command == "plan":
         return cmd_plan(rest)
     if command == "gate":

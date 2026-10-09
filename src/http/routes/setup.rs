@@ -26,9 +26,10 @@ async fn setup_status(
 ) -> Result<Json<SetupStatusResponse>, AppError> {
     let needed = state.auth.setup_needed().await.map_err(internal)?;
     Ok(Json(SetupStatusResponse {
+        realtime_mode: state.realtime_mode,
         needed,
         branding: BrandingOutput {
-            name: crate::settings::current_values_with_license(
+            name: crate::settings::current_values_with_license_backend(
                 &state.auth.db.pool,
                 &state.branding_name,
                 &state.auth.db.license,
@@ -59,7 +60,7 @@ async fn setup_run(
         return Err(AppError::rate_limited(retry_after));
     }
 
-    crate::validate::validate_password_setting(&state.auth.db.pool, &body.password).await?;
+    crate::validate::validate_password_setting_backend(&state.auth.db.pool, &body.password).await?;
 
     let email = normalize_email(&body.email)?;
     let workspace_slug = normalize_slug(&body.workspace_slug)?;

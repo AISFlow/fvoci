@@ -332,22 +332,22 @@ test("nested wiki tree preserves deep links and more than six children", async (
   const id = await workspaceId(page, "acme");
 
   const rootRes = await page.request.post(`/api/v1/workspaces/${id}/documents`, {
-    data: { parentId: null, title: "루트 문서" },
+    data: { commandId: crypto.randomUUID(), parentId: null, title: "루트 문서" },
   });
   expect(rootRes.ok()).toBe(true);
   const root = await readJson(rootRes, flowSchemas.document);
   const childRes = await page.request.post(`/api/v1/workspaces/${id}/documents`, {
-    data: { parentId: root.id, title: "중간 문서" },
+    data: { commandId: crypto.randomUUID(), parentId: root.id, title: "중간 문서" },
   });
   expect(childRes.ok()).toBe(true);
   const child = await readJson(childRes, flowSchemas.document);
   const grandchildRes = await page.request.post(`/api/v1/workspaces/${id}/documents`, {
-    data: { parentId: child.id, title: "하위 문서" },
+    data: { commandId: crypto.randomUUID(), parentId: child.id, title: "하위 문서" },
   });
   expect(grandchildRes.ok()).toBe(true);
   const grandchild = await readJson(grandchildRes, flowSchemas.document);
   const descendantRes = await page.request.post(`/api/v1/workspaces/${id}/documents`, {
-    data: { parentId: grandchild.id, title: "최하위 문서" },
+    data: { commandId: crypto.randomUUID(), parentId: grandchild.id, title: "최하위 문서" },
   });
   expect(descendantRes.ok()).toBe(true);
   const descendant = await readJson(descendantRes, flowSchemas.document);
@@ -355,7 +355,11 @@ test("nested wiki tree preserves deep links and more than six children", async (
   const siblings = [];
   for (let index = 1; index <= 6; index++) {
     const siblingRes = await page.request.post(`/api/v1/workspaces/${id}/documents`, {
-      data: { parentId: root.id, title: `형제 문서 ${String(index)}` },
+      data: {
+        commandId: crypto.randomUUID(),
+        parentId: root.id,
+        title: `형제 문서 ${String(index)}`,
+      },
     });
     expect(siblingRes.ok()).toBe(true);
     siblings.push(await readJson(siblingRes, flowSchemas.document));

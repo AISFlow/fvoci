@@ -1,6 +1,8 @@
 import { uuid } from "./uuid.js";
 import { emojiGlyph } from "./emoji-glyph.js";
 import type { TiptapDoc } from "./json.js";
+import type { Extensions, JSONContent } from "@tiptap/core";
+import { generateUniqueIds } from "@tiptap/extension-unique-id";
 
 /*
  * WHY: 가드를 extractText 진입에만 두면 자식 content 재귀가 그대로 스택을 먹는다.
@@ -85,11 +87,15 @@ export type TiptapWalkNode = {
   marks?: unknown;
 };
 
-export function walkTiptap(node: unknown, visit: (n: TiptapWalkNode) => void, depth = 0): void {
+export function walkTiptap(
+  node: unknown,
+  visit: (n: TiptapWalkNode, depth: number) => void,
+  depth = 0,
+): void {
   if (depth > TIPTAP_WALK_MAX_DEPTH) return;
   if (typeof node !== "object" || node === null) return;
   const n = node as TiptapWalkNode;
-  visit(n);
+  visit(n, depth);
   if (Array.isArray(n.content)) {
     for (const child of n.content) walkTiptap(child, visit, depth + 1);
   }
@@ -115,6 +121,25 @@ export const UNIQUE_ID_NODE_TYPES = [
 ] as const;
 
 const UNIQUE_ID_NODE_TYPE_SET: ReadonlySet<string> = new Set(UNIQUE_ID_NODE_TYPES);
+
+/** A new document owns new block identities; reference entity IDs stay intact.
+ * The caller supplies the maintained current editor extensions/schema. */
+export function independentDraftBody(doc: TiptapDoc, extensions: Extensions): TiptapDoc {
+  // Match the actual REST derived-body byte cap before SDK schema conversion.
+  if (new TextEncoder().encode(JSON.stringify(doc)).length > 1024 * 1024)
+    throw new Error("Independent draft body exceeds limit");
+  const next = structuredClone(doc);
+  let count = 0;
+  walkTiptap(next, (node, depth) => {
+    if (++count > 20_000 || (depth === TIPTAP_WALK_MAX_DEPTH && node.content?.length))
+      throw new Error("Independent draft structure exceeds limit");
+    if (typeof node.type === "string" && UNIQUE_ID_NODE_TYPE_SET.has(node.type) && node.attrs)
+      delete node.attrs.id;
+  });
+  // The pinned SDK validates this unknown-content DTO with Node.fromJSON using
+  // the current shared schema before assigning IDs; unknown nodes still throw.
+  return generateUniqueIds(next as JSONContent, extensions) as TiptapDoc;
+}
 
 export function replaceTiptapNodeById(
   doc: TiptapDoc,

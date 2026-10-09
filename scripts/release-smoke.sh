@@ -429,8 +429,10 @@ log_assert "password login: ok"
 
 WORKSPACE_ID="$(json_get "$(api "$BASE_URL/api/v1/me/workspaces")" items 0 id)"
 DOC_TITLE="Release smoke ${RUN_ID}"
+DOC_COMMAND_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+DOC_CREATE_BODY="{\"commandId\":\"${DOC_COMMAND_ID}\",\"parentId\":null,\"title\":\"$DOC_TITLE\"}"
 DOCUMENT_ID="$(json_get "$(api -H "content-type: application/json" -X POST \
-  "$BASE_URL/api/v1/workspaces/${WORKSPACE_ID}/documents" -d "{\"parentId\":null,\"title\":\"$DOC_TITLE\"}")" id)"
+  "$BASE_URL/api/v1/workspaces/${WORKSPACE_ID}/documents" -d "$DOC_CREATE_BODY")" id)"
 BODY_JSON="$(bun "$ROOT/scripts/install-smoke-collab.mjs" --base-url "$BASE_URL" --origin "$ORIGIN" \
   --session "$SESSION" --workspace-id "$WORKSPACE_ID" --document-id "$DOCUMENT_ID")"
 grep -q '"contentJson"' <<<"$BODY_JSON" || fail "collab body projection failed: $BODY_JSON"

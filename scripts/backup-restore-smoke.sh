@@ -434,9 +434,12 @@ log_assert "password login on source: ok"
 
 WORKSPACES="$(curl -fsS -b "$COOKIE_JAR" "$SOURCE_BASE/api/v1/me/workspaces")"
 WORKSPACE_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["items"][0]["id"])' "$WORKSPACES")"
+# Choose the command/body once, preserving its identity on any replay.
+DOC_COMMAND_ID="$(new_uuid)"
+DOC_CREATE_BODY="{\"commandId\":\"${DOC_COMMAND_ID}\",\"parentId\":null,\"title\":\"Backup doc\"}"
 DOC_CREATE="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $SOURCE_BASE" \
   -X POST "$SOURCE_BASE/api/v1/workspaces/${WORKSPACE_ID}/documents" \
-  -d '{"parentId":null,"title":"Backup doc"}')"
+  -d "$DOC_CREATE_BODY")"
 DOCUMENT_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$DOC_CREATE")"
 log_assert "workspace document create: ok (${DOCUMENT_ID})"
 
@@ -717,7 +720,9 @@ want = dict(zip(["workspaceId", "projectId", "documentId", "taskId"], sys.argv[2
 assert {k: moved[k] for k in want} == want and moved["replayed"] is False, moved
 ' "$MOVED" "$WORKSPACE_ID" "$PRV_ID" "$MOVED_DOC_ID" "$MOVED_TASK_ID"
 log_assert "explicit same-ID MOVE of the personal graph into PRV (same document/task ids): ok"
-REF_DOC_ID="$(json_field "$(api "$SOURCE_BASE" "$MEMBER_JAR" POST /documents '{"parentId":null,"title":"멤버 참조 문서"}')" id)"
+REF_DOC_COMMAND_ID="$(new_uuid)"
+REF_DOC_CREATE_BODY="{\"commandId\":\"${REF_DOC_COMMAND_ID}\",\"parentId\":null,\"title\":\"멤버 참조 문서\"}"
+REF_DOC_ID="$(json_field "$(api "$SOURCE_BASE" "$MEMBER_JAR" POST /documents "$REF_DOC_CREATE_BODY")" id)"
 api "$SOURCE_BASE" "$MEMBER_JAR" PUT "/documents/${REF_DOC_ID}/body" "$(python3 -c '
 import json, sys
 def mention(entity, target, label):

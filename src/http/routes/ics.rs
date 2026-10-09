@@ -87,10 +87,19 @@ async fn list_holidays_route(
         Some(workspace_id),
     )
     .await?;
-    let result =
-        list_workspace_holidays(&state.auth.db.pool, workspace_id, actor_user_id, session_id)
-            .await
-            .map_err(internal)?;
+    let result = list_workspace_holidays(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/ics.rs")
+            .map_err(internal)?,
+        workspace_id,
+        actor_user_id,
+        session_id,
+    )
+    .await
+    .map_err(internal)?;
     match result {
         Ok(list) => Ok(Json(HolidaysListResponse {
             can_edit: list.can_edit,
@@ -122,7 +131,12 @@ async fn create_holiday_route(
     )
     .await?;
     let result = add_workspace_holiday(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/ics.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,
@@ -154,7 +168,12 @@ async fn remove_holiday_route(
     )
     .await?;
     let result = remove_workspace_holiday(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/ics.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,
@@ -184,7 +203,12 @@ async fn create_ics_token_route(
     )
     .await?;
     let result = rotate_ics_token(
-        &state.auth.db.pool,
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/ics.rs")
+            .map_err(internal)?,
         workspace_id,
         actor_user_id,
         session_id,
@@ -241,9 +265,17 @@ async fn ics_public_route(
 ) -> Result<Response, AppError> {
     if method == Method::OPTIONS {
         enforce_ics_limit(&state, peer).await?;
-        let found = read_ics_by_token(&state.auth.db.pool, &token)
-            .await
-            .map_err(internal)?;
+        let found = read_ics_by_token(
+            state
+                .auth
+                .db
+                .pool
+                .postgres("src/http/routes/ics.rs")
+                .map_err(internal)?,
+            &token,
+        )
+        .await
+        .map_err(internal)?;
         if found.is_none() {
             return Ok((
                 StatusCode::NOT_FOUND,
@@ -285,9 +317,17 @@ async fn ics_read(
     kind: IcsReadKind,
 ) -> Result<Response, AppError> {
     enforce_ics_limit(state, peer).await?;
-    let found = read_ics_by_token(&state.auth.db.pool, token)
-        .await
-        .map_err(internal)?;
+    let found = read_ics_by_token(
+        state
+            .auth
+            .db
+            .pool
+            .postgres("src/http/routes/ics.rs")
+            .map_err(internal)?,
+        token,
+    )
+    .await
+    .map_err(internal)?;
     let Some(found) = found else {
         return match kind {
             IcsReadKind::Caldav => Ok((

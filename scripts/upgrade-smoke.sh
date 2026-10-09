@@ -720,8 +720,10 @@ assert mfa["checked"] == 1 and len(mfa["invalid"]) == 1 and mfa["keyUnavailable"
 ' <"$EVIDENCE_DIR/verify-secrets-wrong-key.log" || fail "wrong-key verify-secrets did not report the MFA secret invalid"
 grep -q 'do not open with the configured ENCRYPTION_KEYS' "$EVIDENCE_DIR/verify-secrets-wrong-key.log" \
   || fail "wrong-key verify-secrets failed for another reason (exit ${WRONG_STATUS})"
+POST_DOC_COMMAND_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+POST_DOC_CREATE_BODY="{\"commandId\":\"${POST_DOC_COMMAND_ID}\",\"parentId\":null,\"title\":\"After upgrade\"}"
 POST_DOC="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
-  -X POST "$BASE/api/v1/workspaces/${WORKSPACE_ID}/documents" -d '{"parentId":null,"title":"After upgrade"}' \
+  -X POST "$BASE/api/v1/workspaces/${WORKSPACE_ID}/documents" -d "$POST_DOC_CREATE_BODY" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
 if [[ "$STORAGE" == s3 ]]; then
   verify_storage upgraded "${UP[@]}" "$NEW_TREE"
