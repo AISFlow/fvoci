@@ -22,6 +22,7 @@ import { reference } from "./build.ts";
 import {
   accessible,
   ancestors,
+  assertHandoffActor,
   below,
   call,
   digest,
@@ -482,7 +483,7 @@ const runBoundary: RunBoundary = {
 };
 export async function run(output: string, boundary: RunBoundary = runBoundary): Promise<number> {
   assert.notEqual(process.env.GITHUB_JOB, "collaboration-build");
-  assert.ok(uid() === 1000 && gid() === 1000);
+  assertHandoffActor(output);
   const owner = boundary.identity("run", output),
     before = read(join(output, "before.json")) as Inputs;
   assert.ok(deepEquals(read(join(output, "after.json")), before));
@@ -731,7 +732,8 @@ export function ownershipReturn(output: string): void {
     assert.equal(process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci", "github-ci");
     const owner = identity("run", output);
     diagnostic.phase = "current-source";
-    assert.ok(uid() === 1000 && gid() === 1000 && process.env.GITHUB_JOB === "collaboration-flow");
+    assertHandoffActor(output);
+    assert.equal(process.env.GITHUB_JOB, "collaboration-flow");
     const before = read(join(output, "before.json")) as Inputs;
     assert.equal(before.head, env("GITHUB_SHA"));
     diagnostic.source = before.head;

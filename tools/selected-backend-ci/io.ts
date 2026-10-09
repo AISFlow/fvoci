@@ -34,6 +34,16 @@ export const groups = () => {
   assert.ok(process.getgroups);
   return process.getgroups().sort((a, b) => a - b);
 };
+// The caller hands over one output directory. This process must be that owner.
+// Root is refused even when it owns the directory, and any other uid/gid is refused.
+export function assertHandoffActor(output: string): void {
+  const actorUid = uid(),
+    actorGid = gid(),
+    handed = statSync(output);
+  assert.notEqual(actorUid, 0);
+  assert.equal(handed.uid, actorUid);
+  assert.equal(handed.gid, actorGid);
+}
 export function env(name: string, source: Environment = process.env): string {
   const value = source[name];
   assert.notEqual(value, undefined, "missing required environment name");
