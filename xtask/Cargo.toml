@@ -6,3 +6,12 @@ publish = false
 
 # Keep development tasks independent of the product package and its lockfile.
 [workspace]
+
+# SQLite CI-entry prerequisites, pinned to the product lockfile. The task itself
+# is intentionally not registered by this dependency/bootstrap commit.
+[dependencies]
+libc = "=0.2.189"
+serde_json = "=1.0.151"
+sha2 = "=0.10.9"
+shlex = "=2.0.1"
+tokio = { version = "=1.53.1", features = ["macros", "rt", "process", "io-util", "time"] }
