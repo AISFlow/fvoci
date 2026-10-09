@@ -1983,6 +1983,7 @@ impl OperationTx<'_, '_> {
         Ok(())
     }
 
+    #[cfg(feature = "db-tests")]
     async fn record_native_append(
         &mut self,
         t: &CollabTables,
@@ -2382,6 +2383,7 @@ impl OperationTx<'_, '_> {
     }
 }
 
+#[cfg(feature = "db-tests")]
 async fn record_collab_event_and_audit(
     tx: &mut Transaction<'_, Postgres>,
     t: &CollabTables,

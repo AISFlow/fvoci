@@ -986,11 +986,14 @@ pub struct SqliteMigrationTestControl {
 }
 #[cfg(feature = "db-tests")]
 type MigrationControl = Option<SqliteMigrationTestControl>;
-#[cfg(not(feature = "db-tests"))]
-type MigrationControl = ();
 
+#[cfg(feature = "db-tests")]
 pub fn start_sqlite_migration(path: &std::path::Path) -> Result<SqliteMigration, sqlx::Error> {
     start_sqlite_migration_owned(path, Default::default())
+}
+#[cfg(not(feature = "db-tests"))]
+pub fn start_sqlite_migration(path: &std::path::Path) -> Result<SqliteMigration, sqlx::Error> {
+    start_sqlite_migration_owned(path)
 }
 #[cfg(feature = "db-tests")]
 pub fn start_sqlite_migration_controlled(
@@ -1037,7 +1040,7 @@ fn sqlite_validation_error_after_rollback(
 
 fn start_sqlite_migration_owned(
     path: &std::path::Path,
-    control: MigrationControl,
+    #[cfg(feature = "db-tests")] control: MigrationControl,
 ) -> Result<SqliteMigration, sqlx::Error> {
     let admission = std::sync::Arc::new(SqliteAdmission::migration(path)?);
     let path = path.to_path_buf();
@@ -1060,7 +1063,15 @@ fn start_sqlite_migration_owned(
                     .enable_all()
                     .build()
                     .map_err(sqlx::Error::Io)?;
-                runtime.block_on(run_sqlite_migration_owned(&path, &owned_cancel, control))
+                #[cfg(feature = "db-tests")]
+                let ran = runtime.block_on(run_sqlite_migration_owned(
+                    &path,
+                    &owned_cancel,
+                    control,
+                ));
+                #[cfg(not(feature = "db-tests"))]
+                let ran = runtime.block_on(run_sqlite_migration_owned(&path, &owned_cancel));
+                ran
             }));
             let result = match outcome {
                 Ok(result) => result,
@@ -1093,7 +1104,7 @@ fn start_sqlite_migration_owned(
 async fn run_sqlite_migration_owned(
     path: &std::path::Path,
     cancel: &tokio_util::sync::CancellationToken,
-    control: MigrationControl,
+    #[cfg(feature = "db-tests")] control: MigrationControl,
 ) -> Result<(), sqlx::Error> {
     let preparation = super::pool::connect_sqlite_prepare(path)
         .await
@@ -1110,8 +1121,6 @@ async fn run_sqlite_migration_owned(
             _ = cancel.cancelled() => {},
         }
     }
-    #[cfg(not(feature = "db-tests"))]
-    let _ = control;
     let result = apply_sqlite_migrations(&backend, Some(cancel)).await;
     // Request cancellation does not cancel any operation above or this drain.
     #[cfg(feature = "db-tests")]
