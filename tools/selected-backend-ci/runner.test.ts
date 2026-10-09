@@ -250,6 +250,115 @@ function localFixture(
     },
   };
 }
+const singleFieldRoot = "/tmp/fvoci-single-field-probe";
+function singleFieldBun(): string {
+  mkdirSync(singleFieldRoot, { recursive: true, mode: 0o755 });
+  chmodSync(singleFieldRoot, 0o755);
+  const bun = join(singleFieldRoot, "bun");
+  if (!existsSync(bun)) {
+    copyFileSync(process.execPath, bun);
+    chmodSync(bun, 0o755);
+  }
+  return bun;
+}
+function singleFieldProbe(): string {
+  const probe = join(singleFieldRoot, "probe.ts");
+  const admission = JSON.stringify(join(import.meta.dir, "admission.ts"));
+  const io = JSON.stringify(join(import.meta.dir, "io.ts"));
+  const runtime = JSON.stringify(join(import.meta.dir, "runtime.ts"));
+  writeFileSync(
+    probe,
+    `import process from "node:process";
+import { localAllocation } from ${admission};
+import { assertHandoffActor } from ${io};
+import { ownershipReturn, run } from ${runtime};
+const output = process.argv[2] ?? "";
+const mode = process.argv[3] ?? "";
+try {
+  if (mode === "run-default") {
+    const code = await run(output, {
+      identity: () => "fixture-owner",
+      browser() { throw new Error("actor check passed"); },
+      access() {},
+      execute() { return 0; },
+    });
+    process.stderr.write("run-completed:" + String(code));
+    process.exit(code === 0 ? 0 : 2);
+  }
+  if (mode === "return-default") {
+    ownershipReturn(output);
+    process.exit(0);
+  }
+  if (mode === "local-default") {
+    localAllocation("run");
+    process.exit(0);
+  }
+  throw new Error("unknown probe mode");
+} catch (error) {
+  process.stderr.write(error instanceof Error ? error.message : "thrown");
+  process.exit(1);
+}
+`,
+  );
+  chmodSync(probe, 0o644);
+  return probe;
+}
+function ownTree(path: string, spec: string): void {
+  const result = spawnSync(["sudo", "-n", "chown", "-R", spec, path], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(result.exitCode).toBe(0);
+}
+function shareWithGroup(path: string): void {
+  chmodSync(path, 0o770);
+  for (const name of readdirSync(path)) {
+    const child = join(path, name);
+    chmodSync(child, statSync(child).isDirectory() ? 0o770 : 0o660);
+  }
+}
+function fixedActor(
+  actorUid: number,
+  actorGid: number,
+  mode: string,
+  output: string,
+  extra: Record<string, string> = {},
+) {
+  return spawnSync(
+    [
+      "sudo",
+      "-n",
+      "setpriv",
+      `--reuid=${String(actorUid)}`,
+      `--regid=${String(actorGid)}`,
+      "--clear-groups",
+      "--",
+      "env",
+      `HOME=${output}`,
+      `TMPDIR=${output}`,
+      "PATH=/usr/bin:/bin",
+      ...Object.entries(extra).map(([key, value]) => key + "=" + value),
+      singleFieldBun(),
+      singleFieldProbe(),
+      output,
+      mode,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+}
+function expectFixedActorRefusal(
+  actorUid: number,
+  actorGid: number,
+  mode: string,
+  output: string,
+  extra: Record<string, string> = {},
+): void {
+  const result = fixedActor(actorUid, actorGid, mode, output, extra);
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr.toString()).toContain(
+    "selected runtime actor must be the fixed handoff uid and gid",
+  );
+}
 
 describe.serial("selected runner contract and fail-closed controls", () => {
   test("original five lane tuple and all seven CLI modes remain exact", () => {
@@ -969,6 +1078,129 @@ try {
           stderr: "pipe",
         });
     }
+  });
+
+  test("single-field run rejects a matching 1000 uid with a different gid", () => {
+    const output = cohort().output;
+    ownTree(output, "1000:1001");
+    try {
+      expectFixedActorRefusal(1000, 1001, "run-default", output);
+    } finally {
+      ownTree(output, `${String(uid())}:${String(gid())}`);
+    }
+  });
+  test("single-field run rejects a matching 1000 gid with a different uid", () => {
+    const output = cohort().output;
+    ownTree(output, "1001:1000");
+    try {
+      expectFixedActorRefusal(1001, 1000, "run-default", output);
+    } finally {
+      ownTree(output, `${String(uid())}:${String(gid())}`);
+    }
+  });
+  test("single-field ownershipReturn rejects a matching 1000 uid with a different gid", () => {
+    const output = directory();
+    ownTree(output, "1000:1001");
+    try {
+      expectFixedActorRefusal(1000, 1001, "return-default", output);
+    } finally {
+      ownTree(output, `${String(uid())}:${String(gid())}`);
+    }
+  });
+  test("single-field ownershipReturn rejects a matching 1000 gid with a different uid", () => {
+    const output = directory();
+    ownTree(output, "1001:1000");
+    try {
+      expectFixedActorRefusal(1001, 1000, "return-default", output);
+    } finally {
+      ownTree(output, `${String(uid())}:${String(gid())}`);
+    }
+  });
+  test("single-field localAllocation rejects a matching 1000 uid with a different gid", () => {
+    const fixture = localFixture(1000, 1001);
+    ownTree(fixture.output, "1000:1001");
+    try {
+      expectFixedActorRefusal(1000, 1001, "local-default", fixture.output, fixture.env);
+    } finally {
+      ownTree(fixture.output, `${String(uid())}:${String(gid())}`);
+    }
+  });
+  test("single-field localAllocation rejects a matching 1000 gid with a different uid", () => {
+    const fixture = localFixture(1001, 1000);
+    ownTree(fixture.output, "1001:1000");
+    try {
+      expectFixedActorRefusal(1001, 1000, "local-default", fixture.output, fixture.env);
+    } finally {
+      ownTree(fixture.output, `${String(uid())}:${String(gid())}`);
+    }
+  });
+  test("single-field run rejects a directory gid mismatch when the uid matches", async () => {
+    const { output, boundary } = cohort();
+    ownTree(output, `${String(uid())}:${String(gid() + 1)}`);
+    try {
+      await assert.rejects(run(output, boundary, [uid(), gid()]), (error: unknown) => {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain(`${String(gid() + 1)} !== ${String(gid())}`);
+        return true;
+      });
+    } finally {
+      ownTree(output, `${String(uid())}:${String(gid())}`);
+    }
+  });
+  test("single-field run rejects a directory uid mismatch when the gid matches", async () => {
+    const { output, boundary } = cohort();
+    shareWithGroup(output);
+    ownTree(output, `${String(uid() + 1)}:${String(gid())}`);
+    try {
+      await assert.rejects(run(output, boundary, [uid(), gid()]), (error: unknown) => {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain(`${String(uid() + 1)} !== ${String(uid())}`);
+        return true;
+      });
+    } finally {
+      ownTree(output, `${String(uid())}:${String(gid())}`);
+    }
+  });
+  test("single-field ownershipReturn rejects a directory gid mismatch when the uid matches", () => {
+    const output = directory();
+    write(join(output, "before.json"), { head: source, tree });
+    ownTree(output, `${String(uid())}:${String(gid() + 1)}`);
+    try {
+      expect(() => {
+        ownershipReturn(output, [uid(), gid()]);
+      }).toThrow(`${String(gid() + 1)} !== ${String(gid())}`);
+    } finally {
+      ownTree(output, `${String(uid())}:${String(gid())}`);
+    }
+  });
+  test("single-field ownershipReturn rejects a directory uid mismatch when the gid matches", () => {
+    const output = directory();
+    write(join(output, "before.json"), { head: source, tree });
+    shareWithGroup(output);
+    ownTree(output, `${String(uid() + 1)}:${String(gid())}`);
+    try {
+      expect(() => {
+        ownershipReturn(output, [uid(), gid()]);
+      }).toThrow(`${String(uid() + 1)} !== ${String(uid())}`);
+    } finally {
+      ownTree(output, `${String(uid())}:${String(gid())}`);
+    }
+  });
+  test("single-field localAllocation rejects a grant gid mismatch when the uid matches", async () => {
+    const fixture = localFixture(uid(), gid() + 1);
+    await withEnvironment(fixture.env, () => {
+      expect(() => localAllocation("run", [uid(), gid()])).toThrow(
+        `${String(gid() + 1)} !== ${String(gid())}`,
+      );
+    });
+  });
+  test("single-field localAllocation rejects a grant uid mismatch when the gid matches", async () => {
+    const fixture = localFixture(uid() + 1, gid());
+    await withEnvironment(fixture.env, () => {
+      expect(() => localAllocation("run", [uid(), gid()])).toThrow(
+        `${String(uid() + 1)} !== ${String(uid())}`,
+      );
+    });
   });
 
   test("browser staging preserves source bytes/modes and rejects symlink/owner/byte/mode changes", async () => {
