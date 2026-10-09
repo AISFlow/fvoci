@@ -9,7 +9,7 @@ RUN rustup set profile minimal \
  && chmod -R go-w /usr/local/rustup /usr/local/cargo
 
 # Ubuntu's index includes native linux/amd64 and linux/arm64 images.
-FROM ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 AS system-tools
+FROM ghcr.io/aisflow/fvoci/ci/ubuntu@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 AS system-tools
 
 ARG UBUNTU_SNAPSHOT=20261008T000000Z
 ENV LIBCLANG_PATH=/usr/lib/llvm-18/lib

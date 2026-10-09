@@ -25,7 +25,7 @@ ENV_FILE=""
 OUTPUT=""
 # Same image the compose stack already pulled (has tar); run as root so the
 # host bind mount is writable. Numeric owners in the archive stay uid 1000.
-TAR_IMAGE="postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db"
+TAR_IMAGE="ghcr.io/aisflow/fvoci/ci/postgres@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db"
 
 usage() {
   cat <<'EOF' >&2

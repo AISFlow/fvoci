@@ -9,7 +9,7 @@
 # final runtime execute on the same Ubuntu 26.04 multiarchitecture base.
 FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS rust-toolchain
 FROM oven/bun:1.4.2@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS bun-toolchain
-FROM ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 AS ubuntu
+FROM ghcr.io/aisflow/fvoci/ci/ubuntu@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 AS ubuntu
 
 FROM ubuntu AS rust-sources
 COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo

@@ -486,7 +486,7 @@ exit "${PREREQ_EXIT:-0}"
         docker = (ROOT / 'infra/rust/Dockerfile').read_text()
         builder, runtime = docker.split(' AS runtime', 1)
         self.assertIn('libclang-18-dev=1:18.1.8-20ubuntu8', builder)
-        self.assertIn('FROM ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 AS ubuntu', builder)
+        self.assertIn('FROM ghcr.io/aisflow/fvoci/ci/ubuntu@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 AS ubuntu', builder)
         self.assertIn('FROM ubuntu AS rust-sources', builder)
         self.assertIn('FROM ubuntu AS web-build', builder)
         self.assertIn('prepare-sqlite-ci.sh --parent /sqlite-build -- cargo build', builder)

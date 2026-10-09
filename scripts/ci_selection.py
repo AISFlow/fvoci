@@ -1081,9 +1081,9 @@ def postgres_matrix_inventory(jobs: dict) -> tuple[dict[str, set[str]], str | No
 RUST_POSTGRES_C_TARGETS = frozenset({"task_integration", "comment_integration"})
 RUST_POSTGRES_BUDGET = "${{ matrix.shard == 'b' && (matrix.runner == 'ubuntu-26.04-arm' && 25 || 20) || 15 }}"
 RUST_POSTGRES_IMAGES = {
-    "16": "postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54",
-    "17": "postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f",
-    "18": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
+    "16": "ghcr.io/aisflow/fvoci/ci/postgres@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54",
+    "17": "ghcr.io/aisflow/fvoci/ci/postgres@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f",
+    "18": "ghcr.io/aisflow/fvoci/ci/postgres@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
 }
 RUST_POSTGRES_BUILD_CACHE_KEY = (
     "v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-postgres-db-tests-test-nodebug-"

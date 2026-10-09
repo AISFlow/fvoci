@@ -16,7 +16,7 @@ P = current['run']
 E = P.parent
 W = pathlib.Path(__file__).resolve().parents[2]
 H = current['manifest']['source']
-IMAGE = 'ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7'
+IMAGE = 'ghcr.io/aisflow/fvoci/ci/ubuntu@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7'
 NAME = 'fvoci-v060-install-current-' + secrets.token_hex(4)
 
 def now():

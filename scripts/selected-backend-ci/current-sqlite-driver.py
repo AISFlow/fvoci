@@ -25,7 +25,7 @@ from current_binding import load_current, validate_off_report
 current = load_current('sqlite', __file__)
 HEAD = COMPILED_HEAD = current['manifest']['source']
 TREE = COMPILED_TREE = current['manifest']['tree']
-IMAGE = 'ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7'
+IMAGE = 'ghcr.io/aisflow/fvoci/ci/ubuntu@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7'
 # Native origin/hash are recorded separately in the current bundle qualification.
 OWNER = os.environ['FVOCI_CI_OWNER']
 FLOW = current['manifest'].get('flow', 'on')

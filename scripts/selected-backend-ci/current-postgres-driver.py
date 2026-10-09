@@ -27,7 +27,7 @@ from current_binding import load_current, validate_off_report
 current = load_current('postgres', __file__)
 HEAD = COMPILED_HEAD = current['manifest']['source']
 TREE = COMPILED_TREE = current['manifest']['tree']
-IMAGE = 'ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7'
+IMAGE = 'ghcr.io/aisflow/fvoci/ci/ubuntu@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7'
 # Native origin/hash are recorded separately in the current bundle qualification.
 OWNER = os.environ['FVOCI_CI_OWNER']
 FLOW = current['manifest'].get('flow', 'on')
@@ -262,7 +262,7 @@ assert sha(PLAYWRIGHT_CLI) == before['external'][str(PLAYWRIGHT_CLI)], 'Playwrig
 
 PG_SCRIPT = W / 'scripts/start-test-postgres.sh'
 MEILI_SCRIPT = W / 'scripts/start-test-meili.sh'
-PG_IMAGE = 'postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db'
+PG_IMAGE = 'ghcr.io/aisflow/fvoci/ci/postgres@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db'
 MEILI_IMAGE = 'getmeili/meilisearch:v1.53.2@sha256:c94e58ca09662dd6e65e8f1b0fd145767be3da7d5422a863a27b8d2b68e090c9'
 assert PG_IMAGE in PG_SCRIPT.read_text() and MEILI_IMAGE in MEILI_SCRIPT.read_text()
 assert sha(PG_SCRIPT) == before['tracked']['scripts/start-test-postgres.sh']
