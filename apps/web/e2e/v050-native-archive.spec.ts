@@ -4293,6 +4293,35 @@ test("native archive restores a same-ID personal MOVE graph after a lost restore
     const frozenReceipt = receipt();
     expect(frozenReceipt.count).toBe(1);
     expect(frozenReceipt.session_id).toBe(actorA.sessionId);
+    // MOVE requeues extraction to rebuild the destination's text index. Wait
+    // for its committed final state before freezing the full graph for replay
+    // equality, within the existing poll cap and the test's 30-second budget.
+    await expect
+      .poll(
+        () =>
+          appRoleRead(
+            sourceApp,
+            team.id,
+            `SELECT jsonb_build_object(
+        'status',a.status,'extract_status',a.extract_status,'extract_attempts',a.extract_attempts,
+        'extract_text',a.extract_text,'extract_lease_token',a.extract_lease_token,
+        'extract_lease_expires_at',a.extract_lease_expires_at,
+        'events',(SELECT count(*) FROM fvoci.events WHERE workspace_id='${team.id}'
+          AND target_type='attachment' AND target_id='${attachment}' AND verb='attachment.extracted'
+          AND payload->>'status'='ok'))
+        FROM fvoci.attachments a WHERE workspace_id='${team.id}' AND id='${attachment}'`,
+          ),
+        { timeout: 20000 },
+      )
+      .toEqual({
+        status: "stored",
+        extract_status: "ok",
+        extract_attempts: 1,
+        extract_text: file.text,
+        extract_lease_token: null,
+        extract_lease_expires_at: null,
+        events: 1,
+      });
     const sourceGraph = readGraph(sourceApp, team.id);
     expect(sourceGraph.documents.filter((row) => row.id === pair.documentId)).toHaveLength(1);
     for (const key of ["tasks", "origins", "assignees", "attachments"] as const)
