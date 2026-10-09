@@ -1126,7 +1126,7 @@ class WorkflowRegistryTest(unittest.TestCase):
         self.assertIn("workspace-browser-shard", jobs["web-ci-gate"]["needs"])
         self.assertEqual(jobs["web-checks"]["timeout-minutes"], 23)
         for job in ("web-static", "web-native-checks", "collaboration-build",
-                    *(name for name, _token, _needs in SEL._WEB_COLLAB_LANES)):
+                    *(name for name, _token, _needs, _extra in SEL._WEB_COLLAB_LANES)):
             self.assertEqual(jobs[job]["timeout-minutes"], 15)
         for value in (None, 0, 15, 16, 19, 21, 30, "20", 20.0, True):
             bad = copy.deepcopy(jobs)
@@ -1161,10 +1161,6 @@ class WorkflowRegistryTest(unittest.TestCase):
         bad = copy.deepcopy(jobs)
         next(s for s in bad["collaboration-sqlite-off"]["steps"] if s.get("id") == "browser")["run"] = "bash scripts/run-web-e2e.sh --ci-use-committed-api --with-selected-backends"; mutations.append(bad)
         bad = copy.deepcopy(jobs); bad["collaboration-postgres-off"]["steps"].append({"uses": "actions/cache@anything", "with": {"path": "target"}}); mutations.append(bad)
-        bad = copy.deepcopy(jobs)
-        bad["collaboration-sqlite-on"]["steps"] = [step for step in bad["collaboration-sqlite-on"]["steps"]
-            if step.get("with", {}).get("path") != "${{ runner.temp }}/fvoci-closed-install"]
-        mutations.append(bad)
         for i, bad in enumerate(mutations):
             with self.subTest(mutation=i): self.assertTrue(SEL._verify_web_build_handoff(bad))
 

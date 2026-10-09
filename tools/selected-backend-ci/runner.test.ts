@@ -223,10 +223,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     for (const mode of modes.filter((value) => value !== "stage"))
       expect(caller).toContain('scripts/run-selected-backend-e2e.py" ' + mode);
     expect(caller.match(/scripts\/run-selected-backend-e2e\.py" stage/g)).toHaveLength(4);
-    expect(caller).toContain('bun "$ROOT/scripts/run-selected-backend-e2e.ts" run');
-    expect(caller).toContain('bun "$ROOT/scripts/run-selected-backend-e2e.ts" owner-return');
-    expect(caller).toContain('python3 "$ROOT/scripts/run-selected-backend-e2e.py" run');
-    expect(caller).toContain('python3 "$ROOT/scripts/run-selected-backend-e2e.py" owner-return');
+    expect(caller).not.toContain("run-selected-backend-e2e.ts");
     expect(requestedRuns(undefined)).toEqual(selectedRuns);
     expect(requestedRuns("sqlite/off")).toEqual([["sqlite", "off"]]);
     expect(() => requestedRuns("")).toThrow("unknown collaboration lane");

@@ -62,7 +62,9 @@ def identity(mode="handoff", output=None):
         assert mode in ('handoff', 'record-before', 'stage', 'record-after')
         assert os.environ.get('FVOCI_WEB_BUILD_PHASE') == 'prepare', 'wrong producer phase'
     else:
-        assert os.environ['GITHUB_JOB']=='collaboration-flow'
+        assert os.environ['GITHUB_JOB'] in (
+            'collaboration-flow', 'collaboration-install-on', 'collaboration-postgres-on',
+            'collaboration-sqlite-on', 'collaboration-postgres-off', 'collaboration-sqlite-off')
         assert os.environ.get('FVOCI_WEB_BUILD_PHASE') in (None, 'consume'), 'wrong runtime phase'
     return 'github:'+':'.join(os.environ[k] for k in ('GITHUB_REPOSITORY','GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','GITHUB_JOB'))
 
@@ -197,7 +199,9 @@ def runtime_permissions(output, sqlite_parent, docker_gid):
     """Qualify the existing runner read group before the owned runtime transfer."""
     assert os.environ.get('FVOCI_SELECTED_EXECUTION_MODE', 'github-ci') == 'github-ci'
     owner = identity('run', output)
-    assert os.environ['GITHUB_JOB'] == 'collaboration-flow'
+    assert os.environ['GITHUB_JOB'] in (
+        'collaboration-flow', 'collaboration-install-on', 'collaboration-postgres-on',
+        'collaboration-sqlite-on', 'collaboration-postgres-off', 'collaboration-sqlite-off')
     runner_uid, runner_gid = os.getuid(), os.getgid()
     temp = Path(os.environ['RUNNER_TEMP']).resolve()
     sqlite_parent = Path(sqlite_parent)
@@ -314,7 +318,7 @@ def public_failure_fields(facts):
             'known_browser_checkpoint': published_checkpoint if matched or state is None else None}
 
 
-def runtime_ownership_return(output):
+def runtime_ownership_return(output, only=None):
     """A waited launcher alone does not prove its product resources retired."""
     diagnostic = {'schema':1, 'phase':'identity', 'source':None, 'tree':None,
                   'ownership_return_qualified':False, 'lanes':[]}
@@ -322,7 +326,9 @@ def runtime_ownership_return(output):
         assert os.environ.get('FVOCI_SELECTED_EXECUTION_MODE', 'github-ci') == 'github-ci'
         owner = identity('run', output)
         diagnostic['phase'] = 'current-source'
-        assert os.getuid() == os.getgid() == 1000 and os.environ['GITHUB_JOB'] == 'collaboration-flow'
+        assert os.getuid() == os.getgid() == 1000 and os.environ['GITHUB_JOB'] in (
+            'collaboration-flow', 'collaboration-install-on', 'collaboration-postgres-on',
+            'collaboration-sqlite-on', 'collaboration-postgres-off', 'collaboration-sqlite-off')
         before = read(output/'before.json')
         assert before['head'] == os.environ['GITHUB_SHA']
         diagnostic.update(source=before['head'],
@@ -382,9 +388,11 @@ def runtime_ownership_return(output):
                         parent = read(root/'parent-receipt.json')
                         assert parent['source'] == before['head'] and parent['tree'] == before['tree'] and parent['root_owner'] == owner
                         assert parent['selected_flow'] == run['flow'] and parent['all_owned_fixtures_closed'] is True
-            assert [(r['lane'],r['flow']) for r in result['runs']] == list(selected_runs()), 'all mandatory lanes remain required'
-            proof = {'closed_current_runs':[{'lane':lane,'flow':flow} for lane,flow in selected_runs()],
-                     'installation_process_receipts':15}
+            expected = list(requested_runs(only))
+            assert [(r['lane'],r['flow']) for r in result['runs']] == expected, 'all mandatory lanes remain required'
+            proof = {'closed_current_runs':[{'lane':lane,'flow':flow} for lane,flow in expected]}
+            if any(lane == 'install' for lane, _flow in expected):
+                proof['installation_process_receipts'] = 15
         write(output/'runtime-close-stage.json', {'source':before['head'],'tree':before['tree'],
               'owner':owner,'ownership_return_qualified':True,**proof})
 
@@ -483,6 +491,15 @@ def stage(output,name,command):
 def selected_runs():
     # Mandatory serial companion, not an opt-in replacing the retained ON flows.
     return (('install','on'),('postgres','on'),('sqlite','on'),('postgres','off'),('sqlite','off'))
+
+
+def requested_runs(lane=None):
+    runs = selected_runs()
+    if lane is None:
+        return runs
+    pair = tuple(lane.split('/', 1))
+    assert pair in runs, 'unknown collaboration lane'
+    return (pair,)
 
 
 def lane_retirement(runroot, lane, flow, source, tree, owner, driver_exit):
@@ -649,7 +666,7 @@ def config_list(output, expected_uid=1000):
     return 0
 
 
-def run(output):
+def run(output, only=None):
     assert os.environ.get("GITHUB_JOB") != "collaboration-build", "build producer cannot start runtime"
     assert os.getuid()==os.getgid()==1000, 'normal SQLite browser/fixture/app file ownership must be1000:1000'
     owner=identity('run', output);before=read(output/'before.json');assert read(output/'after.json')==before
@@ -665,14 +682,19 @@ def run(output):
         assert os.access(executable,os.R_OK|os.X_OK), ('current cohort executable inaccessible to1000',executable)
     source_written={k:before[k] for k in ('head','tree','status','tracked','external','untracked')}
     env=dict(os.environ);env.update(BUN_RUNTIME_TRANSPILER_CACHE_PATH=str(output/'bun-transpiler-cache'),FVOCI_CI_OWNER=owner,FVOCI_CI_BUN=bun,FVOCI_CI_SELECTED_RUNS=str(runtime),FVOCI_ROOT_RUN_OWNER=owner,PYTHONDONTWRITEBYTECODE='1')
+    runs=requested_runs(only)
     closed=None;results=[];code=0
+    if runs != selected_runs() and runs[0][0] != 'install':
+        receipt=output/'closed-install-receipt.json'
+        assert receipt.is_file() and not receipt.is_symlink(), 'closed install receipt required'
+        closed=reference(receipt)
     local = os.environ.get('FVOCI_SELECTED_EXECUTION_MODE') == 'orca-local'
     authority = ({'executionMode':'orca-local','localAuthorizationSha256':os.environ['FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256'],
                   'runId':os.environ['FVOCI_LOCAL_RUN_ID'],'runAttempt':os.environ['FVOCI_LOCAL_DISPATCH_ID']} if local else
                  {'exclusiveCIJob':True,'currentCIJobConfirmed':True,'runId':env['GITHUB_RUN_ID'],'runAttempt':env['GITHUB_RUN_ATTEMPT']})
     launcher_failure=None
     try:
-        for lane, flow in selected_runs():
+        for lane, flow in runs:
             runroot=runtime/('root-current-'+lane+'-'+secrets.token_hex(6));driver=TEMPLATES/('current-'+lane+'-driver.py')
             m={'schema':1,'ready':True,'flow':flow,'source':before['head'],'tree':before['tree'],'compiledSource':before['head'],
                'sourceInputsBefore':reference(output/'before.json'),'sourceInputsAfter':reference(output/'after.json'),
@@ -727,7 +749,7 @@ def run(output):
         except BaseException:
             launcher_failure['receiptWrite']='failed'
     finally:
-        complete=[(r['lane'],r['flow']) for r in results] == list(selected_runs())
+        complete=[(r['lane'],r['flow']) for r in results] == list(runs)
         if not complete:code=code or 1
         aggregate={'source':before['head'],'tree':before['tree'],'owner':owner,'runs':results,'exit':code,
               'allRequestedRunsExecuted':complete,'launcherFailure':launcher_failure,
@@ -746,8 +768,9 @@ def run(output):
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('mode',choices=['record-before','stage','record-after','run','permissions','owner-return','config-list']);parser.add_argument('--output',required=True);parser.add_argument('--stage-name');parser.add_argument('--sqlite-parent');parser.add_argument('--docker-gid',type=int);args,command=parser.parse_known_args()
+    parser=argparse.ArgumentParser();parser.add_argument('mode',choices=['record-before','stage','record-after','run','permissions','owner-return','config-list']);parser.add_argument('--output',required=True);parser.add_argument('--stage-name');parser.add_argument('--sqlite-parent');parser.add_argument('--docker-gid',type=int);parser.add_argument('--lane');args,command=parser.parse_known_args()
     assert args.mode=='stage' or not command, 'unexpected arguments outside compiler stage'
+    assert args.lane is None or args.mode in ('run','owner-return'), 'lane argument is only for the selected runtime'
     assert args.mode=='permissions' or (args.sqlite_parent is None and args.docker_gid is None), 'unexpected runtime permission arguments'
     if args.mode=='config-list':
         assert Path(args.output).is_absolute() and Path(args.output).resolve()==Path(args.output), 'config list requires physical output'
@@ -758,9 +781,9 @@ def main():
     elif args.mode=='permissions':
         assert args.sqlite_parent and args.docker_gid is not None
         runtime_permissions(output, args.sqlite_parent, args.docker_gid)
-    elif args.mode=='owner-return':runtime_ownership_return(output)
+    elif args.mode=='owner-return':runtime_ownership_return(output, args.lane)
     elif args.mode=='config-list':return config_list(output)
-    else:return run(output)
+    else:return run(output, args.lane)
     return 0
 
 

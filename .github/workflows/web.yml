@@ -638,8 +638,6 @@ jobs:
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-install-on-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Prepare owned pinned Rustup component metadata before input capture
-        env:
-          GITHUB_JOB: collaboration-flow
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-install-on-step-04 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -730,7 +728,6 @@ jobs:
           FVOCI_E2E_PENDING: "1"
           FVOCI_WEB_BUILD_HANDOFF_SHA256: ${{ needs.collaboration-build.outputs.handoff_sha256 }}
           FVOCI_COLLAB_LANE: "install/on"
-          GITHUB_JOB: collaboration-flow
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-install-on-step-12 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -795,8 +792,6 @@ jobs:
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-on-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Prepare owned pinned Rustup component metadata before input capture
-        env:
-          GITHUB_JOB: collaboration-flow
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-postgres-on-step-04 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -894,7 +889,6 @@ jobs:
           FVOCI_WEB_BUILD_HANDOFF_SHA256: ${{ needs.collaboration-build.outputs.handoff_sha256 }}
           FVOCI_CLOSED_INSTALL_RECEIPT: ${{ runner.temp }}/fvoci-closed-install/closed-install-receipt.json
           FVOCI_COLLAB_LANE: "postgres/on"
-          GITHUB_JOB: collaboration-flow
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-postgres-on-step-12 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -951,8 +945,6 @@ jobs:
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-on-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Prepare owned pinned Rustup component metadata before input capture
-        env:
-          GITHUB_JOB: collaboration-flow
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-sqlite-on-step-04 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1050,7 +1042,6 @@ jobs:
           FVOCI_WEB_BUILD_HANDOFF_SHA256: ${{ needs.collaboration-build.outputs.handoff_sha256 }}
           FVOCI_CLOSED_INSTALL_RECEIPT: ${{ runner.temp }}/fvoci-closed-install/closed-install-receipt.json
           FVOCI_COLLAB_LANE: "sqlite/on"
-          GITHUB_JOB: collaboration-flow
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-sqlite-on-step-12 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1107,8 +1098,6 @@ jobs:
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-off-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Prepare owned pinned Rustup component metadata before input capture
-        env:
-          GITHUB_JOB: collaboration-flow
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-postgres-off-step-04 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1206,7 +1195,6 @@ jobs:
           FVOCI_WEB_BUILD_HANDOFF_SHA256: ${{ needs.collaboration-build.outputs.handoff_sha256 }}
           FVOCI_CLOSED_INSTALL_RECEIPT: ${{ runner.temp }}/fvoci-closed-install/closed-install-receipt.json
           FVOCI_COLLAB_LANE: "postgres/off"
-          GITHUB_JOB: collaboration-flow
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-postgres-off-step-12 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1263,8 +1251,6 @@ jobs:
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-off-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Prepare owned pinned Rustup component metadata before input capture
-        env:
-          GITHUB_JOB: collaboration-flow
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-sqlite-off-step-04 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1362,7 +1348,6 @@ jobs:
           FVOCI_WEB_BUILD_HANDOFF_SHA256: ${{ needs.collaboration-build.outputs.handoff_sha256 }}
           FVOCI_CLOSED_INSTALL_RECEIPT: ${{ runner.temp }}/fvoci-closed-install/closed-install-receipt.json
           FVOCI_COLLAB_LANE: "sqlite/off"
-          GITHUB_JOB: collaboration-flow
         run: |
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-sqlite-off-step-12 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"

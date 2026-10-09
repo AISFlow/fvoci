@@ -128,7 +128,16 @@ export function identity(mode = "handoff", output?: string): string {
     assert.ok(["handoff", "record-before", "stage", "record-after"].includes(mode));
     assert.equal(process.env.FVOCI_WEB_BUILD_PHASE, "prepare");
   } else {
-    assert.equal(process.env.GITHUB_JOB, "collaboration-flow");
+    assert.ok(
+      [
+        "collaboration-flow",
+        "collaboration-install-on",
+        "collaboration-postgres-on",
+        "collaboration-sqlite-on",
+        "collaboration-postgres-off",
+        "collaboration-sqlite-off",
+      ].includes(process.env.GITHUB_JOB),
+    );
     assert.ok(
       process.env.FVOCI_WEB_BUILD_PHASE === undefined ||
         process.env.FVOCI_WEB_BUILD_PHASE === "consume",

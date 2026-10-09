@@ -1839,12 +1839,17 @@ def _verify_web_browser_budget(jobs: dict) -> list[str]:
     return []
 
 
+_CLOSED_INSTALL_RECEIPT = "${{ runner.temp }}/fvoci-closed-install/closed-install-receipt.json"
 _WEB_COLLAB_LANES = (
-    ("collaboration-install-on", "install/on", ["ci-plan", "collaboration-build"]),
-    ("collaboration-postgres-on", "postgres/on", ["ci-plan", "collaboration-build", "collaboration-install-on"]),
-    ("collaboration-sqlite-on", "sqlite/on", ["ci-plan", "collaboration-build", "collaboration-install-on"]),
-    ("collaboration-postgres-off", "postgres/off", ["ci-plan", "collaboration-build", "collaboration-install-on"]),
-    ("collaboration-sqlite-off", "sqlite/off", ["ci-plan", "collaboration-build", "collaboration-install-on"]),
+    ("collaboration-install-on", "install/on", ["ci-plan", "collaboration-build"], {}),
+    ("collaboration-postgres-on", "postgres/on", ["ci-plan", "collaboration-build", "collaboration-install-on"],
+     {"FVOCI_CLOSED_INSTALL_RECEIPT": _CLOSED_INSTALL_RECEIPT}),
+    ("collaboration-sqlite-on", "sqlite/on", ["ci-plan", "collaboration-build", "collaboration-install-on"],
+     {"FVOCI_CLOSED_INSTALL_RECEIPT": _CLOSED_INSTALL_RECEIPT}),
+    ("collaboration-postgres-off", "postgres/off", ["ci-plan", "collaboration-build", "collaboration-install-on"],
+     {"FVOCI_CLOSED_INSTALL_RECEIPT": _CLOSED_INSTALL_RECEIPT}),
+    ("collaboration-sqlite-off", "sqlite/off", ["ci-plan", "collaboration-build", "collaboration-install-on"],
+     {"FVOCI_CLOSED_INSTALL_RECEIPT": _CLOSED_INSTALL_RECEIPT}),
 )
 
 
@@ -1855,10 +1860,10 @@ def _verify_web_build_handoff(jobs: dict) -> list[str]:
         if not ok: errors.append("web: current build handoff " + message)
     producer = jobs.get("collaboration-build", {})
     require(producer.get("needs") == "ci-plan", "producer needs ci-plan")
-    lane_jobs = [(name, jobs.get(name, {}), token, needs) for name, token, needs in _WEB_COLLAB_LANES]
-    for name, job, _token, needs in lane_jobs:
+    lane_jobs = [(name, jobs.get(name, {}), token, needs, extra) for name, token, needs, extra in _WEB_COLLAB_LANES]
+    for _name, job, _token, needs, _extra in lane_jobs:
         require(job.get("needs") == needs, "consumer needs successful registered producer")
-    for name, job in (("collaboration-build", producer), *((name, job) for name, job, _token, _needs in lane_jobs)):
+    for name, job in (("collaboration-build", producer), *((name, job) for name, job, _token, _needs, _extra in lane_jobs)):
         require(job.get("runs-on") == "ubuntu-26.04" and job.get("timeout-minutes") == 15, "fixed runner/budget")
         require(not any(k in job for k in ("continue-on-error", "strategy", "env", "permissions")), "no masked/alternate authority")
         checkout = [step for step in job.get("steps", []) if str(step.get("uses", "")).startswith("actions/checkout@")]
@@ -1887,66 +1892,21 @@ def _verify_web_build_handoff(jobs: dict) -> list[str]:
             and not any(k in publish[0] for k in ("if", "continue-on-error")), "publish only successful complete packet")
     require(producer.get("outputs") == {"artifact_id": "${{ steps.publish.outputs.artifact-id }}",
             "handoff_sha256": "${{ steps.prepare.outputs.handoff_sha256 }}"}, "producer artifact identity and digest outputs")
-    producer_download = {
-        "artifact-ids": "${{ needs.collaboration-build.outputs.artifact_id }}",
-        "merge-multiple": True,
-        "path": "${{ runner.temp }}/fvoci-web-build-handoff",
-    }
-    receipt_download = {
-        "artifact-ids": "${{ needs.collaboration-install-on.outputs.install_receipt_artifact_id }}",
-        "merge-multiple": True,
-        "path": "${{ runner.temp }}/fvoci-closed-install",
-    }
-    for name, job, token, _needs in lane_jobs:
+    for name, job, token, _needs, extra in lane_jobs:
         steps = job.get("steps", [])
-        downloads = [step for step in steps if str(step.get("uses", "")).startswith("actions/download-artifact@")]
-        produced = [step for step in downloads if step.get("with") == producer_download]
-        require(len(produced) == 1 and produced[0].get("uses") == "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
-                and not any(k in produced[0] for k in ("if", "continue-on-error")),
-                "current-run exact artifact ID without foreign token/ref/run")
-        receipt = [step for step in downloads if step.get("with") == receipt_download]
-        if name == "collaboration-install-on":
-            require(receipt == [] and len(downloads) == 1, "install lane publishes its own receipt")
-            require(job.get("outputs") == {
-                "install_receipt_artifact_id": "${{ steps.publish-install.outputs.artifact-id }}",
-            }, "install lane receipt identity")
-            published = [step for step in steps if step.get("id") == "publish-install"]
-            require(len(published) == 1 and published[0].get("uses") == "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
-                    and published[0].get("with") == {
-                        "name": "collaboration-install-receipt-${{ github.run_attempt }}",
-                        "path": "${{ runner.temp }}/fvoci-selected-current/closed-install-receipt.json",
-                        "if-no-files-found": "error",
-                        "retention-days": 1,
-                    }
-                    and not any(k in published[0] for k in ("if", "continue-on-error")),
-                    "publish qualified install receipt")
-            browser_env = {
-                "FVOCI_E2E_PENDING": "1",
-                "FVOCI_WEB_BUILD_HANDOFF_SHA256": "${{ needs.collaboration-build.outputs.handoff_sha256 }}",
-                "FVOCI_COLLAB_LANE": token,
-                "GITHUB_JOB": "collaboration-flow",
-            }
-        else:
-            require(len(produced) == 1 and len(receipt) == 1 and len(downloads) == 2
-                    and receipt[0].get("uses") == produced[0].get("uses")
-                    and not any(k in receipt[0] for k in ("if", "continue-on-error")),
-                    "closed install receipt from this run")
-            require("outputs" not in job, "downstream lane has no extra authority")
-            browser_env = {
-                "FVOCI_E2E_PENDING": "1",
-                "FVOCI_WEB_BUILD_HANDOFF_SHA256": "${{ needs.collaboration-build.outputs.handoff_sha256 }}",
-                "FVOCI_COLLAB_LANE": token,
-                "FVOCI_CLOSED_INSTALL_RECEIPT": "${{ runner.temp }}/fvoci-closed-install/closed-install-receipt.json",
-                "GITHUB_JOB": "collaboration-flow",
-            }
+        download = [step for step in steps if str(step.get("uses", "")).startswith("actions/download-artifact@")
+                    and step.get("with") == {"artifact-ids": "${{ needs.collaboration-build.outputs.artifact_id }}", "merge-multiple": True,
+                        "path": "${{ runner.temp }}/fvoci-web-build-handoff"}]
+        require(len(download) == 1 and download[0].get("uses") == "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
+                and not any(k in download[0] for k in ("if", "continue-on-error")), "current-run exact artifact ID without foreign token/ref/run")
         runtime = [step for step in steps if step.get("id") == "browser"]
-        require(len(runtime) == 1 and runtime[0].get("env") == browser_env
+        require(len(runtime) == 1 and runtime[0].get("env") == {"FVOCI_E2E_PENDING": "1",
+                    "FVOCI_WEB_BUILD_HANDOFF_SHA256": "${{ needs.collaboration-build.outputs.handoff_sha256 }}",
+                    "FVOCI_COLLAB_LANE": token, **extra}
                 and "bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected" in runtime[0].get("run", "")
-                and not any(k in runtime[0] for k in ("if", "continue-on-error")),
-                "mandatory full original runtime after qualification")
+                and not any(k in runtime[0] for k in ("if", "continue-on-error")), "mandatory full original runtime after qualification")
         require(not any(step.get("with", {}).get("path") in ("target", "crates/collab-engine/target")
-                for step in steps if str(step.get("uses", "")).startswith("actions/cache@")),
-                "consumer cannot borrow target cache")
+                for step in steps if str(step.get("uses", "")).startswith("actions/cache@")), "consumer cannot borrow target cache")
     return errors
 
 

@@ -77,9 +77,22 @@ def regular(path):
     return path
 
 
+_COLLAB_CONSUMERS = frozenset({
+    "collaboration-flow",
+    "collaboration-install-on",
+    "collaboration-postgres-on",
+    "collaboration-sqlite-on",
+    "collaboration-postgres-off",
+    "collaboration-sqlite-off",
+})
+
+
 def context(job):
     assert os.environ.get("CI") == os.environ.get("GITHUB_ACTIONS") == "true"
-    assert os.environ.get("GITHUB_JOB") == job, "wrong handoff job"
+    actual = os.environ.get("GITHUB_JOB")
+    if job == "collaboration-flow" and actual in _COLLAB_CONSUMERS:
+        job = actual
+    assert actual == job, "wrong handoff job"
     if browser():
         assert CI.call(["git", "rev-parse", "HEAD"]) == os.environ["GITHUB_SHA"], "checkout differs from tested SHA"
         assert CI.subprocess.run(["git", "diff", "--quiet", "HEAD"], cwd=ROOT).returncode == 0

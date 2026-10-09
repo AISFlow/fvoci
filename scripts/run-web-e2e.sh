@@ -92,6 +92,10 @@ def git(*args):
     return subprocess.check_output(["git", "-C", str(root), *args])
 if os.environ.get("CI") != "true" or os.environ.get("GITHUB_ACTIONS") != "true":
     fail("requires GitHub CI")
+lane_jobs = {
+    "collaboration-install-on", "collaboration-postgres-on", "collaboration-sqlite-on",
+    "collaboration-postgres-off", "collaboration-sqlite-off",
+}
 job = "workspace-browser-shard" if sys.argv[2] else "collaboration-flow"
 if sys.argv[4] == "prepare":
     job = "workspace-browser-build"
@@ -99,7 +103,9 @@ if os.environ.get("GITHUB_JOB") == "collaboration-build" and sys.argv[3] == "tru
     job = "collaboration-build"
 if not sys.argv[2] and sys.argv[3] != "true" and sys.argv[4] != "prepare":
     fail("requires a browser shard or selected companion")
-if os.environ.get("GITHUB_JOB") != job:
+actual_job = os.environ.get("GITHUB_JOB")
+allowed = {job, *lane_jobs} if job == "collaboration-flow" else {job}
+if actual_job not in allowed:
     fail("requires the allocated browser job")
 sha = os.environ.get("GITHUB_SHA", "")
 if not re.fullmatch(r"[0-9a-f]{40}", sha) or git("rev-parse", "HEAD").decode().strip() != sha:
@@ -286,14 +292,21 @@ if [[ "$SELECTED_BACKENDS" == true ]]; then
   : "${FVOCI_SELECTED_CI_OUTPUT:?required private current cohort output}"
   : "${GITHUB_ACTIONS:?selected companion requires its allocated GitHub job}"
   if [[ "$SELECTED_PHASE" == whole ]]; then
-    [[ "${GITHUB_JOB:-}" == collaboration-flow && -z "${FVOCI_WEB_BUILD_PHASE:-}" ]] || { echo "wrong same-job selected authority" >&2; exit 1; }
+    case "${GITHUB_JOB:-}" in
+      collaboration-flow|collaboration-install-on|collaboration-postgres-on|collaboration-sqlite-on|collaboration-postgres-off|collaboration-sqlite-off) ;;
+      *) echo "wrong same-job selected authority" >&2; exit 1 ;;
+    esac
+    [[ -z "${FVOCI_WEB_BUILD_PHASE:-}" ]] || { echo "wrong same-job selected authority" >&2; exit 1; }
   else
     export FVOCI_WEB_BUILD_PHASE="$SELECTED_PHASE"
     [[ "$CI_COMMITTED_API" == true && "${CI:-}" == true && "$GITHUB_ACTIONS" == true ]] || { echo "handoff requires explicit GitHub committed API mode" >&2; exit 1; }
     if [[ "$SELECTED_PHASE" == prepare ]]; then
       [[ "${GITHUB_JOB:-}" == collaboration-build ]] || { echo "wrong producer job" >&2; exit 1; }
     else
-      [[ "${GITHUB_JOB:-}" == collaboration-flow ]] || { echo "wrong consumer job" >&2; exit 1; }
+      case "${GITHUB_JOB:-}" in
+        collaboration-flow|collaboration-install-on|collaboration-postgres-on|collaboration-sqlite-on|collaboration-postgres-off|collaboration-sqlite-off) ;;
+        *) echo "wrong consumer job" >&2; exit 1 ;;
+      esac
       : "${FVOCI_WEB_BUILD_HANDOFF:?missing current producer artifact}"
       : "${FVOCI_WEB_BUILD_HANDOFF_SHA256:?missing current producer digest}"
     fi
@@ -393,43 +406,29 @@ PY_DIAGNOSTICS
           >"$safe_diagnostics/config-list.stdout.log" 2>"$safe_diagnostics/config-list.stderr.log") || config_list_exit=$?
     selected_status="$config_list_exit"
   fi
+  lane_args=()
+  if [[ -n "${FVOCI_COLLAB_LANE:-}" ]]; then
+    case "$FVOCI_COLLAB_LANE" in
+      install/on|postgres/on|sqlite/on|postgres/off|sqlite/off) ;;
+      *) echo "unknown collaboration lane" >&2; exit 1 ;;
+    esac
+    lane_args=(--lane "$FVOCI_COLLAB_LANE")
+  fi
   if [[ "$config_list_exit" == not-run || "$config_list_exit" -eq 0 ]]; then
-    if [[ -n "${FVOCI_COLLAB_LANE:-}" ]]; then
-      case "$FVOCI_COLLAB_LANE" in
-        install/on|postgres/on|sqlite/on|postgres/off|sqlite/off) ;;
-        *) echo "unknown collaboration lane" >&2; exit 1 ;;
-      esac
-      if [[ "$FVOCI_COLLAB_LANE" != install/on ]]; then
-        : "${FVOCI_CLOSED_INSTALL_RECEIPT:?closed install receipt required}"
-      fi
-      sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,PLAYWRIGHT_BROWSERS_PATH,FVOCI_COLLAB_LANE,FVOCI_CLOSED_INSTALL_RECEIPT \
-        setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
-        env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
-          bun "$ROOT/scripts/run-selected-backend-e2e.ts" run --output "$FVOCI_SELECTED_CI_OUTPUT" || selected_status=$?
-    else
-      sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,PLAYWRIGHT_BROWSERS_PATH \
-        setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
-        env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
-          python3 "$ROOT/scripts/run-selected-backend-e2e.py" run --output "$FVOCI_SELECTED_CI_OUTPUT" || selected_status=$?
-    fi
+    sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,PLAYWRIGHT_BROWSERS_PATH \
+      setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
+      env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
+        python3 "$ROOT/scripts/run-selected-backend-e2e.py" run --output "$FVOCI_SELECTED_CI_OUTPUT" "${lane_args[@]}" || selected_status=$?
     launcher_status="$selected_status"
   fi
   # The launcher has returned, but require existing exact resource-retirement
   # witnesses (or proof no runtime began) before changing private data ownership.
   ownership_status=0
-  if [[ -n "${FVOCI_COLLAB_LANE:-}" ]]; then
-    (umask 077
-      sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,FVOCI_COLLAB_LANE,FVOCI_CLOSED_INSTALL_RECEIPT \
-        setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
-        bun "$ROOT/scripts/run-selected-backend-e2e.ts" owner-return --output "$FVOCI_SELECTED_CI_OUTPUT" \
-        >"$safe_diagnostics/ownership-stage.json") || ownership_status=$?
-  else
-    (umask 077
-      sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB \
-        setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
-        python3 "$ROOT/scripts/run-selected-backend-e2e.py" owner-return --output "$FVOCI_SELECTED_CI_OUTPUT" \
-        >"$safe_diagnostics/ownership-stage.json") || ownership_status=$?
-  fi
+  (umask 077
+    sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB \
+      setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
+      python3 "$ROOT/scripts/run-selected-backend-e2e.py" owner-return --output "$FVOCI_SELECTED_CI_OUTPUT" "${lane_args[@]}" \
+      >"$safe_diagnostics/ownership-stage.json") || ownership_status=$?
   if [[ "$ownership_status" -eq 0 ]]; then
     if ! sudo chown -h -R "$runner_uid:$runner_gid" "$FVOCI_SELECTED_CI_OUTPUT" "$FVOCI_SELECTED_CI_SQLITE_PARENT"; then
       echo "selected runtime ownership restoration failed" >&2
