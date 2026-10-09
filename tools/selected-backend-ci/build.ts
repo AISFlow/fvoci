@@ -25,6 +25,7 @@ import {
   read,
   root,
   sha,
+  spawnSelectedCommand,
   tool,
   write,
 } from "./io.ts";
@@ -292,7 +293,11 @@ export function recordAfter(output: string): void {
       "current Ubuntu 26.04 build-host ABI evidence only; runtime uses its own image libraries",
   });
 }
-export function stage(output: string, name: string | undefined, command: string[]): number {
+export async function stage(
+  output: string,
+  name: string | undefined,
+  command: string[],
+): Promise<number> {
   identity("stage", output);
   assert.ok(name && ["main", "lib", "install", "engine"].includes(name) && command.length);
   if (process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local")
@@ -303,11 +308,22 @@ export function stage(output: string, name: string | undefined, command: string[
     out = openSync(join(output, name + "-compiler.jsonl"), "wx"),
     err = openSync(join(output, name + "-stderr.log"), "wx");
   let code: number;
+  const controller = new AbortController();
+  const interrupt = () => {
+    controller.abort(new Error("selected compiler stage interrupted"));
+  };
+  process.once("SIGINT", interrupt);
   try {
-    code = observedExit(
-      spawnSync(command, { cwd: root, stdout: out, stderr: err, stdin: "inherit" }),
-    );
+    const child = spawnSelectedCommand(command, process.env, out, err, controller.signal);
+    const exitCode = await child.exited;
+    code = controller.signal.aborted
+      ? 130
+      : observedExit({ exitCode, signalCode: child.signalCode ?? undefined });
+  } catch (error) {
+    if (!controller.signal.aborted) throw error;
+    code = 130;
   } finally {
+    process.removeListener("SIGINT", interrupt);
     closeSync(out);
     closeSync(err);
   }

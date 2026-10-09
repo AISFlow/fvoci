@@ -1,4 +1,4 @@
-import { deepEquals, spawn, spawnSync } from "bun";
+import { deepEquals, spawnSync } from "bun";
 import { strict as assert } from "node:assert";
 import { randomBytes } from "node:crypto";
 import { Buffer } from "node:buffer";
@@ -29,11 +29,13 @@ import {
   files,
   gid,
   inventory,
+  jsonInteger,
   observedExit,
   read,
   root,
   sha,
   sourceInputText,
+  spawnSelectedCommand,
   templates,
   tool,
   uid,
@@ -135,7 +137,7 @@ export function publicFailureFields(facts: DriverReceipt): Record<string, unknow
     preparation_command_exit:
       driverCheckpoint !== null &&
       typeof preparationExit === "number" &&
-      Number.isInteger(preparationExit) &&
+      jsonInteger(facts, "preparation_command_exit") &&
       preparationExit >= -255 &&
       preparationExit <= 255
         ? preparationExit
@@ -189,7 +191,7 @@ export function laneRetirement(
     if (receipt.failed_phase && publicPhases.includes(receipt.failed_phase))
       facts.failedPhase = receipt.failed_phase;
     assert.ok(receipt.source === source && receipt.tree === tree && receipt.root_owner === owner);
-    assert.ok(Number.isInteger(receipt.final_exit_code) && receipt.final_exit_code === driverExit);
+    assert.ok(jsonInteger(receipt, "final_exit_code") && receipt.final_exit_code === driverExit);
     assert.equal(receipt.owned_container_absent, true);
     if (lane === "install")
       assert.ok(receipt.actual_tests === 4 && receipt.actual_owned_process_receipts === 15);
@@ -455,15 +457,7 @@ const runBoundary: RunBoundary = {
     // These retained lane drivers are not a fallback to the old runner.
     const fd = openSync(log, "wx");
     try {
-      const child = spawn(driverCommand(driver), {
-        cwd: root,
-        env: environment,
-        stdout: fd,
-        stderr: fd,
-        stdin: "inherit",
-        signal,
-        killSignal: "SIGINT",
-      });
+      const child = spawnSelectedCommand(driverCommand(driver), environment, fd, fd, signal);
       const exitCode = await child.exited;
       if (signal.aborted) throw signal.reason;
       return observedExit({ exitCode, signalCode: child.signalCode ?? undefined });
@@ -730,7 +724,7 @@ export function ownershipReturn(output: string): void {
       assert.ok(
         result.owner === owner && result.source === before.head && result.tree === before.tree,
       );
-      diagnostic.selected_exit = Number.isInteger(result.exit) ? result.exit : null;
+      diagnostic.selected_exit = jsonInteger(result, "exit") ? result.exit : null;
       diagnostic.all_requested_runs_executed = Object.is(result.allRequestedRunsExecuted, true);
       assert.equal(new Set(result.runs.map((r) => r.runRoot)).size, result.runs.length);
       for (const run of result.runs) {
@@ -757,17 +751,15 @@ export function ownershipReturn(output: string): void {
         };
         const valid = (key: string, type: string) =>
           type === "integer"
-            ? Number.isInteger(facts[key])
+            ? jsonInteger(facts, key)
             : type === "array"
               ? Array.isArray(facts[key])
               : typeof facts[key] === type;
         lanes.push({
           lane: run.lane,
           flow: run.flow,
-          launcher_observed_driver_exit: Number.isInteger(run.exit) ? run.exit : null,
-          receipt_final_exit: Number.isInteger(facts.final_exit_code)
-            ? facts.final_exit_code
-            : null,
+          launcher_observed_driver_exit: jsonInteger(run, "exit") ? run.exit : null,
+          receipt_final_exit: jsonInteger(facts, "final_exit_code") ? facts.final_exit_code : null,
           receipt_sha256: sha(join(path, "receipt.json")),
           missing_required_fields: Object.keys(required).filter((k) => !(k in facts)),
           invalid_required_fields: Object.entries(required)
