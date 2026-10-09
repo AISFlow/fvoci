@@ -680,6 +680,9 @@ class WholeFinalizationFaults(unittest.TestCase):
         path=ROOT/'scripts/run-selected-backend-e2e.py';tree=ast.parse(path.read_text())
         function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='run')
         main=next(n for n in function.body if isinstance(n,ast.Try) and n.finalbody)
+        # Completeness is the requested cohort, bound before this try. Execute that
+        # binding so an early raise still reaches both receipt writes.
+        requested=next(n for n in function.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='runs' for t in n.targets))
         main.body=ast.parse("raise RuntimeError('FIRST_AGGREGATE_PRIVATE')").body
         for fault in ('original','aggregate','both'):
             with self.subTest(fault=fault),tempfile.TemporaryDirectory() as directory:
@@ -691,10 +694,10 @@ class WholeFinalizationFaults(unittest.TestCase):
                     path.write_text(json.dumps(value))
                 state={'output':output,'code':7,'before':{'head':SOURCE,'tree':TREE},'owner':OWNER,
                        'results':[{'lane':'postgres','flow':'on','exit':7}], 'launcher_failure':None,
-                       'selected_runs':runner.selected_runs,'write':write,'sha':lambda path:hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+                       'requested_runs':runner.requested_runs,'only':None,'write':write,'sha':lambda path:hashlib.sha256(Path(path).read_bytes()).hexdigest(),
                        'hashlib':hashlib,'json':json}
                 stdout=io.StringIO()
-                with contextlib.redirect_stdout(stdout):exec(compile(ast.fix_missing_locations(ast.Module(body=[main],type_ignores=[])),str(path),'exec'),state)
+                with contextlib.redirect_stdout(stdout):exec(compile(ast.fix_missing_locations(ast.Module(body=[requested,main],type_ignores=[])),str(path),'exec'),state)
                 self.assertEqual(state['code'],7)
                 self.assertEqual(writes,['selected-launcher-failure.private.json','selected-ci-receipt.json'])
                 self.assertEqual(state['launcher_failure']['receiptWrite'],'failed' if fault in ('original','both') else 'confirmed')

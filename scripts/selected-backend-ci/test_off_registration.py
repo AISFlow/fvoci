@@ -307,13 +307,87 @@ class LocalAllocation(unittest.TestCase):
             self.check(grant=enlarged, mode='fixture', consumer='turso-ui')
 
     def test_original_github_guards_remain_in_shared_binding_and_runner(self):
+        # collaboration-flow equality is now this closed set: the original job plus
+        # the five lane jobs. Every other job, including the build producer, is refused.
+        admitted = ('collaboration-flow','collaboration-install-on','collaboration-postgres-on',
+                    'collaboration-sqlite-on','collaboration-postgres-off','collaboration-sqlite-off')
+
+        def github_job(node):
+            if not isinstance(node, ast.Subscript):
+                return False
+            slice_ = node.slice
+            if isinstance(slice_, ast.Constant):
+                key = slice_.value
+            elif isinstance(getattr(slice_, 'value', None), ast.Constant):
+                key = slice_.value.value
+            else:
+                return False
+            value = node.value
+            return (isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name)
+                    and value.value.id == 'os' and value.attr == 'environ' and key == 'GITHUB_JOB')
+
+        def flow_equality(node):
+            return (isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(node.ops[0], ast.Eq)
+                    and len(node.comparators) == 1 and github_job(node.left)
+                    and isinstance(node.comparators[0], ast.Constant) and node.comparators[0].value == 'collaboration-flow')
+
+        def job_membership(node):
+            if not (isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(node.ops[0], ast.In)
+                    and len(node.comparators) == 1 and github_job(node.left)):
+                return None
+            right = node.comparators[0]
+            if not isinstance(right, ast.Tuple) or not all(isinstance(elt, ast.Constant) and isinstance(elt.value, str) for elt in right.elts):
+                self.fail('GITHUB_JOB membership must stay a closed constant allowlist')
+            return tuple(elt.value for elt in right.elts)
+
+        def protected(source):
+            return {ast.dump(n.test) for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Assert)
+                    and any(token in ast.unparse(n.test) for token in ('GITHUB_','exclusiveCIJob','currentCIJobConfirmed'))}
+
         for name in ('scripts/selected-backend-ci/current_binding.py','scripts/selected-backend-ci/restart_checkpoint.py','scripts/run-selected-backend-e2e.py'):
             before=subprocess.check_output(['git','show','6c18289e0e97d25c4a3c6b208fa91a1a33af3029:'+name],cwd=ROOT,text=True)
             after=(ROOT/name).read_text()
-            protected = lambda source: {ast.dump(n.test) for n in ast.walk(ast.parse(source)) if isinstance(n,ast.Assert)
-                                        and any(token in ast.unparse(n.test) for token in ('GITHUB_','exclusiveCIJob','currentCIJobConfirmed'))}
             self.assertTrue(protected(before))
-            self.assertLessEqual(protected(before),protected(after), 'all original CI refusal expressions remain')
+            missing = protected(before) - protected(after)
+            equality = {ast.dump(n.test) for n in ast.walk(ast.parse(before)) if isinstance(n, ast.Assert) and flow_equality(n.test)}
+            self.assertLessEqual(missing, equality, 'all original CI refusal expressions remain')
+            if not missing:
+                continue
+            tree = ast.parse(after)
+            parents = {}
+            for parent in ast.walk(tree):
+                for child in ast.iter_child_nodes(parent):
+                    parents[child] = parent
+            standalone = []
+            seen = False
+            for node in ast.walk(tree):
+                jobs = job_membership(node)
+                if jobs is None:
+                    continue
+                seen = True
+                self.assertEqual(set(jobs), set(admitted))
+                self.assertEqual(len(jobs), len(admitted))
+                cursor = parents.get(node)
+                while not isinstance(cursor, ast.Assert):
+                    self.assertIsInstance(cursor, ast.BoolOp)
+                    self.assertIsInstance(cursor.op, ast.And)
+                    cursor = parents.get(cursor)
+                if cursor.test is node:
+                    standalone.append(cursor)
+            self.assertTrue(seen and standalone, 'collaboration-flow refusal must remain a closed runtime job allowlist')
+            for guard in standalone:
+                code = compile(ast.fix_missing_locations(ast.Module(body=[guard], type_ignores=[])), name, 'exec')
+                for job in admitted:
+                    with patch.dict(os.environ, {'GITHUB_JOB': job}):
+                        exec(code, {'os': os})
+                for job in ('web-checks', 'collaboration-build'):
+                    with patch.dict(os.environ, {'GITHUB_JOB': job}):
+                        with self.assertRaises(AssertionError):
+                            exec(code, {'os': os})
+                absent = {key: value for key, value in os.environ.items() if key != 'GITHUB_JOB'}
+                with patch.dict(os.environ, absent, clear=True):
+                    with self.assertRaises(KeyError):
+                        exec(code, {'os': os})
 
 
 if __name__ == '__main__': unittest.main()
