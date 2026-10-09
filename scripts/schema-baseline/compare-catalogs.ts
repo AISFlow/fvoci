@@ -703,7 +703,17 @@ class JsonParser {
       }
     }
     const token = this.s.slice(start, this.i);
-    if (!isFloat) return { k: "int", v: BigInt(token) };
+    if (!isFloat) {
+      // CPython's default sys.get_int_max_str_digits() is 4300. The sign is not a digit.
+      // A longer integer token raises during json.loads and the comparison must not continue.
+      const digits = token.startsWith("-") ? token.length - 1 : token.length;
+      if (digits > 4300) {
+        throw new ParseError(
+          `Exceeds the limit (4300 digits) for integer string conversion: value has ${digits} digits; use sys.set_int_max_str_digits() to increase the limit`,
+        );
+      }
+      return { k: "int", v: BigInt(token) };
+    }
     return { k: "float", v: Number(token) };
   }
 

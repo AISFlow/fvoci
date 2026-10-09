@@ -586,6 +586,34 @@ test("missing file and malformed JSON fail closed with the same exit code", () =
   }
 });
 
+test("a ledger integer longer than 4300 digits fails closed", () => {
+  const baseOld = JSON.stringify(OLD_LEDGER);
+  const baseNew = JSON.stringify(NEW_LEDGER);
+  const inject = (digits: string) => baseOld.replace('"ledger":[{"version":1}', `"ledger":[{"version":${digits}}`);
+  const accepted = runRaw(inject("8".repeat(4300)), baseNew);
+  expect(accepted.rc).toBe(0);
+  expect(accepted.out).toContain("RESULT: PASS");
+  const dir = mkdtempSync(join(tmpdir(), "compare-catalogs-int-"));
+  try {
+    const oldPath = join(dir, "a.json");
+    const newPath = join(dir, "b.json");
+    writeFileSync(oldPath, inject("8".repeat(4301)));
+    writeFileSync(newPath, baseNew);
+    const py = capture("python3", [PY, oldPath, newPath]);
+    const ts = capture(process.execPath, [TS, oldPath, newPath]);
+    expect(py.status).toBe(1);
+    expect(ts.status).toBe(1);
+    expect(py.stdout).toBe("");
+    expect(ts.stdout).toBe("");
+    expect(py.stderr).toContain("Exceeds the limit (4300 digits)");
+    expect(ts.stderr).toContain("Exceeds the limit (4300 digits)");
+    expect(py.stderr).toContain("value has 4301 digits");
+    expect(ts.stderr).toContain("value has 4301 digits");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a BOM before a ledger acl is unparsable", () => {
   const old = structuredClone(OLD_LEDGER);
   const fresh = structuredClone(NEW_LEDGER);
