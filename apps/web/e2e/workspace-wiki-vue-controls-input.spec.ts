@@ -1,5 +1,12 @@
-import { spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { expect, type Browser, type Page, test } from "@playwright/test";
 import { readJson, flowSchemas, createE2eUser } from "./helpers";
 import {
@@ -23,60 +30,42 @@ function runDirectory(): string {
 }
 
 // Login allows 10 attempts per account and 30 per address in five minutes.
-// Later repeats in this worker reuse the first admin session.
+// Every repeat reuses the first admin session instead of signing in again.
 function adminStatePath(): string {
-  return `${runDirectory()}/wiki-input-admin-${String(process.pid)}.json`;
+  return `${runDirectory()}/wiki-input-admin.json`;
 }
 
-// The file's workers start together. Hold the lock across instance setup so
-// only one of them submits the setup form.
-function acquireSetupLock(lockPath: string): Promise<() => Promise<void>> {
-  const child = spawn("flock", ["-x", lockPath, "sh", "-c", "printf ready; cat"], {
-    stdio: ["pipe", "pipe", "inherit"],
-  });
-  const stdout = child.stdout;
-  const stdin = child.stdin;
-  stdout.setEncoding("utf8");
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const fail = (error: Error) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      reject(error);
-    };
-    child.once("error", fail);
-    let text = "";
-    stdout.on("data", (chunk: string) => {
-      text += chunk;
-      if (settled || !text.includes("ready")) {
-        return;
-      }
-      settled = true;
-      resolve(() => {
-        stdin.end();
-        return new Promise<void>((done, stop) => {
-          child.once("exit", () => {
-            done();
-          });
-          child.once("error", stop);
-        });
-      });
-    });
-    child.once("exit", (code) => {
-      fail(new Error(`setup lock exited before ready: ${String(code)}`));
-    });
-  });
+// Workers can start together, and a fresh worker must not sign in just to
+// rediscover an instance that already exists.
+async function ensureInstance(browser: Browser, baseURL: string | undefined): Promise<void> {
+  const marker = `${runDirectory()}/wiki-input-setup.done`;
+  if (existsSync(marker)) {
+    return;
+  }
+  const lockPath = `${runDirectory()}/wiki-input-setup.lock`;
+  let won = false;
+  try {
+    closeSync(openSync(lockPath, "wx"));
+    won = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+      throw error;
+    }
+  }
+  if (!won) {
+    await expect.poll(() => existsSync(marker)).toBe(true);
+    return;
+  }
+  try {
+    await setupInstance(browser, baseURL);
+    writeFileSync(marker, "ok");
+  } finally {
+    unlinkSync(lockPath);
+  }
 }
 
 test.beforeAll(async ({ browser, baseURL }) => {
-  const release = await acquireSetupLock(`${runDirectory()}/wiki-input-setup.lock`);
-  try {
-    await setupInstance(browser, baseURL);
-  } finally {
-    await release();
-  }
+  await ensureInstance(browser, baseURL);
 });
 
 async function openAdmin(browser: Browser, baseURL: string | undefined) {
@@ -95,7 +84,9 @@ async function openAdmin(browser: Browser, baseURL: string | undefined) {
   const signed = await newSignedInPage(browser, baseURL, admin, {
     permissions: ["clipboard-read", "clipboard-write"],
   });
-  await signed.context.storageState({ path: statePath });
+  const temporary = `${statePath}.${String(process.pid)}.tmp`;
+  await signed.context.storageState({ path: temporary });
+  renameSync(temporary, statePath);
   return signed;
 }
 
