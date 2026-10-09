@@ -9,7 +9,7 @@ import {
 } from "@playwright/test";
 import { readJson, flowSchemas, createE2eUser } from "./helpers";
 import {
-  admin,
+  admin as defaultAdmin,
   createDoc,
   editorOf,
   newSignedInPage,
@@ -21,14 +21,18 @@ import {
 } from "./workspace-wiki-vue-editor";
 
 test.describe.configure({ mode: "serial" });
+let admin = defaultAdmin;
 const guest = {
   email: "entities-guest@example.com",
   password: "guestpass1",
   givenName: "참조손님",
 };
 
-test.beforeAll(async ({ browser, baseURL }) => {
-  await setupInstance(browser, baseURL);
+test.beforeAll(async ({ browser, baseURL }, testInfo) => {
+  const namespace = `r${String(testInfo.repeatEachIndex)}-w${String(testInfo.workerIndex)}-t${String(testInfo.retry)}`;
+  admin = { ...defaultAdmin, email: `entities-owner-${namespace}@example.com` };
+  guest.email = `entities-guest-${namespace}@example.com`;
+  await setupInstance(browser, baseURL, admin);
   createE2eUser(guest.email, guest.password, guest.givenName, {
     workspaceSlug: admin.workspaceSlug,
     membershipRole: "guest",
