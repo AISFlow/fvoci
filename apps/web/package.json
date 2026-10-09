@@ -6,7 +6,7 @@
     "dev": "vite",
     "build": "tsc -b && vue-tsc -b tsconfig.vue.json && vite build",
     "typecheck": "tsc -b && vue-tsc -b tsconfig.vue.json",
-    "test": "bun test --parallel --timeout=60000 ./src ../../scripts/ci/workflows.test.ts",
+    "test": "bun test --parallel --timeout=60000 ./src ../../scripts/ci/workflows.test.ts ../../tools/selected-backend-ci",
     "test:e2e": "playwright test"
   },
   "dependencies": {

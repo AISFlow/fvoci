@@ -24,6 +24,10 @@
       "zod/v4/core": ["./node_modules/zod/v4/core/index.d.cts"]
     }
   },
-  "include": ["src"],
+  "include": [
+    "src",
+    "../../scripts/run-selected-backend-e2e.ts",
+    "../../tools/selected-backend-ci/**/*.ts"
+  ],
   "exclude": ["src/**/*.test.ts", "src/vue"]
 }
