@@ -268,7 +268,7 @@ test("archive holds editor read-only while persist and archive PATCH are in flig
 
   const beforeRace = await editor.innerText();
   await page.keyboard.type("레이스 입력");
-  expect(await editor.innerText()).toBe(beforeRace);
+  await expect.poll(() => editor.innerText()).toBe(beforeRace);
 
   await archiveButton.click({ force: true });
   expect((await taskJson(page, wsId, task.id)).archivedAt).toBeNull();

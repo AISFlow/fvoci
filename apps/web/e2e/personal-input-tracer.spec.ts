@@ -225,8 +225,8 @@ test("private input survives lost response, keeps one source block/task UUID and
   await expect(page.locator('[data-collab-persisted="false"]').first()).toBeVisible();
   await saveBody(page);
   const paragraph = editor.locator(":scope > p").first();
+  await expect(paragraph).toHaveAttribute("data-id", /[\s\S]+/);
   const anchor = await paragraph.getAttribute("data-id");
-  expect(anchor).toBeTruthy();
   await paragraph.click();
   const origins = page.getByRole("region", { name: "연결 태스크" });
   await origins.getByRole("button", { name: "선택한 블록에서 할 일 만들기" }).click();

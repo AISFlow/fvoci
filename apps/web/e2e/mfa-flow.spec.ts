@@ -60,8 +60,10 @@ test("TOTP MFA: setup, enable, login challenge with TOTP and single-use recovery
   await expect(otpauthLink).not.toContainText("otpauth");
   const otpauthUri = (await otpauthLink.getAttribute("href")) ?? "";
   await expect(mfa.getByTestId("mfa-qr")).toBeVisible();
-  const qrPath = await mfa.getByTestId("mfa-qr").locator("path").getAttribute("d");
-  expect(qrPath).toBe(qrModules(otpauthUri).path);
+  await expect(mfa.getByTestId("mfa-qr").locator("path")).toHaveAttribute(
+    "d",
+    qrModules(otpauthUri).path,
+  );
 
   // A wrong code keeps MFA off.
   await mfa.locator("#settings-mfa-code").fill("abcdef");

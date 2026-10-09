@@ -1448,9 +1448,7 @@ test("actual preview producer and SafeHtml sink keep rich heading, colors, table
   await expect(preview.locator(".afn-embed-ref")).toHaveText("참조 대상 🧑‍💻");
   await expect(preview.locator(".afn-embed-target")).toHaveText(target.id);
   await expect(preview).toContainText("<script>hostile()</script>");
-  expect(await preview.locator("script,[onclick],[onerror],a[href^='javascript:']").count()).toBe(
-    0,
-  );
+  await expect(preview.locator("script,[onclick],[onerror],a[href^='javascript:']")).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("w3-rich-preview.png"), fullPage: true });
   await selectMode(page, "markdown");
   const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });

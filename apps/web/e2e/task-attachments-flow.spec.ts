@@ -98,8 +98,8 @@ test("task attachments: pick, preview thumbnail, download, delete", async ({ pag
   await expect(panel.getByRole("link", { name: "메모.txt" })).toBeVisible();
 
   // The download link serves the original bytes.
+  await expect(photo).toHaveAttribute("href", /[\s\S]+/);
   const href = await photo.getAttribute("href");
-  expect(href).toBeTruthy();
   assert(href);
   const original = await page.request.get(href);
   expect(original.status()).toBe(200);

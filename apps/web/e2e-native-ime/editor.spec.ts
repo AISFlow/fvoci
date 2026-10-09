@@ -101,7 +101,7 @@ test(`OS IBus Hangul [${cases}]: save and persisted reload`, async ({ baseURL })
           keys("BackSpace");
           await page.waitForTimeout(120);
           await snapshot(page, scenario + "-deleted");
-          expect(await editor.textContent()).toBe("하");
+          await expect.poll(() => editor.textContent()).toBe("하");
           keys("s", "space");
           expected = ["한 "];
         } else {

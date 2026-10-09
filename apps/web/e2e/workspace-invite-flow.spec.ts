@@ -29,8 +29,8 @@ async function inviteAccount(page: Page, email: string): Promise<string> {
   await page.getByRole("button", { name: "초대", exact: true }).click();
   const link = page.getByRole("link").filter({ hasText: "/invite/" });
   await expect(link).toBeVisible();
+  await expect(link).toHaveAttribute("href", /[\s\S]+/);
   const href = await link.getAttribute("href");
-  expect(href).toBeTruthy();
   const required1 = href;
   if (required1 === null) {
     throw new Error("Missing fixture value: href");
@@ -91,8 +91,8 @@ test("owner invites a second user who signs up, accepts, and appears in members"
     throw new Error("Missing fixture value: href");
   }
   await expect(inviteLink).not.toHaveAttribute("href", required2);
+  await expect(inviteLink).toHaveAttribute("href", /[\s\S]+/);
   const expiredHref = await inviteLink.getAttribute("href");
-  expect(expiredHref).toBeTruthy();
   const adminUrl = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
   const container = process.env.FVOCI_TEST_PG_CONTAINER;
   if (!adminUrl || !container) {

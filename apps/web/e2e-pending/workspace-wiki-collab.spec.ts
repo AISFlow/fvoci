@@ -1298,8 +1298,11 @@ test("stored attachment bytes survive owned-server restart", async ({ page, coll
     buffer: fixtureBytes,
   });
   await persistBody(page);
+  await expect(page.locator('.afn-attachment[data-state="stored"]')).toHaveAttribute(
+    "href",
+    /[\s\S]+/,
+  );
   const href = await page.locator('.afn-attachment[data-state="stored"]').getAttribute("href");
-  expect(href).toBeTruthy();
   if (!href) throw new Error("stored attachment has no download href");
   await collabApp.crashAndRestart();
   await page.reload();
@@ -1338,10 +1341,13 @@ test("revoked member cannot download or create wiki attachments", async ({
       name: "revoke-fixture.bin",
       buffer: fixtureBytes,
     });
+    await expect(memberPage.locator('.afn-attachment[data-state="stored"]')).toHaveAttribute(
+      "href",
+      /[\s\S]+/,
+    );
     const href = await memberPage
       .locator('.afn-attachment[data-state="stored"]')
       .getAttribute("href");
-    expect(href).toBeTruthy();
     if (!href) throw new Error("stored attachment has no download href");
 
     const ws = await workspaceId(ownerPage, admin.workspaceSlug);
@@ -1380,8 +1386,11 @@ test("guest attachment upload and download are denied by the product APIs", asyn
     name: "guest-deny.bin",
     buffer: Buffer.from("guest-deny\n", "utf8"),
   });
+  await expect(page.locator('.afn-attachment[data-state="stored"]')).toHaveAttribute(
+    "href",
+    /[\s\S]+/,
+  );
   const href = await page.locator('.afn-attachment[data-state="stored"]').getAttribute("href");
-  expect(href).toBeTruthy();
   if (!href) throw new Error("stored attachment has no download href");
   await page.context().clearCookies();
   await login(page, "collab-attach-guest@example.com", "guestpass1");

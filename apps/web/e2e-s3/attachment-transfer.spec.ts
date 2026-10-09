@@ -174,8 +174,8 @@ test("presigned mode moves bytes between the browser and storage; proxy mode is 
     expect(res?.headers()["access-control-allow-origin"]).toBe(new URL(page.url()).origin);
   }
 
+  await expect(panel.getByRole("link", { name: "big.bin" })).toHaveAttribute("href", /[\s\S]+/);
   const bigHref = await panel.getByRole("link", { name: "big.bin" }).getAttribute("href");
-  expect(bigHref).toBeTruthy();
   const idOf = async (name: string): Promise<string> => {
     const href = await panel.getByRole("link", { name }).getAttribute("href");
     return (href as string).split("/attachments/")[1]?.split("/")[0] ?? "";

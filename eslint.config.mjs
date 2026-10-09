@@ -1,6 +1,7 @@
 import js from "@eslint/js";
 import { defineConfig, globalIgnores } from "eslint/config";
 import prettier from "eslint-config-prettier/flat";
+import playwright from "eslint-plugin-playwright";
 import vue from "eslint-plugin-vue";
 import globals from "globals";
 import tseslint from "typescript-eslint";
@@ -132,6 +133,11 @@ export default defineConfig(
   {
     files: ["**/*.test.ts", "packages/editor/test/**/*.ts", "apps/web/test/**/*.ts"],
     languageOptions: { globals: { Bun: "readonly" } },
+  },
+  {
+    files: ["apps/web/e2e*/**/*.spec.ts"],
+    plugins: { playwright },
+    rules: { "playwright/prefer-web-first-assertions": "error" },
   },
   prettier,
 );
