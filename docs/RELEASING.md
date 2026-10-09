@@ -220,3 +220,4 @@ owner database and the debug `fvoci-e2e-fixture` binary, which a release stack
 does not have, so only specs that create the first admin through the setup page
 run, each on a fresh stack: task edit, project document revisions, task
 attachments and HWPX edit. The full browser suite stays in `web.yml`.
+<!-- cursor cloud agent pipeline test 2026-10-09 -->
