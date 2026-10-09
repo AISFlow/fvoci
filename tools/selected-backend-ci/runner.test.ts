@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { strict as assert } from "node:assert";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -30,6 +31,7 @@ import { buildEnv, elfDependencies, qualifyArtifacts, stage } from "./build.ts";
 import { qualifyListing } from "./config-list.ts";
 import type { Listing } from "./config-list.ts";
 import {
+  assertHandoffActor,
   call,
   digest,
   gid,
@@ -673,6 +675,9 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     "public-file",
     "bad-digest",
     "ci-leak",
+    "root-uid",
+    "foreign-uid",
+    "foreign-gid",
   ] as const)
     test("local allocation " + mutation, async () => {
       const output = directory(),
@@ -700,8 +705,8 @@ describe.serial("selected runner contract and fail-closed controls", () => {
         workerTerminal: "fixture-worker",
         rootTerminal: "fixture-root",
         worktree: root,
-        uid: 1000,
-        gid: 1000,
+        uid: uid(),
+        gid: gid(),
         source,
         tree,
         allowedModes: ["record-before", "stage", "record-after", "run"],
@@ -719,6 +724,9 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       if (mutation === "same-terminal") grant.workerTerminal = grant.rootTerminal;
       if (mutation === "bad-task") grant.taskId = "other";
       if (mutation === "bad-owner") grant.owner = "foreign";
+      if (mutation === "root-uid") grant.uid = 0;
+      if (mutation === "foreign-uid") grant.uid = uid() + 1;
+      if (mutation === "foreign-gid") grant.gid = gid() + 1;
       write(path, grant);
       if (mutation === "public-file") chmodSync(path, 0o644);
       const values = {
@@ -742,6 +750,105 @@ describe.serial("selected runner contract and fail-closed controls", () => {
           expect(() => localAllocation(mutation === "bad-mode" ? "owner-return" : "run")).toThrow();
       });
     });
+
+  test("handoff actor accepts the CI runner pair and refuses root and mismatched uid/gid", async () => {
+    const shared = directory();
+    chmodSync(shared, 0o755);
+    const bunCopy = join(shared, "bun");
+    copyFileSync(process.execPath, bunCopy);
+    chmodSync(bunCopy, 0o755);
+    const probe = join(shared, "probe.ts");
+    writeFileSync(
+      probe,
+      `import { assertHandoffActor } from ${JSON.stringify(join(import.meta.dir, "io.ts"))};\nassertHandoffActor(process.argv.at(-1) ?? "");\n`,
+    );
+    const owned = (user: string) => {
+      const path = directory();
+      const result = spawnSync(["sudo", "-n", "chown", user, path], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(0);
+      return path;
+    };
+    const actor = (actorUid: number, actorGid: number, output: string) =>
+      spawnSync(
+        [
+          "sudo",
+          "-n",
+          "setpriv",
+          `--reuid=${String(actorUid)}`,
+          `--regid=${String(actorGid)}`,
+          "--clear-groups",
+          "--",
+          "env",
+          `HOME=${output}`,
+          `TMPDIR=${output}`,
+          "PATH=/usr/bin:/bin",
+          bunCopy,
+          probe,
+          output,
+        ],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+    const ciOwned = owned("1001:1001");
+    const rootOwned = owned("0:0");
+    const uidMismatch = owned(`${String(uid() + 1)}:${String(gid())}`);
+    const gidMismatch = owned(`${String(uid())}:${String(gid() + 1)}`);
+    try {
+      assertHandoffActor(directory());
+      if (uid() === 1001 && gid() === 1001) assertHandoffActor(ciOwned);
+      else
+        expect(() => {
+          assertHandoffActor(ciOwned);
+        }).toThrow();
+      const accepted = actor(1001, 1001, ciOwned);
+      expect(accepted.exitCode).toBe(0);
+      const rooted = actor(0, 0, rootOwned);
+      expect(rooted.exitCode).not.toBe(0);
+      expect(rooted.stderr.toString()).toContain("AssertionError");
+      const foreignUid = actor(1001, 1001, uidMismatch);
+      expect(foreignUid.exitCode).not.toBe(0);
+      expect(foreignUid.stderr.toString()).toContain("AssertionError");
+      const foreignGid = actor(uid(), gid(), gidMismatch);
+      expect(foreignGid.exitCode).not.toBe(0);
+      expect(foreignGid.stderr.toString()).toContain("AssertionError");
+      expect(() => {
+        assertHandoffActor(uidMismatch);
+      }).toThrow();
+      expect(() => {
+        assertHandoffActor(gidMismatch);
+      }).toThrow();
+      expect(() => {
+        assertHandoffActor(rootOwned);
+      }).toThrow();
+      const { output, boundary } = cohort();
+      const moved = spawnSync(
+        ["sudo", "-n", "chown", `${String(uid() + 1)}:${String(gid() + 1)}`, output],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      expect(moved.exitCode).toBe(0);
+      await assert.rejects(run(output, boundary), assert.AssertionError);
+      await withEnvironment(ci, () => {
+        const returned = directory();
+        write(join(returned, "before.json"), { head: source, tree });
+        const returnedMove = spawnSync(
+          ["sudo", "-n", "chown", `${String(uid() + 1)}:${String(gid() + 1)}`, returned],
+          { stdout: "pipe", stderr: "pipe" },
+        );
+        expect(returnedMove.exitCode).toBe(0);
+        expect(() => {
+          ownershipReturn(returned);
+        }).toThrow(assert.AssertionError);
+      });
+    } finally {
+      for (const path of temporary)
+        spawnSync(["sudo", "-n", "chown", "-R", `${String(uid())}:${String(gid())}`, path], {
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+    }
+  });
 
   test("browser staging preserves source bytes/modes and rejects symlink/owner/byte/mode changes", async () => {
     const cache = directory(),

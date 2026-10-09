@@ -65,13 +65,10 @@ export function localAllocation(mode: string): LocalGrant {
   assert.equal(grant.workerTerminal, env("ORCA_TERMINAL_HANDLE"));
   assert.equal(grant.rootTerminal, env("FVOCI_LOCAL_ROOT_TERMINAL"));
   assert.notEqual(grant.workerTerminal, grant.rootTerminal);
-  assert.ok(
-    grant.worktree === root &&
-      grant.uid === uid() &&
-      uid() === 1000 &&
-      grant.gid === gid() &&
-      gid() === 1000,
-  );
+  assert.equal(grant.worktree, root);
+  assert.notEqual(uid(), 0);
+  assert.equal(grant.uid, uid());
+  assert.equal(grant.gid, gid());
   assert.ok(/^[0-9a-f]{40}$/.test(grant.source) && /^[0-9a-f]{40}$/.test(grant.tree));
   assert.equal(call(["git", "rev-parse", "HEAD"]), grant.source);
   assert.equal(call(["git", "rev-parse", "HEAD^{tree}"]), grant.tree);
