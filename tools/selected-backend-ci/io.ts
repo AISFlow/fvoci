@@ -34,13 +34,18 @@ export const groups = () => {
   assert.ok(process.getgroups);
   return process.getgroups().sort((a, b) => a - b);
 };
-// The caller hands over one output directory. This process must be that owner.
-// Root is refused even when it owns the directory, and any other uid/gid is refused.
-export function assertHandoffActor(output: string): void {
+// `expected` is chosen by the caller. Production entry points pass the fixed
+// [1000, 1000] literal. Root is refused even when it owns the directory and
+// even when `expected` names that same root.
+export function assertHandoffActor(output: string, expected: readonly [number, number]): void {
   const actorUid = uid(),
     actorGid = gid(),
     handed = statSync(output);
-  assert.notEqual(actorUid, 0);
+  assert.notEqual(actorUid, 0, "refusing root");
+  assert.ok(
+    actorUid === expected[0] && actorGid === expected[1],
+    "selected runtime actor must be the fixed handoff uid and gid",
+  );
   assert.equal(handed.uid, actorUid);
   assert.equal(handed.gid, actorGid);
 }

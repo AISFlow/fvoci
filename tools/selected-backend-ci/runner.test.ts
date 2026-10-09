@@ -190,6 +190,66 @@ function cohort() {
   };
   return { output, before, browser, boundary };
 }
+function localFixture(
+  actorUid: number,
+  actorGid: number,
+): {
+  output: string;
+  env: Record<string, string>;
+} {
+  const output = directory(),
+    path = join(output, "local.json");
+  const registrationHashes = Object.fromEntries(
+    [
+      "run-selected-backend-e2e.py",
+      "selected-backend-ci/current_binding.py",
+      "selected-backend-ci/restart_checkpoint.py",
+      "selected-backend-ci/current-install-driver.py",
+      "selected-backend-ci/current-postgres-driver.py",
+      "selected-backend-ci/current-sqlite-driver.py",
+    ].map((name) => [name, sha(join(root, "scripts", name))]),
+  );
+  const grant: LocalGrant = {
+    schema: 1,
+    status: "GRANTED",
+    executionMode: "orca-local",
+    exclusiveLocalBatch: true,
+    currentDispatchConfirmed: true,
+    owner: "orca:fixture",
+    runId: "run_ab12",
+    dispatchId: "ctx_cd34",
+    taskId: "task_ef56",
+    workerTerminal: "fixture-worker",
+    rootTerminal: "fixture-root",
+    worktree: root,
+    uid: actorUid,
+    gid: actorGid,
+    source,
+    tree,
+    allowedModes: ["record-before", "stage", "record-after", "run"],
+    expiresUtc: new Date(Date.now() + 3600000).toISOString(),
+    outputRoot: output,
+    registrationHashes,
+    stageCommands: {},
+  };
+  write(path, grant);
+  return {
+    output,
+    env: {
+      FVOCI_SELECTED_EXECUTION_MODE: "orca-local",
+      FVOCI_SELECTED_LOCAL_ALLOCATION: path,
+      FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256: sha(path),
+      FVOCI_CI_OWNER: "orca:fixture",
+      FVOCI_ROOT_RUN_OWNER: "orca:fixture",
+      FVOCI_LOCAL_RUN_ID: "run_ab12",
+      FVOCI_LOCAL_DISPATCH_ID: "ctx_cd34",
+      FVOCI_LOCAL_TASK_ID: "task_ef56",
+      ORCA_TERMINAL_HANDLE: "fixture-worker",
+      FVOCI_LOCAL_ROOT_TERMINAL: "fixture-root",
+      FVOCI_CI_SELECTED_RUNS: join(output, "runtime"),
+    },
+  };
+}
 
 describe.serial("selected runner contract and fail-closed controls", () => {
   test("original five lane tuple and all seven CLI modes remain exact", () => {
@@ -404,7 +464,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       return execute(driver, environment, log, signal);
     };
     await withEnvironment(ci, async () => {
-      expect(await run(output, boundary)).toBe(0);
+      expect(await run(output, boundary, [uid(), gid()])).toBe(0);
     });
     expect(calls.map((r) => [r.lane, r.flow])).toEqual(
       selectedRuns.map(([lane, flow]) => [lane, flow]),
@@ -441,7 +501,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
           return code;
         };
         await withEnvironment(ci, async () => {
-          expect(await run(output, boundary)).toBe(failure === "exit" ? 7 : 1);
+          expect(await run(output, boundary, [uid(), gid()])).toBe(failure === "exit" ? 7 : 1);
         });
         const aggregate = read(join(output, "selected-ci-receipt.json")) as Aggregate;
         expect(count).toBe(failed + 1);
@@ -456,7 +516,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       throw new Error("private fixture outcome");
     };
     await withEnvironment(ci, async () => {
-      expect(await run(output, boundary)).toBe(1);
+      expect(await run(output, boundary, [uid(), gid()])).toBe(1);
     });
     const aggregate = read(join(output, "selected-ci-receipt.json")) as Aggregate;
     expect(aggregate.runs).toHaveLength(0);
@@ -477,7 +537,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       throw new Error("interrupted fixture");
     };
     await withEnvironment(ci, async () => {
-      expect(await run(output, boundary)).toBe(130);
+      expect(await run(output, boundary, [uid(), gid()])).toBe(130);
     });
     expect(read(join(output, "selected-ci-receipt.json")) as Aggregate).toMatchObject({
       exit: 130,
@@ -489,7 +549,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     const { output, boundary } = cohort();
     write(join(output, "selected-ci-receipt.json"), { occupied: true });
     await withEnvironment(ci, async () => {
-      expect(await run(output, boundary)).toBe(1);
+      expect(await run(output, boundary, [uid(), gid()])).toBe(1);
     });
     expect(read(join(output, "selected-ci-receipt.json"))).toEqual({ occupied: true });
   });
@@ -575,13 +635,13 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     await withEnvironment(ci, async () => {
       const first = directory();
       write(join(first, "before.json"), { head: source, tree });
-      ownershipReturn(first);
+      ownershipReturn(first, [uid(), gid()]);
       expect(read(join(first, "runtime-close-stage.json"))).toMatchObject({
         no_runtime_started: true,
         ownership_return_qualified: true,
       });
       const { output, boundary } = cohort();
-      expect(await run(output, boundary)).toBe(0);
+      expect(await run(output, boundary, [uid(), gid()])).toBe(0);
       const aggregate = read(join(output, "selected-ci-receipt.json")) as Aggregate;
       const install = aggregate.runs[0];
       expect(install).toBeDefined();
@@ -589,7 +649,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       mkdirSync(retained);
       for (let index = 0; index < 15; index++)
         write(join(retained, String(index) + "-process.json"), { status: 0 });
-      ownershipReturn(output);
+      ownershipReturn(output, [uid(), gid()]);
       expect(read(join(output, "runtime-close-stage.json"))).toMatchObject({
         ownership_return_qualified: true,
         installation_process_receipts: 15,
@@ -607,7 +667,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     test("owner-return refuses " + mutation, async () => {
       await withEnvironment(ci, async () => {
         const { output, boundary } = cohort();
-        expect(await run(output, boundary)).toBe(0);
+        expect(await run(output, boundary, [uid(), gid()])).toBe(0);
         const path = join(output, "selected-ci-receipt.json"),
           aggregate = read(path) as Aggregate,
           install = aggregate.runs[0];
@@ -631,7 +691,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
         }
         writeFileSync(path, JSON.stringify(aggregate));
         expect(() => {
-          ownershipReturn(output);
+          ownershipReturn(output, [uid(), gid()]);
         }).toThrow();
         expect(existsSync(join(output, "runtime-close-stage.json"))).toBe(false);
       });
@@ -745,33 +805,89 @@ describe.serial("selected runner contract and fail-closed controls", () => {
         ...(mutation === "ci-leak" ? { CI: "true" } : {}),
       };
       await withEnvironment(values, () => {
-        if (mutation === "none") expect(localAllocation("run")).toEqual(grant);
+        if (mutation === "none") expect(localAllocation("run", [uid(), gid()])).toEqual(grant);
         else
-          expect(() => localAllocation(mutation === "bad-mode" ? "owner-return" : "run")).toThrow();
+          expect(() =>
+            localAllocation(mutation === "bad-mode" ? "owner-return" : "run", [uid(), gid()]),
+          ).toThrow();
       });
     });
 
-  test("handoff actor accepts the CI runner pair and refuses root and mismatched uid/gid", async () => {
+  test("local allocation root grant refusal is its own check", async () => {
+    const fixture = localFixture(0, gid());
+    await withEnvironment(fixture.env, () => {
+      expect(() => localAllocation("run", [uid(), gid()])).toThrow("refusing root grant");
+    });
+  });
+
+  test("production handoff defaults refuse root and an unprivileged 1001 actor", () => {
     const shared = directory();
     chmodSync(shared, 0o755);
     const bunCopy = join(shared, "bun");
     copyFileSync(process.execPath, bunCopy);
     chmodSync(bunCopy, 0o755);
     const probe = join(shared, "probe.ts");
+    const admission = JSON.stringify(join(import.meta.dir, "admission.ts"));
+    const io = JSON.stringify(join(import.meta.dir, "io.ts"));
+    const runtime = JSON.stringify(join(import.meta.dir, "runtime.ts"));
     writeFileSync(
       probe,
-      `import { assertHandoffActor } from ${JSON.stringify(join(import.meta.dir, "io.ts"))};\nassertHandoffActor(process.argv.at(-1) ?? "");\n`,
+      `import process from "node:process";
+import { localAllocation } from ${admission};
+import { assertHandoffActor } from ${io};
+import { ownershipReturn, run } from ${runtime};
+const output = process.argv[2] ?? "";
+const mode = process.argv[3] ?? "";
+const actor = [process.getuid?.() ?? -1, process.getgid?.() ?? -1] as const;
+try {
+  if (mode === "run-default") {
+    const code = await run(output, {
+      identity: () => "fixture-owner",
+      browser() { throw new Error("actor check passed"); },
+      access() {},
+      execute() { return 0; },
+    });
+    process.stderr.write("run-completed:" + String(code));
+    process.exit(code === 0 ? 0 : 2);
+  }
+  if (mode === "return-default") {
+    ownershipReturn(output);
+    process.exit(0);
+  }
+  if (mode === "handoff-actor") {
+    assertHandoffActor(output, actor);
+    process.exit(0);
+  }
+  if (mode === "local-actor") {
+    localAllocation("run", actor);
+    process.exit(0);
+  }
+  if (mode === "local-default") {
+    localAllocation("run");
+    process.exit(0);
+  }
+  throw new Error("unknown probe mode");
+} catch (error) {
+  process.stderr.write(error instanceof Error ? error.message : "thrown");
+  process.exit(1);
+}
+`,
     );
-    const owned = (user: string) => {
-      const path = directory();
-      const result = spawnSync(["sudo", "-n", "chown", user, path], {
+    const give = (path: string, user: string) => {
+      const result = spawnSync(["sudo", "-n", "chown", "-R", user, path], {
         stdout: "pipe",
         stderr: "pipe",
       });
       expect(result.exitCode).toBe(0);
-      return path;
     };
-    const actor = (actorUid: number, actorGid: number, output: string) =>
+    const probeAs = (
+      actorUid: number,
+      actorGid: number,
+      home: string,
+      mode: string,
+      output: string,
+      extra: Record<string, string> = {},
+    ) =>
       spawnSync(
         [
           "sudo",
@@ -782,65 +898,70 @@ describe.serial("selected runner contract and fail-closed controls", () => {
           "--clear-groups",
           "--",
           "env",
-          `HOME=${output}`,
-          `TMPDIR=${output}`,
+          `HOME=${home}`,
+          `TMPDIR=${home}`,
           "PATH=/usr/bin:/bin",
+          ...Object.entries(extra).map(([key, value]) => key + "=" + value),
           bunCopy,
           probe,
           output,
+          mode,
         ],
         { stdout: "pipe", stderr: "pipe" },
       );
-    const ciOwned = owned("1001:1001");
-    const rootOwned = owned("0:0");
-    const uidMismatch = owned(`${String(uid() + 1)}:${String(gid())}`);
-    const gidMismatch = owned(`${String(uid())}:${String(gid() + 1)}`);
+    const ciOwned = directory();
+    const rootOwned = directory();
+    const mismatch = directory();
+    const cohortOutput = cohort().output;
+    const rootGrant = localFixture(0, 0);
+    const ciGrant = localFixture(1001, 1001);
+    give(ciOwned, "1001:1001");
+    give(rootOwned, "0:0");
+    give(mismatch, `${String(uid() + 1)}:${String(gid() + 1)}`);
+    give(cohortOutput, "1001:1001");
+    give(rootGrant.output, "0:0");
+    give(ciGrant.output, "1001:1001");
     try {
-      assertHandoffActor(directory());
-      if (uid() === 1001 && gid() === 1001) assertHandoffActor(ciOwned);
-      else
-        expect(() => {
-          assertHandoffActor(ciOwned);
-        }).toThrow();
-      const accepted = actor(1001, 1001, ciOwned);
+      expect(() => {
+        assertHandoffActor(mismatch, [uid(), gid()]);
+      }).toThrow();
+      const accepted = probeAs(1001, 1001, ciOwned, "handoff-actor", ciOwned);
       expect(accepted.exitCode).toBe(0);
-      const rooted = actor(0, 0, rootOwned);
-      expect(rooted.exitCode).not.toBe(0);
-      expect(rooted.stderr.toString()).toContain("AssertionError");
-      const foreignUid = actor(1001, 1001, uidMismatch);
-      expect(foreignUid.exitCode).not.toBe(0);
-      expect(foreignUid.stderr.toString()).toContain("AssertionError");
-      const foreignGid = actor(uid(), gid(), gidMismatch);
-      expect(foreignGid.exitCode).not.toBe(0);
-      expect(foreignGid.stderr.toString()).toContain("AssertionError");
-      expect(() => {
-        assertHandoffActor(uidMismatch);
-      }).toThrow();
-      expect(() => {
-        assertHandoffActor(gidMismatch);
-      }).toThrow();
-      expect(() => {
-        assertHandoffActor(rootOwned);
-      }).toThrow();
-      const { output, boundary } = cohort();
-      const moved = spawnSync(
-        ["sudo", "-n", "chown", `${String(uid() + 1)}:${String(gid() + 1)}`, output],
-        { stdout: "pipe", stderr: "pipe" },
+      const rooted = probeAs(0, 0, rootOwned, "handoff-actor", rootOwned);
+      expect(rooted.exitCode).toBe(1);
+      expect(rooted.stderr.toString()).toContain("refusing root");
+      const dropped = probeAs(1001, 1001, ciOwned, "run-default", cohortOutput);
+      expect(dropped.exitCode).toBe(1);
+      expect(dropped.stderr.toString()).toContain(
+        "selected runtime actor must be the fixed handoff uid and gid",
       );
-      expect(moved.exitCode).toBe(0);
-      await assert.rejects(run(output, boundary), assert.AssertionError);
-      await withEnvironment(ci, () => {
-        const returned = directory();
-        write(join(returned, "before.json"), { head: source, tree });
-        const returnedMove = spawnSync(
-          ["sudo", "-n", "chown", `${String(uid() + 1)}:${String(gid() + 1)}`, returned],
-          { stdout: "pipe", stderr: "pipe" },
-        );
-        expect(returnedMove.exitCode).toBe(0);
-        expect(() => {
-          ownershipReturn(returned);
-        }).toThrow(assert.AssertionError);
-      });
+      const returned = probeAs(1001, 1001, ciOwned, "return-default", ciOwned);
+      expect(returned.exitCode).toBe(1);
+      expect(returned.stderr.toString()).toContain(
+        "selected runtime actor must be the fixed handoff uid and gid",
+      );
+      const localRoot = probeAs(
+        0,
+        0,
+        rootGrant.output,
+        "local-actor",
+        rootGrant.output,
+        rootGrant.env,
+      );
+      expect(localRoot.exitCode).toBe(1);
+      expect(localRoot.stderr.toString()).toContain("refusing root process");
+      const localCi = probeAs(
+        1001,
+        1001,
+        ciGrant.output,
+        "local-default",
+        ciGrant.output,
+        ciGrant.env,
+      );
+      expect(localCi.exitCode).toBe(1);
+      expect(localCi.stderr.toString()).toContain(
+        "selected runtime actor must be the fixed handoff uid and gid",
+      );
     } finally {
       for (const path of temporary)
         spawnSync(["sudo", "-n", "chown", "-R", `${String(uid())}:${String(gid())}`, path], {
@@ -1142,7 +1263,7 @@ describe.serial("task4 counterexamples and real child cancellation", () => {
       test(`B2 owner-return rejects original float proof: ${field}/${suffix}`, async () => {
         await withEnvironment(ci, async () => {
           const { output, boundary } = cohort();
-          expect(await run(output, boundary)).toBe(0);
+          expect(await run(output, boundary, [uid(), gid()])).toBe(0);
           const aggregate = read(join(output, "selected-ci-receipt.json")) as Aggregate;
           const install = aggregate.runs[0];
           assert.ok(install);
@@ -1151,7 +1272,7 @@ describe.serial("task4 counterexamples and real child cancellation", () => {
           for (let index = 0; index < 15; index++)
             write(join(retained, String(index) + "-process.json"), { status: 0 });
           const closed = join(output, "runtime-close-stage.json");
-          ownershipReturn(output);
+          ownershipReturn(output, [uid(), gid()]);
           expect(existsSync(closed)).toBe(true);
           rmSync(closed);
           const receiptPath = join(install.runRoot, "receipt.json");
@@ -1164,7 +1285,7 @@ describe.serial("task4 counterexamples and real child cancellation", () => {
             ),
           );
           expect(() => {
-            ownershipReturn(output);
+            ownershipReturn(output, [uid(), gid()]);
           }).toThrow();
           expect(existsSync(closed)).toBe(false);
         });
@@ -1272,7 +1393,7 @@ describe.serial("task4 counterexamples and real child cancellation", () => {
       }
     };
     await withEnvironment(ci, async () => {
-      expect(await run(output, boundary)).toBe(130);
+      expect(await run(output, boundary, [uid(), gid()])).toBe(130);
     });
     expect(read(join(output, "selected-ci-receipt.json"))).toMatchObject({
       exit: 130,

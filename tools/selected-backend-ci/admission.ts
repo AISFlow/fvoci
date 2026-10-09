@@ -41,7 +41,10 @@ export function allocationExpiry(value: string): number {
   );
   return expiry;
 }
-export function localAllocation(mode: string): LocalGrant {
+export function localAllocation(
+  mode: string,
+  expected: readonly [number, number] = [1000, 1000],
+): LocalGrant {
   assert.equal(process.env.FVOCI_SELECTED_EXECUTION_MODE, "orca-local");
   assert.ok(!process.env.CI && !Object.keys(process.env).some((key) => key.startsWith("GITHUB_")));
   const path = env("FVOCI_SELECTED_LOCAL_ALLOCATION");
@@ -66,7 +69,10 @@ export function localAllocation(mode: string): LocalGrant {
   assert.equal(grant.rootTerminal, env("FVOCI_LOCAL_ROOT_TERMINAL"));
   assert.notEqual(grant.workerTerminal, grant.rootTerminal);
   assert.equal(grant.worktree, root);
-  assert.notEqual(uid(), 0);
+  assert.notEqual(uid(), 0, "refusing root process");
+  assert.equal(uid(), expected[0], "selected runtime actor must be the fixed handoff uid and gid");
+  assert.equal(gid(), expected[1], "selected runtime actor must be the fixed handoff uid and gid");
+  assert.notEqual(grant.uid, 0, "refusing root grant");
   assert.equal(grant.uid, uid());
   assert.equal(grant.gid, gid());
   assert.ok(/^[0-9a-f]{40}$/.test(grant.source) && /^[0-9a-f]{40}$/.test(grant.tree));
@@ -125,6 +131,8 @@ export function identity(mode = "handoff", output?: string): string {
     assert.ok(["handoff", "record-before", "stage", "record-after"].includes(mode));
     assert.equal(process.env.FVOCI_WEB_BUILD_PHASE, "prepare");
   } else {
+    const job = process.env.GITHUB_JOB;
+    assert.ok(job);
     assert.ok(
       [
         "collaboration-flow",
@@ -133,7 +141,7 @@ export function identity(mode = "handoff", output?: string): string {
         "collaboration-sqlite-on",
         "collaboration-postgres-off",
         "collaboration-sqlite-off",
-      ].includes(process.env.GITHUB_JOB),
+      ].includes(job),
     );
     assert.ok(
       process.env.FVOCI_WEB_BUILD_PHASE === undefined ||
