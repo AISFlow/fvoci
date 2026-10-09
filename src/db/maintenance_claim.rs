@@ -491,6 +491,7 @@ mod test_hooks {
     );
     static PAUSES: LazyLock<Mutex<HashMap<(Uuid, u8), Pause>>> = LazyLock::new(Default::default);
     static FAULTS: LazyLock<Mutex<HashSet<(Uuid, u8)>>> = LazyLock::new(Default::default);
+    #[cfg_attr(not(feature = "db-tests"), allow(dead_code))]
     pub(super) fn pause(
         owner: Uuid,
     ) -> (
@@ -509,6 +510,7 @@ mod test_hooks {
             let _ = proceed.await;
         }
     }
+    #[cfg_attr(not(feature = "db-tests"), allow(dead_code))]
     pub(super) fn fault(owner: Uuid, stage: u8) {
         FAULTS.lock().unwrap().insert((owner, stage));
     }

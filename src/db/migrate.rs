@@ -989,6 +989,7 @@ type MigrationControl = Option<SqliteMigrationTestControl>;
 #[cfg(not(feature = "db-tests"))]
 type MigrationControl = ();
 
+#[cfg_attr(not(feature = "db-tests"), allow(clippy::unit_arg))]
 pub fn start_sqlite_migration(path: &std::path::Path) -> Result<SqliteMigration, sqlx::Error> {
     start_sqlite_migration_owned(path, Default::default())
 }
@@ -1111,6 +1112,7 @@ async fn run_sqlite_migration_owned(
         }
     }
     #[cfg(not(feature = "db-tests"))]
+    #[allow(clippy::let_unit_value)]
     let _ = control;
     let result = apply_sqlite_migrations(&backend, Some(cancel)).await;
     // Request cancellation does not cancel any operation above or this drain.
