@@ -43,7 +43,7 @@ export function watchIconRequests(page: Page): string[] {
 
 /** First run of the group: the setup form creates the admin and the workspace
  * (true); later runs sign in (false). */
-export async function ensureSetup(page: Page): Promise<boolean> {
+export async function ensureSetup(page: Page, setupAdmin = admin): Promise<boolean> {
   let created = false;
   await page.goto("/");
   await expect(
@@ -53,12 +53,12 @@ export async function ensureSetup(page: Page): Promise<boolean> {
       .or(page.getByRole("button", { name: "로그인", exact: true })),
   ).toBeVisible();
   if ((await page.getByRole("button", { name: "시작하기" }).count()) > 0) {
-    await page.getByLabel("성").fill(admin.familyName);
-    await page.getByLabel("이름", { exact: true }).fill(admin.givenName);
-    await page.getByLabel("이메일").fill(admin.email);
-    await page.getByLabel("비밀번호").fill(admin.password);
-    await page.getByLabel("워크스페이스 이름").fill(admin.workspaceName);
-    await page.getByLabel("주소(영문)").fill(admin.workspaceSlug);
+    await page.getByLabel("성").fill(setupAdmin.familyName);
+    await page.getByLabel("이름", { exact: true }).fill(setupAdmin.givenName);
+    await page.getByLabel("이메일").fill(setupAdmin.email);
+    await page.getByLabel("비밀번호").fill(setupAdmin.password);
+    await page.getByLabel("워크스페이스 이름").fill(setupAdmin.workspaceName);
+    await page.getByLabel("주소(영문)").fill(setupAdmin.workspaceSlug);
     await page.getByRole("button", { name: "시작하기" }).click();
     created = true;
   } else {
@@ -66,7 +66,7 @@ export async function ensureSetup(page: Page): Promise<boolean> {
       page.url().includes("/login") ||
       (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0
     ) {
-      await login(page, admin.email, admin.password);
+      await login(page, setupAdmin.email, setupAdmin.password);
     }
   }
   // Setup starts at '/', then may cross Vue /login before returning home.
@@ -78,15 +78,34 @@ export async function ensureSetup(page: Page): Promise<boolean> {
 
 /** The instance, its admin and a workspace member, made on the group's
  * fresh database (a repeated run finds them). */
-export async function setupInstance(browser: Browser, baseURL: string | undefined): Promise<void> {
+export async function setupInstance(
+  browser: Browser,
+  baseURL: string | undefined,
+  isolatedAdmin?: typeof admin,
+): Promise<void> {
   const context = await browser.newContext({ baseURL });
+  const setupAdmin = isolatedAdmin ?? admin;
   try {
-    if (!(await ensureSetup(await context.newPage()))) {
+    if (isolatedAdmin !== undefined) {
+      // Repeated entity runs seed their own owner without charging another
+      // login to the original setup account or the shared client address.
+      const status = await context.request.get("/api/v1/setup");
+      expect(status.ok(), await status.text()).toBe(true);
+      if (!(await readJson(status, flowSchemas.setup)).needed) {
+        createE2eUser(setupAdmin.email, setupAdmin.password, setupAdmin.givenName, {
+          familyName: setupAdmin.familyName,
+          workspaceSlug: setupAdmin.workspaceSlug,
+          membershipRole: "owner",
+        });
+        return;
+      }
+    }
+    if (!(await ensureSetup(await context.newPage(), setupAdmin))) {
       return;
     }
     createE2eUser(member.email, member.password, member.givenName, {
       familyName: member.familyName,
-      workspaceSlug: admin.workspaceSlug,
+      workspaceSlug: setupAdmin.workspaceSlug,
       membershipRole: "member",
     });
   } finally {
