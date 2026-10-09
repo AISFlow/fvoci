@@ -35,7 +35,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@iconify-json/lucide": "1.2.137",
+    "@iconify-json/lucide": "1.2.142",
     "@playwright/test": "1.63.0",
     "@types/node": "^26.6.2",
     "@vitejs/plugin-vue": "6.0.9",
