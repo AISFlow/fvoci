@@ -819,9 +819,11 @@ class WebBuildCacheTest(unittest.TestCase):
             with self.subTest(path=path):
                 jobs = self.workflow()
                 ordinary = next(step['with'] for step in jobs['workspace-browser-build']['steps']
-                                if step.get('with', {}).get('path') == path)
+                                if step.get('uses', '').startswith('actions/cache/save@')
+                                and step.get('with', {}).get('path') == path)
                 selected = next(step['with'] for step in jobs['collaboration-build']['steps']
-                                if step.get('with', {}).get('path') == path)
+                                if step.get('uses', '').startswith('actions/cache/save@')
+                                and step.get('with', {}).get('path') == path)
                 ordinary['key'] = selected['key']
                 with self.assertRaisesRegex(AssertionError, 'duplicate Web build-cache writer'):
                     self.assert_unique_writer_keys(jobs)
