@@ -66,7 +66,7 @@ services:
       start_period: 60s
 
   postgres:
-    image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
+    image: public.ecr.aws/docker/library/postgres@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
     command: ["postgres", "-c", "max_connections=150"]
     environment:
       POSTGRES_USER: fvoci_owner
