@@ -240,8 +240,12 @@ export interface GitResult {
 }
 export const gitOperations = {
   run(repo: string, ...args: string[]): GitResult {
-    const p = Bun.spawnSync(["git", ...args], { cwd: repo, stdout: "pipe", stderr: "pipe" });
-    return { returncode: p.exitCode, stdout: p.stdout, stderr: p.stderr };
+    // Bun's sync declaration omits the null exit code observed on signal termination.
+    const p: { exitCode: number | null; stdout: Uint8Array; stderr: Uint8Array } = Bun.spawnSync(
+      ["git", ...args],
+      { cwd: repo, stdout: "pipe", stderr: "pipe" },
+    );
+    return { returncode: p.exitCode ?? -1, stdout: p.stdout, stderr: p.stderr };
   },
 };
 const gitText = (p: GitResult) => new TextDecoder().decode(p.stdout).trim();
@@ -252,23 +256,23 @@ export function gitRevParse(
 ): [string | null, string | null] {
   if (requireShaRef && !validateSha(ref)) return [null, "SHA_INVALID"];
   const p = gitOperations.run(repo, "rev-parse", ref);
-  if (p.returncode) return [null, "REV_PARSE_FAILED"];
+  if (p.returncode !== 0) return [null, "REV_PARSE_FAILED"];
   const sha = gitText(p);
   return validateSha(sha) ? [sha, null] : [null, "SHA_INVALID"];
 }
 export function gitMergeBase(repo: string, a: string, b: string): [string | null, string | null] {
   const p = gitOperations.run(repo, "merge-base", a, b);
-  if (p.returncode) return [null, "MERGE_BASE_FAILED"];
+  if (p.returncode !== 0) return [null, "MERGE_BASE_FAILED"];
   const sha = gitText(p);
   return validateSha(sha) ? [sha, null] : [null, "SHA_INVALID"];
 }
 export function gitDiffPaths(repo: string, base: string, head: string): [string[], string | null] {
   const p = gitOperations.run(repo, "diff", "--name-status", "-z", "-M", base, head);
-  return p.returncode ? [[], "GIT_DIFF_FAILED"] : parseNameStatusZ(p.stdout);
+  return p.returncode !== 0 ? [[], "GIT_DIFF_FAILED"] : parseNameStatusZ(p.stdout);
 }
 export function gitFetchOrigin(repo: string, ...refs: string[]): string | null {
   if (refs.some((ref) => !validateSha(ref))) return "SHA_INVALID";
-  return gitOperations.run(repo, "fetch", "--no-tags", "origin", ...refs).returncode
+  return gitOperations.run(repo, "fetch", "--no-tags", "origin", ...refs).returncode !== 0
     ? "FETCH_FAILED"
     : null;
 }
@@ -298,7 +302,7 @@ export function ensureCommitShas(repo: string, ...shas: string[]): string | null
 export function gitCommitParents(repo: string, sha: string): [string[] | null, string | null] {
   if (!validateSha(sha)) return [null, "SHA_INVALID"];
   const p = gitOperations.run(repo, "rev-list", "--parents", "-n", "1", sha);
-  if (p.returncode) return [null, "REV_LIST_PARENTS_FAILED"];
+  if (p.returncode !== 0) return [null, "REV_LIST_PARENTS_FAILED"];
   const parts = gitText(p).split(/\s+/).filter(Boolean);
   if (!parts.length) return [null, "REV_LIST_PARENTS_EMPTY"];
   if (parts[0] !== sha) return [null, "REV_LIST_COMMIT_MISMATCH"];
@@ -317,7 +321,7 @@ export function prCheckoutNarrowBlock(
   if (parents[1] !== head) return "FULL_PR_MERGE_PARENTS_MISMATCH";
   if (
     parents[0] !== base &&
-    gitOperations.run(repo, "merge-base", "--is-ancestor", base, parents[0] ?? "").returncode
+    gitOperations.run(repo, "merge-base", "--is-ancestor", base, parents[0] ?? "").returncode !== 0
   )
     return "FULL_PR_MERGE_PARENTS_MISMATCH";
   return null;

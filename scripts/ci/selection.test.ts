@@ -1994,3 +1994,207 @@ test("AgentDocsGateTest.test_full_plan_selected_bad_result_rejected", () => {
     }
   }
 });
+
+const SIGNAL_BASE = "a".repeat(40),
+  SIGNAL_HEAD = "b".repeat(40),
+  SIGNAL_ADVANCED_BASE = "c".repeat(40),
+  SIGNAL_TESTED = "d".repeat(40);
+type SignalOperation = "rev-parse" | "merge-base" | "diff" | "fetch" | "rev-list" | "ancestry";
+type SignalDiffOutput = "none" | "record" | "truncated";
+const signalObservations: {
+  operation: SignalOperation;
+  diffOutput: SignalDiffOutput;
+  signal: string | undefined;
+  exitCode: number | null;
+  normalizedReturncode: number;
+  executedFixture: string;
+}[] = [];
+let signalChildCount = 0;
+afterAll(() => {
+  console.log("Git signal observations: " + JSON.stringify(signalObservations));
+  console.log("Git SIGKILL child count: " + String(signalChildCount));
+});
+function withSignaledGit(
+  operation: SignalOperation,
+  args: string[],
+  check: (repo: string) => void,
+  diffOutput: SignalDiffOutput = "none",
+) {
+  const repo = tmp(),
+    bin = join(repo, "bin"),
+    executable = join(bin, "git"),
+    executed = join(repo, "executed"),
+    fixturePath = `${bin}:${process.env.PATH ?? ""}`;
+  mkdirSync(bin);
+  // Only this fixture child kills itself. It never delegates to a real git process.
+  writeFileSync(
+    executable,
+    `#!/bin/sh
+printf '%s\\n' "$0" "$PATH" > "$FVOCI_TEST_GIT_EXECUTED"
+operation=$1
+if [ "$operation" = merge-base ] && [ "$2" = --is-ancestor ]; then
+  operation=ancestry
+fi
+if [ "$operation" = "$FVOCI_TEST_GIT_SIGNAL" ]; then
+  case "$operation" in
+    rev-parse|merge-base) printf '%s\\n' '${SIGNAL_BASE}' ;;
+    rev-list) printf '%s\\n' '${SIGNAL_TESTED} ${SIGNAL_ADVANCED_BASE} ${SIGNAL_HEAD}' ;;
+    diff)
+      case "$FVOCI_TEST_GIT_DIFF_OUTPUT" in
+        record) printf 'M\\000AGENTS.md\\000' ;;
+        truncated) printf 'M\\000AGENTS.md\\000M\\000docs/rewrite' ;;
+      esac
+      ;;
+  esac
+  kill -9 "$$"
+fi
+case "$operation" in
+  rev-parse)
+    if [ "$2" = HEAD ]; then printf '%s\\n' '${SIGNAL_TESTED}'; else printf '%s\\n' "$2"; fi
+    ;;
+  merge-base) printf '%s\\n' '${SIGNAL_BASE}' ;;
+  rev-list) printf '%s\\n' '${SIGNAL_TESTED} ${SIGNAL_ADVANCED_BASE} ${SIGNAL_HEAD}' ;;
+  diff) printf 'M\\000AGENTS.md\\000' ;;
+  cat-file|fetch|ancestry) exit 0 ;;
+  *) exit 2 ;;
+esac
+`,
+    { mode: 0o700 },
+  );
+  withEnv(
+    {
+      PATH: fixturePath,
+      FVOCI_TEST_GIT_SIGNAL: operation,
+      FVOCI_TEST_GIT_DIFF_OUTPUT: diffOutput,
+      FVOCI_TEST_GIT_EXECUTED: executed,
+    },
+    () => {
+      const env = { ...process.env, PATH: fixturePath },
+        realSpawn = Bun.spawnSync.bind(Bun);
+      expect(Bun.which("git", { cwd: repo, PATH: env.PATH })).toBe(executable);
+      // Spawn's default env is a startup snapshot; explicitly pass this fixture's env.
+      // Forward to the real API so run() and every caller observe actual child exits.
+      const spawn = spyOn(Bun, "spawnSync").mockImplementation(
+        <
+          const In extends Bun.Spawn.Writable = "ignore",
+          const Out extends Bun.Spawn.Readable = "pipe",
+          const Err extends Bun.Spawn.Readable = "pipe",
+        >(
+          cmd: string[] | (Bun.Spawn.SpawnSyncOptions<In, Out, Err> & { cmd: string[] }),
+          opts?: Bun.Spawn.SpawnSyncOptions<In, Out, Err>,
+        ) => {
+          const argv = Array.isArray(cmd) ? cmd : cmd.cmd,
+            options = Array.isArray(cmd) ? opts : cmd;
+          expect(argv[0]).toBe("git");
+          expect(options?.cwd).toBe(repo);
+          if (existsSync(executed)) rmSync(executed);
+          const result = realSpawn(argv, { ...options, env });
+          expect(read(executed)).toBe(`${executable}\n${env.PATH}\n`);
+          if (result.signalCode === "SIGKILL") signalChildCount++;
+          return result;
+        },
+      );
+      try {
+        const probe = Bun.spawnSync(["git", ...args], {
+          cwd: repo,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        expect(probe.exitCode).toBeNull();
+        expect(probe.signalCode).toBe("SIGKILL");
+        if (diffOutput !== "none")
+          expect(probe.stdout).toEqual(
+            Buffer.from(
+              diffOutput === "record" ? "M\0AGENTS.md\0" : "M\0AGENTS.md\0M\0docs/rewrite",
+            ),
+          );
+        const normalized = S.gitOperations.run(repo, ...args);
+        expect(normalized.returncode).toBe(-1);
+        expect(normalized.stdout).toEqual(probe.stdout);
+        expect(normalized.stderr).toEqual(probe.stderr);
+        signalObservations.push({
+          operation,
+          diffOutput,
+          signal: probe.signalCode,
+          exitCode: probe.exitCode,
+          normalizedReturncode: normalized.returncode,
+          executedFixture: "bin/git",
+        });
+        check(repo);
+      } finally {
+        spawn.mockRestore();
+      }
+    },
+  );
+}
+test("GitSignalFailureTest.test_rev_parse_sigkill_fails_closed", () => {
+  withSignaledGit("rev-parse", ["rev-parse", SIGNAL_BASE], (repo) => {
+    expect(S.gitRevParse(repo, SIGNAL_BASE)).toEqual([null, "REV_PARSE_FAILED"]);
+  });
+});
+test("GitSignalFailureTest.test_merge_base_sigkill_fails_closed", () => {
+  withSignaledGit("merge-base", ["merge-base", SIGNAL_BASE, SIGNAL_HEAD], (repo) => {
+    expect(S.gitMergeBase(repo, SIGNAL_BASE, SIGNAL_HEAD)).toEqual([null, "MERGE_BASE_FAILED"]);
+  });
+});
+test("GitSignalFailureTest.test_diff_sigkill_fails_closed", () => {
+  withSignaledGit(
+    "diff",
+    ["diff", "--name-status", "-z", "-M", SIGNAL_BASE, SIGNAL_HEAD],
+    (repo) => {
+      expect(S.gitDiffPaths(repo, SIGNAL_BASE, SIGNAL_HEAD)).toEqual([[], "GIT_DIFF_FAILED"]);
+    },
+  );
+});
+test("GitSignalFailureTest.test_fetch_sigkill_fails_closed", () => {
+  withSignaledGit("fetch", ["fetch", "--no-tags", "origin", SIGNAL_HEAD], (repo) => {
+    expect(S.gitFetchOrigin(repo, SIGNAL_HEAD)).toBe("FETCH_FAILED");
+  });
+});
+test("GitSignalFailureTest.test_rev_list_sigkill_fails_closed", () => {
+  withSignaledGit("rev-list", ["rev-list", "--parents", "-n", "1", SIGNAL_TESTED], (repo) => {
+    expect(S.gitCommitParents(repo, SIGNAL_TESTED)).toEqual([null, "REV_LIST_PARENTS_FAILED"]);
+  });
+});
+test("GitSignalFailureTest.test_ancestry_sigkill_fails_closed", () => {
+  withSignaledGit(
+    "ancestry",
+    ["merge-base", "--is-ancestor", SIGNAL_BASE, SIGNAL_ADVANCED_BASE],
+    (repo) => {
+      expect(S.prCheckoutNarrowBlock(repo, SIGNAL_TESTED, SIGNAL_BASE, SIGNAL_HEAD)).toBe(
+        "FULL_PR_MERGE_PARENTS_MISMATCH",
+      );
+    },
+  );
+});
+test("GitSignalFailureTest.test_partial_diff_sigkill_discards_paths", () => {
+  for (const output of ["record", "truncated"] as const)
+    withSignaledGit(
+      "diff",
+      ["diff", "--name-status", "-z", "-M", SIGNAL_BASE, SIGNAL_HEAD],
+      (repo) => {
+        expect(S.gitDiffPaths(repo, SIGNAL_BASE, SIGNAL_HEAD)).toEqual([[], "GIT_DIFF_FAILED"]);
+        expect(S.diffPathsForPr(repo, SIGNAL_BASE, SIGNAL_HEAD)).toEqual([
+          null,
+          "GIT_DIFF_FAILED",
+          SIGNAL_BASE,
+        ]);
+        const input = withEnv({ GITHUB_SHA: SIGNAL_TESTED }, () =>
+          S.resolveSelectionInputs(
+            repo,
+            { pull_request: { base: { sha: SIGNAL_BASE }, head: { sha: SIGNAL_HEAD } } },
+            "pull_request",
+          ),
+        );
+        expect(input.paths).toBeNull();
+        expect(input.fatal_error).toBe("GIT_DIFF_FAILED");
+        for (const [workflow, p] of Object.entries(all(input.paths, input))) {
+          expect(p.mode).toBe("full");
+          expect(p.reason_code).toBe("GIT_DIFF_FAILED");
+          expect(p.plan_ok).toBe(false);
+          full(workflow, p);
+        }
+      },
+      output,
+    );
+});
