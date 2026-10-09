@@ -1,3 +1,5 @@
+mod evidence_hash;
+
 use std::ffi::OsString;
 use std::fmt;
 use std::process::ExitCode;
@@ -8,17 +10,19 @@ FVOCI development tasks
 Usage: cargo xtask <command>
 
 Commands:
-  help          Show this help
+  help            Show this help
+  evidence-hash   Hash a commit, range, or directive comment
 
 Options:
-  -h, --help    Show this help
+  -h, --help      Show this help
 
-No task commands are registered yet.
+Run `cargo xtask evidence-hash --help` for evidence-hash options.
 ";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Help,
+    EvidenceHash(evidence_hash::Parsed),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -26,6 +30,7 @@ enum CliError {
     MissingCommand,
     UnknownCommand(OsString),
     UnexpectedArgument(OsString),
+    Evidence(String),
 }
 
 impl fmt::Display for CliError {
@@ -36,20 +41,26 @@ impl fmt::Display for CliError {
             Self::UnexpectedArgument(argument) => {
                 write!(formatter, "unexpected argument {argument:?}")
             }
+            Self::Evidence(message) => write!(formatter, "{message}"),
         }
     }
 }
 
 fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, CliError> {
     let argument = args.next().ok_or(CliError::MissingCommand)?;
-    let command = match argument.to_str() {
-        Some("help" | "-h" | "--help") => Command::Help,
-        _ => return Err(CliError::UnknownCommand(argument)),
-    };
-    if let Some(argument) = args.next() {
-        return Err(CliError::UnexpectedArgument(argument));
+    match argument.to_str() {
+        Some("help" | "-h" | "--help") => {
+            if let Some(argument) = args.next() {
+                return Err(CliError::UnexpectedArgument(argument));
+            }
+            Ok(Command::Help)
+        }
+        Some("evidence-hash") => match evidence_hash::parse_args(args.collect()) {
+            Ok(parsed) => Ok(Command::EvidenceHash(parsed)),
+            Err(error) => Err(CliError::Evidence(error.to_string())),
+        },
+        _ => Err(CliError::UnknownCommand(argument)),
     }
-    Ok(command)
 }
 
 fn run(command: Command) -> ExitCode {
@@ -58,12 +69,17 @@ fn run(command: Command) -> ExitCode {
             print!("{HELP}");
             ExitCode::SUCCESS
         }
+        Command::EvidenceHash(parsed) => evidence_hash::execute(&parsed),
     }
 }
 
 fn main() -> ExitCode {
     match parse_args(std::env::args_os().skip(1)) {
         Ok(command) => run(command),
+        Err(CliError::Evidence(message)) => {
+            eprintln!("error: {message}\n\n{}", evidence_hash::help());
+            ExitCode::from(2)
+        }
         Err(error) => {
             eprintln!("error: {error}\n\n{HELP}");
             ExitCode::from(2)
@@ -124,6 +140,14 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn accepts_evidence_hash_help() {
+        assert_eq!(
+            parse_args([OsString::from("evidence-hash"), OsString::from("--help")].into_iter()),
+            Ok(Command::EvidenceHash(super::evidence_hash::Parsed::Help))
+        );
     }
 
     #[cfg(unix)]
