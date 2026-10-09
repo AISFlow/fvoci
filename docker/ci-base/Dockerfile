@@ -1,7 +1,7 @@
 # Tool-only CI image; no application source, credentials or SQLite prefix.
 # Borrow the Debian bookworm CA bundle from the digest-pinned Rust image only
 # for HTTPS bootstrap before apt installs Ubuntu's ca-certificates package.
-FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS rust-toolchain
+FROM public.ecr.aws/docker/library/rust@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS rust-toolchain
 RUN rustup set profile minimal \
  && rustup component add --toolchain 1.98.1 rustfmt clippy \
  && if rustup component list --installed | grep -q '^rust-docs'; then rustup component remove rust-docs; fi \
@@ -9,7 +9,7 @@ RUN rustup set profile minimal \
  && chmod -R go-w /usr/local/rustup /usr/local/cargo
 
 # Ubuntu's index includes native linux/amd64 and linux/arm64 images.
-FROM ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 AS system-tools
+FROM public.ecr.aws/docker/library/ubuntu@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 AS system-tools
 
 ARG UBUNTU_SNAPSHOT=20261008T000000Z
 ENV LIBCLANG_PATH=/usr/lib/llvm-18/lib

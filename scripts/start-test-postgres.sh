@@ -19,9 +19,9 @@ fi
 # matrix in .github/workflows/rust.yml.
 PG_MAJOR="${FVOCI_TEST_PG_MAJOR-18}"
 case "$PG_MAJOR" in
-  16) IMAGE="postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54" ;;
-  17) IMAGE="postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f" ;;
-  18) IMAGE="postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db" ;;
+  16) IMAGE="public.ecr.aws/docker/library/postgres@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54" ;;
+  17) IMAGE="public.ecr.aws/docker/library/postgres@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f" ;;
+  18) IMAGE="public.ecr.aws/docker/library/postgres@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db" ;;
   *)
     echo "FVOCI_TEST_PG_MAJOR must be 16, 17 or 18 (got '$PG_MAJOR')" >&2
     exit 2

@@ -68,7 +68,7 @@ jobs:
     timeout-minutes: ${{ matrix.check == 'native-extraction' && 30 || 15 }}
     services:
       postgres:
-        image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
+        image: public.ecr.aws/docker/library/postgres@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
         env:
           POSTGRES_PASSWORD: ci-ephemeral-only
         ports:

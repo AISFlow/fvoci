@@ -31,7 +31,7 @@ COMPOSE_FILE="$ROOT/infra/rust/compose.yml"
 PROJECT=""
 ENV_FILE=""
 INPUT=""
-TAR_IMAGE="postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db"
+TAR_IMAGE="public.ecr.aws/docker/library/postgres@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db"
 VOLUME_KEYS=(pgdata storage searchdata meili_key)
 
 usage() {
