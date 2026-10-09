@@ -368,3 +368,20 @@ opt-level = 3
 markdown = { path = "vendor/markdown" }
 # Borrowed typed Hrana code accessor; exact upstream delta is documented in PATCHES.md.
 libsql = { path = "vendor/libsql-0.9.30" }
+
+# Development tasks only. Path dependencies stay outside the workspace so the
+# root lockfile resolution is unchanged. The root package stays the default
+# member so product cargo invocations keep selecting fvoci-server.
+[workspace]
+members = ["xtask"]
+default-members = ["."]
+exclude = [
+    "compat",
+    "crates/collab-engine",
+    "crates/document-extract",
+    "crates/document-extract-client",
+    "crates/vendor/yrs-0.28.0",
+    "vendor/libsql-0.9.30",
+    "vendor/markdown",
+]
+resolver = "2"
