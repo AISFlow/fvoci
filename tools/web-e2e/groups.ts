@@ -96,7 +96,6 @@ export function assertShardCoverage(
   shards: readonly (readonly ListedTest[])[],
 ): void {
   assertRunnableList(full);
-  for (const shard of shards) assertRunnableList(shard);
   const assigned = shards.flat();
   const expected = new Map(full.map((test) => [test.id, test]));
   if (
@@ -105,6 +104,7 @@ export function assertShardCoverage(
   ) {
     throw new Error("Shard coverage has missing or duplicate tests");
   }
+  for (const shard of shards) assertRunnableList(shard);
   for (const test of assigned) {
     const original = expected.get(test.id);
     if (
