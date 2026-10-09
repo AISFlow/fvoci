@@ -158,20 +158,128 @@ function splitSemicolons(value: string): string[] {
   return parts;
 }
 
+const TOKEN = /^[!#$%&'+\-.0-9A-Z^_`a-z|~]$/;
+
+type Parameter = {
+  name: string;
+  section: number;
+  extended: boolean;
+  charset: string;
+  value: string;
+};
+
+function isWsp(char: string | undefined): boolean {
+  return char === " " || char === "\t";
+}
+
+function parseParameter(piece: string): Parameter | null {
+  let i = 0;
+  while (isWsp(piece[i])) i += 1;
+  const nameStart = i;
+  while (TOKEN.test(piece[i] ?? "")) i += 1;
+  if (i === nameStart) return null;
+  const name = piece.slice(nameStart, i).toLowerCase();
+  let section = 0;
+  let extended = false;
+  let sawStar = false;
+  if (piece[i] === "*") {
+    sawStar = true;
+    i += 1;
+    if ((piece[i] ?? "") >= "0" && (piece[i] ?? "") <= "9") {
+      const sectionStart = i;
+      while ((piece[i] ?? "") >= "0" && (piece[i] ?? "") <= "9") i += 1;
+      section = Number(piece.slice(sectionStart, i));
+      if (piece[i] === "*") {
+        extended = true;
+        i += 1;
+      }
+    } else {
+      extended = true;
+    }
+  }
+  if (isWsp(piece[i])) {
+    if (sawStar) return null;
+    while (isWsp(piece[i])) i += 1;
+  }
+  if (piece[i] !== "=") return null;
+  i += 1;
+  while (isWsp(piece[i])) i += 1;
+  let raw = piece.slice(i);
+  const quoted = raw.startsWith('"') && raw.endsWith('"') && raw.length >= 2;
+  if (quoted) raw = raw.slice(1, -1);
+  else if (raw.trim().length === 0) return null;
+  let charset = "us-ascii";
+  let value = raw;
+  if (extended && section === 0) {
+    const first = raw.indexOf("'");
+    const second = first < 0 ? -1 : raw.indexOf("'", first + 1);
+    if (first >= 0 && second >= first + 1) {
+      charset = (raw.slice(0, first).toLowerCase() || "us-ascii");
+      value = raw.slice(second + 1);
+    }
+  }
+  return { name, section, extended, charset, value };
+}
+
+function percentDecode(value: string): Uint8Array {
+  const bytes: number[] = [];
+  for (let i = 0; i < value.length; i += 1) {
+    const hex = value.slice(i + 1, i + 3);
+    if (value[i] === "%" && /^[0-9A-Fa-f]{2}$/.test(hex)) {
+      bytes.push(Number.parseInt(hex, 16));
+      i += 2;
+      continue;
+    }
+    bytes.push((value.charCodeAt(i) ?? 0) & 0xff);
+  }
+  return Uint8Array.from(bytes);
+}
+
+function contentParameters(pieces: string[]): Map<string, string> {
+  const grouped = new Map<string, Parameter[]>();
+  for (const piece of pieces) {
+    const parameter = parseParameter(piece);
+    if (!parameter) continue;
+    const list = grouped.get(parameter.name) ?? [];
+    list.push(parameter);
+    grouped.set(parameter.name, list);
+  }
+  const params = new Map<string, string>();
+  for (const [name, parts] of grouped) {
+    let ordered = [...parts].sort((left, right) => left.section - right.section);
+    const first = ordered[0];
+    if (!first) continue;
+    if (!first.extended && ordered.length > 1 && ordered[1]?.section === 0) ordered = ordered.slice(0, 1);
+    const values: string[] = [];
+    let expect = 0;
+    for (const parameter of ordered) {
+      if (parameter.section !== expect) {
+        if (!parameter.extended) continue;
+      }
+      expect += 1;
+      if (!parameter.extended) {
+        values.push(parameter.value);
+        continue;
+      }
+      let decoded: string;
+      try {
+        decoded = decodeCharset(percentDecode(parameter.value), first.charset);
+      } catch (err) {
+        if (!(err instanceof UnknownCharsetError)) throw err;
+        decoded = decodeAscii(percentDecode(parameter.value));
+      }
+      values.push(decoded);
+    }
+    params.set(name, values.join(""));
+  }
+  return params;
+}
+
 function contentType(headers: Headers): { type: string; params: Map<string, string> } {
   const raw = headers.get("content-type") ?? "text/plain";
   const pieces = splitSemicolons(raw);
   const type = (pieces.shift() ?? "text/plain").trim().toLowerCase();
-  const params = new Map<string, string>();
-  for (const piece of pieces) {
-    const eq = piece.indexOf("=");
-    if (eq < 0) continue;
-    const key = piece.slice(0, eq).trim().toLowerCase();
-    let val = piece.slice(eq + 1).trim();
-    if (val.startsWith('"') && val.endsWith('"') && val.length >= 2) val = val.slice(1, -1);
-    params.set(key, val);
-  }
-  return { type, params };
+  return { type, params: contentParameters(pieces) };
 }
 
 function isAttachment(headers: Headers): boolean {
@@ -206,13 +314,140 @@ function parseMime(data: string): Mime {
   return mime;
 }
 
-function decodeCharset(bytes: Uint8Array, charset: string): string {
-  try {
-    return new TextDecoder(charset.trim()).decode(bytes);
-  } catch (err) {
-    if (err instanceof RangeError) throw new UnknownCharsetError(charset);
-    throw err;
+// Labels Python's codecs.lookup accepts and this decoder matches on every
+// byte 0x00-0xFF (singly and as one buffer). TextDecoder is used only for the
+// labels where that comparison matched. ASCII and ISO-8859-1 are decoded
+// here because TextDecoder maps both through windows-1252.
+const ASCII_LABELS = new Set([
+  "646",
+  "ansi_x3.4-1968",
+  "ansi_x3.4_1968",
+  "ansi_x3.4_1986",
+  "ansi_x3_4_1968",
+  "ascii",
+  "cp367",
+  "csascii",
+  "ibm367",
+  "iso646_us",
+  "iso_646.irv_1991",
+  "iso_ir_6",
+  "us",
+  "us-ascii",
+  "us_ascii",
+]);
+
+const LATIN1_LABELS = new Set([
+  "8859",
+  "cp819",
+  "csisolatin1",
+  "ibm819",
+  "iso-8859-1",
+  "iso8859",
+  "iso8859-1",
+  "iso8859_1",
+  "iso_8859_1",
+  "iso_8859_1_1987",
+  "iso_ir_100",
+  "l1",
+  "latin",
+  "latin-1",
+  "latin1",
+  "latin_1",
+]);
+
+const UTF8_LABELS = new Set(["cp65001", "u8", "utf", "utf-8", "utf8", "utf8_ucs2", "utf8_ucs4", "utf_8"]);
+
+const TEXT_DECODER_LABELS = new Set([
+  "866",
+  "arabic",
+  "cp1256",
+  "cp866",
+  "csibm866",
+  "csisolatin2",
+  "csisolatin3",
+  "csisolatin4",
+  "csisolatin6",
+  "csisolatinarabic",
+  "csisolatincyrillic",
+  "csisolatingreek",
+  "csisolatinhebrew",
+  "cskoi8r",
+  "cyrillic",
+  "elot_928",
+  "greek",
+  "greek8",
+  "hebrew",
+  "ibm866",
+  "iso-8859-15",
+  "iso-8859-2",
+  "koi8-r",
+  "koi8_r",
+  "l2",
+  "l3",
+  "l4",
+  "l6",
+  "l9",
+  "latin2",
+  "latin3",
+  "latin4",
+  "latin6",
+  "macintosh",
+  "utf-16",
+  "utf-16be",
+  "utf-16le",
+]);
+
+// Python's cp125x leaves these bytes undefined (U+FFFD). TextDecoder emits a
+// C1 control or a different character for the same byte.
+const CORRECTED_SINGLE_BYTE = new Map<string, { decoder: string; undefinedBytes: ReadonlySet<number> }>([
+  ["1250", { decoder: "cp1250", undefinedBytes: new Set([0x81, 0x83, 0x88, 0x90, 0x98]) }],
+  ["1251", { decoder: "cp1251", undefinedBytes: new Set([0x98]) }],
+  ["1252", { decoder: "windows-1252", undefinedBytes: new Set([0x81, 0x8d, 0x8f, 0x90, 0x9d]) }],
+  ["cp1250", { decoder: "cp1250", undefinedBytes: new Set([0x81, 0x83, 0x88, 0x90, 0x98]) }],
+  ["cp1251", { decoder: "cp1251", undefinedBytes: new Set([0x98]) }],
+  ["cp1252", { decoder: "cp1252", undefinedBytes: new Set([0x81, 0x8d, 0x8f, 0x90, 0x9d]) }],
+  ["cp1253", { decoder: "cp1253", undefinedBytes: new Set([0x81, 0x88, 0x8a, 0x8c, 0x8d, 0x8e, 0x8f, 0x90, 0x98, 0x9a, 0x9c, 0x9d, 0x9e, 0x9f]) }],
+  ["cp1254", { decoder: "cp1254", undefinedBytes: new Set([0x81, 0x8d, 0x8e, 0x8f, 0x90, 0x9d, 0x9e]) }],
+  ["cp1255", { decoder: "cp1255", undefinedBytes: new Set([0x81, 0x8a, 0x8c, 0x8d, 0x8e, 0x8f, 0x90, 0x9a, 0x9c, 0x9d, 0x9e, 0x9f, 0xca]) }],
+  ["cp1257", { decoder: "cp1257", undefinedBytes: new Set([0x81, 0x83, 0x88, 0x8a, 0x8c, 0x90, 0x98, 0x9a, 0x9c, 0x9f]) }],
+  ["cp1258", { decoder: "cp1258", undefinedBytes: new Set([0x81, 0x8a, 0x8d, 0x8e, 0x8f, 0x90, 0x9a, 0x9d, 0x9e]) }],
+  ["windows-1252", { decoder: "windows-1252", undefinedBytes: new Set([0x81, 0x8d, 0x8f, 0x90, 0x9d]) }],
+  ["windows_1250", { decoder: "cp1250", undefinedBytes: new Set([0x81, 0x83, 0x88, 0x90, 0x98]) }],
+  ["windows_1251", { decoder: "cp1251", undefinedBytes: new Set([0x98]) }],
+  ["windows_1252", { decoder: "windows-1252", undefinedBytes: new Set([0x81, 0x8d, 0x8f, 0x90, 0x9d]) }],
+]);
+
+function decodeAscii(bytes: Uint8Array): string {
+  let out = "";
+  for (const byte of bytes) out += byte < 0x80 ? String.fromCharCode(byte) : "\uFFFD";
+  return out;
+}
+
+function decodeLatin1(bytes: Uint8Array): string {
+  let out = "";
+  for (const byte of bytes) out += String.fromCharCode(byte);
+  return out;
+}
+
+function decodeCorrected(decoder: string, bytes: Uint8Array, undefinedBytes: ReadonlySet<number>): string {
+  const decoded = new TextDecoder(decoder).decode(bytes);
+  const chars = [...decoded];
+  if (chars.length !== bytes.length) throw new UnknownCharsetError(decoder);
+  for (let i = 0; i < bytes.length; i += 1) {
+    if (undefinedBytes.has(bytes[i] ?? 0)) chars[i] = "\uFFFD";
   }
+  return chars.join("");
+}
+
+function decodeCharset(bytes: Uint8Array, charset: string): string {
+  const label = charset.trim().toLowerCase();
+  if (ASCII_LABELS.has(label)) return decodeAscii(bytes);
+  if (LATIN1_LABELS.has(label)) return decodeLatin1(bytes);
+  if (UTF8_LABELS.has(label)) return new TextDecoder("utf-8").decode(bytes);
+  const corrected = CORRECTED_SINGLE_BYTE.get(label);
+  if (corrected) return decodeCorrected(corrected.decoder, bytes, corrected.undefinedBytes);
+  if (TEXT_DECODER_LABELS.has(label)) return new TextDecoder(label).decode(bytes);
+  throw new UnknownCharsetError(charset);
 }
 
 function decodeQuotedPrintable(input: string): Uint8Array {
@@ -278,7 +513,8 @@ function decodeEncodedWords(value: string): string {
       decoded = decodeCharset(bytes, charset);
     } catch (err) {
       if (!(err instanceof UnknownCharsetError)) throw err;
-      decoded = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+      // Python keeps the message and shows one U+FFFD per undecodable byte.
+      decoded = decodeAscii(bytes);
     }
     if (!(previous && /^[ \t]*$/.test(gap))) out += gap;
     out += decoded;

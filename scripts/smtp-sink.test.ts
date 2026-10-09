@@ -1,3 +1,4 @@
+import { once } from "node:events";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import net from "node:net";
@@ -33,7 +34,10 @@ afterEach(async () => {
 });
 
 function command(kind: Kind, args: string[]): string[] {
-  return kind === "py" ? ["python3", python, ...args] : ["bun", typescript, ...args];
+  // process.execPath is the bun binary running this file. "bun" on PATH may be
+  // a wrapper that starts the real bun as a child; proc.kill() then leaves that
+  // child alive and the stdout pipe open.
+  return kind === "py" ? ["python3", python, ...args] : [process.execPath, typescript, ...args];
 }
 
 async function tempDir(): Promise<string> {
@@ -114,51 +118,43 @@ class LineBuffer {
   }
 }
 
-function connect(port: number): Promise<{ socket: net.Socket; lines: LineBuffer }> {
+function connect(port: number): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection({ host: "127.0.0.1", port });
+    const socket = net.createConnection({ host: "127.0.0.1", port }, () => resolve(socket));
     socket.setNoDelay(true);
-    const lines = new LineBuffer(socket);
-    socket.once("connect", () => resolve({ socket, lines }));
-    socket.once("error", reject);
+    socket.on("error", reject);
   });
 }
 
 async function exchange(port: number, payload: string): Promise<string[]> {
-  const { socket, lines } = await connect(port);
+  const socket = await connect(port);
+  const lines = new LineBuffer(socket);
   socket.end(payload);
   const replies: string[] = [];
-  try {
-    for (;;) {
-      const line = await lines.read();
-      if (line === null) break;
-      replies.push(line);
-    }
-  } finally {
-    socket.destroy();
+  for (;;) {
+    const line = await lines.read();
+    if (line === null) break;
+    replies.push(line);
   }
   return replies;
 }
 
 async function lockstep(port: number, steps: { send: string; reply: boolean }[]): Promise<string[]> {
-  const { socket, lines } = await connect(port);
-  try {
-    const greeting = await lines.read();
-    if (greeting === null) throw new Error("missing greeting");
-    const replies = [greeting];
-    for (const step of steps) {
-      socket.write(step.send);
-      if (!step.reply) continue;
-      const line = await lines.read();
-      if (line === null) break;
-      replies.push(line);
-    }
-    return replies;
-  } finally {
-    // QUIT's 221 and the peer FIN can arrive together. close has then already
-    // fired, and waiting for it again never resolves.
-    socket.destroy();
+  const socket = await connect(port);
+  const lines = new LineBuffer(socket);
+  const greeting = await lines.read();
+  if (greeting === null) throw new Error("missing greeting");
+  const replies = [greeting];
+  for (const step of steps) {
+    socket.write(step.send);
+    if (!step.reply) continue;
+    const line = await lines.read();
+    if (line === null) break;
+    replies.push(line);
   }
+  socket.end();
+  await once(socket, "close");
+  return replies;
 }
 
 function contract(mail: Mail): { from: string; to: string; data: string; text: string } {
@@ -584,23 +580,34 @@ test("multipart, base64, and single-byte charsets match", async () => {
       "Content-Type: text/plain; charset=iso-8859-1",
       "Content-Transfer-Encoding: base64",
       "",
-      Buffer.from([0xe9]).toString("base64"),
+      Buffer.from([0x80, 0xe9]).toString("base64"),
     ].join("\r\n"),
     [
-      "Subject: K",
-      "Content-Type: text/plain; charset=euc-kr",
+      "Subject: U",
+      "Content-Type: text/plain; charset=us-ascii",
       "Content-Transfer-Encoding: base64",
       "",
-      Buffer.from([0xc7, 0xd1, 0xb1, 0xdb]).toString("base64"),
+      Buffer.from([0x80, 0xe9]).toString("base64"),
     ].join("\r\n"),
     [
-      "Subject: J",
-      "Content-Type: text/plain; charset=iso-2022-jp",
+      "Subject: D",
       "Content-Transfer-Encoding: base64",
       "",
-      Buffer.from([0x1b, 0x24, 0x42, 0x24, 0x33, 0x24, 0x73, 0x24, 0x4b, 0x24, 0x41, 0x24, 0x4f, 0x1b, 0x28, 0x42]).toString(
-        "base64",
-      ),
+      Buffer.from([0x80, 0xe9]).toString("base64"),
+    ].join("\r\n"),
+    [
+      "Subject: S",
+      "Content-Type: text/plain; charset*=utf-8''iso-8859-1",
+      "Content-Transfer-Encoding: base64",
+      "",
+      Buffer.from([0x80, 0xe9]).toString("base64"),
+    ].join("\r\n"),
+    [
+      "Subject: WU",
+      "Content-Type: text/plain; charset=windows-1252",
+      "Content-Transfer-Encoding: base64",
+      "",
+      Buffer.from([0x81, 0x80]).toString("base64"),
     ].join("\r\n"),
     [
       "Subject: =?utf-8?q?hello?= =?utf-8?q?world?=",
@@ -625,11 +632,102 @@ test("multipart, base64, and single-byte charsets match", async () => {
   expect(mails[2]?.text).toBe("Subject: H\n\n");
   expect(mails[3]?.text).toContain("안녕");
   expect(mails[4]?.text).toContain("€");
-  expect(mails[5]?.text).toContain("é");
-  expect(mails[6]?.text).toBe("Subject: K\n\n한글");
-  expect(mails[7]?.text).toBe("Subject: J\n\nこんにちは");
-  expect(mails[8]?.text).toContain("Subject: helloworld");
-  expect(mails[9]?.text).toContain("Subject: café");
+  expect(mails[5]?.text).toBe("Subject: L\n\n\u0080é");
+  expect(mails[6]?.text).toBe("Subject: U\n\n\uFFFD\uFFFD");
+  expect(mails[7]?.text).toBe("Subject: D\n\n\uFFFD\uFFFD");
+  expect(mails[8]?.text).toBe("Subject: S\n\n\u0080é");
+  expect(mails[9]?.text).toBe("Subject: WU\n\n\uFFFD€");
+  expect(mails[10]?.text).toContain("Subject: helloworld");
+  expect(mails[11]?.text).toContain("Subject: café");
+});
+
+const pythonRejectedLabels = [
+  "x-user-defined",
+  "x-cp1252",
+  "x-mac-roman",
+  "unicode-1-1-utf-8",
+  "unicode11utf8",
+  "x-unicode20utf8",
+];
+
+function smtpData(message: string): string {
+  return (
+    ["EHLO t", "MAIL FROM:<a@example.com>", "RCPT TO:<b@example.com>", "DATA", message, ".", "QUIT"].join("\r\n") +
+    "\r\n"
+  );
+}
+
+test("labels python rejects are not acknowledged at top level or inside multipart", async () => {
+  const dir = await tempDir();
+  const { py, ts } = await pair(dir);
+  for (const label of pythonRejectedLabels) {
+    const top = [
+      `Subject: ${label}`,
+      `Content-Type: text/plain; charset=${label}`,
+      "",
+      "hi",
+    ].join("\r\n");
+    const nested = [
+      "Subject: part",
+      "MIME-Version: 1.0",
+      "Content-Type: multipart/mixed; boundary=bbb",
+      "",
+      "--bbb",
+      `Content-Type: text/plain; charset=${label}`,
+      "",
+      "hi",
+      "--bbb--",
+    ].join("\r\n");
+    for (const message of [top, nested]) {
+      const [pyReplies, tsReplies] = await Promise.all([
+        exchange(py.port, smtpData(message)),
+        exchange(ts.port, smtpData(message)),
+      ]);
+      expect(tsReplies).toEqual(pyReplies);
+      expect(acknowledged(pyReplies)).toBe(false);
+      expect(acknowledged(tsReplies)).toBe(false);
+    }
+  }
+  expect(captured(py.capture)).toEqual([]);
+  expect(captured(ts.capture)).toEqual([]);
+});
+
+test("an unknown RFC 2231 charset* is not acknowledged", async () => {
+  const dir = await tempDir();
+  const { py, ts } = await pair(dir);
+  const message = [
+    "Subject: star",
+    "Content-Type: text/plain; charset*=utf-8''not-a-charset",
+    "",
+    "hi",
+  ].join("\r\n");
+  const [pyReplies, tsReplies] = await Promise.all([
+    exchange(py.port, smtpData(message)),
+    exchange(ts.port, smtpData(message)),
+  ]);
+  expect(tsReplies).toEqual(pyReplies);
+  expect(acknowledged(pyReplies)).toBe(false);
+  expect(acknowledged(tsReplies)).toBe(false);
+  expect(captured(py.capture)).toEqual([]);
+  expect(captured(ts.capture)).toEqual([]);
+});
+
+test("charsets TextDecoder does not match are not acknowledged", async () => {
+  const dir = await tempDir();
+  const { py, ts } = await pair(dir);
+  const labels = ["euc-kr", "iso-2022-jp", "gb2312", "gbk", "shift_jis"];
+  for (const label of labels) {
+    const message = [`Subject: ${label}`, `Content-Type: text/plain; charset=${label}`, "", "x"].join("\r\n");
+    const [pyReplies, tsReplies] = await Promise.all([
+      exchange(py.port, smtpData(message)),
+      exchange(ts.port, smtpData(message)),
+    ]);
+    expect(acknowledged(pyReplies)).toBe(true);
+    expect(acknowledged(tsReplies)).toBe(false);
+    expect(tsReplies).not.toEqual(pyReplies);
+  }
+  expect(captured(ts.capture)).toEqual([]);
+  expect(captured(py.capture)).toHaveLength(labels.length);
 });
 
 test("dropped DATA, unknown charset, and an unwritable capture are not acknowledged", async () => {
