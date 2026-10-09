@@ -810,6 +810,47 @@ test("leading BOMs match Python for utf-8 and utf-16", async () => {
   expect(texts).toEqual(bodies.map((body) => body.text));
 });
 
+test("headers outside the supported grammar are not acknowledged", async () => {
+  const dir = await tempDir();
+  const { py, ts } = await pair(dir);
+  const plain = (type: string, body = "hi", headers: string[] = []) =>
+    ["Subject: g", ...headers, `Content-Type: ${type}`, "", body].join("\r\n");
+  const messages = [
+    plain("text/plain; charset (c)=bad"),
+    plain("text/plain; (c) charset=utf-8"),
+    plain(`text/plain; charset${"\u00a0"}=utf-8`),
+    plain("text;"),
+    plain("multipart/mixed; boundary=b "),
+    plain("multipart/mixed; boundary=b(c)"),
+    plain("multipart/mixed; boundary (c)=b"),
+    plain("text/plain; charset=utf-8", "aGk=", ["Content-Transfer-Encoding: base64 (c)"]),
+    plain("text/plain; charset=utf-8", "aGk=", ["Content-Transfer-Encoding: base64; x=y"]),
+    plain("text/plain; charset=utf-8", "aGk=", [`Content-Transfer-Encoding: base64${"\u0085"}`]),
+    plain("text/plain; charset=utf-8", "aGk=", ["Content-Transfer-Encoding: quoted-printable (c)"]),
+    plain(`text/plain; charset=${"\u000b"}utf-8`),
+    plain(`text/plain; charset=${"\u000c"}utf-8`),
+    plain("text/plain; charset=utf-8", "aGk=x", ["Content-Transfer-Encoding: base64"]),
+    plain("text/plain; charset=utf-8", "aGk*!!=x", ["Content-Transfer-Encoding: base64"]),
+    plain("text/plain; charset=utf\t8"),
+    plain(`text/plain; charset=${"\u0130"}SO-8859-1`),
+    plain("text/plain; charset* =utf-8''utf-8"),
+  ];
+  for (const message of messages) {
+    const tsBefore = captured(ts.capture).length;
+    const pyBefore = captured(py.capture).length;
+    const [pyReplies, tsReplies] = await Promise.all([
+      exchange(py.port, smtpData(message)),
+      exchange(ts.port, smtpData(message)),
+    ]);
+    expect(acknowledged(tsReplies)).toBe(false);
+    expect(captured(ts.capture)).toHaveLength(tsBefore);
+    if (!acknowledged(pyReplies)) {
+      expect(tsReplies).toEqual(pyReplies);
+      expect(captured(py.capture)).toHaveLength(pyBefore);
+    }
+  }
+});
+
 test("charsets TextDecoder does not match are not acknowledged", async () => {
   const dir = await tempDir();
   const { py, ts } = await pair(dir);

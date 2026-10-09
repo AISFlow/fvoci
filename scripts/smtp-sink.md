@@ -1,23 +1,39 @@
 # smtp-sink.ts 와 smtp-sink.py
 
-호출자가 보는 계약은 같다. `--capture`와 `--port-file`로 127.0.0.1의 평문 SMTP를 띄우고, DATA 한 통이 캡처 파일에 한 줄로 붙은 뒤에만 `250`을 보낸다. 아래는 그 계약을 맞추면서 Python `email` + `codecs`와 달라지는 지점이다.
+호출자는 단순한 메시지만 보낸다. 지원하는 헤더 문법만 파싱하고, 그 밖은 캡처하지 않으며 `250`을 보내지 않는다. Python보다 엄격하게 거부하는 것은 허용된다. 받아 둔 메시지의 본문을 Python과 다르게 저장하지는 않는다.
+
+## Supported input grammar
+
+```
+WSP        = SP / HTAB
+token      = 1*(%x21-7E except tspecials "(" / ")" / "<" / ">" / "@" / "," / ";" / ":" / "\" / DQUOTE / "/" / "[" / "]" / "?" / "=")
+attr       = token without "*"
+media-type = [WSP] token "/" token *( [WSP] ";" [WSP] parameter )
+parameter  = attr [WSP] ["*" 1*DIGIT] ["*"] "=" [WSP] (token / DQUOTE 1*token DQUOTE)
+CTE        = [WSP] ("7bit" / "8bit" / "binary" / "base64" / "quoted-printable") [WSP]
+```
+
+`*`와 `=` 사이에는 WSP가 없다. 주석 `(...)`, NBSP를 포함한 비ASCII, VT(`\x0b`), FF(`\x0c`), NEL(U+0085)은 문법 밖이다. charset 라벨은 ASCII 제어 문자와 공백이 없는 token이다. `utf 8`처럼 가운데 공백이 있으면 거부한다. boundary 값도 공백·주석·NBSP가 없는 token이다. base64 본문은 SP/HTAB/CR/LF를 뺀 뒤 알파벳만 허용하고, `=`는 끝에만 두며 길이는 4의 배수다.
 
 | 항목 | 의도 | 이전 | 지금 | 남은 차이 / 이유 |
 | --- | --- | --- | --- | --- |
-| 본문 charset | Python `get_content`와 같은 문자열일 때만 `250`과 캡처를 남긴다 | `new TextDecoder(label)`에 라벨을 그대로 넘겼다. `x-user-defined`, `x-cp1252`, `x-mac-roman`, `unicode-1-1-utf-8`, `unicode11utf8`, `x-unicode20utf8`도 디코드되고 `250`이 나갔다 | 허용 목록만 디코드한다. ASCII와 ISO-8859-1은 직접 디코드한다. cp125x의 미정의 바이트는 U+FFFD로 고친다. 목록 밖은 기록 없이 연결을 끊고 `250`을 보내지 않는다 | `euc-kr`, `iso-2022-jp`, `gb2312`, `gbk`, `gb18030`, `big5`, `shift_jis`, `euc-jp`와 그 별칭은 Python이 디코드해 `250`을 보낸다. TextDecoder의 WHATWG 표가 Python `codecs`와 달라서 TS는 거부한다 |
-| ISO-8859-1, US-ASCII, charset 생략 | base64처럼 원문 바이트가 남을 때 `0x80`의 문자가 Python과 같다 | TextDecoder가 둘 다 windows-1252로 넘겨 `0x80`이 U+20AC가 됐다. 비교 입력은 `[0xe9]`만 남았다 | ISO-8859-1은 바이트를 U+0000–U+00FF로 둔다 (`0x80` → U+0080). US-ASCII와 charset이 없는 본문은 그 바이트의 `0x80`–`0xFF`를 U+FFFD로 둔다. 입력은 `[0x80, 0xe9]`다 | 이 일치는 base64·quoted-printable처럼 바이트가 보존될 때다. 8bit 본문은 아래 행 |
-| charset 라벨의 대소문자 | ASCII `A`–`Z`만 소문자로 보고, 그 밖의 문자는 다른 라벨이다 | `toLowerCase()`가 U+212A KELVIN SIGN을 `k`로 바꿔 `\u212aoi8-r`를 `koi8-r`로 승인했다 | ASCII만 접고, 비ASCII가 있으면 기록도 `250`도 없다 | Python `codecs.lookup`은 그 라벨을 `LookupError`로 거부한다 |
-| `charset *` 공백 | `*` 앞의 공백도 RFC 2231 확장이다 | `charset *=utf-8''not-a-charset`를 버리고 US-ASCII로 `250`을 보냈다 | 이름 뒤 CFWS를 읽은 다음 `*`를 본다. 알 수 없는 값이면 `250`이 없다. `*`와 `=` 사이의 공백은 여전히 확장이 아니다 | Python `get_attribute`가 이름의 뒤 공백을 먹고 `*`를 확장 표시로 본다 |
-| BOM | utf-8·utf-16le·utf-16be는 U+FEFF를 남기고, utf-16은 BOM으로 엔디안만 고른다 | TextDecoder가 utf-8/u8/cp65001/utf-16le/utf-16be의 앞 BOM을 지웠다. `utf-16`의 FE FF는 리틀엔디안으로 풀어 U+FFFE가 됐다 | `ignoreBOM`으로 그 BOM을 남긴다. `utf-16`이 FE FF로 시작하면 뒤를 utf-16be로, FF FE로 시작하면 utf-16le로 풀고 BOM 문자는 넣지 않는다 | Python `codecs`와 같다. BOM이 없는 `utf-16`은 리틀엔디안이다 |
-| windows-1252 | `0x80`은 U+20AC, 미정의 바이트는 U+FFFD | TextDecoder는 `0x81` 등을 C1 제어 문자로 둔다 | `0x81`, `0x8D`, `0x8F`, `0x90`, `0x9D`만 U+FFFD로 바꾼다 | 이 보정 뒤 0x00–0xFF는 Python cp1252와 같다 |
-| RFC 2231 `charset*` | `charset*=utf-8''…`의 값이 본문 charset이다 | `charset=`만 봐서 `charset*=utf-8''not-a-charset`가 US-ASCII로 떨어지고 `250`이 나갔다 | `attribute*section*`와 percent-encoding을 풀고, 풀린 값이 허용 목록 밖이면 `250`을 보내지 않는다 | `charset*=utf-8''`처럼 값이 빈 확장 파라미터는 Python이 ASCII로 두고 TS는 알 수 없는 charset으로 거부한다 |
-| RFC 2047 제목 | 제목 디코드 실패가 본문 실패와 같지 않다 | 알 수 없는 제목 charset을 UTF-8로 다시 디코드했다 | 허용 목록 밖 제목은 ASCII가 아닌 바이트마다 U+FFFD로 두고, 본문 charset이 허용되면 `250`을 보낸다 | Python은 `euc-kr` 같은 제목을 실제로 디코드한다. lookup 자체가 실패할 때만 바이트마다 U+FFFD다. TS는 허용 목록 밖 제목을 모두 후자로 둔다 |
-| 테스트 프로세스 | `proc.kill()`이 sink를 끝내고 stdout을 닫는다 | 테스트를 `bun`으로 띄웠다. PATH의 `bun`이 자식으로 진짜 bun을 띄우면 kill이 래퍼만 죽이고 자식이 stdout을 붙잡는다 | TypeScript sink는 `process.execPath`로 띄운다. lockstep은 다시 `close`를 기다린다 | `6c17f0ed`의 QUIT/FIN 설명은 재현되지 않았다. hang의 원인은 래퍼가 남긴 자식이다 |
-| 봉투 주소 | 캡처의 `from`/`to` | Python은 콜론 뒤를 `strip("<>")` 한다 | 첫 `<...>` 안쪽을 쓴다 | `MAIL FROM:<a@b.com> (주석)`에서 결과가 다르다. 테스트 호출자는 `<addr-spec>`만 보낸다. U+FEFF는 JS `trim`이 지우고 Python `strip`은 남긴다. 꺾쇠가 없으면 Python은 U+001F·U+0085를 지우지만 TS는 주소 앞에 남긴다 |
-| 8bit 비ASCII 본문 | SMTP 한 줄을 UTF-8로 읽은 뒤 본문 charset으로 다시 푼다 | Python은 U+00FF 이하를 그 코드 포인트의 한 바이트로 되돌린다. U+FFFD는 `raw-unicode-escape`로 `\ufffd`라는 ASCII가 된다 | TS는 JS 문자열을 UTF-8로 다시 인코드한 바이트를 charset으로 푼다 | charset이 utf-8이고 본문이 UTF-8 `C3 A9`(é)이면 Python 본문은 U+FFFD, TS는 `é`다. charset이 없고 바이트가 `0x80`이면 Python 본문은 글자 `\ufffd` 여섯 자이고 TS는 U+FFFD 세 개다. base64로 바이트를 넘기면 이 행이 아니라 위의 charset 행이 적용된다 |
-| `DATA\r\r`, `.\r\r` | 명령과 본문 끝의 CR을 어떻게 걷어 내는지 | Python `rstrip("\\r")`는 끝의 CR을 모두 걷어 `DATA`와 `.`로 본다 | TS는 CR을 하나면 걷는다. `DATA\r`는 DATA가 아니고 `.\r`는 본문 끝이 아니다 | TS가 더 엄격하다. 그 줄은 명령으로 인정되지 않는다 |
-| BOM으로 시작하는 헤더 이름 | 헤더 이름의 U+FEFF | Python은 이름에 BOM을 남겨 `Subject`로 보지 않는다 | TS `trim`이 BOM을 지워 `Subject`로 본다 | 헤더로 인식되면 그 charset 검사가 적용된다. Python이 헤더로 보지 않는 메일을 TS가 거부할 수 있다 |
-| BOM으로 시작하는 Content-Type 값 | 타입 토큰의 U+FEFF | Python 타입은 `\ufefftext/plain`이라 text/plain이 아니고 charset을 찾지 않는다. `250`이 나간다 | TS `trim`이 BOM을 지워 text/plain으로 보고, charset이 허용 목록 밖이면 `250`이 없다 | TS가 더 엄격하다 |
-| `Content-Type :` | 콜론 앞 공백 | Python은 헤더로 보지 않고 그 줄을 본문에 둔 채 `250`을 보낸다 | TS는 이름을 trim해서 Content-Type으로 본다. charset이 나쁘면 `250`이 없다 | TS가 더 엄격하다 |
-| BOM으로 시작하는 Content-Transfer-Encoding | base64로 볼지 | Python은 값의 U+FEFF 때문에 base64로 보지 않고 본문 문자를 그대로 둔다 | TS `trim`이 BOM을 지워 base64로 푼다 | 둘 다 `250`일 수 있고 캡처 `text`가 다르다 |
-| 길이가 어긋난 base64 | 디코드할 수 없는 패딩 | 길이가 4로 나눈 나머지가 1이면 Python `decode_b`는 원문을 그대로 둔다. `aGkx1`의 본문은 `aGkx1` | TS `Buffer.from(..., "base64")`는 앞부분을 풀어 `aGkx1`이 `hi1`이 된다 | 둘 다 `250`이고 캡처 문자만 다르다 |
+| 주석·NBSP·빈 파라미터 | Content-Type, Content-Disposition, Content-Transfer-Encoding이 문법 밖이면 거부한다 | `charset (c)=bad`, `(c) charset=`, `charset\u00a0=`를 건너뛰거나 US-ASCII로 두고 `250`을 보낼 수 있었다 | 주석, NBSP, 빈 파라미터는 기록도 `250`도 없다 | TS가 더 엄격하다. Python은 일부를 고쳐 받아들인다 |
+| 타입 토큰 | `type/subtype`만 미디어 타입이다 | `Content-Type: text;`를 text/plain으로 넘길 수 있었다 | `text;`처럼 서브타입이 없거나 토큰이 비면 거부한다 | TS가 더 엄격하다 |
+| boundary | 구분자는 공백·주석·NBSP가 없는 token이다 | `b `, `b(c)`, `boundary (c)=b`를 다른 boundary로 읽을 수 있었다 | 그 세 형태는 거부한다 | 받아 두면 Python이 자른 본문과 달라질 수 있다 |
+| CTE | 전송 인코딩은 토큰 하나다 | `base64 (c)`, `base64; x=y`, `base64\x85`, `quoted-printable (c)`를 base64로 풀 수 있었다 | 주석, 파라미터, 비ASCII, 뒤쪽 쓰레기가 있으면 거부한다 | Python은 그 값을 base64로 보지 않고 원문을 둔다. TS는 다른 본문을 저장하지 않도록 거부한다 |
+| `\x0b` `\x0c` charset | 제어 문자를 라벨에서 잘라 내지 않는다 | 부모 `84abf9a5`의 `trim()`은 VT·FF를 지워 `\x0butf-8`과 `\x0cutf-8`을 utf-8로 승인했다 | 둘 다 문법 밖이라 거부한다 | Python은 이 라벨로 `A`를 디코드해 `250`을 보낸다. TS는 거부한다 |
+| charset 라벨 | ASCII `A`–`Z`만 소문자로 접고, 제어·공백·비ASCII는 거부한다 | `toLowerCase()`가 U+212A를 `k`로, U+0130을 `i`와 결합 문자로 바꿀 수 있었다 | `\u212aoi8-r`, `\u0130SO-8859-1`, `utf 8`, `utf\t8`은 거부한다 | `utf 8`은 가운데 공백이다. Python은 공백 앞 `utf`만 보고 받아들일 수 있다 |
+| `charset* =` | `*` 바로 뒤가 `=`일 때만 확장 파라미터다 | `charset* =utf-8''…`를 버리고 US-ASCII로 `250`을 보냈다 | `*`와 `=` 사이의 공백은 거부한다. 이름과 `*` 사이의 WSP(`charset *=`)는 확장으로 읽는다 | TS가 더 엄격하다 |
+| base64 `=` | `=` 뒤에 데이터가 있으면 다른 본문을 저장하지 않는다 | `aGk=x`와 `aGk*!!=x`를 앞부분만 풀어 Python의 `hi`와 다른 바이트가 될 수 있었다. 길이가 4의 배수가 아닌 `aGkx1`도 달랐다 | 그 본문은 거부한다. 패딩이 끝에만 있는 `aGk=`는 `hi`다 | Python은 `aGk=x`와 `aGk*!!=x`를 `hi`로 저장한다. TS는 거부한다 |
+| 본문 charset | 허용 목록이고 바이트가 보존될 때만 Python과 같은 문자열에 `250`을 보낸다 | TextDecoder에 라벨을 그대로 넘겼다 | ASCII와 ISO-8859-1은 직접 디코드한다. cp125x 미정의 바이트는 U+FFFD다. 목록 밖은 거부한다 | `euc-kr`, `iso-2022-jp`, `gb2312`, `gbk`, `gb18030`, `big5`, `shift_jis`, `euc-jp`는 Python이 `250`을 보낸다. WHATWG 표가 달라 TS는 거부한다 |
+| ISO-8859-1, US-ASCII, charset 생략 | base64·quoted-printable로 바이트가 남을 때 `0x80`이 Python과 같다 | TextDecoder가 `0x80`을 U+20AC로 뒀다 | ISO-8859-1은 U+0080. US-ASCII와 charset 생략은 `0x80`–`0xFF`를 U+FFFD로 둔다. 입력은 `[0x80, 0xe9]` | 8bit 본문에는 적용하지 않는다 |
+| BOM | utf-8·utf-16le·utf-16be는 U+FEFF를 남기고, utf-16은 BOM으로 엔디안만 고른다 | TextDecoder가 BOM을 지우거나 FE FF를 리틀엔디안으로 풀었다 | `ignoreBOM`으로 BOM을 남긴다. `utf-16`의 FE FF는 뒤를 utf-16be로 푼다 | 받아들인 BOM 본문은 Python과 같다 |
+| windows-1252 | `0x80`은 U+20AC, 미정의 바이트는 U+FFFD | TextDecoder는 `0x81` 등을 C1로 둔다 | `0x81`, `0x8D`, `0x8F`, `0x90`, `0x9D`만 U+FFFD | 보정 뒤 0x00–0xFF는 Python cp1252와 같다 |
+| RFC 2231 `charset*` | `charset*=utf-8''…`의 값이 본문 charset이다 | 확장 형태를 무시하면 US-ASCII로 `250`이 나갔다 | 문법 안의 `charset*`를 풀고, 값이 허용 목록 밖이면 거부한다 | 값이 빈 `charset*=utf-8''`는 Python이 ASCII로 두고 TS는 거부한다 |
+| RFC 2047 제목 | 제목 디코드 실패가 본문 실패와 같지 않다 | 알 수 없는 제목 charset을 UTF-8로 다시 디코드했다 | 허용 목록 밖 제목은 비ASCII 바이트마다 U+FFFD다. 본문이 허용되면 `250` | Python은 `euc-kr` 제목을 디코드한다 |
+| 봉투 주소 | 캡처의 `from`/`to` | Python은 콜론 뒤를 `strip("<>")` 한다 | 첫 `<...>` 안쪽을 쓴다 | U+001F와 U+0085는 주소의 양쪽 끝에 그대로 남는다. JS `trim`은 이 둘을 공백으로 보지 않는다. U+FEFF는 `trim`이 제거한다 |
+| 8bit 비ASCII 본문 | SMTP 줄을 UTF-8로 읽은 뒤 charset으로 다시 푼다 | Python은 U+00FF 이하를 한 바이트로 되돌리고, 그 위는 `raw-unicode-escape`로 둔다 | TS는 JS 문자열을 UTF-8 바이트로 다시 인코드한 뒤 charset으로 푼다 | charset이 utf-8이고 본문이 `한`(UTF-8 ED 95 9C, U+D55C)이면 Python 본문은 ASCII 여섯 자 `\ud55c`이고 TS 본문은 문자 `한`이다. base64로 바이트를 넘기면 이 차이가 없다 |
+| `DATA\r\r`, `.\r\r` | CR을 하나만 걷는다 | Python `rstrip("\\r")`는 `DATA`와 `.`로 본다 | `DATA\r`와 `.\r`는 그 명령이 아니다 | TS가 더 엄격하다 |
+| BOM 헤더 이름 | 헤더 이름의 U+FEFF | Python은 BOM이 붙은 이름을 Subject로 보지 않는다 | TS `trim`이 BOM을 지워 Subject로 본다 | Python이 헤더로 보지 않는 메일을 TS가 거부할 수 있다 |
+| 콜론 앞 공백 | `Content-Type :` | Python은 헤더로 보지 않는다 | TS는 이름을 trim해서 Content-Type으로 본다 | charset이 나쁘면 TS만 거부한다 |
+| 테스트 프로세스 | `proc.kill()`이 sink stdout을 닫는다 | PATH의 `bun` 래퍼를 죽이면 자식이 stdout을 붙잡는다 | TypeScript sink는 `process.execPath`로 띄운다. lockstep은 소켓이 아직 열려 있을 때만 `close`를 기다린다 | hang의 원인은 래퍼가 남긴 자식이다 |

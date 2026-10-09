@@ -37,6 +37,13 @@ class UnknownCharsetError extends Error {
   }
 }
 
+class MessageRejected extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "MessageRejected";
+  }
+}
+
 type Headers = Map<string, string>;
 
 type Mime = {
@@ -141,25 +148,6 @@ function parseHeaders(block: string): Headers {
   return headers;
 }
 
-function splitSemicolons(value: string): string[] {
-  const parts: string[] = [];
-  let current = "";
-  let quoted = false;
-  for (const char of value) {
-    if (char === '"') quoted = !quoted;
-    if (char === ";" && !quoted) {
-      parts.push(current);
-      current = "";
-      continue;
-    }
-    current += char;
-  }
-  if (current.length > 0) parts.push(current);
-  return parts;
-}
-
-const TOKEN = /^[!#$%&'+\-.0-9A-Z^_`a-z|~]$/;
-
 type Parameter = {
   name: string;
   section: number;
@@ -168,56 +156,113 @@ type Parameter = {
   value: string;
 };
 
+const CTE_TOKENS = new Set(["7bit", "8bit", "binary", "base64", "quoted-printable"]);
+
+function reject(reason: string): never {
+  throw new MessageRejected(reason);
+}
+
 function isWsp(char: string | undefined): boolean {
   return char === " " || char === "\t";
 }
 
-function parseParameter(piece: string): Parameter | null {
-  let i = 0;
-  while (isWsp(piece[i])) i += 1;
-  const nameStart = i;
-  while (TOKEN.test(piece[i] ?? "")) i += 1;
-  if (i === nameStart) return null;
-  const name = asciiFold(piece.slice(nameStart, i));
-  if (name === null) return null;
-  // Python's attribute token consumes trailing CFWS before the RFC 2231 '*'.
-  while (isWsp(piece[i])) i += 1;
+function isTokenChar(char: string | undefined): boolean {
+  if (!char) return false;
+  const code = char.charCodeAt(0);
+  if (code <= 0x20 || code >= 0x7f) return false;
+  return !"()<>@,;:\\\"/[]?=".includes(char);
+}
+
+function isAttrChar(char: string | undefined): boolean {
+  return isTokenChar(char) && char !== "*";
+}
+
+function prescanHeader(raw: string): void {
+  for (const char of raw) {
+    const code = char.codePointAt(0) ?? 0;
+    if (char === "(" || char === ")") reject("comment");
+    if (code === 0x09 || code === 0x20) continue;
+    if (code < 0x20 || code > 0x7e) reject("header character");
+  }
+}
+
+function readWhile(value: string, i: number, ok: (char: string | undefined) => boolean): { text: string; next: number } | null {
+  const start = i;
+  while (ok(value[i])) i += 1;
+  if (i === start) return null;
+  return { text: value.slice(start, i), next: i };
+}
+
+function readParameter(value: string, i: number): { parameter: Parameter; next: number } {
+  const nameRead = readWhile(value, i, isAttrChar);
+  if (!nameRead) reject("parameter name");
+  const name = mustFold(nameRead.text);
+  i = nameRead.next;
+  while (isWsp(value[i])) i += 1;
   let section = 0;
   let extended = false;
-  if (piece[i] === "*") {
+  if (value[i] === "*") {
     i += 1;
-    if ((piece[i] ?? "") >= "0" && (piece[i] ?? "") <= "9") {
-      const sectionStart = i;
-      while ((piece[i] ?? "") >= "0" && (piece[i] ?? "") <= "9") i += 1;
-      section = Number(piece.slice(sectionStart, i));
-      if (piece[i] === "*") {
+    if ((value[i] ?? "") >= "0" && (value[i] ?? "") <= "9") {
+      const sectionRead = readWhile(value, i, (char) => (char ?? "") >= "0" && (char ?? "") <= "9");
+      section = Number(sectionRead?.text ?? "");
+      i = sectionRead?.next ?? i;
+      if (value[i] === "*") {
         extended = true;
         i += 1;
       }
     } else {
       extended = true;
     }
-    // `charset* =...` is not an extended parameter. `charset *=...` is.
-    if (isWsp(piece[i])) return null;
+    if (isWsp(value[i])) reject("space after *");
   }
-  if (piece[i] !== "=") return null;
+  if (value[i] !== "=") reject("parameter equals");
   i += 1;
-  while (isWsp(piece[i])) i += 1;
-  let raw = piece.slice(i);
-  const quoted = raw.startsWith('"') && raw.endsWith('"') && raw.length >= 2;
-  if (quoted) raw = raw.slice(1, -1);
-  else if (raw.trim().length === 0) return null;
+  while (isWsp(value[i])) i += 1;
+  let paramValue = "";
+  if (value[i] === '"') {
+    i += 1;
+    const quoted = readWhile(value, i, isTokenChar);
+    if (!quoted || value[quoted.next] !== '"') reject("quoted parameter");
+    paramValue = quoted.text;
+    i = quoted.next + 1;
+  } else {
+    const token = readWhile(value, i, isTokenChar);
+    if (!token) reject("parameter value");
+    paramValue = token.text;
+    i = token.next;
+  }
   let charset = "us-ascii";
-  let value = raw;
   if (extended && section === 0) {
-    const first = raw.indexOf("'");
-    const second = first < 0 ? -1 : raw.indexOf("'", first + 1);
+    const first = paramValue.indexOf("'");
+    const second = first < 0 ? -1 : paramValue.indexOf("'", first + 1);
     if (first >= 0 && second >= first + 1) {
-      charset = asciiFold(raw.slice(0, first)) || "us-ascii";
-      value = raw.slice(second + 1);
+      const encoding = paramValue.slice(0, first);
+      charset = encoding.length === 0 ? "us-ascii" : mustFold(encoding);
+      paramValue = paramValue.slice(second + 1);
     }
   }
-  return { name, section, extended, charset, value };
+  return { parameter: { name, section, extended, charset, value: paramValue }, next: i };
+}
+
+function parseParameterList(value: string, i: number): Map<string, string> {
+  const parts: Parameter[] = [];
+  while (i < value.length) {
+    const mark = i;
+    while (isWsp(value[i])) i += 1;
+    if (i >= value.length) {
+      if (i !== mark) reject("trailing whitespace");
+      break;
+    }
+    if (value[i] !== ";") reject("trailing junk");
+    i += 1;
+    while (isWsp(value[i])) i += 1;
+    if (i >= value.length) reject("empty parameter");
+    const read = readParameter(value, i);
+    parts.push(read.parameter);
+    i = read.next;
+  }
+  return combineParameters(parts);
 }
 
 function percentDecode(value: string): Uint8Array {
@@ -234,27 +279,23 @@ function percentDecode(value: string): Uint8Array {
   return Uint8Array.from(bytes);
 }
 
-function contentParameters(pieces: string[]): Map<string, string> {
+function combineParameters(parts: Parameter[]): Map<string, string> {
   const grouped = new Map<string, Parameter[]>();
-  for (const piece of pieces) {
-    const parameter = parseParameter(piece);
-    if (!parameter) continue;
+  for (const parameter of parts) {
     const list = grouped.get(parameter.name) ?? [];
     list.push(parameter);
     grouped.set(parameter.name, list);
   }
   const params = new Map<string, string>();
-  for (const [name, parts] of grouped) {
-    let ordered = [...parts].sort((left, right) => left.section - right.section);
+  for (const [name, group] of grouped) {
+    let ordered = [...group].sort((left, right) => left.section - right.section);
     const first = ordered[0];
     if (!first) continue;
     if (!first.extended && ordered.length > 1 && ordered[1]?.section === 0) ordered = ordered.slice(0, 1);
     const values: string[] = [];
     let expect = 0;
     for (const parameter of ordered) {
-      if (parameter.section !== expect) {
-        if (!parameter.extended) continue;
-      }
+      if (parameter.section !== expect && !parameter.extended) continue;
       expect += 1;
       if (!parameter.extended) {
         values.push(parameter.value);
@@ -274,22 +315,65 @@ function contentParameters(pieces: string[]): Map<string, string> {
   return params;
 }
 
+function parseContentType(raw: string): { type: string; params: Map<string, string> } {
+  prescanHeader(raw);
+  let i = 0;
+  while (isWsp(raw[i])) i += 1;
+  const main = readWhile(raw, i, isTokenChar);
+  if (!main || raw[main.next] !== "/") reject("media type");
+  i = main.next + 1;
+  const sub = readWhile(raw, i, isTokenChar);
+  if (!sub) reject("media subtype");
+  const params = parseParameterList(raw, sub.next);
+  const type = `${mustFold(main.text)}/${mustFold(sub.text)}`;
+  if (type.startsWith("multipart/")) {
+    const boundary = params.get("boundary");
+    if (!boundary) reject("boundary");
+  }
+  return { type, params };
+}
+
+function parseDisposition(raw: string): string {
+  prescanHeader(raw);
+  let i = 0;
+  while (isWsp(raw[i])) i += 1;
+  const token = readWhile(raw, i, isTokenChar);
+  if (!token) reject("disposition");
+  parseParameterList(raw, token.next);
+  return mustFold(token.text);
+}
+
+function parseCte(raw: string): string {
+  prescanHeader(raw);
+  let i = 0;
+  while (isWsp(raw[i])) i += 1;
+  const token = readWhile(raw, i, isTokenChar);
+  if (!token) reject("transfer encoding");
+  i = token.next;
+  while (isWsp(raw[i])) i += 1;
+  if (i !== raw.length) reject("transfer encoding");
+  const label = mustFold(token.text);
+  if (!CTE_TOKENS.has(label)) reject("transfer encoding");
+  return label;
+}
+
 function contentType(headers: Headers): { type: string; params: Map<string, string> } {
-  const raw = headers.get("content-type") ?? "text/plain";
-  const pieces = splitSemicolons(raw);
-  const type = (pieces.shift() ?? "text/plain").trim().toLowerCase();
-  return { type, params: contentParameters(pieces) };
+  const raw = headers.get("content-type");
+  if (raw === undefined) return { type: "text/plain", params: new Map() };
+  return parseContentType(raw);
 }
 
 function isAttachment(headers: Headers): boolean {
   const disposition = headers.get("content-disposition");
-  if (!disposition) return false;
-  return (disposition.split(";")[0] ?? "").trim().toLowerCase() === "attachment";
+  if (disposition === undefined) return false;
+  return parseDisposition(disposition) === "attachment";
 }
 
 function parseMime(data: string): Mime {
   const { head, body } = splitHeadBody(data);
   const headers = parseHeaders(head);
+  if (headers.has("content-disposition")) parseDisposition(headers.get("content-disposition") ?? "");
+  if (headers.has("content-transfer-encoding")) parseCte(headers.get("content-transfer-encoding") ?? "");
   const { type, params } = contentType(headers);
   const mime: Mime = { headers, body, parts: [] };
   if (!type.startsWith("multipart/")) return mime;
@@ -426,14 +510,41 @@ function asciiFold(value: string): string | null {
   return out;
 }
 
+function mustFold(value: string): string {
+  const folded = asciiFold(value);
+  if (folded === null || folded.length === 0) reject(value);
+  return folded;
+}
+
 function foldCharsetLabel(charset: string): string {
-  let start = 0;
-  let end = charset.length;
-  while (start < end && (charset.charCodeAt(start) === 0x20 || charset.charCodeAt(start) === 0x09)) start += 1;
-  while (end > start && (charset.charCodeAt(end - 1) === 0x20 || charset.charCodeAt(end - 1) === 0x09)) end -= 1;
-  const label = asciiFold(charset.slice(start, end));
-  if (label === null) throw new UnknownCharsetError(charset);
+  for (let i = 0; i < charset.length; i += 1) {
+    const code = charset.charCodeAt(i) ?? 0;
+    if (code <= 0x20 || code === 0x7f) throw new UnknownCharsetError(charset);
+  }
+  const label = asciiFold(charset);
+  if (label === null || label.length === 0) throw new UnknownCharsetError(charset);
   return label;
+}
+
+function decodeBase64Body(body: string): Uint8Array {
+  let compact = "";
+  for (const char of body) {
+    if (char === " " || char === "\t" || char === "\n" || char === "\r") continue;
+    const code = char.charCodeAt(0);
+    const alphabet =
+      (code >= 0x41 && code <= 0x5a) ||
+      (code >= 0x61 && code <= 0x7a) ||
+      (code >= 0x30 && code <= 0x39) ||
+      char === "+" ||
+      char === "/" ||
+      char === "=";
+    if (!alphabet) reject("base64");
+    compact += char;
+  }
+  const pad = compact.indexOf("=");
+  if (pad >= 0 && !/^=*$/.test(compact.slice(pad))) reject("base64");
+  if (compact.length % 4 !== 0) reject("base64");
+  return Buffer.from(compact, "base64");
 }
 
 function decodeUtf8(bytes: Uint8Array): string {
@@ -565,8 +676,9 @@ function decodeEncodedWords(value: string): string {
 }
 
 function transferBytes(body: string, headers: Headers): Uint8Array {
-  const encoding = (headers.get("content-transfer-encoding") ?? "7bit").trim().toLowerCase();
-  if (encoding === "base64") return Buffer.from(body.replace(/\s+/g, ""), "base64");
+  const raw = headers.get("content-transfer-encoding");
+  const encoding = raw === undefined ? "7bit" : parseCte(raw);
+  if (encoding === "base64") return decodeBase64Body(body);
   if (encoding === "quoted-printable") return decodeQuotedPrintable(body);
   return Buffer.from(body, "utf8");
 }
@@ -662,7 +774,7 @@ async function handleClient(socket: net.Socket, capturePath: string): Promise<vo
       }
     }
   } catch (err) {
-    if (err instanceof UnknownCharsetError) return;
+    if (err instanceof UnknownCharsetError || err instanceof MessageRejected) return;
     const code = (err as NodeJS.ErrnoException).code;
     if (code) return;
     throw err;
