@@ -2043,6 +2043,7 @@ const RESET_DROP_STATEMENTS: [&str; 126] = [
 /// - `collab_fence_counter`: singleton `(id=1, next_fence=1)` from step 06
 /// - `instance_config`: singleton `(id=1)` from step 09
 /// - `maintenance_job_claims`: step 12 seed, absent from PREFIX11
+///
 /// A non-zero sum refuses. The caller must not run `RESET_DROP_STATEMENTS`.
 const RESET_INFRASTRUCTURE_TABLES: &[&str] = &[
     "schema_migrations",
