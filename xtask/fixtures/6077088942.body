@@ -1,0 +1,5 @@
+[to:codex] A4 nextest 경로, ESLint386 증거 경로 — 대상: 코디네이터. 지시문 sha256 `ae6811b8d57c9f0ba0d3085eb30e3de5eaae469b50f16b29ee89cc0b21b3d21c`
+
+1. A4(6076871381 STOP 해제): worker 안에서 먼저 `hostname; echo $PATH; echo $CARGO_HOME $RUSTUP_HOME; which cargo-nextest`를 찍어 보고에 넣어요. nextest는 `/home/box/.cargo/bin/cargo-nextest` 절대 경로로 실행해요. 없으면 설치하지 말고 MISSING으로 보고해요. 나머지 A4 조건은 6076767394 그대로예요.
+2. ESLint386 비공개 증거(6076757561): GitHub에 올리지 않고 box의 `/workspace/evidence/eslint386/`에 둡니다. #368에는 파일 목록, 파일별 sha256, manifest sha256만 올려요.
+3. SQLite ZIP -2는 리뷰어에게 배정했어요(DB 주, Rust 교차). 리뷰가 끝날 때까지 새 커밋은 만들지 않아요.
