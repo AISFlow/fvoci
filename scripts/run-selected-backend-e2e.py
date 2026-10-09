@@ -72,16 +72,18 @@ def inputs():
     tracked={p:sha(ROOT/p) for p in call(['git','ls-files','-z']).split('\0') if p}
     untracked={p:sha(ROOT/p) for p in call(['git','ls-files','--others','--exclude-standard','-z']).split('\0') if p and (ROOT/p).is_file()}
     external={}
-    def add(path):
+    def add(path, excluded=()):
         path=Path(path)
         if path.is_dir():
             for f in path.rglob('*'):
-                if f.is_file():external[str(f)]=sha(f)
+                if f.is_file() and not any(f.is_relative_to(p) for p in excluded):external[str(f)]=sha(f)
         elif path.is_file():external[str(path)]=sha(path)
         else:raise RuntimeError('missing qualified build input: '+str(path))
     cargo_home=Path(os.environ.get('CARGO_HOME',str(Path.home()/'.cargo'))).resolve()
+    # Sparse index lookup caches can refresh under --locked; crate/source bytes remain inputs.
+    index_caches=tuple(p for p in (cargo_home/'registry/index').glob('*/.cache') if p.is_dir())
     for subdirectory in ('registry','git'):
-        if (cargo_home/subdirectory).exists():add(cargo_home/subdirectory)
+        if (cargo_home/subdirectory).exists():add(cargo_home/subdirectory, index_caches if subdirectory=='registry' else ())
     for config in (cargo_home/'config',cargo_home/'config.toml',Path(os.environ.get('FVOCI_SELECTED_CI_OUTPUT','/nonexistent'))/'build-env-inputs.json'):
         if config.exists():add(config)
     assert not (cargo_home/'credentials').exists() and not (cargo_home/'credentials.toml').exists(), 'public offline CI cannot borrow account credentials'

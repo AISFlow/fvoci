@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('handoff', ROOT / 'scripts/selected-backend-ci/web-build-handoff.py')
 H = importlib.util.module_from_spec(spec); spec.loader.exec_module(H)
 ORIGINAL_IDENTITY = H.CI.identity
+ORIGINAL_INPUTS = H.CI.inputs
 SHA = 'a' * 40
 TREE = 'b' * 40
 
@@ -206,6 +207,90 @@ class PacketTest(unittest.TestCase):
         self.transfer();self.header.write_bytes(b'different actual input')
         with self.assertRaises(AssertionError):H.consume()
         self.assertFalse((self.output/'handoff-consumed.json').exists())
+
+    def cargo_input_control(self, mutation):
+        cargo = self.root/'cargo-home'
+        retained = ('registry/index/fixture/config.json', 'registry/index/fixture/data',
+                    'registry/index/fixture/nested/.cache/data',
+                    'registry/cache/fixture/retained.crate', 'registry/cache/fixture/other.crate',
+                    'registry/cache/fixture/.cache/data', 'registry/src/fixture/source.rs',
+                    'registry/src/fixture/.cache/data', 'git/checkouts/fixture/source.rs',
+                    'git/checkouts/fixture/.cache/data', 'config.toml')
+        caches = ('registry/index/fixture/.cache/data', 'registry/index/fixture/.cache/nested/data')
+        for name in (*retained, *caches):
+            path = cargo/name; path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'actual Cargo input fixture bytes')
+        lock = self.root/'Cargo.lock'
+        lock.write_text('version = 4\n\n[[package]]\nname = "fixture"\nversion = "1.0.0"\nchecksum = "'+'a'*64+'"\n')
+        for name in ('node_modules/.cache', 'sysroot', 'clang', 'sqlite/lib', 'compiler/include'):
+            directory = self.root/name; directory.mkdir(parents=True)
+            (directory/'data').write_bytes(b'actual external fixture bytes')
+
+        def call(args):
+            if args == ['git','ls-files','-z']:return 'Cargo.lock\0header\0'
+            if args == ['git','ls-files','--others','--exclude-standard','-z']:return ''
+            if args == ['rustc','--print','sysroot']:return str(self.root/'sysroot')
+            if args == ['cc','-print-file-name=include']:return str(self.root/'compiler/include')
+            return self.call(args)
+
+        def ldd(args, **kwargs):
+            if args == ['ldd', str(self.header)]:
+                return type('StaticFixtureTool', (), {'returncode':1, 'stdout':'statically linked', 'stderr':''})()
+            return self.ldd(args, **kwargs)
+
+        with patch.object(H.CI, 'ROOT', self.root), patch.object(H.CI, 'inputs', side_effect=ORIGINAL_INPUTS), \
+             patch.object(H.CI, 'call', side_effect=call), patch.object(H.CI.shutil, 'which', return_value=str(self.header)), \
+             patch.object(H.CI.subprocess, 'run', side_effect=ldd), patch.object(H.CI.subprocess, 'check_output', return_value=''), \
+             patch.dict(os.environ, {'CARGO_HOME':str(cargo), 'LIBCLANG_PATH':str(self.root/'clang'), 'SQLITE3_LIB_DIR':str(self.root/'sqlite/lib')}):
+            environment = self.get('build-environment.json')
+            environment['sqlite'] = {k:os.environ[k] for k in environment['sqlite']}
+            self.put('build-environment.json', environment)
+            before = H.build_inputs()
+            for name in retained:
+                self.assertEqual(before['external'][str(cargo/name)], H.CI.sha(cargo/name))
+            for name in caches:self.assertNotIn(str(cargo/name), before['external'])
+            self.assertEqual(before['external'][str(self.root/'node_modules/.cache/data')], H.CI.sha(self.root/'node_modules/.cache/data'))
+            self.assertEqual(before['tracked']['Cargo.lock'], H.CI.sha(lock))
+            self.put('before.json', before); self.put('after.json', before)
+            H.qualify(self.output)
+            changed = {'cache':cargo/caches[0], 'crate':cargo/'registry/cache/fixture/retained.crate', 'lock':lock}[mutation]
+            original = changed.read_bytes()
+            if mutation == 'lock':
+                altered = original.replace(b'checksum = "a', b'checksum = "b', 1)
+            else:
+                altered = bytes([original[0] ^ 1])+original[1:]
+            self.assertEqual(len(original), len(altered))
+            self.assertEqual(sum(a != b for a, b in zip(original, altered)), 1)
+            changed.write_bytes(altered)
+            current = H.build_inputs()
+            self.assertEqual(self.get('before.json'), before); self.assertEqual(self.get('after.json'), before)
+            fields = [key for key in before if before[key] != current[key]]
+            if mutation == 'cache':
+                self.assertEqual(current, before)
+                H.qualify(self.output)
+                self.assertFalse(list(self.output.glob('handoff-input-*-safe.json')))
+            else:
+                field = 'external' if mutation == 'crate' else 'tracked'
+                self.assertEqual(fields, [field])
+                key = str(changed) if mutation == 'crate' else 'Cargo.lock'
+                self.assertNotEqual(before[field][key], current[field][key])
+                self.assertEqual([k for k in before[field] if before[field][k] != current[field][k]], [key])
+                with self.assertRaisesRegex(AssertionError, 'current physical inputs differ'):H.qualify(self.output)
+                self.assertEqual(list(self.get('handoff-input-delta-safe.json')['after_current']), [field])
+            print(json.dumps({'control':'cargo-'+mutation, 'changed_bytes':1, 'changed_fields':fields,
+                              'retained_cargo_inputs':len(retained), 'excluded_index_cache_files':len(caches),
+                              'before_equals_after':True, 'after_equals_current':before == current,
+                              'qualify':'PASS' if mutation == 'cache' else 'expected mismatch FAIL'}), flush=True)
+
+    def test_cargo_index_cache_only_change_qualifies(self):
+        self.cargo_input_control('cache')
+
+    def test_cargo_registry_crate_one_byte_change_mismatches(self):
+        self.cargo_input_control('crate')
+
+    def test_cargo_lock_checksum_one_byte_change_mismatches(self):
+        self.cargo_input_control('lock')
+
     def test_fresh_dist_changed(self):
         self.transfer();(self.dist/'index.html').write_bytes(b'different fresh dist')
         with self.assertRaises(AssertionError):H.consume()
