@@ -7,15 +7,22 @@
 //! | Intent | Old shell | New | Why |
 //! | --- | --- | --- | --- |
 //! | Patch byte identity | `git diff --binary --full-index "$parent" "$sha"` piped to `sha256sum` | `patch-sha256` | Digest the exact diff bytes the recorder compared by hand. Parent is `sha^` unless `--base` is set. |
-//! | Stable patch id | `git show "$sha"` piped to `git patch-id --stable` | `patch-id` from `git diff --binary --full-index "$parent" "$sha"` piped to `git patch-id --stable` | Without `--full-index`, index abbreviations change with how many objects the clone has. The same command covers a `--base` range. |
+//! | Stable patch id | `git show "$sha"` piped to `git patch-id --stable` | `patch-id` from `git diff --binary --full-index <parent> <sha>` piped to `git patch-id --stable` | Without `--full-index`, index abbreviations change with how many objects the clone has. |
+//! | First parent | `sha^` or a combined merge diff | explicit `<sha>^1` | A merge has more than one parent. The first parent is the mainline; the patch is that diff, and it is not the second-parent diff. |
 //! | Diff size | `git diff --numstat "$parent" "$sha"`, then sum | `files`, `insertions`, `deletions` | Totals. A binary `-` counts as one file and zero lines. |
-//! | Directive self-hash | Drop the first two lines and the last byte, then `sha256sum`, and compare with the first 64-hex token anywhere | `directive-sha256` and `directive` | Hash the bytes after the two-line header as-is. The expected token is the 64-hex value on the first line (`지시문 sha256`), which is where #368 comments put it. The second line is the blank separator and is not searched. |
+//! | Directive self-hash | Drop the first two lines and the last byte, then compare with the first 64-hex token anywhere | `directive-sha256` and `directive` | Line 1 must be exactly `지시문 sha256 `<64 lowercase hex>``. Line 2 must be empty. The bytes after that blank line are hashed as-is. |
+//! | N7 hash token | The token could have been inside the hashed bytes | Only the hash token on line 1 is not hashed | By convention the token lives in the dropped header. The body after the empty line 2 is the preimage. |
+//! | N8 range syntax | `base..head` positional and `--head` | removed | Interface change. A range is `--sha <sha> --base <parent>`. |
 //! | Expected value | Visual compare of a full hex or `prefix…suffix` | `--expect field=pattern` | Non-zero exit on mismatch. Empty sides, extra ellipses, non-hex, the wrong length, or an overlapping prefix and suffix that disagree are an ambiguous expect. |
 //!
 //! Raw directive bytes are `gh api repos/OWNER/REPO/issues/comments/<id> | jq -j .body`.
 //! A body that ends in `\n` or contains CR is rejected. `directive: MISMATCH` exits 1.
-//! An empty commit exits 1 because that diff has no patch id. A merge is hashed
-//! with the same full-index diff against its parent, not with `git show`.
+//! An empty diff exits 1 as an empty commit. Any other git failure reports that
+//! command's stderr. In-tree `.gitattributes` are ignored with
+//! `--attr-source` set to the empty tree from `git hash-object -t tree /dev/null`.
+//! `core.attributesFile=/dev/null` and `GIT_ATTR_NOSYSTEM=1` ignore the global
+//! and system attribute files. `$GIT_DIR/info/attributes` still applies; git has
+//! no switch for that file. Git older than 2.40 has no `--attr-source` and exits 1.
 //!
 //! Fail closed (non-zero, message on stderr, no partial stdout) for an unknown
 //! commit, an ambiguous short SHA, a root commit, a missing parent (including a
@@ -36,17 +43,18 @@ Hash a commit the way the evidence recorder checks it
 Usage: cargo xtask evidence-hash [options] --sha <sha>
        cargo xtask evidence-hash [options] --sha <sha> --base <parent>
 
-The diff parent of a commit is <sha>^ unless --base is set. patch-sha256 and
-patch-id both come from
+The diff parent is <sha>^1 (the first parent) unless --base is set. --sha must
+name a commit. patch-sha256 and patch-id both come from
 `git diff --binary --full-index <parent> <sha> | git patch-id --stable`
 (sha256sum of that same diff for patch-sha256). Numstat totals come from
-`git diff --numstat` of that pair. An empty commit exits 1.
+`git diff --numstat` of that pair. An empty diff exits 1.
 
 Save a GitHub issue comment with:
   gh api repos/OWNER/REPO/issues/comments/<id> | jq -j .body
-The checker drops the first two lines and hashes the remaining bytes as-is.
-The expected hash is the 64-hex token on the first line. A trailing newline
-(typical of `gh api --jq`) or any CR is an error. MISMATCH exits 1.
+Line 1 must be exactly `지시문 sha256 `<64 lowercase hex>`.
+Line 2 must be empty. The remaining bytes are hashed as-is.
+A trailing newline (typical of `gh api --jq`) or any CR is an error.
+MISMATCH exits 1.
 
 Options:
   --repo <path>               Repository (default: .)
@@ -322,27 +330,14 @@ fn outcome(options: &Options) -> Outcome {
 }
 
 fn compute(options: &Options) -> Result<Evidence, EvidenceError> {
-    let (commit, parent) = if let Some(base) = &options.target.base {
-        // Range endpoints are not required to be commits.
-        let parent = resolve_rev(&options.repo, base)?;
-        let commit = resolve_rev(&options.repo, &options.target.sha)?;
-        (commit, parent)
+    let commit = resolve_commit(&options.repo, &options.target.sha)?;
+    let parent = if let Some(base) = &options.target.base {
+        resolve_rev(&options.repo, base)?
     } else {
-        let commit = resolve_commit(&options.repo, &options.target.sha)?;
-        let parent = resolve_parent(&options.repo, &commit)?;
-        (commit, parent)
+        resolve_parent(&options.repo, &commit)?
     };
-    let diff = git_stdout(
-        &options.repo,
-        &[
-            "diff",
-            "--no-ext-diff",
-            "--binary",
-            "--full-index",
-            &parent,
-            &commit,
-        ],
-    )?;
+    let diff_args = pinned_diff_args(true, &parent, &commit);
+    let diff = git_stdout(&options.repo, &diff_args)?;
     let patch_sha256 = sha256_hex(&diff)?;
     let patch_id = patch_id_of_diff(&options.repo, &diff)?;
     let totals = numstat(&options.repo, &parent, &commit)?;
@@ -589,7 +584,7 @@ fn ambiguous(raw: &str, reason: &str) -> EvidenceError {
 
 fn resolve_commit(repo: &Path, rev: &str) -> Result<String, EvidenceError> {
     let spec = format!("{rev}^{{commit}}");
-    let output = git(repo)
+    let output = git(repo)?
         .args(["rev-parse", "--verify", "--end-of-options", &spec])
         .output()
         .map_err(|err| spawn_error("git", err))?;
@@ -600,7 +595,7 @@ fn resolve_commit(repo: &Path, rev: &str) -> Result<String, EvidenceError> {
 }
 
 fn resolve_rev(repo: &Path, rev: &str) -> Result<String, EvidenceError> {
-    let output = git(repo)
+    let output = git(repo)?
         .args(["rev-parse", "--verify", "--end-of-options", rev])
         .output()
         .map_err(|err| spawn_error("git", err))?;
@@ -611,8 +606,9 @@ fn resolve_rev(repo: &Path, rev: &str) -> Result<String, EvidenceError> {
 }
 
 fn resolve_parent(repo: &Path, sha: &str) -> Result<String, EvidenceError> {
-    let spec = format!("{sha}^");
-    let output = git(repo)
+    // ^1 is the first parent. On a merge that is the mainline, not ^2.
+    let spec = format!("{sha}^1");
+    let output = git(repo)?
         .args(["rev-parse", "--verify", "--end-of-options", &spec])
         .output()
         .map_err(|err| spawn_error("git", err))?;
@@ -624,7 +620,7 @@ fn resolve_parent(repo: &Path, sha: &str) -> Result<String, EvidenceError> {
     }
     if !commit_records_parent(repo, sha)? {
         return Err(EvidenceError::Failed(format!(
-            "root commit {sha} has no parent"
+            "root commit {sha} has no first parent"
         )));
     }
     let why = if is_shallow(repo) {
@@ -633,12 +629,12 @@ fn resolve_parent(repo: &Path, sha: &str) -> Result<String, EvidenceError> {
         "the parent commit is not in this repository"
     };
     Err(EvidenceError::Failed(format!(
-        "parent of {sha} is missing ({sha}^); {why}; pass --base when that tree is already available"
+        "parent of {sha} is missing ({sha}^1); {why}; pass --base when that tree is already available"
     )))
 }
 
 fn commit_records_parent(repo: &Path, sha: &str) -> Result<bool, EvidenceError> {
-    let stdout = git_stdout(repo, &["cat-file", "-p", sha])?;
+    let stdout = git_stdout(repo, ["cat-file", "-p", sha])?;
     let text = std::str::from_utf8(&stdout)
         .map_err(|_| EvidenceError::Failed("git cat-file output is not utf-8".to_string()))?;
     Ok(text.lines().any(|line| line.starts_with("parent ")))
@@ -661,7 +657,10 @@ fn is_short_hex(rev: &str) -> bool {
 
 fn matching_objects(repo: &Path, prefix: &str) -> usize {
     let flag = format!("--disambiguate={prefix}");
-    let Ok(output) = git(repo).args(["rev-parse", &flag]).output() else {
+    let Ok(mut command) = git(repo) else {
+        return 0;
+    };
+    let Ok(output) = command.args(["rev-parse", &flag]).output() else {
         return 0;
     };
     if !output.status.success() {
@@ -691,7 +690,10 @@ fn parse_rev_stdout(stdout: &[u8]) -> Result<String, EvidenceError> {
 }
 
 fn is_shallow(repo: &Path) -> bool {
-    git(repo)
+    let Ok(mut command) = git(repo) else {
+        return false;
+    };
+    command
         .args(["rev-parse", "--is-shallow-repository"])
         .output()
         .ok()
@@ -701,8 +703,34 @@ fn is_shallow(repo: &Path) -> bool {
 }
 
 fn numstat(repo: &Path, from: &str, to: &str) -> Result<Totals, EvidenceError> {
-    let stdout = git_stdout(repo, &["diff", "--no-ext-diff", "--numstat", from, to])?;
+    let args = pinned_diff_args(false, from, to);
+    let stdout = git_stdout(repo, &args)?;
     parse_numstat(&stdout)
+}
+
+fn pinned_diff_args(patch: bool, parent: &str, sha: &str) -> Vec<String> {
+    let mut args = vec!["diff".to_string()];
+    for flag in [
+        "--no-color",
+        "--no-textconv",
+        "--no-ext-diff",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "--diff-algorithm=myers",
+    ] {
+        args.push(flag.to_string());
+    }
+    if patch {
+        // -U3 with --numstat also prints the patch, which is not numstat.
+        for flag in ["-U3", "--inter-hunk-context=0", "--binary", "--full-index"] {
+            args.push((*flag).to_string());
+        }
+    } else {
+        args.push("--numstat".to_string());
+    }
+    args.push(parent.to_string());
+    args.push(sha.to_string());
+    args
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -760,7 +788,7 @@ fn numstat_error() -> EvidenceError {
 }
 
 fn patch_id_of_diff(repo: &Path, diff: &[u8]) -> Result<String, EvidenceError> {
-    let mut command = git(repo);
+    let mut command = git(repo)?;
     command
         .args(["patch-id", "--stable"])
         .stdin(Stdio::piped())
@@ -792,10 +820,10 @@ fn patch_id_of_diff(repo: &Path, diff: &[u8]) -> Result<String, EvidenceError> {
             &output.stderr,
         ));
     }
-    parse_patch_id(&output.stdout)
+    parse_patch_id(&output.stdout, diff)
 }
 
-fn parse_patch_id(stdout: &[u8]) -> Result<String, EvidenceError> {
+fn parse_patch_id(stdout: &[u8], diff: &[u8]) -> Result<String, EvidenceError> {
     let text = std::str::from_utf8(stdout)
         .map_err(|_| EvidenceError::Failed("git patch-id output is not utf-8".to_string()))?;
     let mut ids = Vec::new();
@@ -815,9 +843,12 @@ fn parse_patch_id(stdout: &[u8]) -> Result<String, EvidenceError> {
     }
     match ids.as_slice() {
         [id] => Ok(id.clone()),
-        [] => Err(EvidenceError::Failed(
-            "git patch-id --stable produced no patch id; an empty commit has an empty diff and exits 1"
+        [] if diff.is_empty() => Err(EvidenceError::Failed(
+            "empty commit: git diff --binary --full-index produced no diff, so there is no patch id"
                 .to_string(),
+        )),
+        [] => Err(EvidenceError::Failed(
+            "git patch-id --stable produced no patch id for a non-empty diff".to_string(),
         )),
         _ => Err(EvidenceError::Failed(
             "git patch-id --stable produced multiple patch ids".to_string(),
@@ -825,15 +856,28 @@ fn parse_patch_id(stdout: &[u8]) -> Result<String, EvidenceError> {
     }
 }
 
-fn git_stdout(repo: &Path, args: &[&str]) -> Result<Vec<u8>, EvidenceError> {
-    let output = git(repo)
-        .args(args)
+fn git_stdout<I, S>(repo: &Path, args: I) -> Result<Vec<u8>, EvidenceError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let args: Vec<std::ffi::OsString> = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_os_string())
+        .collect();
+    let shown = args
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let output = git(repo)?
+        .args(&args)
         .output()
         .map_err(|err| spawn_error("git", err))?;
     if !output.status.success() {
         return Err(command_failure(
             "git",
-            &args.join(" "),
+            &shown,
             output.status,
             &output.stderr,
         ));
@@ -841,7 +885,9 @@ fn git_stdout(repo: &Path, args: &[&str]) -> Result<Vec<u8>, EvidenceError> {
     Ok(output.stdout)
 }
 
-fn git(repo: &Path) -> Command {
+fn git(repo: &Path) -> Result<Command, EvidenceError> {
+    require_attr_source()?;
+    let empty = empty_tree(repo)?;
     let mut command = Command::new("git");
     command
         .args([
@@ -851,19 +897,107 @@ fn git(repo: &Path) -> Command {
             "diff.renames=true",
             "-c",
             "diff.mnemonicPrefix=false",
+            "-c",
+            "core.attributesFile=/dev/null",
         ])
+        .arg("--attr-source")
+        .arg(empty)
         .arg("-C")
         .arg(repo)
         .arg("--no-pager")
         .stdin(Stdio::null());
     scrub_git_env(&mut command);
-    command
+    Ok(command)
+}
+
+fn require_attr_source() -> Result<(), EvidenceError> {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<Result<(), String>> = OnceLock::new();
+    let cached = CACHED.get_or_init(|| {
+        let output = match Command::new("git")
+            .arg("version")
+            .env("LC_ALL", "C")
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) => return Err(format!("failed to start git: {err}")),
+        };
+        if !output.status.success() {
+            return Err(format!(
+                "git version failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        match git_version_supports_attr_source(&text) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(format!(
+                "git is older than 2.40 and has no --attr-source ({}); evidence-hash exits 1",
+                text.trim()
+            )),
+            Err(message) => Err(message),
+        }
+    });
+    match cached {
+        Ok(()) => Ok(()),
+        Err(message) => Err(EvidenceError::Failed(message.clone())),
+    }
+}
+
+fn git_version_supports_attr_source(text: &str) -> Result<bool, String> {
+    let Some(version) = text.split_whitespace().nth(2) else {
+        return Err(format!("unrecognized git version output: {text:?}"));
+    };
+    let mut parts = version.split(['.', '-']);
+    let major: u32 = parts
+        .next()
+        .unwrap_or("0")
+        .parse()
+        .map_err(|_| format!("unrecognized git version output: {text:?}"))?;
+    let minor: u32 = parts
+        .next()
+        .unwrap_or("0")
+        .parse()
+        .map_err(|_| format!("unrecognized git version output: {text:?}"))?;
+    Ok(major > 2 || (major == 2 && minor >= 40))
+}
+
+fn empty_tree(repo: &Path) -> Result<String, EvidenceError> {
+    let output = plain_git()?
+        .arg("-C")
+        .arg(repo)
+        .args(["hash-object", "-w", "-t", "tree", "--", "/dev/null"])
+        .output()
+        .map_err(|err| spawn_error("git", err))?;
+    if !output.status.success() {
+        return Err(command_failure(
+            "git",
+            "hash-object -w -t tree /dev/null",
+            output.status,
+            &output.stderr,
+        ));
+    }
+    parse_rev_stdout(&output.stdout)
+}
+
+fn plain_git() -> Result<Command, EvidenceError> {
+    let mut command = Command::new("git");
+    command.stdin(Stdio::null());
+    scrub_git_env(&mut command);
+    Ok(command)
 }
 
 fn scrub_git_env(command: &mut Command) {
     command
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env_remove("GIT_DIFF_OPTS")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
@@ -947,8 +1081,7 @@ fn directive_from_bytes(bytes: &[u8]) -> Result<Directive, EvidenceError> {
                 .to_string(),
         ));
     }
-    let preimage = drop_first_two_lines(bytes)?;
-    let embedded = hash_on_first_line(bytes)?;
+    let (embedded, preimage) = split_directive(bytes)?;
     let sha256 = sha256_hex(preimage)?;
     let verdict = if sha256 == embedded {
         Verdict::Match
@@ -958,58 +1091,80 @@ fn directive_from_bytes(bytes: &[u8]) -> Result<Directive, EvidenceError> {
     Ok(Directive { sha256, verdict })
 }
 
-/// Header is two newline-terminated lines. The remainder is hashed as-is.
-fn drop_first_two_lines(bytes: &[u8]) -> Result<&[u8], EvidenceError> {
-    let mut seen = 0;
-    for (index, byte) in bytes.iter().enumerate() {
-        if *byte == b'\n' {
-            seen += 1;
-            if seen == 2 {
-                return Ok(&bytes[index + 1..]);
-            }
-        }
+const DIRECTIVE_LABEL: &[u8] = "지시문 sha256 `".as_bytes();
+
+/// Line 1 is exactly `지시문 sha256 `<64 lowercase hex>``.
+/// Line 2 is empty. Only that header token is outside the hash (N7).
+fn split_directive(bytes: &[u8]) -> Result<(String, &[u8]), EvidenceError> {
+    let Some(first_nl) = bytes.iter().position(|byte| *byte == b'\n') else {
+        return Err(directive_header("directive body has fewer than 2 lines"));
+    };
+    let after_first = &bytes[first_nl + 1..];
+    let Some(second_rel) = after_first.iter().position(|byte| *byte == b'\n') else {
+        return Err(directive_header("directive body has fewer than 2 lines"));
+    };
+    let line1 = &bytes[..first_nl];
+    let line2 = &after_first[..second_rel];
+    if !line2.is_empty() {
+        return Err(directive_header("directive line 2 must be empty"));
     }
-    Err(EvidenceError::Failed(
-        "directive body has fewer than 2 lines".to_string(),
-    ))
+    let embedded = exact_directive_line(line1)?;
+    Ok((embedded, &after_first[second_rel + 1..]))
 }
 
-/// #368 comments put `지시문 sha256 \`<64-hex>\`` on the first line.
-/// The second line is the blank separator. Later lines are not searched.
-fn hash_on_first_line(bytes: &[u8]) -> Result<String, EvidenceError> {
-    let end = bytes
-        .iter()
-        .position(|byte| *byte == b'\n')
-        .unwrap_or(bytes.len());
-    let line = &bytes[..end];
-    let mut found = None;
-    let mut index = 0;
-    while index < line.len() {
-        if line[index].is_ascii_hexdigit() {
-            let start = index;
-            while index < line.len() && line[index].is_ascii_hexdigit() {
-                index += 1;
-            }
-            if index - start == 64 {
-                if found.is_some() {
-                    return Err(EvidenceError::Failed(
-                        "first line has more than one 64-hex value".to_string(),
-                    ));
-                }
-                found = Some(
-                    std::str::from_utf8(&line[start..index])
-                        .map_err(|_| {
-                            EvidenceError::Failed("directive hash is not utf-8".to_string())
-                        })?
-                        .to_ascii_lowercase(),
-                );
-            }
-        } else {
-            index += 1;
-        }
+fn exact_directive_line(line: &[u8]) -> Result<String, EvidenceError> {
+    if line.starts_with(b" ") || line.starts_with(b"\t") {
+        return Err(directive_header("directive line 1 has leading space"));
     }
-    found
-        .ok_or_else(|| EvidenceError::Failed("first line has no 64-hex directive hash".to_string()))
+    if line.ends_with(b" ") || line.ends_with(b"\t") {
+        return Err(directive_header("directive line 1 has trailing space"));
+    }
+    if std::str::from_utf8(line)
+        .unwrap_or("")
+        .contains("지시문 sha1")
+    {
+        return Err(directive_header(
+            "directive label must be exactly `지시문 sha256`, not sha1",
+        ));
+    }
+    if !line.starts_with(DIRECTIVE_LABEL) {
+        return Err(directive_header(
+            "directive line 1 must be exactly `지시문 sha256 `<64 lowercase hex>`",
+        ));
+    }
+    let rest = &line[DIRECTIVE_LABEL.len()..];
+    if rest.starts_with(b" ") || rest.starts_with(b"\t") {
+        return Err(directive_header(
+            "directive hash has a space inside the backticks",
+        ));
+    }
+    if rest.starts_with(b"0x") || rest.starts_with(b"0X") {
+        return Err(directive_header("directive hash must not use a 0x prefix"));
+    }
+    let Some(backtick) = rest.iter().position(|byte| *byte == b'`') else {
+        return Err(directive_header(
+            "directive line 1 must end with a closing backtick",
+        ));
+    };
+    if backtick + 1 != rest.len() {
+        return Err(directive_header("directive line 1 has text after the hash"));
+    }
+    let hex = &rest[..backtick];
+    if hex.iter().any(|byte| byte.is_ascii_uppercase()) {
+        return Err(directive_header("directive hash must be lowercase hex"));
+    }
+    if hex.len() != 64 || !hex.iter().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(directive_header(
+            "directive hash must be 64 lowercase hex digits",
+        ));
+    }
+    let text =
+        std::str::from_utf8(hex).map_err(|_| directive_header("directive hash is not utf-8"))?;
+    Ok(text.to_string())
+}
+
+fn directive_header(message: &str) -> EvidenceError {
+    EvidenceError::Failed(message.to_string())
 }
 
 fn spawn_error(program: &str, err: std::io::Error) -> EvidenceError {
@@ -1035,8 +1190,8 @@ fn command_failure(program: &str, args: &str, status: ExitStatus, stderr: &[u8])
 #[cfg(test)]
 mod tests {
     use super::{
-        compute, help, outcome, parse_args, CompiledPattern, EvidenceError, Field, Options, Parsed,
-        Target,
+        compute, directive_from_bytes, git_version_supports_attr_source, help, outcome, parse_args,
+        CompiledPattern, EvidenceError, Field, Options, Parsed, Target, Verdict,
     };
     use std::ffi::OsString;
     use std::io::Write;
@@ -1078,7 +1233,9 @@ mod tests {
         }
 
         fn rev_parse(&self, rev: &str) -> String {
-            self.sh(&format!("git rev-parse {rev}")).trim().to_string()
+            self.git_text(&["rev-parse", "--verify", rev])
+                .trim()
+                .to_string()
         }
 
         fn clone_depth(&self, depth: u32) -> PathBuf {
@@ -1117,8 +1274,12 @@ mod tests {
             );
         }
 
-        fn sh(&self, script: &str) -> String {
-            sh(&self.origin, script)
+        fn git_bytes(&self, args: &[&str]) -> Vec<u8> {
+            git_bytes(&self.origin, args)
+        }
+
+        fn git_text(&self, args: &[&str]) -> String {
+            String::from_utf8(self.git_bytes(args)).unwrap()
         }
     }
 
@@ -1139,23 +1300,97 @@ mod tests {
         command
     }
 
-    fn sh(dir: &Path, script: &str) -> String {
-        let output = Command::new("bash")
-            .arg("-c")
-            .arg(format!("set -o pipefail; {script}"))
-            .current_dir(dir)
+    fn git_bytes(dir: &Path, args: &[&str]) -> Vec<u8> {
+        let output = git_command()
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    }
+
+    fn git_text(dir: &Path, args: &[&str]) -> String {
+        String::from_utf8(git_bytes(dir, args)).unwrap()
+    }
+
+    fn empty_tree_for(dir: &Path) -> String {
+        git_text(dir, &["hash-object", "-w", "-t", "tree", "--", "/dev/null"])
+            .trim()
+            .to_string()
+    }
+
+    fn oracle_diff(dir: &Path, parent: &str, sha: &str, mode: &[&str]) -> Vec<u8> {
+        let empty = empty_tree_for(dir);
+        let mut args = vec![
+            "-c",
+            "diff.noprefix=false",
+            "-c",
+            "diff.renames=true",
+            "-c",
+            "diff.mnemonicPrefix=false",
+            "-c",
+            "core.attributesFile=/dev/null",
+            "--attr-source",
+        ];
+        args.push(empty.as_str());
+        args.extend([
+            "-C",
+            dir.to_str().unwrap(),
+            "--no-pager",
+            "diff",
+            "--no-color",
+            "--no-textconv",
+            "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--diff-algorithm=myers",
+        ]);
+        if mode == ["--numstat"] {
+            args.push("--numstat");
+        } else {
+            args.extend(["-U3", "--inter-hunk-context=0"]);
+            args.extend(mode);
+        }
+        args.push(parent);
+        args.push(sha);
+        let output = Command::new("git")
+            .args(&args)
             .env("LC_ALL", "C")
-            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_ATTR_NOSYSTEM", "1")
+            .env_remove("GIT_DIFF_OPTS")
+            .env_remove("GIT_CONFIG_PARAMETERS")
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .output()
             .unwrap();
         assert!(
             output.status.success(),
-            "{script}\n{}",
+            "oracle git {args:?}\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        String::from_utf8(output.stdout).unwrap()
+        output.stdout
+    }
+
+    fn oracle_patch_id(diff: &[u8]) -> String {
+        let mut child = git_command()
+            .args(["patch-id", "--stable"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(diff).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        first_field(&String::from_utf8(output.stdout).unwrap())
     }
 
     fn first_field(text: &str) -> String {
@@ -1201,8 +1436,6 @@ mod tests {
         (files, insertions, deletions)
     }
 
-    const PINNED_DIFF: &str = "git -c diff.noprefix=false -c diff.renames=true -c diff.mnemonicPrefix=false diff --no-ext-diff";
-
     const COMMENT_6076767394: &[u8] = include_bytes!("../fixtures/6076767394.body");
     const COMMENT_6077088942: &[u8] = include_bytes!("../fixtures/6077088942.body");
 
@@ -1229,21 +1462,25 @@ mod tests {
     }
 
     fn full_index_sha256(dir: &Path, parent: &str, sha: &str) -> String {
-        first_field(&sh(
+        oracle_sha256(&oracle_diff(
             dir,
-            &format!("{PINNED_DIFF} --binary --full-index {parent} {sha} | sha256sum"),
+            parent,
+            sha,
+            &["--binary", "--full-index"],
         ))
     }
 
     fn full_index_patch_id(dir: &Path, parent: &str, sha: &str) -> String {
-        first_field(&sh(
+        oracle_patch_id(&oracle_diff(
             dir,
-            &format!("{PINNED_DIFF} --binary --full-index {parent} {sha} | git patch-id --stable"),
+            parent,
+            sha,
+            &["--binary", "--full-index"],
         ))
     }
 
-    fn show_patch_id(dir: &Path, sha: &str) -> String {
-        first_field(&sh(dir, &format!("git show {sha} | git patch-id --stable")))
+    fn pinned_numstat(dir: &Path, parent: &str, sha: &str) -> String {
+        String::from_utf8(oracle_diff(dir, parent, sha, &["--numstat"])).unwrap()
     }
 
     fn second_line_end(bytes: &[u8]) -> usize {
@@ -1296,10 +1533,8 @@ mod tests {
 
         let patch = full_index_sha256(&repo.origin, "HEAD^", "HEAD");
         let patch_id = full_index_patch_id(&repo.origin, "HEAD^", "HEAD");
-        let (files, insertions, deletions) = sum_numstat(&sh(
-            &repo.origin,
-            &format!("{PINNED_DIFF} --numstat HEAD^ HEAD"),
-        ));
+        let (files, insertions, deletions) =
+            sum_numstat(&pinned_numstat(&repo.origin, "HEAD^", "HEAD"));
 
         assert_eq!(evidence.commit, head);
         assert_eq!(evidence.parent, repo.rev_parse("HEAD^"));
@@ -1322,14 +1557,12 @@ mod tests {
 
         let patch = full_index_sha256(&repo.origin, &root, &head);
         let patch_id = full_index_patch_id(&repo.origin, &root, &head);
-        let parent_only = full_index_patch_id(&repo.origin, "HEAD^", "HEAD");
-        let shown = show_patch_id(&repo.origin, &head);
+        let parent_only = full_index_patch_id(&repo.origin, "HEAD^1", "HEAD");
         assert_eq!(evidence.parent, root);
         assert_eq!(evidence.commit, head);
         assert_eq!(evidence.patch_sha256, patch);
         assert_eq!(evidence.patch_id, patch_id);
         assert_ne!(evidence.patch_id, parent_only);
-        assert_ne!(evidence.patch_id, shown);
     }
 
     #[test]
@@ -1340,10 +1573,11 @@ mod tests {
         repo.git(&["config", "diff.noprefix", "true"]);
         let evidence = compute(&commit_options(&repo.origin, &head)).unwrap();
         let pinned = full_index_sha256(&repo.origin, "HEAD^", "HEAD");
-        let unpinned = first_field(&sh(
+        let unpinned_bytes = git_bytes(
             &repo.origin,
-            "git diff --binary --full-index HEAD^ HEAD | sha256sum",
-        ));
+            &["diff", "--binary", "--full-index", "HEAD^", "HEAD"],
+        );
+        let unpinned = oracle_sha256(&unpinned_bytes);
         assert_eq!(evidence.patch_sha256, pinned);
         assert_ne!(pinned, unpinned);
         assert_eq!(evidence.commit, head);
@@ -1357,12 +1591,8 @@ mod tests {
         pack_distinct_blobs(&repo.origin, 40_000);
         let shallow = repo.clone_depth(2);
 
-        let fat_short = first_field(&sh(
-            &repo.origin,
-            "git diff HEAD^ HEAD | git patch-id --stable",
-        ));
-        let shallow_short =
-            first_field(&sh(&shallow, "git diff HEAD^ HEAD | git patch-id --stable"));
+        let fat_short = oracle_patch_id(&git_bytes(&repo.origin, &["diff", "HEAD^", "HEAD"]));
+        let shallow_short = oracle_patch_id(&git_bytes(&shallow, &["diff", "HEAD^", "HEAD"]));
         let stable = full_index_patch_id(&repo.origin, "HEAD^", "HEAD");
         let shallow_stable = full_index_patch_id(&shallow, "HEAD^", "HEAD");
         assert_ne!(
@@ -1389,7 +1619,7 @@ mod tests {
         repo.commit("a.txt", b"text\n", "root");
         let head = repo.commit("b.bin", &[0, 1, 2, 255], "binary");
         let evidence = compute(&commit_options(&repo.origin, &head)).unwrap();
-        let numstat = sh(&repo.origin, &format!("{PINNED_DIFF} --numstat HEAD^ HEAD"));
+        let numstat = pinned_numstat(&repo.origin, "HEAD^", "HEAD");
         assert!(numstat.contains('-'), "{numstat}");
         let (files, insertions, deletions) = sum_numstat(&numstat);
         assert_eq!(
@@ -1415,10 +1645,7 @@ mod tests {
         assert!(!message.contains("unknown commit"), "{message}");
 
         pack_distinct_blobs(&repo.origin, 2_000);
-        let listed = sh(
-            &repo.origin,
-            "git cat-file --batch-check --batch-all-objects",
-        );
+        let listed = repo.git_text(&["cat-file", "--batch-check", "--batch-all-objects"]);
         let objects: Vec<String> = listed
             .lines()
             .filter_map(|line| line.split_whitespace().next().map(str::to_string))
@@ -1476,7 +1703,7 @@ mod tests {
 
         let depth_two = repo.clone_depth(2);
         assert_eq!(
-            sh(&depth_two, "git rev-parse --is-shallow-repository").trim(),
+            git_text(&depth_two, &["rev-parse", "--is-shallow-repository"]).trim(),
             "true"
         );
         let evidence = compute(&commit_options(&depth_two, &head)).unwrap();
@@ -1506,19 +1733,19 @@ mod tests {
         repo.git(&["merge", "--no-ff", "side", "-m", "merge"]);
         let merge = repo.rev_parse("HEAD");
         let evidence = compute(&commit_options(&repo.origin, &merge)).unwrap();
-        let parent = repo.rev_parse("HEAD^");
-        assert_ne!(parent, side);
+        let first = repo.rev_parse("HEAD^1");
+        let second = repo.rev_parse("HEAD^2");
+        assert_eq!(evidence.parent, first);
+        assert_ne!(first, second);
+        assert_ne!(first, side);
         assert_eq!(
-            evidence.patch_id,
-            full_index_patch_id(&repo.origin, &parent, &merge)
+            evidence.patch_sha256,
+            full_index_sha256(&repo.origin, &first, &merge)
         );
-        let shown = sh(
-            &repo.origin,
-            &format!("git show {merge} | git patch-id --stable"),
-        );
-        assert!(
-            shown.trim().is_empty() || first_field(&shown) != evidence.patch_id,
-            "git show of a merge is not the patch-id input: {shown}"
+        assert_ne!(
+            evidence.patch_sha256,
+            full_index_sha256(&repo.origin, &second, &merge),
+            "first-parent diff must differ from the second parent"
         );
     }
 
@@ -1530,11 +1757,13 @@ mod tests {
             let preimage = &bytes[second_line_end(bytes)..];
             assert_eq!(oracle_sha256(preimage), expected);
             let result = directive_outcome(bytes);
-            assert_eq!(result.exit, 0, "{}", result.stderr);
-            assert!(result
-                .stdout
-                .contains(&format!("directive-sha256: {expected}")));
-            assert!(result.stdout.contains("directive: MATCH"));
+            assert_eq!(result.exit, 1, "{}", result.stdout);
+            assert!(
+                result.stderr.contains("exactly"),
+                "real #368 line 1 is a [to:codex] preamble, not the exact header: {}",
+                result.stderr
+            );
+            assert!(result.stdout.is_empty(), "{}", result.stdout);
         }
 
         let mut trailed = COMMENT_6076767394.to_vec();
@@ -1559,11 +1788,15 @@ mod tests {
         assert_eq!(result.exit, 1);
         assert!(result.stderr.contains("CR"), "{}", result.stderr);
 
-        let mut mismatched = COMMENT_6076767394.to_vec();
-        let flip = second_line_end(&mismatched);
-        mismatched[flip] ^= 0x01;
-        let result = directive_outcome(&mismatched);
-        assert_eq!(result.exit, 1);
+        let preimage = b"payload line";
+        let mut matched = exact_directive(preimage);
+        let result = directive_from_bytes(&matched).unwrap();
+        assert_eq!(result.verdict, Verdict::Match);
+        assert_eq!(result.sha256, oracle_sha256(preimage));
+        let flip = matched.len() - 1;
+        matched[flip] ^= 0x01;
+        let result = directive_outcome(&matched);
+        assert_eq!(result.exit, 1, "{}", result.stderr);
         assert!(
             result.stdout.contains("directive: MISMATCH"),
             "{}",
@@ -1579,7 +1812,68 @@ mod tests {
         buried.extend(b"ab".repeat(32));
         let result = directive_outcome(&buried);
         assert_eq!(result.exit, 1);
-        assert!(result.stderr.contains("first line"), "{}", result.stderr);
+        assert!(result.stderr.contains("exactly"), "{}", result.stderr);
+    }
+
+    fn exact_directive(preimage: &[u8]) -> Vec<u8> {
+        let hash = oracle_sha256(preimage);
+        let mut body = format!("지시문 sha256 `{hash}`\n\n").into_bytes();
+        body.extend_from_slice(preimage);
+        body
+    }
+
+    #[test]
+    fn directive_header_counterexamples_exit_1() {
+        let hash = oracle_sha256(b"body\n");
+        let cases = [
+            (
+                format!("지시문 sha256 `{}`\n\nbody", hash.to_ascii_uppercase()),
+                "lowercase",
+            ),
+            (
+                format!("지시문 sha256 `{}`\n\nbody", {
+                    let mut mixed = hash.clone();
+                    mixed.replace_range(0..1, "A");
+                    mixed
+                }),
+                "lowercase",
+            ),
+            (format!(" 지시문 sha256 `{hash}`\n\nbody"), "leading space"),
+            (format!("지시문 sha256 `{hash}` \n\nbody"), "trailing space"),
+            (format!("지시문 sha256 ` {hash}`\n\nbody"), "space inside"),
+            (format!("지시문 sha256 `0x{hash}`\n\nbody"), "0x"),
+            (format!("`{hash}`\n\nbody"), "exactly"),
+            (format!("지시문 sha1 `{hash}`\n\nbody"), "sha1"),
+            (
+                format!("지시문 sha256 `{hash}` extra\n\nbody"),
+                "text after",
+            ),
+            (format!("지시문 sha256 `{hash}`\nnot-empty\nbody"), "line 2"),
+        ];
+        for (body, needle) in cases {
+            let error = directive_from_bytes(body.as_bytes()).unwrap_err();
+            assert!(
+                error.to_string().contains(needle),
+                "{needle}: {error} body={body:?}"
+            );
+            assert_eq!(error.exit_code(), 1);
+        }
+    }
+
+    #[test]
+    fn git_older_than_2_40_has_no_attr_source() {
+        assert!(!git_version_supports_attr_source("git version 2.39.1\n").unwrap());
+        assert!(git_version_supports_attr_source("git version 2.40.0\n").unwrap());
+        assert!(git_version_supports_attr_source("git version 2.43.0\n").unwrap());
+    }
+
+    #[test]
+    fn base_requires_sha_to_be_a_commit() {
+        let repo = Repo::new();
+        repo.commit("a.txt", b"a\n", "root");
+        let tree = repo.rev_parse("HEAD^{tree}");
+        let err = compute(&with_base(commit_options(&repo.origin, &tree), "HEAD")).unwrap_err();
+        assert!(err.to_string().contains("unknown commit"), "{err}");
     }
 
     fn directive_outcome(bytes: &[u8]) -> super::Outcome {
