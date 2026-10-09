@@ -15,6 +15,7 @@ pub enum DirectoryError {
     CountMismatch,
     InvalidZip64,
     MultiDiskZip64,
+    UnsupportedVersion,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -24,6 +25,13 @@ pub struct Entry<'a> {
     pub extra: &'a [u8],
     pub uncompressed_size: u64,
     pub external_attributes: u32,
+    /// Absolute offset of the local header in `input` (prepend included).
+    pub local_header_offset: u64,
+    pub compression_method: u16,
+    pub compressed_size: u64,
+    /// Central-directory "version needed to extract" (offset 6), both bytes.
+    /// Rejection compares only the low byte with 63. Offset 7 is reserved.
+    pub version_needed: u16,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -57,9 +65,10 @@ fn extent(input: &[u8], offset: u64, length: u64) -> Result<&[u8]> {
 }
 
 fn number<const N: usize>(input: &[u8], offset: u64) -> Result<[u8; N]> {
-    extent(input, offset, N as u64)?
-        .try_into()
-        .map_err(|_| DirectoryError::Truncated)
+    let bytes = extent(input, offset, N as u64)?;
+    let mut value = [0; N];
+    value.copy_from_slice(bytes);
+    Ok(value)
 }
 
 fn u16_at(input: &[u8], offset: u64) -> Result<u16> {
@@ -91,9 +100,7 @@ fn end_record(input: &[u8]) -> Result<End> {
         input.len() - 22
     } else {
         let start = input.len().saturating_sub(22 + usize::from(u16::MAX));
-        let found = input
-            .get(start..)
-            .ok_or(DirectoryError::OutOfBounds)?
+        let found = input[start..]
             .windows(4)
             .rposition(|bytes| bytes == EOCD)
             .ok_or(DirectoryError::MissingEndRecord)?;
@@ -145,7 +152,6 @@ fn end_record(input: &[u8]) -> Result<End> {
             if physical.checked_add(record_length) != Some(locator_start) {
                 return Err(DirectoryError::InvalidZip64);
             }
-            extent(input, physical, record_length)?;
             let count = u64_at(record, 32)?;
             if end.count != u64::from(u16::MAX) && end.count != count {
                 return Err(DirectoryError::CountMismatch);
@@ -167,22 +173,30 @@ fn end_record(input: &[u8]) -> Result<End> {
     Ok(end)
 }
 
-fn entry_size_and_offset(header: &[u8], mut extra: &[u8]) -> Result<(u64, u64)> {
-    let mut size = u64::from(u32_at(header, 24)?);
+fn entry_size_and_offset(header: &[u8], mut extra: &[u8]) -> Result<(u64, u64, u64)> {
+    let mut uncompressed = u64::from(u32_at(header, 24)?);
+    let mut compressed = u64::from(u32_at(header, 20)?);
     let mut offset = u64::from(u32_at(header, 42)?);
-    let mut need_size = size == u64::from(u32::MAX);
-    let mut need_compressed = u32_at(header, 20)? == u32::MAX;
+    let mut need_uncompressed = uncompressed == u64::from(u32::MAX);
+    let mut need_compressed = compressed == u64::from(u32::MAX);
     let mut need_offset = offset == u64::from(u32::MAX);
+    let mut saw_zip64 = false;
     while !extra.is_empty() {
         let tag = take(&mut extra, 4)?;
         let mut value = take(&mut extra, usize::from(u16_at(tag, 2)?))?;
         if u16_at(tag, 0)? == 1 {
-            if need_size {
-                size = u64_at(take(&mut value, 8)?, 0)?;
-                need_size = false;
+            // Python reads a later ZIP64 block only while a sentinel remains.
+            // A second block is rejected here even when that read would succeed.
+            if saw_zip64 {
+                return Err(DirectoryError::InvalidZip64);
+            }
+            saw_zip64 = true;
+            if need_uncompressed {
+                uncompressed = u64_at(take(&mut value, 8)?, 0)?;
+                need_uncompressed = false;
             }
             if need_compressed {
-                take(&mut value, 8)?;
+                compressed = u64_at(take(&mut value, 8)?, 0)?;
                 need_compressed = false;
             }
             if need_offset {
@@ -191,10 +205,10 @@ fn entry_size_and_offset(header: &[u8], mut extra: &[u8]) -> Result<(u64, u64)> 
             }
         }
     }
-    if need_size || need_compressed || need_offset {
+    if need_uncompressed || need_compressed || need_offset {
         return Err(DirectoryError::InvalidZip64);
     }
-    Ok((size, offset))
+    Ok((uncompressed, compressed, offset))
 }
 
 /// Return every central entry, or an error without a partial inventory.
@@ -220,14 +234,23 @@ pub fn parse_directory(input: &[u8]) -> Result<Directory<'_>> {
         if header.get(..4) != Some(CENTRAL.as_slice()) {
             return Err(DirectoryError::InvalidSignature);
         }
+        let version_needed = u16_at(header, 6)?;
+        // ZIP stores the spec version in the low byte. The high byte is reserved.
+        if (version_needed & 0xff) > 63 {
+            return Err(DirectoryError::UnsupportedVersion);
+        }
+        let compression_method = u16_at(header, 10)?;
         let name_raw = take(&mut central, usize::from(u16_at(header, 28)?))?;
         let extra = take(&mut central, usize::from(u16_at(header, 30)?))?;
         take(&mut central, usize::from(u16_at(header, 32)?))?;
-        let (uncompressed_size, local_offset) = entry_size_and_offset(header, extra)?;
-        let local_position = prefix
+        let (uncompressed_size, compressed_size, local_offset) =
+            entry_size_and_offset(header, extra)?;
+        let local_header_offset = prefix
             .checked_add(local_offset)
             .ok_or(DirectoryError::IntegerOverflow)?;
-        if local_position >= u64::try_from(input.len()).map_err(|_| DirectoryError::OutOfBounds)? {
+        if local_header_offset
+            >= u64::try_from(input.len()).map_err(|_| DirectoryError::OutOfBounds)?
+        {
             return Err(DirectoryError::OutOfBounds);
         }
         entries.push(Entry {
@@ -236,6 +259,10 @@ pub fn parse_directory(input: &[u8]) -> Result<Directory<'_>> {
             extra,
             uncompressed_size,
             external_attributes: u32_at(header, 38)?,
+            local_header_offset,
+            compression_method,
+            compressed_size,
+            version_needed,
         });
     }
     if u64::try_from(entries.len()).map_err(|_| DirectoryError::IntegerOverflow)? != end.count {
@@ -248,6 +275,29 @@ pub fn parse_directory(input: &[u8]) -> Result<Directory<'_>> {
         disk_number: end.disk,
         directory_disk: end.directory_disk,
     })
+}
+
+/// Reads every central-directory field so the non-test binary keeps this leaf live.
+pub(crate) fn read_fields_fingerprint(directory: &Directory<'_>) -> u64 {
+    let mut mixed = directory
+        .declared_entry_count
+        .wrapping_add(directory.entries_on_disk)
+        .wrapping_add(u64::from(directory.disk_number))
+        .wrapping_add(u64::from(directory.directory_disk));
+    for entry in &directory.entries {
+        mixed = mixed
+            .wrapping_add(u64::from(entry.flags))
+            .wrapping_add(entry.uncompressed_size)
+            .wrapping_add(u64::from(entry.external_attributes))
+            .wrapping_add(entry.local_header_offset)
+            .wrapping_add(u64::from(entry.compression_method))
+            .wrapping_add(entry.compressed_size)
+            .wrapping_add(u64::from(entry.version_needed));
+        for byte in entry.name_raw.iter().chain(entry.extra) {
+            mixed = mixed.wrapping_add(u64::from(*byte));
+        }
+    }
+    mixed
 }
 
 #[cfg(test)]
@@ -351,6 +401,19 @@ mod tests {
         );
         assert_eq!(directory.entries[0].external_attributes >> 16, 0o040755);
         assert_eq!(directory.entries[1].external_attributes >> 16, 0o100644);
+        assert_eq!(directory.entries[0].compression_method, 0);
+        assert_eq!(directory.entries[0].compressed_size, 0);
+        assert_eq!(directory.entries[0].version_needed, 20);
+        assert_eq!(
+            &bytes[directory.entries[0].local_header_offset as usize..][..4],
+            b"PK\x03\x04"
+        );
+        for entry in &directory.entries {
+            assert_eq!(
+                &bytes[entry.local_header_offset as usize..][..4],
+                b"PK\x03\x04"
+            );
+        }
     }
 
     #[test]
@@ -448,10 +511,10 @@ mod tests {
             };
             let mut prefixed = b"prefix".to_vec();
             prefixed.extend(bytes);
-            assert_eq!(
-                parse_directory(&prefixed).unwrap().entries[0].name_raw,
-                b"a"
-            );
+            let directory = parse_directory(&prefixed).unwrap();
+            assert_eq!(directory.entries[0].name_raw, b"a");
+            assert_eq!(directory.entries[0].local_header_offset, 6);
+            assert_eq!(&prefixed[6..10], b"PK\x03\x04");
         }
     }
 
@@ -545,6 +608,10 @@ mod tests {
         set32(&mut bytes, footer + 12 + 12, (footer - start + 12) as u32);
         let directory = parse_directory(&bytes).unwrap();
         assert_eq!(directory.entries[0].uncompressed_size, 1_u64 << 40);
+        assert_eq!(directory.entries[0].compressed_size, 0);
+        assert_eq!(directory.entries[0].compression_method, 0);
+        assert_eq!(directory.entries[0].version_needed, 20);
+        assert_eq!(directory.entries[0].local_header_offset, 0);
         assert_eq!(directory.entries[0].external_attributes >> 16, 0o120777);
         assert_eq!(directory.entries[0].extra, extra);
     }
@@ -608,10 +675,10 @@ mod tests {
         }
         set16(&mut bytes, start + 30, 28);
         set32(&mut bytes, footer + 28 + 12, (footer - start + 28) as u32);
-        assert_eq!(
-            parse_directory(&bytes).unwrap().entries[0].uncompressed_size,
-            u64::from(u32::MAX)
-        );
+        let directory = parse_directory(&bytes).unwrap();
+        assert_eq!(directory.entries[0].uncompressed_size, u64::from(u32::MAX));
+        assert_eq!(directory.entries[0].compressed_size, 0);
+        assert_eq!(directory.entries[0].local_header_offset, 0);
         set64(&mut bytes, footer + 20, u64::MAX);
         assert_eq!(parse_directory(&bytes), Err(DirectoryError::OutOfBounds));
     }
@@ -633,5 +700,276 @@ mod tests {
         let directory = parse_directory(&bytes).unwrap();
         assert!(directory.entries.is_empty());
         assert_eq!(directory.declared_entry_count, 0);
+    }
+
+    fn with_central(
+        name: &[u8],
+        version: u16,
+        compressed: u32,
+        uncompressed: u32,
+        extra: &[u8],
+    ) -> Vec<u8> {
+        let (mut bytes, start, footer) = archive(&[name]);
+        bytes.splice(footer..footer, extra.iter().copied());
+        set16(&mut bytes, start + 6, version);
+        set32(&mut bytes, start + 20, compressed);
+        set32(&mut bytes, start + 24, uncompressed);
+        set16(&mut bytes, start + 30, u16::try_from(extra.len()).unwrap());
+        let eocd = footer + extra.len();
+        set32(
+            &mut bytes,
+            eocd + 12,
+            u32::try_from(footer - start + extra.len()).unwrap(),
+        );
+        bytes
+    }
+
+    fn zip64_then_empty(payload: u64) -> Vec<u8> {
+        let mut extra = vec![1, 0, 8, 0];
+        extra.extend(payload.to_le_bytes());
+        extra.extend_from_slice(&[1, 0, 0, 0]);
+        extra
+    }
+
+    #[test]
+    fn duplicate_zip64_extra_blocks_are_rejected() {
+        // Hand cases 38, 38b, and 38d: a second ZIP64 extra follows a short or sentinel copy.
+        let cases = [
+            with_central(
+                b"a",
+                20,
+                0,
+                u32::MAX,
+                &zip64_then_empty(u64::from(u32::MAX)),
+            ),
+            with_central(
+                b"a",
+                20,
+                u32::MAX,
+                0,
+                &zip64_then_empty(u64::from(u32::MAX)),
+            ),
+            with_central(
+                b"d/",
+                20,
+                u32::MAX,
+                0,
+                &zip64_then_empty(u64::from(u32::MAX)),
+            ),
+            // G3/G4 shapes: Python accepts these; the second block is still rejected.
+            with_central(b"a", 20, 0, u32::MAX, &zip64_then_empty(1_u64 << 40)),
+            with_central(b"a", 20, 0, 0, &zip64_then_empty(7)),
+        ];
+        for bytes in cases {
+            assert_eq!(parse_directory(&bytes), Err(DirectoryError::InvalidZip64));
+        }
+    }
+
+    #[test]
+    fn version_needed_compares_only_the_low_byte_with_63() {
+        assert_eq!(
+            parse_directory(&with_central(b"a", 64, 0, 0, &[])).unwrap_err(),
+            DirectoryError::UnsupportedVersion
+        );
+        assert_eq!(
+            parse_directory(&with_central(b"a", u16::MAX, 0, 0, &[])).unwrap_err(),
+            DirectoryError::UnsupportedVersion
+        );
+        let (mut bytes, start, _) = archive(&[b"dir/", b"dir/", b"a"]);
+        set16(&mut bytes, start + 6, 64);
+        assert_eq!(
+            parse_directory(&bytes),
+            Err(DirectoryError::UnsupportedVersion)
+        );
+        let (mut bytes, start, _) = archive(&[b"dir/", b"a"]);
+        let second = start + 46 + b"dir/".len();
+        set16(&mut bytes, second + 6, 64);
+        assert_eq!(
+            parse_directory(&bytes),
+            Err(DirectoryError::UnsupportedVersion)
+        );
+
+        let high_byte_bytes = with_central(b"a", 0x0314, 0, 0, &[]);
+        let high_byte = parse_directory(&high_byte_bytes).unwrap();
+        assert_eq!(high_byte.entries[0].version_needed, 0x0314);
+        assert_eq!(high_byte.entries[0].compression_method, 0);
+        let at_limit_bytes = with_central(b"a", 63, 0, 0, &[]);
+        let at_limit = parse_directory(&at_limit_bytes).unwrap();
+        assert_eq!(at_limit.entries[0].version_needed, 63);
+    }
+
+    fn fixture(dir: &str, name: &str) -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sqlite-zip")
+            .join(dir)
+            .join(name);
+        std::fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+    }
+
+    #[test]
+    fn probe_fixtures_accept_g1_g2_g5_and_reject_the_rest_of_the_review_set() {
+        assert_eq!(
+            parse_directory(&fixture("probe", "D-B1-extract-version-64.zip")).unwrap_err(),
+            DirectoryError::UnsupportedVersion
+        );
+        assert_eq!(
+            parse_directory(&fixture("probe", "D-B1-extract-version-255.zip")).unwrap_err(),
+            DirectoryError::UnsupportedVersion
+        );
+        assert_eq!(
+            parse_directory(&fixture(
+                "probe",
+                "D-B2-zip64-extra-twice-size-ffffffff.zip"
+            ))
+            .unwrap_err(),
+            DirectoryError::InvalidZip64
+        );
+        assert_eq!(
+            parse_directory(&fixture("probe", "D-B2-zip64-extra-twice-size-u64max.zip"))
+                .unwrap_err(),
+            DirectoryError::InvalidZip64
+        );
+        assert_eq!(
+            parse_directory(&fixture(
+                "probe",
+                "G3-zip64-extra-twice-resolved-1TiB-must-accept.zip"
+            ))
+            .unwrap_err(),
+            DirectoryError::InvalidZip64
+        );
+        assert_eq!(
+            parse_directory(&fixture(
+                "probe",
+                "G4-zip64-extra-twice-unneeded-must-accept.zip"
+            ))
+            .unwrap_err(),
+            DirectoryError::InvalidZip64
+        );
+        assert_eq!(
+            parse_directory(&fixture("probe", "D-N3-zip64-sentinel-no-extra.zip")).unwrap_err(),
+            DirectoryError::InvalidZip64
+        );
+
+        let g1_bytes = fixture("probe", "G1-version-0x0314-must-accept.zip");
+        let g1 = parse_directory(&g1_bytes).unwrap();
+        assert_eq!(g1.entries.len(), 1);
+        assert_eq!(g1.entries[0].version_needed, 0x0314);
+        assert_eq!(g1.entries[0].name_raw, b"a");
+        assert_eq!(g1.entries[0].local_header_offset, 0);
+        assert_eq!(g1.entries[0].compression_method, 0);
+        assert_eq!(g1.entries[0].compressed_size, 0);
+
+        let g2_bytes = fixture("probe", "G2-extract-version-63-must-accept.zip");
+        let g2 = parse_directory(&g2_bytes).unwrap();
+        assert_eq!(g2.entries[0].version_needed, 63);
+
+        let g5_bytes = fixture("probe", "G5-duplicate-entry-count6.zip");
+        let g5 = parse_directory(&g5_bytes).unwrap();
+        assert_eq!(g5.declared_entry_count, 6);
+        assert_eq!(g5.entries.len(), 6);
+        assert_eq!(
+            g5.entries
+                .iter()
+                .filter(|entry| entry.name_raw.ends_with(b"sqlite3.c"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn d_n1_current_results_stay_accepted_until_a_later_b_commit() {
+        let utf8_bytes = fixture("probe", "D-N1-utf8-flag-invalid-name.zip");
+        let utf8 = parse_directory(&utf8_bytes).unwrap();
+        assert_eq!(utf8.entries.len(), 1);
+        assert_eq!(utf8.entries[0].name_raw, &[0xff, 0xfe]);
+        assert_eq!(utf8.entries[0].flags, 0x800);
+        assert!(utf8.entries[0].extra.is_empty());
+        assert_eq!(utf8.entries[0].version_needed, 20);
+
+        let short_bytes = fixture("probe", "D-N1-unicode-path-short.zip");
+        let short = parse_directory(&short_bytes).unwrap();
+        assert_eq!(short.entries.len(), 1);
+        assert_eq!(short.entries[0].name_raw, b"a");
+        assert_eq!(short.entries[0].extra, [0x75, 0x70, 1, 0, 1]);
+
+        let bad_bytes = fixture("probe", "D-N1-unicode-path-bad-utf8.zip");
+        let bad = parse_directory(&bad_bytes).unwrap();
+        assert_eq!(bad.entries.len(), 1);
+        assert_eq!(bad.entries[0].name_raw, b"a");
+        assert_eq!(
+            bad.entries[0].extra,
+            [0x75, 0x70, 7, 0, 1, 0x43, 0xbe, 0xb7, 0xe8, 0xff, 0xfe]
+        );
+    }
+
+    #[test]
+    fn every_hand_case_is_classified_and_the_known_counterexamples_are_rejected() {
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sqlite-zip/hand/cases");
+        let mut names = Vec::new();
+        let mut accepted = Vec::new();
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().into_string().unwrap();
+            assert!(name.ends_with(".zip"), "{name}");
+            names.push(name.clone());
+            if parse_directory(&std::fs::read(entry.path()).unwrap()).is_ok() {
+                accepted.push(name);
+            }
+        }
+        names.sort();
+        accepted.sort();
+        assert_eq!(names.len(), 76, "hand fixture count");
+        for required in [
+            "38_zip64_extra_dup_block_max.zip",
+            "38b_zip64_dup_block_csize_max.zip",
+            "38c_zip64_dup_block_loff_max.zip",
+            "38d_zip64_dup_block_csize_max_dir.zip",
+            "39_zip64_extra_dup_block_max_ok.zip",
+            "42_extract_ver_64.zip",
+            "44_extract_ver_65535.zip",
+            "69_ver_dir_64_dup.zip",
+        ] {
+            assert!(
+                !accepted.iter().any(|name| name == required),
+                "{required} accepted"
+            );
+        }
+        let expected = [
+            "01_valid5.zip",
+            "02_valid5_pyzipfile.zip",
+            "03_dup6.zip",
+            "04_dup5_replaces.zip",
+            "05_dup_dir.zip",
+            "16_comment_len_lt_trailing.zip",
+            "17_trailing_junk.zip",
+            "18_classic_multidisk.zip",
+            "19_classic_ondisk_mismatch.zip",
+            "23_zip64_valid.zip",
+            "32_zip64_multidisk_record_only.zip",
+            "33_zip64_extensible_data.zip",
+            "36_zip64_extra_ok.zip",
+            "37_zip64_extra_big_size.zip",
+            "43_extract_ver_63.zip",
+            "45_utf8flag_invalid_name.zip",
+            "46_utf8flag_invalid_name_6.zip",
+            "47_up7075_short.zip",
+            "48_up7075_crc_match_bad_utf8.zip",
+            "49_up7075_rename_to_expected.zip",
+            "55_local_off_into_cd.zip",
+            "56_local_off_same_two.zip",
+            "57_local_off_into_eocd.zip",
+            "58_prepended.zip",
+            "59_prepended_zip64.zip",
+            "60_symlink.zip",
+            "61_oversize.zip",
+            "62_empty.zip",
+            "64_eocd_edge_65557.zip",
+            "65_two_eocd_last_bogus.zip",
+            "67_nul_in_name.zip",
+            "68_flag_encrypted.zip",
+            "70_pyzip_force_zip64.zip",
+        ];
+        assert_eq!(accepted, expected);
     }
 }

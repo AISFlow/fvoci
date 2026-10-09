@@ -2,6 +2,8 @@ use std::ffi::OsString;
 use std::fmt;
 use std::process::ExitCode;
 
+mod sqlite_zip_directory;
+
 const HELP: &str = "\
 FVOCI development tasks
 
@@ -62,6 +64,10 @@ fn run(command: Command) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    // The non-test binary must name this leaf. Clippy denies dead_code, and
+    // `allow(dead_code)` is not used. No CLI command is registered for it yet.
+    let _ = sqlite_zip_directory::parse_directory;
+    let _ = sqlite_zip_directory::read_fields_fingerprint;
     match parse_args(std::env::args_os().skip(1)) {
         Ok(command) => run(command),
         Err(error) => {
