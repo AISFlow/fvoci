@@ -6,8 +6,10 @@ The integrator (통합) may publish the reviewed fixed source to the single hard
 `fvoci/v060-turso-verified-connection` under the same review and approval
 rules as the PR branch in AGENTS.md. Its push bootstrap runs **only pure
 fixtures/source admission**, with no Environment, credentials, build or probe.
-The secret job permits only manual dispatch on main or that exact same-repo
-reviewed branch, checking exact github.sha. No free-form checkout input, PR,
+The secret connection job permits only manual dispatch on main or that exact
+same-repo reviewed branch, checking exact github.sha. Manual dispatch of
+`ui-baseline` or `ui-ack` also admits the #347 branch
+`fvoci/v060-product-integration-20261005`. No free-form checkout input, PR,
 fork, pull_request_target or other ref is allowed. GitHub documents the default-
 branch requirement for manual dispatch. The designated reviewed branch was
 actually dispatched in [run37312388258](https://github.com/AISFlow/fvoci/actions/runs/37312388258)
@@ -40,6 +42,8 @@ neither server identity proof nor permission to initialize/reset anything.
 Current Environment `deployment_branch_policy` is null and is allowed. The
 secret job enforces AISFlow/fvoci + workflow_dispatch + main or the single
 reviewed branch, and exact github.sha with credentials persistence disabled.
+`ui-baseline` and `ui-ack` may also be dispatched on
+`fvoci/v060-product-integration-20261005`.
 Bootstrap pushes cannot enter that job. The admission job
 first verifies the preexisting named Environment through an anonymous public
 GitHub metadata GET. It does not create or modify an Environment or policy;
@@ -134,8 +138,10 @@ fresh-observer reconciliation or blind retry. Successful close is product owner
 drain/zero active leases, not an unexposed server Close ACK. The uniquely
 identified test workspace and current schema remain retained for the lead's inspection.
 
-Other phases (`crud`, `transactions`, `persistence`, `restore`, `ui-ack`) remain
-**NOT IMPLEMENTED** and refuse before credential consumption. Current tenant
+Other phases (`crud`, `transactions`, `persistence`, `restore`) remain
+**NOT IMPLEMENTED** and refuse before credential consumption. `ui-ack` is an
+allowed dispatch input, with `ui-baseline`, on main, the reviewed branch, or
+`fvoci/v060-product-integration-20261005`. Current tenant
 CRUD/authorization, request/version replay, real concurrent/cancel/uncertain
 finish, normal remote setup, backup/restore, real UI persist ACK and fresh-client
 history remain required separate product acceptance. Local SQLite or loopback

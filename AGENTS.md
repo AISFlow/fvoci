@@ -13,7 +13,7 @@
 
 - 작성자와 리뷰어는 항상 다른 주체다. 같은 주체의 자기 검토나 동의는 독립 검토가 아니다.
 - 리드가 직접 커밋을 쓰면 그 커밋의 작성자다. 다른 봇이 독립 검토하고 통합이 push한다.
-- PR 브랜치 push는 통합 봇만 일반 push로 한다. 작성자 봇은 작업 브랜치에만 커밋하고, 독립 리뷰어가 ACCEPT한 커밋만 PR 브랜치로 들어간다. 승인 대상 경로는 AGENTS.md, `.agents/`, `.github/workflows/`, `scripts/ci_selection.py`, `xtask/**`, `docs/testing-turso.md`, `docs/rewrite.md`이다. 이 중 하나라도 바꾸는 커밋은 같은 SHA에 대한 사용자 승인도 필요하고, 나머지 커밋은 리뷰어 ACCEPT로 충분하다. Turso 검증 브랜치 `fvoci/v060-turso-verified-connection`(`docs/testing-turso.md` 참고) push도 PR 브랜치와 같은 기준을 따른다.
+- PR 브랜치 push는 통합 봇만 일반 push로 한다. 작성자 봇은 작업 브랜치에만 커밋하고, 독립 리뷰어가 ACCEPT한 커밋만 PR 브랜치로 들어간다. 승인 대상 경로는 AGENTS.md, `.agents/`, `.github/workflows/`, `scripts/ci_selection.py`, `xtask/**`, `docs/testing-turso.md`이다. 이 중 하나라도 바꾸는 커밋은 같은 SHA에 대한 사용자 승인도 필요하고, 나머지 커밋은 리뷰어 ACCEPT로 충분하다. Turso 검증 브랜치 `fvoci/v060-turso-verified-connection`(`docs/testing-turso.md` 참고) push도 PR 브랜치와 같은 기준을 따른다.
 - ACCEPT와 사용자 승인은 고정 커밋 SHA를 가리킨다. 통합은 그 커밋 객체를 다시 적용(cherry-pick·patch)하지 않고 그대로 push하므로, SHA가 같으면 트리와 부모도 같다. push된 head는 리뷰·승인받은 커밋 SHA와 같고 그 부모는 직전 head여야 한다. push 직전에는 통합이, 직후에는 증거기록이 SHA·부모를 다시 확인해 기록하고, 모두 같을 때만 수락이 이어진다. 하나라도 다르면 push하지 않거나 즉시 알린다.
 - 큰 작업은 계획을 먼저 제시하고 사용자 승인 뒤 진행한다.
 - 정본은 PR 본문의 현재 체크포인트(`<!-- fvoci-current-checkpoint -->`)와 이슈 #331이다. 레포 문서에는 현재 상태로 읽힐 head SHA·run ID·세션·로컬 경로를 적지 않는다.
