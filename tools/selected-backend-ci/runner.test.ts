@@ -1,4 +1,4 @@
-import { spawnSync } from "bun";
+import { spawn, spawnSync } from "bun";
 import { afterEach, describe, expect, test } from "bun:test";
 import { strict as assert } from "node:assert";
 import {
@@ -19,6 +19,7 @@ import process from "node:process";
 import { main, modes, parseCLI } from "../../scripts/run-selected-backend-e2e.ts";
 import {
   admittedBrowser,
+  allocationExpiry,
   browserInventory,
   configListInputs,
   expectedFiles,
@@ -32,11 +33,13 @@ import {
   call,
   digest,
   gid,
+  jsonInteger,
   observedExit,
   read,
   root,
   sha,
   sourceInputText,
+  spawnSelectedCommand,
   templates,
   tool,
   uid,
@@ -903,13 +906,13 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       async () => {
         const output = directory();
         write(join(output, "before.json"), { head: source, tree });
-        await withEnvironment(ci, () => {
+        await withEnvironment(ci, async () => {
           const command = [
             process.execPath,
             "--eval",
             `console.log('compiler-fixture'); process.exit(${String(exit)});`,
           ];
-          expect(stage(output, "main", command)).toBe(exit);
+          expect(await stage(output, "main", command)).toBe(exit);
           expect(read(join(output, "main-stage.json"))).toMatchObject({
             source,
             tree,
@@ -974,5 +977,225 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     const output = directory();
     await assert.rejects(main(["run", "--output", output, "--docker-gid", "1000"]), Error);
     await assert.rejects(main(["config-list", "--output", "relative"]), Error);
+  });
+});
+
+describe.serial("task4 counterexamples and real child cancellation", () => {
+  for (const expiry of [
+    "2099-12-31T00:00:00",
+    "2099-12-31",
+    "2099",
+    "Dec 31 2099",
+    "Thu, 31 Dec 2099 00:00:00 GMT",
+    "2099-02-30T00:00:00Z",
+    "2099-02-29T00:00:00Z",
+    "2099-12-31T24:00:00Z",
+    "0000-12-31T00:00:00Z",
+    "2099-12-31T00:00:00+24:00",
+  ])
+    test("B1 rejects non-timezone ISO expiry: " + expiry, () => {
+      expect(() => allocationExpiry(expiry)).toThrow();
+    });
+  for (const expiry of [
+    "2099-12-31T00:00:00Z",
+    "2099-12-31T01:00:00+01:00",
+    "2099-12-30T19:00:00-05:00",
+  ])
+    test("B1 accepts equivalent timezone ISO expiry: " + expiry, () => {
+      expect(allocationExpiry(expiry)).toBe(4102358400000);
+    });
+  test("B1 accepts a valid leap day and Python microsecond precision", () => {
+    expect(allocationExpiry("2096-02-29T00:00:00.123456Z")).toBe(
+      Date.UTC(2096, 1, 29, 0, 0, 0, 123),
+    );
+  });
+
+  for (const [lane, flow] of selectedRuns)
+    for (const token of ["0.0", "0e0", "0E0"])
+      test(`B2 retirement rejects original float token: ${lane}/${flow}/${token}`, () => {
+        const path = join(directory(), "run");
+        retirementFiles(path, lane, flow);
+        expect(laneRetirement(path, lane, flow, source, tree, owner, 0).qualified).toBe(true);
+        writeFileSync(
+          join(path, "receipt.json"),
+          JSON.stringify(receipt(lane, flow)).replace(
+            '"final_exit_code":0',
+            '"final_exit_code":' + token,
+          ),
+        );
+        expect(laneRetirement(path, lane, flow, source, tree, owner, 0).qualified).toBe(false);
+      });
+  for (const field of ["final_exit_code", "actual_owned_process_receipts"])
+    for (const suffix of [".0", "e0", "E0"])
+      test(`B2 owner-return rejects original float proof: ${field}/${suffix}`, async () => {
+        await withEnvironment(ci, async () => {
+          const { output, boundary } = cohort();
+          expect(await run(output, boundary)).toBe(0);
+          const aggregate = read(join(output, "selected-ci-receipt.json")) as Aggregate;
+          const install = aggregate.runs[0];
+          assert.ok(install);
+          const retained = join(install.runRoot, "retained-run");
+          mkdirSync(retained);
+          for (let index = 0; index < 15; index++)
+            write(join(retained, String(index) + "-process.json"), { status: 0 });
+          const closed = join(output, "runtime-close-stage.json");
+          ownershipReturn(output);
+          expect(existsSync(closed)).toBe(true);
+          rmSync(closed);
+          const receiptPath = join(install.runRoot, "receipt.json");
+          const integer = field === "final_exit_code" ? "0" : "15";
+          writeFileSync(
+            receiptPath,
+            readFileSync(receiptPath, "utf8").replace(
+              '"' + field + '": ' + integer,
+              '"' + field + '": ' + integer + suffix,
+            ),
+          );
+          expect(() => {
+            ownershipReturn(output);
+          }).toThrow();
+          expect(existsSync(closed)).toBe(false);
+        });
+      });
+  test("B2 nested integer diagnostics retain token identity without changing JSON values", () => {
+    const path = join(directory(), "tokens.json");
+    writeFileSync(
+      path,
+      '{"exit":0.0,"runs":[{"exit":0e0}],"final_exit_code":0E0,"integer":-0,"large":9007199254740993,"escaped\\u004bey":15}',
+    );
+    const value = read(path) as Aggregate & {
+      final_exit_code: number;
+      integer: number;
+      large: number;
+      escapedKey: number;
+    };
+    assert.ok(value.runs[0]);
+    expect(value.exit).toBe(0);
+    expect(value.runs[0].exit).toBe(0);
+    expect(value.final_exit_code).toBe(0);
+    expect(jsonInteger(value, "exit")).toBe(false);
+    expect(jsonInteger(value.runs[0], "exit")).toBe(false);
+    expect(jsonInteger(value, "final_exit_code")).toBe(false);
+    expect(jsonInteger(value, "integer")).toBe(true);
+    expect(jsonInteger(value, "large")).toBe(false);
+    expect(jsonInteger(value, "escapedKey")).toBe(true);
+  });
+
+  for (const token of ["15", "15.0", "15e0", "15E0"])
+    test("B2 preparation diagnostic preserves Python integer type: " + token, () => {
+      const path = join(directory(), "diagnostic.json");
+      writeFileSync(
+        path,
+        JSON.stringify({
+          failed_phase: "container-prepare",
+          failure_code: "SELECTED_DRIVER_EXCEPTION",
+          original_driver_failure: { type: "ReturnedNonzero" },
+          known_driver_checkpoint: "scripts/selected-backend-ci/current-sqlite-driver.py:120",
+          preparation_command_exit: 15,
+        }).replace('"preparation_command_exit":15', '"preparation_command_exit":' + token),
+      );
+      expect(publicFailureFields(read(path) as DriverReceipt).preparation_command_exit).toBe(
+        token === "15" ? 15 : null,
+      );
+    });
+
+  const childFixture = join(import.meta.dir, "interrupt-child.fixture.ts");
+  test("B3 actual spawn abort kills and reaps a direct child ignoring SIGINT", async () => {
+    const controller = new AbortController();
+    const child = spawnSelectedCommand(
+      [process.execPath, childFixture],
+      process.env,
+      "pipe",
+      "pipe",
+      controller.signal,
+    );
+    try {
+      assert.ok(child.stdout instanceof ReadableStream);
+      const reader = child.stdout.getReader();
+      try {
+        const ready = await reader.read();
+        expect(ready.done).toBe(false);
+        expect(Number(new TextDecoder().decode(ready.value).trim())).toBe(child.pid);
+      } finally {
+        reader.releaseLock();
+      }
+      controller.abort(new Error("actual child cancellation fixture"));
+      await child.exited;
+      expect(child.signalCode).toBe("SIGKILL");
+      expect(() => process.kill(child.pid, 0)).toThrow();
+    } finally {
+      if (child.exitCode === null) child.kill("SIGKILL");
+      await child.exited;
+    }
+  });
+  test("B3 real child abort is awaited before run records exit130", async () => {
+    const { output, boundary } = cohort();
+    boundary.execute = async (_driver, environment, _log, signal) => {
+      const child = spawnSelectedCommand(
+        [process.execPath, childFixture],
+        environment,
+        "pipe",
+        "pipe",
+        signal,
+      );
+      try {
+        assert.ok(child.stdout instanceof ReadableStream);
+        const reader = child.stdout.getReader();
+        try {
+          const ready = await reader.read();
+          expect(ready.done).toBe(false);
+          expect(Number(new TextDecoder().decode(ready.value).trim())).toBe(child.pid);
+        } finally {
+          reader.releaseLock();
+        }
+        process.emit("SIGINT");
+        await child.exited;
+        expect(child.signalCode).toBe("SIGKILL");
+        expect(() => process.kill(child.pid, 0)).toThrow();
+        signal.throwIfAborted();
+        throw new Error("SIGINT fixture must abort the run");
+      } finally {
+        if (child.exitCode === null) child.kill("SIGKILL");
+        await child.exited;
+      }
+    };
+    await withEnvironment(ci, async () => {
+      expect(await run(output, boundary)).toBe(130);
+    });
+    expect(read(join(output, "selected-ci-receipt.json"))).toMatchObject({
+      exit: 130,
+      allRequestedRunsExecuted: false,
+      runs: [],
+    });
+  });
+  test("B3 actual stage CLI kills a SIGINT-resistant child and writes exit130", async () => {
+    const output = directory();
+    write(join(output, "before.json"), { head: source, tree });
+    const child = spawn(
+      [
+        process.execPath,
+        join(root, "scripts/run-selected-backend-e2e.ts"),
+        "stage",
+        "--output",
+        output,
+        "--stage-name",
+        "main",
+        "--",
+        process.execPath,
+        childFixture,
+        "interrupt-parent",
+      ],
+      { cwd: root, env: { ...process.env, ...ci }, stdout: "pipe", stderr: "pipe" },
+    );
+    try {
+      expect(await child.exited).toBe(130);
+      expect(read(join(output, "main-stage.json"))).toMatchObject({ exit_code: 130 });
+      const compilerPid = Number(readFileSync(join(output, "main-compiler.jsonl"), "utf8").trim());
+      expect(Number.isSafeInteger(compilerPid) && compilerPid > 0).toBe(true);
+      expect(() => process.kill(compilerPid, 0)).toThrow();
+    } finally {
+      if (child.exitCode === null) child.kill("SIGKILL");
+      await child.exited;
+    }
   });
 });

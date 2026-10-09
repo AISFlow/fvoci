@@ -22,6 +22,25 @@ import {
 import type { AccessReceipt, Browser, Bundle, Inputs, LocalGrant, Web } from "./types.ts";
 
 const localModes = ["record-before", "stage", "record-after", "run"];
+export function allocationExpiry(value: string): number {
+  assert.ok(
+    /^[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,6})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$/.test(
+      value,
+    ),
+    "timezone ISO allocation expiry required",
+  );
+  const day = value.slice(0, 10),
+    calendar = new Date(day + "T00:00:00Z"),
+    expiry = Date.parse(value);
+  assert.ok(
+    Number(day.slice(0, 4)) >= 1 &&
+      Number.isFinite(calendar.getTime()) &&
+      calendar.toISOString().slice(0, 10) === day &&
+      Number.isFinite(expiry),
+    "invalid ISO allocation expiry",
+  );
+  return expiry;
+}
 export function localAllocation(mode: string): LocalGrant {
   assert.equal(process.env.FVOCI_SELECTED_EXECUTION_MODE, "orca-local");
   assert.ok(!process.env.CI && !Object.keys(process.env).some((key) => key.startsWith("GITHUB_")));
@@ -66,7 +85,7 @@ export function localAllocation(mode: string): LocalGrant {
     grant.allowedModes.includes(mode) &&
       grant.allowedModes.every((value) => localModes.includes(value)),
   );
-  assert.ok(Date.now() < Date.parse(grant.expiresUtc), "expired or invalid local allocation");
+  assert.ok(Date.now() < allocationExpiry(grant.expiresUtc), "expired local allocation");
   assert.ok(
     isAbsolute(grant.outputRoot) &&
       resolve(grant.outputRoot, "runtime") === env("FVOCI_CI_SELECTED_RUNS"),

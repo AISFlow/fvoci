@@ -1,5 +1,5 @@
 // Bun 1.4.2 / Node compatibility APIs, with only the existing FVOCI file policy.
-import { spawnSync, which } from "bun";
+import { spawn, spawnSync, which } from "bun";
 import { strict as assert } from "node:assert";
 import { createHash } from "node:crypto";
 import {
@@ -57,9 +57,53 @@ export function sha(path: string): string {
   }
   return hash.digest("hex");
 }
+const numberTokens = new WeakMap<object, Map<string, string>>();
 export function read(path: string): unknown {
-  const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+  const value: unknown = JSON.parse(
+    readFileSync(path, "utf8"),
+    function (this: object, key: string, item: unknown, context?: { source?: string }): unknown {
+      if (typeof item === "number") {
+        assert.ok(context?.source, "JSON number source is required");
+        let tokens = numberTokens.get(this);
+        if (!tokens) {
+          tokens = new Map();
+          numberTokens.set(this, tokens);
+        }
+        tokens.set(key, context.source);
+      }
+      return item;
+    },
+  );
   return value;
+}
+export function jsonInteger(record: object, key: string): boolean {
+  const value: unknown = Reflect.get(record, key);
+  const token = numberTokens.get(record)?.get(key);
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    token !== undefined &&
+    /^-?(?:0|[1-9][0-9]*)$/.test(token)
+  );
+}
+// Existing selected command policy; spawn, cancellation and reaping stay in Bun.
+export function spawnSelectedCommand(
+  command: string[],
+  environment: Environment,
+  stdout: number | "pipe",
+  stderr: number | "pipe",
+  signal: AbortSignal,
+) {
+  signal.throwIfAborted();
+  return spawn(command, {
+    cwd: root,
+    env: environment,
+    stdout,
+    stderr,
+    stdin: "inherit",
+    signal,
+    killSignal: "SIGKILL",
+  });
 }
 export const jsonText = (value: unknown) => JSON.stringify(value, null, 2) + "\n";
 // This byte form is a consumer contract: restart_checkpoint/current_binding hash
