@@ -38,6 +38,7 @@ startup_failure() {
   echo "$1" >&2
   sed -E -e 's#postgres(ql)?://[^[:space:]]+#postgres://redacted#g' \
     -e 's#libsql://[^[:space:]]+#libsql://redacted#g' \
+    -e 's#https://[^[:space:]]*\.turso\.io[^[:space:]]*#https://redacted#g' \
     -e 's#(DATABASE_URL|DATABASE_APP_URL|FVOCI_E2E_ADMIN_DATABASE_URL|TEST_DATABASE_URL|FVOCI_LIBSQL_URL|FVOCI_LIBSQL_AUTH_TOKEN|FVOCI_TEST_TURSO_[A-Z0-9_]*URL|FVOCI_TEST_TURSO_AUTH_TOKEN|MEILI[A-Z_]*KEY|PASSWORD[A-Z_]*|ENCRYPTION_KEYS)=[^[:space:]]+#\1=redacted#g' \
     "$SERVER_LOG" >&2
   exit 1

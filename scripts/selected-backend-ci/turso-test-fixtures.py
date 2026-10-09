@@ -284,7 +284,7 @@ class AdmissionTests(unittest.TestCase):
             native.write_bytes(b"pure metadata fixture, not native proof")
             manifest = {"sha": "a" * 40, "source_digest": "fixture", "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "native_input_sha256": hashlib.sha256(native.read_bytes()).hexdigest()}
             (root / "turso-connection-build.json").write_text(json.dumps(manifest))
-            environment = {**self.settings, "FVOCI_DATABASE_BACKEND": "libsql-remote", "FVOCI_LIBSQL_URL": self.secrets["FVOCI_TEST_TURSO_DATABASE_URL"], "FVOCI_LIBSQL_AUTH_TOKEN": self.secrets["FVOCI_TEST_TURSO_AUTH_TOKEN"], "RUNNER_TEMP": directory, "UNRELATED_FAKE_CREDENTIAL": "never forwarded"}
+            environment = {**self.settings, "FVOCI_DATABASE_BACKEND": "libsql-remote", "FVOCI_TEST_TURSO_DATABASE_URL": self.secrets["FVOCI_TEST_TURSO_DATABASE_URL"], "FVOCI_TEST_TURSO_AUTH_TOKEN": self.secrets["FVOCI_TEST_TURSO_AUTH_TOKEN"], "RUNNER_TEMP": directory, "UNRELATED_FAKE_CREDENTIAL": "never forwarded"}
             valid = ("test " + guard.TEST_NAME + " ... FVOCI_TURSO_RECEIPT primary=OK rollback=OK close=OK leases=ZERO\nok\n"
                      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out;\n").encode()
             with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(guard, "source_digest", return_value="fixture"), mock.patch.object(guard.subprocess, "run") as run:
@@ -305,6 +305,38 @@ class AdmissionTests(unittest.TestCase):
                 run.reset_mock()
                 self.denied("COMPILED_TEST_BINDING_FAILED", guard.run_connection, "b" * 40, self.inputs)
                 run.assert_not_called()
+
+    def test_published_workflow_env_drives_run_primary_for_each_phase(self):
+        # Parent env matches turso-test.yml's non-UI consume step: test pair only.
+        connection = ("test " + guard.TEST_NAME + " ... FVOCI_TURSO_RECEIPT primary=OK rollback=OK close=OK leases=ZERO\nok\n"
+                      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out;\n").encode()
+        migration = ("test " + guard.MIGRATION_TEST_NAME + " ... FVOCI_TURSO_MIGRATION_RECEIPT primary=OK prefix=OK fk_rollback=OK fk_proof=EXTENDED current=OK restart=OK close=OK leases=ZERO\nok\n"
+                     "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out;\n").encode()
+        cases = (
+            ("connection", False, "false", guard.run_connection, connection),
+            ("migration", True, "true", guard.run_migration, migration),
+            ("inventory", False, "false", guard.run_inventory, InventoryTests().success().encode()),
+            ("reset", True, "true", guard.run_reset, ResetTests.success().encode()),
+        )
+        for phase, destructive, allow, runner, output in cases:
+            with self.subTest(phase=phase), InventoryTests().frozen() as (_, _, run):
+                run.return_value = subprocess.CompletedProcess([], 0, output)
+                with mock.patch.dict(os.environ, {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": allow}):
+                    self.assertNotIn("FVOCI_LIBSQL_URL", os.environ)
+                    self.assertNotIn("FVOCI_LIBSQL_AUTH_TOKEN", os.environ)
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        runner("a" * 40, {"phase": phase, "destructive": destructive})
+                child = run.call_args.kwargs["env"]
+                if phase == "reset":
+                    self.assertEqual(child["FVOCI_TEST_TURSO_DATABASE_URL"], os.environ["FVOCI_TEST_TURSO_DATABASE_URL"])
+                    self.assertEqual(child["FVOCI_TEST_TURSO_AUTH_TOKEN"], os.environ["FVOCI_TEST_TURSO_AUTH_TOKEN"])
+                    self.assertNotIn("FVOCI_LIBSQL_URL", child)
+                    self.assertNotIn("FVOCI_LIBSQL_AUTH_TOKEN", child)
+                else:
+                    self.assertEqual(child["FVOCI_LIBSQL_URL"], os.environ["FVOCI_TEST_TURSO_DATABASE_URL"])
+                    self.assertEqual(child["FVOCI_LIBSQL_AUTH_TOKEN"], os.environ["FVOCI_TEST_TURSO_AUTH_TOKEN"])
+                    self.assertNotIn("FVOCI_TEST_TURSO_DATABASE_URL", child)
+                    self.assertNotIn("FVOCI_TEST_TURSO_AUTH_TOKEN", child)
 
     def test_cargo_emission_freeze_controls_are_file_only_not_compilation(self):
         for mutation in ("valid", "wrong_feature", "wrong_source", "duplicate", "failed_build", "foreign_path"):
@@ -395,7 +427,7 @@ class AdmissionTests(unittest.TestCase):
             native.write_bytes(b"pure metadata fixture, not native proof")
             manifest = {"sha": "a" * 40, "source_digest": "fixture", "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "native_input_sha256": hashlib.sha256(native.read_bytes()).hexdigest()}
             (root / "turso-connection-build.json").write_text(json.dumps(manifest))
-            environment = {"PATH": os.environ.get("PATH", ""), "FVOCI_DATABASE_BACKEND": "libsql-remote", "FVOCI_LIBSQL_URL": self.secrets["FVOCI_TEST_TURSO_DATABASE_URL"], "FVOCI_LIBSQL_AUTH_TOKEN": self.secrets["FVOCI_TEST_TURSO_AUTH_TOKEN"], "RUNNER_TEMP": directory, "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true", "UNRELATED_FAKE_CREDENTIAL": "never forwarded"}
+            environment = {"PATH": os.environ.get("PATH", ""), "FVOCI_DATABASE_BACKEND": "libsql-remote", "FVOCI_TEST_TURSO_DATABASE_URL": self.secrets["FVOCI_TEST_TURSO_DATABASE_URL"], "FVOCI_TEST_TURSO_AUTH_TOKEN": self.secrets["FVOCI_TEST_TURSO_AUTH_TOKEN"], "RUNNER_TEMP": directory, "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true", "UNRELATED_FAKE_CREDENTIAL": "never forwarded"}
             inputs = {"phase": "migration", "destructive": True}
             valid = ("test " + guard.MIGRATION_TEST_NAME + " ... FVOCI_TURSO_MIGRATION_RECEIPT primary=OK prefix=OK fk_rollback=OK fk_proof=EXTENDED current=OK restart=OK close=OK leases=ZERO\nok\n"
                      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out;\n").encode()
@@ -750,8 +782,8 @@ class InventoryTests(unittest.TestCase):
         with DiagnosticUnitRegistrationTests().frozen() as (root, manifest, run):
             env = {
                 "FVOCI_DATABASE_BACKEND": "libsql-remote",
-                "FVOCI_LIBSQL_URL": "libsql://isolated-owner.aws-us-east-1.turso.io",
-                "FVOCI_LIBSQL_AUTH_TOKEN": "FAKE_PRIVATE_TOKEN",
+                "FVOCI_TEST_TURSO_DATABASE_URL": "libsql://isolated-owner.aws-us-east-1.turso.io",
+                "FVOCI_TEST_TURSO_AUTH_TOKEN": "FAKE_PRIVATE_TOKEN",
                 "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "false",
                 "LD_LIBRARY_PATH": "/fixture/lib",
                 "SSL_CERT_FILE": "/fixture/cert",
@@ -762,6 +794,10 @@ class InventoryTests(unittest.TestCase):
                 "UNRELATED_FAKE_CREDENTIAL": "FAKE_PRIVATE_TOKEN",
             }
             with mock.patch.dict(os.environ, env):
+                # The published non-UI step does not set product names. Drop any
+                # inherited FVOCI_LIBSQL_* so this fixture matches that step.
+                os.environ.pop("FVOCI_LIBSQL_URL", None)
+                os.environ.pop("FVOCI_LIBSQL_AUTH_TOKEN", None)
                 run.side_effect = None
                 run.return_value = subprocess.CompletedProcess([], 0, self.success().encode())
                 yield root, manifest, run
@@ -848,8 +884,8 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0], [str(root / "turso-connection-libtest"), guard.INVENTORY_TEST_NAME,
                                                      "--ignored", "--exact", "--test-threads=1", "--nocapture"])
             expected = {key: os.environ[key] for key in ("PATH", "LD_LIBRARY_PATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "TZ")}
-            expected.update({"FVOCI_DATABASE_BACKEND": "libsql-remote", "FVOCI_LIBSQL_URL": os.environ["FVOCI_LIBSQL_URL"],
-                             "FVOCI_LIBSQL_AUTH_TOKEN": "FAKE_PRIVATE_TOKEN", "FVOCI_TEST_TURSO_MIGRATION_SELECTED": "1",
+            expected.update({"FVOCI_DATABASE_BACKEND": "libsql-remote", "FVOCI_LIBSQL_URL": os.environ["FVOCI_TEST_TURSO_DATABASE_URL"],
+                             "FVOCI_LIBSQL_AUTH_TOKEN": os.environ["FVOCI_TEST_TURSO_AUTH_TOKEN"], "FVOCI_TEST_TURSO_MIGRATION_SELECTED": "1",
                              "FVOCI_TEST_TURSO_PHASE": "inventory", "FVOCI_TEST_TURSO_DESTRUCTIVE": "false",
                              "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "false"})
             self.assertEqual(run.call_args.kwargs, {"env": expected, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "check": False})
@@ -1207,8 +1243,8 @@ class ResetTests(unittest.TestCase):
                 "--ignored", "--exact", "--test-threads=1", "--nocapture"])
             child = run.call_args.kwargs["env"]
             expected = {key: os.environ[key] for key in ("PATH", "LD_LIBRARY_PATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "TZ")}
-            expected.update({"FVOCI_DATABASE_BACKEND": "libsql-remote", "FVOCI_LIBSQL_URL": os.environ["FVOCI_LIBSQL_URL"],
-                "FVOCI_LIBSQL_AUTH_TOKEN": "FAKE_PRIVATE_TOKEN", "FVOCI_TEST_TURSO_RESET_SELECTED": "1",
+            expected.update({"FVOCI_DATABASE_BACKEND": "libsql-remote", "FVOCI_TEST_TURSO_DATABASE_URL": os.environ["FVOCI_TEST_TURSO_DATABASE_URL"],
+                "FVOCI_TEST_TURSO_AUTH_TOKEN": os.environ["FVOCI_TEST_TURSO_AUTH_TOKEN"], "FVOCI_TEST_TURSO_RESET_SELECTED": "1",
                 "FVOCI_TEST_TURSO_MIGRATION_SELECTED": "1", "FVOCI_TEST_TURSO_PHASE": "migration",
                 "FVOCI_TEST_TURSO_DESTRUCTIVE": "true", "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "true"})
             self.assertEqual(child, expected)

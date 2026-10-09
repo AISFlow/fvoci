@@ -92,6 +92,7 @@ echo "fvoci-server listening on http://127.0.0.1:9"
 echo "probe DATABASE_APP_URL=${DATABASE_APP_URL:-} admin ${FVOCI_E2E_ADMIN_DATABASE_URL-unset}"
 echo "probe FVOCI_LIBSQL_URL=libsql://libsql-url-secret.example.test FVOCI_LIBSQL_AUTH_TOKEN=libsql-auth-secret FVOCI_TEST_TURSO_DATABASE_URL=https://turso-url-secret.example.test FVOCI_TEST_TURSO_AUTH_TOKEN=turso-auth-secret"
 echo "bare libsql://libsql-url-secret.example.test"
+echo "bare https://libsql-url-secret.aws-ap-northeast-1.turso.io"
 echo "$$" >"$FVOCI_FIXTURE_NET_STATE.server-pid"
 if [[ "${FVOCI_FIXTURE_SETUP:-ok}" == "earlydeath" ]]; then
   echo "fixture server exited before setup"
@@ -285,6 +286,8 @@ for pending in 0 1; do
       || fail "$label: test turso token not redacted in server.log" "$log"
     grep -q 'libsql://redacted' "$retained/server.log" \
       || fail "$label: bare libsql url not redacted in server.log" "$log"
+    grep -q 'https://redacted' "$retained/server.log" \
+      || fail "$label: bare turso https url not redacted in server.log" "$log"
     ! grep -q -e 'fixture-secret' -e 'libsql-url-secret' -e 'libsql-auth-secret' -e 'turso-url-secret' -e 'turso-auth-secret' -e '://[^/[:space:]]*:[^@[:space:]]*@' "$retained/server.log" || fail "$label: credentials in retained server.log" "$log"
   fi
   for shared in test-results test-results-collab e2e-pending/test-results-collab; do
@@ -397,6 +400,7 @@ for wrapper in ordinary perf; do
       grep -q 'FVOCI_TEST_TURSO_DATABASE_URL=redacted' "$log" || fail "$label: startup log left test turso url" "$log"
       grep -q 'FVOCI_TEST_TURSO_AUTH_TOKEN=redacted' "$log" || fail "$label: startup log left test turso token" "$log"
       grep -q 'libsql://redacted' "$log" || fail "$label: startup log left bare libsql url" "$log"
+      grep -q 'https://redacted' "$log" || fail "$label: startup log left bare turso https url" "$log"
       if [[ "$wrapper" == "ordinary" ]]; then
         retained="$(sed -n 's/^failure-artifacts=//p' "$gh_output")"
         [[ -n "$retained" && -f "$retained/server.log" ]] || fail "$label: server log not retained" "$log"
