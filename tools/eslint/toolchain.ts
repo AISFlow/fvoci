@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { createProgram } from "@typescript-eslint/parser";
 import { ESLint, type Linter } from "eslint";
 import * as prettier from "prettier";
 
@@ -103,12 +104,21 @@ class Proof {
         exclude: [],
       }),
     );
-    this.fixture = this.eslint(project);
-  }
-  eslint(project: string): ESLint {
-    return new ESLint({
+    this.fixture = new ESLint({
       cwd: root,
       overrideConfig: { languageOptions: { parserOptions: { project: [project] } } },
+    });
+  }
+  eslint(project: string): ESLint {
+    // Declaration consumers need a fresh snapshot after emit/cleanup. Supplying
+    // a program avoids the shared watch cache without clearing other callers.
+    return new ESLint({
+      cwd: root,
+      overrideConfig: {
+        languageOptions: {
+          parserOptions: { project: [project], programs: [createProgram(project, root)] },
+        },
+      },
     });
   }
   source(name: string, content: string): string {
