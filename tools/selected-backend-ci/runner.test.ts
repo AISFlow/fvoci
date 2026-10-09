@@ -1202,6 +1202,54 @@ try {
       );
     });
   });
+  test("single-field assertHandoffActor rejects handed directory uid():gid()+1", () => {
+    const output = directory();
+    ownTree(output, `${String(uid())}:${String(gid() + 1)}`);
+    try {
+      expect(() => {
+        assertHandoffActor(output, [uid(), gid()]);
+      }).toThrow(`${String(gid() + 1)} !== ${String(gid())}`);
+    } finally {
+      ownTree(output, `${String(uid())}:${String(gid())}`);
+    }
+  });
+  test("single-field assertHandoffActor rejects handed directory uid()+1:gid()", () => {
+    const output = directory();
+    ownTree(output, `${String(uid() + 1)}:${String(gid())}`);
+    try {
+      expect(() => {
+        assertHandoffActor(output, [uid(), gid()]);
+      }).toThrow(`${String(uid() + 1)} !== ${String(uid())}`);
+    } finally {
+      ownTree(output, `${String(uid())}:${String(gid())}`);
+    }
+  });
+  test("single-field assertHandoffActor rejects expected gid only", () => {
+    expect(() => {
+      assertHandoffActor(directory(), [uid(), gid() + 1]);
+    }).toThrow("selected runtime actor must be the fixed handoff uid and gid");
+  });
+  test("single-field assertHandoffActor rejects expected uid only", () => {
+    expect(() => {
+      assertHandoffActor(directory(), [uid() + 1, gid()]);
+    }).toThrow("selected runtime actor must be the fixed handoff uid and gid");
+  });
+  test("single-field localAllocation rejects expected gid only", async () => {
+    const fixture = localFixture(uid(), gid());
+    await withEnvironment(fixture.env, () => {
+      expect(() => {
+        localAllocation("run", [uid(), gid() + 1]);
+      }).toThrow("selected runtime actor must be the fixed handoff uid and gid");
+    });
+  });
+  test("single-field localAllocation rejects expected uid only", async () => {
+    const fixture = localFixture(uid(), gid());
+    await withEnvironment(fixture.env, () => {
+      expect(() => {
+        localAllocation("run", [uid() + 1, gid()]);
+      }).toThrow("selected runtime actor must be the fixed handoff uid and gid");
+    });
+  });
 
   test("browser staging preserves source bytes/modes and rejects symlink/owner/byte/mode changes", async () => {
     const cache = directory(),
