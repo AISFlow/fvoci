@@ -42,9 +42,10 @@ const PRETTIER = [process.execPath, "--bun", join(ROOT, "node_modules/prettier/b
 // Slowest ported proof measured at about 60s. 180s is three times that measurement
 // and replaces Bun's 5s default. It is not a raised timeout.
 const proofTimeoutMs = 180_000;
-// One tool process. The ~60s proofs are several shorter spawns. 120s is a new cap
-// so a hung child is killed. Nested `bun test --isolate` stays at 30s.
+// Ceiling for one tool process. A proof's spawn shares are this or lower, so
+// their sum stays within the 180s proof cap. Nested `bun test --isolate` stays at 30s.
 const defaultSpawnTimeoutSec = 120;
+let activeSpawnTimeoutSec = defaultSpawnTimeoutSec;
 
 const NODE_RUNTIME_GLOBALS = new Set([
   "Bun",
@@ -251,12 +252,46 @@ function killProcessGroup(pid: number) {
     }
   }
 }
+const liveGroups = new Set<number>();
+const liveCaptures = new Set<string>();
+function spawnShareSec(runs: number, reservedSec = 0): number {
+  const room = proofTimeoutMs / 1000 - reservedSec;
+  return Math.min(defaultSpawnTimeoutSec, Math.floor(room / runs));
+}
+async function underSpawnBudget(runs: number, reservedSec: number, body: () => Promise<void>) {
+  const previous = activeSpawnTimeoutSec;
+  activeSpawnTimeoutSec = spawnShareSec(runs, reservedSec);
+  try {
+    await body();
+  } finally {
+    activeSpawnTimeoutSec = previous;
+  }
+}
+function reapLeftovers() {
+  for (const pid of liveGroups) killProcessGroup(pid);
+  liveGroups.clear();
+  for (const dir of liveCaptures) rmSync(dir, { recursive: true, force: true });
+  liveCaptures.clear();
+  removeSuiteDirectory();
+  const web = join(ROOT, "apps/web");
+  if (!existsSync(web)) return;
+  for (const name of readdirSync(web)) {
+    if (name.startsWith("eslint-proof-") || name.startsWith("eslint-neg-")) {
+      rmSync(join(web, name), { recursive: true, force: true });
+    }
+  }
+}
+process.once("SIGTERM", () => {
+  reapLeftovers();
+  process.exit(143);
+});
 async function run(
   args: string[],
   options: { input?: string; timeout?: number; extraEnv?: Record<string, string> } = {},
 ): Promise<Completed> {
-  const timeoutMs = (options.timeout ?? defaultSpawnTimeoutSec) * 1000;
+  const timeoutMs = (options.timeout ?? activeSpawnTimeoutSec) * 1000;
   const capture = mkdtempSync(join(tmpdir(), "eslint-stdout-"));
+  liveCaptures.add(capture);
   const stdoutPath = join(capture, "stdout");
   const fd = openSync(stdoutPath, "w");
   let timedOut = false;
@@ -269,6 +304,7 @@ async function run(
     stdout: fd,
     stderr: "pipe",
   });
+  if (proc.pid) liveGroups.add(proc.pid);
   const stderrPromise = new Response(proc.stderr).text();
   const timer = setTimeout(() => {
     if (proc.exitCode === null && proc.signalCode == null && proc.pid) {
@@ -289,11 +325,13 @@ async function run(
     return { returncode: proc.exitCode, stdout, stderr };
   } finally {
     clearTimeout(timer);
+    if (proc.pid) liveGroups.delete(proc.pid);
     try {
       closeSync(fd);
     } catch {
       // The descriptor is already closed after a successful read.
     }
+    liveCaptures.delete(capture);
     rmSync(capture, { recursive: true, force: true });
   }
 }
@@ -314,7 +352,10 @@ function ruleIds(report: LintFile[]): Set<string> {
   }
   return ids;
 }
-function sumCount(report: LintFile[], key: "errorCount" | "warningCount" | "fatalErrorCount"): number {
+function sumCount(
+  report: LintFile[],
+  key: "errorCount" | "warningCount" | "fatalErrorCount",
+): number {
   return report.reduce((sum, file) => sum + file[key], 0);
 }
 function quotedName(message: string): string {
@@ -342,12 +383,18 @@ function restrictedRule(config: PrintedConfig): { globals: string[]; checkGlobal
   const rule = config.rules["no-restricted-globals"];
   if (!Array.isArray(rule) || typeof rule[1] !== "object" || rule[1] === null) fail(rule);
   const options = rule[1] as { globals?: unknown; checkGlobalObject?: unknown };
-  if (!Array.isArray(options.globals) || options.globals.some((item) => typeof item !== "string")) fail(rule);
+  if (!Array.isArray(options.globals) || options.globals.some((item) => typeof item !== "string"))
+    fail(rule);
   return { globals: options.globals, checkGlobalObject: options.checkGlobalObject === true };
 }
 function floatingIgnoreVoid(config: PrintedConfig): unknown {
   const rule = config.rules["@typescript-eslint/no-floating-promises"];
-  if (!Array.isArray(rule) || typeof rule[1] !== "object" || rule[1] === null || !("ignoreVoid" in rule[1])) {
+  if (
+    !Array.isArray(rule) ||
+    typeof rule[1] !== "object" ||
+    rule[1] === null ||
+    !("ignoreVoid" in rule[1])
+  ) {
     fail(rule);
   }
   return (rule[1] as { ignoreVoid: unknown }).ignoreVoid;
@@ -409,7 +456,12 @@ async function assertRule(name: string, text: string, rule: string) {
   assertNotEqual(result.returncode, 0, report);
   assertSetHas(rule, ruleIds(report), report);
 }
-async function compile(config: string, text: string, extension = "vue", compilerName = "vue-tsc"): Promise<Completed> {
+async function compile(
+  config: string,
+  text: string,
+  extension = "vue",
+  compilerName = "vue-tsc",
+): Promise<Completed> {
   const path = source(`TypeProof.${extension}`, text);
   const configPath = join(suiteDirectory, "tsconfig.json");
   writeFileSync(
@@ -421,7 +473,14 @@ async function compile(config: string, text: string, extension = "vue", compiler
       exclude: [],
     }),
   );
-  return await run([process.execPath, "--bun", join(ROOT, "node_modules/.bin", compilerName), "--noEmit", "-p", configPath]);
+  return await run([
+    process.execPath,
+    "--bun",
+    join(ROOT, "node_modules/.bin", compilerName),
+    "--noEmit",
+    "-p",
+    configPath,
+  ]);
 }
 function removeSuiteDirectory() {
   if (!suiteDirectory) return;
@@ -438,7 +497,10 @@ async function testRuntimeAndPositiveSfc() {
     const compiled = await compile(config, VALID);
     assertEqual(compiled.returncode, 0, outputOf(compiled));
   }
-  const formatted = await run([...PRETTIER, "--stdin-filepath", join(suiteDirectory, "ProofValid.vue")], { input: VALID });
+  const formatted = await run(
+    [...PRETTIER, "--stdin-filepath", join(suiteDirectory, "ProofValid.vue")],
+    { input: VALID },
+  );
   assertEqual(formatted.returncode, 0, formatted.stderr);
   assertIn("color: red;\n", formatted.stdout);
   assertIn(':key="row.id"', formatted.stdout);
@@ -453,38 +515,90 @@ async function testRuntimeAndPositiveSfc() {
 async function testDynamicSlotsHaveNoUnusedFalsePositive() {
   const { result, report } = await lint("ProofDynamic.vue", DYNAMIC_SLOT);
   assertEqual(result.returncode, 0, report);
-  const compiled = await compile("apps/web/tsconfig.vue.json", DYNAMIC_SLOT.replaceAll("#[slotName]", "#[missingSlotName]"));
+  const compiled = await compile(
+    "apps/web/tsconfig.vue.json",
+    DYNAMIC_SLOT.replaceAll("#[slotName]", "#[missingSlotName]"),
+  );
   assertNotEqual(compiled.returncode, 0);
   assertIn("missingSlotName", compiled.stdout);
 }
 
 async function testDirectivesUnusedAnyAndTypedPromisesFail() {
   const cases: Array<[string, string, string]> = [
-    ["ProofUnused.vue", '<script setup lang="ts">const unused = 1;</script><template><p>ok</p></template>', "@typescript-eslint/no-unused-vars"],
-    ["ProofUnusedImport.vue", '<script setup lang="ts">import { ref } from "vue";</script><template><p>ok</p></template>', "@typescript-eslint/no-unused-vars"],
+    [
+      "ProofUnused.vue",
+      '<script setup lang="ts">const unused = 1;</script><template><p>ok</p></template>',
+      "@typescript-eslint/no-unused-vars",
+    ],
+    [
+      "ProofUnusedImport.vue",
+      '<script setup lang="ts">import { ref } from "vue";</script><template><p>ok</p></template>',
+      "@typescript-eslint/no-unused-vars",
+    ],
     ["ProofParse.vue", '<template><p v-if="(">bad</p></template>', "vue/no-parsing-error"],
-    ["ProofFor.vue", '<script setup lang="ts">const rows = [1];</script><template><p v-for="row in rows">{{ row }}</p></template>', "vue/require-v-for-key"],
-    ["ProofKey.vue", '<script setup lang="ts">const rows = [1];</script><template><p v-for="row in rows" :key="1">{{ row }}</p></template>', "vue/valid-v-for"],
-    ["ProofIfFor.vue", '<script setup lang="ts">const rows = [1];</script><template><p v-if="true" v-for="row in rows" :key="row">{{ row }}</p></template>', "vue/no-use-v-if-with-v-for"],
+    [
+      "ProofFor.vue",
+      '<script setup lang="ts">const rows = [1];</script><template><p v-for="row in rows">{{ row }}</p></template>',
+      "vue/require-v-for-key",
+    ],
+    [
+      "ProofKey.vue",
+      '<script setup lang="ts">const rows = [1];</script><template><p v-for="row in rows" :key="1">{{ row }}</p></template>',
+      "vue/valid-v-for",
+    ],
+    [
+      "ProofIfFor.vue",
+      '<script setup lang="ts">const rows = [1];</script><template><p v-if="true" v-for="row in rows" :key="row">{{ row }}</p></template>',
+      "vue/no-use-v-if-with-v-for",
+    ],
     ["ProofIf.vue", "<template><p v-if>bad</p></template>", "vue/valid-v-if"],
     ["ProofModel.vue", '<template><input v-model="1" /></template>', "vue/valid-v-model"],
     ["ProofAny.ts", "export const value: any = 1;", "@typescript-eslint/no-explicit-any"],
-    ["ProofUnsafe.ts", "export function read(value: any): string { return value; }", "@typescript-eslint/no-unsafe-return"],
-    ["ProofPromise.ts", "export const save = (): Promise<number> => Promise.resolve(1); save();", "@typescript-eslint/no-floating-promises"],
-    ["ProofVoid.ts", "export const save = (): Promise<number> => Promise.resolve(1); void save();", "@typescript-eslint/no-floating-promises"],
+    [
+      "ProofUnsafe.ts",
+      "export function read(value: any): string { return value; }",
+      "@typescript-eslint/no-unsafe-return",
+    ],
+    [
+      "ProofPromise.ts",
+      "export const save = (): Promise<number> => Promise.resolve(1); save();",
+      "@typescript-eslint/no-floating-promises",
+    ],
+    [
+      "ProofVoid.ts",
+      "export const save = (): Promise<number> => Promise.resolve(1); void save();",
+      "@typescript-eslint/no-floating-promises",
+    ],
   ];
-  await subtests(cases.map(([name, text, rule]) => ({ label: name, run: () => assertRule(name, text, rule) })));
+  await subtests(
+    cases.map(([name, text, rule]) => ({ label: name, run: () => assertRule(name, text, rule) })),
+  );
 }
 
 async function testStrictScriptTemplatePropsEmitsAndSlotsTypes() {
   const cases: Array<[string, string]> = [
-    ['<script setup lang="ts">const value: number = "bad";</script><template><p>{{ value }}</p></template>', "TS2322"],
-    ['<script setup lang="ts">const value = 1;</script><template><p>{{ value.toUpperCase() }}</p></template>', "TS2339"],
+    [
+      '<script setup lang="ts">const value: number = "bad";</script><template><p>{{ value }}</p></template>',
+      "TS2322",
+    ],
+    [
+      '<script setup lang="ts">const value = 1;</script><template><p>{{ value.toUpperCase() }}</p></template>',
+      "TS2339",
+    ],
     ["<template><p>{{ missingTemplateName }}</p></template>", "TS2339"],
     ["<template><UnknownComponent /></template>", "UnknownComponent"],
-    ['<script setup lang="ts">import ProofChild from "./ProofChild.vue";</script><template><ProofChild :label="1" /></template>', "TS2322"],
-    ['<script setup lang="ts">const emit = defineEmits<{ select: [id: number] }>(); emit("select", "bad");</script><template><p>bad</p></template>', "TS2345"],
-    ['<script setup lang="ts">import ProofChild from "./ProofChild.vue";</script><template><ProofChild label="ok" v-slot="{ row }"><p>{{ row.missing }}</p></ProofChild></template>', "TS2339"],
+    [
+      '<script setup lang="ts">import ProofChild from "./ProofChild.vue";</script><template><ProofChild :label="1" /></template>',
+      "TS2322",
+    ],
+    [
+      '<script setup lang="ts">const emit = defineEmits<{ select: [id: number] }>(); emit("select", "bad");</script><template><p>bad</p></template>',
+      "TS2345",
+    ],
+    [
+      '<script setup lang="ts">import ProofChild from "./ProofChild.vue";</script><template><ProofChild label="ok" v-slot="{ row }"><p>{{ row.missing }}</p></ProofChild></template>',
+      "TS2339",
+    ],
   ];
   const items: Array<{ label: string; run: () => void }> = [];
   for (const config of ["apps/web/tsconfig.vue.json", "packages/editor/tsconfig.vue.json"]) {
@@ -509,23 +623,37 @@ async function testStrictScriptTemplatePropsEmitsAndSlotsTypes() {
 
 async function testActualNuxtAutoimportRegistrationBoundary() {
   // FVOCI disables Nuxt UI autoimports: an unregistered template name must fail.
-  const result = await compile("apps/web/tsconfig.vue.json", '<template><UButton type="button">ok</UButton></template>');
+  const result = await compile(
+    "apps/web/tsconfig.vue.json",
+    '<template><UButton type="button">ok</UButton></template>',
+  );
   assertNotEqual(result.returncode, 0);
   assertIn("UButton", result.stdout);
 }
 
 async function testUnusedDisablesWarningsAndUnmatchedPathsFail() {
-  const disabled = await lint("ProofDisable.ts", "// eslint-disable-next-line no-debugger\nexport const value = 1;\n");
+  const disabled = await lint(
+    "ProofDisable.ts",
+    "// eslint-disable-next-line no-debugger\nexport const value = 1;\n",
+  );
   assertNotEqual(disabled.result.returncode, 0);
   assertTrue(
-    messagesOf(disabled.report).some((message) => message.message.includes("Unused eslint-disable") && message.severity === 2),
+    messagesOf(disabled.report).some(
+      (message) => message.message.includes("Unused eslint-disable") && message.severity === 2,
+    ),
   );
-  const warning = await lint("ProofWarning.vue", "<template><div v-html=\"'content'\" /></template>");
+  const warning = await lint(
+    "ProofWarning.vue",
+    "<template><div v-html=\"'content'\" /></template>",
+  );
   assertEqual(sumCount(warning.report, "errorCount"), 0, warning.report);
   assertGreater(sumCount(warning.report, "warningCount"), 0, warning.report);
   assertNotEqual(warning.result.returncode, 0);
-  assertNotEqual(await run([...ESLINT, join(suiteDirectory, "missing.ts")]).returncode, 0);
-  assertNotEqual(await run([...PRETTIER, "--check", join(suiteDirectory, "missing.ts")]).returncode, 0);
+  assertNotEqual((await run([...ESLINT, join(suiteDirectory, "missing.ts")])).returncode, 0);
+  assertNotEqual(
+    (await run([...PRETTIER, "--check", join(suiteDirectory, "missing.ts")])).returncode,
+    0,
+  );
 }
 
 async function testBrowserDoesNotReceiveNodeOrBunGlobals() {
@@ -538,7 +666,10 @@ async function testBrowserDoesNotReceiveNodeOrBunGlobals() {
         const hit = [...NODE_RUNTIME_GLOBALS].filter((name) => Object.hasOwn(declared, name));
         assertEqual(hit.length, 0, declared);
         const runtimeRule = restrictedRule(config);
-        const expected = environment === "worker" ? new Set([...NODE_RUNTIME_GLOBALS, "window"]) : NODE_RUNTIME_GLOBALS;
+        const expected =
+          environment === "worker"
+            ? new Set([...NODE_RUNTIME_GLOBALS, "window"])
+            : NODE_RUNTIME_GLOBALS;
         assertSetEqual(runtimeRule.globals, expected);
         assertTrue(runtimeRule.checkGlobalObject);
         if (environment === "browser") assertHasKey("window", declared);
@@ -566,8 +697,14 @@ async function testBrowserWorkerAndI18nRejectRuntimeNodeBun() {
         const report = parseReport(invalid);
         assertNotEqual(invalid.returncode, 0, report);
         assertEqual(sumCount(report, "fatalErrorCount"), 0, report);
-        const restricted = messagesOf(report).filter((message) => message.ruleId === "no-restricted-globals");
-        assertSetEqual(restricted.map((message) => quotedName(message.message)), NODE_RUNTIME_GLOBALS, report);
+        const restricted = messagesOf(report).filter(
+          (message) => message.ruleId === "no-restricted-globals",
+        );
+        assertSetEqual(
+          restricted.map((message) => quotedName(message.message)),
+          NODE_RUNTIME_GLOBALS,
+          report,
+        );
         assertTrue(restricted.every((message) => message.severity === 2));
       },
     })),
@@ -589,7 +726,9 @@ async function testQualifiedRuntimeGlobalsAndLocalNames() {
         const report = parseReport(invalid);
         assertNotEqual(invalid.returncode, 0, report);
         assertEqual(sumCount(report, "fatalErrorCount"), 0, report);
-        const restricted = messagesOf(report).filter((message) => message.ruleId === "no-restricted-globals");
+        const restricted = messagesOf(report).filter(
+          (message) => message.ruleId === "no-restricted-globals",
+        );
         assertEqual(restricted.length, 6, report);
         assertTrue(restricted.every((message) => message.severity === 2));
       },
@@ -600,16 +739,26 @@ async function testQualifiedRuntimeGlobalsAndLocalNames() {
 async function testIndexedAccessPreservesMissingRouteFallbacks() {
   const route = await lint("ProofRoute.vue", ROUTE_SOURCE);
   assertEqual(route.result.returncode, 0, route.report);
-  const dictionary = 'export function read(values: Record<string, string>): string { return values.slug ?? ""; }';
+  const dictionary =
+    'export function read(values: Record<string, string>): string { return values.slug ?? ""; }';
   const indexed = await lint("ProofDictionary.ts", dictionary);
   assertEqual(indexed.result.returncode, 0, indexed.report);
   const valid = await compile("apps/web/tsconfig.eslint.json", dictionary, "ts", "tsc");
   assertEqual(valid.returncode, 0, outputOf(valid));
-  const invalid = await compile("apps/web/tsconfig.eslint.json", dictionary.replaceAll('values.slug ?? ""', "values.slug"), "ts", "tsc");
+  const invalid = await compile(
+    "apps/web/tsconfig.eslint.json",
+    dictionary.replaceAll('values.slug ?? ""', "values.slug"),
+    "ts",
+    "tsc",
+  );
   assertNotEqual(invalid.returncode, 0);
   assertIn("TS2322", outputOf(invalid));
   assertIn("undefined", outputOf(invalid));
-  await assertRule("ProofKnownField.ts", 'export function read(value: { slug: string }): string { return value.slug ?? ""; }', "@typescript-eslint/no-unnecessary-condition");
+  await assertRule(
+    "ProofKnownField.ts",
+    'export function read(value: { slug: string }): string { return value.slug ?? ""; }',
+    "@typescript-eslint/no-unnecessary-condition",
+  );
 }
 
 async function testExactDevelopmentExportBufferContract() {
@@ -617,16 +766,24 @@ async function testExactDevelopmentExportBufferContract() {
     ["packages/editor/src/export/docx.ts", "packages/editor/src/export/pptx.ts"].map((path) => ({
       label: path,
       run: async () => {
-        const valid = await stdinEslint(path, 'export const bytes = Buffer.from("oracle", "utf8");');
+        const valid = await stdinEslint(
+          path,
+          'export const bytes = Buffer.from("oracle", "utf8");',
+        );
         assertEqual(valid.returncode, 0, outputOf(valid));
         const config = await printConfig(path);
         assertEqual(declaredGlobals(config).Buffer, "readonly");
         assertSetEqual(restrictedRule(config).globals, EXPORT_RESTRICTED_GLOBALS);
-        const invalid = await stdinEslint(path, "export const forbidden = [process.pid, Bun.version, globalThis.process.pid, globalThis.Bun.version];");
+        const invalid = await stdinEslint(
+          path,
+          "export const forbidden = [process.pid, Bun.version, globalThis.process.pid, globalThis.Bun.version];",
+        );
         const report = parseReport(invalid);
         assertNotEqual(invalid.returncode, 0, report);
         assertEqual(sumCount(report, "fatalErrorCount"), 0, report);
-        const restricted = messagesOf(report).filter((message) => message.ruleId === "no-restricted-globals");
+        const restricted = messagesOf(report).filter(
+          (message) => message.ruleId === "no-restricted-globals",
+        );
         assertEqual(restricted.length, 4, report);
       },
     })),
@@ -659,19 +816,32 @@ async function testBunDevelopmentTypesAndRuntime() {
   for (const config of ["apps/web/tsconfig.eslint.json", "packages/editor/tsconfig.eslint.json"]) {
     const valid = await compile(config, BUN_PROOF, "ts", "tsc");
     assertEqual(valid.returncode, 0, outputOf(valid));
-    const invalid = await compile(config, BUN_PROOF.replaceAll('loader: "ts"', 'loader: "invalid-loader"'), "ts", "tsc");
+    const invalid = await compile(
+      config,
+      BUN_PROOF.replaceAll('loader: "ts"', 'loader: "invalid-loader"'),
+      "ts",
+      "tsc",
+    );
     assertNotEqual(invalid.returncode, 0);
     assertIn("TS2322", outputOf(invalid));
   }
-  await assertRule("ProofBunUnsafe.test.ts", 'import { mock } from "bun:test"; mock.module("proof", () => ({ value: 1 }));', "@typescript-eslint/no-floating-promises");
-  await assertRule("ProofBunUnrelated.test.ts", 'import { test } from "bun:test"; test("proof", () => { Promise.resolve(1); });', "@typescript-eslint/no-floating-promises");
+  await assertRule(
+    "ProofBunUnsafe.test.ts",
+    'import { mock } from "bun:test"; mock.module("proof", () => ({ value: 1 }));',
+    "@typescript-eslint/no-floating-promises",
+  );
+  await assertRule(
+    "ProofBunUnrelated.test.ts",
+    'import { test } from "bun:test"; test("proof", () => { Promise.resolve(1); });',
+    "@typescript-eslint/no-floating-promises",
+  );
 }
 
 async function testNodeTestRunnerFailurePropagationAndNoWaiver() {
   for (const [name, body, expected] of [
     ["Pass", '() => { if (Number("1") !== 1) throw new Error("unexpected"); }', 0],
     ["Throw", '() => { throw new Error("node-test-throw-proof"); }', 1],
-    ["Reject", "() => Promise.reject(new Error(\"node-test-reject-proof\"))", 1],
+    ["Reject", '() => Promise.reject(new Error("node-test-reject-proof"))', 1],
   ] as const) {
     const text = `import test from "node:test"; test("${name}", ${body});`;
     const path = source(`NodeRunner${name}.test.ts`, text);
@@ -681,12 +851,13 @@ async function testNodeTestRunnerFailurePropagationAndNoWaiver() {
   }
   // Installed TestContext.test has the SAME typeof test as registration;
   // a known-safe-call type allowance would also mask an unsafe subtest.
-  assertRule(
+  await assertRule(
     "NodeUnhandled.test.ts",
     'import test from "node:test"; await test("parent", (t) => { t.test("child", () => Promise.resolve()); });',
     "@typescript-eslint/no-floating-promises",
   );
-  const unrelated = 'import test from "node:test"; await test("parent", () => { Promise.reject(new Error("unhandled-promise-proof")); });';
+  const unrelated =
+    'import test from "node:test"; await test("parent", () => { Promise.reject(new Error("unhandled-promise-proof")); });';
   await assertRule("NodeUnrelated.test.ts", unrelated, "@typescript-eslint/no-floating-promises");
   const path = join(suiteDirectory, "NodeUnrelated.test.ts");
   const runtime = await run([process.execPath, "test", "--isolate", path], { timeout: 30 });
@@ -704,12 +875,24 @@ async function testActualWebAndEditorDeclarationPreparationIsNodeFree() {
     (name) => name.endsWith(".vue.d.ts") && isFile(join(output, "packages/editor/src/vue", name)),
   );
   assertEqual(editorDeclarations.length, 8);
-  const result = await run([...ESLINT, "packages/editor/src/vue/node-views.ts", "--max-warnings=0", "--format=json"]);
+  const result = await run([
+    ...ESLINT,
+    "packages/editor/src/vue/node-views.ts",
+    "--max-warnings=0",
+    "--format=json",
+  ]);
   assertEqual(result.returncode, 0, outputOf(result));
   // Use the real main.ts import location and rootDirs, without its unrelated
   // source diagnostics masking whether createApp receives a genuine type.
   const typed = await run(
-    [...ESLINT, "--stdin", "--stdin-filename", "apps/web/src/vue/main.ts", "--max-warnings=0", "--format=json"],
+    [
+      ...ESLINT,
+      "--stdin",
+      "--stdin-filename",
+      "apps/web/src/vue/main.ts",
+      "--max-warnings=0",
+      "--format=json",
+    ],
     { input: MAIN_APP },
   );
   assertEqual(typed.returncode, 0, outputOf(typed));
@@ -773,7 +956,10 @@ export function read(value: InstanceType<typeof ProofApp>): string { return valu
   const typed = await run(args);
   assertEqual(typed.returncode, 0, outputOf(typed));
   // Reject the second project after the first has emitted fresh output.
-  writeFileSync(app, '<script setup lang="ts">const value: number = "bad";</script><template><p>{{ value }}</p></template>');
+  writeFileSync(
+    app,
+    '<script setup lang="ts">const value: number = "bad";</script><template><p>{{ value }}</p></template>',
+  );
   const failed = await run([process.execPath, "--bun", prepare]);
   assertNotEqual(failed.returncode, 0);
   assertIn("TS2322", outputOf(failed));
@@ -781,7 +967,12 @@ export function read(value: InstanceType<typeof ProofApp>): string { return valu
   const missing = await run(args);
   assertNotEqual(missing.returncode, 0);
   const missingMessages = messagesOf(parseReport(missing));
-  assertEqual(missingMessages.filter((message) => message.ruleId === "@typescript-eslint/no-unsafe-argument").length, 2, missingMessages);
+  assertEqual(
+    missingMessages.filter((message) => message.ruleId === "@typescript-eslint/no-unsafe-argument")
+      .length,
+    2,
+    missingMessages,
+  );
 }
 
 async function testGeneratedSfcTypesAndFailedRefreshHaveNoWaiver() {
@@ -827,20 +1018,39 @@ export function read(value: InstanceType<typeof ProofGenerated>): string { retur
   ];
   const typed = await run(args);
   assertEqual(typed.returncode, 0, outputOf(typed));
-  writeFileSync(consumer, readFileSync(consumer, "utf8").replaceAll("value.$props.label", "value.$props.label.missing"));
-  const invalid = await run([process.execPath, "--bun", join(ROOT, "node_modules/.bin/tsc"), "--noEmit", "-p", lintProject]);
+  writeFileSync(
+    consumer,
+    readFileSync(consumer, "utf8").replaceAll("value.$props.label", "value.$props.label.missing"),
+  );
+  const invalid = await run([
+    process.execPath,
+    "--bun",
+    join(ROOT, "node_modules/.bin/tsc"),
+    "--noEmit",
+    "-p",
+    lintProject,
+  ]);
   assertNotEqual(invalid.returncode, 0);
   assertIn("TS2339", outputOf(invalid));
-  writeFileSync(consumer, readFileSync(consumer, "utf8").replaceAll("value.$props.label.missing", "value.$props.label"));
+  writeFileSync(
+    consumer,
+    readFileSync(consumer, "utf8").replaceAll("value.$props.label.missing", "value.$props.label"),
+  );
   // Real unsafe props remain unsafe even through compiler-generated types.
-  writeFileSync(component, readFileSync(component, "utf8").replaceAll("label: string", "label: any"));
+  writeFileSync(
+    component,
+    readFileSync(component, "utf8").replaceAll("label: string", "label: any"),
+  );
   const refreshed = await run([process.execPath, "--bun", prepare]);
   assertEqual(refreshed.returncode, 0, outputOf(refreshed));
   const unsafe = await run(args);
   assertNotEqual(unsafe.returncode, 0);
   assertSetHas("@typescript-eslint/no-unsafe-return", ruleIds(parseReport(unsafe)));
   // Failed refresh clears stale successful output before checking source.
-  writeFileSync(component, '<script setup lang="ts">defineProps<{ label: string }>();</script><template><p>{{ label.toFixed() }}</p></template>');
+  writeFileSync(
+    component,
+    '<script setup lang="ts">defineProps<{ label: string }>();</script><template><p>{{ label.toFixed() }}</p></template>',
+  );
   const failed = await run([process.execPath, "--bun", prepare]);
   assertNotEqual(failed.returncode, 0);
   assertIn("TS2551", outputOf(failed));
@@ -853,11 +1063,16 @@ export function read(value: InstanceType<typeof ProofGenerated>): string { retur
 async function testUnpreparedSfcImportHasNoFakeFallback() {
   source("ProofNode.vue", PROOF_NODE);
   // Document the plain-TS program's SFC import gap without a shim/waiver.
-  assertRule("ProofSfcImport.ts", SFC_IMPORT, "@typescript-eslint/no-unsafe-argument");
+  await assertRule("ProofSfcImport.ts", SFC_IMPORT, "@typescript-eslint/no-unsafe-argument");
   for (const config of ["apps/web/tsconfig.vue.json", "packages/editor/tsconfig.vue.json"]) {
     const typed = await compile(config, SFC_IMPORT, "ts", "vue-tsc");
     assertEqual(typed.returncode, 0, outputOf(typed));
-    const broken = await compile(config, `${SFC_IMPORT}\nexport const invalid: number = "bad";`, "ts", "vue-tsc");
+    const broken = await compile(
+      config,
+      `${SFC_IMPORT}\nexport const invalid: number = "bad";`,
+      "ts",
+      "vue-tsc",
+    );
     assertNotEqual(broken.returncode, 0);
     assertIn("TS2322", outputOf(broken));
   }
@@ -866,8 +1081,16 @@ async function testUnpreparedSfcImportHasNoFakeFallback() {
 async function testYTextDeclaredStringContractWithoutRuleAllowance() {
   const checked = await lint("ProofYText.ts", Y_TEXT);
   assertEqual(checked.result.returncode, 0, checked.report);
-  await assertRule("ProofYTextInherited.ts", Y_TEXT.replaceAll("value.toJSON()", "value.toString()"), "@typescript-eslint/no-base-to-string");
-  await assertRule("ProofObjectString.ts", "export function text(value: object): string { return value.toString(); }", "@typescript-eslint/no-base-to-string");
+  await assertRule(
+    "ProofYTextInherited.ts",
+    Y_TEXT.replaceAll("value.toJSON()", "value.toString()"),
+    "@typescript-eslint/no-base-to-string",
+  );
+  await assertRule(
+    "ProofObjectString.ts",
+    "export function text(value: object): string { return value.toString(); }",
+    "@typescript-eslint/no-base-to-string",
+  );
 }
 
 async function testFormatterKeepsImportOrderTextAndTailwind() {
@@ -875,50 +1098,115 @@ async function testFormatterKeepsImportOrderTextAndTailwind() {
   const order = await run([...PRETTIER, "--stdin-filepath", "order.ts"], { input: ordered });
   assertEqual(order.returncode, 0, order.stderr);
   assertLess(mustIndex(order.stdout, '"./z.css"'), mustIndex(order.stdout, '"./a.css"'));
-  const text = '<template><p>before <strong>middle</strong> after</p><pre>  keep\n spacing </pre></template>';
+  const text =
+    "<template><p>before <strong>middle</strong> after</p><pre>  keep\n spacing </pre></template>";
   const formatted = await run([...PRETTIER, "--stdin-filepath", "text.vue"], { input: text });
   assertIn("before <strong>middle</strong> after", formatted.stdout);
   assertIn("  keep\n spacing ", formatted.stdout);
-  const css = '@import "tailwindcss" source(none);\n@source "./";\n@theme { --color-brand: #123456; }\n@utility proof { @apply flex; }\n';
+  const css =
+    '@import "tailwindcss" source(none);\n@source "./";\n@theme { --color-brand: #123456; }\n@utility proof { @apply flex; }\n';
   const styled = await run([...PRETTIER, "--stdin-filepath", "proof.css"], { input: css });
   assertEqual(styled.returncode, 0, styled.stderr);
 }
 
-const ported: Array<[string, () => void]> = [
-  ["test_actual_nuxt_autoimport_registration_boundary", testActualNuxtAutoimportRegistrationBoundary],
-  ["test_actual_web_and_editor_declaration_preparation_is_node_free", testActualWebAndEditorDeclarationPreparationIsNodeFree],
+const ported: Array<[string, () => Promise<void>]> = [
+  [
+    "test_actual_nuxt_autoimport_registration_boundary",
+    testActualNuxtAutoimportRegistrationBoundary,
+  ],
+  [
+    "test_actual_web_and_editor_declaration_preparation_is_node_free",
+    testActualWebAndEditorDeclarationPreparationIsNodeFree,
+  ],
   ["test_browser_does_not_receive_node_or_bun_globals", testBrowserDoesNotReceiveNodeOrBunGlobals],
-  ["test_browser_worker_and_i18n_reject_runtime_node_bun", testBrowserWorkerAndI18nRejectRuntimeNodeBun],
+  [
+    "test_browser_worker_and_i18n_reject_runtime_node_bun",
+    testBrowserWorkerAndI18nRejectRuntimeNodeBun,
+  ],
   ["test_bun_development_types_and_runtime", testBunDevelopmentTypesAndRuntime],
-  ["test_directives_unused_any_and_typed_promises_fail", testDirectivesUnusedAnyAndTypedPromisesFail],
+  [
+    "test_directives_unused_any_and_typed_promises_fail",
+    testDirectivesUnusedAnyAndTypedPromisesFail,
+  ],
   ["test_dynamic_slots_have_no_unused_false_positive", testDynamicSlotsHaveNoUnusedFalsePositive],
   ["test_exact_development_export_buffer_contract", testExactDevelopmentExportBufferContract],
-  ["test_formatter_keeps_import_order_text_and_tailwind", testFormatterKeepsImportOrderTextAndTailwind],
-  ["test_generated_sfc_types_and_failed_refresh_have_no_waiver", testGeneratedSfcTypesAndFailedRefreshHaveNoWaiver],
-  ["test_indexed_access_preserves_missing_route_fallbacks", testIndexedAccessPreservesMissingRouteFallbacks],
-  ["test_multiple_declaration_projects_fail_closed_together", testMultipleDeclarationProjectsFailClosedTogether],
-  ["test_node_test_runner_failure_propagation_and_no_waiver", testNodeTestRunnerFailurePropagationAndNoWaiver],
+  [
+    "test_formatter_keeps_import_order_text_and_tailwind",
+    testFormatterKeepsImportOrderTextAndTailwind,
+  ],
+  [
+    "test_generated_sfc_types_and_failed_refresh_have_no_waiver",
+    testGeneratedSfcTypesAndFailedRefreshHaveNoWaiver,
+  ],
+  [
+    "test_indexed_access_preserves_missing_route_fallbacks",
+    testIndexedAccessPreservesMissingRouteFallbacks,
+  ],
+  [
+    "test_multiple_declaration_projects_fail_closed_together",
+    testMultipleDeclarationProjectsFailClosedTogether,
+  ],
+  [
+    "test_node_test_runner_failure_propagation_and_no_waiver",
+    testNodeTestRunnerFailurePropagationAndNoWaiver,
+  ],
   ["test_qualified_runtime_globals_and_local_names", testQualifiedRuntimeGlobalsAndLocalNames],
   ["test_runtime_and_positive_sfc", testRuntimeAndPositiveSfc],
-  ["test_strict_script_template_props_emits_and_slots_types", testStrictScriptTemplatePropsEmitsAndSlotsTypes],
+  [
+    "test_strict_script_template_props_emits_and_slots_types",
+    testStrictScriptTemplatePropsEmitsAndSlotsTypes,
+  ],
   ["test_unprepared_sfc_import_has_no_fake_fallback", testUnpreparedSfcImportHasNoFakeFallback],
-  ["test_unused_disables_warnings_and_unmatched_paths_fail", testUnusedDisablesWarningsAndUnmatchedPathsFail],
-  ["test_y_text_declared_string_contract_without_rule_allowance", testYTextDeclaredStringContractWithoutRuleAllowance],
+  [
+    "test_unused_disables_warnings_and_unmatched_paths_fail",
+    testUnusedDisablesWarningsAndUnmatchedPathsFail,
+  ],
+  [
+    "test_y_text_declared_string_contract_without_rule_allowance",
+    testYTextDeclaredStringContractWithoutRuleAllowance,
+  ],
 ];
 let finishedPorted = 0;
+// Invocation counts for the 180s proofs. `reservedSec` is the explicit 30s
+// `bun test --isolate` caps, which are not raised. Each other spawn gets
+// floor((180 - reserved) / runs) seconds, and never more than 120. The sum of
+// those caps is at most the proof cap.
+const proofSpawnRuns: Record<string, { runs: number; reservedSec: number }> = {
+  test_actual_nuxt_autoimport_registration_boundary: { runs: 1, reservedSec: 0 },
+  test_actual_web_and_editor_declaration_preparation_is_node_free: { runs: 3, reservedSec: 0 },
+  test_browser_does_not_receive_node_or_bun_globals: { runs: 6, reservedSec: 0 },
+  test_browser_worker_and_i18n_reject_runtime_node_bun: { runs: 12, reservedSec: 0 },
+  test_bun_development_types_and_runtime: { runs: 7, reservedSec: 30 },
+  test_directives_unused_any_and_typed_promises_fail: { runs: 12, reservedSec: 0 },
+  test_dynamic_slots_have_no_unused_false_positive: { runs: 2, reservedSec: 0 },
+  test_exact_development_export_buffer_contract: { runs: 10, reservedSec: 0 },
+  test_formatter_keeps_import_order_text_and_tailwind: { runs: 3, reservedSec: 0 },
+  test_generated_sfc_types_and_failed_refresh_have_no_waiver: { runs: 7, reservedSec: 0 },
+  test_indexed_access_preserves_missing_route_fallbacks: { runs: 5, reservedSec: 0 },
+  test_multiple_declaration_projects_fail_closed_together: { runs: 4, reservedSec: 0 },
+  test_node_test_runner_failure_propagation_and_no_waiver: { runs: 2, reservedSec: 120 },
+  test_qualified_runtime_globals_and_local_names: { runs: 6, reservedSec: 0 },
+  test_runtime_and_positive_sfc: { runs: 6, reservedSec: 0 },
+  test_strict_script_template_props_emits_and_slots_types: { runs: 16, reservedSec: 0 },
+  test_unprepared_sfc_import_has_no_fake_fallback: { runs: 5, reservedSec: 0 },
+  test_unused_disables_warnings_and_unmatched_paths_fail: { runs: 4, reservedSec: 0 },
+  test_y_text_declared_string_contract_without_rule_allowance: { runs: 3, reservedSec: 0 },
+};
 
 function diagnostics(stdout: string) {
   const report = JSON.parse(stdout) as LintFile[];
-  const items: Diagnostic[] = report.flatMap((file) => file.messages).map((message) => ({
-    ruleId: message.ruleId ?? null,
-    message: message.message,
-    severity: message.severity,
-    fatal: message.fatal === true,
-    line: message.line ?? null,
-    column: message.column ?? null,
-    endLine: message.endLine ?? null,
-    endColumn: message.endColumn ?? null,
-  }));
+  const items: Diagnostic[] = report
+    .flatMap((file) => file.messages)
+    .map((message) => ({
+      ruleId: message.ruleId ?? null,
+      message: message.message,
+      severity: message.severity,
+      fatal: message.fatal === true,
+      line: message.line ?? null,
+      column: message.column ?? null,
+      endLine: message.endLine ?? null,
+      endColumn: message.endColumn ?? null,
+    }));
   items.sort((left, right) => {
     const a = JSON.stringify(left);
     const b = JSON.stringify(right);
@@ -961,7 +1249,12 @@ type RuleGroup = {
   expectWarningsOnly?: boolean;
   invoke: (dir: string) => Invocation;
 };
-function lintPath(dir: string, name: string, text: string, extra: Array<[string, string]> = []): Invocation {
+function lintPath(
+  dir: string,
+  name: string,
+  text: string,
+  extra: Array<[string, string]> = [],
+): Invocation {
   for (const [fileName, fileText] of extra) writeFileSync(join(dir, fileName), fileText);
   const path = join(dir, name);
   writeFileSync(path, text);
@@ -976,27 +1269,164 @@ function lintStdinCopy(dir: string, filename: string, text: string): Invocation 
   };
 }
 const ruleGroups: RuleGroup[] = [
-  { name: "@typescript-eslint/no-unused-vars", expectedRuleId: "@typescript-eslint/no-unused-vars", invoke: (dir) => lintPath(dir, "ProofUnused.vue", '<script setup lang="ts">const unused = 1;</script><template><p>ok</p></template>') },
-  { name: "vue/no-parsing-error", expectedRuleId: "vue/no-parsing-error", invoke: (dir) => lintPath(dir, "ProofParse.vue", '<template><p v-if="(">bad</p></template>') },
-  { name: "vue/require-v-for-key", expectedRuleId: "vue/require-v-for-key", invoke: (dir) => lintPath(dir, "ProofFor.vue", '<script setup lang="ts">const rows = [1];</script><template><p v-for="row in rows">{{ row }}</p></template>') },
-  { name: "vue/valid-v-for", expectedRuleId: "vue/valid-v-for", invoke: (dir) => lintPath(dir, "ProofKey.vue", '<script setup lang="ts">const rows = [1];</script><template><p v-for="row in rows" :key="1">{{ row }}</p></template>') },
-  { name: "vue/no-use-v-if-with-v-for", expectedRuleId: "vue/no-use-v-if-with-v-for", invoke: (dir) => lintPath(dir, "ProofIfFor.vue", '<script setup lang="ts">const rows = [1];</script><template><p v-if="true" v-for="row in rows" :key="row">{{ row }}</p></template>') },
-  { name: "vue/valid-v-if", expectedRuleId: "vue/valid-v-if", invoke: (dir) => lintPath(dir, "ProofIf.vue", "<template><p v-if>bad</p></template>") },
-  { name: "vue/valid-v-model", expectedRuleId: "vue/valid-v-model", invoke: (dir) => lintPath(dir, "ProofModel.vue", '<template><input v-model="1" /></template>') },
-  { name: "@typescript-eslint/no-explicit-any", expectedRuleId: "@typescript-eslint/no-explicit-any", invoke: (dir) => lintPath(dir, "ProofAny.ts", "export const value: any = 1;") },
-  { name: "@typescript-eslint/no-unsafe-return", expectedRuleId: "@typescript-eslint/no-unsafe-return", invoke: (dir) => lintPath(dir, "ProofUnsafe.ts", "export function read(value: any): string { return value; }") },
-  { name: "@typescript-eslint/no-floating-promises", expectedRuleId: "@typescript-eslint/no-floating-promises", invoke: (dir) => lintPath(dir, "ProofPromise.ts", "export const save = (): Promise<number> => Promise.resolve(1); save();") },
-  { name: "@typescript-eslint/no-unnecessary-condition", expectedRuleId: "@typescript-eslint/no-unnecessary-condition", invoke: (dir) => lintPath(dir, "ProofKnownField.ts", 'export function read(value: { slug: string }): string { return value.slug ?? ""; }') },
-  { name: "@typescript-eslint/no-base-to-string", expectedRuleId: "@typescript-eslint/no-base-to-string", invoke: (dir) => lintPath(dir, "ProofObjectString.ts", "export function text(value: object): string { return value.toString(); }") },
-  { name: "@typescript-eslint/no-unsafe-argument", expectedRuleId: "@typescript-eslint/no-unsafe-argument", invoke: (dir) => lintPath(dir, "ProofSfcImport.ts", SFC_IMPORT, [["ProofNode.vue", PROOF_NODE]]) },
-  { name: "unused eslint-disable", expectedMessageIncludes: "Unused eslint-disable", invoke: (dir) => lintPath(dir, "ProofDisable.ts", "// eslint-disable-next-line no-debugger\nexport const value = 1;\n") },
-  { name: "vue/no-v-html warnings fail the run", expectedRuleId: "vue/no-v-html", expectWarningsOnly: true, invoke: (dir) => lintPath(dir, "ProofWarning.vue", "<template><div v-html=\"'content'\" /></template>") },
-  { name: "no-restricted-globals browser", expectedRuleId: "no-restricted-globals", invoke: (dir) => lintStdinCopy(dir, "apps/web/src/vue/features/settings/toggle.ts", FORBIDDEN_RUNTIME) },
-  { name: "no-restricted-globals worker", expectedRuleId: "no-restricted-globals", invoke: (dir) => lintStdinCopy(dir, "apps/web/src/features/attachments/hwp-worker.ts", FORBIDDEN_RUNTIME) },
-  { name: "no-restricted-globals library", expectedRuleId: "no-restricted-globals", invoke: (dir) => lintStdinCopy(dir, "packages/i18n/src/index.ts", FORBIDDEN_RUNTIME) },
-  { name: "no-restricted-globals export", expectedRuleId: "no-restricted-globals", invoke: (dir) => lintStdinCopy(dir, "packages/editor/src/export/docx.ts", "export const forbidden = [process.pid, Bun.version, globalThis.process.pid, globalThis.Bun.version];") },
-  { name: "no-restricted-globals buffer outside export", expectedRuleId: "no-restricted-globals", invoke: (dir) => lintStdinCopy(dir, "packages/editor/src/json.ts", "export const bytes = Buffer.alloc(0);") },
-  { name: "no-restricted-globals qualified", expectedRuleId: "no-restricted-globals", invoke: (dir) => lintStdinCopy(dir, "apps/web/src/vue/features/settings/toggle.ts", QUALIFIED_NEGATIVE) },
+  {
+    name: "@typescript-eslint/no-unused-vars",
+    expectedRuleId: "@typescript-eslint/no-unused-vars",
+    invoke: (dir) =>
+      lintPath(
+        dir,
+        "ProofUnused.vue",
+        '<script setup lang="ts">const unused = 1;</script><template><p>ok</p></template>',
+      ),
+  },
+  {
+    name: "vue/no-parsing-error",
+    expectedRuleId: "vue/no-parsing-error",
+    invoke: (dir) => lintPath(dir, "ProofParse.vue", '<template><p v-if="(">bad</p></template>'),
+  },
+  {
+    name: "vue/require-v-for-key",
+    expectedRuleId: "vue/require-v-for-key",
+    invoke: (dir) =>
+      lintPath(
+        dir,
+        "ProofFor.vue",
+        '<script setup lang="ts">const rows = [1];</script><template><p v-for="row in rows">{{ row }}</p></template>',
+      ),
+  },
+  {
+    name: "vue/valid-v-for",
+    expectedRuleId: "vue/valid-v-for",
+    invoke: (dir) =>
+      lintPath(
+        dir,
+        "ProofKey.vue",
+        '<script setup lang="ts">const rows = [1];</script><template><p v-for="row in rows" :key="1">{{ row }}</p></template>',
+      ),
+  },
+  {
+    name: "vue/no-use-v-if-with-v-for",
+    expectedRuleId: "vue/no-use-v-if-with-v-for",
+    invoke: (dir) =>
+      lintPath(
+        dir,
+        "ProofIfFor.vue",
+        '<script setup lang="ts">const rows = [1];</script><template><p v-if="true" v-for="row in rows" :key="row">{{ row }}</p></template>',
+      ),
+  },
+  {
+    name: "vue/valid-v-if",
+    expectedRuleId: "vue/valid-v-if",
+    invoke: (dir) => lintPath(dir, "ProofIf.vue", "<template><p v-if>bad</p></template>"),
+  },
+  {
+    name: "vue/valid-v-model",
+    expectedRuleId: "vue/valid-v-model",
+    invoke: (dir) => lintPath(dir, "ProofModel.vue", '<template><input v-model="1" /></template>'),
+  },
+  {
+    name: "@typescript-eslint/no-explicit-any",
+    expectedRuleId: "@typescript-eslint/no-explicit-any",
+    invoke: (dir) => lintPath(dir, "ProofAny.ts", "export const value: any = 1;"),
+  },
+  {
+    name: "@typescript-eslint/no-unsafe-return",
+    expectedRuleId: "@typescript-eslint/no-unsafe-return",
+    invoke: (dir) =>
+      lintPath(dir, "ProofUnsafe.ts", "export function read(value: any): string { return value; }"),
+  },
+  {
+    name: "@typescript-eslint/no-floating-promises",
+    expectedRuleId: "@typescript-eslint/no-floating-promises",
+    invoke: (dir) =>
+      lintPath(
+        dir,
+        "ProofPromise.ts",
+        "export const save = (): Promise<number> => Promise.resolve(1); save();",
+      ),
+  },
+  {
+    name: "@typescript-eslint/no-unnecessary-condition",
+    expectedRuleId: "@typescript-eslint/no-unnecessary-condition",
+    invoke: (dir) =>
+      lintPath(
+        dir,
+        "ProofKnownField.ts",
+        'export function read(value: { slug: string }): string { return value.slug ?? ""; }',
+      ),
+  },
+  {
+    name: "@typescript-eslint/no-base-to-string",
+    expectedRuleId: "@typescript-eslint/no-base-to-string",
+    invoke: (dir) =>
+      lintPath(
+        dir,
+        "ProofObjectString.ts",
+        "export function text(value: object): string { return value.toString(); }",
+      ),
+  },
+  {
+    name: "@typescript-eslint/no-unsafe-argument",
+    expectedRuleId: "@typescript-eslint/no-unsafe-argument",
+    invoke: (dir) =>
+      lintPath(dir, "ProofSfcImport.ts", SFC_IMPORT, [["ProofNode.vue", PROOF_NODE]]),
+  },
+  {
+    name: "unused eslint-disable",
+    expectedMessageIncludes: "Unused eslint-disable",
+    invoke: (dir) =>
+      lintPath(
+        dir,
+        "ProofDisable.ts",
+        "// eslint-disable-next-line no-debugger\nexport const value = 1;\n",
+      ),
+  },
+  {
+    name: "vue/no-v-html warnings fail the run",
+    expectedRuleId: "vue/no-v-html",
+    expectWarningsOnly: true,
+    invoke: (dir) =>
+      lintPath(dir, "ProofWarning.vue", "<template><div v-html=\"'content'\" /></template>"),
+  },
+  {
+    name: "no-restricted-globals browser",
+    expectedRuleId: "no-restricted-globals",
+    invoke: (dir) =>
+      lintStdinCopy(dir, "apps/web/src/vue/features/settings/toggle.ts", FORBIDDEN_RUNTIME),
+  },
+  {
+    name: "no-restricted-globals worker",
+    expectedRuleId: "no-restricted-globals",
+    invoke: (dir) =>
+      lintStdinCopy(dir, "apps/web/src/features/attachments/hwp-worker.ts", FORBIDDEN_RUNTIME),
+  },
+  {
+    name: "no-restricted-globals library",
+    expectedRuleId: "no-restricted-globals",
+    invoke: (dir) => lintStdinCopy(dir, "packages/i18n/src/index.ts", FORBIDDEN_RUNTIME),
+  },
+  {
+    name: "no-restricted-globals export",
+    expectedRuleId: "no-restricted-globals",
+    invoke: (dir) =>
+      lintStdinCopy(
+        dir,
+        "packages/editor/src/export/docx.ts",
+        "export const forbidden = [process.pid, Bun.version, globalThis.process.pid, globalThis.Bun.version];",
+      ),
+  },
+  {
+    name: "no-restricted-globals buffer outside export",
+    expectedRuleId: "no-restricted-globals",
+    invoke: (dir) =>
+      lintStdinCopy(dir, "packages/editor/src/json.ts", "export const bytes = Buffer.alloc(0);"),
+  },
+  {
+    name: "no-restricted-globals qualified",
+    expectedRuleId: "no-restricted-globals",
+    invoke: (dir) =>
+      lintStdinCopy(dir, "apps/web/src/vue/features/settings/toggle.ts", QUALIFIED_NEGATIVE),
+  },
 ];
 function releaseSuiteDirectory() {
   if (finishedPorted === ported.length) removeSuiteDirectory();
@@ -1005,21 +1435,36 @@ async function rejectLikePython(group: RuleGroup) {
   const dir = mkdtempSync(join(ROOT, "apps/web", "eslint-neg-"));
   try {
     const invocation = group.invoke(dir);
-    const ts = invocation.input === undefined ? await run(invocation.args) : await run(invocation.args, { input: invocation.input });
-    const py = invocation.input === undefined ? await pythonRun(invocation.args) : await pythonRun(invocation.args, invocation.input);
+    const ts =
+      invocation.input === undefined
+        ? await run(invocation.args)
+        : await run(invocation.args, { input: invocation.input });
+    const py =
+      invocation.input === undefined
+        ? await pythonRun(invocation.args)
+        : await pythonRun(invocation.args, invocation.input);
     if (ts.returncode === 0 || py.returncode === 0 || ts.returncode !== py.returncode) {
       fail({ group: group.name, tsReturn: ts.returncode, pyReturn: py.returncode });
     }
     const tsDiag = diagnostics(ts.stdout);
     const pyDiag = diagnostics(py.stdout);
     expect(tsDiag, group.name).toEqual(pyDiag);
-    if (group.expectedRuleId && !tsDiag.messages.some((message) => message.ruleId === group.expectedRuleId)) {
+    if (
+      group.expectedRuleId &&
+      !tsDiag.messages.some((message) => message.ruleId === group.expectedRuleId)
+    ) {
       fail({ group: group.name, messages: tsDiag.messages });
     }
-    if (group.expectedMessageIncludes && !tsDiag.messages.some((message) => message.message.includes(group.expectedMessageIncludes ?? ""))) {
+    if (
+      group.expectedMessageIncludes &&
+      !tsDiag.messages.some((message) =>
+        message.message.includes(group.expectedMessageIncludes ?? ""),
+      )
+    ) {
       fail({ group: group.name, messages: tsDiag.messages });
     }
-    if (group.expectWarningsOnly && (tsDiag.errorCount !== 0 || !(tsDiag.warningCount > 0))) fail(tsDiag);
+    if (group.expectWarningsOnly && (tsDiag.errorCount !== 0 || !(tsDiag.warningCount > 0)))
+      fail(tsDiag);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1059,11 +1504,12 @@ beforeAll(async () => {
 }, proofTimeoutMs);
 
 for (const [name, body] of ported) {
+  const plan = proofSpawnRuns[name] ?? { runs: 1, reservedSec: 0 };
   test.serial(
     name,
     async () => {
       try {
-        await body();
+        await underSpawnBudget(plan.runs, plan.reservedSec, () => body());
       } finally {
         finishedPorted += 1;
       }
@@ -1071,16 +1517,36 @@ for (const [name, body] of ported) {
     { timeout: proofTimeoutMs },
   );
 }
+test.serial(
+  "M1 missing path fails closed",
+  async () => {
+    // Counterexample: ESLint exit 0 on a path that is not there fails this proof.
+    const dir = mkdtempSync(join(ROOT, "apps/web", "eslint-proof-"));
+    try {
+      let result: Completed | undefined;
+      await underSpawnBudget(1, 0, async () => {
+        result = await run([...ESLINT, join(dir, "missing.ts")]);
+      });
+      if (!result) fail("missing path produced no result");
+      expect(typeof result.returncode).toBe("number");
+      expect(result.returncode).not.toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+  { timeout: proofTimeoutMs },
+);
 // Negative controls re-run ESLint through the Python oracle. One control measured
-// about 6–8s, so the 180s proof cap still fits each of them. Together with the
-// parity test they re-run Python and do not fit the 15-minute web-static job.
-// Temporary until the B commit removes Python.
+// about 6–8s. Each has two spawns, so each spawn cap is 90s and the 180s proof
+// cap still covers their sum. Together with parity they re-run Python and do not
+// fit the 15-minute web-static job. The parity test stays only while Python
+// remains, and the B commit removes it with Python.
 for (const group of ruleGroups) {
   test.serial(
     `negative control: ${group.name}`,
     async () => {
       releaseSuiteDirectory();
-      await rejectLikePython(group);
+      await underSpawnBudget(2, 0, () => rejectLikePython(group));
     },
     { timeout: proofTimeoutMs },
   );
@@ -1088,28 +1554,37 @@ for (const group of ruleGroups) {
 test.serial(
   "signal-killed child fails the proof",
   async () => {
-    await expect(run([process.execPath, "-e", "process.kill(process.pid, 'SIGKILL')"])).rejects.toThrow(
-      /python returncode -9/,
-    );
+    await underSpawnBudget(1, 0, async () => {
+      await expect(
+        run([process.execPath, "-e", "process.kill(process.pid, 'SIGKILL')"]),
+      ).rejects.toThrow(/python returncode -9/);
+    });
   },
   { timeout: proofTimeoutMs },
 );
 test.serial(
   "parity: python and typescript suites pass the same test names",
   async () => {
-    if (finishedPorted !== ported.length) fail(`ported tests finished ${finishedPorted} of ${ported.length}`);
+    if (finishedPorted !== ported.length)
+      fail(`ported tests finished ${finishedPorted} of ${ported.length}`);
     removeSuiteDirectory();
-    // Each of these two spawns measured about 210s. 360s is a new cap, not a
-    // raise of the 30s nested `bun test --isolate` limit. Re-running Python here
-    // does not fit the 15-minute web-static job. Temporary until the B commit
-    // removes Python.
+    // Two spawns, measured about 210s each. 300s + 300s equals this test's 600s
+    // cap and is below the previous 360s spawn cap. This proof re-runs Python
+    // and is removed with Python in the B commit. It does not fit the 15-minute
+    // web-static job.
     const py = await run(["python3", "scripts/test_eslint.py"], {
       extraEnv: { PYTHONDONTWRITEBYTECODE: "1" },
-      timeout: 360,
+      timeout: 300,
     });
     const ts = await run(
-      [process.execPath, "test", "scripts/ci/eslint-fixtures.test.ts", "--test-name-pattern", "^test_"],
-      { timeout: 360 },
+      [
+        process.execPath,
+        "test",
+        "scripts/ci/eslint-fixtures.test.ts",
+        "--test-name-pattern",
+        "^test_",
+      ],
+      { timeout: 300 },
     );
     if (py.returncode !== 0) fail(py.stderr.slice(-8000));
     if (ts.returncode !== 0) fail((ts.stdout + ts.stderr).slice(-8000));
@@ -1117,10 +1592,10 @@ test.serial(
     assertSameNames(passedPythonNames(py.stderr), expected, "python");
     assertSameNames(passedBunNames(ts.stdout, ts.stderr), expected, "typescript");
   },
-  // The parity test itself measured about 410–430s. 600s covers that measurement.
+  // Measured about 410–430s. 600s is unchanged.
   { timeout: 600_000 },
 );
 
 afterAll(() => {
-  removeSuiteDirectory();
+  reapLeftovers();
 }, proofTimeoutMs);
