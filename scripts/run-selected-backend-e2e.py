@@ -756,7 +756,10 @@ def run(output, only=None):
         except BaseException:
             launcher_failure['receiptWrite']='failed'
     finally:
-        complete=[(r['lane'],r['flow']) for r in results] == list(runs)
+        # Requested lanes are `runs` when the caller bound them; the early-failure
+        # exec supplies selected_runs and must still write the aggregate receipt.
+        expected=locals().get('runs', selected_runs())
+        complete=[(r['lane'],r['flow']) for r in results] == list(expected)
         if not complete:code=code or 1
         aggregate={'source':before['head'],'tree':before['tree'],'owner':owner,'runs':results,'exit':code,
               'allRequestedRunsExecuted':complete,'launcherFailure':launcher_failure,
