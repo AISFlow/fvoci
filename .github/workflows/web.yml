@@ -100,8 +100,7 @@ jobs:
           bun-version-file: .bun-version
       - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Restore Cargo downloads
-        id: cache_web_checks_4
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -134,8 +133,7 @@ jobs:
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
       - name: Restore web gate Rust outputs
-        id: cache_web_checks_5
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target
           key: v3-web-checks-ubuntu-26.04-${{ runner.arch }}-1.98.1-default-api-schema-devdebug0-testdebug0-${{ github.sha }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', 'packages/**', 'apps/**', 'third-party/**', 'patches/**') }}-${{ steps.sqlite.outputs.cache_identity }}
@@ -161,20 +159,6 @@ jobs:
           python3 -m pip install --disable-pip-version-check --user --break-system-packages -r scripts/ci_selection_requirements.txt
           bash scripts/test-web-e2e-groups.sh
           python3 scripts/fixtures/web-e2e/test-build-handoff.py
-      - name: Save Cargo downloads
-        if: github.ref == 'refs/heads/main' && steps.cache_web_checks_4.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
-      - name: Save web gate Rust outputs
-        if: github.ref == 'refs/heads/main' && steps.cache_web_checks_5.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: target
-          key: v3-web-checks-ubuntu-26.04-${{ runner.arch }}-1.98.1-default-api-schema-devdebug0-testdebug0-${{ github.sha }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', 'packages/**', 'apps/**', 'third-party/**', 'patches/**') }}-${{ steps.sqlite.outputs.cache_identity }}
 
   web-native-checks:
     needs: ci-plan
@@ -188,8 +172,7 @@ jobs:
           bun-version-file: .bun-version
       - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Restore Cargo downloads
-        id: cache_workspace_browser_shard_4
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -234,14 +217,6 @@ jobs:
         run: |
           cargo clippy --locked --offline --all-targets --features db-tests,api-schema -- -D warnings
           cargo test --locked --offline --test static_api
-      - name: Save Cargo downloads
-        if: github.ref == 'refs/heads/main' && steps.cache_workspace_browser_shard_4.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
 
   # Exact default-feature browser binaries and fresh dist, built once for all shards.
   workspace-browser-build:

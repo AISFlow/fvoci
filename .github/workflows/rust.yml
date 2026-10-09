@@ -79,8 +79,7 @@ jobs:
       - name: restore.sh env-file parsing and app password argv checks
         run: bash scripts/test-restore-env.sh
       - name: Restore Cargo downloads
-        id: cache_fast_5
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -206,14 +205,6 @@ jobs:
         with:
           path: target/db-lib
           key: ${{ steps.db_lib_cache.outputs.cache-primary-key }}
-      - name: Save Cargo downloads
-        if: github.ref == 'refs/heads/main' && steps.cache_fast_5.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
 
   # Default-feature build/policy previously ran only on PostgreSQL ARM A.
   # Give that same check its own budget so DB compilation/tests keep their 15m.
