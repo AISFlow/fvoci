@@ -7,7 +7,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { expect, type Browser, type Page, test } from "@playwright/test";
+import { expect, type Browser, type Page, type TestInfo, test } from "@playwright/test";
 import { readJson, flowSchemas, createE2eUser } from "./helpers";
 import {
   admin,
@@ -27,6 +27,15 @@ import {
 
 function runDirectory(): string {
   return process.env.FVOCI_E2E_RESULT_DIR ?? "/tmp";
+}
+
+// Clock reading for this worker process. The next run is a new process, so
+// its peer addresses do not collide with rows left in the same database.
+const peerRunStartedAt = String(Date.now());
+
+function peerEmail(testInfo: TestInfo): string {
+  const testId = testInfo.testId.toLowerCase().replace(/[^a-z0-9-]+/g, "");
+  return `vue-input-peer-${peerRunStartedAt}-${testId}-${String(testInfo.workerIndex)}-${String(testInfo.repeatEachIndex)}@example.com`;
 }
 
 // Login allows 10 attempts per account and 30 per address in five minutes.
@@ -311,7 +320,7 @@ test("file drop keeps multi-file order and moving anchors, clipboard paste persi
   baseURL,
 }, testInfo) => {
   const who = {
-    email: `vue-input-peer-${String(testInfo.workerIndex)}-${String(testInfo.repeatEachIndex)}@example.com`,
+    email: peerEmail(testInfo),
     password: "peerpass1",
     givenName: "파일 동료",
   };
