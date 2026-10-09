@@ -511,7 +511,7 @@ def prepare_browser(output, chromium):
     # Legacy39 controls isolate the original source/native ownership boundary;
     # the separate BrowserAssetsTest exercises the real private-copy boundary.
     return Path(chromium)
-def run(output):
+def run(output, only=None):
     assert os.getuid()==os.getgid()==1000
     assert output.stat().st_uid==1000 and output.stat().st_mode & 0o777 == 0o700
     before=read(output/'before.json')
@@ -1295,6 +1295,60 @@ class HistoricalFixturePortabilityTest(unittest.TestCase):
                               'original_guard_exit':original['footer_exit'], 'original_err13':original['err13'],
                               'fixed_guard_exit':fixed['footer_exit'], 'first_child_status':failed['footer_exit'],
                               'negative_controls':7}), flush=True)
+
+
+class InstallLaneReceiptTest(unittest.TestCase):
+    def test_single_install_lane_copies_closed_receipt(self):
+        CI = H.CI
+        with tempfile.TemporaryDirectory(prefix='fvoci-install-lane-') as tmp:
+            output = Path(tmp) / 'fvoci-selected-current'
+            output.mkdir(mode=0o700)
+            before = {'head': SHA, 'tree': TREE, 'status': '', 'tracked': {}, 'external': {}, 'untracked': {}}
+            CI.write(output / 'before.json', before)
+            CI.write(output / 'after.json', before)
+            executable = output / 'fvoci-server'
+            executable.write_bytes(b'fixture')
+            executable.chmod(0o755)
+            bun = output / 'bun'
+            bun.write_bytes(b'bun')
+            bun.chmod(0o755)
+            chromium = output / 'chromium'
+            chromium.write_bytes(b'chromium')
+            chromium.chmod(0o755)
+            CI.write(output / 'bundle.json', {'binaries': {str(executable): {'sha256': 'ab'}}})
+            CI.write(output / 'web-receipt.json', {'dist_files': {}})
+            CI.write(output / 'abi-receipt.json', {'host_runtime_files': {}})
+            CI.write(output / 'compile-receipt.json', {'source': SHA})
+
+            def fake_driver(argv, **kwargs):
+                allocation = json.loads(Path(kwargs['env']['FVOCI_ROOT_CURRENT_ALLOCATION']).read_text())
+                runroot = Path(allocation['runRoot'])
+                runroot.mkdir()
+                CI.write(runroot / 'receipt.json', {
+                    'source': SHA, 'tree': TREE, 'root_owner': 'lane-owner',
+                    'final_exit_code': 0, 'owned_container_absent': True,
+                    'actual_tests': 4, 'actual_owned_process_receipts': 15,
+                })
+                return subprocess.CompletedProcess(argv, 0)
+
+            with patch.dict(os.environ, {
+                'GITHUB_JOB': 'collaboration-install-on',
+                'GITHUB_RUN_ID': '1', 'GITHUB_RUN_ATTEMPT': '1',
+                'FVOCI_SELECTED_EXECUTION_MODE': 'github-ci', 'GITHUB_SHA': SHA,
+            }), patch.object(CI.os, 'getuid', return_value=1000), \
+                 patch.object(CI.os, 'getgid', return_value=1000), \
+                 patch.object(CI, 'identity', return_value='lane-owner'), \
+                 patch.object(CI.shutil, 'which', return_value=str(bun)), \
+                 patch.object(CI, 'call', return_value=str(chromium)), \
+                 patch.object(CI, 'admitted_browser', return_value=str(chromium)), \
+                 patch.object(CI, 'runtime_access', return_value=None), \
+                 patch.object(CI.subprocess, 'run', side_effect=fake_driver):
+                code = CI.run(output, 'install/on')
+            copied = output / 'closed-install-receipt.json'
+            self.assertEqual(code, 0)
+            self.assertTrue(copied.is_file())
+            self.assertFalse(copied.is_symlink())
+            self.assertEqual(json.loads(copied.read_text())['actual_owned_process_receipts'], 15)
 
 
 if __name__=='__main__':unittest.main()

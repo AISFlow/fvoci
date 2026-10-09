@@ -1840,16 +1840,27 @@ def _verify_web_browser_budget(jobs: dict) -> list[str]:
 
 
 _CLOSED_INSTALL_RECEIPT = "${{ runner.temp }}/fvoci-closed-install/closed-install-receipt.json"
+_PRODUCER_DOWNLOAD_WITH = {
+    "artifact-ids": "${{ needs.collaboration-build.outputs.artifact_id }}",
+    "merge-multiple": True,
+    "path": "${{ runner.temp }}/fvoci-web-build-handoff",
+}
+_RECEIPT_DOWNLOAD_WITH = {
+    "artifact-ids": "${{ needs.collaboration-install-on.outputs.install_receipt_artifact_id }}",
+    "merge-multiple": True,
+    "path": "${{ runner.temp }}/fvoci-closed-install",
+}
+_DOWNLOAD_PIN = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
 _WEB_COLLAB_LANES = (
-    ("collaboration-install-on", "install/on", ["ci-plan", "collaboration-build"], {}),
+    ("collaboration-install-on", "install/on", ["ci-plan", "collaboration-build"], {}, 1, (_PRODUCER_DOWNLOAD_WITH,)),
     ("collaboration-postgres-on", "postgres/on", ["ci-plan", "collaboration-build", "collaboration-install-on"],
-     {"FVOCI_CLOSED_INSTALL_RECEIPT": _CLOSED_INSTALL_RECEIPT}),
+     {"FVOCI_CLOSED_INSTALL_RECEIPT": _CLOSED_INSTALL_RECEIPT}, 2, (_PRODUCER_DOWNLOAD_WITH, _RECEIPT_DOWNLOAD_WITH)),
     ("collaboration-sqlite-on", "sqlite/on", ["ci-plan", "collaboration-build", "collaboration-install-on"],
-     {"FVOCI_CLOSED_INSTALL_RECEIPT": _CLOSED_INSTALL_RECEIPT}),
+     {"FVOCI_CLOSED_INSTALL_RECEIPT": _CLOSED_INSTALL_RECEIPT}, 2, (_PRODUCER_DOWNLOAD_WITH, _RECEIPT_DOWNLOAD_WITH)),
     ("collaboration-postgres-off", "postgres/off", ["ci-plan", "collaboration-build", "collaboration-install-on"],
-     {"FVOCI_CLOSED_INSTALL_RECEIPT": _CLOSED_INSTALL_RECEIPT}),
+     {"FVOCI_CLOSED_INSTALL_RECEIPT": _CLOSED_INSTALL_RECEIPT}, 2, (_PRODUCER_DOWNLOAD_WITH, _RECEIPT_DOWNLOAD_WITH)),
     ("collaboration-sqlite-off", "sqlite/off", ["ci-plan", "collaboration-build", "collaboration-install-on"],
-     {"FVOCI_CLOSED_INSTALL_RECEIPT": _CLOSED_INSTALL_RECEIPT}),
+     {"FVOCI_CLOSED_INSTALL_RECEIPT": _CLOSED_INSTALL_RECEIPT}, 2, (_PRODUCER_DOWNLOAD_WITH, _RECEIPT_DOWNLOAD_WITH)),
 )
 
 
@@ -1860,10 +1871,11 @@ def _verify_web_build_handoff(jobs: dict) -> list[str]:
         if not ok: errors.append("web: current build handoff " + message)
     producer = jobs.get("collaboration-build", {})
     require(producer.get("needs") == "ci-plan", "producer needs ci-plan")
-    lane_jobs = [(name, jobs.get(name, {}), token, needs, extra) for name, token, needs, extra in _WEB_COLLAB_LANES]
-    for _name, job, _token, needs, _extra in lane_jobs:
+    lane_jobs = [(name, jobs.get(name, {}), token, needs, extra, count, expected_withs)
+                 for name, token, needs, extra, count, expected_withs in _WEB_COLLAB_LANES]
+    for _name, job, _token, needs, _extra, _count, _expected_withs in lane_jobs:
         require(job.get("needs") == needs, "consumer needs successful registered producer")
-    for name, job in (("collaboration-build", producer), *((name, job) for name, job, _token, _needs, _extra in lane_jobs)):
+    for name, job in (("collaboration-build", producer), *((name, job) for name, job, _token, _needs, _extra, _count, _expected_withs in lane_jobs)):
         require(job.get("runs-on") == "ubuntu-26.04" and job.get("timeout-minutes") == 15, "fixed runner/budget")
         require(not any(k in job for k in ("continue-on-error", "strategy", "env", "permissions")), "no masked/alternate authority")
         checkout = [step for step in job.get("steps", []) if str(step.get("uses", "")).startswith("actions/checkout@")]
@@ -1892,13 +1904,17 @@ def _verify_web_build_handoff(jobs: dict) -> list[str]:
             and not any(k in publish[0] for k in ("if", "continue-on-error")), "publish only successful complete packet")
     require(producer.get("outputs") == {"artifact_id": "${{ steps.publish.outputs.artifact-id }}",
             "handoff_sha256": "${{ steps.prepare.outputs.handoff_sha256 }}"}, "producer artifact identity and digest outputs")
-    for name, job, token, _needs, extra in lane_jobs:
+    for name, job, token, _needs, extra, count, expected_withs in lane_jobs:
         steps = job.get("steps", [])
-        download = [step for step in steps if str(step.get("uses", "")).startswith("actions/download-artifact@")
-                    and step.get("with") == {"artifact-ids": "${{ needs.collaboration-build.outputs.artifact_id }}", "merge-multiple": True,
-                        "path": "${{ runner.temp }}/fvoci-web-build-handoff"}]
-        require(len(download) == 1 and download[0].get("uses") == "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
-                and not any(k in download[0] for k in ("if", "continue-on-error")), "current-run exact artifact ID without foreign token/ref/run")
+        downloads = [step for step in steps if str(step.get("uses", "")).startswith("actions/download-artifact@")]
+        exact = []
+        for expected_with in expected_withs:
+            matched = [step for step in downloads if step.get("with") == expected_with
+                       and step.get("uses") == _DOWNLOAD_PIN
+                       and not any(k in step for k in ("if", "continue-on-error"))]
+            exact.extend(matched[:1])
+        require(len(downloads) == count and len(exact) == len(expected_withs),
+                "current-run exact artifact ID without foreign token/ref/run")
         runtime = [step for step in steps if step.get("id") == "browser"]
         require(len(runtime) == 1 and runtime[0].get("env") == {"FVOCI_E2E_PENDING": "1",
                     "FVOCI_WEB_BUILD_HANDOFF_SHA256": "${{ needs.collaboration-build.outputs.handoff_sha256 }}",

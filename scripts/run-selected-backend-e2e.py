@@ -735,7 +735,14 @@ def run(output, only=None):
             # Preserve its actual exit and raw private receipt/log; never start a lane
             # just to fill the expected count or turn a partial run into PASS.
             if r.returncode != 0 or not retirement['qualified']:break
-            if lane=='install':closed=reference(runroot/'receipt.json')
+            if lane=='install':
+                receipt_path=runroot/'receipt.json'
+                closed=reference(receipt_path)
+                if len(runs)==1:
+                    destination=output/'closed-install-receipt.json'
+                    with destination.open('xb') as handle:
+                        os.fchmod(handle.fileno(),0o600)
+                        handle.write(receipt_path.read_bytes())
     except BaseException as error:
         code=code or (130 if isinstance(error,KeyboardInterrupt) else 1)
         original=output/'selected-launcher-failure.private.json'
