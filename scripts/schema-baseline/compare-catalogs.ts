@@ -735,6 +735,9 @@ function indexBy(items: Value[], key: string): Array<{ name: Value; item: Value 
   const out: Array<{ name: Value; item: Value }> = [];
   for (const item of items) {
     const name = requireKey(item, key);
+    if (name.k === "arr" || name.k === "obj") {
+      throw new Fail(1, `TypeError: unhashable type: '${name.k === "arr" ? "list" : "dict"}'\n`);
+    }
     if (out.some((entry) => pyEq(entry.name, name))) throw new Fail(1, `duplicate ${key} ${pyRepr(name)}\n`);
     out.push({ name, item });
   }
@@ -848,10 +851,26 @@ function appRoleName(catalog: Value): Value | undefined {
   return name;
 }
 
+// Python str.strip() uses Unicode whitespace from str.isspace(). U+FEFF is not in that set.
+const PYTHON_SPACE = new Set<number>([
+  0x0009, 0x000a, 0x000b, 0x000c, 0x000d, 0x001c, 0x001d, 0x001e, 0x001f, 0x0020, 0x0085, 0x00a0, 0x1680,
+  0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029,
+  0x202f, 0x205f, 0x3000,
+]);
+
+function pythonStrip(value: string): string {
+  const chars = [...value];
+  let start = 0;
+  let end = chars.length;
+  while (start < end && PYTHON_SPACE.has(chars[start].codePointAt(0)!)) start++;
+  while (end > start && PYTHON_SPACE.has(chars[end - 1].codePointAt(0)!)) end--;
+  return chars.slice(start, end).join("");
+}
+
 function parseAcl(acl: Value): { entries: Array<{ grantee: string; privs: string; grantor: string }> } | { error: string } {
   if (acl.k === "null") return { entries: [] };
   if (acl.k !== "str") throw new Fail(1, `AttributeError: '${typeName(acl)}' object has no attribute 'strip'\n`);
-  const text = acl.v.trim();
+  const text = pythonStrip(acl.v);
   if (text.includes('"') || !text.startsWith("{") || !text.endsWith("}")) return { error: `unparsable acl ${pyRepr(acl)}` };
   const entries: Array<{ grantee: string; privs: string; grantor: string }> = [];
   for (const item of text.slice(1, -1).split(",").filter((part) => part.length > 0)) {
