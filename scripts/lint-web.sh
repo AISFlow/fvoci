@@ -7,6 +7,7 @@ bun --bun scripts/prepare-vue-lint-types.mjs
 if [[ $# == 0 || $1 == -* ]]; then
   set -- 'apps/web/**/*.{js,mjs,cjs,ts,tsx,vue}' \
     'packages/editor/**/*.{js,mjs,cjs,ts,tsx,vue}' 'packages/i18n/**/*.{js,mjs,cjs,ts,tsx,vue}' \
-    'scripts/**/*.mjs' eslint.config.mjs "$@"
+    'scripts/**/*.mjs' 'scripts/run-selected-backend-e2e.ts' \
+    'tools/selected-backend-ci/**/*.ts' eslint.config.mjs "$@"
 fi
 exec bun --bun node_modules/eslint/bin/eslint.js --max-warnings=0 "$@"
