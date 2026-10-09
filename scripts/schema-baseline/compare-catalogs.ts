@@ -948,10 +948,17 @@ function validateLedgerTableIdentity(oldLedger: Value[], newLedger: Value[], app
     if (owners.length !== 1) {
       problems.push(`LEDGER TABLE ${side} acl owner entries ${stringList(owners)} (expected exactly one self-granted full entry)`);
     }
+    const onlyOwners = parsed.entries.every((item) => owners.includes(item.grantee));
     for (const entry of parsed.entries) {
-      if (owners.includes(entry.grantee)) continue;
+      const isOwner = owners.includes(entry.grantee);
+      const isApp = appRole !== undefined && pyEq(str(entry.grantee), appRole);
+      if (isOwner && (isApp || (appRole === undefined && onlyOwners))) {
+        problems.push(`LEDGER TABLE ${side} acl grants ${pyStrRepr(entry.grantee)} ${pyStrRepr(entry.privs)}; app role must not hold owner write`);
+        continue;
+      }
+      if (isOwner) continue;
       if (entry.grantee === "") problems.push(`LEDGER TABLE ${side} acl grants PUBLIC ${pyStrRepr(entry.privs)}`);
-      else if (appRole !== undefined && !pyEq(str(entry.grantee), appRole)) {
+      else if (appRole === undefined || !isApp) {
         problems.push(`LEDGER TABLE ${side} acl grants foreign grantee ${pyStrRepr(entry.grantee)} ${pyStrRepr(entry.privs)}`);
       } else if (entry.privs !== "r") {
         problems.push(`LEDGER TABLE ${side} acl grants ${pyStrRepr(entry.grantee)} ${pyStrRepr(entry.privs)}; expected exactly 'r' (read, no grant option)`);
@@ -1138,8 +1145,9 @@ function compare(oldPath: string, newPath: string, oldCatalog: Value, newCatalog
   }
   const oldHasRole = hasKey(oldCatalog, "app_role");
   const newHasRole = hasKey(newCatalog, "app_role");
-  if (oldHasRole !== newHasRole) report.push("NOTE app_role privileges dumped for only one side");
-  else if (oldHasRole) {
+  if (!oldHasRole) report.push("app_role missing on old");
+  if (!newHasRole) report.push("app_role missing on new");
+  if (oldHasRole && newHasRole) {
     const oldRole = requireKey(oldCatalog, "app_role");
     const newRole = requireKey(newCatalog, "app_role");
     report.push(...validateRoleIdentity(oldRole, newRole));
