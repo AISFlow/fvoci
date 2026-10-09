@@ -177,10 +177,28 @@ function normalizeProg(text: string) {
   return text.replaceAll("compare-catalogs.py", "PROG").replaceAll("compare-catalogs.ts", "PROG");
 }
 
-const OLD_LEDGER = catalog(OLD_COLS, Array.from({ length: 55 }, (_, index) => ({ version: index + 1 })));
-const NEW_LEDGER = catalog(NEW_COLS, Array.from({ length: 12 }, (_, index) => ({ version: index + 1, lineage: "fvoci-postgres-060", sql_sha256: (index + 1).toString(16).padStart(64, "0") })));
-const OLD_ROLE = withRole(OLD_LEDGER, OLD_COLS);
-const NEW_ROLE = withRole(NEW_LEDGER, NEW_COLS);
+const OLD_BARE = catalog(OLD_COLS, Array.from({ length: 55 }, (_, index) => ({ version: index + 1 })));
+const NEW_BARE = catalog(NEW_COLS, Array.from({ length: 12 }, (_, index) => ({ version: index + 1, lineage: "fvoci-postgres-060", sql_sha256: (index + 1).toString(16).padStart(64, "0") })));
+const OLD_LEDGER = withRole(OLD_BARE, OLD_COLS);
+const NEW_LEDGER = withRole(NEW_BARE, NEW_COLS);
+const OLD_ROLE = withRole(OLD_BARE, OLD_COLS);
+const NEW_ROLE = withRole(NEW_BARE, NEW_COLS);
+
+function diverge(old: unknown, fresh: unknown) {
+  const dir = mkdtempSync(join(tmpdir(), "compare-catalogs-sec-"));
+  try {
+    const oldPath = join(dir, "a.json");
+    const newPath = join(dir, "b.json");
+    writeFileSync(oldPath, JSON.stringify(old));
+    writeFileSync(newPath, JSON.stringify(fresh));
+    return {
+      py: capture("python3", [PY, oldPath, newPath]),
+      ts: capture(process.execPath, [TS, oldPath, newPath]),
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 function ledgerTable(cat: Catalog) {
   const found = cat.tables.find((item) => item.name === "schema_migrations");
@@ -274,6 +292,41 @@ test("role inclusive ledger select expansion passes", () => {
   expect(out).toContain("RESULT: PASS");
   const flagged = out.split("\n").filter((line) => line.startsWith("EXTRA") || line.startsWith("MISSING") || line.startsWith("DIFF")).join("\n");
   expect(flagged).not.toContain("app_role");
+});
+
+test("a missing app_role or an unlabeled ledger acl fails closed", () => {
+  const elevated = withRole(OLD_BARE, OLD_COLS, { attrs: attributes({ superuser: true }) });
+  let result = diverge(elevated, NEW_BARE);
+  expect(result.py.status).toBe(0);
+  expect(result.ts.status).toBe(1);
+  expect(result.ts.stdout).toContain("RESULT: FAIL");
+  expect(result.ts.stdout).toContain("app_role missing on new");
+  expect(result.ts.stdout).not.toContain("NOTE app_role");
+
+  const attacked = acl(["owner=arwdDxtm/owner", "app=r/owner", "attacker=r/owner"]);
+  const oldAttack = structuredClone(OLD_BARE);
+  const newAttack = structuredClone(NEW_BARE);
+  ledgerTable(oldAttack).acl = attacked;
+  ledgerTable(newAttack).acl = attacked;
+  result = diverge(oldAttack, newAttack);
+  expect(result.py.status).toBe(0);
+  expect(result.ts.status).toBe(1);
+  expect(result.ts.stdout).toContain("RESULT: FAIL");
+  expect(result.ts.stdout).toContain("foreign grantee 'attacker'");
+  expect(result.ts.stdout).toContain("app_role missing on old");
+  expect(result.ts.stdout).toContain("app_role missing on new");
+
+  const appOwner = acl(["app=arwdDxtm/app"]);
+  const oldOwner = structuredClone(OLD_BARE);
+  const newOwner = structuredClone(NEW_BARE);
+  ledgerTable(oldOwner).acl = appOwner;
+  ledgerTable(newOwner).acl = appOwner;
+  result = diverge(oldOwner, newOwner);
+  expect(result.py.status).toBe(0);
+  expect(result.ts.status).toBe(1);
+  expect(result.ts.stdout).toContain("RESULT: FAIL");
+  expect(result.ts.stdout).toContain("app role must not hold owner write");
+  expect(result.ts.stdout).toContain("'arwdDxtm'");
 });
 
 test("unauthorized or incomplete ledger privileges fail", () => {
