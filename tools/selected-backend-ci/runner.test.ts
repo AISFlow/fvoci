@@ -372,13 +372,6 @@ function expectFixedActorRefusal(
 
 describe.serial("selected runner contract and fail-closed controls", () => {
   test("original five lane tuple and all seven CLI modes remain exact", () => {
-    const original = readFileSync(join(root, "scripts/run-selected-backend-e2e.py"), "utf8");
-    expect(original).toContain(
-      "return (('install','on'),('postgres','on'),('sqlite','on'),('postgres','off'),('sqlite','off'))",
-    );
-    expect(original).toContain(
-      "subprocess.run([sys.executable,str(driver)],env=env,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)",
-    );
     expect(selectedRuns).toEqual([
       ["install", "on"],
       ["postgres", "on"],
@@ -456,17 +449,12 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     ["run", "--output"],
     ["permissions", "--output", "/fixture", "--docker-gid", "nan"],
   ])
-    test("actual Bun CLI versus original Python exit: " + JSON.stringify(args), () => {
-      const ts = spawnSync(
+    test("actual CLI keeps a fixed exit for " + JSON.stringify(args), () => {
+      const result = spawnSync(
         [process.execPath, join(root, "scripts/run-selected-backend-e2e.ts"), ...args],
         { stdout: "pipe", stderr: "pipe" },
       );
-      const py = spawnSync(
-        [tool("python3"), join(root, "scripts/run-selected-backend-e2e.py"), ...args],
-        { stdout: "pipe", stderr: "pipe", env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } },
-      );
-      expect(ts.exitCode).toBe(py.exitCode);
-      expect(ts.exitCode).toBe(args.includes("--help") ? 0 : 2);
+      expect(result.exitCode).toBe(args.includes("--help") ? 0 : 2);
     });
   for (const mode of modes)
     test("actual CLI refuses unallocated " + mode + " without starting resources", () => {
@@ -1467,52 +1455,47 @@ try {
       },
     );
   for (const exit of [0, 7])
-    test("real stage CLI comparison against unchanged Python: " + String(exit), () => {
+    test("actual stage CLI preserves child exit " + String(exit) + " and the receipt", () => {
       const command = [
         process.execPath,
         "--eval",
         `console.log('compiler-fixture'); process.exit(${String(exit)});`,
       ];
-      const receipts: unknown[] = [];
-      for (const [executable, runner] of [
-        [process.execPath, "run-selected-backend-e2e.ts"],
-        [tool("python3"), "run-selected-backend-e2e.py"],
-      ]) {
-        const output = directory();
-        write(join(output, "before.json"), { head: source, tree });
-        const result = spawnSync(
-          [
-            executable as string,
-            join(root, "scripts", runner as string),
-            "stage",
-            "--output",
-            output,
-            "--stage-name",
-            "main",
-            "--",
-            ...command,
-          ],
-          {
-            cwd: root,
-            env: { ...process.env, ...ci, PYTHONDONTWRITEBYTECODE: "1" },
-            stdout: "pipe",
-            stderr: "pipe",
-          },
-        );
-        expect(result.exitCode).toBe(exit);
-        const receipt = read(join(output, "main-stage.json")) as {
-          seconds: number;
-          [key: string]: unknown;
-        };
-        expect(receipt.seconds).toBeGreaterThanOrEqual(0);
-        const { seconds: elapsed, ...contract } = receipt;
-        expect(Number.isFinite(elapsed)).toBe(true);
-        receipts.push(contract);
-        expect(readFileSync(join(output, "main-compiler.jsonl"), "utf8")).toBe(
-          "compiler-fixture\n",
-        );
-      }
-      expect(receipts[0]).toEqual(receipts[1]);
+      const output = directory();
+      write(join(output, "before.json"), { head: source, tree });
+      const result = spawnSync(
+        [
+          process.execPath,
+          join(root, "scripts/run-selected-backend-e2e.ts"),
+          "stage",
+          "--output",
+          output,
+          "--stage-name",
+          "main",
+          "--",
+          ...command,
+        ],
+        {
+          cwd: root,
+          env: { ...process.env, ...ci },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      expect(result.exitCode).toBe(exit);
+      const receipt = read(join(output, "main-stage.json")) as {
+        source: string;
+        tree: string;
+        command: string[];
+        exit_code: number;
+        seconds: number;
+      };
+      const { seconds, ...contract } = receipt;
+      expect(contract).toEqual({ source, tree, command, exit_code: exit });
+      expect(Object.keys(receipt)).toEqual(["source", "tree", "command", "exit_code", "seconds"]);
+      expect(seconds).toBeGreaterThanOrEqual(0);
+      expect(Number.isFinite(seconds)).toBe(true);
+      expect(readFileSync(join(output, "main-compiler.jsonl"), "utf8")).toBe("compiler-fixture\n");
     });
   test("main rejects broad permission arguments and nonphysical config output", async () => {
     const output = directory();
