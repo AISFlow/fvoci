@@ -376,7 +376,7 @@ exit "${PREREQ_EXIT:-0}"
 
     def test_workflow_root_cache_preparation_order_and_independent_crates(self):
         consumers = {'rust': {'fast', 'native-arm64', 'postgres-build', 'postgres', 'collaboration'},
-                     'web': {'web-checks', 'web-native-checks', 'workspace-browser-build', 'workspace-browser-shard', 'collaboration-build', 'collaboration-flow'},
+                     'web': {'web-checks', 'web-native-checks', 'workspace-browser-build', 'workspace-browser-shard', 'collaboration-build', 'collaboration-install-on', 'collaboration-postgres-on', 'collaboration-sqlite-on', 'collaboration-postgres-off', 'collaboration-sqlite-off'},
                      'documents': {'native-extraction'}}
         for workflow, expected in consumers.items():
             # Bounded textual contract; the CI planner separately parses/validates YAML.
@@ -397,12 +397,16 @@ exit "${PREREQ_EXIT:-0}"
                     self.assertIn('artifact-ids: ${{ needs.workspace-browser-build.outputs.artifact_id }}', body)
                     self.assertIn('--ci-consume-browser', body)
                     self.assertLess(body.index('id: sqlite'), body.index('Download this run'))
-                elif workflow == 'web' and job == 'collaboration-flow':
-                    # The current consumer prepares its own SDK before admitting
-                    # the successful producer's exact artifact; it has no target cache.
+                elif workflow == 'web' and job in {
+                        'collaboration-install-on', 'collaboration-postgres-on', 'collaboration-sqlite-on',
+                        'collaboration-postgres-off', 'collaboration-sqlite-off'}:
+                    # Each lane prepares its own SDK before admitting the producer's exact artifact.
                     self.assertNotIn('path: target', body)
                     self.assertNotIn('path: crates/collab-engine/target', body)
-                    self.assertIn('needs: [ci-plan, collaboration-build]', body)
+                    if job == 'collaboration-install-on':
+                        self.assertIn('needs: [ci-plan, collaboration-build]\n', body)
+                    else:
+                        self.assertIn('needs: [ci-plan, collaboration-build, collaboration-install-on]\n', body)
                     self.assertIn('artifact-ids: ${{ needs.collaboration-build.outputs.artifact_id }}', body)
                     self.assertIn('FVOCI_WEB_BUILD_HANDOFF_SHA256: ${{ needs.collaboration-build.outputs.handoff_sha256 }}', body)
                     self.assertIn('bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected', body)
@@ -524,7 +528,7 @@ exit "${PREREQ_EXIT:-0}"
             shutil.copy(ROOT / '.github/workflows' / (workflow+'.yml'), fixture / '.github/workflows' / (workflow+'.yml'))
         shutil.copy(ROOT / 'infra/rust/Dockerfile', fixture / 'infra/rust/Dockerfile')
         web = fixture / '.github/workflows/web.yml'; original = web.read_text()
-        consumer = re.search(r'^  collaboration-flow:\n(.*?)(?=^  [a-z][\w-]*:|\Z)', original, re.M | re.S)
+        consumer = re.search(r'^  collaboration-install-on:\n(.*?)(?=^  [a-z][\w-]*:|\Z)', original, re.M | re.S)
         producer = re.search(r'^  collaboration-build:\n(.*?)(?=^  [a-z][\w-]*:|\Z)', original, re.M | re.S)
         self.assertIsNotNone(consumer);self.assertIsNotNone(producer)
         changes = [(producer, 'id: sqlite', 'id: missing-sqlite'),

@@ -124,7 +124,9 @@ class UbuntuPrimaryMirrorTest(unittest.TestCase):
     def test_every_x64_root_preparation_selects_signed_primary_before_apt(self):
         steps = self.preparation_steps()
         self.assertEqual(set(steps), {('web', 'web-checks'), ('web', 'web-native-checks'), ('web', 'workspace-browser-build'), ('web', 'workspace-browser-shard'),
-            ('web', 'collaboration-build'), ('web', 'collaboration-flow')})
+            ('web', 'collaboration-build'), ('web', 'collaboration-install-on'),
+            ('web', 'collaboration-postgres-on'), ('web', 'collaboration-sqlite-on'),
+            ('web', 'collaboration-postgres-off'), ('web', 'collaboration-sqlite-off')})
         for name, step in steps.items():
             with self.subTest(consumer=name):
                 run = step['run']
@@ -815,7 +817,7 @@ class GateSchemaTest(unittest.TestCase):
             {
                 "web-checks": "success",
                 "workspace-browser-shard": "skipped",
-                "collaboration-flow": "skipped",
+                "collaboration-install-on": "skipped",
             },
         )
         self.assertEqual(rc, 1)
@@ -891,7 +893,7 @@ class GateSchemaTest(unittest.TestCase):
             {
                 "web-checks": "success",
                 "workspace-browser-shard": "skipped",
-                "collaboration-flow": "skipped",
+                "collaboration-install-on": "skipped",
             },
         )
         self.assertEqual(rc, 1)
@@ -1123,8 +1125,8 @@ class WorkflowRegistryTest(unittest.TestCase):
         })
         self.assertIn("workspace-browser-shard", jobs["web-ci-gate"]["needs"])
         self.assertEqual(jobs["web-checks"]["timeout-minutes"], 23)
-        for job in ("web-static", "web-native-checks",
-                    "collaboration-build", "collaboration-flow"):
+        for job in ("web-static", "web-native-checks", "collaboration-build",
+                    *(name for name, _token, _needs in SEL._WEB_COLLAB_LANES)):
             self.assertEqual(jobs[job]["timeout-minutes"], 15)
         for value in (None, 0, 15, 16, 19, 21, 30, "20", 20.0, True):
             bad = copy.deepcopy(jobs)
@@ -1147,18 +1149,22 @@ class WorkflowRegistryTest(unittest.TestCase):
         jobs = data["jobs"]
         self.assertEqual(SEL._verify_web_build_handoff(jobs), [])
         mutations = []
-        bad = copy.deepcopy(jobs); bad["collaboration-flow"]["needs"] = "ci-plan"; mutations.append(bad)
+        bad = copy.deepcopy(jobs); bad["collaboration-install-on"]["needs"] = "ci-plan"; mutations.append(bad)
         bad = copy.deepcopy(jobs); bad["collaboration-build"]["timeout-minutes"] = 16; mutations.append(bad)
-        for job, key in (("collaboration-build", "prepare"), ("collaboration-build", "publish"), ("collaboration-flow", "browser")):
+        for job, key in (("collaboration-build", "prepare"), ("collaboration-build", "publish"), ("collaboration-install-on", "browser")):
             bad = copy.deepcopy(jobs); step = next(s for s in bad[job]["steps"] if s.get("id") == key)
             step["continue-on-error"] = True; mutations.append(bad)
         bad = copy.deepcopy(jobs)
-        step = next(s for s in bad["collaboration-flow"]["steps"] if str(s.get("uses", "")).startswith("actions/download-artifact@"))
+        step = next(s for s in bad["collaboration-postgres-on"]["steps"] if str(s.get("uses", "")).startswith("actions/download-artifact@"))
         step["with"]["run-id"] = "foreign"; mutations.append(bad)
         bad = copy.deepcopy(jobs); bad["collaboration-build"]["outputs"]["handoff_sha256"] = ""; mutations.append(bad)
         bad = copy.deepcopy(jobs)
-        next(s for s in bad["collaboration-flow"]["steps"] if s.get("id") == "browser")["run"] = "bash scripts/run-web-e2e.sh --ci-use-committed-api --with-selected-backends"; mutations.append(bad)
-        bad = copy.deepcopy(jobs); bad["collaboration-flow"]["steps"].append({"uses": "actions/cache@anything", "with": {"path": "target"}}); mutations.append(bad)
+        next(s for s in bad["collaboration-sqlite-off"]["steps"] if s.get("id") == "browser")["run"] = "bash scripts/run-web-e2e.sh --ci-use-committed-api --with-selected-backends"; mutations.append(bad)
+        bad = copy.deepcopy(jobs); bad["collaboration-postgres-off"]["steps"].append({"uses": "actions/cache@anything", "with": {"path": "target"}}); mutations.append(bad)
+        bad = copy.deepcopy(jobs)
+        bad["collaboration-sqlite-on"]["steps"] = [step for step in bad["collaboration-sqlite-on"]["steps"]
+            if step.get("with", {}).get("path") != "${{ runner.temp }}/fvoci-closed-install"]
+        mutations.append(bad)
         for i, bad in enumerate(mutations):
             with self.subTest(mutation=i): self.assertTrue(SEL._verify_web_build_handoff(bad))
 
@@ -3054,7 +3060,11 @@ class RegistryMutationCliTest(unittest.TestCase):
         workspace-browser-build,
         workspace-browser-shard,
         collaboration-build,
-        collaboration-flow,
+        collaboration-install-on,
+        collaboration-postgres-on,
+        collaboration-sqlite-on,
+        collaboration-postgres-off,
+        collaboration-sqlite-off,
       ]"""
         self.assertIn(original_needs, gate)
         mutated = before_gate + gate.replace(original_needs, "    needs: [ci-plan, web-checks]", 1)

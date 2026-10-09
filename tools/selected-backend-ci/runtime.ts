@@ -64,6 +64,20 @@ export const selectedRuns = [
   ["postgres", "off"],
   ["sqlite", "off"],
 ] as const;
+export function requestedRuns(
+  value = process.env.FVOCI_COLLAB_LANE,
+): readonly (readonly [Lane, Flow])[] {
+  if (value === undefined) return selectedRuns;
+  const match = /^(install|postgres|sqlite)\/(on|off)$/.exec(value);
+  assert.ok(match, "unknown collaboration lane");
+  const lane = match[1] as Lane;
+  const flow = match[2] as Flow;
+  assert.ok(
+    selectedRuns.some(([itemLane, itemFlow]) => itemLane === lane && itemFlow === flow),
+    "unknown collaboration lane",
+  );
+  return [[lane, flow]];
+}
 export const knownOnBrowserTest =
   "selected normal main: Vue setup, stable wiki create, native persist, manual revision and fresh actor readback";
 const publicPhases = [
@@ -510,8 +524,12 @@ export async function run(output: string, boundary: RunBoundary = runBoundary): 
         runId: env("GITHUB_RUN_ID"),
         runAttempt: env("GITHUB_RUN_ATTEMPT"),
       };
-  let closed: Reference | null = null,
-    code = 0;
+  const runs = requestedRuns();
+  const only = runs.length === 1 ? runs[0] : undefined;
+  let closed: Reference | null = null;
+  if (only && only[0] !== "install") closed = reference(env("FVOCI_CLOSED_INSTALL_RECEIPT"));
+  else assert.equal(process.env.FVOCI_CLOSED_INSTALL_RECEIPT, undefined);
+  let code = 0;
   const results: RunResult[] = [];
   let launcherFailure: {
     code: string;
@@ -527,7 +545,7 @@ export async function run(output: string, boundary: RunBoundary = runBoundary): 
   };
   process.once("SIGINT", interrupt);
   try {
-    for (const [lane, flow] of selectedRuns) {
+    for (const [lane, flow] of runs) {
       const runRoot = join(runtime, "root-current-" + lane + "-" + randomBytes(6).toString("hex")),
         driver = join(templates, "current-" + lane + "-driver.py");
       const manifest: Record<string, unknown> = {
@@ -633,7 +651,12 @@ export async function run(output: string, boundary: RunBoundary = runBoundary): 
       );
       if (!result.retirement.qualified) code ||= 1;
       if (exit !== 0 || !result.retirement.qualified) break;
-      if (lane === "install") closed = reference(join(runRoot, "receipt.json"));
+      if (lane === "install") {
+        const receipt = join(runRoot, "receipt.json");
+        closed = reference(receipt);
+        if (runs.length === 1)
+          cpSync(receipt, join(output, "closed-install-receipt.json"), { errorOnExist: true });
+      }
     }
   } catch (error) {
     code ||= controller.signal.aborted ? 130 : 1;
@@ -659,7 +682,7 @@ export async function run(output: string, boundary: RunBoundary = runBoundary): 
     process.removeListener("SIGINT", interrupt);
     const complete = deepEquals(
       results.map((r) => [r.lane, r.flow]),
-      selectedRuns,
+      runs,
     );
     if (!complete) code ||= 1;
     try {
@@ -819,15 +842,18 @@ export function ownershipReturn(output: string): void {
           }
         }
       }
+      const expected = requestedRuns();
       assert.ok(
         deepEquals(
           result.runs.map((r) => [r.lane, r.flow]),
-          selectedRuns,
+          expected,
         ),
       );
       proof = {
-        closed_current_runs: selectedRuns.map(([lane, flow]) => ({ lane, flow })),
-        installation_process_receipts: 15,
+        closed_current_runs: expected.map(([lane, flow]) => ({ lane, flow })),
+        ...(expected.some(([lane]) => lane === "install")
+          ? { installation_process_receipts: 15 }
+          : {}),
       };
     }
     write(join(output, "runtime-close-stage.json"), {

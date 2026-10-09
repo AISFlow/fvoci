@@ -48,7 +48,11 @@ const contracts = {
     "workspace-browser-build": "select_workspace_browser_shard",
     "workspace-browser-shard": "select_workspace_browser_shard",
     "collaboration-build": "select_collaboration_build",
-    "collaboration-flow": "select_collaboration_flow",
+    "collaboration-install-on": "select_collaboration_install_on",
+    "collaboration-postgres-on": "select_collaboration_postgres_on",
+    "collaboration-sqlite-on": "select_collaboration_sqlite_on",
+    "collaboration-postgres-off": "select_collaboration_postgres_off",
+    "collaboration-sqlite-off": "select_collaboration_sqlite_off",
   },
   documents: { "native-extraction": "select_native_extraction" },
   "collab-engine": { "native-collab-engine": "select_native_collab_engine" },
@@ -176,7 +180,11 @@ function artifactPolicy(workflow: Workflow, name: "rust" | "web"): void {
         ]
       : [
           ["workspace-browser-build", "workspace-browser-shard"],
-          ["collaboration-build", "collaboration-flow"],
+          ["collaboration-build", "collaboration-install-on"],
+          ["collaboration-build", "collaboration-postgres-on"],
+          ["collaboration-build", "collaboration-sqlite-on"],
+          ["collaboration-build", "collaboration-postgres-off"],
+          ["collaboration-build", "collaboration-sqlite-off"],
         ];
   for (const pair of pairs) {
     const [producerId, consumerId] = pair;
@@ -184,10 +192,18 @@ function artifactPolicy(workflow: Workflow, name: "rust" | "web"): void {
     const producer = job(workflow, producerId);
     const consumer = job(workflow, consumerId);
     assert.ok(needs(consumer).includes(producerId), "consumer must depend on its producer");
-    const download = oneStep(
-      consumer,
-      (step) => step.uses?.startsWith("actions/download-artifact@") ?? false,
-    );
+    const downloads = actionSteps(consumer, "actions/download-artifact");
+    const expectedArtifact = `\${{ needs.${producerId}.outputs.artifact_id }}`;
+    const producerDownloads =
+      name === "web"
+        ? downloads.filter((step) => step.with?.["artifact-ids"] === expectedArtifact)
+        : downloads;
+    const download = producerDownloads[0] ?? downloads[0];
+    assert.ok(download, "required step must occur exactly once");
+    if (name === "web") {
+      assert.equal(download.with?.["artifact-ids"], expectedArtifact);
+      assert.equal(producerDownloads.length, 1, "required step must occur exactly once");
+    }
     required(download);
     assert.equal(download.if, undefined);
     assert.equal(download.with?.["run-id"], undefined, "handoff must stay in the current run");
