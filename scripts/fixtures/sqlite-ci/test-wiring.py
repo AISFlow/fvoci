@@ -441,10 +441,26 @@ exit "${PREREQ_EXIT:-0}"
                     if re.search(r'^          path: target(?:/[^\n]+)?$', text, re.M):
                         self.assertLessEqual(ready.end(), block.start())
                         if 'actions/cache/save@' in text:
+                            # Fast cites cache-primary-key. Other main-only saves repeat the restore key verbatim;
+                            # the registry rejects a primary-key citation unless that save is explicitly exempt.
                             key = re.search(r'key: \$\{\{ steps\.([a-z_]+)\.outputs\.cache-primary-key \}\}', text)
-                            self.assertIsNotNone(key, 'save must use its qualified restore key')
-                            restored = [entry for entry in blocks if re.search(r'^        id: ' + key.group(1) + '$', entry.group(), re.M)]
-                            self.assertEqual(len(restored), 1)
+                            if key is None:
+                                literal = re.search(r'(?m)^          key: (.+)$', text)
+                                hit = re.search(r'steps\.([A-Za-z0-9_]+)\.outputs\.cache-hit', text)
+                                self.assertIsNotNone(literal, 'save must use its qualified restore key')
+                                self.assertIsNotNone(hit, 'save must use its qualified restore key')
+                                restored = [entry for entry in blocks if re.search(
+                                    r'(?m)^        id: ' + re.escape(hit.group(1)) + r'$', entry.group())]
+                                self.assertEqual(len(restored), 1, 'save must use its qualified restore key')
+                                restore_key = re.search(r'(?m)^          key: (.+)$', restored[0].group())
+                                self.assertIsNotNone(restore_key, 'save must use its qualified restore key')
+                                self.assertEqual(restore_key.group(1), literal.group(1),
+                                                 'save must use its qualified restore key')
+                            else:
+                                restored = [entry for entry in blocks if re.search(
+                                    r'^        id: ' + key.group(1) + '$', entry.group(), re.M)]
+                                self.assertEqual(len(restored), 1)
+                            self.assertLessEqual(restored[0].end(), block.start())
                             self.assertIn('actions/cache/restore@', restored[0].group())
                             self.assertIn('${{ steps.sqlite.outputs.cache_identity }}', restored[0].group())
                             self.assertEqual(re.search(r'^          path: (target[^\n]*)$', text, re.M).group(1),
@@ -509,6 +525,12 @@ exit "${PREREQ_EXIT:-0}"
                 verify = next(block for block in blocks if 'name: Verify cached SQLite prefix or build\n' in block.group())
                 changes['missing producer verification'] = body[:verify.start()] + body[verify.end():]
                 changes['output cache before verification'] = body[:verify.start()] + root_cache.group() + body[verify.start():root_cache.start()] + body[root_cache.end():]
+            if workflow == 'web':
+                save = next(block for block in blocks if 'actions/cache/save@' in block.group()
+                            and re.search(r'(?m)^          path: target$', block.group()))
+                changes['save key drifts from its restore'] = body.replace(
+                    save.group(), save.group().replace(
+                        'v1-web-browser-default-fixture-', 'v1-web-browser-drifted-', 1), 1)
             with mock.patch.dict(globals(), ROOT=fixture):
                 self.test_workflow_root_cache_preparation_order_and_independent_crates()
             for label, changed in changes.items():
