@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "bun";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { strict as assert } from "node:assert";
 import {
   chmodSync,
@@ -254,7 +254,7 @@ function localFixture(
 // 0o755 is required so the setpriv actor can traverse the directory and execute it.
 const singleFieldRoot = mkdtempSync(join(tmpdir(), "fvoci-single-field-"));
 chmodSync(singleFieldRoot, 0o755);
-process.on("exit", () => {
+afterAll(() => {
   rmSync(singleFieldRoot, { recursive: true, force: true });
 });
 function singleFieldBun(): string {
