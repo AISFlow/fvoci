@@ -4,6 +4,12 @@
     "noUncheckedIndexedAccess": true,
     "rootDirs": ["../..", "../../node_modules/.cache/fvoci-vue-lint/types"]
   },
-  "include": ["**/*.ts", "**/*.tsx", "**/*.vue"],
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    "**/*.vue",
+    "../../scripts/run-selected-backend-e2e.ts",
+    "../../tools/selected-backend-ci/**/*.ts"
+  ],
   "exclude": ["node_modules", "src/generated/api.ts"]
 }
