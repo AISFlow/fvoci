@@ -60,7 +60,7 @@ RUN install -d -o 1000 -g 1000 -m 0755 /home/ci/.cargo /home/ci/.cargo/registry 
  && cargo --version && cargo fmt --version && cargo clippy --version
 
 FROM rust-tools AS ci-base
-# No cargo-installed tools are used by the baseline CI (including nextest).
+# CI tools use pinned official binaries.
 RUN case "$(dpkg --print-architecture)" in \
       amd64) archive=bun-linux-x64; checksum=36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913 ;; \
       arm64) archive=bun-linux-aarch64; checksum=54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7 ;; \
@@ -74,6 +74,21 @@ RUN case "$(dpkg --print-architecture)" in \
  && ln -s bun /usr/local/bin/bunx \
  && test "$(bun --version)" = 1.4.2 \
  && rm -rf /tmp/bun /tmp/bun.zip
+
+RUN version=0.9.148 \
+ && case "$(dpkg --print-architecture)" in \
+      amd64) target=x86_64-unknown-linux-gnu; checksum=223ba936714cc861a9cdedad5a8eb664dfdd69d6fbdf6cea6aa8184f523290dc ;; \
+      arm64) target=aarch64-unknown-linux-gnu; checksum=81469eb963ef883fd590e60189e77d6aba3d91b418591d3391f50fe3e9480d2b ;; \
+      *) exit 1 ;; \
+    esac \
+ && curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+      "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$version/cargo-nextest-$version-$target.tar.gz" -o /tmp/nextest.tar.gz \
+ && printf '%s  %s\n' "$checksum" /tmp/nextest.tar.gz | sha256sum --check --strict \
+ && mkdir /tmp/nextest \
+ && tar -xzf /tmp/nextest.tar.gz -C /tmp/nextest cargo-nextest \
+ && install -o 0 -g 0 -m 0755 /tmp/nextest/cargo-nextest /usr/local/bin/cargo-nextest \
+ && test "$(cargo nextest --version | sed -n '1p' | cut -d' ' -f2)" = "$version" \
+ && rm -rf /tmp/nextest /tmp/nextest.tar.gz
 
 USER 1000:1000
 WORKDIR /home/ci
