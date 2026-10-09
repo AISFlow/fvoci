@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["bun", "node"]
+  },
+  "include": [
+    "./*.ts",
+    "../eslint/*.ts",
+    "../harness-comparison/harness-web-e2e-groups-ts-1.test.ts"
+  ]
+}

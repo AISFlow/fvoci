@@ -6,7 +6,7 @@
     "dev": "vite",
     "build": "tsc -b && vue-tsc -b tsconfig.vue.json && vite build",
     "typecheck": "tsc -b && vue-tsc -b tsconfig.vue.json",
-    "test": "bun test --parallel --timeout=60000 ./src",
+    "test": "bun test --parallel --timeout=60000 ./src ../../tools/web-e2e/groups.test.ts ../../tools/harness-comparison/harness-web-e2e-groups-ts-1.test.ts",
     "test:e2e": "playwright test"
   },
   "dependencies": {
