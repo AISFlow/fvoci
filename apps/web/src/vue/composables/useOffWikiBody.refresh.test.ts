@@ -11,6 +11,7 @@ import {
   encodeUpdate,
   loadBody,
   ownerKey,
+  serverContainsLive,
 } from "../../features/documents/off-wiki-draft";
 import type { OffWikiOwner } from "../../features/documents/off-wiki-draft";
 import type { BodySaveResult, VersionedBody } from "../../features/documents/versioned-body-api";
@@ -74,6 +75,7 @@ function harness(storageKind: "null" | "access-denied" | "write-denied") {
     encodeUpdate,
     loadBody,
     ownerKey,
+    serverContainsLive,
     ProblemError,
     sourceDraftAuthRetiredKey: Symbol(),
     inject: () => Vue.ref(false),

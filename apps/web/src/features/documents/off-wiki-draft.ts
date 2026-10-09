@@ -62,6 +62,16 @@ function tail(value: string): bigint {
   if (parsed > 9223372036854775807n) throw new Error("Invalid body version");
   return parsed;
 }
+/** True when `server` contains `liveUpdate`.
+ * A yrs Load→Apply→Snapshot keeps the history and the delete set, not the
+ * update bytes. Both checks are required: the server state vector must cover
+ * every struct in the live update, and the live delete set must be included in
+ * the server delete set. Covering the state vector alone would accept a
+ * deletion that was never saved. */
+export function serverContainsLive(server: Y.Doc, liveUpdate: Uint8Array): boolean {
+  if (server.store.pendingStructs || server.store.pendingDs) return false;
+  return Y.snapshotContainsUpdate(Y.snapshot(server), liveUpdate);
+}
 export function loadBody(source: VersionedBody, targetId: string): Y.Doc {
   if (source.targetId !== targetId) throw new Error("Body target mismatch");
   tail(source.tailSeq);
@@ -236,14 +246,14 @@ export class OffWikiDraft {
   observeAuthorizedBody(current: VersionedBody): void {
     if (this.retired || current.targetId !== this.owner.targetId) return;
     const reader = loadBody(current, this.owner.targetId);
-    let snapshot: string;
+    let contained: boolean;
     try {
-      snapshot = encodeUpdate(Y.encodeStateAsUpdate(reader));
+      contained = serverContainsLive(reader, decodeUpdate(this.acknowledged));
     } finally {
       reader.destroy();
     }
     this.start = { ...this.start, writable: current.writable };
-    if (current.tailSeq !== this.start.tailSeq || snapshot !== this.acknowledged) {
+    if (current.tailSeq !== this.start.tailSeq || !contained) {
       this.latest = current;
       this.comparison = {
         start: this.start.contentJson,

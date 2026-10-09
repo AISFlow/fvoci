@@ -13,6 +13,7 @@ import {
   encodeUpdate,
   loadBody,
   ownerKey,
+  serverContainsLive,
   type OffWikiOwner,
 } from "../../features/documents/off-wiki-draft";
 import type {
@@ -43,6 +44,22 @@ const original = {
   workspaceId: "workspace",
   targetId: "document",
 };
+function bodyFromUpdate(update: Uint8Array, tailSeq = "0"): VersionedBody {
+  const doc = new Y.Doc({ gc: false });
+  try {
+    Y.applyUpdate(doc, update);
+    return {
+      targetId: original.targetId,
+      tailSeq,
+      snapshotV1: encodeUpdate(update),
+      tailV1: [],
+      contentJson: yDocToTiptapJson(doc),
+      writable: true,
+    };
+  } finally {
+    doc.destroy();
+  }
+}
 function source(scope: OffWikiOwner, value = scope.actorId, tailSeq = "0"): VersionedBody {
   const doc = tiptapJsonToYDoc({
     type: "doc",
@@ -102,6 +119,7 @@ function harness() {
     encodeUpdate,
     loadBody,
     ownerKey,
+    serverContainsLive,
     ProblemError,
     sourceDraftAuthRetiredKey: Symbol(),
     inject: () => authRetired,
@@ -919,6 +937,52 @@ test("malformed persisted frozen command cannot advertise or replay a pending sa
     expect(h.body.draft.value?.frozen).toBeNull();
     expect(h.body.pendingSave.value).toBe(false);
     expect(h.writes).toHaveLength(1);
+  } finally {
+    h.effects.stop();
+  }
+});
+
+test("verifyCommitted accepts a yrs re-encoded link body and rejects a different one", async () => {
+  const h = harness();
+  try {
+    const live = Uint8Array.from(
+      readFileSync(new URL("../../features/documents/fixtures/link-mark-live.v1", import.meta.url)),
+    );
+    const server = Uint8Array.from(
+      readFileSync(
+        new URL("../../features/documents/fixtures/link-mark-yrs-snapshot.v1", import.meta.url),
+      ),
+    );
+    required(h.reads[0]).pending.resolve(bodyFromUpdate(live));
+    await settle();
+    const draft = required(h.body.draft.value);
+    const reader = loadBody(bodyFromUpdate(server), original.targetId);
+    try {
+      expect(encodeUpdate(Y.encodeStateAsUpdate(reader))).not.toBe(
+        encodeUpdate(Y.encodeStateAsUpdate(draft.doc)),
+      );
+    } finally {
+      reader.destroy();
+    }
+    const accepted = h.body.verifyCommitted();
+    required(h.reads.at(-1)).pending.resolve(bodyFromUpdate(server));
+    expect(await accepted).toBe(true);
+    const other = tiptapJsonToYDoc({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { id: "other" },
+          content: [{ type: "text", text: "different body" }],
+        },
+      ],
+    });
+    const otherUpdate = Y.encodeStateAsUpdate(other);
+    other.destroy();
+    const rejected = h.body.verifyCommitted();
+    required(h.reads.at(-1)).pending.resolve(bodyFromUpdate(otherUpdate));
+    expect(await rejected).toBe(false);
+    expect(h.body.draft.value).toBe(draft);
   } finally {
     h.effects.stop();
   }

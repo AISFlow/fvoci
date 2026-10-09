@@ -3,9 +3,9 @@ import * as Y from "yjs";
 import {
   OffWikiDraft,
   decodeUpdate,
-  encodeUpdate,
   loadBody,
   ownerKey,
+  serverContainsLive,
   type OffWikiOwner,
   type DraftDestination,
 } from "@/features/documents/off-wiki-draft";
@@ -246,8 +246,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
         return (
           fresh.tailSeq === current.start.tailSeq &&
           isDurable() &&
-          encodeUpdate(Y.encodeStateAsUpdate(reader)) ===
-            encodeUpdate(Y.encodeStateAsUpdate(current.doc))
+          serverContainsLive(reader, Y.encodeStateAsUpdate(current.doc))
         );
       } finally {
         reader.destroy();
