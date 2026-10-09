@@ -1,0 +1,8 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Keep development tasks independent of the product package and its lockfile.
+[workspace]
