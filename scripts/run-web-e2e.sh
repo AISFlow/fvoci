@@ -367,6 +367,15 @@ PY_DIAGNOSTICS
   runtime_groups="$(python3 "$ROOT/scripts/run-selected-backend-e2e.py" permissions \
     --output "$FVOCI_SELECTED_CI_OUTPUT" --sqlite-parent "$FVOCI_SELECTED_CI_SQLITE_PARENT" --docker-gid "$docker_gid")"
   export PLAYWRIGHT_BROWSERS_PATH="$FVOCI_SELECTED_CI_OUTPUT/browser"
+  if [[ -n "${FVOCI_COLLAB_LANE:-}" && "$FVOCI_COLLAB_LANE" != install/on ]]; then
+    : "${FVOCI_CLOSED_INSTALL_RECEIPT:?closed install receipt required}"
+    [[ -f "$FVOCI_CLOSED_INSTALL_RECEIPT" && ! -L "$FVOCI_CLOSED_INSTALL_RECEIPT" ]] || {
+      echo "closed install receipt missing" >&2
+      exit 1
+    }
+    install -m 0400 "$FVOCI_CLOSED_INSTALL_RECEIPT" "$FVOCI_SELECTED_CI_OUTPUT/closed-install-receipt.json"
+    export FVOCI_CLOSED_INSTALL_RECEIPT="$FVOCI_SELECTED_CI_OUTPUT/closed-install-receipt.json"
+  fi
   sudo chown -h -R 1000:1000 "$FVOCI_SELECTED_CI_OUTPUT" "$FVOCI_SELECTED_CI_SQLITE_PARENT"
   sudo install -d -o 1000 -g 1000 -m 0700 "$FVOCI_SELECTED_CI_OUTPUT/tmp"
   config_list_exit=not-run
@@ -385,20 +394,42 @@ PY_DIAGNOSTICS
     selected_status="$config_list_exit"
   fi
   if [[ "$config_list_exit" == not-run || "$config_list_exit" -eq 0 ]]; then
-    sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,PLAYWRIGHT_BROWSERS_PATH \
-      setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
-      env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
-        python3 "$ROOT/scripts/run-selected-backend-e2e.py" run --output "$FVOCI_SELECTED_CI_OUTPUT" || selected_status=$?
+    if [[ -n "${FVOCI_COLLAB_LANE:-}" ]]; then
+      case "$FVOCI_COLLAB_LANE" in
+        install/on|postgres/on|sqlite/on|postgres/off|sqlite/off) ;;
+        *) echo "unknown collaboration lane" >&2; exit 1 ;;
+      esac
+      if [[ "$FVOCI_COLLAB_LANE" != install/on ]]; then
+        : "${FVOCI_CLOSED_INSTALL_RECEIPT:?closed install receipt required}"
+      fi
+      sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,PLAYWRIGHT_BROWSERS_PATH,FVOCI_COLLAB_LANE,FVOCI_CLOSED_INSTALL_RECEIPT \
+        setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
+        env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
+          bun "$ROOT/scripts/run-selected-backend-e2e.ts" run --output "$FVOCI_SELECTED_CI_OUTPUT" || selected_status=$?
+    else
+      sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,PLAYWRIGHT_BROWSERS_PATH \
+        setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
+        env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
+          python3 "$ROOT/scripts/run-selected-backend-e2e.py" run --output "$FVOCI_SELECTED_CI_OUTPUT" || selected_status=$?
+    fi
     launcher_status="$selected_status"
   fi
   # The launcher has returned, but require existing exact resource-retirement
   # witnesses (or proof no runtime began) before changing private data ownership.
   ownership_status=0
-  (umask 077
-    sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB \
-      setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
-      python3 "$ROOT/scripts/run-selected-backend-e2e.py" owner-return --output "$FVOCI_SELECTED_CI_OUTPUT" \
-      >"$safe_diagnostics/ownership-stage.json") || ownership_status=$?
+  if [[ -n "${FVOCI_COLLAB_LANE:-}" ]]; then
+    (umask 077
+      sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,FVOCI_COLLAB_LANE,FVOCI_CLOSED_INSTALL_RECEIPT \
+        setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
+        bun "$ROOT/scripts/run-selected-backend-e2e.ts" owner-return --output "$FVOCI_SELECTED_CI_OUTPUT" \
+        >"$safe_diagnostics/ownership-stage.json") || ownership_status=$?
+  else
+    (umask 077
+      sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB \
+        setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
+        python3 "$ROOT/scripts/run-selected-backend-e2e.py" owner-return --output "$FVOCI_SELECTED_CI_OUTPUT" \
+        >"$safe_diagnostics/ownership-stage.json") || ownership_status=$?
+  fi
   if [[ "$ownership_status" -eq 0 ]]; then
     if ! sudo chown -h -R "$runner_uid:$runner_gid" "$FVOCI_SELECTED_CI_OUTPUT" "$FVOCI_SELECTED_CI_SQLITE_PARENT"; then
       echo "selected runtime ownership restoration failed" >&2
