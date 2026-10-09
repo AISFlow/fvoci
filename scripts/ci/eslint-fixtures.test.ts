@@ -20,7 +20,6 @@
 //
 // ESLint stdout is written to a regular file because Bun 1.4.2 truncates a
 // piped ESLint stdout above 64KiB. That is a tool limit, not a Python API.
-import { spawnSync } from "node:child_process";
 import {
   closeSync,
   existsSync,
@@ -32,16 +31,20 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { constants, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const ESLINT = ["bun", "--bun", join(ROOT, "node_modules/eslint/bin/eslint.js")];
-const PRETTIER = ["bun", "--bun", join(ROOT, "node_modules/prettier/bin/prettier.cjs")];
-// Bun's default 5s deadline would abort proofs that scripts/test_eslint.py leaves unbounded.
-setDefaultTimeout(10 * 60 * 1000);
+const ESLINT = [process.execPath, "--bun", join(ROOT, "node_modules/eslint/bin/eslint.js")];
+const PRETTIER = [process.execPath, "--bun", join(ROOT, "node_modules/prettier/bin/prettier.cjs")];
+// Slowest ported proof measured at about 60s. 180s is three times that measurement
+// and replaces Bun's 5s default. It is not a raised timeout.
+const proofTimeoutMs = 180_000;
+// One tool process. The ~60s proofs are several shorter spawns. 120s is a new cap
+// so a hung child is killed. Nested `bun test --isolate` stays at 30s.
+const defaultSpawnTimeoutSec = 120;
 
 const NODE_RUNTIME_GLOBALS = new Set([
   "Bun",
@@ -224,32 +227,68 @@ function asText(value: string | Buffer | null | undefined): string {
   if (value == null) return "";
   return typeof value === "string" ? value : value.toString("utf8");
 }
-function run(
+function childEnv(extra?: Record<string, string>): Record<string, string> | undefined {
+  if (!extra) return undefined;
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === "string") env[key] = value;
+  }
+  return { ...env, ...extra };
+}
+function pythonSignalStatus(signalCode: string | number): number {
+  if (typeof signalCode === "number") return -Math.abs(signalCode);
+  const number = constants.signals[signalCode as NodeJS.Signals];
+  return typeof number === "number" ? -number : -9;
+}
+function killProcessGroup(pid: number) {
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // The process already exited.
+    }
+  }
+}
+async function run(
   args: string[],
   options: { input?: string; timeout?: number; extraEnv?: Record<string, string> } = {},
-): Completed {
+): Promise<Completed> {
+  const timeoutMs = (options.timeout ?? defaultSpawnTimeoutSec) * 1000;
   const capture = mkdtempSync(join(tmpdir(), "eslint-stdout-"));
   const stdoutPath = join(capture, "stdout");
   const fd = openSync(stdoutPath, "w");
+  let timedOut = false;
+  const proc = Bun.spawn({
+    cmd: args,
+    cwd: ROOT,
+    detached: true,
+    ...(options.extraEnv ? { env: childEnv(options.extraEnv) } : {}),
+    stdin: options.input === undefined ? "ignore" : new TextEncoder().encode(options.input),
+    stdout: fd,
+    stderr: "pipe",
+  });
+  const stderrPromise = new Response(proc.stderr).text();
+  const timer = setTimeout(() => {
+    if (proc.exitCode === null && proc.signalCode == null && proc.pid) {
+      timedOut = true;
+      killProcessGroup(proc.pid);
+    }
+  }, timeoutMs);
   try {
-    const result = spawnSync(args[0] ?? "", args.slice(1), {
-      cwd: ROOT,
-      encoding: "utf8",
-      env: options.extraEnv ? { ...process.env, ...options.extraEnv } : undefined,
-      stdio: [options.input === undefined ? "ignore" : "pipe", fd, "pipe"],
-      input: options.input,
-      timeout: options.timeout === undefined ? undefined : options.timeout * 1000,
-      maxBuffer: 256 * 1024 * 1024,
-    });
+    await proc.exited;
+    const stderr = asText(await stderrPromise);
     closeSync(fd);
     const stdout = asText(readFileSync(stdoutPath));
-    if (result.error) {
-      const code = (result.error as NodeJS.ErrnoException).code;
-      if (code === "ETIMEDOUT") fail(`timed out: ${args.join(" ")}`);
-      throw result.error;
+    if (timedOut) fail(`timed out: ${args.join(" ")}`);
+    if (proc.signalCode != null || proc.exitCode === null) {
+      const pythonCode = proc.signalCode == null ? -9 : pythonSignalStatus(proc.signalCode);
+      fail(`child killed by signal ${String(proc.signalCode)} (python returncode ${pythonCode})`);
     }
-    return { returncode: result.status === null ? 1 : result.status, stdout, stderr: asText(result.stderr) };
+    return { returncode: proc.exitCode, stdout, stderr };
   } finally {
+    clearTimeout(timer);
     try {
       closeSync(fd);
     } catch {
@@ -291,8 +330,8 @@ function mustIndex(haystack: string, needle: string): number {
 function isFile(path: string): boolean {
   return existsSync(path) && statSync(path).isFile();
 }
-function printConfig(path: string): PrintedConfig {
-  const result = run([...ESLINT, "--print-config", path]);
+async function printConfig(path: string): Promise<PrintedConfig> {
+  const result = await run([...ESLINT, "--print-config", path]);
   assertEqual(result.returncode, 0, result.stderr);
   return JSON.parse(result.stdout) as PrintedConfig;
 }
@@ -313,16 +352,16 @@ function floatingIgnoreVoid(config: PrintedConfig): unknown {
   }
   return (rule[1] as { ignoreVoid: unknown }).ignoreVoid;
 }
-function stdinEslint(filename: string, input: string): Completed {
-  return run(
+async function stdinEslint(filename: string, input: string): Promise<Completed> {
+  return await run(
     [...ESLINT, "--stdin", "--stdin-filename", filename, "--max-warnings=0", "--format=json"],
     { input },
   );
 }
-function subtests(items: Array<{ label: string; run: () => void }>) {
+async function subtests(items: Array<{ label: string; run: () => Promise<void> | void }>) {
   for (const item of items) {
     try {
-      item.run();
+      await item.run();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`${item.label}\n${message}`);
@@ -360,17 +399,17 @@ function source(name: string, text: string): string {
   writeFileSync(path, text);
   return path;
 }
-function lint(name: string, text: string, ...options: string[]) {
+async function lint(name: string, text: string, ...options: string[]) {
   const path = source(name, text);
-  const result = run([...ESLINT, path, "--max-warnings=0", "--format=json", ...options]);
+  const result = await run([...ESLINT, path, "--max-warnings=0", "--format=json", ...options]);
   return { result, report: parseReport(result) };
 }
-function assertRule(name: string, text: string, rule: string) {
-  const { result, report } = lint(name, text);
+async function assertRule(name: string, text: string, rule: string) {
+  const { result, report } = await lint(name, text);
   assertNotEqual(result.returncode, 0, report);
   assertSetHas(rule, ruleIds(report), report);
 }
-function compile(config: string, text: string, extension = "vue", compilerName = "vue-tsc"): Completed {
+async function compile(config: string, text: string, extension = "vue", compilerName = "vue-tsc"): Promise<Completed> {
   const path = source(`TypeProof.${extension}`, text);
   const configPath = join(suiteDirectory, "tsconfig.json");
   writeFileSync(
@@ -382,7 +421,7 @@ function compile(config: string, text: string, extension = "vue", compilerName =
       exclude: [],
     }),
   );
-  return run(["bun", "--bun", join(ROOT, "node_modules/.bin", compilerName), "--noEmit", "-p", configPath]);
+  return await run([process.execPath, "--bun", join(ROOT, "node_modules/.bin", compilerName), "--noEmit", "-p", configPath]);
 }
 function removeSuiteDirectory() {
   if (!suiteDirectory) return;
@@ -390,40 +429,36 @@ function removeSuiteDirectory() {
   suiteDirectory = "";
 }
 
-function testRuntimeAndPositiveSfc() {
-  const runtime = run([
-    "bun",
-    "-e",
-    "console.log(JSON.stringify({bun:process.versions.bun,execPath:process.execPath}))",
-  ]);
-  assertEqual((JSON.parse(runtime.stdout) as { bun: string }).bun, "1.4.2", runtime.stdout);
-  const { result, report } = lint("ProofValid.vue", VALID);
+async function testRuntimeAndPositiveSfc() {
+  expect(Bun.version).toBe("1.4.2");
+  expect(existsSync(process.execPath)).toBe(true);
+  const { result, report } = await lint("ProofValid.vue", VALID);
   assertEqual(result.returncode, 0, report);
   for (const config of ["apps/web/tsconfig.vue.json", "packages/editor/tsconfig.vue.json"]) {
-    const compiled = compile(config, VALID);
+    const compiled = await compile(config, VALID);
     assertEqual(compiled.returncode, 0, outputOf(compiled));
   }
-  const formatted = run([...PRETTIER, "--stdin-filepath", join(suiteDirectory, "ProofValid.vue")], { input: VALID });
+  const formatted = await run([...PRETTIER, "--stdin-filepath", join(suiteDirectory, "ProofValid.vue")], { input: VALID });
   assertEqual(formatted.returncode, 0, formatted.stderr);
   assertIn("color: red;\n", formatted.stdout);
   assertIn(':key="row.id"', formatted.stdout);
   assertIn('emit("select", id);\n', formatted.stdout);
   const path = source("ProofValid.vue", formatted.stdout);
-  const checked = run([...PRETTIER, "--check", path]);
+  const checked = await run([...PRETTIER, "--check", path]);
   assertEqual(checked.returncode, 0, outputOf(checked));
   writeFileSync(path, VALID);
-  assertNotEqual(run([...PRETTIER, "--check", path]).returncode, 0);
+  assertNotEqual((await run([...PRETTIER, "--check", path])).returncode, 0);
 }
 
-function testDynamicSlotsHaveNoUnusedFalsePositive() {
-  const { result, report } = lint("ProofDynamic.vue", DYNAMIC_SLOT);
+async function testDynamicSlotsHaveNoUnusedFalsePositive() {
+  const { result, report } = await lint("ProofDynamic.vue", DYNAMIC_SLOT);
   assertEqual(result.returncode, 0, report);
-  const compiled = compile("apps/web/tsconfig.vue.json", DYNAMIC_SLOT.replaceAll("#[slotName]", "#[missingSlotName]"));
+  const compiled = await compile("apps/web/tsconfig.vue.json", DYNAMIC_SLOT.replaceAll("#[slotName]", "#[missingSlotName]"));
   assertNotEqual(compiled.returncode, 0);
   assertIn("missingSlotName", compiled.stdout);
 }
 
-function testDirectivesUnusedAnyAndTypedPromisesFail() {
+async function testDirectivesUnusedAnyAndTypedPromisesFail() {
   const cases: Array<[string, string, string]> = [
     ["ProofUnused.vue", '<script setup lang="ts">const unused = 1;</script><template><p>ok</p></template>', "@typescript-eslint/no-unused-vars"],
     ["ProofUnusedImport.vue", '<script setup lang="ts">import { ref } from "vue";</script><template><p>ok</p></template>', "@typescript-eslint/no-unused-vars"],
@@ -438,10 +473,10 @@ function testDirectivesUnusedAnyAndTypedPromisesFail() {
     ["ProofPromise.ts", "export const save = (): Promise<number> => Promise.resolve(1); save();", "@typescript-eslint/no-floating-promises"],
     ["ProofVoid.ts", "export const save = (): Promise<number> => Promise.resolve(1); void save();", "@typescript-eslint/no-floating-promises"],
   ];
-  subtests(cases.map(([name, text, rule]) => ({ label: name, run: () => assertRule(name, text, rule) })));
+  await subtests(cases.map(([name, text, rule]) => ({ label: name, run: () => assertRule(name, text, rule) })));
 }
 
-function testStrictScriptTemplatePropsEmitsAndSlotsTypes() {
+async function testStrictScriptTemplatePropsEmitsAndSlotsTypes() {
   const cases: Array<[string, string]> = [
     ['<script setup lang="ts">const value: number = "bad";</script><template><p>{{ value }}</p></template>', "TS2322"],
     ['<script setup lang="ts">const value = 1;</script><template><p>{{ value.toUpperCase() }}</p></template>', "TS2339"],
@@ -456,49 +491,49 @@ function testStrictScriptTemplatePropsEmitsAndSlotsTypes() {
     for (const [text, expected] of cases) {
       items.push({
         label: `${config} ${expected}`,
-        run: () => {
-          const result = compile(config, text);
+        run: async () => {
+          const result = await compile(config, text);
           assertNotEqual(result.returncode, 0, outputOf(result));
           assertIn(expected, outputOf(result));
         },
       });
     }
   }
-  subtests(items);
+  await subtests(items);
   for (const config of ["apps/web/tsconfig.app.json", "packages/editor/tsconfig.json"]) {
-    const result = compile(config, 'export const value: number = "bad";', "ts", "tsc");
+    const result = await compile(config, 'export const value: number = "bad";', "ts", "tsc");
     assertNotEqual(result.returncode, 0);
     assertIn("TS2322", result.stdout);
   }
 }
 
-function testActualNuxtAutoimportRegistrationBoundary() {
+async function testActualNuxtAutoimportRegistrationBoundary() {
   // FVOCI disables Nuxt UI autoimports: an unregistered template name must fail.
-  const result = compile("apps/web/tsconfig.vue.json", '<template><UButton type="button">ok</UButton></template>');
+  const result = await compile("apps/web/tsconfig.vue.json", '<template><UButton type="button">ok</UButton></template>');
   assertNotEqual(result.returncode, 0);
   assertIn("UButton", result.stdout);
 }
 
-function testUnusedDisablesWarningsAndUnmatchedPathsFail() {
-  const disabled = lint("ProofDisable.ts", "// eslint-disable-next-line no-debugger\nexport const value = 1;\n");
+async function testUnusedDisablesWarningsAndUnmatchedPathsFail() {
+  const disabled = await lint("ProofDisable.ts", "// eslint-disable-next-line no-debugger\nexport const value = 1;\n");
   assertNotEqual(disabled.result.returncode, 0);
   assertTrue(
     messagesOf(disabled.report).some((message) => message.message.includes("Unused eslint-disable") && message.severity === 2),
   );
-  const warning = lint("ProofWarning.vue", "<template><div v-html=\"'content'\" /></template>");
+  const warning = await lint("ProofWarning.vue", "<template><div v-html=\"'content'\" /></template>");
   assertEqual(sumCount(warning.report, "errorCount"), 0, warning.report);
   assertGreater(sumCount(warning.report, "warningCount"), 0, warning.report);
   assertNotEqual(warning.result.returncode, 0);
-  assertNotEqual(run([...ESLINT, join(suiteDirectory, "missing.ts")]).returncode, 0);
-  assertNotEqual(run([...PRETTIER, "--check", join(suiteDirectory, "missing.ts")]).returncode, 0);
+  assertNotEqual(await run([...ESLINT, join(suiteDirectory, "missing.ts")]).returncode, 0);
+  assertNotEqual(await run([...PRETTIER, "--check", join(suiteDirectory, "missing.ts")]).returncode, 0);
 }
 
-function testBrowserDoesNotReceiveNodeOrBunGlobals() {
-  subtests(
+async function testBrowserDoesNotReceiveNodeOrBunGlobals() {
+  await subtests(
     runtimePaths().map(([path, environment]) => ({
       label: path,
-      run: () => {
-        const config = printConfig(path);
+      run: async () => {
+        const config = await printConfig(path);
         const declared = declaredGlobals(config);
         const hit = [...NODE_RUNTIME_GLOBALS].filter((name) => Object.hasOwn(declared, name));
         assertEqual(hit.length, 0, declared);
@@ -518,16 +553,16 @@ function testBrowserDoesNotReceiveNodeOrBunGlobals() {
   );
 }
 
-function testBrowserWorkerAndI18nRejectRuntimeNodeBun() {
+async function testBrowserWorkerAndI18nRejectRuntimeNodeBun() {
   // Stdin with actual file paths exercises the real root config/projects
   // without writing product files or replacing the parser/rule set.
-  subtests(
+  await subtests(
     runtimePaths().map(([path, environment]) => ({
       label: path,
-      run: () => {
-        const valid = stdinEslint(path, positiveRuntime(environment));
+      run: async () => {
+        const valid = await stdinEslint(path, positiveRuntime(environment));
         assertEqual(valid.returncode, 0, outputOf(valid));
-        const invalid = stdinEslint(path, FORBIDDEN_RUNTIME);
+        const invalid = await stdinEslint(path, FORBIDDEN_RUNTIME);
         const report = parseReport(invalid);
         assertNotEqual(invalid.returncode, 0, report);
         assertEqual(sumCount(report, "fatalErrorCount"), 0, report);
@@ -539,18 +574,18 @@ function testBrowserWorkerAndI18nRejectRuntimeNodeBun() {
   );
 }
 
-function testQualifiedRuntimeGlobalsAndLocalNames() {
-  subtests(
+async function testQualifiedRuntimeGlobalsAndLocalNames() {
+  await subtests(
     [
       "apps/web/src/vue/features/settings/toggle.ts",
       "apps/web/src/features/attachments/hwp-worker.ts",
       "packages/i18n/src/index.ts",
     ].map((path) => ({
       label: path,
-      run: () => {
-        const valid = stdinEslint(path, LOCAL_NAMES);
+      run: async () => {
+        const valid = await stdinEslint(path, LOCAL_NAMES);
         assertEqual(valid.returncode, 0, outputOf(valid));
-        const invalid = stdinEslint(path, QUALIFIED_NEGATIVE);
+        const invalid = await stdinEslint(path, QUALIFIED_NEGATIVE);
         const report = parseReport(invalid);
         assertNotEqual(invalid.returncode, 0, report);
         assertEqual(sumCount(report, "fatalErrorCount"), 0, report);
@@ -562,32 +597,32 @@ function testQualifiedRuntimeGlobalsAndLocalNames() {
   );
 }
 
-function testIndexedAccessPreservesMissingRouteFallbacks() {
-  const route = lint("ProofRoute.vue", ROUTE_SOURCE);
+async function testIndexedAccessPreservesMissingRouteFallbacks() {
+  const route = await lint("ProofRoute.vue", ROUTE_SOURCE);
   assertEqual(route.result.returncode, 0, route.report);
   const dictionary = 'export function read(values: Record<string, string>): string { return values.slug ?? ""; }';
-  const indexed = lint("ProofDictionary.ts", dictionary);
+  const indexed = await lint("ProofDictionary.ts", dictionary);
   assertEqual(indexed.result.returncode, 0, indexed.report);
-  const valid = compile("apps/web/tsconfig.eslint.json", dictionary, "ts", "tsc");
+  const valid = await compile("apps/web/tsconfig.eslint.json", dictionary, "ts", "tsc");
   assertEqual(valid.returncode, 0, outputOf(valid));
-  const invalid = compile("apps/web/tsconfig.eslint.json", dictionary.replaceAll('values.slug ?? ""', "values.slug"), "ts", "tsc");
+  const invalid = await compile("apps/web/tsconfig.eslint.json", dictionary.replaceAll('values.slug ?? ""', "values.slug"), "ts", "tsc");
   assertNotEqual(invalid.returncode, 0);
   assertIn("TS2322", outputOf(invalid));
   assertIn("undefined", outputOf(invalid));
-  assertRule("ProofKnownField.ts", 'export function read(value: { slug: string }): string { return value.slug ?? ""; }', "@typescript-eslint/no-unnecessary-condition");
+  await assertRule("ProofKnownField.ts", 'export function read(value: { slug: string }): string { return value.slug ?? ""; }', "@typescript-eslint/no-unnecessary-condition");
 }
 
-function testExactDevelopmentExportBufferContract() {
-  subtests(
+async function testExactDevelopmentExportBufferContract() {
+  await subtests(
     ["packages/editor/src/export/docx.ts", "packages/editor/src/export/pptx.ts"].map((path) => ({
       label: path,
-      run: () => {
-        const valid = stdinEslint(path, 'export const bytes = Buffer.from("oracle", "utf8");');
+      run: async () => {
+        const valid = await stdinEslint(path, 'export const bytes = Buffer.from("oracle", "utf8");');
         assertEqual(valid.returncode, 0, outputOf(valid));
-        const config = printConfig(path);
+        const config = await printConfig(path);
         assertEqual(declaredGlobals(config).Buffer, "readonly");
         assertSetEqual(restrictedRule(config).globals, EXPORT_RESTRICTED_GLOBALS);
-        const invalid = stdinEslint(path, "export const forbidden = [process.pid, Bun.version, globalThis.process.pid, globalThis.Bun.version];");
+        const invalid = await stdinEslint(path, "export const forbidden = [process.pid, Bun.version, globalThis.process.pid, globalThis.Bun.version];");
         const report = parseReport(invalid);
         assertNotEqual(invalid.returncode, 0, report);
         assertEqual(sumCount(report, "fatalErrorCount"), 0, report);
@@ -596,7 +631,7 @@ function testExactDevelopmentExportBufferContract() {
       },
     })),
   );
-  subtests(
+  await subtests(
     [
       "packages/editor/src/json.ts",
       "packages/editor/src/export/limits.ts",
@@ -604,8 +639,8 @@ function testExactDevelopmentExportBufferContract() {
       "packages/i18n/src/index.ts",
     ].map((path) => ({
       label: path,
-      run: () => {
-        const result = stdinEslint(path, "export const bytes = Buffer.alloc(0);");
+      run: async () => {
+        const result = await stdinEslint(path, "export const bytes = Buffer.alloc(0);");
         const report = parseReport(result);
         assertNotEqual(result.returncode, 0, report);
         assertSetHas("no-restricted-globals", ruleIds(report), report);
@@ -614,25 +649,25 @@ function testExactDevelopmentExportBufferContract() {
   );
 }
 
-function testBunDevelopmentTypesAndRuntime() {
-  const checked = lint("ProofBun.test.ts", BUN_PROOF);
+async function testBunDevelopmentTypesAndRuntime() {
+  const checked = await lint("ProofBun.test.ts", BUN_PROOF);
   assertEqual(checked.result.returncode, 0, checked.report);
   const path = join(suiteDirectory, "ProofBun.test.ts");
-  const runtime = run(["bun", "test", "--isolate", path], { timeout: 30 });
+  const runtime = await run([process.execPath, "test", "--isolate", path], { timeout: 30 });
   assertEqual(runtime.returncode, 0, outputOf(runtime));
   assertIn("1 pass", runtime.stderr);
   for (const config of ["apps/web/tsconfig.eslint.json", "packages/editor/tsconfig.eslint.json"]) {
-    const valid = compile(config, BUN_PROOF, "ts", "tsc");
+    const valid = await compile(config, BUN_PROOF, "ts", "tsc");
     assertEqual(valid.returncode, 0, outputOf(valid));
-    const invalid = compile(config, BUN_PROOF.replaceAll('loader: "ts"', 'loader: "invalid-loader"'), "ts", "tsc");
+    const invalid = await compile(config, BUN_PROOF.replaceAll('loader: "ts"', 'loader: "invalid-loader"'), "ts", "tsc");
     assertNotEqual(invalid.returncode, 0);
     assertIn("TS2322", outputOf(invalid));
   }
-  assertRule("ProofBunUnsafe.test.ts", 'import { mock } from "bun:test"; mock.module("proof", () => ({ value: 1 }));', "@typescript-eslint/no-floating-promises");
-  assertRule("ProofBunUnrelated.test.ts", 'import { test } from "bun:test"; test("proof", () => { Promise.resolve(1); });', "@typescript-eslint/no-floating-promises");
+  await assertRule("ProofBunUnsafe.test.ts", 'import { mock } from "bun:test"; mock.module("proof", () => ({ value: 1 }));', "@typescript-eslint/no-floating-promises");
+  await assertRule("ProofBunUnrelated.test.ts", 'import { test } from "bun:test"; test("proof", () => { Promise.resolve(1); });', "@typescript-eslint/no-floating-promises");
 }
 
-function testNodeTestRunnerFailurePropagationAndNoWaiver() {
+async function testNodeTestRunnerFailurePropagationAndNoWaiver() {
   for (const [name, body, expected] of [
     ["Pass", '() => { if (Number("1") !== 1) throw new Error("unexpected"); }', 0],
     ["Throw", '() => { throw new Error("node-test-throw-proof"); }', 1],
@@ -640,7 +675,7 @@ function testNodeTestRunnerFailurePropagationAndNoWaiver() {
   ] as const) {
     const text = `import test from "node:test"; test("${name}", ${body});`;
     const path = source(`NodeRunner${name}.test.ts`, text);
-    const runtime = run(["bun", "test", "--isolate", path], { timeout: 30 });
+    const runtime = await run([process.execPath, "test", "--isolate", path], { timeout: 30 });
     assertEqual(runtime.returncode, expected, outputOf(runtime));
     assertIn(expected === 0 ? "1 pass" : "1 fail", runtime.stderr);
   }
@@ -652,15 +687,15 @@ function testNodeTestRunnerFailurePropagationAndNoWaiver() {
     "@typescript-eslint/no-floating-promises",
   );
   const unrelated = 'import test from "node:test"; await test("parent", () => { Promise.reject(new Error("unhandled-promise-proof")); });';
-  assertRule("NodeUnrelated.test.ts", unrelated, "@typescript-eslint/no-floating-promises");
+  await assertRule("NodeUnrelated.test.ts", unrelated, "@typescript-eslint/no-floating-promises");
   const path = join(suiteDirectory, "NodeUnrelated.test.ts");
-  const runtime = run(["bun", "test", "--isolate", path], { timeout: 30 });
+  const runtime = await run([process.execPath, "test", "--isolate", path], { timeout: 30 });
   assertNotEqual(runtime.returncode, 0, outputOf(runtime));
   assertIn("unhandled-promise-proof", runtime.stderr);
 }
 
-function testActualWebAndEditorDeclarationPreparationIsNodeFree() {
-  const prepared = run(["bun", "--bun", "scripts/prepare-vue-lint-types.mjs"]);
+async function testActualWebAndEditorDeclarationPreparationIsNodeFree() {
+  const prepared = await run([process.execPath, "--bun", "scripts/prepare-vue-lint-types.mjs"]);
   assertEqual(prepared.returncode, 0, outputOf(prepared));
   const output = join(ROOT, "node_modules/.cache/fvoci-vue-lint/types");
   const app = join(output, "apps/web/src/vue/App.vue.d.ts");
@@ -669,18 +704,18 @@ function testActualWebAndEditorDeclarationPreparationIsNodeFree() {
     (name) => name.endsWith(".vue.d.ts") && isFile(join(output, "packages/editor/src/vue", name)),
   );
   assertEqual(editorDeclarations.length, 8);
-  const result = run([...ESLINT, "packages/editor/src/vue/node-views.ts", "--max-warnings=0", "--format=json"]);
+  const result = await run([...ESLINT, "packages/editor/src/vue/node-views.ts", "--max-warnings=0", "--format=json"]);
   assertEqual(result.returncode, 0, outputOf(result));
   // Use the real main.ts import location and rootDirs, without its unrelated
   // source diagnostics masking whether createApp receives a genuine type.
-  const typed = run(
+  const typed = await run(
     [...ESLINT, "--stdin", "--stdin-filename", "apps/web/src/vue/main.ts", "--max-warnings=0", "--format=json"],
     { input: MAIN_APP },
   );
   assertEqual(typed.returncode, 0, outputOf(typed));
 }
 
-function testMultipleDeclarationProjectsFailClosedTogether() {
+async function testMultipleDeclarationProjectsFailClosedTogether() {
   const app = source("ProofApp.vue", LABELED_SFC);
   const editor = source("ProofEditor.vue", PROOF_NODE);
   const output = join(suiteDirectory, "combined");
@@ -702,7 +737,7 @@ function testMultipleDeclarationProjectsFailClosedTogether() {
     projects.push(project);
   }
   const prepare = source("prepare-combined.mjs", prepareModule(projects, output));
-  const emitted = run(["bun", "--bun", prepare]);
+  const emitted = await run([process.execPath, "--bun", prepare]);
   assertEqual(emitted.returncode, 0, outputOf(emitted));
   for (const name of ["ProofApp.vue.d.ts", "ProofEditor.vue.d.ts"]) {
     assertTrue(isFile(join(output, name)), name);
@@ -735,21 +770,21 @@ export function read(value: InstanceType<typeof ProofApp>): string { return valu
     "--parser-options",
     JSON.stringify({ project: [lintProject] }),
   ];
-  const typed = run(args);
+  const typed = await run(args);
   assertEqual(typed.returncode, 0, outputOf(typed));
   // Reject the second project after the first has emitted fresh output.
   writeFileSync(app, '<script setup lang="ts">const value: number = "bad";</script><template><p>{{ value }}</p></template>');
-  const failed = run(["bun", "--bun", prepare]);
+  const failed = await run([process.execPath, "--bun", prepare]);
   assertNotEqual(failed.returncode, 0);
   assertIn("TS2322", outputOf(failed));
   assertFalse(existsSync(output));
-  const missing = run(args);
+  const missing = await run(args);
   assertNotEqual(missing.returncode, 0);
   const missingMessages = messagesOf(parseReport(missing));
   assertEqual(missingMessages.filter((message) => message.ruleId === "@typescript-eslint/no-unsafe-argument").length, 2, missingMessages);
 }
 
-function testGeneratedSfcTypesAndFailedRefreshHaveNoWaiver() {
+async function testGeneratedSfcTypesAndFailedRefreshHaveNoWaiver() {
   const component = source("ProofGenerated.vue", LABELED_SFC);
   const output = join(suiteDirectory, "generated");
   const project = join(suiteDirectory, "tsconfig.emit.json");
@@ -763,7 +798,7 @@ function testGeneratedSfcTypesAndFailedRefreshHaveNoWaiver() {
     }),
   );
   const prepare = source("prepare.mjs", prepareModule(project, output));
-  const emitted = run(["bun", "--bun", prepare]);
+  const emitted = await run([process.execPath, "--bun", prepare]);
   assertEqual(emitted.returncode, 0, outputOf(emitted));
   const declaration = join(output, "ProofGenerated.vue.d.ts");
   assertTrue(isFile(declaration));
@@ -790,62 +825,62 @@ export function read(value: InstanceType<typeof ProofGenerated>): string { retur
     "--parser-options",
     JSON.stringify({ project: [lintProject] }),
   ];
-  const typed = run(args);
+  const typed = await run(args);
   assertEqual(typed.returncode, 0, outputOf(typed));
   writeFileSync(consumer, readFileSync(consumer, "utf8").replaceAll("value.$props.label", "value.$props.label.missing"));
-  const invalid = run(["bun", "--bun", join(ROOT, "node_modules/.bin/tsc"), "--noEmit", "-p", lintProject]);
+  const invalid = await run([process.execPath, "--bun", join(ROOT, "node_modules/.bin/tsc"), "--noEmit", "-p", lintProject]);
   assertNotEqual(invalid.returncode, 0);
   assertIn("TS2339", outputOf(invalid));
   writeFileSync(consumer, readFileSync(consumer, "utf8").replaceAll("value.$props.label.missing", "value.$props.label"));
   // Real unsafe props remain unsafe even through compiler-generated types.
   writeFileSync(component, readFileSync(component, "utf8").replaceAll("label: string", "label: any"));
-  const refreshed = run(["bun", "--bun", prepare]);
+  const refreshed = await run([process.execPath, "--bun", prepare]);
   assertEqual(refreshed.returncode, 0, outputOf(refreshed));
-  const unsafe = run(args);
+  const unsafe = await run(args);
   assertNotEqual(unsafe.returncode, 0);
   assertSetHas("@typescript-eslint/no-unsafe-return", ruleIds(parseReport(unsafe)));
   // Failed refresh clears stale successful output before checking source.
   writeFileSync(component, '<script setup lang="ts">defineProps<{ label: string }>();</script><template><p>{{ label.toFixed() }}</p></template>');
-  const failed = run(["bun", "--bun", prepare]);
+  const failed = await run([process.execPath, "--bun", prepare]);
   assertNotEqual(failed.returncode, 0);
   assertIn("TS2551", outputOf(failed));
   assertFalse(existsSync(declaration));
-  const missing = run(args);
+  const missing = await run(args);
   assertNotEqual(missing.returncode, 0);
   assertSetHas("@typescript-eslint/no-unsafe-return", ruleIds(parseReport(missing)));
 }
 
-function testUnpreparedSfcImportHasNoFakeFallback() {
+async function testUnpreparedSfcImportHasNoFakeFallback() {
   source("ProofNode.vue", PROOF_NODE);
   // Document the plain-TS program's SFC import gap without a shim/waiver.
   assertRule("ProofSfcImport.ts", SFC_IMPORT, "@typescript-eslint/no-unsafe-argument");
   for (const config of ["apps/web/tsconfig.vue.json", "packages/editor/tsconfig.vue.json"]) {
-    const typed = compile(config, SFC_IMPORT, "ts", "vue-tsc");
+    const typed = await compile(config, SFC_IMPORT, "ts", "vue-tsc");
     assertEqual(typed.returncode, 0, outputOf(typed));
-    const broken = compile(config, `${SFC_IMPORT}\nexport const invalid: number = "bad";`, "ts", "vue-tsc");
+    const broken = await compile(config, `${SFC_IMPORT}\nexport const invalid: number = "bad";`, "ts", "vue-tsc");
     assertNotEqual(broken.returncode, 0);
     assertIn("TS2322", outputOf(broken));
   }
 }
 
-function testYTextDeclaredStringContractWithoutRuleAllowance() {
-  const checked = lint("ProofYText.ts", Y_TEXT);
+async function testYTextDeclaredStringContractWithoutRuleAllowance() {
+  const checked = await lint("ProofYText.ts", Y_TEXT);
   assertEqual(checked.result.returncode, 0, checked.report);
-  assertRule("ProofYTextInherited.ts", Y_TEXT.replaceAll("value.toJSON()", "value.toString()"), "@typescript-eslint/no-base-to-string");
-  assertRule("ProofObjectString.ts", "export function text(value: object): string { return value.toString(); }", "@typescript-eslint/no-base-to-string");
+  await assertRule("ProofYTextInherited.ts", Y_TEXT.replaceAll("value.toJSON()", "value.toString()"), "@typescript-eslint/no-base-to-string");
+  await assertRule("ProofObjectString.ts", "export function text(value: object): string { return value.toString(); }", "@typescript-eslint/no-base-to-string");
 }
 
-function testFormatterKeepsImportOrderTextAndTailwind() {
+async function testFormatterKeepsImportOrderTextAndTailwind() {
   const ordered = 'import "./z.css";\nimport "./a.css";\nexport const value = 1;\n';
-  const order = run([...PRETTIER, "--stdin-filepath", "order.ts"], { input: ordered });
+  const order = await run([...PRETTIER, "--stdin-filepath", "order.ts"], { input: ordered });
   assertEqual(order.returncode, 0, order.stderr);
   assertLess(mustIndex(order.stdout, '"./z.css"'), mustIndex(order.stdout, '"./a.css"'));
   const text = '<template><p>before <strong>middle</strong> after</p><pre>  keep\n spacing </pre></template>';
-  const formatted = run([...PRETTIER, "--stdin-filepath", "text.vue"], { input: text });
+  const formatted = await run([...PRETTIER, "--stdin-filepath", "text.vue"], { input: text });
   assertIn("before <strong>middle</strong> after", formatted.stdout);
   assertIn("  keep\n spacing ", formatted.stdout);
   const css = '@import "tailwindcss" source(none);\n@source "./";\n@theme { --color-brand: #123456; }\n@utility proof { @apply flex; }\n';
-  const styled = run([...PRETTIER, "--stdin-filepath", "proof.css"], { input: css });
+  const styled = await run([...PRETTIER, "--stdin-filepath", "proof.css"], { input: css });
   assertEqual(styled.returncode, 0, styled.stderr);
 }
 
@@ -898,7 +933,7 @@ function diagnostics(stdout: string) {
     messages: items,
   };
 }
-function pythonRun(args: string[], input?: string): Completed {
+async function pythonRun(args: string[], input?: string): Promise<Completed> {
   const program = [
     "import importlib.util, json, sys",
     'spec = importlib.util.spec_from_file_location("fvoci_test_eslint", "scripts/test_eslint.py")',
@@ -911,7 +946,7 @@ function pythonRun(args: string[], input?: string): Completed {
     'result = module.run(request["args"], **kwargs)',
     'sys.stdout.write(json.dumps({"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}))',
   ].join("\n");
-  const wrapped = run(["python3", "-c", program], {
+  const wrapped = await run(["python3", "-c", program], {
     input: JSON.stringify({ args, input: input ?? null }),
     extraEnv: { PYTHONDONTWRITEBYTECODE: "1" },
   });
@@ -966,12 +1001,12 @@ const ruleGroups: RuleGroup[] = [
 function releaseSuiteDirectory() {
   if (finishedPorted === ported.length) removeSuiteDirectory();
 }
-function rejectLikePython(group: RuleGroup) {
+async function rejectLikePython(group: RuleGroup) {
   const dir = mkdtempSync(join(ROOT, "apps/web", "eslint-neg-"));
   try {
     const invocation = group.invoke(dir);
-    const ts = invocation.input === undefined ? run(invocation.args) : run(invocation.args, { input: invocation.input });
-    const py = invocation.input === undefined ? pythonRun(invocation.args) : pythonRun(invocation.args, invocation.input);
+    const ts = invocation.input === undefined ? await run(invocation.args) : await run(invocation.args, { input: invocation.input });
+    const py = invocation.input === undefined ? await pythonRun(invocation.args) : await pythonRun(invocation.args, invocation.input);
     if (ts.returncode === 0 || py.returncode === 0 || ts.returncode !== py.returncode) {
       fail({ group: group.name, tsReturn: ts.returncode, pyReturn: py.returncode });
     }
@@ -1015,51 +1050,77 @@ function assertSameNames(actual: string[], expected: string[], context: string) 
   }
 }
 
-beforeAll(() => {
-  const verified = run(["bun", "--bun", "scripts/verify-web-tools.mjs"]);
+beforeAll(async () => {
+  const verified = await run([process.execPath, "--bun", "scripts/verify-web-tools.mjs"]);
   if (verified.returncode !== 0) fail(outputOf(verified));
   suiteDirectory = mkdtempSync(join(ROOT, "apps/web", "eslint-proof-"));
   writeFileSync(join(suiteDirectory, "props.ts"), PROPS);
   writeFileSync(join(suiteDirectory, "ProofChild.vue"), CHILD);
-}, 60_000);
+}, proofTimeoutMs);
 
 for (const [name, body] of ported) {
-  test.serial(name, () => {
-    try {
-      body();
-    } finally {
-      finishedPorted += 1;
-    }
-  });
+  test.serial(
+    name,
+    async () => {
+      try {
+        await body();
+      } finally {
+        finishedPorted += 1;
+      }
+    },
+    { timeout: proofTimeoutMs },
+  );
 }
+// Negative controls re-run ESLint through the Python oracle. One control measured
+// about 6–8s, so the 180s proof cap still fits each of them. Together with the
+// parity test they re-run Python and do not fit the 15-minute web-static job.
+// Temporary until the B commit removes Python.
 for (const group of ruleGroups) {
-  test.serial(`negative control: ${group.name}`, () => {
-    releaseSuiteDirectory();
-    rejectLikePython(group);
-  });
+  test.serial(
+    `negative control: ${group.name}`,
+    async () => {
+      releaseSuiteDirectory();
+      await rejectLikePython(group);
+    },
+    { timeout: proofTimeoutMs },
+  );
 }
 test.serial(
+  "signal-killed child fails the proof",
+  async () => {
+    await expect(run([process.execPath, "-e", "process.kill(process.pid, 'SIGKILL')"])).rejects.toThrow(
+      /python returncode -9/,
+    );
+  },
+  { timeout: proofTimeoutMs },
+);
+test.serial(
   "parity: python and typescript suites pass the same test names",
-  () => {
+  async () => {
     if (finishedPorted !== ported.length) fail(`ported tests finished ${finishedPorted} of ${ported.length}`);
     removeSuiteDirectory();
-    const py = run(["python3", "scripts/test_eslint.py"], { extraEnv: { PYTHONDONTWRITEBYTECODE: "1" } });
-    const ts = run([
-      "bun",
-      "test",
-      "scripts/ci/eslint-fixtures.test.ts",
-      "--test-name-pattern",
-      "^test_",
-    ]);
+    // Each of these two spawns measured about 210s. 360s is a new cap, not a
+    // raise of the 30s nested `bun test --isolate` limit. Re-running Python here
+    // does not fit the 15-minute web-static job. Temporary until the B commit
+    // removes Python.
+    const py = await run(["python3", "scripts/test_eslint.py"], {
+      extraEnv: { PYTHONDONTWRITEBYTECODE: "1" },
+      timeout: 360,
+    });
+    const ts = await run(
+      [process.execPath, "test", "scripts/ci/eslint-fixtures.test.ts", "--test-name-pattern", "^test_"],
+      { timeout: 360 },
+    );
     if (py.returncode !== 0) fail(py.stderr.slice(-8000));
     if (ts.returncode !== 0) fail((ts.stdout + ts.stderr).slice(-8000));
     const expected = ported.map(([name]) => name);
     assertSameNames(passedPythonNames(py.stderr), expected, "python");
     assertSameNames(passedBunNames(ts.stdout, ts.stderr), expected, "typescript");
   },
-  { timeout: 20 * 60 * 1000 },
+  // The parity test itself measured about 410–430s. 600s covers that measurement.
+  { timeout: 600_000 },
 );
 
 afterAll(() => {
   removeSuiteDirectory();
-}, 60_000);
+}, proofTimeoutMs);
