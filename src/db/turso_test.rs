@@ -2,6 +2,8 @@
 //! Connection is read-only; migration requires both explicit destructive gates.
 //! No synthetic transport, retry, or normal startup unlock is used.
 //! Disposable reset is separately selected; ordinary consumers never reset.
+//! Reset reads only `FVOCI_TEST_TURSO_DATABASE_URL` and
+//! `FVOCI_TEST_TURSO_AUTH_TOKEN`, never the product `FVOCI_LIBSQL_*` pair.
 use super::backend::{Backend, DbTx, FamilyTx, RemoteDatabase};
 use super::codec::Cell;
 use crate::config::DatabaseSettings;
@@ -1858,6 +1860,48 @@ fn reset_selection(
     Ok(())
 }
 
+const RESET_ALLOWED_HOST: &str = "fvoci-fvoci.aws-ap-northeast-1.turso.io";
+
+/// Product `FVOCI_LIBSQL_*` values are never parsed or connected. Any presence
+/// refuses, whether or not the test pair is also set.
+fn reset_credentials(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<(String, String), &'static str> {
+    if lookup("FVOCI_LIBSQL_URL").is_some() || lookup("FVOCI_LIBSQL_AUTH_TOKEN").is_some() {
+        return Err("RESET_PRODUCT_ENV_REFUSED");
+    }
+    let (Some(url), Some(token)) = (
+        lookup("FVOCI_TEST_TURSO_DATABASE_URL"),
+        lookup("FVOCI_TEST_TURSO_AUTH_TOKEN"),
+    ) else {
+        return Err("RESET_TEST_ENV_REQUIRED");
+    };
+    if url.is_empty() || token.is_empty() {
+        return Err("RESET_TEST_ENV_REQUIRED");
+    }
+    reset_require_allowed_host(&url)?;
+    configuration(url, token)
+}
+
+/// Authority host after the scheme and before path, query, or fragment.
+/// Comparison is exact bytes: no case folding, trailing-dot stripping, port
+/// removal, or userinfo skip. The verification database is also named `fvoci`,
+/// so a database-name prefix cannot separate it from production.
+fn reset_require_allowed_host(url: &str) -> Result<(), &'static str> {
+    let rest = url
+        .strip_prefix("libsql://")
+        .or_else(|| url.strip_prefix("https://"))
+        .ok_or("RESET_HOST_REFUSED")?;
+    if rest.contains('@') {
+        return Err("RESET_HOST_REFUSED");
+    }
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if host != RESET_ALLOWED_HOST {
+        return Err("RESET_HOST_REFUSED");
+    }
+    Ok(())
+}
+
 // Literal statements only, reviewed against the compiled schema. Remove
 // triggers before implicit DROP deletes, then children before FK parents,
 // and the ledger last. FK enforcement is NEVER disabled or deferred.
@@ -1990,6 +2034,90 @@ const RESET_DROP_STATEMENTS: [&str; 126] = [
     "DROP TABLE IF EXISTS \"schema_migrations\";",
 ];
 
+/// Counted before any DROP. These are every `DROP TABLE` target on the
+/// PREFIX11 writer except infrastructure a disposable schema always contains,
+/// and except step 12 which is not in that schema:
+/// - `schema_migrations`: migration receipt ledger, not user data
+/// - `instance_settings_meta`: singleton `(id=1, revision=0)` from step 03
+/// - `event_sequence`: singleton `(id=1, last_seq=0)` from step 04
+/// - `collab_fence_counter`: singleton `(id=1, next_fence=1)` from step 06
+/// - `instance_config`: singleton `(id=1)` from step 09
+/// - `maintenance_job_claims`: step 12 seed, absent from PREFIX11
+/// A non-zero sum refuses. The caller must not run `RESET_DROP_STATEMENTS`.
+const RESET_INFRASTRUCTURE_TABLES: &[&str] = &[
+    "schema_migrations",
+    "instance_settings_meta",
+    "event_sequence",
+    "collab_fence_counter",
+    "instance_config",
+    "maintenance_job_claims",
+];
+
+fn reset_user_data_table(statement: &str) -> Option<&str> {
+    let name = statement
+        .strip_prefix("DROP TABLE IF EXISTS \"")?
+        .strip_suffix("\";")?;
+    if RESET_INFRASTRUCTURE_TABLES.contains(&name) {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn reset_user_data_count_sql_owned() -> String {
+    let mut sql = String::from("SELECT ");
+    let mut first = true;
+    for statement in RESET_DROP_STATEMENTS {
+        let Some(name) = reset_user_data_table(statement) else {
+            continue;
+        };
+        debug_assert!(name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+        }));
+        if !first {
+            sql.push('+');
+        }
+        first = false;
+        sql.push_str("(SELECT count(*) FROM \"");
+        sql.push_str(name);
+        sql.push_str("\")");
+    }
+    debug_assert!(!first);
+    sql
+}
+
+fn reset_user_data_count_sql() -> &'static str {
+    // FamilyTx::query accepts only 'static SQL. The text is fixed by the drop
+    // list, so one process-lifetime copy is the statement the writer runs.
+    static SQL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SQL.get_or_init(reset_user_data_count_sql_owned).as_str()
+}
+
+fn reset_user_data_admitted(total: i64) -> Result<(), &'static str> {
+    if total == 0 {
+        Ok(())
+    } else {
+        Err("RESET_USER_DATA_PRESENT")
+    }
+}
+
+async fn reset_user_data_total(family: &mut FamilyTx) -> Result<i64, &'static str> {
+    let rows = family
+        .query(reset_user_data_count_sql(), &[])
+        .await
+        .map_err(|_| "RESET_USER_DATA_QUERY_FAILED")?;
+    if rows.len() != 1 {
+        return Err("RESET_USER_DATA_QUERY_FAILED");
+    }
+    match rows[0]
+        .cell(0)
+        .map_err(|_| "RESET_USER_DATA_QUERY_FAILED")?
+    {
+        Cell::Integer(total) if total >= 0 => Ok(total),
+        _ => Err("RESET_USER_DATA_QUERY_FAILED"),
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ResetOutcome {
     primary: &'static str,
@@ -2031,6 +2159,10 @@ async fn reset_transaction(backend: &Backend) -> ResetOutcome {
         super::migrate::turso_test_schema_in_writer(family, 11)
             .await
             .map_err(|_| "RESET_SCHEMA_REFUSED")?;
+        // User-data totals are read on this writer before any drop. Non-zero
+        // refuses with steps still 0; infrastructure singletons are not counted.
+        let user_rows = reset_user_data_total(family).await?;
+        reset_user_data_admitted(user_rows)?;
         for statement in RESET_DROP_STATEMENTS {
             family
                 .execute(statement, &[])
@@ -2095,15 +2227,7 @@ async fn reset_transaction(backend: &Backend) -> ResetOutcome {
 async fn turso_primary_disposable_prefix11_reset() -> Result<(), &'static str> {
     let args: Vec<String> = std::env::args().collect();
     reset_selection(|name| std::env::var(name).ok(), &args)?;
-    let settings = DatabaseSettings::from_env().map_err(|_| "PRODUCT_CONFIGURATION_FAILED")?;
-    let DatabaseSettings::LibsqlRemote {
-        primary_url,
-        auth_token,
-    } = settings
-    else {
-        return Err("WRONG_PRODUCT_BACKEND");
-    };
-    let (url, token) = configuration(primary_url, auth_token)?;
+    let (url, token) = reset_credentials(|name| std::env::var(name).ok())?;
     let backend = Backend::LibsqlRemote(
         RemoteDatabase::connect(url, token, 1)
             .await
@@ -2249,6 +2373,143 @@ mod reset_policy_tests {
             assert!(!statement.contains("PRAGMA"));
         }
     }
+
+    fn creds(pairs: &[(&str, &str)]) -> Result<(String, String), &'static str> {
+        reset_credentials(|name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        })
+    }
+
+    const ALLOWED_RESET_URL: &str = "libsql://fvoci-fvoci.aws-ap-northeast-1.turso.io";
+
+    #[test]
+    fn reset_accepts_test_env_only_when_the_allowlisted_target_is_empty() {
+        let (url, token) = creds(&[
+            ("FVOCI_TEST_TURSO_DATABASE_URL", ALLOWED_RESET_URL),
+            ("FVOCI_TEST_TURSO_AUTH_TOKEN", "test-token"),
+        ])
+        .unwrap();
+        assert_eq!(url, ALLOWED_RESET_URL);
+        assert_eq!(token, "test-token");
+        assert!(creds(&[
+            (
+                "FVOCI_TEST_TURSO_DATABASE_URL",
+                "https://fvoci-fvoci.aws-ap-northeast-1.turso.io/"
+            ),
+            ("FVOCI_TEST_TURSO_AUTH_TOKEN", "test-token"),
+        ])
+        .is_ok());
+        assert_eq!(reset_user_data_admitted(0), Ok(()));
+    }
+
+    #[test]
+    fn reset_refuses_product_env_alone_or_beside_the_test_env() {
+        assert_eq!(
+            creds(&[
+                ("FVOCI_LIBSQL_URL", ALLOWED_RESET_URL),
+                ("FVOCI_LIBSQL_AUTH_TOKEN", "product-token"),
+            ])
+            .unwrap_err(),
+            "RESET_PRODUCT_ENV_REFUSED"
+        );
+        assert_eq!(
+            creds(&[
+                ("FVOCI_TEST_TURSO_DATABASE_URL", ALLOWED_RESET_URL),
+                ("FVOCI_TEST_TURSO_AUTH_TOKEN", "test-token"),
+                ("FVOCI_LIBSQL_URL", "not-used"),
+                ("FVOCI_LIBSQL_AUTH_TOKEN", "not-used"),
+            ])
+            .unwrap_err(),
+            "RESET_PRODUCT_ENV_REFUSED"
+        );
+        assert_eq!(
+            creds(&[
+                ("FVOCI_TEST_TURSO_DATABASE_URL", ALLOWED_RESET_URL),
+                ("FVOCI_TEST_TURSO_AUTH_TOKEN", "test-token"),
+                ("FVOCI_LIBSQL_AUTH_TOKEN", ""),
+            ])
+            .unwrap_err(),
+            "RESET_PRODUCT_ENV_REFUSED"
+        );
+        assert_eq!(creds(&[]).unwrap_err(), "RESET_TEST_ENV_REQUIRED");
+        assert_eq!(
+            creds(&[("FVOCI_TEST_TURSO_DATABASE_URL", ALLOWED_RESET_URL)]).unwrap_err(),
+            "RESET_TEST_ENV_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn reset_refuses_hosts_other_than_the_exact_allowlisted_text() {
+        for url in [
+            "libsql://Fvoci-Fvoci.aws-ap-northeast-1.turso.io",
+            "libsql://FVOCI-FVOCI.AWS-AP-NORTHEAST-1.TURSO.IO",
+            "libsql://fvoci-fvoci.aws-ap-northeast-1.turso.io.",
+            "libsql://fvoci-fvoci.aws-ap-northeast-1.turso.io:443",
+            "libsql://user:secret@fvoci-fvoci.aws-ap-northeast-1.turso.io",
+            "https://token@fvoci-fvoci.aws-ap-northeast-1.turso.io",
+            "libsql://db.fvoci-fvoci.aws-ap-northeast-1.turso.io",
+            "libsql://fvoci-prod.aws-ap-northeast-1.turso.io",
+            "libsql://fvoci-prod-fvoci.aws-ap-northeast-1.turso.io",
+            "libsql://fvoci-fvoci.aws-us-east-1.turso.io",
+            "libsql://fvoci-fvoci.aws-ap-northeast-2.turso.io",
+            "libsql://fvoci-fvoci.aws-eu-west-1.turso.io",
+        ] {
+            assert_eq!(
+                creds(&[
+                    ("FVOCI_TEST_TURSO_DATABASE_URL", url),
+                    ("FVOCI_TEST_TURSO_AUTH_TOKEN", "test-token"),
+                ])
+                .unwrap_err(),
+                "RESET_HOST_REFUSED",
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn reset_refuses_simulated_user_rows_without_admitting_drops() {
+        assert_eq!(
+            reset_user_data_admitted(1),
+            Err("RESET_USER_DATA_PRESENT")
+        );
+        let refused = ResetOutcome::refused("RESET_USER_DATA_PRESENT");
+        assert_eq!(refused.steps, 0);
+        assert_eq!(refused.commit, "NOT_STARTED");
+        assert_eq!(refused.blank, "NOT_RUN");
+        let sql = reset_user_data_count_sql();
+        for required in ["workspaces", "users", "documents", "sessions", "tasks"] {
+            assert_eq!(
+                sql.matches(&format!("(SELECT count(*) FROM \"{required}\")")).count(),
+                1,
+                "{required}"
+            );
+        }
+        for skipped in RESET_INFRASTRUCTURE_TABLES {
+            assert!(
+                !sql.contains(&format!("\"{skipped}\"")),
+                "{skipped} is not a counted user-data table"
+            );
+        }
+        let mut counted = 0;
+        for statement in RESET_DROP_STATEMENTS {
+            if let Some(name) = reset_user_data_table(statement) {
+                counted += 1;
+                assert!(
+                    name.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                    }),
+                    "{name}"
+                );
+                assert_eq!(sql.matches(&format!("\"{name}\"")).count(), 1, "{name}");
+            }
+        }
+        assert!(counted > 0);
+        assert_eq!(reset_user_data_admitted(0), Ok(()));
+    }
+
     #[tokio::test]
     async fn reset_wrong_backend_preserves_actual_local_catalog_and_fk() {
         let f = crate::db::attachment_preview::tests::Fixture::new().await;
@@ -2316,30 +2577,30 @@ mod reset_policy_tests {
 
     #[tokio::test]
     #[ignore = "ROOT allocated official sqld and explicit migration helper gates required"]
-    async fn reset_known_populated_prefix11_reaches_blank_on_fresh_stream() {
+    async fn reset_populated_prefix11_refuses_without_drops() {
         let (driver, root, backend) = protocol_fixture().await;
         super::super::migrate::turso_test_apply_prefix(&backend, 11)
             .await
             .unwrap();
-        migration_populate(&backend, uuid::Uuid::now_v7())
+        let workspace = uuid::Uuid::now_v7();
+        migration_populate(&backend, workspace).await.unwrap();
+        let outcome = reset_transaction(&backend).await;
+        assert_eq!(outcome.primary, "RESET_USER_DATA_PRESENT");
+        assert_eq!(outcome.steps, 0);
+        assert_eq!(outcome.commit, "NOT_STARTED");
+        assert_eq!(outcome.blank, "NOT_RUN");
+        assert_eq!(outcome.rollback, "RETURNED_OK");
+        let mut tx = backend.begin_write().await.unwrap();
+        let rows = remote_family(&mut tx)
+            .unwrap()
+            .query(
+                "SELECT count(*) FROM workspaces WHERE id=?1",
+                &[Cell::uuid(workspace)],
+            )
             .await
             .unwrap();
-        let outcome = reset_transaction(&backend).await;
-        assert_eq!(
-            outcome,
-            ResetOutcome {
-                primary: "OK",
-                rollback: "NOT_STARTED",
-                commit: "RETURNED_OK",
-                blank: "CONFIRMED",
-                steps: 126
-            }
-        );
-        assert!(migration_snapshot(&backend, 0)
-            .await
-            .unwrap()
-            .receipts
-            .is_empty());
+        assert_eq!(rows[0].cell(0).unwrap(), Cell::Integer(1));
+        tx.rollback().await.unwrap();
         close_migration_owner(&backend).await.unwrap();
         assert_eq!(backend.connection_stats().unwrap().size, 0);
         finish_fixture(driver, root).await;
@@ -2397,6 +2658,11 @@ mod reset_policy_tests {
         remote_family(&mut tx)
             .unwrap()
             .execute("DROP TABLE reset_unexpected_object", &[])
+            .await
+            .unwrap();
+        remote_family(&mut tx)
+            .unwrap()
+            .execute("DELETE FROM workspaces WHERE id=?1", &[Cell::uuid(workspace)])
             .await
             .unwrap();
         tx.commit_with_cleanup().await.unwrap();

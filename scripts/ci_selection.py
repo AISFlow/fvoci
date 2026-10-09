@@ -2212,8 +2212,8 @@ def verify_turso_workflow(path: Path) -> list[str]:
         "run": "python3 scripts/selected-backend-ci/turso-test-guard.py --diagnostic-unit"}, "credential-free exact frozen diagnostic unit before secret consumption")
     require(steps[4] == {"name": "Real primary selected phase (exactly one test)", "env": {
         "FVOCI_DATABASE_BACKEND": "libsql-remote",
-        "FVOCI_LIBSQL_URL": "${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}",
-        "FVOCI_LIBSQL_AUTH_TOKEN": "${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}",
+        "FVOCI_TEST_TURSO_DATABASE_URL": "${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}",
+        "FVOCI_TEST_TURSO_AUTH_TOKEN": "${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}",
         "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": "${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}",
     }, "run": "python3 scripts/selected-backend-ci/turso-test-guard.py --consume"}, "only one sanitized runtime step consumes two secrets")
     # Entire private UI allocation is closed: no extra unchecked step, secret

@@ -39,11 +39,12 @@ Environment variable. No values were inspected or verified by this author.
 required.** The secret URL is the designated target; URL shape validation is
 neither server identity proof nor permission to initialize/reset anything.
 
-Current Environment `deployment_branch_policy` is null and is allowed. The
-secret job enforces AISFlow/fvoci + workflow_dispatch + main or the single
-reviewed branch, and exact github.sha with credentials persistence disabled.
-`ui-baseline` and `ui-ack` may also be dispatched on
-`fvoci/v060-product-integration-20261005`.
+Environment `fvoci-turso-test` deployment branches are limited to `main`,
+`fvoci/v060-turso-verified-connection`, and
+`fvoci/v060-product-integration-20261005`. The secret job enforces
+AISFlow/fvoci + workflow_dispatch + main or the single reviewed branch, and
+exact github.sha with credentials persistence disabled. `ui-baseline` and
+`ui-ack` may also be dispatched on `fvoci/v060-product-integration-20261005`.
 Bootstrap pushes cannot enter that job. The admission job
 first verifies the preexisting named Environment through an anonymous public
 GitHub metadata GET. It does not create or modify an Environment or policy;
@@ -54,10 +55,29 @@ private authenticated equivalents need Actions read access. [GitHub Environment 
 The dedicated `turso-connection` job (historical job ID retained) prepares the maintained pinned SQLite/Rust
 inputs and compiles the current library tests **without credentials**. It
 freezes the actual Cargo-emitted test ELF and binds source SHA/digest, emitted
-profile/features, binary hash and native preparation receipt. Only its final runtime step maps the two registered secrets to product
-`FVOCI_DATABASE_BACKEND=libsql-remote`, `FVOCI_LIBSQL_URL`, and
-`FVOCI_LIBSQL_AUTH_TOKEN`; the fixture uses `DatabaseSettings::from_env` and the
-existing RemoteDatabase constructor, rather than a test-only configuration path. No raw SDK/test error body, URL, header,
+profile/features, binary hash and native preparation receipt. Its final runtime step maps the two registered secrets to
+`FVOCI_DATABASE_BACKEND=libsql-remote`, `FVOCI_TEST_TURSO_DATABASE_URL`, and
+`FVOCI_TEST_TURSO_AUTH_TOKEN`. Reset reads only that test pair. It does not
+read `FVOCI_LIBSQL_URL` or `FVOCI_LIBSQL_AUTH_TOKEN`; if either product name is
+present, or the test pair is missing, reset refuses before connect. The
+`turso-ui` job's final step still maps the same secrets to `FVOCI_LIBSQL_URL`
+and `FVOCI_LIBSQL_AUTH_TOKEN`, because that step starts the product server
+through `DatabaseSettings::from_env`. The product server does not read
+`FVOCI_TEST_TURSO_*`. Connection, migration, and inventory keep using
+`DatabaseSettings::from_env` inside their own selected tests.
+Reset allows one host, compared as the raw authority host with no case
+folding and no trailing-dot, port, or userinfo stripping:
+`fvoci-fvoci.aws-ap-northeast-1.turso.io`. The verification database is named
+`fvoci`, so a database-name prefix cannot distinguish it from production.
+Case variants, a trailing dot, a port, userinfo, a subdomain,
+`fvoci-prod…turso.io`, and any other region are refused before connect. The
+allowlist is that literal, not an Environment variable or dispatch input.
+Before any DROP, reset sums `count(*)` over the PREFIX11 user-data tables:
+every reset `DROP TABLE` target except the ledger `schema_migrations`, the
+infrastructure singletons `instance_settings_meta`, `event_sequence`,
+`collab_fence_counter`, and `instance_config`, and step-12
+`maintenance_job_claims` (not part of PREFIX11). A non-zero sum refuses and
+drops nothing. No raw SDK/test error body, URL, header,
 token, environment dump or credential-bearing trace is printed or uploaded.
 
 Default phase `connection` requires `destructive=false` and makes no schema/data

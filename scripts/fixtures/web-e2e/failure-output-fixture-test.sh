@@ -90,6 +90,8 @@ echo "fvoci-server listening on http://127.0.0.1:9"
 # real server must never log), and the admin URL web-e2e-inner.sh withholds
 # from the server environment ("unset" only when truly absent).
 echo "probe DATABASE_APP_URL=${DATABASE_APP_URL:-} admin ${FVOCI_E2E_ADMIN_DATABASE_URL-unset}"
+echo "probe FVOCI_LIBSQL_URL=libsql://libsql-url-secret.example.test FVOCI_LIBSQL_AUTH_TOKEN=libsql-auth-secret FVOCI_TEST_TURSO_DATABASE_URL=https://turso-url-secret.example.test FVOCI_TEST_TURSO_AUTH_TOKEN=turso-auth-secret"
+echo "bare libsql://libsql-url-secret.example.test"
 echo "$$" >"$FVOCI_FIXTURE_NET_STATE.server-pid"
 if [[ "${FVOCI_FIXTURE_SETUP:-ok}" == "earlydeath" ]]; then
   echo "fixture server exited before setup"
@@ -273,7 +275,17 @@ for pending in 0 1; do
     [[ -f "$retained/server.log" ]] || fail "$label: the group server.log was not retained" "$log"
     grep -qx 'probe DATABASE_APP_URL=redacted admin unset' "$retained/server.log" \
       || fail "$label: redaction probe missing from server.log" "$log"
-    ! grep -q -e 'fixture-secret' -e '://[^/[:space:]]*:[^@[:space:]]*@' "$retained/server.log" || fail "$label: credentials in retained server.log" "$log"
+    grep -q 'FVOCI_LIBSQL_URL=redacted' "$retained/server.log" \
+      || fail "$label: libsql url not redacted in server.log" "$log"
+    grep -q 'FVOCI_LIBSQL_AUTH_TOKEN=redacted' "$retained/server.log" \
+      || fail "$label: libsql token not redacted in server.log" "$log"
+    grep -q 'FVOCI_TEST_TURSO_DATABASE_URL=redacted' "$retained/server.log" \
+      || fail "$label: test turso url not redacted in server.log" "$log"
+    grep -q 'FVOCI_TEST_TURSO_AUTH_TOKEN=redacted' "$retained/server.log" \
+      || fail "$label: test turso token not redacted in server.log" "$log"
+    grep -q 'libsql://redacted' "$retained/server.log" \
+      || fail "$label: bare libsql url not redacted in server.log" "$log"
+    ! grep -q -e 'fixture-secret' -e 'libsql-url-secret' -e 'libsql-auth-secret' -e 'turso-url-secret' -e 'turso-auth-secret' -e '://[^/[:space:]]*:[^@[:space:]]*@' "$retained/server.log" || fail "$label: credentials in retained server.log" "$log"
   fi
   for shared in test-results test-results-collab e2e-pending/test-results-collab; do
     [[ ! -e "$FIXTURE_ROOT/apps/web/$shared" ]] || fail "$label: wrote shared $shared" "$log"
@@ -379,12 +391,23 @@ for wrapper in ordinary perf; do
         grep -qx 'fixture server exited before setup' "$log" || fail "$label: missing server failure log" "$log"
       fi
       grep -q '^fvoci-server listening on ' "$log" || fail "$label: missing server startup log" "$log"
-      ! grep -q 'fixture-secret' "$log" || fail "$label: credentials in startup diagnostics" "$log"
+      ! grep -q -e 'fixture-secret' -e 'libsql-url-secret' -e 'libsql-auth-secret' -e 'turso-url-secret' -e 'turso-auth-secret' "$log" || fail "$label: credentials in startup diagnostics" "$log"
+      grep -q 'FVOCI_LIBSQL_URL=redacted' "$log" || fail "$label: startup log left libsql url" "$log"
+      grep -q 'FVOCI_LIBSQL_AUTH_TOKEN=redacted' "$log" || fail "$label: startup log left libsql token" "$log"
+      grep -q 'FVOCI_TEST_TURSO_DATABASE_URL=redacted' "$log" || fail "$label: startup log left test turso url" "$log"
+      grep -q 'FVOCI_TEST_TURSO_AUTH_TOKEN=redacted' "$log" || fail "$label: startup log left test turso token" "$log"
+      grep -q 'libsql://redacted' "$log" || fail "$label: startup log left bare libsql url" "$log"
       if [[ "$wrapper" == "ordinary" ]]; then
         retained="$(sed -n 's/^failure-artifacts=//p' "$gh_output")"
         [[ -n "$retained" && -f "$retained/server.log" ]] || fail "$label: server log not retained" "$log"
         grep -qx 'probe DATABASE_APP_URL=redacted admin unset' "$retained/server.log" \
           || fail "$label: retained server log missing redacted probe" "$log"
+        grep -q 'FVOCI_LIBSQL_URL=redacted' "$retained/server.log" \
+          || fail "$label: retained server log left libsql url" "$log"
+        grep -q 'FVOCI_TEST_TURSO_AUTH_TOKEN=redacted' "$retained/server.log" \
+          || fail "$label: retained server log left test turso token" "$log"
+        ! grep -q -e 'libsql-url-secret' -e 'libsql-auth-secret' -e 'turso-url-secret' -e 'turso-auth-secret' "$retained/server.log" \
+          || fail "$label: libsql secret in retained server.log" "$log"
         ! grep -q '# fvoci: playwright start' "$retained/net-events.log" || fail "$label: browser marker before readiness" "$log"
         [[ ! -d "$retained/playwright-output" ]] || fail "$label: unexpected Playwright output" "$log"
         rm -rf "$retained"

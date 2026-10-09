@@ -858,6 +858,34 @@ mod tests {
     }
 
     #[test]
+    fn product_database_settings_do_not_read_turso_reset_env() {
+        let requested = std::cell::RefCell::new(Vec::new());
+        let settings = DatabaseSettings::from_lookup(|name| {
+            requested.borrow_mut().push(name.to_owned());
+            match name {
+                "FVOCI_DATABASE_BACKEND" => Some("libsql-remote".into()),
+                "FVOCI_LIBSQL_URL" => Some("https://primary.example.test".into()),
+                "FVOCI_LIBSQL_AUTH_TOKEN" => Some("synthetic-secret".into()),
+                _ => None,
+            }
+        })
+        .unwrap();
+        let requested = requested.into_inner();
+        assert!(
+            requested
+                .iter()
+                .all(|name| !name.starts_with("FVOCI_TEST_TURSO")),
+            "{requested:?}"
+        );
+        match settings {
+            DatabaseSettings::LibsqlRemote { primary_url, .. } => {
+                assert_eq!(primary_url, "https://primary.example.test");
+            }
+            other => panic!("product settings changed backend: {other:?}"),
+        }
+    }
+
+    #[test]
     fn storage_root_requires_explicit_nonempty_path() {
         let err = storage_root_path_from_values(None, None).unwrap_err();
         assert!(err.contains("FVOCI_STORAGE_DIR"));

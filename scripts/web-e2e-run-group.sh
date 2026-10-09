@@ -108,7 +108,8 @@ stop_net_monitor() {
 redact_server_log() {
   sed -E \
     -e 's#postgres(ql)?://[^[:space:]]+#postgres://redacted#g' \
-    -e 's#(DATABASE_URL|DATABASE_APP_URL|FVOCI_E2E_ADMIN_DATABASE_URL|TEST_DATABASE_URL)=[^[:space:]]+#\1=redacted#g' \
+    -e 's#libsql://[^[:space:]]+#libsql://redacted#g' \
+    -e 's#(DATABASE_URL|DATABASE_APP_URL|FVOCI_E2E_ADMIN_DATABASE_URL|TEST_DATABASE_URL|FVOCI_LIBSQL_URL|FVOCI_LIBSQL_AUTH_TOKEN|FVOCI_TEST_TURSO_[A-Z0-9_]*URL|FVOCI_TEST_TURSO_AUTH_TOKEN)=[^[:space:]]+#\1=redacted#g' \
     "$1"
 }
 
