@@ -9,7 +9,7 @@ import {
 } from "@playwright/test";
 import { readJson, flowSchemas, createE2eUser } from "./helpers";
 import {
-  admin,
+  admin as defaultAdmin,
   createDoc,
   editorOf,
   newSignedInPage,
@@ -21,14 +21,20 @@ import {
 } from "./workspace-wiki-vue-editor";
 
 test.describe.configure({ mode: "serial" });
+let admin = defaultAdmin;
+let fixtureNamespace = "";
 const guest = {
   email: "entities-guest@example.com",
   password: "guestpass1",
   givenName: "참조손님",
 };
 
-test.beforeAll(async ({ browser, baseURL }) => {
-  await setupInstance(browser, baseURL);
+test.beforeAll(async ({ browser, baseURL }, testInfo) => {
+  const namespace = `r${String(testInfo.repeatEachIndex)}-w${String(testInfo.workerIndex)}-t${String(testInfo.retry)}`;
+  fixtureNamespace = `R${String(testInfo.repeatEachIndex)}W${String(testInfo.workerIndex)}`;
+  admin = { ...defaultAdmin, email: `entities-owner-${namespace}@example.com` };
+  guest.email = `entities-guest-${namespace}@example.com`;
+  await setupInstance(browser, baseURL, admin);
   createE2eUser(guest.email, guest.password, guest.givenName, {
     workspaceSlug: admin.workspaceSlug,
     membershipRole: "guest",
@@ -114,11 +120,11 @@ for (const host of ["wiki", "project", "task"] as const) {
     });
     const page = signed.page;
     try {
-      const key = { wiki: "ENW", project: "ENP", task: "ENT" }[host];
+      const key = `${{ wiki: "ENW", project: "ENP", task: "ENT" }[host]}${fixtureNamespace}`;
       const f = await fixtures(page.request, key);
       if (host === "wiki") {
         const response = await page.request.post(`/api/v1/workspaces/${f.ws}/groups`, {
-          data: { name: "Entity Team" },
+          data: { name: `Entity Team ${key}` },
         });
         expect(response.status(), await response.text()).toBe(201);
       }
@@ -194,8 +200,8 @@ for (const host of ["wiki", "project", "task"] as const) {
           await nextParagraph(page, editor);
           await mention(page, "편집", "동료편집");
           await nextParagraph(page, editor);
-          await mention(page, "Entity", "Entity Team");
-          await expect(peerEditor.locator("[data-mention]").last()).toHaveText("@Entity Team");
+          await mention(page, "Entity", `Entity Team ${key}`);
+          await expect(peerEditor.locator("[data-mention]").last()).toHaveText(`@Entity Team ${key}`);
           await save(page);
           const shared = await body(page.request, bodyPath);
           expect(
@@ -240,7 +246,8 @@ test("guest member denial keeps allowed entities; inaccessible refs and readonly
     permissions: ["clipboard-read", "clipboard-write"],
   });
   try {
-    const f = await fixtures(owner.page.request, "ENG");
+    const key = `ENG${fixtureNamespace}`;
+    const f = await fixtures(owner.page.request, key);
     const members = await owner.page.request.get(`/api/v1/workspaces/${f.ws}/members`);
     const fixtureValue1 = (await readJson(members, flowSchemas.members)).items.find(
       (m: { email: string }) => m.email === guest.email,
@@ -257,16 +264,16 @@ test("guest member denial keeps allowed entities; inaccessible refs and readonly
     const page = visitor.page;
     const editor = await openDoc(
       page,
-      `/w/${admin.workspaceSlug}/ENG-${String(f.document.number)}`,
+      `/w/${admin.workspaceSlug}/${key}-${String(f.document.number)}`,
     );
     expect((await page.request.get(`/api/v1/workspaces/${f.ws}/members`)).status()).toBe(404);
     await editor.click();
-    await mention(page, `ENG-${String(f.task.number)}`, f.task.title);
+    await mention(page, `${key}-${String(f.task.number)}`, f.task.title);
     await expect(editor.locator("[data-mention]")).toHaveText(`@${f.task.title}`);
     await nextParagraph(page, editor);
     await paste(page, f.wiki.id);
     await expect(editor.locator(".afn-embed-inaccessible")).toBeVisible();
-    await expect(editor).not.toContainText("ENG wiki reference");
+    await expect(editor).not.toContainText(`${key} wiki reference`);
     await nextParagraph(page, editor);
     await page.keyboard.type("/");
     await expect(page.locator(".fvoci-suggestion").getByRole("option").first()).toBeVisible();
@@ -286,7 +293,7 @@ test("guest member denial keeps allowed entities; inaccessible refs and readonly
       `/api/v1/workspaces/${f.ws}/projects/${f.project.id}/documents/${f.document.id}/body`,
     );
     await editorOf(page).click();
-    await page.keyboard.type("@ENG-1");
+    await page.keyboard.type(`@${key}-1`);
     expect(
       await body(
         page.request,
@@ -582,7 +589,7 @@ for (const host of ["wiki", "project"] as const) {
     }[] = [];
     let countObservation: Awaited<ReturnType<typeof observeCounts>> | undefined;
     try {
-      const key = host === "wiki" ? "LCW" : "LCP";
+      const key = `${host === "wiki" ? "LCW" : "LCP"}${fixtureNamespace}`;
       const f = await fixtures(page.request, key);
       async function extra(title: string) {
         if (host === "wiki") {
