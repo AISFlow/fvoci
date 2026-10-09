@@ -156,6 +156,8 @@ function runRaw(oldText: string, newText: string) {
     writeFileSync(newPath, newText);
     const py = capture("python3", [PY, oldPath, newPath, "--report", pyReport]);
     const ts = capture(process.execPath, [TS, oldPath, newPath, "--report", tsReport]);
+    expect(py.status).not.toBeNull();
+    expect(ts.status).not.toBeNull();
     expect(ts.status).toBe(py.status);
     expect(ts.stdout).toBe(py.stdout);
     expect(ts.stderr).toBe(py.stderr);
