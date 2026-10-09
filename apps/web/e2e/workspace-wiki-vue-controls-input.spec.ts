@@ -1,5 +1,6 @@
-import { readFileSync, writeFileSync } from "node:fs";
-import { expect, type Page, test } from "@playwright/test";
+import { spawn } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { expect, type Browser, type Page, test } from "@playwright/test";
 import { readJson, flowSchemas, createE2eUser } from "./helpers";
 import {
   admin,
@@ -17,7 +18,86 @@ import {
   type TiptapNode,
 } from "./workspace-wiki-vue-editor";
 
-test.beforeAll(async ({ browser, baseURL }) => setupInstance(browser, baseURL));
+function runDirectory(): string {
+  return process.env.FVOCI_E2E_RESULT_DIR ?? "/tmp";
+}
+
+// Login allows 10 attempts per account and 30 per address in five minutes.
+// Later repeats in this worker reuse the first admin session.
+function adminStatePath(): string {
+  return `${runDirectory()}/wiki-input-admin-${String(process.pid)}.json`;
+}
+
+// The file's workers start together. Hold the lock across instance setup so
+// only one of them submits the setup form.
+function acquireSetupLock(lockPath: string): Promise<() => Promise<void>> {
+  const child = spawn("flock", ["-x", lockPath, "sh", "-c", "printf ready; cat"], {
+    stdio: ["pipe", "pipe", "inherit"],
+  });
+  const stdout = child.stdout;
+  const stdin = child.stdin;
+  stdout.setEncoding("utf8");
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (error: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(error);
+    };
+    child.once("error", fail);
+    let text = "";
+    stdout.on("data", (chunk: string) => {
+      text += chunk;
+      if (settled || !text.includes("ready")) {
+        return;
+      }
+      settled = true;
+      resolve(() => {
+        stdin.end();
+        return new Promise<void>((done, stop) => {
+          child.once("exit", () => {
+            done();
+          });
+          child.once("error", stop);
+        });
+      });
+    });
+    child.once("exit", (code) => {
+      fail(new Error(`setup lock exited before ready: ${String(code)}`));
+    });
+  });
+}
+
+test.beforeAll(async ({ browser, baseURL }) => {
+  const release = await acquireSetupLock(`${runDirectory()}/wiki-input-setup.lock`);
+  try {
+    await setupInstance(browser, baseURL);
+  } finally {
+    await release();
+  }
+});
+
+async function openAdmin(browser: Browser, baseURL: string | undefined) {
+  const statePath = adminStatePath();
+  if (existsSync(statePath)) {
+    const context = await browser.newContext({
+      baseURL,
+      storageState: statePath,
+      permissions: ["clipboard-read", "clipboard-write"],
+    });
+    const page = await context.newPage();
+    await page.goto("/");
+    await expect(page.getByRole("button", { name: "로그아웃", exact: true })).toBeVisible();
+    return { context, page };
+  }
+  const signed = await newSignedInPage(browser, baseURL, admin, {
+    permissions: ["clipboard-read", "clipboard-write"],
+  });
+  await signed.context.storageState({ path: statePath });
+  return signed;
+}
 
 const paragraph = (text: string) => ({ type: "paragraph", content: [{ type: "text", text }] });
 const table = {
@@ -240,7 +320,7 @@ test("file drop keeps multi-file order and moving anchors, clipboard paste persi
   baseURL,
 }, testInfo) => {
   const who = {
-    email: "vue-input-peer@example.com",
+    email: `vue-input-peer-${String(testInfo.workerIndex)}-${String(testInfo.repeatEachIndex)}@example.com`,
     password: "peerpass1",
     givenName: "파일 동료",
   };
@@ -248,9 +328,7 @@ test("file drop keeps multi-file order and moving anchors, clipboard paste persi
     workspaceSlug: admin.workspaceSlug,
     membershipRole: "member",
   });
-  const a = await newSignedInPage(browser, baseURL, admin, {
-    permissions: ["clipboard-read", "clipboard-write"],
-  });
+  const a = await openAdmin(browser, baseURL);
   const b = await newSignedInPage(browser, baseURL, who);
   const anonymous = await browser.newContext({ baseURL });
   try {
