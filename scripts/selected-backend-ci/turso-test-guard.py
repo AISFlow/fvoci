@@ -582,7 +582,8 @@ def run_primary(checkout_sha, inputs):
     if os.environ.get("FVOCI_DATABASE_BACKEND") != "libsql-remote":
         reject("BACKEND_SELECTOR_REQUIRED")
     settings = {"FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE": os.environ.get("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "")}
-    credentials = {"FVOCI_TEST_TURSO_DATABASE_URL": os.environ.get("FVOCI_LIBSQL_URL", ""), "FVOCI_TEST_TURSO_AUTH_TOKEN": os.environ.get("FVOCI_LIBSQL_AUTH_TOKEN", "")}
+    # The non-UI consume step publishes the test pair, not product FVOCI_LIBSQL_*.
+    credentials = {"FVOCI_TEST_TURSO_DATABASE_URL": os.environ.get("FVOCI_TEST_TURSO_DATABASE_URL", ""), "FVOCI_TEST_TURSO_AUTH_TOKEN": os.environ.get("FVOCI_TEST_TURSO_AUTH_TOKEN", "")}
     validate_target(inputs, settings, credentials)
     # Inventory/reset bind the full maintained freeze receipt before/after
     # their one child. Original connection/migration binding and parsers stay intact.
@@ -602,7 +603,15 @@ def run_primary(checkout_sha, inputs):
     child_env = {key: os.environ[key] for key in (
         "PATH", "LD_LIBRARY_PATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "TZ"
     ) if key in os.environ}
-    child_env.update({"FVOCI_DATABASE_BACKEND": "libsql-remote", "FVOCI_LIBSQL_URL": credentials["FVOCI_TEST_TURSO_DATABASE_URL"], "FVOCI_LIBSQL_AUTH_TOKEN": credentials["FVOCI_TEST_TURSO_AUTH_TOKEN"]})
+    child_env["FVOCI_DATABASE_BACKEND"] = "libsql-remote"
+    # Connection, migration, and inventory still open DatabaseSettings, which
+    # reads product names. Reset must not see those names.
+    if phase == "reset":
+        child_env["FVOCI_TEST_TURSO_DATABASE_URL"] = credentials["FVOCI_TEST_TURSO_DATABASE_URL"]
+        child_env["FVOCI_TEST_TURSO_AUTH_TOKEN"] = credentials["FVOCI_TEST_TURSO_AUTH_TOKEN"]
+    else:
+        child_env["FVOCI_LIBSQL_URL"] = credentials["FVOCI_TEST_TURSO_DATABASE_URL"]
+        child_env["FVOCI_LIBSQL_AUTH_TOKEN"] = credentials["FVOCI_TEST_TURSO_AUTH_TOKEN"]
     if phase == "connection":
         child_env["FVOCI_TEST_TURSO_CONNECTION_SELECTED"] = "1"
         test_name = TEST_NAME

@@ -63,8 +63,10 @@ present, or the test pair is missing, reset refuses before connect. The
 `turso-ui` job's final step still maps the same secrets to `FVOCI_LIBSQL_URL`
 and `FVOCI_LIBSQL_AUTH_TOKEN`, because that step starts the product server
 through `DatabaseSettings::from_env`. The product server does not read
-`FVOCI_TEST_TURSO_*`. Connection, migration, and inventory keep using
-`DatabaseSettings::from_env` inside their own selected tests.
+`FVOCI_TEST_TURSO_*`. The consume wrapper reads that test pair from the step.
+It forwards the values to connection, migration, and inventory children as
+`FVOCI_LIBSQL_*`, because those tests use `DatabaseSettings::from_env`. The
+reset child receives only the test pair.
 Reset allows one host, compared as the raw authority host with no case
 folding and no trailing-dot, port, or userinfo stripping:
 `fvoci-fvoci.aws-ap-northeast-1.turso.io`. The verification database is named
