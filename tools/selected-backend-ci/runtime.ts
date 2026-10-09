@@ -481,9 +481,13 @@ const runBoundary: RunBoundary = {
     }
   },
 };
-export async function run(output: string, boundary: RunBoundary = runBoundary): Promise<number> {
+export async function run(
+  output: string,
+  boundary: RunBoundary = runBoundary,
+  expected: readonly [number, number] = [1000, 1000],
+): Promise<number> {
   assert.notEqual(process.env.GITHUB_JOB, "collaboration-build");
-  assertHandoffActor(output);
+  assertHandoffActor(output, expected);
   const owner = boundary.identity("run", output),
     before = read(join(output, "before.json")) as Inputs;
   assert.ok(deepEquals(read(join(output, "after.json")), before));
@@ -717,7 +721,10 @@ export async function run(output: string, boundary: RunBoundary = runBoundary): 
   return code;
 }
 
-export function ownershipReturn(output: string): void {
+export function ownershipReturn(
+  output: string,
+  expected: readonly [number, number] = [1000, 1000],
+): void {
   const diagnostic: Record<string, unknown> = {
     schema: 1,
     phase: "identity",
@@ -730,9 +737,9 @@ export function ownershipReturn(output: string): void {
   diagnostic.lanes = lanes;
   try {
     assert.equal(process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci", "github-ci");
+    assertHandoffActor(output, expected);
     const owner = identity("run", output);
     diagnostic.phase = "current-source";
-    assertHandoffActor(output);
     assert.equal(process.env.GITHUB_JOB, "collaboration-flow");
     const before = read(join(output, "before.json")) as Inputs;
     assert.equal(before.head, env("GITHUB_SHA"));
