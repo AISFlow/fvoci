@@ -1,5 +1,13 @@
-import { readFileSync, writeFileSync } from "node:fs";
-import { expect, type Page, test } from "@playwright/test";
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { expect, type Browser, type Page, type TestInfo, test } from "@playwright/test";
 import { readJson, flowSchemas, createE2eUser } from "./helpers";
 import {
   admin,
@@ -17,7 +25,79 @@ import {
   type TiptapNode,
 } from "./workspace-wiki-vue-editor";
 
-test.beforeAll(async ({ browser, baseURL }) => setupInstance(browser, baseURL));
+function runDirectory(): string {
+  return process.env.FVOCI_E2E_RESULT_DIR ?? "/tmp";
+}
+
+// Clock reading for this worker process. The next run is a new process, so
+// its peer addresses do not collide with rows left in the same database.
+const peerRunStartedAt = String(Date.now());
+
+function peerEmail(testInfo: TestInfo): string {
+  const testId = testInfo.testId.toLowerCase().replace(/[^a-z0-9-]+/g, "");
+  return `vue-input-peer-${peerRunStartedAt}-${testId}-${String(testInfo.workerIndex)}-${String(testInfo.repeatEachIndex)}@example.com`;
+}
+
+// Login allows 10 attempts per account and 30 per address in five minutes.
+// Every repeat reuses the first admin session instead of signing in again.
+function adminStatePath(): string {
+  return `${runDirectory()}/wiki-input-admin.json`;
+}
+
+// Workers can start together, and a fresh worker must not sign in just to
+// rediscover an instance that already exists.
+async function ensureInstance(browser: Browser, baseURL: string | undefined): Promise<void> {
+  const marker = `${runDirectory()}/wiki-input-setup.done`;
+  if (existsSync(marker)) {
+    return;
+  }
+  const lockPath = `${runDirectory()}/wiki-input-setup.lock`;
+  let won = false;
+  try {
+    closeSync(openSync(lockPath, "wx"));
+    won = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+      throw error;
+    }
+  }
+  if (!won) {
+    await expect.poll(() => existsSync(marker)).toBe(true);
+    return;
+  }
+  try {
+    await setupInstance(browser, baseURL);
+    writeFileSync(marker, "ok");
+  } finally {
+    unlinkSync(lockPath);
+  }
+}
+
+test.beforeAll(async ({ browser, baseURL }) => {
+  await ensureInstance(browser, baseURL);
+});
+
+async function openAdmin(browser: Browser, baseURL: string | undefined) {
+  const statePath = adminStatePath();
+  if (existsSync(statePath)) {
+    const context = await browser.newContext({
+      baseURL,
+      storageState: statePath,
+      permissions: ["clipboard-read", "clipboard-write"],
+    });
+    const page = await context.newPage();
+    await page.goto("/");
+    await expect(page.getByRole("button", { name: "로그아웃", exact: true })).toBeVisible();
+    return { context, page };
+  }
+  const signed = await newSignedInPage(browser, baseURL, admin, {
+    permissions: ["clipboard-read", "clipboard-write"],
+  });
+  const temporary = `${statePath}.${String(process.pid)}.tmp`;
+  await signed.context.storageState({ path: temporary });
+  renameSync(temporary, statePath);
+  return signed;
+}
 
 const paragraph = (text: string) => ({ type: "paragraph", content: [{ type: "text", text }] });
 const table = {
@@ -240,7 +320,7 @@ test("file drop keeps multi-file order and moving anchors, clipboard paste persi
   baseURL,
 }, testInfo) => {
   const who = {
-    email: "vue-input-peer@example.com",
+    email: peerEmail(testInfo),
     password: "peerpass1",
     givenName: "파일 동료",
   };
@@ -248,9 +328,7 @@ test("file drop keeps multi-file order and moving anchors, clipboard paste persi
     workspaceSlug: admin.workspaceSlug,
     membershipRole: "member",
   });
-  const a = await newSignedInPage(browser, baseURL, admin, {
-    permissions: ["clipboard-read", "clipboard-write"],
-  });
+  const a = await openAdmin(browser, baseURL);
   const b = await newSignedInPage(browser, baseURL, who);
   const anonymous = await browser.newContext({ baseURL });
   try {
@@ -309,7 +387,8 @@ test("file drop keeps multi-file order and moving anchors, clipboard paste persi
       );
     });
     // Click the visible text, rather than the centre of the full-width block.
-    // Observe PM and the browser agreeing before delivering native paste.
+    // Parent text is already "끝" while the caret is still at its start.
+    // Wait until PM and the browser both collapse at that paragraph's end.
     await blockAt(a.page, 3).click({ position: { x: 8, y: 8 } });
     await a.page.keyboard.press("End");
     await expect
@@ -320,9 +399,14 @@ test("file drop keeps multi-file order and moving anchors, clipboard paste persi
               editor: {
                 state: {
                   selection: {
+                    empty: boolean;
+                    from: number;
                     $from: {
+                      parentOffset: number;
+                      end: () => number;
                       parent: {
                         textContent: string;
+                        content: { size: number };
                       };
                     };
                   };
@@ -330,13 +414,30 @@ test("file drop keeps multi-file order and moving anchors, clipboard paste persi
               };
             }
           ).editor;
+          const selection = editor.state.selection;
+          const parent = selection.$from.parent;
+          const native = window.getSelection();
+          const anchor = native?.anchorNode ?? null;
+          const anchorText = anchor?.textContent ?? null;
+          const collapsedAtEnd =
+            selection.empty &&
+            selection.from === selection.$from.end() &&
+            selection.$from.parentOffset === parent.content.size &&
+            native !== null &&
+            native.isCollapsed &&
+            anchor !== null &&
+            anchor.nodeType === Node.TEXT_NODE &&
+            anchorText !== null &&
+            anchorText === parent.textContent &&
+            native.anchorOffset === anchorText.length;
           return {
-            parent: editor.state.selection.$from.parent.textContent,
-            native: window.getSelection()?.anchorNode?.textContent,
+            parent: parent.textContent,
+            native: anchorText,
+            collapsedAtEnd,
           };
         }),
       )
-      .toEqual({ parent: "끝", native: "끝" });
+      .toEqual({ parent: "끝", native: "끝", collapsedAtEnd: true });
     await a.page.keyboard.press("Control+V"); // real browser paste -> FileHandler
     expect(await a.page.evaluate(() => (window as InputWindow).fvociInputPaste)).toEqual({
       trusted: true,
