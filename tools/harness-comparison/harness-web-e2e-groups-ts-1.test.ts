@@ -60,7 +60,10 @@ test("legacy/typed normal fixtures retain all specs, workspace order and exact s
       ...Array.from({ length: 20 }, (_, index) => "new-" + String(index) + ".spec.ts"),
     ]);
     for (const [name, source] of Object.entries(files)) writeFileSync(join(e2e, name), source);
-    const options = { ...fixture.options, env: { FVOCI_GROUP_FIXTURE_DIR: e2e } };
+    const options = {
+      ...fixture.options,
+      env: { ...fixture.options.env, FVOCI_GROUP_FIXTURE_DIR: e2e },
+    };
     const original = legacy(["python3", script, "list-groups"], fixture.directory);
     const groups = original.stdout
       .trim()
@@ -137,7 +140,10 @@ test("legacy/typed missing pair, empty discovery and invalid shards are failures
       assert.notEqual(original.status, null);
       assert.throws(() => {
         assertWorkspacePair(
-          listTests({ ...fixture.options, env: { FVOCI_GROUP_FIXTURE_DIR: e2e } }),
+          listTests({
+            ...fixture.options,
+            env: { ...fixture.options.env, FVOCI_GROUP_FIXTURE_DIR: e2e },
+          }),
         );
       });
     } finally {
@@ -163,6 +169,7 @@ test("legacy timer lifecycle controls and typed actual discovery preserve four f
   const options = {
     config: join(root, "apps/web/playwright.config.ts"),
     cwd: join(root, "apps/web"),
+    env: { JEST_WORKER_ID: undefined },
     selection: ["v050-task-timer.spec.ts"],
   };
   const full = listTests(options);

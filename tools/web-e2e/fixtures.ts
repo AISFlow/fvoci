@@ -19,7 +19,10 @@ export function groupFixture(files: Readonly<Record<string, string>>): {
   }
   return {
     directory,
-    options: { config: fixtureConfig, env: { FVOCI_GROUP_FIXTURE_DIR: directory } },
+    options: {
+      config: fixtureConfig,
+      env: { FVOCI_GROUP_FIXTURE_DIR: directory, JEST_WORKER_ID: undefined },
+    },
     cleanup: () => {
       rmSync(directory, { recursive: true, force: true });
     },

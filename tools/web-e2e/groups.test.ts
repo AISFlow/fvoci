@@ -135,7 +135,7 @@ test("test_workspace_pair_required → dependency setup precedes independently s
         ["--bun", cli, "test", "--config", config, "--project=wiki", "--reporter=" + reporter],
         {
           cwd: repositoryRoot,
-          env: { ...process.env, FVOCI_GROUP_FIXTURE_DIR: directory },
+          env: { ...process.env, FVOCI_GROUP_FIXTURE_DIR: directory, JEST_WORKER_ID: undefined },
           encoding: "utf8",
         },
       );
