@@ -250,7 +250,13 @@ function localFixture(
     },
   };
 }
-const singleFieldRoot = "/tmp/fvoci-single-field-probe";
+// A fixed /tmp path makes two runner processes on one host share one bun copy.
+// 0o755 is required so the setpriv actor can traverse the directory and execute it.
+const singleFieldRoot = mkdtempSync(join(tmpdir(), "fvoci-single-field-"));
+chmodSync(singleFieldRoot, 0o755);
+process.on("exit", () => {
+  rmSync(singleFieldRoot, { recursive: true, force: true });
+});
 function singleFieldBun(): string {
   mkdirSync(singleFieldRoot, { recursive: true, mode: 0o755 });
   chmodSync(singleFieldRoot, 0o755);
