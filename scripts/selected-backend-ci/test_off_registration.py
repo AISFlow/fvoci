@@ -34,6 +34,32 @@ def functions(path, names):
     return scope
 
 
+def github_guard_expressions(source):
+    return {ast.dump(node.test) for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Assert)
+            and any(token in ast.unparse(node.test) for token in ('GITHUB_', 'exclusiveCIJob', 'currentCIJobConfirmed'))}
+
+
+def web_collaboration_lane_ids():
+    # collaboration-flow, then the web.yml lane jobs in file order. The build producer is not a lane.
+    lanes = re.findall(r'(?m)^  (collaboration-(?!build\b)[A-Za-z0-9-]+):$',
+                       (ROOT / '.github/workflows/web.yml').read_text())
+    return ('collaboration-flow', *lanes)
+
+
+def original_github_guards(name, before):
+    """One substitution: the runner's `== 'collaboration-flow'` stands for the six-id membership."""
+    found = github_guard_expressions(before)
+    equality = ast.dump(ast.parse("os.environ['GITHUB_JOB'] == 'collaboration-flow'", mode='eval').body)
+    if name != 'scripts/run-selected-backend-e2e.py' or equality not in found:
+        return found
+    ids = web_collaboration_lane_ids()
+    if len(ids) != 6 or len(set(ids)) != 6 or ids[0] != 'collaboration-flow' or 'collaboration-build' in ids:
+        raise AssertionError('web.yml collaboration lane jobs')
+    expression = "os.environ['GITHUB_JOB'] in (" + ', '.join(repr(job) for job in ids) + ')'
+    widened = ast.dump(ast.parse(expression, mode='eval').body)
+    return (found - {equality}) | {widened}
+
+
 class OnSpecPin(unittest.TestCase):
     spec = 'apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts'
 
@@ -310,10 +336,23 @@ class LocalAllocation(unittest.TestCase):
         for name in ('scripts/selected-backend-ci/current_binding.py','scripts/selected-backend-ci/restart_checkpoint.py','scripts/run-selected-backend-e2e.py'):
             before=subprocess.check_output(['git','show','6c18289e0e97d25c4a3c6b208fa91a1a33af3029:'+name],cwd=ROOT,text=True)
             after=(ROOT/name).read_text()
-            protected = lambda source: {ast.dump(n.test) for n in ast.walk(ast.parse(source)) if isinstance(n,ast.Assert)
-                                        and any(token in ast.unparse(n.test) for token in ('GITHUB_','exclusiveCIJob','currentCIJobConfirmed'))}
-            self.assertTrue(protected(before))
-            self.assertLessEqual(protected(before),protected(after), 'all original CI refusal expressions remain')
+            self.assertTrue(github_guard_expressions(before))
+            self.assertLessEqual(original_github_guards(name, before), github_guard_expressions(after),
+                                 'all original CI refusal expressions remain')
+
+    def test_runner_job_widening_rejects_an_extra_id_or_getenv(self):
+        name = 'scripts/run-selected-backend-e2e.py'
+        before = subprocess.check_output(['git', 'show', '6c18289e0e97d25c4a3c6b208fa91a1a33af3029:' + name], cwd=ROOT, text=True)
+        after = (ROOT / name).read_text()
+        required = original_github_guards(name, before)
+        extra = after.replace("'collaboration-sqlite-off')", "'collaboration-sqlite-off', 'not-a-lane')")
+        self.assertEqual(extra.count("'not-a-lane'"), 3)
+        with self.assertRaises(AssertionError):
+            self.assertLessEqual(required, github_guard_expressions(extra), 'all original CI refusal expressions remain')
+        switched = after.replace("os.environ['GITHUB_JOB']", "os.environ.get('GITHUB_JOB')")
+        self.assertGreater(switched.count("os.environ.get('GITHUB_JOB')"), after.count("os.environ.get('GITHUB_JOB')"))
+        with self.assertRaises(AssertionError):
+            self.assertLessEqual(required, github_guard_expressions(switched), 'all original CI refusal expressions remain')
 
 
 if __name__ == '__main__': unittest.main()
