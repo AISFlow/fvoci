@@ -178,12 +178,13 @@ function parseParameter(piece: string): Parameter | null {
   const nameStart = i;
   while (TOKEN.test(piece[i] ?? "")) i += 1;
   if (i === nameStart) return null;
-  const name = piece.slice(nameStart, i).toLowerCase();
+  const name = asciiFold(piece.slice(nameStart, i));
+  if (name === null) return null;
+  // Python's attribute token consumes trailing CFWS before the RFC 2231 '*'.
+  while (isWsp(piece[i])) i += 1;
   let section = 0;
   let extended = false;
-  let sawStar = false;
   if (piece[i] === "*") {
-    sawStar = true;
     i += 1;
     if ((piece[i] ?? "") >= "0" && (piece[i] ?? "") <= "9") {
       const sectionStart = i;
@@ -196,10 +197,8 @@ function parseParameter(piece: string): Parameter | null {
     } else {
       extended = true;
     }
-  }
-  if (isWsp(piece[i])) {
-    if (sawStar) return null;
-    while (isWsp(piece[i])) i += 1;
+    // `charset* =...` is not an extended parameter. `charset *=...` is.
+    if (isWsp(piece[i])) return null;
   }
   if (piece[i] !== "=") return null;
   i += 1;
@@ -214,7 +213,7 @@ function parseParameter(piece: string): Parameter | null {
     const first = raw.indexOf("'");
     const second = first < 0 ? -1 : raw.indexOf("'", first + 1);
     if (first >= 0 && second >= first + 1) {
-      charset = (raw.slice(0, first).toLowerCase() || "us-ascii");
+      charset = asciiFold(raw.slice(0, first)) || "us-ascii";
       value = raw.slice(second + 1);
     }
   }
@@ -417,6 +416,43 @@ const CORRECTED_SINGLE_BYTE = new Map<string, { decoder: string; undefinedBytes:
   ["windows_1252", { decoder: "windows-1252", undefinedBytes: new Set([0x81, 0x8d, 0x8f, 0x90, 0x9d]) }],
 ]);
 
+function asciiFold(value: string): string | null {
+  let out = "";
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i) ?? 0;
+    if (code > 0x7f) return null;
+    out += code >= 0x41 && code <= 0x5a ? String.fromCharCode(code + 0x20) : (value[i] ?? "");
+  }
+  return out;
+}
+
+function foldCharsetLabel(charset: string): string {
+  let start = 0;
+  let end = charset.length;
+  while (start < end && (charset.charCodeAt(start) === 0x20 || charset.charCodeAt(start) === 0x09)) start += 1;
+  while (end > start && (charset.charCodeAt(end - 1) === 0x20 || charset.charCodeAt(end - 1) === 0x09)) end -= 1;
+  const label = asciiFold(charset.slice(start, end));
+  if (label === null) throw new UnknownCharsetError(charset);
+  return label;
+}
+
+function decodeUtf8(bytes: Uint8Array): string {
+  return new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes);
+}
+
+function decodeUtf16(bytes: Uint8Array): string {
+  // Python's utf-16 consumes either BOM and does not emit U+FEFF. TextDecoder's
+  // utf-16 label only treats FF FE as a BOM, so a FE FF prefix was decoded as
+  // little-endian data (U+FFFE plus a swapped character).
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return new TextDecoder("utf-16be", { ignoreBOM: true }).decode(bytes.subarray(2));
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return new TextDecoder("utf-16le", { ignoreBOM: true }).decode(bytes.subarray(2));
+  }
+  return new TextDecoder("utf-16le", { ignoreBOM: true }).decode(bytes);
+}
+
 function decodeAscii(bytes: Uint8Array): string {
   let out = "";
   for (const byte of bytes) out += byte < 0x80 ? String.fromCharCode(byte) : "\uFFFD";
@@ -440,12 +476,16 @@ function decodeCorrected(decoder: string, bytes: Uint8Array, undefinedBytes: Rea
 }
 
 function decodeCharset(bytes: Uint8Array, charset: string): string {
-  const label = charset.trim().toLowerCase();
+  const label = foldCharsetLabel(charset);
   if (ASCII_LABELS.has(label)) return decodeAscii(bytes);
   if (LATIN1_LABELS.has(label)) return decodeLatin1(bytes);
-  if (UTF8_LABELS.has(label)) return new TextDecoder("utf-8").decode(bytes);
+  if (UTF8_LABELS.has(label)) return decodeUtf8(bytes);
   const corrected = CORRECTED_SINGLE_BYTE.get(label);
   if (corrected) return decodeCorrected(corrected.decoder, bytes, corrected.undefinedBytes);
+  if (label === "utf-16") return decodeUtf16(bytes);
+  if (label === "utf-16le" || label === "utf-16be") {
+    return new TextDecoder(label, { ignoreBOM: true }).decode(bytes);
+  }
   if (TEXT_DECODER_LABELS.has(label)) return new TextDecoder(label).decode(bytes);
   throw new UnknownCharsetError(charset);
 }

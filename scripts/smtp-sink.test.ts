@@ -131,12 +131,16 @@ async function exchange(port: number, payload: string): Promise<string[]> {
   const lines = new LineBuffer(socket);
   socket.end(payload);
   const replies: string[] = [];
-  for (;;) {
-    const line = await lines.read();
-    if (line === null) break;
-    replies.push(line);
+  try {
+    for (;;) {
+      const line = await lines.read();
+      if (line === null) break;
+      replies.push(line);
+    }
+    return replies;
+  } finally {
+    socket.destroy();
   }
-  return replies;
 }
 
 async function lockstep(port: number, steps: { send: string; reply: boolean }[]): Promise<string[]> {
@@ -153,7 +157,7 @@ async function lockstep(port: number, steps: { send: string; reply: boolean }[])
     replies.push(line);
   }
   socket.end();
-  await once(socket, "close");
+  if (!socket.closed) await once(socket, "close");
   return replies;
 }
 
@@ -710,6 +714,100 @@ test("an unknown RFC 2231 charset* is not acknowledged", async () => {
   expect(acknowledged(tsReplies)).toBe(false);
   expect(captured(py.capture)).toEqual([]);
   expect(captured(ts.capture)).toEqual([]);
+});
+
+test("a kelvin sign in a charset label is not a k", async () => {
+  const dir = await tempDir();
+  const { py, ts } = await pair(dir);
+  const message = [
+    "Subject: kelvin",
+    `Content-Type: text/plain; charset=${"\u212a"}oi8-r`,
+    "",
+    "hi",
+  ].join("\r\n");
+  const [pyReplies, tsReplies] = await Promise.all([
+    exchange(py.port, smtpData(message)),
+    exchange(ts.port, smtpData(message)),
+  ]);
+  expect(tsReplies).toEqual(pyReplies);
+  expect(acknowledged(pyReplies)).toBe(false);
+  expect(acknowledged(tsReplies)).toBe(false);
+  expect(captured(py.capture)).toEqual([]);
+  expect(captured(ts.capture)).toEqual([]);
+  const kept = ["Subject: kept", "Content-Type: text/plain; charset=KOI8-R", "", "hi"].join("\r\n");
+  const [pyKept, tsKept] = await Promise.all([
+    exchange(py.port, smtpData(kept)),
+    exchange(ts.port, smtpData(kept)),
+  ]);
+  expect(tsKept).toEqual(pyKept);
+  expect(acknowledged(pyKept)).toBe(true);
+  expect(captured(ts.capture).map(contract)).toEqual(captured(py.capture).map(contract));
+});
+
+test("whitespace before charset* is still an extended parameter", async () => {
+  const dir = await tempDir();
+  const { py, ts } = await pair(dir);
+  const unknown = [
+    "Subject: gap",
+    "Content-Type: text/plain; charset *=utf-8''not-a-charset",
+    "",
+    "hi",
+  ].join("\r\n");
+  const [pyReplies, tsReplies] = await Promise.all([
+    exchange(py.port, smtpData(unknown)),
+    exchange(ts.port, smtpData(unknown)),
+  ]);
+  expect(tsReplies).toEqual(pyReplies);
+  expect(acknowledged(pyReplies)).toBe(false);
+  expect(acknowledged(tsReplies)).toBe(false);
+  expect(captured(py.capture)).toEqual([]);
+  expect(captured(ts.capture)).toEqual([]);
+  const known = [
+    "Subject: gap-latin",
+    "Content-Type: text/plain; charset *=utf-8''iso-8859-1",
+    "Content-Transfer-Encoding: base64",
+    "",
+    Buffer.from([0x80, 0xe9]).toString("base64"),
+  ].join("\r\n");
+  const [pyKnown, tsKnown] = await Promise.all([
+    exchange(py.port, smtpData(known)),
+    exchange(ts.port, smtpData(known)),
+  ]);
+  expect(tsKnown).toEqual(pyKnown);
+  expect(acknowledged(pyKnown)).toBe(true);
+  expect(captured(ts.capture).map(contract)).toEqual(captured(py.capture).map(contract));
+  expect(captured(py.capture)[0]?.text).toBe("Subject: gap-latin\n\n\u0080é");
+});
+
+test("leading BOMs match Python for utf-8 and utf-16", async () => {
+  const dir = await tempDir();
+  const { py, ts } = await pair(dir);
+  const bodies: { subject: string; charset: string; bytes: number[]; text: string }[] = [
+    { subject: "U8", charset: "utf-8", bytes: [0xef, 0xbb, 0xbf, 0x41], text: "Subject: U8\n\n\uFEFFA" },
+    { subject: "U8A", charset: "u8", bytes: [0xef, 0xbb, 0xbf, 0x41], text: "Subject: U8A\n\n\uFEFFA" },
+    { subject: "CP", charset: "cp65001", bytes: [0xef, 0xbb, 0xbf, 0x41], text: "Subject: CP\n\n\uFEFFA" },
+    { subject: "LE", charset: "utf-16le", bytes: [0xff, 0xfe, 0x41, 0x00], text: "Subject: LE\n\n\uFEFFA" },
+    { subject: "BE", charset: "utf-16be", bytes: [0xfe, 0xff, 0x00, 0x41], text: "Subject: BE\n\n\uFEFFA" },
+    { subject: "BOM", charset: "utf-16", bytes: [0xfe, 0xff, 0x00, 0x41], text: "Subject: BOM\n\nA" },
+  ];
+  for (const body of bodies) {
+    const message = [
+      `Subject: ${body.subject}`,
+      `Content-Type: text/plain; charset=${body.charset}`,
+      "Content-Transfer-Encoding: base64",
+      "",
+      Buffer.from(body.bytes).toString("base64"),
+    ].join("\r\n");
+    const [pyReplies, tsReplies] = await Promise.all([
+      exchange(py.port, smtpData(message)),
+      exchange(ts.port, smtpData(message)),
+    ]);
+    expect(tsReplies).toEqual(pyReplies);
+    expect(acknowledged(pyReplies)).toBe(true);
+  }
+  expect(captured(ts.capture).map(contract)).toEqual(captured(py.capture).map(contract));
+  const texts = captured(py.capture).map((mail) => mail.text);
+  expect(texts).toEqual(bodies.map((body) => body.text));
 });
 
 test("charsets TextDecoder does not match are not acknowledged", async () => {
