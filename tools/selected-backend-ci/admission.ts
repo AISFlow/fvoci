@@ -133,7 +133,7 @@ export function identity(mode = "handoff", output?: string): string {
         "collaboration-sqlite-on",
         "collaboration-postgres-off",
         "collaboration-sqlite-off",
-      ].includes(process.env.GITHUB_JOB),
+      ].includes(env("GITHUB_JOB")),
     );
     assert.ok(
       process.env.FVOCI_WEB_BUILD_PHASE === undefined ||
