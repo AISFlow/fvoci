@@ -79,7 +79,7 @@ class LineBuffer {
       let raw: Buffer = this.buf.subarray(0, idx);
       this.buf = Buffer.from(this.buf.subarray(idx + 1));
       if (raw.length > 0 && raw[raw.length - 1] === 0x0d) raw = raw.subarray(0, raw.length - 1);
-      this.queue.push(new TextDecoder("utf-8", { fatal: false }).decode(raw));
+      this.queue.push(new TextDecoder("utf-8", { fatal: false, ignoreBOM: true }).decode(raw));
     }
     this.flush();
   }
@@ -141,7 +141,12 @@ function parseHeaders(block: string): Headers {
   for (const line of logical) {
     const colon = line.indexOf(":");
     if (colon < 0) continue;
-    const name = line.slice(0, colon).trim().toLowerCase();
+    const rawName = line.slice(0, colon);
+    for (const char of rawName) {
+      const code = char.charCodeAt(0);
+      if (code <= 0x20 || code >= 0x7f) reject("header name");
+    }
+    const name = mustFold(rawName);
     const value = line.slice(colon + 1).replace(/^[ \t]+/, "");
     if (!headers.has(name)) headers.set(name, value);
   }
@@ -659,14 +664,7 @@ function decodeEncodedWords(value: string): string {
       (match[2] ?? "").toLowerCase() === "b"
         ? Buffer.from(match[3] ?? "", "base64")
         : decodeQ(match[3] ?? "");
-    let decoded: string;
-    try {
-      decoded = decodeCharset(bytes, charset);
-    } catch (err) {
-      if (!(err instanceof UnknownCharsetError)) throw err;
-      // Python keeps the message and shows one U+FFFD per undecodable byte.
-      decoded = decodeAscii(bytes);
-    }
+    const decoded = decodeCharset(bytes, charset);
     if (!(previous && /^[ \t]*$/.test(gap))) out += gap;
     out += decoded;
     previous = true;

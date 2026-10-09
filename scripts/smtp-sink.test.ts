@@ -851,6 +851,48 @@ test("headers outside the supported grammar are not acknowledged", async () => {
   }
 });
 
+test("these messages get no 250 and an empty capture", async () => {
+  // Python still accepts every message below, so this test does not call it.
+  // Removing the Python sink must not drop these checks.
+  // =?euc-kr?...?= is a real euc-kr word. charset=utf 8 is the token "utf" plus junk.
+  // aGkx1 is stored by Python as the literal text aGkx1.
+  // A leading BOM or a space before ":" makes Python keep the base64 text "aGk="
+  // and still send 250, while recognizing the header would decode it to "hi".
+  const dir = await tempDir();
+  const ts = await start("ts", dir);
+  const messages = [
+    ["Subject: =?euc-kr?b?x9GxuQ==?=", "Content-Type: text/plain; charset=utf-8", "", "hi"].join("\r\n"),
+    [
+      "Subject: T",
+      `${"\uFEFF"}Content-Type: text/plain; charset=utf-8`,
+      "Content-Transfer-Encoding: base64",
+      "",
+      "aGk=",
+    ].join("\r\n"),
+    [
+      "Subject: T",
+      "Content-Type : text/plain; charset=utf-8",
+      "Content-Transfer-Encoding: base64",
+      "",
+      "aGk=",
+    ].join("\r\n"),
+    [
+      "Subject: T",
+      "Content-Type: text/plain; charset=utf-8",
+      "Content-Transfer-Encoding: base64",
+      "",
+      "aGkx1",
+    ].join("\r\n"),
+    ["Subject: T", "Content-Type: text/plain; charset=utf 8", "", "A"].join("\r\n"),
+  ];
+  for (const message of messages) {
+    const replies = await exchange(ts.port, smtpData(message));
+    expect(acknowledged(replies)).toBe(false);
+    expect(readFileSync(ts.capture, "utf8")).toBe("");
+    expect(captured(ts.capture)).toEqual([]);
+  }
+});
+
 test("charsets TextDecoder does not match are not acknowledged", async () => {
   const dir = await tempDir();
   const { py, ts } = await pair(dir);
