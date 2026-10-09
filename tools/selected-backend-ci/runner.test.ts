@@ -293,6 +293,10 @@ try {
     localAllocation("run");
     process.exit(0);
   }
+  if (mode === "actor-fixed") {
+    assertHandoffActor(output, [1000, 1000]);
+    process.exit(0);
+  }
   throw new Error("unknown probe mode");
 } catch (error) {
   process.stderr.write(error instanceof Error ? error.message : "thrown");
@@ -1080,6 +1084,24 @@ try {
     }
   });
 
+  test("single-field actor 1001:1000 is refused", () => {
+    const output = directory();
+    ownTree(output, "1001:1000");
+    try {
+      expectFixedActorRefusal(1001, 1000, "actor-fixed", output);
+    } finally {
+      ownTree(output, `${String(uid())}:${String(gid())}`);
+    }
+  });
+  test("single-field actor 1000:1001 is refused", () => {
+    const output = directory();
+    ownTree(output, "1000:1001");
+    try {
+      expectFixedActorRefusal(1000, 1001, "actor-fixed", output);
+    } finally {
+      ownTree(output, `${String(uid())}:${String(gid())}`);
+    }
+  });
   test("single-field run rejects a matching 1000 uid with a different gid", () => {
     const output = cohort().output;
     ownTree(output, "1000:1001");
