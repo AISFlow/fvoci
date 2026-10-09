@@ -207,30 +207,12 @@ function parseMime(data: string): Mime {
 }
 
 function decodeCharset(bytes: Uint8Array, charset: string): string {
-  const name = charset.trim().toLowerCase();
-  if (name === "ascii" || name === "us-ascii" || name === "ansi_x3.4-1968") {
-    let out = "";
-    for (const byte of bytes) out += byte < 0x80 ? String.fromCharCode(byte) : "\uFFFD";
-    return out;
+  try {
+    return new TextDecoder(charset.trim()).decode(bytes);
+  } catch (err) {
+    if (err instanceof RangeError) throw new UnknownCharsetError(charset);
+    throw err;
   }
-  if (
-    name === "iso-8859-1" ||
-    name === "latin1" ||
-    name === "latin-1" ||
-    name === "iso_8859-1" ||
-    name === "iso8859-1"
-  ) {
-    let out = "";
-    for (const byte of bytes) out += String.fromCharCode(byte);
-    return out;
-  }
-  if (name === "utf-8" || name === "utf8") {
-    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-  }
-  if (name === "windows-1252" || name === "cp1252") {
-    return new TextDecoder("windows-1252", { fatal: false }).decode(bytes);
-  }
-  throw new UnknownCharsetError(charset);
 }
 
 function decodeQuotedPrintable(input: string): Uint8Array {

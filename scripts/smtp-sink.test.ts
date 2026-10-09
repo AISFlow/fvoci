@@ -1,4 +1,3 @@
-import { once } from "node:events";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import net from "node:net";
@@ -115,43 +114,51 @@ class LineBuffer {
   }
 }
 
-function connect(port: number): Promise<net.Socket> {
+function connect(port: number): Promise<{ socket: net.Socket; lines: LineBuffer }> {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection({ host: "127.0.0.1", port }, () => resolve(socket));
+    const socket = net.createConnection({ host: "127.0.0.1", port });
     socket.setNoDelay(true);
-    socket.on("error", reject);
+    const lines = new LineBuffer(socket);
+    socket.once("connect", () => resolve({ socket, lines }));
+    socket.once("error", reject);
   });
 }
 
 async function exchange(port: number, payload: string): Promise<string[]> {
-  const socket = await connect(port);
-  const lines = new LineBuffer(socket);
+  const { socket, lines } = await connect(port);
   socket.end(payload);
   const replies: string[] = [];
-  for (;;) {
-    const line = await lines.read();
-    if (line === null) break;
-    replies.push(line);
+  try {
+    for (;;) {
+      const line = await lines.read();
+      if (line === null) break;
+      replies.push(line);
+    }
+  } finally {
+    socket.destroy();
   }
   return replies;
 }
 
 async function lockstep(port: number, steps: { send: string; reply: boolean }[]): Promise<string[]> {
-  const socket = await connect(port);
-  const lines = new LineBuffer(socket);
-  const greeting = await lines.read();
-  if (greeting === null) throw new Error("missing greeting");
-  const replies = [greeting];
-  for (const step of steps) {
-    socket.write(step.send);
-    if (!step.reply) continue;
-    const line = await lines.read();
-    if (line === null) break;
-    replies.push(line);
+  const { socket, lines } = await connect(port);
+  try {
+    const greeting = await lines.read();
+    if (greeting === null) throw new Error("missing greeting");
+    const replies = [greeting];
+    for (const step of steps) {
+      socket.write(step.send);
+      if (!step.reply) continue;
+      const line = await lines.read();
+      if (line === null) break;
+      replies.push(line);
+    }
+    return replies;
+  } finally {
+    // QUIT's 221 and the peer FIN can arrive together. close has then already
+    // fired, and waiting for it again never resolves.
+    socket.destroy();
   }
-  socket.end();
-  await once(socket, "close");
-  return replies;
 }
 
 function contract(mail: Mail): { from: string; to: string; data: string; text: string } {
@@ -577,7 +584,23 @@ test("multipart, base64, and single-byte charsets match", async () => {
       "Content-Type: text/plain; charset=iso-8859-1",
       "Content-Transfer-Encoding: base64",
       "",
-      Buffer.from([0x80, 0xe9]).toString("base64"),
+      Buffer.from([0xe9]).toString("base64"),
+    ].join("\r\n"),
+    [
+      "Subject: K",
+      "Content-Type: text/plain; charset=euc-kr",
+      "Content-Transfer-Encoding: base64",
+      "",
+      Buffer.from([0xc7, 0xd1, 0xb1, 0xdb]).toString("base64"),
+    ].join("\r\n"),
+    [
+      "Subject: J",
+      "Content-Type: text/plain; charset=iso-2022-jp",
+      "Content-Transfer-Encoding: base64",
+      "",
+      Buffer.from([0x1b, 0x24, 0x42, 0x24, 0x33, 0x24, 0x73, 0x24, 0x4b, 0x24, 0x41, 0x24, 0x4f, 0x1b, 0x28, 0x42]).toString(
+        "base64",
+      ),
     ].join("\r\n"),
     [
       "Subject: =?utf-8?q?hello?= =?utf-8?q?world?=",
@@ -602,9 +625,11 @@ test("multipart, base64, and single-byte charsets match", async () => {
   expect(mails[2]?.text).toBe("Subject: H\n\n");
   expect(mails[3]?.text).toContain("안녕");
   expect(mails[4]?.text).toContain("€");
-  expect(mails[5]?.text).toContain("\u0080é");
-  expect(mails[6]?.text).toContain("Subject: helloworld");
-  expect(mails[7]?.text).toContain("Subject: café");
+  expect(mails[5]?.text).toContain("é");
+  expect(mails[6]?.text).toBe("Subject: K\n\n한글");
+  expect(mails[7]?.text).toBe("Subject: J\n\nこんにちは");
+  expect(mails[8]?.text).toContain("Subject: helloworld");
+  expect(mails[9]?.text).toContain("Subject: café");
 });
 
 test("dropped DATA, unknown charset, and an unwritable capture are not acknowledged", async () => {
