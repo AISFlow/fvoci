@@ -11,6 +11,7 @@
   },
   "include": [
     "./*.ts",
+    "./acceptance-reporter.mts",
     "../eslint/*.ts",
     "../harness-comparison/harness-web-e2e-groups-ts-1.test.ts"
   ]

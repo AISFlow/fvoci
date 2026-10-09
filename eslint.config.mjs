@@ -6,8 +6,8 @@ import globals from "globals";
 import tseslint from "typescript-eslint";
 import vueParser from "vue-eslint-parser";
 
-const code = ["**/*.{js,mjs,cjs,ts,tsx,vue}"];
-const typed = ["**/*.{ts,tsx,vue}"];
+const code = ["**/*.{js,mjs,cjs,ts,mts,tsx,vue}"];
+const typed = ["**/*.{ts,mts,tsx,vue}"];
 const nodeRuntimeGlobals = [
   "Bun",
   "process",

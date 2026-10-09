@@ -16,7 +16,7 @@ import { fixtureTest, groupFixture, pairFiles } from "./fixtures";
 
 const require = createRequire(import.meta.url);
 const cli = resolve(dirname(require.resolve("playwright/package.json")), "cli.js");
-const reporter = resolve(import.meta.dir, "acceptance-reporter.ts");
+const reporter = resolve(import.meta.dir, "acceptance-reporter.mts");
 
 function withFixture(
   files: Record<string, string>,
