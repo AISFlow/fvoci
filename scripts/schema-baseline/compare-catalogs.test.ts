@@ -142,7 +142,9 @@ function withRole(cat: Catalog, ledgerColumns: string[], options: {
 
 function capture(command: string, args: string[]) {
   const proc = spawnSync(command, args, { encoding: "utf8" });
-  return { status: proc.status, stdout: proc.stdout ?? "", stderr: proc.stderr ?? "" };
+  const status = proc.status;
+  expect(status).not.toBeNull();
+  return { status, stdout: proc.stdout ?? "", stderr: proc.stderr ?? "" };
 }
 
 function runRaw(oldText: string, newText: string) {
@@ -156,8 +158,6 @@ function runRaw(oldText: string, newText: string) {
     writeFileSync(newPath, newText);
     const py = capture("python3", [PY, oldPath, newPath, "--report", pyReport]);
     const ts = capture(process.execPath, [TS, oldPath, newPath, "--report", tsReport]);
-    expect(py.status).not.toBeNull();
-    expect(ts.status).not.toBeNull();
     expect(ts.status).toBe(py.status);
     expect(ts.stdout).toBe(py.stdout);
     expect(ts.stderr).toBe(py.stderr);
@@ -583,5 +583,45 @@ test("missing file and malformed JSON fail closed with the same exit code", () =
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a BOM before a ledger acl is unparsable", () => {
+  const old = structuredClone(OLD_LEDGER);
+  const fresh = structuredClone(NEW_LEDGER);
+  const bomAcl = `\uFEFF${LEDGER_ACL}`;
+  ledgerTable(old).acl = bomAcl;
+  ledgerTable(fresh).acl = bomAcl;
+  const { rc, out } = run(old, fresh);
+  expect(rc).toBe(1);
+  expect(out).toContain("unparsable acl");
+  expect(out).toContain("\\ufeff");
+});
+
+test("list and dict object names fail closed", () => {
+  const cases: Array<[string, (cat: Catalog) => void, string]> = [
+    ["schema name", (cat) => { (cat.schemas[0] as { name: unknown }).name = ["fvoci"]; }, "list"],
+    ["table name", (cat) => { (cat.tables[1] as { name: unknown }).name = ["users"]; }, "list"],
+    ["function signature", (cat) => { cat.functions.push({ signature: ["f"] }); }, "list"],
+    ["schema dict name", (cat) => { (cat.schemas[0] as { name: unknown }).name = { name: "fvoci" }; }, "dict"],
+  ];
+  for (const [label, mutate, kind] of cases) {
+    const cat = structuredClone(OLD_LEDGER);
+    mutate(cat);
+    const dir = mkdtempSync(join(tmpdir(), "compare-catalogs-hash-"));
+    try {
+      const path = join(dir, "a.json");
+      writeFileSync(path, JSON.stringify(cat));
+      const py = capture("python3", [PY, path, path]);
+      const ts = capture(process.execPath, [TS, path, path]);
+      expect(py.status, label).toBe(1);
+      expect(ts.status, label).toBe(1);
+      expect(py.stdout, label).toBe("");
+      expect(ts.stdout, label).toBe("");
+      expect(py.stderr, label).toContain(`unhashable type: '${kind}'`);
+      expect(ts.stderr, label).toContain(`unhashable type: '${kind}'`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
