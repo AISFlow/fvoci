@@ -151,23 +151,35 @@ await test("a stream that decodes far past its declared size passes the metadata
   assert.equal(checkXlsxPackage(zip), "ok");
 });
 
-// Decoding the 512 MiB takes about 1.3 s under V8 (Chromium, the e2e browser)
-// and 10 s under Bun's JavaScriptCore, past bun test's 5 s default.
+// Observe completion directly: the same decode can outlast the client's
+// 20 s deadline under load. The separate timeout control tests that protection.
 await test(
   "negative control: left to finish, the worker decodes it and reports invalid, off the main thread",
   { timeout: 60_000 },
-  async () => {
-    const worker = threadWorker();
-    await worker.booted;
+  async (context) => {
+    const worker = new Worker(new URL(`data:text/javascript,${encodeURIComponent(BOOT)}`));
+    const exited = new Promise<number>((resolve) => worker.once("exit", resolve));
     let ticks = 0;
-    const interval = setInterval(() => (ticks += 1), 1);
+    let interval: ReturnType<typeof setInterval> | undefined;
     try {
-      const opened = await openXlsxInWorker(await hostileStream(), { createWorker: () => worker });
-      assert.equal(opened.status, "invalid");
+      assert.deepEqual(await once(worker, "message", { signal: context.signal }), ["booted"]);
+      const bytes = await hostileStream();
+      interval = setInterval(() => (ticks += 1), 1);
+      const opened = once(worker, "message", { signal: context.signal });
+      worker.postMessage({ type: "open", bytes } satisfies XlsxWorkerRequest, [
+        bytes.buffer as ArrayBuffer,
+      ]);
+      assert.deepEqual(await opened, [{ type: "opened", status: "invalid" }]);
       // This thread's timers kept firing while the worker decoded.
       assert.ok(ticks > 0);
     } finally {
       clearInterval(interval);
+      try {
+        await worker.terminate();
+        await exited;
+      } finally {
+        worker.removeAllListeners();
+      }
     }
   },
 );
