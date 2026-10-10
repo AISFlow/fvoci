@@ -2,7 +2,7 @@
 
 Compares two PostgreSQL catalog dumps. The ledger table's own columns, constraints, indexes, and rows are the only allowed difference, and only when the old side is the retired `(version, applied_at)` shape and the new side is contiguous `fvoci-postgres-060` receipts. Ledger ACLs, RLS, triggers, policies, column ACLs, and the app role's identity and grants stay strict. Exit 0 only when no semantic difference remains. Callers read that status and the markdown report on stdout and `--report`.
 
-Where a comparison finishes, the report bytes match `compare-catalogs.py`. An integer token of more than 4300 digits is rejected at parse on both sides (exit 1, no report), the same limit as CPython's default `sys.get_int_max_str_digits()`. The rows below are the remaining caller-visible differences. Some exit 1 here while Python exits 0. Others keep the same status with a different diagnostic.
+Where a comparison finishes, the report bytes match `compare-catalogs.py`; the test checks them against outcomes captured once from it in `fixtures/compare-catalogs-python-oracle.json`. An integer token of more than 4300 digits is rejected at parse on both sides (exit 1, no report), the same limit as CPython's default `sys.get_int_max_str_digits()`. The rows below are the remaining caller-visible differences. Some exit 1 here while Python exits 0. Others keep the same status with a different diagnostic.
 
 | Intent | Original | New | Why |
 | --- | --- | --- | --- |

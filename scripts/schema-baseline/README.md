@@ -21,11 +21,15 @@ and data moves between installs with a current-format native archive.
        FVOCI_SCHEMA_CATALOG_OUT=/path/a.json cargo test --features db-tests --test schema_baseline_integration postgres_catalog_dump
        (same for B)
 
-4. Compare: `python3 scripts/schema-baseline/compare-catalogs.py a.json b.json --report report.md`.
+4. Compare: `bun scripts/schema-baseline/compare-catalogs.ts a.json b.json --report report.md`.
    Only the ledger may differ. The comparison is catalog-fact based
    (`pg_get_constraintdef`, `pg_get_indexdef`, `pg_get_triggerdef`, policies,
    `format_type`, defaults, ACLs, function bodies/options, seeds, row counts);
-   raw DDL text is never compared.
+   raw DDL text is never compared. Exit 0 means no semantic difference.
+   `bun test scripts/schema-baseline/compare-catalogs.test.ts` checks the
+   comparison against outcomes captured once from the Python original
+   (`fixtures/compare-catalogs-python-oracle.json`); `compare-catalogs.md` lists
+   where the two intentionally differ.
 
 ## SQLite-family controls (no database)
 

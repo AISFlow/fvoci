@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,7 +8,15 @@ import { expect, test } from "bun:test";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TS = join(HERE, "compare-catalogs.ts");
-const PY = join(HERE, "compare-catalogs.py");
+// Fixed outcomes of the Python original. Each case was captured once by running
+// compare-catalogs.py (CPython 3.14.4) at commit
+// 431c7f91745edb56a21bd0643ff100739cd76295 on exactly the inputs this file
+// writes. A case is keyed by the SHA-256 of its argv and input files, so a
+// changed input finds no captured outcome and fails instead of comparing
+// against a stale one. "<DIR>" stands for the per-case temporary directory.
+// report is null when no report file was written and true when the report
+// file bytes equal stdout.
+const ORACLE_PATH = join(HERE, "fixtures", "compare-catalogs-python-oracle.json");
 const OWNER = "fvoci_owner";
 const APP = "fvoci_app_cmp";
 const NEW_COLS = ["version", "lineage", "sql_sha256", "applied_at"];
@@ -140,33 +149,88 @@ function withRole(cat: Catalog, ledgerColumns: string[], options: {
   return next;
 }
 
-function capture(command: string, args: string[]) {
-  const proc = spawnSync(command, args, { encoding: "utf8" });
-  const status = proc.status;
-  expect(status).not.toBeNull();
-  return { status, stdout: proc.stdout ?? "", stderr: proc.stderr ?? "" };
+type Outcome = { status: number; stdout: string; stderr: string; report: string | true | null };
+type Files = Record<string, string | Uint8Array>;
+type OracleFile = { source: string; cases: Record<string, Outcome & { label: string }> };
+
+const ORACLE = JSON.parse(readFileSync(ORACLE_PATH, "utf8")) as OracleFile;
+const usedCases = new Set<string>();
+let currentLabel = "";
+let labelCount = 0;
+
+function caseTest(name: string, body: () => void) {
+  test(name, () => {
+    currentLabel = name;
+    labelCount = 0;
+    body();
+  });
 }
 
-function runRaw(oldText: string, newText: string) {
+function caseKey(args: string[], files: Files) {
+  const hash = createHash("sha256");
+  hash.update(JSON.stringify(args));
+  for (const name of Object.keys(files).sort()) {
+    hash.update(`\0${name}\0`);
+    hash.update(files[name]);
+  }
+  return hash.digest("hex");
+}
+
+function expectedFor(args: string[], files: Files): Outcome {
+  const key = caseKey(args, files);
+  const found: (Outcome & { label: string }) | undefined = ORACLE.cases[key];
+  if (!found) throw new Error(`no captured compare-catalogs.py outcome for ${currentLabel} #${String(labelCount)} (${key})`);
+  usedCases.add(key);
+  return { status: found.status, stdout: found.stdout, stderr: found.stderr, report: found.report };
+}
+
+function decode(bytes: Uint8Array) {
+  const text = Buffer.from(bytes).toString("utf8");
+  expect(Buffer.from(text, "utf8").equals(Buffer.from(bytes))).toBe(true);
+  return text;
+}
+
+// Runs compare-catalogs.ts with args in which "<DIR>" names a fresh directory
+// holding files, and returns its outcome beside the captured Python outcome.
+function invoke(files: Files, args: string[]) {
+  labelCount += 1;
   const dir = mkdtempSync(join(tmpdir(), "compare-catalogs-"));
   try {
-    const oldPath = join(dir, "a.json");
-    const newPath = join(dir, "b.json");
-    const pyReport = join(dir, "py.md");
-    const tsReport = join(dir, "ts.md");
-    writeFileSync(oldPath, oldText);
-    writeFileSync(newPath, newText);
-    const py = capture("python3", [PY, oldPath, newPath, "--report", pyReport]);
-    const ts = capture(process.execPath, [TS, oldPath, newPath, "--report", tsReport]);
-    expect(ts.status).toBe(py.status);
-    expect(ts.stdout).toBe(py.stdout);
-    expect(ts.stderr).toBe(py.stderr);
-    expect(readFileSync(tsReport, "utf8")).toBe(readFileSync(pyReport, "utf8"));
-    expect(ts.stdout).toBe(readFileSync(tsReport, "utf8"));
-    return { rc: ts.status ?? -1, out: ts.stdout };
+    for (const [name, body] of Object.entries(files)) writeFileSync(join(dir, name), body);
+    const argv = args.map((arg) => arg.replaceAll("<DIR>", dir));
+    const reportAt = argv.indexOf("--report");
+    const reportPath = reportAt >= 0 ? argv[reportAt + 1] : undefined;
+    const py = expectedFor(args, files); // ORACLE-LOOKUP
+    const proc = spawnSync(process.execPath, [TS, ...argv]);
+    expect(proc.status).not.toBeNull();
+    const normalize = (text: string) => text.replaceAll(dir, "<DIR>");
+    const stdout = normalize(decode(proc.stdout));
+    const reportText = reportPath !== undefined && existsSync(reportPath) ? normalize(decode(readFileSync(reportPath))) : null;
+    const ts: Outcome = {
+      status: proc.status ?? -1,
+      stdout,
+      stderr: normalize(decode(proc.stderr)),
+      report: reportText !== null && reportText === stdout ? true : reportText,
+    };
+    return { ts, py };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+// The last line of a CPython traceback: the exception and its message.
+function exceptionLine(stderr: string) {
+  return `${stderr.trimEnd().split("\n").at(-1) ?? ""}\n`;
+}
+
+const REPORTED = ["<DIR>/a.json", "<DIR>/b.json", "--report", "<DIR>/report.md"];
+const UNREPORTED = ["<DIR>/a.json", "<DIR>/b.json"];
+
+function runRaw(oldText: string, newText: string) {
+  const { ts, py } = invoke({ "a.json": oldText, "b.json": newText }, REPORTED);
+  expect(ts).toEqual(py);
+  expect(ts.report).toBe(true);
+  return { rc: ts.status, out: ts.stdout };
 }
 
 function run(old: unknown, fresh: unknown) {
@@ -185,19 +249,7 @@ const OLD_ROLE = withRole(OLD_BARE, OLD_COLS);
 const NEW_ROLE = withRole(NEW_BARE, NEW_COLS);
 
 function diverge(old: unknown, fresh: unknown) {
-  const dir = mkdtempSync(join(tmpdir(), "compare-catalogs-sec-"));
-  try {
-    const oldPath = join(dir, "a.json");
-    const newPath = join(dir, "b.json");
-    writeFileSync(oldPath, JSON.stringify(old));
-    writeFileSync(newPath, JSON.stringify(fresh));
-    return {
-      py: capture("python3", [PY, oldPath, newPath]),
-      ts: capture(process.execPath, [TS, oldPath, newPath]),
-    };
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  return invoke({ "a.json": JSON.stringify(old), "b.json": JSON.stringify(fresh) }, UNREPORTED);
 }
 
 function ledgerTable(cat: Catalog) {
@@ -206,7 +258,7 @@ function ledgerTable(cat: Catalog) {
   return found;
 }
 
-test("ledger table and rows are the only declared exception", () => {
+caseTest("ledger table and rows are the only declared exception", () => {
   const { rc, out } = run(OLD_LEDGER, NEW_LEDGER);
   expect(rc).toBe(0);
   expect(out).toContain("RESULT: PASS");
@@ -215,7 +267,7 @@ test("ledger table and rows are the only declared exception", () => {
   expect(out).not.toContain("DIFF table schema_migrations");
 });
 
-test("a product column default difference fails", () => {
+caseTest("a product column default difference fails", () => {
   const fresh = structuredClone(NEW_LEDGER);
   (fresh.tables[1].columns as Column[])[1].default = "'x'::text";
   const { rc, out } = run(OLD_LEDGER, fresh);
@@ -224,7 +276,7 @@ test("a product column default difference fails", () => {
   expect(out).toContain("RESULT: FAIL");
 });
 
-test("a missing product constraint or index fails", () => {
+caseTest("a missing product constraint or index fails", () => {
   const cases = [
     ["constraints", { name: "users_email_unique", type: "u", def: "UNIQUE (email)", deferrable: false, deferred: false, validated: true }],
     ["indexes", { name: "users_email_idx", def: "CREATE INDEX users_email_idx ON fvoci.users USING btree (email)", unique: false, primary: false, valid: true }],
@@ -238,7 +290,7 @@ test("a missing product constraint or index fails", () => {
   }
 });
 
-test("malformed new ledger is a failure not an exception", () => {
+caseTest("malformed new ledger is a failure not an exception", () => {
   const cases: Array<[string, (cat: Catalog) => void]> = [
     ["wrong lineage", (cat) => { cat.ledger[3] = { ...cat.ledger[3], lineage: "fvoci-postgres-999" }; }],
     ["missing digest", (cat) => { cat.ledger[5] = { version: 6, lineage: "fvoci-postgres-060" }; }],
@@ -264,7 +316,7 @@ test("malformed new ledger is a failure not an exception", () => {
   expect(out).toContain("old receipt 1 carries a lineage");
 });
 
-test("a missing ledger table is reported not silently excepted", () => {
+caseTest("a missing ledger table is reported not silently excepted", () => {
   const fresh = structuredClone(NEW_LEDGER);
   fresh.tables = fresh.tables.filter((item) => item.name !== "schema_migrations");
   const { rc, out } = run(OLD_LEDGER, fresh);
@@ -272,7 +324,7 @@ test("a missing ledger table is reported not silently excepted", () => {
   expect(out).toContain("MISSING ledger table schema_migrations");
 });
 
-test("seed and column order differences fail", () => {
+caseTest("seed and column order differences fail", () => {
   const seeded = structuredClone(NEW_LEDGER);
   seeded.seeds.instance_settings_meta = [{ id: 1, revision: 1 }];
   let result = run(OLD_LEDGER, seeded);
@@ -286,7 +338,7 @@ test("seed and column order differences fail", () => {
   expect(result.out).toContain("COLUMN-ORDER table users");
 });
 
-test("role inclusive ledger select expansion passes", () => {
+caseTest("role inclusive ledger select expansion passes", () => {
   const { rc, out } = run(OLD_ROLE, NEW_ROLE);
   expect(rc).toBe(0);
   expect(out).toContain("RESULT: PASS");
@@ -294,7 +346,7 @@ test("role inclusive ledger select expansion passes", () => {
   expect(flagged).not.toContain("app_role");
 });
 
-test("a missing app_role or an unlabeled ledger acl fails closed", () => {
+caseTest("a missing app_role or an unlabeled ledger acl fails closed", () => {
   const elevated = withRole(OLD_BARE, OLD_COLS, { attrs: attributes({ superuser: true }) });
   let result = diverge(elevated, NEW_BARE);
   expect(result.py.status).toBe(0);
@@ -329,7 +381,7 @@ test("a missing app_role or an unlabeled ledger acl fails closed", () => {
   expect(result.ts.stdout).toContain("'arwdDxtm'");
 });
 
-test("unauthorized or incomplete ledger privileges fail", () => {
+caseTest("unauthorized or incomplete ledger privileges fail", () => {
   const cases: Record<string, Catalog> = {
     "new INSERT on ledger table": withRole(NEW_LEDGER, NEW_COLS, { extraTable: [tp("schema_migrations", "INSERT")] }),
     "new UPDATE on lineage column": withRole(NEW_LEDGER, NEW_COLS, { extraColumn: [cp("schema_migrations", "lineage", "UPDATE")] }),
@@ -360,7 +412,7 @@ test("unauthorized or incomplete ledger privileges fail", () => {
   expect(result.out).toContain("LEDGER grantor differs across sides");
 });
 
-test("non ledger grant differences still fail", () => {
+caseTest("non ledger grant differences still fail", () => {
   let fresh = withRole(NEW_LEDGER, NEW_COLS, { extraColumn: [cp("users", "email", "UPDATE")] });
   let result = run(OLD_ROLE, fresh);
   expect(result.rc).toBe(1);
@@ -398,7 +450,7 @@ test("non ledger grant differences still fail", () => {
   expect(result.out).toContain("DIFF app_role.schema_privileges");
 });
 
-test("role identity must match and stay unprivileged", () => {
+caseTest("role identity must match and stay unprivileged", () => {
   let fresh = withRole(NEW_LEDGER, NEW_COLS, { role: "other_app" });
   let result = run(OLD_ROLE, fresh);
   expect(result.rc).toBe(1);
@@ -425,7 +477,7 @@ test("role identity must match and stay unprivileged", () => {
   expect(result.out).toContain("role absent");
 });
 
-test("missing or unexpected metadata fails", () => {
+caseTest("missing or unexpected metadata fails", () => {
   let fresh = structuredClone(NEW_ROLE);
   delete fresh.app_role?.attributes;
   let result = run(OLD_ROLE, fresh);
@@ -460,7 +512,7 @@ test("missing or unexpected metadata fails", () => {
   expect(result.out).toContain("attributes incomplete");
 });
 
-test("ledger acl authority is never discarded", () => {
+caseTest("ledger acl authority is never discarded", () => {
   const cases: Array<[string, string | null, string]> = [
     ["foreign grantee read", acl([`${OWNER}=arwdDxtm/${OWNER}`, `${APP}=r/${OWNER}`, `other=r/${OWNER}`]), "foreign grantee 'other'"],
     ["another recipient write", acl([`${OWNER}=arwdDxtm/${OWNER}`, `${APP}=r/${OWNER}`, `other=w/${OWNER}`]), "foreign grantee 'other'"],
@@ -526,7 +578,7 @@ test("ledger acl authority is never discarded", () => {
   expect(result.out).toContain("LEDGER TABLE policies differs");
 });
 
-test("product table, column type, and index or constraint definition differences fail", () => {
+caseTest("product table, column type, and index or constraint definition differences fail", () => {
   const missing = structuredClone(NEW_LEDGER);
   missing.tables = missing.tables.filter((item) => item.name !== "users");
   let result = run(OLD_LEDGER, missing);
@@ -555,7 +607,7 @@ test("product table, column type, and index or constraint definition differences
   expect(result.out).toContain("DIFF table users.constraints users_email_unique.def");
 });
 
-test("integer magnitude, decimal one, quoted text, and CRLF catalogs keep the same verdict", () => {
+caseTest("integer magnitude, decimal one, quoted text, and CRLF catalogs keep the same verdict", () => {
   const oldText = JSON.stringify(OLD_LEDGER).replace('"extensions":["plpgsql"]', '"extensions":[9223372036854775807]');
   const newText = JSON.stringify(NEW_LEDGER).replace('"extensions":["plpgsql"]', '"extensions":[9223372036854775806]');
   let result = runRaw(oldText, newText);
@@ -577,97 +629,68 @@ test("integer magnitude, decimal one, quoted text, and CRLF catalogs keep the sa
   expect(result.out).toContain("RESULT: FAIL");
 });
 
-test("duplicate object names fail closed before a report", () => {
-  const dir = mkdtempSync(join(tmpdir(), "compare-catalogs-dup-"));
-  try {
-    const cat = structuredClone(OLD_LEDGER);
-    cat.tables.push(structuredClone(cat.tables[1]));
-    const path = join(dir, "a.json");
-    const report = join(dir, "report.md");
-    writeFileSync(path, JSON.stringify(cat));
-    const py = capture("python3", [PY, path, path, "--report", report]);
-    const ts = capture(process.execPath, [TS, path, path, "--report", report]);
-    expect(py.status).toBe(1);
-    expect(ts.status).toBe(py.status);
-    expect(ts.stdout).toBe(py.stdout);
-    expect(ts.stderr).toBe(py.stderr);
-    expect(ts.stderr).toBe("duplicate name 'users'\n");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+
+caseTest("duplicate object names fail closed before a report", () => {
+  const cat = structuredClone(OLD_LEDGER);
+  cat.tables.push(structuredClone(cat.tables[1]));
+  const { ts, py } = invoke({ "a.json": JSON.stringify(cat) }, ["<DIR>/a.json", "<DIR>/a.json", "--report", "<DIR>/report.md"]);
+  expect(py.status).toBe(1);
+  expect(ts).toEqual(py);
+  expect(ts.stderr).toBe("duplicate name 'users'\n");
 });
 
-test("documented usage and help match except the program name", () => {
+caseTest("documented usage and help match except the program name", () => {
   const cases = [[], ["only"], ["a", "b", "--report"], ["a", "b", "--nope"], ["-h"], ["--help"], ["-h", "extra"], ["a", "--nope"]];
   for (const args of cases) {
-    const py = capture("python3", [PY, ...args]);
-    const ts = capture(process.execPath, [TS, ...args]);
+    const { ts, py } = invoke({}, args);
     expect(ts.status, args.join(" ")).toBe(py.status);
     expect(normalizeProg(ts.stdout), args.join(" ")).toBe(normalizeProg(py.stdout));
     expect(normalizeProg(ts.stderr), args.join(" ")).toBe(normalizeProg(py.stderr));
+    expect(ts.report, args.join(" ")).toBeNull();
   }
 });
 
-test("missing file and malformed JSON fail closed with the same exit code", () => {
-  const dir = mkdtempSync(join(tmpdir(), "compare-catalogs-bad-"));
-  try {
-    const missingPy = capture("python3", [PY, join(dir, "missing-a.json"), join(dir, "missing-b.json"), "--report", join(dir, "missing.md")]);
-    const missingTs = capture(process.execPath, [TS, join(dir, "missing-a.json"), join(dir, "missing-b.json"), "--report", join(dir, "missing.md")]);
-    expect(missingPy.status).toBe(1);
-    expect(missingTs.status).toBe(1);
-    expect(missingPy.stdout).toBe("");
-    expect(missingTs.stdout).toBe("");
-    expect(missingPy.stderr).toContain("No such file or directory");
-    expect(missingTs.stderr).toContain("No such file or directory");
-    for (const body of ["", "{", '{"a":1,}', Buffer.from([0xff])]) {
-      const path = join(dir, "bad.json");
-      writeFileSync(path, body);
-      const good = join(dir, "good.json");
-      writeFileSync(good, "{}");
-      const report = join(dir, "bad.md");
-      const py = capture("python3", [PY, good, path, "--report", report]);
-      const ts = capture(process.execPath, [TS, good, path, "--report", report]);
-      expect(py.status, body).toBe(1);
-      expect(ts.status, body).toBe(1);
-      expect(py.stdout, body).toBe("");
-      expect(ts.stdout, body).toBe("");
-      expect(py.stderr.length, body).toBeGreaterThan(0);
-      expect(ts.stderr.length, body).toBeGreaterThan(0);
+caseTest("missing file and malformed JSON fail closed with the same exit code", () => {
+  const missing = invoke({}, ["<DIR>/missing-a.json", "<DIR>/missing-b.json", "--report", "<DIR>/missing.md"]);
+  for (const outcome of [missing.py, missing.ts]) {
+    expect(outcome.status).toBe(1);
+    expect(outcome.stdout).toBe("");
+    expect(outcome.stderr).toContain("No such file or directory");
+    expect(outcome.report).toBeNull();
+  }
+  expect(missing.ts.stderr).toBe(exceptionLine(missing.py.stderr));
+  for (const body of ["", "{", '{"a":1,}', Buffer.from([0xff])]) {
+    const { ts, py } = invoke({ "good.json": "{}", "bad.json": body }, ["<DIR>/good.json", "<DIR>/bad.json", "--report", "<DIR>/bad.md"]);
+    for (const outcome of [py, ts]) {
+      expect(outcome.status, String(body)).toBe(1);
+      expect(outcome.stdout, String(body)).toBe("");
+      expect(outcome.stderr.length, String(body)).toBeGreaterThan(0);
+      expect(outcome.report, String(body)).toBeNull();
     }
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
+    // compare-catalogs.md, "Input and usage failures": the short diagnosis keeps the exception class.
+    const pyClass = exceptionLine(py.stderr).split(":")[0];
+    const tsClass = ts.stderr.split(":")[0];
+    expect(pyClass.split(".").at(-1), String(body)).toBe(tsClass);
   }
 });
 
-test("a ledger integer longer than 4300 digits fails closed", () => {
+caseTest("a ledger integer longer than 4300 digits fails closed", () => {
   const baseOld = JSON.stringify(OLD_LEDGER);
   const baseNew = JSON.stringify(NEW_LEDGER);
   const inject = (digits: string) => baseOld.replace('"ledger":[{"version":1}', `"ledger":[{"version":${digits}}`);
   const accepted = runRaw(inject("8".repeat(4300)), baseNew);
   expect(accepted.rc).toBe(0);
   expect(accepted.out).toContain("RESULT: PASS");
-  const dir = mkdtempSync(join(tmpdir(), "compare-catalogs-int-"));
-  try {
-    const oldPath = join(dir, "a.json");
-    const newPath = join(dir, "b.json");
-    writeFileSync(oldPath, inject("8".repeat(4301)));
-    writeFileSync(newPath, baseNew);
-    const py = capture("python3", [PY, oldPath, newPath]);
-    const ts = capture(process.execPath, [TS, oldPath, newPath]);
-    expect(py.status).toBe(1);
-    expect(ts.status).toBe(1);
-    expect(py.stdout).toBe("");
-    expect(ts.stdout).toBe("");
-    expect(py.stderr).toContain("Exceeds the limit (4300 digits)");
-    expect(ts.stderr).toContain("Exceeds the limit (4300 digits)");
-    expect(py.stderr).toContain("value has 4301 digits");
-    expect(ts.stderr).toContain("value has 4301 digits");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
+  const { ts, py } = invoke({ "a.json": inject("8".repeat(4301)), "b.json": baseNew }, UNREPORTED);
+  for (const outcome of [py, ts]) {
+    expect(outcome.status).toBe(1);
+    expect(outcome.stdout).toBe("");
+    expect(outcome.stderr).toContain("Exceeds the limit (4300 digits)");
+    expect(outcome.stderr).toContain("value has 4301 digits");
   }
 });
 
-test("a BOM before a ledger acl is unparsable", () => {
+caseTest("a BOM before a ledger acl is unparsable", () => {
   const old = structuredClone(OLD_LEDGER);
   const fresh = structuredClone(NEW_LEDGER);
   const bomAcl = `\uFEFF${LEDGER_ACL}`;
@@ -679,7 +702,7 @@ test("a BOM before a ledger acl is unparsable", () => {
   expect(out).toContain("\\ufeff");
 });
 
-test("list and dict object names fail closed", () => {
+caseTest("list and dict object names fail closed", () => {
   const cases: Array<[string, (cat: Catalog) => void, string]> = [
     ["schema name", (cat) => { (cat.schemas[0] as { name: unknown }).name = ["fvoci"]; }, "list"],
     ["table name", (cat) => { (cat.tables[1] as { name: unknown }).name = ["users"]; }, "list"],
@@ -689,20 +712,15 @@ test("list and dict object names fail closed", () => {
   for (const [label, mutate, kind] of cases) {
     const cat = structuredClone(OLD_LEDGER);
     mutate(cat);
-    const dir = mkdtempSync(join(tmpdir(), "compare-catalogs-hash-"));
-    try {
-      const path = join(dir, "a.json");
-      writeFileSync(path, JSON.stringify(cat));
-      const py = capture("python3", [PY, path, path]);
-      const ts = capture(process.execPath, [TS, path, path]);
-      expect(py.status, label).toBe(1);
-      expect(ts.status, label).toBe(1);
-      expect(py.stdout, label).toBe("");
-      expect(ts.stdout, label).toBe("");
-      expect(py.stderr, label).toContain(`unhashable type: '${kind}'`);
-      expect(ts.stderr, label).toContain(`unhashable type: '${kind}'`);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
+    const { ts, py } = invoke({ "a.json": JSON.stringify(cat) }, ["<DIR>/a.json", "<DIR>/a.json"]);
+    for (const outcome of [py, ts]) {
+      expect(outcome.status, label).toBe(1);
+      expect(outcome.stdout, label).toBe("");
+      expect(outcome.stderr, label).toContain(`unhashable type: '${kind}'`);
     }
   }
+});
+
+test("every captured Python outcome is still exercised", () => {
+  expect(Object.keys(ORACLE.cases).filter((key) => !usedCases.has(key))).toEqual([]);
 });
