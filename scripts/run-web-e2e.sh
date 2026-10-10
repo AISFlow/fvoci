@@ -15,8 +15,9 @@ if [[ -n "${FVOCI_WEB_E2E_DRY_RUN:-}" ]]; then
   exit 1
 fi
 
-# CI matrix runs exactly eight browser shards; do not allow runtime overrides.
-CI_SHARD_COUNT=8
+# The CI browser shard count is tools/web-e2e/groups.ts's (read in
+# run_ci_shard); runtime overrides are refused.
+CI_SHARD_COUNT=""
 CI_SHARD=""
 SPEC_ARGS=()
 SELECTED_BACKENDS=false
@@ -63,7 +64,7 @@ while (($# > 0)); do
       break
       ;;
     --ci-shard-count)
-      echo "--ci-shard-count is not supported; CI uses a fixed shard count of ${CI_SHARD_COUNT}" >&2
+      echo "--ci-shard-count is not supported; CI uses the fixed shard count from tools/web-e2e/groups.ts" >&2
       exit 1
       ;;
     *)
@@ -153,7 +154,7 @@ require_prepared() {
   fi
 }
 
-build_current_artifacts() {
+prepare_sqlite_env() {
   local sqlite_env
   sqlite_env="$(mktemp "${TMPDIR:-/tmp}/fvoci-sqlite-env.XXXXXX")"
   if ! bash "$ROOT/scripts/prepare-sqlite-ci.sh" --env-file "$sqlite_env"; then
@@ -164,12 +165,73 @@ build_current_artifacts() {
   # shellcheck disable=SC1090
   source "$sqlite_env"
   rm -f "$sqlite_env"
-  if [[ "$CI_COMMITTED_API" == true ]]; then
-    verify_committed_api
+}
+
+# This script's one owner of each native build command, per feature profile:
+# - selected: the collaboration packet. tools/selected-backend-ci/handoff.ts
+#   qualify() requires features [api-schema, db-tests] on every server binary,
+#   so api-schema here is intentional. Always run under
+#   run-selected-backend-e2e.ts stage, which reads the JSON diagnostics.
+# - default: local/browser binaries: the fixture with db-tests only, server
+#   and migrate with default features. handoff.ts browserStage still repeats
+#   this profile for the browser packet (follow-up: take it from here).
+# Sets NATIVE_ARGV.
+native_build_argv() {
+  local profile="$1" stage="$2"
+  case "$profile/$stage" in
+    selected/main)
+      NATIVE_ARGV=(cargo build --locked --offline --features db-tests,api-schema
+        --bin fvoci-server --bin fvoci-migrate --bin fvoci-e2e-fixture) ;;
+    selected/lib)
+      NATIVE_ARGV=(cargo test --locked --offline --features db-tests,api-schema --lib --no-run) ;;
+    selected/install)
+      NATIVE_ARGV=(cargo test --locked --offline --features db-tests,api-schema
+        --test selected_install_lifetime --no-run) ;;
+    selected/engine | default/engine)
+      NATIVE_ARGV=(cargo build --locked --offline --manifest-path "$ROOT/crates/collab-engine/Cargo.toml"
+        --features worker --bin collab-engine) ;;
+    default/fixture)
+      NATIVE_ARGV=(cargo build --locked --offline --bin fvoci-e2e-fixture --features db-tests) ;;
+    default/server)
+      NATIVE_ARGV=(cargo build --locked --offline --bin fvoci-server --bin fvoci-migrate) ;;
+    *)
+      echo "unknown native build ${profile}/${stage}" >&2
+      return 1
+      ;;
+  esac
+  if [[ "$profile" == selected ]]; then NATIVE_ARGV+=(--message-format=json-render-diagnostics); fi
+}
+
+# run_native_stage LABEL PROFILE STAGE [WRAPPER...]: one native build stage;
+# the engine builds into its own target directory.
+run_native_stage() {
+  local label="$1" profile="$2" stage="$3" target="$CARGO_TARGET_DIR"
+  shift 3
+  native_build_argv "$profile" "$stage"
+  if [[ "$stage" == engine ]]; then target="$COLLAB_ENGINE_TARGET_DIR"; fi
+  CARGO_TARGET_DIR="$target" run_stage "$label" "$@" "${NATIVE_ARGV[@]}"
+}
+
+build_current_artifacts() {
+  if [[ "$SELECTED_PHASE" == consume ]]; then
+    # A verified-handoff consumer compiles nothing natively. Its workflow step
+    # already prepared and exported the SQLite prefix; handoff consume checks
+    # those exports and hashes the prefix against the producer's inputs.
+    if [[ -z "${SQLITE3_LIB_DIR:-}" || -z "${SQLITE3_INCLUDE_DIR:-}" ||
+      "${SQLITE3_STATIC:-}" != 1 || "${SQLITE3_NO_PKG_CONFIG:-}" != 1 ]]; then
+      echo "selected consumer requires the workflow-prepared SQLite environment" >&2
+      return 1
+    fi
   else
+    prepare_sqlite_env
+  fi
+  # Committed API outputs were already verified at entry, before any build.
+  if [[ "$CI_COMMITTED_API" != true ]]; then
     run_stage api-generation bash "$ROOT/scripts/generate-api.sh"
   fi
 
+  # Consumers still build dist: the collaboration packet carries no dist, and
+  # handoff consume requires this dist to equal the producer's asset hashes.
   cd "$ROOT/apps/web"
   run_stage web-build bun --bun run build
 
@@ -178,21 +240,17 @@ build_current_artifacts() {
   if [[ "$SELECTED_PHASE" == consume ]]; then
     run_stage selected-handoff-consume bun "$ROOT/tools/selected-backend-ci/handoff.ts" consume
   elif [[ "$SELECTED_BACKENDS" == true ]]; then
-    run_stage selected-input-before bun "$ROOT/scripts/run-selected-backend-e2e.ts" record-before --output "$FVOCI_SELECTED_CI_OUTPUT"
-    run_stage selected-main bun "$ROOT/scripts/run-selected-backend-e2e.ts" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name main -- \
-      cargo build --locked --offline --features db-tests,api-schema --bin fvoci-server --bin fvoci-migrate --bin fvoci-e2e-fixture --message-format=json-render-diagnostics
-    run_stage selected-lib bun "$ROOT/scripts/run-selected-backend-e2e.ts" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name lib -- \
-      cargo test --locked --offline --features db-tests,api-schema --lib --no-run --message-format=json-render-diagnostics
-    run_stage selected-install bun "$ROOT/scripts/run-selected-backend-e2e.ts" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name install -- \
-      cargo test --locked --offline --features db-tests,api-schema --test selected_install_lifetime --no-run --message-format=json-render-diagnostics
-    CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" run_stage selected-engine bun "$ROOT/scripts/run-selected-backend-e2e.ts" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name engine -- \
-      cargo build --locked --offline --manifest-path "$ROOT/crates/collab-engine/Cargo.toml" --features worker --bin collab-engine --message-format=json-render-diagnostics
-    run_stage selected-input-after bun "$ROOT/scripts/run-selected-backend-e2e.ts" record-after --output "$FVOCI_SELECTED_CI_OUTPUT"
+    local stage selected=(bun "$ROOT/scripts/run-selected-backend-e2e.ts")
+    run_stage selected-input-before "${selected[@]}" record-before --output "$FVOCI_SELECTED_CI_OUTPUT"
+    for stage in main lib install engine; do
+      run_native_stage "selected-${stage}" selected "$stage" \
+        "${selected[@]}" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name "$stage" --
+    done
+    run_stage selected-input-after "${selected[@]}" record-after --output "$FVOCI_SELECTED_CI_OUTPUT"
   else
-    run_stage fixture-build cargo build --locked --offline --bin fvoci-e2e-fixture --features db-tests
-    run_stage default-server-build cargo build --locked --offline --bin fvoci-server --bin fvoci-migrate
-    CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" run_stage worker-build cargo build --locked --offline \
-      --manifest-path "$ROOT/crates/collab-engine/Cargo.toml" --features worker --bin collab-engine
+    run_native_stage fixture-build default fixture
+    run_native_stage default-server-build default server
+    run_native_stage worker-build default engine
   fi
 }
 
@@ -200,7 +258,11 @@ run_ci_shard() {
   local shard_index="$1"
 
   if [[ -n "${FVOCI_WEB_E2E_SHARD_COUNT:-}" ]]; then
-    echo "FVOCI_WEB_E2E_SHARD_COUNT must not override the fixed CI shard count (${CI_SHARD_COUNT})" >&2
+    echo "FVOCI_WEB_E2E_SHARD_COUNT must not override the fixed CI shard count from tools/web-e2e/groups.ts" >&2
+    exit 1
+  fi
+  if ! CI_SHARD_COUNT="$(bun "$ROOT/tools/web-e2e/groups.ts" shards)" || [[ ! "$CI_SHARD_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "cannot read the CI shard count from tools/web-e2e/groups.ts" >&2
     exit 1
   fi
   if (( shard_index < 0 || shard_index >= CI_SHARD_COUNT )); then
