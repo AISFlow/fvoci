@@ -11,11 +11,11 @@
 # Both inner wrappers must reject listening-only/early-exit servers and launch
 # Playwright exactly once when setup becomes healthy on the final startup poll.
 # The group retires what it created (database, app role, Meilisearch index and
-# key, server with its child, SMTP sink) on pass, failure and SIGINT; a
-# Meilisearch index counts as deleted only once its deletion task succeeded
-# and the index is gone; failing steps are named; retention errors never
-# change the verdict; and services a scope shares are started once for its
-# groups.
+# key, server with its child, SMTP sink) on pass, failure, SIGINT and a SIGTERM
+# that also ends the output reader; a Meilisearch index counts as deleted only
+# once its deletion task succeeded and the index is gone; failing steps are
+# named; retention errors never change the verdict; and services a scope
+# shares are started once for its groups.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -31,6 +31,20 @@ fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-web-e2e-failure-output.XXXXXX")"
 cleanup() {
+  local environ pid
+  # After a failed case, stop everything a group left running (wrappers,
+  # Playwright and its workers, the server, its child, the SMTP sink, spec
+  # children): exactly the processes started with this fixture's own state
+  # path in their environment, so no other process is ever signalled.
+  for environ in /proc/[0-9]*/environ; do
+    [[ -n "${NET_STATE:-}" ]] || break
+    pid="${environ#/proc/}"
+    pid="${pid%/environ}"
+    ((pid != $$)) || continue
+    if grep -qzxF "FVOCI_FIXTURE_NET_STATE=$NET_STATE" "$environ" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -64,7 +78,8 @@ test("controlled pass", async () => {
     // started during teardown does), then tell the fixture the browser phase
     // is running and wait.
     const sleep = process.env.FVOCI_FIXTURE_REAL_SLEEP ?? "sleep";
-    const child = spawn("bash", ["-c", 'trap "" INT; exec "$0" 600', sleep], { stdio: "ignore" });
+    const ignored = process.env.FVOCI_FIXTURE_TERM_RESIST === "1" ? "INT TERM" : "INT";
+    const child = spawn("bash", ["-c", `trap "" ${ignored}; exec "$0" 600`, sleep], { stdio: "ignore" });
     writeFileSync(`${process.env.FVOCI_FIXTURE_NET_STATE}.spec-child-pid`, String(child.pid));
     writeFileSync(`${process.env.FVOCI_FIXTURE_NET_STATE}.hanging`, "");
     await new Promise(() => undefined);
@@ -116,6 +131,11 @@ exit 0
 STUB
 cat >"$FIXTURE_ROOT/target/debug/fvoci-server" <<'STUB'
 #!/usr/bin/env bash
+# FVOCI_FIXTURE_TERM_RESIST=1: the server and its child ignore SIGTERM, so only
+# the cleanup's SIGKILL escalation stops them.
+if [[ "${FVOCI_FIXTURE_TERM_RESIST:-0}" == 1 ]]; then
+  trap '' TERM
+fi
 # A child of the group server, as the collab engine is: reaped with its group.
 if [[ "${FVOCI_FIXTURE_SERVER_CHILD:-0}" == 1 ]]; then
   "$FVOCI_FIXTURE_REAL_SLEEP" 600 &
@@ -809,6 +829,56 @@ wait "$group_pid" || status=$?
 check_retired sigint "$log"
 grep -q '^DROP DATABASE ' "$NET_STATE.sql" || fail "sigint: database not dropped" "$log"
 check_monitor_stopped sigint "$log"
+rm -rf "$(retained_of "$gh_output")"
+
+# SIGTERM to the group's process group while its output goes through a reader
+# in that same group (a tee, as a CI step log or terminal pipeline is): the
+# reader dies with the group, so each diagnostic the cleanup writes raises
+# SIGPIPE. With a server and a spec child that ignore SIGTERM, the cleanup
+# must still escalate to SIGKILL and retire the database, the app role, the
+# Meilisearch index and key, the server, its child and the SMTP sink. The
+# services are shared exports, so the real wrappers alone handle the signal.
+log="$WORK/sigterm-closed-output.log"
+gh_output="$WORK/sigterm-closed-output.github-output"
+: >"$gh_output"
+rm -f "$NET_STATE".*
+set -m
+(
+  exec > >(exec tee "$log" >/dev/null) 2>&1
+  export PATH="$FIXTURE_PATH" TMPDIR="$RUN_TMP" ROOT="$FIXTURE_ROOT" CARGO_TARGET_DIR="$FIXTURE_ROOT/target"
+  export GITHUB_OUTPUT="$gh_output"
+  export FVOCI_FIXTURE_OUTCOME=hang FVOCI_FIXTURE_NET=quiet FVOCI_FIXTURE_NET_STATE="$NET_STATE"
+  export FVOCI_FIXTURE_REAL_BUN="$REAL_BUN" FVOCI_FIXTURE_REAL_SLEEP="$REAL_SLEEP" FVOCI_FIXTURE_REAL_SEQ="$REAL_SEQ"
+  export FVOCI_FIXTURE_SERVER_CHILD=1 FVOCI_FIXTURE_TERM_RESIST=1
+  export FVOCI_E2E_SHARED_SERVICES=1 FVOCI_TEST_PG_CONTAINER=fvoci-fixture-pg
+  export TEST_DATABASE_URL="postgres://postgres:fixture-secret@127.0.0.1:5432/postgres"
+  export FVOCI_MEILI_URL="http://127.0.0.1:7" MEILI_MASTER_KEY="fixture-meili-master-secret"
+  export FVOCI_MEILI_KEY="$MEILI_MASTER_KEY" FVOCI_TEST_MEILI_CONTAINER=fvoci-fixture-meili
+  unset FVOCI_E2E_PENDING
+  cd "$FIXTURE_ROOT"
+  exec bash scripts/web-e2e-run-group.sh e2e/controlled-failure.spec.ts
+) &
+group_pid=$!
+set +m
+for _ in {1..600}; do
+  [[ ! -f "$NET_STATE.hanging" || ! -f "$NET_STATE.server-child-pid" ]] || break
+  kill -0 "$group_pid" 2>/dev/null || break
+  "$REAL_SLEEP" 0.1
+done
+[[ -f "$NET_STATE.hanging" ]] || fail "sigterm closed output: Playwright never reached the hanging test" "$log"
+kill -TERM -- "-$group_pid"
+status=0
+wait "$group_pid" || status=$?
+((status == 143)) || fail "sigterm closed output: expected exit 143, got $status" "$log"
+for pid_file in server-pid server-child-pid smtp-pid spec-child-pid; do
+  [[ -f "$NET_STATE.$pid_file" ]] || fail "sigterm closed output: $pid_file never recorded" "$log"
+done
+check_retired sigterm-closed-output "$log"
+grep -q '^DROP DATABASE ' "$NET_STATE.sql" || fail "sigterm closed output: database not dropped" "$log"
+index="$(cat "$NET_STATE.meili-indexes")"
+[[ "$(cat "$NET_STATE.meili-deletes")" == "DELETE /indexes/$index"$'\n'"DELETE /keys/fixture-scoped-key-$index" ]] \
+  || fail "sigterm closed output: Meilisearch index or key not deleted" "$log"
+check_monitor_stopped sigterm-closed-output "$log"
 rm -rf "$(retained_of "$gh_output")"
 
 leftover="$(find "$RUN_TMP" -mindepth 1 -maxdepth 1 -name 'fvoci-*' -print -quit)"

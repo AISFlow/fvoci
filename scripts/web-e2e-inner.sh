@@ -9,6 +9,12 @@
 # setup step's exit (named on stderr as "web-e2e step <name> failed"), else 1
 # when the group's fixtures could not be retired, else 0.
 set -Eeuo pipefail
+# The reader of this script's output (a tee or CI log pipe) may die first, for
+# example with the same process-group SIGTERM. A shell killed by SIGPIPE never
+# runs its EXIT trap, so a write to that closed pipe ends the group through
+# cleanup instead (exit 141); cleanup itself then ignores SIGPIPE. A handler,
+# unlike an ignored signal, is not inherited by the group's child processes.
+trap 'exit 141' PIPE
 
 STEP=prepare
 trap 'echo "web-e2e step ${STEP} failed (exit $?)" >&2' ERR
@@ -168,6 +174,9 @@ meili_delete_key() {
 cleanup() {
   local status=$? failed=()
   trap - ERR
+  # Writes to a closed output pipe fail with EPIPE from here on: every
+  # retirement step below runs and is checked, whatever happens to its messages.
+  trap '' PIPE
   # A second interrupt must not cut the retirement short; it is bounded.
   trap '' HUP INT TERM
   set +e
