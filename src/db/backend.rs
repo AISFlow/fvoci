@@ -1941,3 +1941,16 @@ pub(crate) mod maintenance_claim_driver_tests {
         f.close().await;
     }
 }
+
+#[cfg(test)]
+mod remote_tls {
+    #[tokio::test]
+    async fn remote_builder_uses_platform_roots_without_dialing() {
+        // build() loads the platform trust store and constructs the rustls
+        // client. It does not open a socket.
+        libsql::Builder::new_remote("https://example.invalid".into(), "token".into())
+            .build()
+            .await
+            .expect("platform roots should build a remote client");
+    }
+}

@@ -27,7 +27,12 @@
   "acceptedConsumerTree": "fa574ad849fbe13c3e7476e96185bef582655a18",
   "rootPermissionMessage": "msg_337917efa4b0",
   "sdkProductionChangedFiles": [
-    "src/errors.rs"
+    "src/errors.rs",
+    "src/database.rs",
+    "src/lib.rs",
+    "src/tls.rs",
+    "Cargo.toml",
+    "examples/flutter.rs"
   ],
   "sdkVersionOrFeaturesChanged": false,
   "fullLicenseTextStatus": "RESOLVED_EXACT_ROOT_RECOVERED_SAME_VCS_TEXT",
