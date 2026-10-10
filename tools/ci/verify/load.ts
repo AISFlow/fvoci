@@ -134,8 +134,9 @@ export function loadContext(root: string): VerifyContext {
   for (const name of files ?? []) {
     let text: string;
     try {
-      // Strict UTF-8 and universal newlines, like Python's read_text().
-      text = new TextDecoder("utf-8", { fatal: true })
+      // Strict UTF-8 and universal newlines, like Python's read_text(). A leading
+      // U+FEFF stays in the text; the YAML parser skips it at index 0, as PyYAML does.
+      text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
         .decode(readFileSync(join(root, ".github", "workflows", name)))
         .replace(/\r\n?/g, "\n");
     } catch (error) {

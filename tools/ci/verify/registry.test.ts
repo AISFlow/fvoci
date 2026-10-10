@@ -310,6 +310,17 @@ describe("verify-workflows CLI", () => {
     expect(runCli(["--repo-root", dir, "--partial"])).toEqual({ code: 0, stdout: "", stderr: "" });
   });
 
+  test("a leading BOM stays in the workflow text and YAML skips it", () => {
+    const text = workflowText("documents.yml");
+    const dir = tree({ "documents.yml": "\ufeff" + text });
+    const ctx = loadContext(dir);
+    expect(ctx.loadErrors).toEqual({});
+    expect(ctx.texts["documents.yml"]).toBe("\ufeff" + text);
+    expect(ctx.workflows["documents.yml"]).toEqual(
+      contextFromTexts(root, { "documents.yml": text }).workflows["documents.yml"] ?? {},
+    );
+  });
+
   test("a job whose steps are not a list is reported", () => {
     const text = workflowText("documents.yml").replace(
       "\njobs:\n",
