@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { crc32 } from "node:zlib";
 import { Zip, ZipDeflate } from "fflate";
 import { shortUrl, summarize } from "./trace-summary.ts";
 
@@ -196,6 +197,62 @@ describe("trace summary redaction", () => {
     const summary = summarize(zipOf([["0-trace.network", rows.join("\n")]]));
     expect(summary).not.toContain(token);
     expect(summary.split("\n").filter((line) => line.includes("<redacted>"))).toHaveLength(20);
+  });
+
+  test("deflate data is checked whatever size the record declares", () => {
+    const name = "0-trace.network";
+    const row = (path: string, at: number) =>
+      JSON.stringify({
+        type: "resource-snapshot",
+        snapshot: {
+          request: { method: "GET", url: `http://localhost${path}` },
+          response: { status: 200 },
+          _monotonicTime: at,
+        },
+      });
+    const first = `${row("/first.js", 1)}\n`;
+    /** Declare `size` bytes with `crc` in the central record (the one Python reads). */
+    const declare = (archive: Uint8Array, size: number, crc: number) =>
+      editRecords(archive, name, (view, at, central) => {
+        if (!central) return;
+        view.setUint32(at + 16, crc, true);
+        view.setUint32(at + 24, size, true);
+      });
+    const corrupt = (archive: Uint8Array) => {
+      const out = declare(archive, 0, 0);
+      const view = new DataView(out.buffer);
+      // An invalid block type in the first deflate byte of the only member.
+      out[30 + view.getUint16(26, true) + view.getUint16(28, true)] = 0xff;
+      return out;
+    };
+    const cases: [string, Uint8Array, number, string][] = [
+      ["normal empty deflate", zipOf([[name, ""]]), 0, "(no requests"],
+      ["corrupt deflate declared empty", corrupt(zipOf([[name, "{}"]])), 1, ""],
+      [
+        "CRC-matching truncation keeps the declared prefix",
+        declare(zipOf([[name, first + row("/second.js", 2)]]), first.length, crc32(first) >>> 0),
+        0,
+        "GET 200 - /first.js",
+      ],
+    ];
+    const work = mkdtempSync(join(tmpdir(), "fvoci-trace-summary."));
+    try {
+      for (const [label, archive, exitCode, contains] of cases) {
+        const path = join(work, "trace.zip");
+        writeFileSync(path, archive);
+        const result = Bun.spawnSync([process.execPath, cli, path], {
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const stdout = result.stdout.toString();
+        expect(result.exitCode, label).toBe(exitCode);
+        if (exitCode === 0) expect(stdout, label).toContain(contains);
+        else expect(stdout, label).toBe("");
+        if (label.startsWith("CRC")) expect(stdout, label).not.toContain("/second.js");
+      }
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
   });
 
   test("an unreadable archive fails with exit 1 and no stdout", () => {

@@ -325,17 +325,20 @@ function readMember(archive: Uint8Array, member: Member): Uint8Array {
     data = raw.subarray(0, limit);
     if (data.length < Math.min(member.compressSize, limit)) throw new BadZipFile("Truncated data");
   } else if (member.method === 8) {
-    // Bounded like Python's reader: stop once file_size bytes are out.
+    // The whole compressed stream is decoded, whatever file_size declares, so a
+    // corrupt stream fails even when it is declared empty; at most file_size bytes are kept.
     const chunks: Uint8Array[] = [];
     let length = 0;
     const inflater = new Inflate((chunk) => {
-      chunks.push(chunk);
-      length += chunk.length;
+      if (length >= limit) return;
+      const kept = chunk.subarray(0, limit - length);
+      chunks.push(kept);
+      length += kept.length;
     });
-    for (let from = 0; length < limit && from < raw.length; from += 16384) {
+    for (let from = 0; from < raw.length; from += 16384) {
       inflater.push(raw.subarray(from, from + 16384), from + 16384 >= raw.length);
     }
-    data = Buffer.concat(chunks).subarray(0, limit);
+    data = Buffer.concat(chunks);
   } else {
     // Python also decoded bzip2, LZMA and zstd; Playwright writes deflate, so those fail closed.
     throw new BadZipFile("compression method not supported");
