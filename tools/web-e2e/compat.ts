@@ -204,3 +204,140 @@ export function display(value: unknown): string {
   if (value instanceof JsonFloat) return pyFloatRepr(value.value);
   return JSON.stringify(value);
 }
+
+/** The parts of `urllib.parse.urlsplit(url)` a caller reads; the fragment is dropped. */
+export interface SplitUrl {
+  scheme: string;
+  netloc: string;
+  path: string;
+  query: string;
+}
+
+/** `ipaddress.IPv4Address(text)` accepts it. */
+function isPyIpv4(text: string): boolean {
+  const octets = text.split(".");
+  return (
+    octets.length === 4 &&
+    octets.every(
+      (octet) =>
+        /^[0-9]{1,3}$/.test(octet) && (octet === "0" || !octet.startsWith("0")) && +octet <= 255,
+    )
+  );
+}
+
+/** `ipaddress.IPv6Address(text)` accepts it, scope id included. */
+function isPyIpv6(text: string): boolean {
+  const scope = text.indexOf("%");
+  if (scope >= 0) {
+    const id = text.slice(scope + 1);
+    if (id === "" || id.includes("%")) return false;
+  }
+  const address = scope >= 0 ? text.slice(0, scope) : text;
+  if (address === "" || address.length > 45) return false;
+  const parts = address.split(":");
+  if (parts.length < 3) return false;
+  if ((parts[parts.length - 1] ?? "").includes(".")) {
+    if (!isPyIpv4(parts.pop() ?? "")) return false;
+    parts.push("0", "0");
+  }
+  if (parts.length > 9) return false;
+  let skip: number | null = null;
+  for (let index = 1; index < parts.length - 1; index += 1) {
+    if (parts[index] !== "") continue;
+    if (skip !== null) return false;
+    skip = index;
+  }
+  let high = parts.length;
+  let low = 0;
+  if (skip !== null) {
+    high = skip;
+    low = parts.length - skip - 1;
+    if (parts[0] === "" && --high !== 0) return false;
+    if (parts[parts.length - 1] === "" && --low !== 0) return false;
+    if (8 - (high + low) < 1) return false;
+  } else if (parts.length !== 8 || parts[0] === "" || parts[parts.length - 1] === "") {
+    return false;
+  }
+  return [...parts.slice(0, high), ...parts.slice(parts.length - low)].every((hextet) =>
+    /^[0-9A-Fa-f]{1,4}$/.test(hextet),
+  );
+}
+
+/** `_check_bracketed_netloc`: Python raises ValueError unless this holds. */
+function validBracketedNetloc(netloc: string): boolean {
+  const hostAndPort = netloc.slice(netloc.lastIndexOf("@") + 1);
+  const open = hostAndPort.indexOf("[");
+  let host: string;
+  if (open >= 0) {
+    if (open > 0) return false;
+    const bracketed = hostAndPort.slice(open + 1);
+    const close = bracketed.indexOf("]");
+    host = close >= 0 ? bracketed.slice(0, close) : bracketed;
+    const port = close >= 0 ? bracketed.slice(close + 1) : "";
+    if (port !== "" && !port.startsWith(":")) return false;
+  } else {
+    const colon = hostAndPort.indexOf(":");
+    host = colon >= 0 ? hostAndPort.slice(0, colon) : hostAndPort;
+  }
+  // Python's "." stops only at "\n", which urlsplit already removed.
+  if (host.startsWith("v")) return /^v[a-fA-F0-9]+\.[^]+$/u.test(host);
+  return isPyIpv6(host);
+}
+
+/**
+ * `urllib.parse.urlsplit(url)` of a str (Python 3.14). Unlike a WHATWG URL
+ * it keeps backslashes, dot segments and percent escapes as written, so
+ * redaction sees the path Python saw. null where Python raises ValueError.
+ */
+export function pyUrlsplit(input: string): SplitUrl | null {
+  // eslint-disable-next-line no-control-regex -- Python strips leading C0 controls and space.
+  let url = input.replace(/^[\x00-\x20]+/u, "").replace(/[\t\r\n]/gu, "");
+  let scheme = "";
+  let netloc = "";
+  const colon = url.indexOf(":");
+  if (colon > 0 && /^[A-Za-z][A-Za-z0-9+.-]*$/.test(url.slice(0, colon))) {
+    scheme = url.slice(0, colon).toLowerCase();
+    url = url.slice(colon + 1);
+  }
+  if (url.startsWith("//")) {
+    const ends = ["/", "?", "#"].map((char) => url.indexOf(char, 2)).filter((at) => at >= 0);
+    const end = ends.length > 0 ? Math.min(...ends) : url.length;
+    netloc = url.slice(2, end);
+    url = url.slice(end);
+    const bracketed = netloc.includes("[");
+    if (bracketed !== netloc.includes("]")) return null;
+    if (bracketed && !validBracketedNetloc(netloc)) return null;
+  }
+  const hash = url.indexOf("#");
+  if (hash >= 0) url = url.slice(0, hash);
+  let query = "";
+  const question = url.indexOf("?");
+  if (question >= 0) {
+    query = url.slice(question + 1);
+    url = url.slice(0, question);
+  }
+  // eslint-disable-next-line no-control-regex -- str.isascii().
+  if (!/^[\x00-\x7f]*$/u.test(netloc)) {
+    const bare = netloc.replace(/[@:#?]/gu, "");
+    const normalized = bare.normalize("NFKC");
+    if (bare !== normalized && /[/?#@:]/u.test(normalized)) return null;
+  }
+  return { scheme, netloc, path: url, query };
+}
+
+/** `SplitResult.hostname`, None as "". */
+export function pyHostname(netloc: string): string {
+  const hostInfo = netloc.slice(netloc.lastIndexOf("@") + 1);
+  const open = hostInfo.indexOf("[");
+  let host: string;
+  if (open >= 0) {
+    const bracketed = hostInfo.slice(open + 1);
+    const close = bracketed.indexOf("]");
+    host = close >= 0 ? bracketed.slice(0, close) : bracketed;
+  } else {
+    const colon = hostInfo.indexOf(":");
+    host = colon >= 0 ? hostInfo.slice(0, colon) : hostInfo;
+  }
+  const zone = host.indexOf("%");
+  return zone >= 0 ? host.slice(0, zone).toLowerCase() + host.slice(zone) : host.toLowerCase();
+}
