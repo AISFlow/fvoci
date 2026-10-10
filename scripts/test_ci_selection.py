@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import copy
 import importlib.util
+import inspect
 import json
 import os
 import shutil
@@ -479,6 +480,22 @@ class PlanSelectionTest(unittest.TestCase):
         self.assertEqual(plan["mode"], "full")
         self.assertEqual(plan["reason_code"], "FULL_EVENT_MERGE_GROUP")
         self.assertTrue(plan["plan_ok"])
+
+    def test_unknown_event_stays_full_and_selectable(self) -> None:
+        for event_name in ("schedule", "", "pull_request_target", "deployment"):
+            plan = SEL.build_plan(
+                workflow="web",
+                event_name=event_name,
+                base_sha=None,
+                head_sha=None,
+                merge_base_sha=None,
+                tested_sha="b" * 40,
+                paths=["docs/rewrite.md"],
+            )
+            self.assertEqual(plan["mode"], "full", event_name)
+            self.assertEqual(plan["reason_code"], "FULL_EVENT_UNKNOWN", event_name)
+            self.assertTrue(plan["plan_ok"], event_name)
+            self.assertTrue(plan["jobs"]["web-checks"]["selected"], event_name)
 
     def test_parent_mismatch_cannot_narrow(self) -> None:
         plan = SEL.build_plan(
@@ -1582,6 +1599,7 @@ class RustSuiteRegistryTest(unittest.TestCase):
                 self.assertEqual(len(a | b | c), 44)
                 self.assertFalse(a & b or a & c or b & c)
                 self.assertEqual(selected["a"]["postgres_image"], selected["c"]["postgres_image"])
+        self.assertEqual(job["strategy"]["matrix"]["exclude"], SEL.POSTGRES_MATRIX_EXCLUDE_EXPR)
         self.assertEqual(job["services"]["postgres"]["image"], "${{ matrix.postgres_image }}")
         self.assertEqual(job["services"]["postgres"]["ports"], ["5432/tcp"])
         step = next(step for step in job["steps"] if step.get("name") == SEL.RUST_POSTGRES_INTEGRATION_STEP)
@@ -1640,6 +1658,81 @@ class RustSuiteRegistryTest(unittest.TestCase):
                     elif mutation == "missing-pg16-target": a["tests"] = a["tests"].replace("--test db_integration ", "")
                     elif mutation == "c-filter": c["tests"] += " -- --skip failing"
                     else: c["continue-on-error"] = True
+                fx.mutate_rust_workflow(change)
+                self.assertTrue(SEL.verify_postgres_budget_matrix(SEL._rust_workflow_jobs(fx.root)[0]))
+
+    def test_postgres_exclude_follows_event_and_rejects_check_mutations(self) -> None:
+        jobs, err = SEL._rust_workflow_jobs(ROOT)
+        self.assertIsNone(err)
+        rows, row_err = SEL._postgres_matrix_rows(jobs["postgres"])
+        self.assertIsNone(row_err)
+        assert rows is not None
+
+        def representative(row: dict) -> bool:
+            return row.get("runner") == "ubuntu-26.04" and row.get("pg_major") == "18"
+
+        kept = [row["check"] for row in rows if representative(row)]
+        excluded = [{"check": row["check"]} for row in rows if not representative(row)]
+        self.assertEqual(kept, ["postgres", "postgres-c", "postgres-b"])
+        self.assertEqual(len(rows) - len(kept), 9)
+        self.assertEqual(json.loads(SEL.postgres_exclude_json("pull_request", rows)), excluded)
+        for event_name in ("push", "merge_group", "workflow_dispatch", "schedule", "", "pull_request_target"):
+            self.assertEqual(SEL.postgres_exclude_json(event_name, rows), "[]", event_name)
+
+        def holds(fn, matrix_rows: list[dict]) -> bool:
+            ran = {row["check"] for row in matrix_rows if fn("pull_request", row)}
+            if ran != {"postgres", "postgres-c", "postgres-b"}:
+                return False
+            full_events = ("push", "merge_group", "workflow_dispatch", "schedule", "", "pull_request_target")
+            return all(fn(event_name, row) for event_name in full_events for row in matrix_rows)
+
+        source = inspect.getsource(SEL.postgres_matrix_row_runs)
+        self.assertEqual(source.count('event_name != "pull_request"'), 1)
+        self.assertTrue(holds(SEL.postgres_matrix_row_runs, rows))
+        inverted = source.replace('event_name != "pull_request"', 'event_name == "pull_request"', 1)
+        dropped_check = source.replace(
+            '    if event_name != "pull_request":\n        return True\n',
+            "",
+            1,
+        )
+        dropped_reduction = source.replace(
+            '    if event_name != "pull_request":\n'
+            '        return True\n'
+            '    return row.get("runner") == "ubuntu-26.04" and row.get("pg_major") == "18"\n',
+            "    return True\n",
+            1,
+        )
+
+        def compiled(text: str):
+            namespace: dict = {}
+            exec(text, namespace)
+            return namespace["postgres_matrix_row_runs"]
+
+        for label, mutated in (
+            ("invert", inverted),
+            ("drop-check", dropped_check),
+            ("drop-reduction", dropped_reduction),
+        ):
+            self.assertNotEqual(source, mutated, label)
+            self.assertNotIn('event_name != "pull_request"', mutated, label)
+            self.assertFalse(holds(compiled(mutated), rows), label)
+
+        for mutation in ("drop-exclude", "static-exclude", "invert-event"):
+            with self.subTest(mutation=mutation), RustSuiteRegistryFixture() as fx:
+                fx.write_cargo()
+
+                def change(data: dict, mutation: str = mutation) -> None:
+                    matrix = data["jobs"]["postgres"]["strategy"]["matrix"]
+                    if mutation == "drop-exclude":
+                        del matrix["exclude"]
+                    elif mutation == "static-exclude":
+                        matrix["exclude"] = [{"check": "postgres-arm64"}]
+                    else:
+                        matrix["exclude"] = (
+                            "${{ fromJSON(github.event_name == 'pull_request' && '[]' "
+                            "|| needs.ci-plan.outputs.postgres_exclude) }}"
+                        )
+
                 fx.mutate_rust_workflow(change)
                 self.assertTrue(SEL.verify_postgres_budget_matrix(SEL._rust_workflow_jobs(fx.root)[0]))
 
@@ -3660,6 +3753,234 @@ class AgentDocsSelectionTest(unittest.TestCase):
             self.assertEqual(plan["path_count"], 2)
             self.assertTrue(plan["plan_ok"])
             self.assertFalse(any(meta["selected"] for meta in plan["jobs"].values()))
+
+
+class MergeGroupPlanTest(unittest.TestCase):
+    """plan reads merge_group SHAs directly and keeps required check names stable."""
+
+    def _plan(
+        self,
+        fx: PrCheckoutFixture,
+        *,
+        workflow: str,
+        event_name: str,
+        payload: object,
+        tested: str,
+    ) -> tuple[subprocess.CompletedProcess[str], dict, str]:
+        event = fx.work / f"{workflow}-{event_name}-event.json"
+        event.write_text(json.dumps(payload), encoding="utf-8")
+        output = fx.work / f"{workflow}-{event_name}-plan.json"
+        github_output = fx.work / f"{workflow}-{event_name}-github.txt"
+        proc = run_cli(
+            [
+                "plan",
+                "--workflow",
+                workflow,
+                "--repo-root",
+                str(fx.work),
+                "--event-json",
+                str(event),
+                "--output-plan",
+                str(output),
+                "--github-output",
+                str(github_output),
+            ],
+            env={"GITHUB_EVENT_NAME": event_name, "GITHUB_SHA": tested},
+            cwd=fx.work,
+        )
+        plan = json.loads(output.read_text(encoding="utf-8")) if output.exists() else {}
+        text = github_output.read_text(encoding="utf-8") if github_output.exists() else ""
+        return proc, plan, text
+
+    def test_plan_copies_merge_group_shas_and_ignores_pull_request(self) -> None:
+        with PrCheckoutFixture() as fx:
+            head = fx.commit_on_branch("pr", "docs/rewrite.md", "docs only lane\n")
+            fx.clone_work()
+            tested = fx.merge_checkout(fx.base_sha, head)
+            mg_base = "a" * 40
+            mg_head = "b" * 40
+            payload = {
+                "merge_group": {"base_sha": mg_base, "head_sha": mg_head},
+                "pull_request": {"base": {"sha": fx.base_sha}, "head": {"sha": head}},
+                "before": "e" * 40,
+                "after": "f" * 40,
+            }
+            proc, plan, _text = self._plan(
+                fx, workflow="web", event_name="merge_group", payload=payload, tested=tested
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(plan["base_sha"], mg_base)
+            self.assertEqual(plan["head_sha"], mg_head)
+            self.assertNotEqual(plan["base_sha"], fx.base_sha)
+            self.assertNotEqual(plan["head_sha"], head)
+            self.assertEqual(plan["mode"], "full")
+            self.assertEqual(plan["reason_code"], "FULL_EVENT_MERGE_GROUP")
+            self.assertTrue(plan["plan_ok"])
+            assert_full_selection(self, "web", plan, "merge_group")
+            self.assertNotIn("postgres_exclude", plan)
+
+    def test_missing_or_invalid_merge_group_fields_stay_full(self) -> None:
+        with PrCheckoutFixture() as fx:
+            head = fx.commit_on_branch("pr", "docs/rewrite.md", "docs only lane\n")
+            fx.clone_work()
+            tested = fx.merge_checkout(fx.base_sha, head)
+            pr = {"base": {"sha": fx.base_sha}, "head": {"sha": head}}
+            cases = (
+                ("missing-group", {"pull_request": pr, "before": "e" * 40, "after": "f" * 40}, None, None),
+                ("non-object", {"merge_group": "queued", "pull_request": pr}, None, None),
+                ("missing-head", {"merge_group": {"base_sha": "a" * 40}, "pull_request": pr}, "a" * 40, None),
+                (
+                    "invalid-base",
+                    {"merge_group": {"base_sha": "HEAD", "head_sha": "b" * 40}, "pull_request": pr},
+                    None,
+                    "b" * 40,
+                ),
+                (
+                    "uppercase",
+                    {"merge_group": {"base_sha": "A" * 40, "head_sha": "b" * 40}},
+                    None,
+                    "b" * 40,
+                ),
+            )
+            for label, payload, base, head_sha in cases:
+                proc, plan, _text = self._plan(
+                    fx, workflow="rust", event_name="merge_group", payload=payload, tested=tested
+                )
+                self.assertEqual(proc.returncode, 0, (label, proc.stderr))
+                self.assertEqual(plan["base_sha"], base, label)
+                self.assertEqual(plan["head_sha"], head_sha, label)
+                self.assertEqual(plan["mode"], "full", label)
+                self.assertEqual(plan["reason_code"], "FULL_EVENT_MERGE_GROUP", label)
+                self.assertTrue(plan["plan_ok"], label)
+                assert_full_selection(self, "rust", plan, label)
+                self.assertNotIn(fx.base_sha, (plan["base_sha"], plan["head_sha"]), label)
+                self.assertNotIn(head, (plan["base_sha"], plan["head_sha"]), label)
+
+    def test_non_dict_event_does_not_crash(self) -> None:
+        with PrCheckoutFixture() as fx:
+            fx.clone_work()
+            tested = git_sha(fx.work)
+            proc, plan, _text = self._plan(
+                fx, workflow="documents", event_name="merge_group", payload=[], tested=tested
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIsNone(plan["base_sha"])
+            self.assertIsNone(plan["head_sha"])
+            self.assertEqual(plan["mode"], "full")
+            self.assertTrue(plan["plan_ok"])
+            assert_full_selection(self, "documents", plan, "list")
+
+    def test_unknown_event_cli_does_not_narrow_a_docs_merge(self) -> None:
+        with PrCheckoutFixture() as fx:
+            head = fx.commit_on_branch("pr", "NOTES.md", "ordinary docs\n")
+            fx.clone_work()
+            tested = fx.merge_checkout(fx.base_sha, head)
+            payload = {"pull_request": {"base": {"sha": fx.base_sha}, "head": {"sha": head}}}
+            for event_name in ("schedule", "deployment", "not-an-event"):
+                proc, plan, text = self._plan(
+                    fx, workflow="install", event_name=event_name, payload=payload, tested=tested
+                )
+                self.assertEqual(proc.returncode, 0, (event_name, proc.stderr))
+                self.assertEqual(plan["mode"], "full", event_name)
+                self.assertEqual(plan["reason_code"], "FULL_EVENT_UNKNOWN", event_name)
+                self.assertTrue(plan["plan_ok"], event_name)
+                self.assertIsNone(plan["base_sha"], event_name)
+                self.assertIsNone(plan["head_sha"], event_name)
+                assert_full_selection(self, "install", plan, event_name)
+                self.assertNotIn("postgres_exclude<<", text, event_name)
+
+    def test_rust_plan_exclude_is_event_scoped_and_outside_plan_json(self) -> None:
+        with PrCheckoutFixture() as fx:
+            fx.clone_work()
+            tested = git_sha(fx.work)
+            jobs, err = SEL._rust_workflow_jobs(ROOT)
+            self.assertIsNone(err)
+            rows, row_err = SEL._postgres_matrix_rows(jobs["postgres"])
+            self.assertIsNone(row_err)
+            assert rows is not None
+            reduced = SEL.postgres_exclude_json("pull_request", rows)
+            self.assertNotEqual(reduced, "[]")
+            pr_payload = {
+                "pull_request": {"base": {"sha": fx.base_sha}, "head": {"sha": tested}},
+                "merge_group": {"base_sha": "a" * 40, "head_sha": "b" * 40},
+            }
+            proc, plan, text = self._plan(
+                fx, workflow="rust", event_name="pull_request", payload=pr_payload, tested=tested
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertNotIn("postgres_exclude", plan)
+            self.assertIn(f"postgres_exclude<<POSTGRES_EXCLUDE_EOF\n{reduced}\nPOSTGRES_EXCLUDE_EOF\n", text)
+            mg_payload = {
+                "merge_group": {"base_sha": "a" * 40, "head_sha": "b" * 40},
+                "pull_request": {"base": {"sha": fx.base_sha}, "head": {"sha": tested}},
+            }
+            proc, plan, text = self._plan(
+                fx, workflow="rust", event_name="merge_group", payload=mg_payload, tested=tested
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(plan["base_sha"], "a" * 40)
+            self.assertEqual(plan["head_sha"], "b" * 40)
+            self.assertIn("postgres_exclude<<POSTGRES_EXCLUDE_EOF\n[]\nPOSTGRES_EXCLUDE_EOF\n", text)
+            for event_name in ("push", "workflow_dispatch", "schedule"):
+                proc, _plan_body, text = self._plan(
+                    fx,
+                    workflow="rust",
+                    event_name=event_name,
+                    payload={"before": "e" * 40, "after": tested, "ref": "refs/heads/main"},
+                    tested=tested,
+                )
+                self.assertEqual(proc.returncode, 0, (event_name, proc.stderr))
+                self.assertIn("postgres_exclude<<POSTGRES_EXCLUDE_EOF\n[]\nPOSTGRES_EXCLUDE_EOF\n", text, event_name)
+
+    def test_required_gate_names_match_under_every_event(self) -> None:
+        rust = (ROOT / ".github/workflows/rust.yml").read_text(encoding="utf-8")
+        self.assertEqual(rust.count("rust-postgres-${{ runner.arch }}-${{ github.sha }}-${{ github.run_attempt }}"), 2)
+        self.assertEqual(rust.count("rust-helper-${{ runner.arch }}-${{ github.sha }}-${{ github.run_attempt }}"), 2)
+        self.assertEqual(SEL.verify_workflow_registry(ROOT), [])
+        for workflow, filename in SEL.WORKFLOW_YAML.items():
+            path = ROOT / ".github" / "workflows" / filename
+            data, error = SEL._load_yaml_mapping(path)
+            self.assertIsNone(error, workflow)
+            gate_id = f"{workflow}-ci-gate"
+            gate = data["jobs"][gate_id]
+            triggers = data.get("on", data.get(True))
+            self.assertEqual(gate["name"], gate_id, workflow)
+            self.assertNotIn("github.event", gate["name"], workflow)
+            self.assertIsNone(triggers["merge_group"], workflow)
+            self.assertIsNone(triggers["pull_request"], workflow)
+
+    def test_event_specific_gate_name_or_filtered_merge_group_rejected(self) -> None:
+        for workflow, filename in SEL.WORKFLOW_YAML.items():
+            for mutation in ("event-name", "drop-merge-group", "filter-merge-group"):
+                with self.subTest(workflow=workflow, mutation=mutation):
+                    root = Path(tempfile.mkdtemp())
+                    self.addCleanup(shutil.rmtree, root, True)
+                    copy_workflows(root)
+                    write_minimal_rust_registry_stub(root)
+                    path = root / ".github" / "workflows" / filename
+                    text = path.read_text(encoding="utf-8")
+                    gate_line = f"    name: {workflow}-ci-gate\n"
+                    if mutation == "event-name":
+                        changed = text.replace(
+                            gate_line,
+                            "    name: ${{ github.event_name }}-ci-gate\n",
+                            1,
+                        )
+                        needle = f"{workflow}-ci-gate name must stay {workflow}-ci-gate"
+                    elif mutation == "drop-merge-group":
+                        changed = text.replace("  merge_group:\n", "", 1)
+                        needle = "merge_group trigger is required"
+                    else:
+                        changed = text.replace(
+                            "  merge_group:\n",
+                            "  merge_group:\n    types: [checks_requested]\n",
+                            1,
+                        )
+                        needle = "merge_group must be unfiltered"
+                    self.assertNotEqual(text, changed)
+                    path.write_text(changed, encoding="utf-8")
+                    errors = "\n".join(SEL.verify_workflow_registry(root))
+                    self.assertIn(needle, errors)
 
 
 class MarkdownOnlyLaneTest(unittest.TestCase):

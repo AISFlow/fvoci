@@ -567,8 +567,9 @@ def build_plan(
             "full", sanitize_reason_code(f"FULL_EVENT_{event_name.upper()}"), frozenset()
         )
     elif event_name not in KNOWN_EVENTS:
+        # Unknown events stay full and selectable. A fatal here would fail the
+        # required gate even when every job succeeded.
         decision = SelectionDecision("full", "FULL_EVENT_UNKNOWN", frozenset())
-        plan_ok = False
     elif force_full_reason:
         decision = SelectionDecision("full", sanitize_reason_code(force_full_reason), frozenset())
     elif paths is None:
@@ -601,13 +602,33 @@ def build_plan(
     }
 
 
+def _sha_or_none(value: object) -> str | None:
+    if isinstance(value, str) and validate_sha(value):
+        return value
+    return None
+
+
+def merge_group_shas(event: object) -> tuple[str | None, str | None]:
+    """Copy merge_group.base_sha and merge_group.head_sha, nothing else.
+
+    A simultaneous pull_request or push payload is ignored. A missing group,
+    a non-object, or a value that is not 40 lowercase hex characters is
+    absent. Callers still select the full matrix and do not narrow.
+    """
+    if not isinstance(event, dict):
+        return None, None
+    group = event.get("merge_group")
+    if not isinstance(group, dict):
+        return None, None
+    return _sha_or_none(group.get("base_sha")), _sha_or_none(group.get("head_sha"))
+
+
 def event_shas(event: dict, event_name: str) -> tuple[str | None, str | None]:
     if event_name == "pull_request":
         pr = event.get("pull_request") or {}
         return pr.get("base", {}).get("sha"), pr.get("head", {}).get("sha")
     if event_name == "merge_group":
-        mg = event.get("merge_group") or {}
-        return mg.get("base_sha"), mg.get("head_sha")
+        return merge_group_shas(event)
     if event_name == "push":
         return event.get("before"), event.get("after")
     return None, None
@@ -663,10 +684,14 @@ def resolve_selection_inputs(
     if event_name == "workflow_dispatch":
         return ResolvedInputs(None, None, None, None, None, None, tested_sha)
 
-    if event_name not in KNOWN_EVENTS:
-        return ResolvedInputs(None, "EVENT_UNKNOWN", None, None, None, None, tested_sha)
+    if event_name == "merge_group":
+        base_sha, head_sha = merge_group_shas(event)
+        return ResolvedInputs(None, None, None, base_sha, head_sha, None, tested_sha)
 
-    if event_name in ("push", "merge_group"):
+    if event_name not in KNOWN_EVENTS:
+        return ResolvedInputs(None, None, None, None, None, None, tested_sha)
+
+    if event_name == "push":
         base_sha, head_sha = event_shas(event, event_name)
         return ResolvedInputs(None, None, None, base_sha, head_sha, None, tested_sha)
 
@@ -702,7 +727,9 @@ def resolve_selection_inputs(
     return ResolvedInputs(paths, None, None, base_sha, head_sha, merge_base, tested_sha)
 
 
-def write_github_outputs(plan: dict, output_path: Path | None) -> None:
+def write_github_outputs(
+    plan: dict, output_path: Path | None, *, postgres_exclude: str | None = None
+) -> None:
     if output_path is None:
         return
     reason_code = plan["reason_code"]
@@ -724,6 +751,13 @@ def write_github_outputs(plan: dict, output_path: Path | None) -> None:
         handle.write("plan_json<<PLAN_EOF\n")
         handle.write(payload + "\n")
         handle.write("PLAN_EOF\n")
+        if postgres_exclude is not None:
+            parsed = json.loads(postgres_exclude)
+            if not isinstance(parsed, list) or "\n" in postgres_exclude:
+                raise ValueError("postgres_exclude must be one JSON array line")
+            handle.write("postgres_exclude<<POSTGRES_EXCLUDE_EOF\n")
+            handle.write(postgres_exclude + "\n")
+            handle.write("POSTGRES_EXCLUDE_EOF\n")
 
 
 def _load_yaml_mapping(path: Path) -> tuple[dict | None, str | None]:
@@ -1119,6 +1153,31 @@ RUST_POSTGRES_IMAGES = {
     "17": "postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f",
     "18": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
 }
+POSTGRES_MATRIX_EXCLUDE_EXPR = "${{ fromJSON(needs.ci-plan.outputs.postgres_exclude) }}"
+POSTGRES_EXCLUDE_OUTPUT_EXPR = "${{ steps.plan.outputs.postgres_exclude }}"
+
+
+def postgres_matrix_row_runs(event_name: str, row: dict) -> bool:
+    """Pull requests run PG 18 on x64 only; every other event runs every row."""
+    if event_name != "pull_request":
+        return True
+    return row.get("runner") == "ubuntu-26.04" and row.get("pg_major") == "18"
+
+
+def postgres_exclude_entries(event_name: str, rows: list[dict]) -> list[dict]:
+    excluded: list[dict] = []
+    for row in rows:
+        if postgres_matrix_row_runs(event_name, row):
+            continue
+        check = row.get("check")
+        if not isinstance(check, str) or not check:
+            raise ValueError("postgres matrix row missing check")
+        excluded.append({"check": check})
+    return excluded
+
+
+def postgres_exclude_json(event_name: str, rows: list[dict]) -> str:
+    return json.dumps(postgres_exclude_entries(event_name, rows), separators=(",", ":"))
 RUST_POSTGRES_BUILD_CACHE_KEY = (
     "v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-postgres-db-tests-test-nodebug-"
     "${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-"
@@ -1271,8 +1330,10 @@ def verify_postgres_budget_matrix(jobs: dict) -> list[str]:
     if not isinstance(strategy, dict) or strategy.get("fail-fast") is not False:
         errors.append("rust: PostgreSQL budget must run every selected matrix row")
     matrix = strategy.get("matrix", {}) if isinstance(strategy, dict) else {}
-    if not isinstance(matrix, dict) or set(matrix) != {"include"}:
-        errors.append("rust: PostgreSQL budget matrix must use only explicit include rows")
+    if not isinstance(matrix, dict) or set(matrix) != {"include", "exclude"}:
+        errors.append("rust: PostgreSQL budget matrix must use explicit include rows and the plan exclude expression")
+    elif matrix.get("exclude") != POSTGRES_MATRIX_EXCLUDE_EXPR:
+        errors.append("rust: PostgreSQL budget exclude must be the plan postgres_exclude expression")
     rows, err = _postgres_matrix_rows(job)
     if err:
         return errors + [err]
@@ -2017,6 +2078,10 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
             errors.append(f"{workflow}: pull_request trigger is required for the stable gate")
         elif triggers["pull_request"] is not None:
             errors.append(f"{workflow}: pull_request must be unfiltered so required gates always run")
+        if not isinstance(triggers, dict) or "merge_group" not in triggers:
+            errors.append(f"{workflow}: merge_group trigger is required for the stable gate")
+        elif triggers["merge_group"] is not None:
+            errors.append(f"{workflow}: merge_group must be unfiltered so required gates always run")
         jobs = data.get("jobs")
         if not isinstance(jobs, dict) or not jobs:
             errors.append(f"{workflow}: jobs mapping missing")
@@ -2077,6 +2142,10 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
                     key = select_output_key(job)
                     if key not in outputs:
                         errors.append(f"{workflow}: missing selector output {key}")
+                if workflow == "rust" and outputs.get("postgres_exclude") != POSTGRES_EXCLUDE_OUTPUT_EXPR:
+                    errors.append(
+                        f"{workflow}: {PLAN_JOB_ID} must publish postgres_exclude from the plan step"
+                    )
             plan_runs = "\n".join(_run_scripts(plan_job))
             if REQUIREMENTS_FILE not in plan_runs:
                 errors.append(
@@ -2136,6 +2205,10 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
         if isinstance(gate_job, dict):
             if gate_job.get("if") != "always()":
                 errors.append(f"{workflow}: {reserved_gate} must use if: always()")
+            if gate_job.get("name") != reserved_gate:
+                errors.append(
+                    f"{workflow}: {reserved_gate} name must stay {reserved_gate} for pull_request and merge_group"
+                )
             needs, needs_err = _needs_list(gate_job)
             expected_needs = {PLAN_JOB_ID, *expected}
             if needs_err:
@@ -2447,8 +2520,23 @@ def cmd_plan(argv: list[str] | None = None) -> int:
         force_full_reason=resolved.force_full_reason,
         opt_in_inputs=opt_ins,
     )
+    postgres_exclude = None
+    if args.workflow == "rust":
+        jobs, jobs_err = _rust_workflow_jobs(args.repo_root)
+        rows: list[dict] | None = None
+        rows_err = jobs_err
+        if jobs is not None:
+            postgres_job = jobs.get("postgres")
+            if isinstance(postgres_job, dict):
+                rows, rows_err = _postgres_matrix_rows(postgres_job)
+            else:
+                rows_err = "rust: postgres job missing"
+        if rows_err or rows is None:
+            print(f"plan: {rows_err or 'postgres rows missing'}", file=sys.stderr)
+            return 1
+        postgres_exclude = postgres_exclude_json(event_name, rows)
     args.output_plan.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
-    write_github_outputs(plan, args.github_output)
+    write_github_outputs(plan, args.github_output, postgres_exclude=postgres_exclude)
     print(json.dumps({"mode": plan["mode"], "reason_code": plan["reason_code"]}))
     return 0
 
