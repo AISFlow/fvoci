@@ -296,13 +296,13 @@ fn root_work_line(line: &str) -> bool {
     let selected = cargo
         || line.contains("scripts/ci_selection.py rust-binaries build")
         || line.contains("bash scripts/run-web-e2e.sh");
-    let crate_manifest = [
-        "--manifest-path crates/",
-        "--manifest-path \"crates/",
-        "--manifest-path 'crates/",
-    ]
-    .iter()
-    .any(|m| line.contains(m));
+    // Independent workspaces with their own lockfile and target dir and no
+    // SQLite dependency: helper crates under crates/ and the xtask crate.
+    let crate_manifest = ["crates/", "xtask/"].iter().any(|dir| {
+        ["", "\"", "'"]
+            .iter()
+            .any(|quote| line.contains(&format!("--manifest-path {quote}{dir}")))
+    });
     selected && !crate_manifest
 }
 
@@ -825,6 +825,38 @@ fn web_producer_consumer_mutations_fail_same_wiring_contract() {
         let changed = replace_once(body, old, new);
         assert_mutations_fail(&path, &root, &original, span, vec![(format!("{name}: {old}"), changed, None)]);
     }
+}
+
+/// The requested rust.yml wiring (xtask checks where test-wiring.py ran,
+/// before SQLite preparation) satisfies the contract: xtask is an
+/// independent workspace, like crates/. A root build in the same place
+/// still fails.
+#[test]
+fn xtask_steps_before_preparation_are_independent_work() {
+    let (_temp, root) = contract_copy();
+    let path = root.join(".github/workflows/rust.yml");
+    let original = fs::read_to_string(&path).unwrap();
+    let old = "        run: python3 scripts/fixtures/sqlite-ci/test-wiring.py\n";
+    let xtask = "        run: cargo fmt --check --manifest-path xtask/Cargo.toml\n      - run: cargo test --locked --manifest-path xtask/Cargo.toml\n";
+    if original.contains(old) {
+        fs::write(&path, original.replacen(old, xtask, 1)).unwrap();
+        contract(&root).unwrap();
+    }
+    let span = job_span(&original, "fast");
+    let body = &original[span.0..span.1];
+    let first_step = blocks(body)[0];
+    let changed = format!(
+        "{}      - run: cargo test --locked --manifest-path ./Cargo.toml\n{}",
+        &body[..first_step.0],
+        &body[first_step.0..]
+    );
+    assert_mutations_fail(
+        &path,
+        &root,
+        &original,
+        span,
+        vec![("root test before preparation".into(), changed, None)],
+    );
 }
 
 #[test]
