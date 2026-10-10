@@ -714,6 +714,27 @@
       "stdout": "",
       "stderr": "Traceback (most recent call last):\n  File \"<PATH>/compare-catalogs.py\", line 356, in <module>\n    sys.exit(main())\n             ~~~~^^\n  File \"<PATH>/compare-catalogs.py\", line 278, in main\n    diff_lists(\"schema\", old[\"schemas\"], new[\"schemas\"], \"name\", report)\n    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"<PATH>/compare-catalogs.py\", line 252, in diff_lists\n    old_map = index_by(old, key)\n  File \"<PATH>/compare-catalogs.py\", line 245, in index_by\n    if name in out:\n       ^^^^^^^^^^^\nTypeError: cannot use 'dict' as a dict key (unhashable type: 'dict')\n",
       "report": null
+    },
+    "c07b33f68a220419200d3fc02c2369d2292c3e18c251fed03b6b3439d1ae0320": {
+      "label": "a UTF-8 BOM before either catalog fails closed like json.load #1",
+      "status": 1,
+      "stdout": "",
+      "stderr": "Traceback (most recent call last):\n  File \"<PATH>/compare-catalogs.py\", line 356, in <module>\n    sys.exit(main())\n             ~~~~^^\n  File \"<PATH>/compare-catalogs.py\", line 274, in main\n    old, new = load(args.old), load(args.new)\n               ~~~~^^^^^^^^^^\n  File \"<PATH>/compare-catalogs.py\", line 238, in load\n    return json.load(handle)\n           ~~~~~~~~~^^^^^^^^\n  File \"<PATH>/__init__.py\", line 298, in load\n    return loads(fp.read(),\n        cls=cls, object_hook=object_hook,\n        parse_float=parse_float, parse_int=parse_int,\n        parse_constant=parse_constant, object_pairs_hook=object_pairs_hook, **kw)\n  File \"<PATH>/__init__.py\", line 341, in loads\n    raise JSONDecodeError(\"Unexpected UTF-8 BOM (decode using utf-8-sig)\",\n                          s, 0)\njson.decoder.JSONDecodeError: Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)\n",
+      "report": null
+    },
+    "c9e556f1b0d9a231a0d2c880df30430b7c9eef6f7cb09c20a4bd9ab30f31b68a": {
+      "label": "a UTF-8 BOM before either catalog fails closed like json.load #2",
+      "status": 1,
+      "stdout": "",
+      "stderr": "Traceback (most recent call last):\n  File \"<PATH>/compare-catalogs.py\", line 356, in <module>\n    sys.exit(main())\n             ~~~~^^\n  File \"<PATH>/compare-catalogs.py\", line 274, in main\n    old, new = load(args.old), load(args.new)\n                               ~~~~^^^^^^^^^^\n  File \"<PATH>/compare-catalogs.py\", line 238, in load\n    return json.load(handle)\n           ~~~~~~~~~^^^^^^^^\n  File \"<PATH>/__init__.py\", line 298, in load\n    return loads(fp.read(),\n        cls=cls, object_hook=object_hook,\n        parse_float=parse_float, parse_int=parse_int,\n        parse_constant=parse_constant, object_pairs_hook=object_pairs_hook, **kw)\n  File \"<PATH>/__init__.py\", line 341, in loads\n    raise JSONDecodeError(\"Unexpected UTF-8 BOM (decode using utf-8-sig)\",\n                          s, 0)\njson.decoder.JSONDecodeError: Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)\n",
+      "report": null
+    },
+    "c58bbfb1f7197a14513765cc14c8d0108041b1ddfc98b3113cbd8858eef1b666": {
+      "label": "a UTF-8 BOM before either catalog fails closed like json.load #3",
+      "status": 1,
+      "stdout": "",
+      "stderr": "Traceback (most recent call last):\n  File \"<PATH>/compare-catalogs.py\", line 356, in <module>\n    sys.exit(main())\n             ~~~~^^\n  File \"<PATH>/compare-catalogs.py\", line 274, in main\n    old, new = load(args.old), load(args.new)\n               ~~~~^^^^^^^^^^\n  File \"<PATH>/compare-catalogs.py\", line 238, in load\n    return json.load(handle)\n           ~~~~~~~~~^^^^^^^^\n  File \"<PATH>/__init__.py\", line 298, in load\n    return loads(fp.read(),\n        cls=cls, object_hook=object_hook,\n        parse_float=parse_float, parse_int=parse_int,\n        parse_constant=parse_constant, object_pairs_hook=object_pairs_hook, **kw)\n  File \"<PATH>/__init__.py\", line 341, in loads\n    raise JSONDecodeError(\"Unexpected UTF-8 BOM (decode using utf-8-sig)\",\n                          s, 0)\njson.decoder.JSONDecodeError: Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)\n",
+      "report": null
     }
   }
 }
