@@ -219,6 +219,7 @@ function dirEntry(
   for (let i = 0; i < name.length; i++) v.setUint16(i * 2, name.charCodeAt(i), true);
   v.setUint16(64, name.length * 2 + 2, true);
   out[66] = type;
+  out[67] = type === 0 ? 0 : 1; // used entries are black: a valid one-node red-black tree
   v.setUint32(68, NOSTREAM, true); // left sibling
   v.setUint32(72, NOSTREAM, true); // right sibling
   v.setUint32(76, child, true);
@@ -227,28 +228,41 @@ function dirEntry(
   return out;
 }
 
-/** OLE CFB v3 holding a FileHeader stream: public MS-CFB + HWP 5.0 file signature. */
+/**
+ * OLE CFB v3 holding a FileHeader stream: public MS-CFB + HWP 5.0 file signature.
+ * MS-CFB 2.6.3: a stream below the 4096-byte cutoff lives in the mini stream, so
+ * FileHeader is mini sectors 0-3, chained by the mini FAT, inside the mini stream
+ * container that the Root Entry points to.
+ *
+ * Sectors: 0 FAT, 1 directory, 2 mini FAT, 3 mini stream container.
+ */
 export function buildHwp(): Uint8Array {
   const sector = 512;
+  const miniSector = 64;
   // HWP 5.0 FileHeader: 32-byte signature field, version and flags left zero.
   const payload = new Uint8Array(256);
   payload.set(enc.encode("HWP Document File"));
+  const miniSectors = payload.length / miniSector;
 
-  const fat = new Uint8Array(sector);
-  const fv = new DataView(fat.buffer);
-  for (let i = 0; i < 128; i++) fv.setUint32(i * 4, FREESECT, true);
-  fv.setUint32(0, FATSECT, true); // sector 0: the FAT
-  fv.setUint32(4, ENDOFCHAIN, true); // sector 1: directory
-  fv.setUint32(8, ENDOFCHAIN, true); // sector 2: FileHeader stream
+  const table = (entries: number[]) => {
+    const out = new Uint8Array(sector);
+    const v = new DataView(out.buffer);
+    for (let i = 0; i < sector / 4; i++) v.setUint32(i * 4, entries[i] ?? FREESECT, true);
+    return out;
+  };
+  const fat = table([FATSECT, ENDOFCHAIN, ENDOFCHAIN, ENDOFCHAIN]);
+  const miniFat = table(
+    Array.from({ length: miniSectors }, (_, i) => (i + 1 < miniSectors ? i + 1 : ENDOFCHAIN)),
+  );
 
   const dir = concat([
-    dirEntry("Root Entry", 5, ENDOFCHAIN, 0, 1),
-    dirEntry("FileHeader", 2, 2, payload.length),
+    dirEntry("Root Entry", 5, 3, payload.length, 1),
+    dirEntry("FileHeader", 2, 0, payload.length),
     dirEntry("", 0, 0, 0),
     dirEntry("", 0, 0, 0),
   ]);
-  const stream = new Uint8Array(sector);
-  stream.set(payload);
+  const container = new Uint8Array(sector);
+  container.set(payload);
 
   const head = new Uint8Array(sector);
   const hv = new DataView(head.buffer);
@@ -261,11 +275,12 @@ export function buildHwp(): Uint8Array {
   hv.setUint32(44, 1, true); // number of FAT sectors
   hv.setUint32(48, 1, true); // first directory sector
   hv.setUint32(56, 4096, true); // mini stream cutoff
-  hv.setUint32(60, ENDOFCHAIN, true); // first mini FAT sector
+  hv.setUint32(60, 2, true); // first mini FAT sector
+  hv.setUint32(64, 1, true); // number of mini FAT sectors
   hv.setUint32(68, ENDOFCHAIN, true); // first DIFAT sector
   hv.setUint32(76, 0, true); // DIFAT[0] = sector 0
   for (let i = 1; i < 109; i++) hv.setUint32(76 + i * 4, FREESECT, true);
-  return concat([head, fat, dir, stream]);
+  return concat([head, fat, dir, miniFat, container]);
 }
 
 export const OUTPUTS: readonly (readonly [string, () => Uint8Array])[] = [

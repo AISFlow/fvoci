@@ -41,18 +41,37 @@ describe("compat fixture generator", () => {
     );
   });
 
-  test("HWP is a CFB v3 file whose FileHeader stream carries the HWP signature", () => {
+  test("HWP FileHeader resolves through the CFB mini stream (MS-CFB 2.6.3)", () => {
     const bytes = buildHwp();
-    expect(bytes.length).toBe(2048);
-    expect([...bytes.subarray(0, 8)]).toEqual([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
     const v = new DataView(bytes.buffer, bytes.byteOffset);
-    expect(v.getUint32(512 + 8, true)).toBe(0xfffffffe); // FAT: stream sector 2 ends its chain
-    const entry = 1024 + 128; // directory sector 1, entry 1
-    expect(String.fromCharCode(...new Uint16Array(bytes.slice(entry, entry + 20).buffer))).toBe(
+    const u32 = (at: number) => v.getUint32(at, true);
+    const ENDOFCHAIN = 0xfffffffe;
+    expect([...bytes.subarray(0, 8)]).toEqual([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+    const sectorAt = (n: number) => 512 * (n + 1);
+    const fatNext = (n: number) => u32(sectorAt(u32(76)) + n * 4); // single FAT sector (DIFAT[0])
+    const dirEntry = (i: number) => sectorAt(u32(48)) + i * 128;
+    const root = dirEntry(0);
+    const file = dirEntry(1);
+    expect(String.fromCharCode(...new Uint16Array(bytes.slice(file, file + 20).buffer))).toBe(
       "FileHeader",
     );
-    expect(v.getUint32(entry + 116, true)).toBe(2);
-    expect(strFromU8(bytes.subarray(1536, 1536 + 17))).toBe("HWP Document File");
+    const size = Number(v.getBigUint64(file + 120, true));
+    expect(size).toBe(256);
+    expect(size).toBeLessThan(u32(56)); // below the cutoff, so it must be a mini stream
+    // Mini stream container: the Root Entry's regular-sector chain.
+    const container: number[] = [];
+    for (let s = u32(root + 116); s !== ENDOFCHAIN; s = fatNext(s)) container.push(s);
+    expect(container.length * 512).toBeGreaterThanOrEqual(Number(v.getBigUint64(root + 120, true)));
+    // FileHeader: the mini FAT chain from its start, read out of the container.
+    const miniFat = sectorAt(u32(60));
+    expect(u32(64)).toBe(1);
+    const out: number[] = [];
+    for (let m = u32(file + 116); m !== ENDOFCHAIN; m = u32(miniFat + m * 4)) {
+      const at = sectorAt(container[Math.floor((m * 64) / 512)]!) + ((m * 64) % 512);
+      out.push(...bytes.subarray(at, at + 64));
+    }
+    expect(out.length).toBe(size);
+    expect(strFromU8(Uint8Array.from(out.slice(0, 17)))).toBe("HWP Document File");
   });
 
   test("writes the four specimens into an empty directory", () => {
@@ -62,7 +81,7 @@ describe("compat fixture generator", () => {
       const r = run(["--output-dir", out]);
       expect(r.code).toBe(0);
       expect(r.stdout).toBe(
-        "sample.pdf 593 bytes\nsample.docx 949 bytes\nsample.hwpx 1717 bytes\nsample.hwp 2048 bytes\n",
+        "sample.pdf 593 bytes\nsample.docx 949 bytes\nsample.hwpx 1717 bytes\nsample.hwp 2560 bytes\n",
       );
       expect(readdirSync(out).sort()).toEqual([
         "sample.docx",
