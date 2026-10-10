@@ -7,7 +7,7 @@ disable-model-invocation: true
 ## 완료 조건
 
 - 이 역할은 main PR을 병합한다. #347 fast-forward는 하지 않는다.
-- 리뷰 수·게이트·재실행·머지 큐는 AGENTS.md다. 병합 순서, tested merge, Turso, 브랜치 삭제, ruleset은 `fvoci-handoff` 완료 조건이다.
+- 리뷰 수·게이트·재실행·머지 큐는 AGENTS.md다. 병합 순서, tested merge, 병합 후 main CI·이미지 publication 확인, Turso, 브랜치 삭제, ruleset은 `fvoci-handoff` 완료 조건이다.
 - workflow·xtask·게이트의 0.x 병합은 2명 ACCEPT와 필수 CI PASS 뒤에, 병합 SHA와 규칙 요약을 게시한 다음 한다. AGENTS.md와 `.agents/` 스킬 커밋은 리뷰어 ACCEPT와 CI에 더해, 메인테이너가 그 40자 SHA를 명시한 뒤에만 병합한다(2026-10-10 11:08 KST).
 - 알림은 head와 tested merge를 다른 줄에 적는다.
 

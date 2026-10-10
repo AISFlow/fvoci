@@ -14,7 +14,7 @@ Rust 서버(Tokio, axum 0.8, SQLx, Serde, tracing), UI는 Vue 3 + Nuxt UI + Vite
 경로가 바뀌면 그 명령이 exit 0이다.
 
 - `src/`, `crates/`, `migrations/`: `cargo fmt --check`와 그 타깃의 `cargo test --locked --offline`
-- `apps/web/`, `packages/` TS·Vue: `bun run lint`, `bun run format:check`, 해당 패키지 `bun --bun run typecheck`. 테스트는 그 패키지의 `bun run test`다. bare `bun test`는 쓰지 않는다.
+- `apps/web/`, `packages/` TS·Vue: 루트에서 `bun run lint`, `bun run format:check`, 해당 스크립트가 있는 패키지에서 `bun --bun run typecheck`, `bun run test`를 실행한다. 자체 스크립트가 없는 공유 패키지는 바뀐 계약을 소비하는 패키지의 검사로 검증하고 cwd와 선택 근거를 남긴다. bare `bun test`는 쓰지 않는다.
 - `.github/workflows/`, `scripts/ci_selection.py`: `bash scripts/test-ci-selection.sh`
 - 인가·RLS·잠금·원자성: 실제 DB·앱 역할. `TEST_DATABASE_URL`이 없으면 실패로 남긴다.
 
@@ -26,7 +26,7 @@ Rust 서버(Tokio, axum 0.8, SQLx, Serde, tracing), UI는 Vue 3 + Nuxt UI + Vite
 
 - main 병합은 병합 검사가 통과하고 병합 SHA를 방에 먼저 게시한 뒤에 허용된다. 0.x는 리뷰어 2/2와 게이트 5개(`rust-ci-gate`, `web-ci-gate`, `install-ci-gate`, `documents-ci-gate`, `collab-engine-ci-gate`) PASS. 1.0.0 병합은 메인테이너 말이 있을 때 허용된다. 절차는 `fvoci-handoff`다.
 - 브랜치 삭제는 main에 포함됐는지 다시 확인한 뒤 그 목록을 게시한 다음에 허용된다. 절차는 `fvoci-handoff`다.
-- 리뷰 수는 여기에만 적는다. 작은 변경은 1명. `docs/rewrite.md`는 1명. workflow, xtask, 게이트, ruleset, `scripts/ci_selection.py`는 2명 ACCEPT. workflow·xtask·게이트의 0.x 병합은 그 2명 ACCEPT와 필수 CI PASS 뒤에, 병합 SHA와 규칙 요약을 게시한 다음 허용된다. AGENTS.md와 `.agents/` 스킬은 리뷰어 ACCEPT와 CI에 더해, 그 커밋 40자 SHA에 대한 메인테이너의 명시 승인이 있어야 한다(메인테이너, 2026-10-10 11:08 KST). ruleset 변경은 2명 ACCEPT 뒤에 허용된다. 주 리뷰어: AGENTS.md·`.agents/` 스킬은 리드가 배정하고 기본은 CI·웹과 Rust. xtask는 Rust가 주고 CI·웹이 교차. 의존성 변경은 Rust가 주고 DB가 교차.
+- 리뷰 수는 여기에만 적는다. 작은 변경은 1명. `docs/rewrite.md`는 1명. workflow, xtask, 게이트, ruleset, `scripts/ci_selection.py`는 2명 ACCEPT. workflow·xtask·게이트의 0.x 병합은 그 2명 ACCEPT와 필수 CI PASS 뒤에, 병합 SHA와 규칙 요약을 게시한 다음 허용된다. AGENTS.md와 `.agents/` 스킬은 리뷰어 ACCEPT와 CI에 더해, 그 커밋 40자 SHA에 대한 메인테이너의 명시 승인이 있어야 한다(메인테이너, 2026-10-10 11:08 KST). GitHub ruleset·branch protection·권한 설정 변경은 문서 정책 변경과 구분한다. 리뷰어 2명 ACCEPT에 더해 정확한 대상과 변경 내용에 대한 메인테이너 명시 승인이 필요하며, 기존 보호 조건을 우회·약화하지 않는다. 주 리뷰어: AGENTS.md·`.agents/` 스킬은 리드가 배정하고 기본은 CI·웹과 Rust. xtask는 Rust가 주고 CI·웹이 교차. 의존성 변경은 Rust가 주고 DB가 교차.
 - 작성자와 리뷰어는 다른 주체다. 리뷰어는 검토하는 커밋을 고치지 않는다.
 - 태그와 릴리스는 메인테이너 말이 있고 대상 SHA가 방에 먼저 게시된 뒤에 허용된다. 이미 게시된 태그, `:0.y.z` 이미지, Release 파일은 그 내용 그대로 남을 때 유지된다.
 - 배포, 시크릿, 패키지 공개 범위, 유료 사용은 메인테이너 말이 있을 때 허용된다.
@@ -38,7 +38,7 @@ Rust 서버(Tokio, axum 0.8, SQLx, Serde, tracing), UI는 Vue 3 + Nuxt UI + Vite
 - 게이트 workflow에 `paths:`가 없다. `ci-base-image.yml`의 이미지 경로 필터는 게이트 밖이다.
 - 재실행은 전체 rerun이다. `gh run rerun --failed`는 범위 밖이다. `GITHUB_RUN_ATTEMPT` 생산자 대조는 유지한다. 머지 큐 근거는 게시한 큐 head와 `merge_group` checkout SHA = 그 main 커밋 SHA다.
 - 통과는 타임아웃 증액·retry·sleep·skip 없이 나온다. regression·resolved·flaky 라벨에는 재현 근거가 있다.
-- 원인이 알려진 flaky는 재실행하지 않는다. 같은 실패가 두 번이면 고친다. REJECT는 2라운드까지다. 3라운드부터 막는 것은 보안·fail-closed, 데이터 유실, 잘못된 저장 ACK, 복구 실패, 잘못된 영속 상태다. 스타일·이름·문서 논쟁은 거기서 멈춘다.
+- 원인이 알려진 flaky는 수정 없이 재실행하지 않는다. 같은 실패가 두 번이면 원인을 조사하고 고친다. 스타일·이름·절차에 대한 반복 리뷰는 2라운드까지다. 재현되거나 구체적인 호출 경로로 입증된 기능·API 계약 위반, 보안·fail-closed, 데이터 유실, 잘못된 저장 ACK, 복구 실패, 잘못된 영속 상태는 라운드와 관계없이 차단한다. 두 라운드 뒤에도 판단이 갈리면 근거와 미해결 쟁점을 메인테이너에게 전달하며 자동 ACCEPT로 바꾸지 않는다.
 - 하네스(메인테이너, 2026-10-09 11:31 KST): 코드는 Rust(xtask)와 TypeScript(Bun)뿐이다. Python·shell 하네스 파일은 옮긴 뒤 제거한다. 이전은 intent부터다. diff·intent 표는 커밋 메시지와 PR 본문에만 있다.
 - 메인테이너, 2026-10-10 10:39 KST. 경계는 2026-10-10 10:42 KST: 새 `.py`와 새 Python 코드는 없다. 이전 전까지 기존 Python 파일(예: `scripts/ci_selection.py`)의 기존 검사 수정은 허용된다. 새 기능이나 새 테스트 준비는 TypeScript 또는 Rust에 둔다.
 - 외부 Python 도구(2026-10-09 repowise 결정): uv로 설치해 도구로 쓴다. 그 도구 때문에 레포에 Python 코드를 더하지 않는다.

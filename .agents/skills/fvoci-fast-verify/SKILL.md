@@ -10,7 +10,7 @@ description: "바꾼 경로의 검사, 실패 원인, CI 수락을 고를 때 �
 - 바꾼 경계의 명령이 exit 0이다. 순수 정책, DB, HTTP, 기동·네트워크, 브라우저·배포 중 실제로 바뀐 경계만 고른다.
 - 보고에 검사명, 명령, cwd, SHA, 범위·개수, PASS/FAIL/NOTRUN/MISSING, exit code, 소요, 생략 이유, 남은 위험이 있다. 0개 실행, cargo check, 미실행 DB·브라우저는 통과가 아니다.
 - `.github/workflows/` 또는 `scripts/ci_selection.py`가 바뀌면 `bash scripts/test-ci-selection.sh`가 exit 0이다. 이 명령은 `verify-workflows`와 `python3 -m unittest scripts.test_ci_selection`이다.
-- 웹 샤드 정책을 바꾸면 `python3 scripts/web-e2e-groups.py verify --shards 8`, `python3 -m unittest scripts.test_web_e2e_groups`, `bash scripts/test-web-e2e-groups.sh`가 exit 0이다.
+- 웹 샤드 정책을 바꾸면 `bash scripts/test-web-e2e-groups.sh`가 exit 0이다. 이 명령에 포함된 verify·단위 검사를 별도로 중복 실행하지 않는다.
 - 반복 횟수는 AGENTS.md 손대지 말 것이다.
 - 원격 수락은 그 head의 CI다. 같은 코드·같은 범위의 원격 성공은 재사용하고, 바뀐 부분만 더 본다. 리뷰 판정은 그 CI를 대신하지 않는다.
 

@@ -19,7 +19,8 @@ description: "커밋을 제출·검토·통합하거나 작업을 재개·정리
   - 머지 큐를 쓰면 큐 head를 게시하고, `merge_group` checkout SHA는 그 main 커밋 SHA와 같다.
   - 순서: 조건 확인 → gh 계정 `fvoci`로 Ready 전환 → `gh pr merge` 직전에 base와 게시한 head 재확인 → `gh pr merge --merge --match-head-commit <게시한 SHA>`. squash·rebase는 쓰지 않는다. 만든 merge commit의 부모는 `[확인한 main, 게시한 head]`다. SHA가 아니라 부모로 본다. 이 병합의 Ready 전환과 그 `Closes #N` 이슈 종료는 이 조건에 포함된다.
 - Turso dispatch는 그 head의 나머지 필수 CI가 PASS한 뒤, 정확한 40자 SHA로 한 번이다. run의 `head_sha`가 요청 SHA와 다르면 결과는 MISSING이다.
-- 브랜치 삭제는 각 브랜치가 적은 커밋을 여전히 가리키는지와 main 포함을 다시 확인한 뒤, 삭제한 목록을 남긴다. ruleset 변경은 AGENTS.md 리뷰 수를 만족하고, 변경 전 JSON과 변경 후 JSON의 sha256이 있다.
+- 병합 담당자는 실제 main merge SHA와 그 SHA의 CI를 끝까지 확인하고 결과를 기록한다. main push에서만 실행되는 이미지 publication도 해당 실행 결과로 확인한다. 병합 전 PASS를 병합 후 PASS나 제품 릴리스 완료로 대신하지 않는다.
+- 브랜치 삭제는 각 브랜치가 적은 커밋을 여전히 가리키는지와 main 포함을 다시 확인한 뒤, 삭제한 목록을 남긴다. GitHub ruleset 변경은 AGENTS.md의 명시 승인과 검토 조건을 따르고 변경 전후 JSON을 기록한다. 기록이나 hash만으로 변경 권한을 대신하지 않는다.
 - 재개할 때 원격 브랜치, PR head, CI를 다시 조회한다. 로컬 작업 트리에만 있는 커밋은 수락 근거가 아니다.
 
 ## 기본 절차
@@ -34,7 +35,7 @@ PR 수락·머지는 포팅 종료가 아니다. 의존성이 갖춰진 다음 �
 
 - 리뷰어는 검토 중인 커밋을 고치지 않는다. 통합은 cherry-pick·patch로 SHA를 바꾸지 않는다. 작성자와 리뷰어는 다른 주체다.
 - 작성자는 PR 브랜치를 push하지 않는다. 원본 GitHub는 읽기 전용이다. main 갱신은 완료 조건의 병합으로만 허용된다.
-- 재실행·force push·`reset --hard`는 AGENTS.md에 허용 조건이 없다. 브랜치 삭제는 완료 조건이다. 되돌림은 메인테이너 말이 있을 때 허용된다.
+- CI 재실행의 범위와 생산자·소비자 attempt 대조는 AGENTS.md를 따른다. force push·`reset --hard`는 AGENTS.md에 허용 조건이 없다. 브랜치 삭제는 완료 조건이다. 되돌림은 메인테이너 말이 있을 때 허용된다.
 - auto-merge는 허용 조건이 없다. 0.x 병합 순서 밖의 Ready 전환, 그 병합의 `Closes`가 아닌 이슈 종료, 배포, 시크릿, 패키지 공개 범위, 유료 사용, 권한 확대는 메인테이너 말이 있을 때 허용된다.
 - 사용자 승인 없이 계정·인증·결제, 상주 프로세스, scheduler, routine, MCP 서버를 새로 만들지 않는다. 멈춘 다른 작업 체인을 다시 켜지 않는다.
 - 시크릿·cookie·credential·접속 URL·host·전체 환경을 보고·커밋·artifact에 남기지 않는다.
