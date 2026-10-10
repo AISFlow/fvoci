@@ -2,7 +2,7 @@
 # One perf run: fresh DB + app role, release server on 127.0.0.1:0, Playwright.
 set -euo pipefail
 
-: "${ROOT:?}" "${RUN_DIR:?}" "${RELEASE:?}" "${FVOCI_PERF_OUT:?}" "${FVOCI_PERF_DATASET:?}"
+: "${ROOT:?}" "${RUN_DIR:?}" "${RELEASE:?}" "${FVOCI_PERF_OUT:?}" "${FVOCI_PERF_DATASET:?}" "${TEST_DATABASE_URL:?}"
 PG_CONTAINER="${FVOCI_TEST_PG_CONTAINER:?missing test postgres container}"
 SERVER_LOG="$RUN_DIR/server.log"
 SERVER_PID=""
@@ -32,18 +32,28 @@ startup_failure() {
 DB_NAME="fvoci_perf_$(openssl rand -hex 8)"
 ROLE_NAME="fvoci_app_${DB_NAME}"
 ROLE_PASSWORD="$(openssl rand -hex 16)"
+# Admin URL: TEST_DATABASE_URL with only its path replaced. App URL: the same
+# host and port with the app role. ROLE_NAME and ROLE_PASSWORD are generated
+# above from [0-9a-z_] only, so they need no percent-encoding.
+admin_scheme="${TEST_DATABASE_URL%%://*}"
+[[ "$admin_scheme" != "$TEST_DATABASE_URL" ]] || { echo "TEST_DATABASE_URL is not a URL" >&2; exit 1; }
+admin_rest="${TEST_DATABASE_URL#*://}"
+admin_netloc="${admin_rest%%[/?#]*}"
+admin_tail="${admin_rest#"$admin_netloc"}"
+admin_path="${admin_tail%%[?#]*}"
+admin_hostport="${admin_netloc##*@}"
+if [[ "$admin_hostport" == \[* ]]; then
+  admin_host="${admin_hostport%%]*}]"
+else
+  admin_host="${admin_hostport%%:*}"
+fi
+admin_port="${admin_hostport#"$admin_host"}"
+admin_port="${admin_port#:}"
+[[ "$admin_port" =~ ^[0-9]*$ ]] || { echo "TEST_DATABASE_URL has an invalid port" >&2; exit 1; }
+admin_host="${admin_host,,}"
+export DATABASE_URL="$admin_scheme://$admin_netloc/$DB_NAME${admin_tail#"$admin_path"}"
+export DATABASE_APP_URL="postgres://$ROLE_NAME:$ROLE_PASSWORD@${admin_host:-127.0.0.1}:${admin_port:-5432}/$DB_NAME"
 psql_admin -d postgres -c "CREATE DATABASE \"$DB_NAME\"" >/dev/null
-mapfile -t urls < <(DB_NAME="$DB_NAME" ROLE_NAME="$ROLE_NAME" ROLE_PASSWORD="$ROLE_PASSWORD" python3 - <<'PY'
-import os, urllib.parse
-admin = urllib.parse.urlparse(os.environ["TEST_DATABASE_URL"])
-db = os.environ["DB_NAME"]
-print(urllib.parse.urlunparse(admin._replace(path=f"/{db}")))
-user = urllib.parse.quote(os.environ["ROLE_NAME"], safe="")
-pw = urllib.parse.quote(os.environ["ROLE_PASSWORD"], safe="")
-print(f"postgres://{user}:{pw}@{admin.hostname or '127.0.0.1'}:{admin.port or 5432}/{db}")
-PY
-)
-export DATABASE_URL="${urls[0]}" DATABASE_APP_URL="${urls[1]}"
 "$RELEASE/fvoci-migrate" >/dev/null
 psql_admin -d "$DB_NAME" -c "CREATE ROLE \"$ROLE_NAME\" LOGIN PASSWORD '$ROLE_PASSWORD' NOSUPERUSER NOBYPASSRLS" >/dev/null
 "$RELEASE/fvoci-migrate" --grant-app-role "$ROLE_NAME" >/dev/null
@@ -81,12 +91,11 @@ if [[ -n "${FVOCI_PERF_GREP:-}" ]]; then
   GREP_ARGS=(--grep "$FVOCI_PERF_GREP")
   [[ -n "$TAG" ]] || { echo "FVOCI_PERF_GREP requires FVOCI_PERF_TAG" >&2; exit 1; }
 fi
-python3 - "$FVOCI_PERF_OUT/run-$FVOCI_PERF_DATASET$TAG.json" "$PG_VERSION" <<'PY'
-import json, sys, datetime
-json.dump({"dataset_run_started": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-           "postgres_server_version": sys.argv[2], "network": "loopback 127.0.0.1",
-           "server": "release fvoci-server (source build)"}, open(sys.argv[1], "w"), indent=1)
-PY
+# PG_VERSION has no whitespace left; escape the JSON-significant characters.
+pg_version_json="${PG_VERSION//\\/\\\\}"
+pg_version_json="${pg_version_json//\"/\\\"}"
+printf '{\n "dataset_run_started": "%s",\n "postgres_server_version": "%s",\n "network": "loopback 127.0.0.1",\n "server": "release fvoci-server (source build)"\n}' \
+  "$(date -u +%Y-%m-%dT%H:%M:%S.%6N+00:00)" "$pg_version_json" >"$FVOCI_PERF_OUT/run-$FVOCI_PERF_DATASET$TAG.json"
 
 cd "$ROOT/apps/web"
 set +e
