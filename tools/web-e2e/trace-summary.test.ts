@@ -7,13 +7,16 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Zip, ZipDeflate } from "fflate";
-import { summarize } from "./trace-summary.ts";
+import { shortUrl, summarize } from "./trace-summary.ts";
 
 type Value = string | Uint8Array;
 type Json = Record<string, unknown>;
 
+/** Unix mode and the "made by" system (3 Unix, 0 DOS) of one record. */
+type Mode = { mode: number; os: number };
+
 /** A deflated ZIP of the given members, in order; duplicate names are kept. */
-function zipOf(members: [string, Value][], modes: Record<string, number> = {}): Uint8Array {
+function zipOf(members: [string, Value][], modes: Record<string, Mode> = {}): Uint8Array {
   const chunks: Uint8Array[] = [];
   const zip = new Zip((error, chunk) => {
     if (error) throw error;
@@ -23,9 +26,9 @@ function zipOf(members: [string, Value][], modes: Record<string, number> = {}): 
     const mode = modes[name];
     const file = new ZipDeflate(name, { level: 6 });
     if (mode !== undefined) {
-      // Unix "made by" and the mode in the high half of the external attributes.
-      file.os = 3;
-      file.attrs = mode * 0x10000;
+      // The mode goes in the high half of the external attributes.
+      file.os = mode.os;
+      file.attrs = mode.mode * 0x10000;
     }
     zip.add(file);
     file.push(typeof value === "string" ? new TextEncoder().encode(value) : value, true);
@@ -34,24 +37,40 @@ function zipOf(members: [string, Value][], modes: Record<string, number> = {}): 
   return Buffer.concat(chunks);
 }
 
-/** Set the encryption bit of every local and central record named `name` (no real cipher). */
-function markEncrypted(archive: Uint8Array, name: string): Uint8Array {
+/** Apply `edit` to every local and central record named `name`. */
+function editRecords(
+  archive: Uint8Array,
+  name: string,
+  edit: (view: DataView, at: number, central: boolean) => void,
+): Uint8Array {
   const out = Uint8Array.from(archive);
   const view = new DataView(out.buffer);
   const wanted = new TextEncoder().encode(name);
   for (let at = 0; at + 46 <= out.length; at += 1) {
     const signature = view.getUint32(at, true);
-    const [nameAt, flagAt] =
-      signature === 0x04034b50 ? [30, 6] : signature === 0x02014b50 ? [46, 8] : [0, 0];
+    const nameAt = signature === 0x04034b50 ? 30 : signature === 0x02014b50 ? 46 : 0;
     if (nameAt === 0) continue;
     const length = view.getUint16(at + (signature === 0x04034b50 ? 26 : 28), true);
     const found = out.subarray(at + nameAt, at + nameAt + length);
     if (length === wanted.length && found.every((byte, index) => byte === wanted[index])) {
-      view.setUint16(at + flagAt, view.getUint16(at + flagAt, true) | 1, true);
+      edit(view, at, signature === 0x02014b50);
     }
   }
   return out;
 }
+
+/** Set the encryption bit of the records named `name` (no real cipher). */
+const markEncrypted = (archive: Uint8Array, name: string) =>
+  editRecords(archive, name, (view, at, central) => {
+    const flags = at + (central ? 8 : 6);
+    view.setUint16(flags, view.getUint16(flags, true) | 1, true);
+  });
+
+/** Flip one bit of the central-directory CRC-32 of the records named `name`. */
+const corruptCrc = (archive: Uint8Array, name: string) =>
+  editRecords(archive, name, (view, at, central) => {
+    if (central) view.setUint32(at + 16, view.getUint32(at + 16, true) ^ 1, true);
+  });
 
 const cli = join(import.meta.dir, "trace-summary.ts");
 
@@ -134,6 +153,49 @@ describe("trace summary redaction", () => {
     } finally {
       rmSync(work, { recursive: true, force: true });
     }
+  });
+
+  test("paths are redacted as Python split them: no backslash or dot-segment rewriting", () => {
+    const token = "SYNTHETIC_PRIVATE";
+    // Expected values are the replaced Python script's output for the same URLs.
+    const expected: [string, string][] = [];
+    for (const family of ["s", "invite", "share", "invitations", "ics"]) {
+      const redacted = `/${family}/<redacted>`;
+      expected.push(
+        [`http://localhost/${family}/prefix\\${token}`, redacted],
+        [`http://localhost/${family}/..\\${token}`, redacted],
+        [`http://127.0.0.1:4000/${family}/%2e%2e%2f${token}`, redacted],
+        [
+          `https://Example.COM:8443/${family}/a%5c..\\%2E%2E${token}?q=1`,
+          `https://example.com${redacted}?…`,
+        ],
+      );
+    }
+    for (const [url, path] of expected) {
+      expect(shortUrl(url), url).toBe(path);
+    }
+    // Same rule as Python: a later segment is not a path token (parity, not a new rule).
+    expect(shortUrl(`http://localhost/s/../${token}`)).toBe(`/s/<redacted>/${token}`);
+    expect(shortUrl("http://[::1]:3000/s/abc")).toBe("/s/<redacted>");
+    expect(shortUrl("http://user:pw@Host:99/x")).toBe("http://host/x");
+    for (const url of ["http://[1.2.3.4]/p", "http://[::1/p", "http://a℀b.com/p"]) {
+      expect(shortUrl(url), url).toBe("<unparsable url>");
+    }
+    for (const url of ["", null, 0, false]) expect(shortUrl(url)).toBe("/");
+
+    const rows = expected.map(([url], index) =>
+      JSON.stringify({
+        type: "resource-snapshot",
+        snapshot: {
+          request: { method: "GET", url },
+          response: { status: 200 },
+          _monotonicTime: index,
+        },
+      }),
+    );
+    const summary = summarize(zipOf([["0-trace.network", rows.join("\n")]]));
+    expect(summary).not.toContain(token);
+    expect(summary.split("\n").filter((line) => line.includes("<redacted>"))).toHaveLength(20);
   });
 
   test("an unreadable archive fails with exit 1 and no stdout", () => {
@@ -251,10 +313,10 @@ describe("template diagnostic", () => {
     test?: string;
     extra?: [string, string][];
     duplicate?: boolean;
-    mode?: number;
-    encrypted?: boolean;
+    modes?: Record<string, Mode>;
+    edit?: (archive: Uint8Array) => Uint8Array;
   }
-  const run = async (label: string, options: Options = {}): Promise<Json> => {
+  const run = (label: string, options: Options = {}): Json => {
     const payload = "payload" in options ? options.payload : data;
     const members: [string, Value][] = [
       ["0-trace.network", JSON.stringify(network)],
@@ -266,8 +328,8 @@ describe("template diagnostic", () => {
       ...(options.extra ?? []),
     ];
     if (options.duplicate) members.push([member, JSON.stringify(data)]);
-    const archive = zipOf(members, options.mode === undefined ? {} : { [member]: options.mode });
-    const output = await summarize(options.encrypted ? markEncrypted(archive, member) : archive);
+    const archive = zipOf(members, options.modes);
+    const output = summarize(options.edit ? options.edit(archive) : archive);
     expect(output, `${label}: base digest lost`).toContain("GET 200 script /assets/fixture.js");
     for (const forbidden of [
       secret,
@@ -294,8 +356,8 @@ describe("template diagnostic", () => {
   };
   const reject = (reason: string) => ({ available: false, reason });
 
-  test("valid input exports the allowlist only", async () => {
-    const valid = (await run("valid")) as {
+  test("valid input exports the allowlist only", () => {
+    const valid = run("valid") as {
       available: boolean;
       counts: Json;
       actions: Record<string, Json | null>;
@@ -382,8 +444,8 @@ describe("template diagnostic", () => {
     return value;
   };
 
-  test("caret boundaries: exact, private and nullable inputs", async () => {
-    const caretValid = (await run("caret_valid", { payload: caretData() })) as {
+  test("caret boundaries: exact, private and nullable inputs", () => {
+    const caretValid = run("caret_valid", { payload: caretData() }) as {
       missingActions: string[];
       actions: Record<string, Json & { native: Json; focus: Json }>;
     };
@@ -415,7 +477,7 @@ describe("template diagnostic", () => {
       at: 7,
       native: { anchor: { inside: null, noneditableLeaf: null, position: null }, head: {} },
     };
-    const caretUnknown = (await run("caret_unknown", { payload: unknown })) as {
+    const caretUnknown = run("caret_unknown", { payload: unknown }) as {
       actions: Record<string, Json>;
     };
     expect(caretUnknown.actions["caret:after-End"]?.caret).toEqual({
@@ -426,7 +488,7 @@ describe("template diagnostic", () => {
     });
   });
 
-  test("caret boundaries: 15 typed, shape and overflow rejection controls", async () => {
+  test("caret boundaries: 15 typed, shape and overflow rejection controls", () => {
     const rejects: [string, Data, string][] = [];
     const base = caretData();
     const boundaries = base.caretBoundaries as Json[];
@@ -467,11 +529,11 @@ describe("template diagnostic", () => {
     }
     expect(rejects).toHaveLength(15);
     for (const [label, payload, reason] of rejects) {
-      expect(await run(`caret_reject_${label}`, { payload }), label).toEqual(reject(reason));
+      expect(run(`caret_reject_${label}`, { payload }), label).toEqual(reject(reason));
     }
   });
 
-  test("hostile, partial and legacy inputs", async () => {
+  test("hostile, partial and legacy inputs", () => {
     const hostile = clone(data);
     const hostileFrame = hostile.frames[0] as Json & { auth: Json; focus: Json; native: Json };
     hostileFrame.stage = "keydown:" + secret;
@@ -479,7 +541,7 @@ describe("template diagnostic", () => {
     hostileFrame.focus.activeTag = secret;
     hostileFrame.native.positions = { unknown: secret };
     hostileFrame.native.text = secret;
-    const safe = ((await run("hostile", { payload: hostile })).tail as Json[])[0] as Json & {
+    const safe = (run("hostile", { payload: hostile }).tail as Json[])[0] as Json & {
       auth: Json;
       native: Json;
     };
@@ -493,19 +555,17 @@ describe("template diagnostic", () => {
     truncated.totals.frames = 501;
     truncated.dropped.frames = 500;
     expect(
-      ((await run("truncated", { payload: truncated })).counts as Record<string, Json>).frames
-        ?.dropped,
+      (run("truncated", { payload: truncated }).counts as Record<string, Json>).frames?.dropped,
     ).toBe(500);
     const legacy: Partial<typeof data> = clone(data);
     delete legacy.totals;
     delete legacy.dropped;
     expect(
-      ((await run("legacy_unknown", { payload: legacy })).counts as Record<string, Json>).frames
-        ?.unknown,
+      (run("legacy_unknown", { payload: legacy }).counts as Record<string, Json>).frames?.unknown,
     ).toBe(true);
   });
 
-  test("14 rejection controls", async () => {
+  test("14 rejection controls", () => {
     const inconsistent = clone(data);
     inconsistent.totals.frames = 2;
     const malformedSnapshot = clone(data);
@@ -557,24 +617,59 @@ describe("template diagnostic", () => {
     ];
     expect(rejects).toHaveLength(14);
     for (const [label, options, reason] of rejects) {
-      expect(await run(label, options), label).toEqual(reject(reason));
+      expect(run(label, options), label).toEqual(reject(reason));
     }
   });
 
-  test("the attachment record must be a plain, unencrypted file", async () => {
-    expect((await run("regular_mode", { mode: 0o100644 })).available).toBe(true);
-    for (const [label, options] of [
-      ["symlink", { mode: 0o120777 }],
-      ["fifo", { mode: 0o010644 }],
-      ["encrypted", { encrypted: true }],
-    ] as const) {
-      expect(await run(label, options), label).toEqual(
-        reject("missing_or_invalid_attachment_member"),
+  test("the attachment record must be a plain, unencrypted file", () => {
+    const unix = (mode: number) => ({ [member]: { mode, os: 3 } });
+    expect(run("regular_mode", { modes: unix(0o100644) }).available).toBe(true);
+    const dosRegular = { [member]: { mode: 0o100644, os: 0 } };
+    expect(run("dos_regular_mode", { modes: dosRegular }).available).toBe(true);
+    const rejects: [string, Options][] = [
+      ["symlink", { modes: unix(0o120777) }],
+      ["fifo", { modes: unix(0o010644) }],
+      ["encrypted", { edit: (archive) => markEncrypted(archive, member) }],
+      // Python reads the mode whatever system made the record.
+      ["dos_symlink", { modes: { [member]: { mode: 0o120777, os: 0 } } }],
+      // A later "../" alias of the name must not stand in for the record that is read.
+      [
+        "alias_symlink",
+        {
+          extra: [["../" + member, JSON.stringify(data)]],
+          modes: { ...unix(0o120777), ["../" + member]: { mode: 0o100644, os: 3 } },
+        },
+      ],
+    ];
+    for (const [label, options] of rejects) {
+      expect(run(label, options), label).toEqual(reject("missing_or_invalid_attachment_member"));
+    }
+  });
+
+  test("a CRC-32 mismatch is invalid data, never a valid digest", () => {
+    for (const target of [member, "test.trace"]) {
+      expect(run(`bad_crc ${target}`, { edit: (archive) => corruptCrc(archive, target) })).toEqual(
+        reject("invalid_attachment_data"),
       );
     }
+    // Outside the digest a corrupt member fails the summary, as Python's read did.
+    const work = mkdtempSync(join(tmpdir(), "fvoci-trace-summary."));
+    try {
+      const archive = join(work, "trace.zip");
+      const network = JSON.stringify({ type: "console", messageType: "error", text: "x" });
+      writeFileSync(archive, corruptCrc(zipOf([["0-trace.network", network]]), "0-trace.network"));
+      const result = Bun.spawnSync([process.execPath, cli, archive], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout.toString()).toBe("");
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
   });
 
-  test("Python float and integer tokens keep their types", async () => {
+  test("Python float and integer tokens keep their types", () => {
     const floats = clone(data);
     (floats.frames[0] as Json).at = 10.5;
     const text = JSON.stringify(floats).replace('"bindingGeneration":1', '"bindingGeneration":1.0');
@@ -584,7 +679,7 @@ describe("template diagnostic", () => {
       [member, text],
     ]);
     const line =
-      (await summarize(archive))
+      summarize(archive)
         .split("\n")
         .find((row) => row.startsWith("w3-template-diagnostic ")) ?? "";
     // A float `at` keeps Python's repr; a float where an int is required is unknown.

@@ -10,8 +10,8 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import process from "node:process";
-import { unzipSync } from "fflate";
-import JSZip from "jszip";
+import { crc32 } from "node:zlib";
+import { Inflate } from "fflate";
 import {
   JsonFloat,
   PY_SPACE,
@@ -24,8 +24,10 @@ import {
   isDict,
   numeric,
   parseJson,
+  pyHostname,
   pyJsonDumps,
   pyRstrip,
+  pyUrlsplit,
   pySplitlines,
   sliceCodePoints,
   truthy,
@@ -91,74 +93,271 @@ const KEY_STAGE =
   /^(?:keydown|keyup):(?:Home|End|Shift|Enter|Escape|ArrowLeft|ArrowRight|ArrowUp|ArrowDown|PageUp|PageDown):shift=(?:true|false):composing=(?:true|false):keyCode=\p{Nd}{1,3}(?::microtask)?$/u;
 const ATTACHMENT_PATH = /^attachments\/[a-f0-9]{40,64}$/;
 
-/** One central-directory record, as fflate's reader reports it. */
+/**
+ * One central-directory record, as Python's `zipfile.ZipInfo` reads it. The
+ * attachment type check and the data read both take this record, so they
+ * can never refer to different records.
+ */
 export interface Member {
-  index: number;
+  /** The name as stored (`orig_filename`); the local header must repeat it. */
+  storedName: string;
+  /** `filename`: cut at NUL, or the matching Unicode Path extra field. */
   name: string;
+  flags: number;
+  method: number;
+  crc: number;
+  compressSize: number;
   originalSize: number;
+  externalAttr: number;
+  headerOffset: number;
+  endOffset: number;
 }
 
-/** The archive's central directory, in order and with duplicate names. */
+class BadZipFile extends Error {
+  override name = "BadZipFile";
+}
+
+const CP437_HIGH =
+  "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ";
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+/** A stored name: UTF-8 when general-purpose flag bit 11 is set, else cp437. */
+function decodeName(bytes: Uint8Array, flags: number): string {
+  if (flags & 0x800) return strictUtf8.decode(bytes);
+  return Array.from(bytes, (byte) =>
+    byte < 0x80 ? String.fromCharCode(byte) : (CP437_HIGH[byte - 0x80] ?? ""),
+  ).join("");
+}
+
+const sanitizeName = (name: string) => name.split("\0", 1)[0] ?? "";
+
+function view(bytes: Uint8Array): DataView {
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
+/** `_EndRecData`: the end-of-central-directory record that ZipFile() would use. */
+function endRecord(archive: Uint8Array): { size: number; offset: number; location: number } {
+  const data = view(archive);
+  const end = archive.length - 22;
+  let location = -1;
+  if (
+    end >= 0 &&
+    data.getUint32(end, true) === 0x06054b50 &&
+    data.getUint16(end + 20, true) === 0
+  ) {
+    location = end;
+  } else if (end >= 0) {
+    // ZIP_MAX_COMMENT (0xffff) bytes of comment at most.
+    for (let at = archive.length - 4; at >= Math.max(end - 0xffff, 0); at -= 1) {
+      if (data.getUint32(at, true) !== 0x06054b50) continue;
+      if (at <= end) location = at;
+      break;
+    }
+  }
+  if (location < 0) throw new BadZipFile("File is not a zip file");
+  const record = {
+    size: data.getUint32(location + 12, true),
+    offset: data.getUint32(location + 16, true),
+    location,
+  };
+  return endRecord64(data, location - 20, record);
+}
+
+/** `_EndRecData64`: the ZIP64 end record replaces the plain one when its locator is present. */
+function endRecord64(
+  data: DataView,
+  locator: number,
+  record: { size: number; offset: number; location: number },
+): { size: number; offset: number; location: number } {
+  if (locator < 0 || data.getUint32(locator, true) !== 0x07064b50) return record;
+  if (data.getUint32(locator + 4, true) !== 0 || data.getUint32(locator + 16, true) > 1) {
+    throw new BadZipFile("zipfiles that span multiple disks are not supported");
+  }
+  const reloff = uint64(data, locator + 8);
+  const offset = locator - 56;
+  if (reloff > offset) throw new BadZipFile("Corrupt zip64 end of central directory locator");
+  let at = reloff;
+  let extra = offset - reloff;
+  // With prepended data the locator's offset is stale; Python then tries the record right before it.
+  if (data.getUint32(at, true) !== 0x06064b50 && reloff !== offset) {
+    at = offset;
+    extra = 0;
+  }
+  if (data.getUint32(at, true) !== 0x06064b50) {
+    throw new BadZipFile("Zip64 end of central directory record not found");
+  }
+  const size = uint64(data, at + 40);
+  const directory = uint64(data, at + 48);
+  if (directory + size !== reloff || uint64(data, at + 4) + 12 !== 56 + extra) {
+    throw new BadZipFile("Corrupt zip64 end of central directory record");
+  }
+  return { size, offset: directory, location: offset - extra };
+}
+
+/** An unsigned 64-bit field; above 2^53 it would not stay exact, so it is refused. */
+function uint64(data: DataView, at: number): number {
+  const value = data.getBigUint64(at, true);
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new BadZipFile("ZIP64 value out of range");
+  return Number(value);
+}
+
+/** `ZipInfo._decodeExtra`: ZIP64 sizes/offset and the Unicode Path field. */
+function decodeExtra(member: Member, extra: Uint8Array, rawName: Uint8Array): void {
+  let rest = extra;
+  while (rest.length >= 4) {
+    const type = view(rest).getUint16(0, true);
+    const length = view(rest).getUint16(2, true);
+    if (length + 4 > rest.length) throw new BadZipFile("Corrupt extra field");
+    let field = rest.subarray(4, length + 4);
+    if (type === 0x0001) {
+      const next = () => {
+        if (field.length < 8) throw new BadZipFile("Corrupt zip64 extra field");
+        const value = uint64(view(field), 0);
+        field = field.subarray(8);
+        return value;
+      };
+      if (member.originalSize === 0xffffffff) member.originalSize = next();
+      if (member.compressSize === 0xffffffff) member.compressSize = next();
+      if (member.headerOffset === 0xffffffff) member.headerOffset = next();
+    } else if (type === 0x7075) {
+      if (field.length < 5) throw new BadZipFile("Corrupt unicode path extra field");
+      if (field[0] === 1 && view(field).getUint32(1, true) === crc32(rawName) >>> 0) {
+        let unicode: string;
+        try {
+          unicode = strictUtf8.decode(field.subarray(5));
+        } catch {
+          throw new BadZipFile("Corrupt unicode path extra field");
+        }
+        if (unicode !== "") member.name = sanitizeName(unicode);
+      }
+    }
+    rest = rest.subarray(length + 4);
+  }
+}
+
+/**
+ * `ZipFile(path).infolist()`: every central-directory record in order,
+ * duplicate names kept. Throws where opening the archive in Python raised.
+ */
 export function listMembers(archive: Uint8Array): Member[] {
+  const { size, offset, location } = endRecord(archive);
+  const concat = location - size - offset;
+  const startDir = offset + concat;
+  if (startDir < 0) throw new BadZipFile("Bad offset for central directory");
+  const directory = archive.subarray(startDir, startDir + size);
   const members: Member[] = [];
-  unzipSync(archive, {
-    filter: (file) => {
-      members.push({ index: members.length, name: file.name, originalSize: file.originalSize });
-      return false;
-    },
-  });
+  let cursor = 0;
+  const take = (length: number) => {
+    const bytes = directory.subarray(cursor, cursor + length);
+    cursor = Math.min(cursor + length, directory.length);
+    return bytes;
+  };
+  for (let total = 0; total < size;) {
+    const header = take(46);
+    if (header.length !== 46) throw new BadZipFile("Truncated central directory");
+    const fields = view(header);
+    if (fields.getUint32(0, true) !== 0x02014b50) {
+      throw new BadZipFile("Bad magic number for central directory");
+    }
+    const nameLength = fields.getUint16(28, true);
+    const extraLength = fields.getUint16(30, true);
+    const commentLength = fields.getUint16(32, true);
+    const flags = fields.getUint16(8, true);
+    const rawName = take(nameLength);
+    const storedName = decodeName(rawName, flags);
+    const extra = take(extraLength);
+    take(commentLength);
+    if ((header[6] ?? 0) > 63) throw new BadZipFile("zip file version not supported");
+    const member: Member = {
+      storedName,
+      name: sanitizeName(storedName),
+      flags,
+      method: fields.getUint16(10, true),
+      crc: fields.getUint32(16, true),
+      compressSize: fields.getUint32(20, true),
+      originalSize: fields.getUint32(24, true),
+      externalAttr: fields.getUint32(38, true),
+      headerOffset: fields.getUint32(42, true),
+      endOffset: startDir,
+    };
+    decodeExtra(member, extra, rawName);
+    member.headerOffset += concat;
+    members.push(member);
+    total += 46 + nameLength + extraLength + commentLength;
+  }
+  // Each record's data must end before the next local header (Python's zip-bomb guard).
+  let endOffset = startDir;
+  for (const member of [...members].sort((a, b) => a.headerOffset - b.headerOffset).reverse()) {
+    member.endOffset = endOffset;
+    endOffset = member.headerOffset;
+  }
   return members;
 }
 
-/** Inflate exactly the given records; a later record of one name replaces an earlier one. */
-function readMembers(
-  archive: Uint8Array,
-  wanted: (member: Member) => boolean,
-): Map<string, Uint8Array> {
-  const out = new Map<string, Uint8Array>();
-  let index = 0;
-  const files = unzipSync(archive, {
-    filter: (file) => {
-      const keep = wanted({ index, name: file.name, originalSize: file.originalSize });
-      index += 1;
-      return keep;
-    },
-  });
-  for (const name of Object.keys(files)) {
-    const data = files[name];
-    if (data) out.set(name, data);
-  }
-  return out;
-}
-
+/**
+ * `ZipFile.read(member)` of exactly this record: local header and name
+ * checks, no encryption, the overlap guard, at most `file_size` bytes and a
+ * matching CRC-32. Stored and deflated data only.
+ */
 function readMember(archive: Uint8Array, member: Member): Uint8Array {
-  const data = readMembers(archive, (item) => item.index === member.index).get(member.name);
-  if (!data) throw new Error("member not read");
+  const at = member.headerOffset;
+  const header = at >= 0 ? archive.subarray(at, at + 30) : new Uint8Array();
+  if (header.length !== 30) throw new BadZipFile("Truncated file header");
+  const fields = view(header);
+  if (fields.getUint32(0, true) !== 0x04034b50) {
+    throw new BadZipFile("Bad magic number for file header");
+  }
+  const nameLength = fields.getUint16(26, true);
+  const localName = archive.subarray(at + 30, at + 30 + nameLength);
+  if (member.flags & 0x60) throw new BadZipFile("compressed patched data or strong encryption");
+  if (decodeName(localName, fields.getUint16(6, true)) !== member.storedName) {
+    throw new BadZipFile("File name in directory and header differ");
+  }
+  const start = at + 30 + nameLength + fields.getUint16(28, true);
+  if (start + member.compressSize > member.endOffset && member.endOffset !== member.headerOffset) {
+    throw new BadZipFile("Overlapped entries");
+  }
+  if (member.flags & 1) throw new BadZipFile("File is encrypted");
+  const raw = archive.subarray(start, start + member.compressSize);
+  const limit = member.originalSize;
+  let data: Uint8Array;
+  if (member.method === 0) {
+    data = raw.subarray(0, limit);
+    if (data.length < Math.min(member.compressSize, limit)) throw new BadZipFile("Truncated data");
+  } else if (member.method === 8) {
+    // Bounded like Python's reader: stop once file_size bytes are out.
+    const chunks: Uint8Array[] = [];
+    let length = 0;
+    const inflater = new Inflate((chunk) => {
+      chunks.push(chunk);
+      length += chunk.length;
+    });
+    for (let from = 0; length < limit && from < raw.length; from += 16384) {
+      inflater.push(raw.subarray(from, from + 16384), from + 16384 >= raw.length);
+    }
+    data = Buffer.concat(chunks).subarray(0, limit);
+  } else {
+    // Python also decoded bzip2, LZMA and zstd; Playwright writes deflate, so those fail closed.
+    throw new BadZipFile("compression method not supported");
+  }
+  if (crc32(data) >>> 0 !== member.crc) throw new BadZipFile("Bad CRC-32");
   return data;
 }
 
-/** Attachment records whose entry type JSZip reports as a plain file; null if JSZip refuses the archive. */
-export type PlainFiles = ReadonlySet<string> | null;
+/** `ZipFile.NameToInfo`: the last record of each name. */
+const nameIndex = (members: Member[]) => new Map(members.map((member) => [member.name, member]));
 
-/**
- * Python refused an attachment record that is a directory, encrypted, or whose
- * Unix mode is neither unset nor a regular file. fflate does not expose those
- * header fields, so JSZip (which rejects encrypted archives) reports them.
- */
-export async function plainAttachmentFiles(archive: Uint8Array): Promise<PlainFiles> {
-  let zip: JSZip;
-  try {
-    zip = await JSZip.loadAsync(archive);
-  } catch {
-    return null;
-  }
-  const plain = new Set<string>();
-  for (const [name, entry] of Object.entries(zip.files)) {
-    if (!name.startsWith("attachments/") || entry.dir) continue;
-    const mode = typeof entry.unixPermissions === "number" ? entry.unixPermissions & 0o170000 : 0;
-    if (mode === 0 || mode === 0o100000) plain.add(name);
-  }
-  return plain;
+/** `ZipFile.read(name)`. */
+function readNamed(archive: Uint8Array, index: Map<string, Member>, name: string): Uint8Array {
+  const member = index.get(name);
+  if (!member) throw new BadZipFile("There is no item with that name");
+  return readMember(archive, member);
+}
+
+/** Python's plain-file test of the attachment record: not a directory, unencrypted, regular or unset mode. */
+function plainFile(member: Member): boolean {
+  const mode = (member.externalAttr >>> 16) & 0o170000;
+  return !member.name.endsWith("/") && !(member.flags & 1) && (mode === 0 || mode === 0o100000);
 }
 
 /** `bytes.splitlines()`: LF, CR and CRLF only. */
@@ -262,11 +461,7 @@ function dicts(value: unknown): Dict[] {
  * Raw trace/attachment content stays on the runner. All invalid-input outcomes
  * are fixed enums, never exception messages or a raw-content fallback.
  */
-export function diagnosticDigest(
-  archive: Uint8Array,
-  members: Member[],
-  plainFiles: PlainFiles,
-): Dict | Unavailable {
+export function diagnosticDigest(archive: Uint8Array, members: Member[]): Dict | Unavailable {
   if (members.length > 4096) return unavailable("member_limit");
   const named = members.filter((item) => item.name === "test.trace");
   const testTrace = named[0];
@@ -303,11 +498,12 @@ export function diagnosticDigest(
     }
     const matching = members.filter((item) => item.name === path);
     const member = matching[0];
-    if (matching.length !== 1 || !member || !plainFiles?.has(path))
+    if (matching.length !== 1 || !member || !plainFile(member))
       return unavailable("missing_or_invalid_attachment_member");
     if (member.originalSize > 1024 * 1024) return unavailable("attachment_size_limit");
     data = parseJsonBytes(readMember(archive, member));
   } catch {
+    // Also truncated or corrupt deflate data, where Python's uncaught EOFError/zlib.error exited.
     return unavailable("invalid_attachment_data");
   }
   if (!isDict(data)) return unavailable("invalid_schema");
@@ -635,23 +831,22 @@ export function redact(text: string): string {
 
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "::1", ""]);
 
+/**
+ * Path of a URL, split as Python's urlsplit split it and redacted before
+ * anything else: no WHATWG step turns "\" into "/" or drops "..", so a token
+ * never moves out of the segment the path rule redacts.
+ */
 export function shortUrl(url: unknown): string {
-  if (typeof url !== "string") throw new TypeError("url is not a string");
-  let path: string;
-  if (url === "") {
-    path = "/";
-  } else {
-    let parts: URL;
-    try {
-      parts = new URL(url);
-    } catch {
-      return "<unparsable url>";
-    }
-    const host = parts.hostname.replace(/^\[(.*)\]$/u, "$1");
-    const prefix = LOCAL_HOSTS.has(host) ? "" : `${parts.protocol.slice(0, -1)}://${host}`;
-    path = redact(prefix + (parts.pathname || "/"));
-    if (parts.search !== "") path += "?…";
+  // urlsplit turns a falsy non-str (None, 0, False) into "" and fails on any other.
+  if (typeof url !== "string" && (truthy(url) || isDict(url) || Array.isArray(url))) {
+    throw new TypeError("url is not a string");
   }
+  const parts = pyUrlsplit(typeof url === "string" ? url : "");
+  if (!parts) return "<unparsable url>";
+  const host = pyHostname(parts.netloc);
+  const prefix = LOCAL_HOSTS.has(host) ? "" : `${parts.scheme}://${host}`;
+  let path = redact(prefix + (parts.path || "/"));
+  if (parts.query !== "") path += "?…";
   return sliceCodePoints(path, 0, 120);
 }
 
@@ -696,8 +891,8 @@ const SUMMARIZED_TYPES = new Set(["resource-snapshot", "console", "event"]);
  * JSON records of one member, one per Python line; unparsable lines are skipped.
  * Records of other types are only type-checked, so they skip the int/float reviver.
  */
-function jsonLines(archive: Uint8Array, name: string): unknown[] {
-  const data = readMembers(archive, (member) => member.name === name).get(name);
+function jsonLines(archive: Uint8Array, index: Map<string, Member>, name: string): unknown[] {
+  const data = readNamed(archive, index, name);
   const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(data);
   return pySplitlines(text).flatMap((line) => {
     try {
@@ -710,15 +905,16 @@ function jsonLines(archive: Uint8Array, name: string): unknown[] {
   });
 }
 
-export async function summarize(archive: Uint8Array): Promise<string> {
+export function summarize(archive: Uint8Array): string {
   const members = listMembers(archive);
-  const diagnostic = diagnosticDigest(archive, members, await plainAttachmentFiles(archive));
+  const diagnostic = diagnosticDigest(archive, members);
+  const index = nameIndex(members);
   const names = members.map((member) => member.name).sort(compareCodePoints);
   const rows: Row[] = [];
   // One member inflated at a time, as Python read them.
   for (const name of names) {
     if (!name.endsWith(".network")) continue;
-    for (const entry of jsonLines(archive, name)) {
+    for (const entry of jsonLines(archive, index, name)) {
       const snap =
         field(entry, "type", null) === "resource-snapshot" ? field(entry, "snapshot", null) : null;
       if (!truthy(snap)) continue;
@@ -737,7 +933,7 @@ export async function summarize(archive: Uint8Array): Promise<string> {
   }
   for (const name of names) {
     if (!name.endsWith(".trace") || name === "test.trace") continue;
-    for (const event of jsonLines(archive, name)) {
+    for (const event of jsonLines(archive, index, name)) {
       const kind = field(event, "type", null);
       const when = field(event, "time", 0);
       const messageType = field(event, "messageType", null);
@@ -794,7 +990,7 @@ if (import.meta.main) {
   }
   let output: string;
   try {
-    output = await summarize(readFileSync(path));
+    output = summarize(readFileSync(path));
   } catch (error) {
     // Only the error class: a message could quote unredacted trace content.
     process.stderr.write(
