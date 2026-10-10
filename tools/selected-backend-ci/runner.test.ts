@@ -29,7 +29,7 @@ import {
   localAllocation,
   runtimeJobs,
 } from "./admission.ts";
-import { buildEnv, elfDependencies, qualifyArtifacts, stage } from "./build.ts";
+import { buildEnv, cargoInputs, elfDependencies, qualifyArtifacts, stage } from "./build.ts";
 import { qualifyListing } from "./config-list.ts";
 import type { Listing } from "./config-list.ts";
 import {
@@ -1553,6 +1553,44 @@ try {
     expect(elfDependencies(1, "", "statically linked")).toEqual([]);
     for (const code of [1, 2, 127, -15])
       expect(() => elfDependencies(code, "unexpected", "")).toThrow();
+  });
+  test("Cargo inputs keep registry/git bytes and config but not sparse index caches", () => {
+    const cargo = directory();
+    const retained = [
+      "registry/index/fixture/config.json",
+      "registry/index/fixture/data",
+      "registry/index/fixture/nested/.cache/data",
+      "registry/cache/fixture/retained.crate",
+      "registry/cache/fixture/other.crate",
+      "registry/cache/fixture/.cache/data",
+      "registry/src/fixture/source.rs",
+      "registry/src/fixture/.cache/data",
+      "git/checkouts/fixture/source.rs",
+      "git/checkouts/fixture/.cache/data",
+      "config.toml",
+    ];
+    const caches = [
+      "registry/index/fixture/.cache/data",
+      "registry/index/fixture/.cache/nested/data",
+    ];
+    for (const name of [...retained, ...caches]) {
+      mkdirSync(join(cargo, name, ".."), { recursive: true });
+      writeFileSync(join(cargo, name), "actual Cargo input fixture bytes");
+    }
+    const before = cargoInputs(cargo);
+    expect(Object.keys(before).sort()).toEqual(retained.map((name) => join(cargo, name)).sort());
+    for (const name of retained) expect(before[join(cargo, name)]).toBe(sha(join(cargo, name)));
+    // One flipped byte in an index cache leaves the map unchanged.
+    const cache = join(cargo, caches[0] as string);
+    writeFileSync(cache, "Actual Cargo input fixture bytes");
+    expect(cargoInputs(cargo)).toEqual(before);
+    // One flipped byte in a retained crate changes exactly that entry.
+    const crate = join(cargo, "registry/cache/fixture/retained.crate");
+    writeFileSync(crate, "Actual Cargo input fixture bytes");
+    const after = cargoInputs(cargo);
+    expect(Object.keys(after).filter((key) => after[key] !== before[key])).toEqual([crate]);
+    writeFileSync(join(cargo, "credentials.toml"), "");
+    expect(() => cargoInputs(cargo)).toThrow("public offline CI cannot borrow account credentials");
   });
   test("compiler environment contains hashes only and rejects wrappers/accounts", async () => {
     await withEnvironment(

@@ -64,6 +64,33 @@ export function buildEnv(): Record<string, string> {
   assert.ok(!process.env.RUSTC_WRAPPER && !process.env.RUSTC_WORKSPACE_WRAPPER);
   return Object.fromEntries(names.map((name) => [name, digest(env(name))]));
 }
+function addInput(external: Record<string, string>, path: string, excluded: string[] = []): void {
+  const entries = statSync(path).isDirectory() ? files(path) : [path];
+  for (const file of entries)
+    if (!excluded.some((prefix) => below(file, prefix))) external[file] = sha(file);
+}
+// Cargo registry/git bytes and config are build inputs; sparse index lookup
+// caches (registry/index/*/.cache) refresh under --locked and are not.
+// Account credentials refuse the offline public CI build.
+export function cargoInputs(cargo: string): Record<string, string> {
+  const external: Record<string, string> = {};
+  const index = join(cargo, "registry/index");
+  const caches = existsSync(index)
+    ? readdirSync(index)
+        .map((name) => join(index, name, ".cache"))
+        .filter((p) => existsSync(p) && statSync(p).isDirectory())
+    : [];
+  for (const sub of ["registry", "git"])
+    if (existsSync(join(cargo, sub)))
+      addInput(external, join(cargo, sub), sub === "registry" ? caches : []);
+  for (const config of [join(cargo, "config"), join(cargo, "config.toml")])
+    if (existsSync(config)) addInput(external, config);
+  assert.ok(
+    !existsSync(join(cargo, "credentials")) && !existsSync(join(cargo, "credentials.toml")),
+    "public offline CI cannot borrow account credentials",
+  );
+  return external;
+}
 export function inputs(): Inputs {
   const tracked = Object.fromEntries(
     call(["git", "ls-files", "-z"])
@@ -78,29 +105,18 @@ export function inputs(): Inputs {
       .map((p) => [p, sha(join(root, p))]),
   );
   const external: Record<string, string> = {};
-  function add(path: string, excluded: string[] = []): void {
-    const entries = statSync(path).isDirectory() ? files(path) : [path];
-    for (const file of entries)
-      if (!excluded.some((prefix) => below(file, prefix))) external[file] = sha(file);
-  }
-  const cargo = realpathSync(process.env.CARGO_HOME ?? join(homedir(), ".cargo"));
-  const index = join(cargo, "registry/index");
-  const caches = existsSync(index)
-    ? readdirSync(index)
-        .map((name) => join(index, name, ".cache"))
-        .filter((p) => existsSync(p) && statSync(p).isDirectory())
-    : [];
-  for (const sub of ["registry", "git"])
-    if (existsSync(join(cargo, sub))) add(join(cargo, sub), sub === "registry" ? caches : []);
-  for (const config of [
-    join(cargo, "config"),
-    join(cargo, "config.toml"),
-    join(process.env.FVOCI_SELECTED_CI_OUTPUT ?? "/nonexistent", "build-env-inputs.json"),
-  ])
-    if (existsSync(config)) add(config);
-  assert.ok(
-    !existsSync(join(cargo, "credentials")) && !existsSync(join(cargo, "credentials.toml")),
+  const add = (path: string) => {
+    addInput(external, path);
+  };
+  Object.assign(
+    external,
+    cargoInputs(realpathSync(process.env.CARGO_HOME ?? join(homedir(), ".cargo"))),
   );
+  const compilerInputs = join(
+    process.env.FVOCI_SELECTED_CI_OUTPUT ?? "/nonexistent",
+    "build-env-inputs.json",
+  );
+  if (existsSync(compilerInputs)) add(compilerInputs);
   for (const directory of [
     join(root, "node_modules"),
     call(["rustc", "--print", "sysroot"]),
