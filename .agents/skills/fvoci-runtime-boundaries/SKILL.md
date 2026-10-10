@@ -29,7 +29,8 @@ crate, 배포 실행 파일, 프로세스, 독립 service, 운영자 명령을 �
 - 서버 측 제품 연산의 기준은 Rust다. 새 Node 의존, 숨은 JS fallback, 내장 JS 엔진, JS 런타임 번들, 외부 변환 서비스 우회를 넣지 않는다. Vue/Tiptap, 브라우저 JS, 개발용 Node/CodeGraph, TS oracle, 합의한 PostgreSQL·Meilisearch·S3·SMTP는 제품 서버와 별개다.
 - 자식 프로세스는 `process.execPath`로 띄운다. rlimit·env_clear를 파일시스템·네트워크 sandbox라고 하지 않는다. timeout과 Drop만으로 정리 완료라고 하지 않는다. `spawn_blocking`만으로 process 격리를 대체하지 않는다.
 - parser·CRDT process 격리를 유지한다. 위험한 파싱을 HTTP 프로세스 안에 넣지 않는다. 편집 중 문서를 JSON 왕복으로 다시 만들어 삭제·동시편집 이력을 버리지 않는다.
-- 하네스(영환님, 2026-10-09 11:31 KST): Harness code is Rust via xtask and TypeScript via Bun only; existing Python and shell harness files are migrated and removed. Python tools may be installed with uv and used as tools, but no Python code is committed. 이전 중 기존 Python 경로·데이터 문자열은 고칠 수 있다. 이전은 intent부터 한다. diff·intent 표는 커밋 메시지와 PR 본문에 두고 레포 파일로 남기지 않는다.
+- 하네스(영환님, 2026-10-09 11:31 KST): 하네스 코드는 Rust(xtask)와 TypeScript(Bun)뿐이다. Python·shell 하네스 파일은 옮긴 뒤 제거한다. 파일이 옮겨지기 전까지 기존 Python 파일은 로직을 포함해 고칠 수 있다. 새 `.py` 파일은 만들지 않는다. 이전은 intent부터 한다. diff·intent 표는 커밋 메시지와 PR 본문에 두고 레포 파일로 남기지 않는다.
+- 외부 Python 도구(2026-10-09 repowise 결정): uv로 설치해 도구로 쓸 수 있다. 그 도구 때문에 레포에 Python 코드를 더하지 않는다.
 - 새 검증 wrapper를 만들지 않는다. 손 절차를 대체하는 예외는 지정 task의 xtask 하위 명령뿐이다.
 - Docker/build 입력, 설치 CI, manifest/lockfile은 그 경로의 작성자가 정해진 뒤에만 맞춘다. 개발·비교 fixture의 JS를 무조건 지우지 않는다.
 - migrate의 current_exe를 서버로 보지 않는다. PATH에서 node만 숨기고 번들 runtime을 남긴 것을 Node 제거로 세지 않는다. 운영 배포·서비스 추가·권한 확대는 이 스킬의 범위가 아니다.
