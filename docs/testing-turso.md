@@ -171,6 +171,10 @@ SDK results cannot be labeled actual Turso PASS. Constant per-database
 concurrency remains `cancel-in-progress:false`; no service resource reset,
 provider/account/secret/policy/permission change is made by the worker.
 
-Pure local checks: `python3 scripts/selected-backend-ci/turso-test-fixtures.py`
+Pure local checks: `bun test tools/turso` (from the repository root; the UI
+consumer `tools/turso/ui*.test.ts` and the guard `tools/turso/guard*.test.ts`)
 and `bash scripts/test-ci-selection.sh`. These do not prove Rust compilation,
-SDK/network execution or actual Turso PASS.
+SDK/network execution or actual Turso PASS. The UI consumer is
+`tools/turso/ui.ts` (`--record-before`, `--freeze`, and the member `--actor`
+the browser fixture runs); the guard's `--consume` calls its exported
+`consume`.
