@@ -69,11 +69,12 @@ jobs:
         run: id
       - name: Collaboration CI runner fixture
         run: bash scripts/fixtures/rust-ci/run-collaboration-admission-fixture-test.sh
-      - name: Pinned SQLite build wiring fixtures (no native compilation)
-        run: python3 scripts/fixtures/sqlite-ci/test-wiring.py
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
       - name: Script unit tests without a database
         run: |
-          python3 scripts/schema-baseline/test_compare_catalogs.py
+          bun test scripts/schema-baseline/compare-catalogs.test.ts
           python3 scripts/fixtures/rustup-ci/test_metadata.py
           python3 scripts/selected-backend-ci/test_early_driver_failure.py
           python3 scripts/selected-backend-ci/test_restart_ledger.py
@@ -146,6 +147,10 @@ jobs:
           key: v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-fast-db-tests-lib-test-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - run: cargo fetch --locked
       - run: cargo fmt --check
+      - name: Pinned SQLite build wiring (xtask, no native compilation)
+        run: |
+          cargo fmt --check --manifest-path xtask/Cargo.toml
+          cargo test --locked --manifest-path xtask/Cargo.toml
       - run: python3 scripts/encryption_keys.py self-test
       - run: cargo clippy --target-dir target/clippy --locked --offline --all-targets --features db-tests -- -D warnings
       - run: cargo test --locked --offline --lib --bin fvoci-server
