@@ -1,48 +1,46 @@
 ---
 name: fvoci-handoff
-description: 모든 변경의 제출·독립 검토·통합·재개·자원 정리와 전체 포팅 종료 판단에 사용한다. 제품 구현·시각 설계 절차를 대신하지 않는다.
+description: "커밋을 제출·검토·통합하거나 작업을 재개·정리·종료를 판단할 때 쓴다. SHA·검사·남은 위험을 완료 조건으로 두며, 제품 구현과 시각 설계 절차를 대신하지 않는다."
 ---
 
-# 제출·독립 검토·통합·재개·종료 판단
+# 제출·검토·통합
 
-역할·승인은 AGENTS.md를 따른다. 작성자·리뷰어·통합은 항상 다른 주체다.
+## 완료 조건
 
-## 작업 제출
+- 제출 보고에 base SHA, 커밋 SHA(여럿이면 순서), 작업 브랜치, 커밋별 파일, 실행한 명령, cwd, 범위·개수, PASS/FAIL/NOTRUN/MISSING, exit code, 남은 위험이 있다. 실행하지 않은 검사는 미실행이다.
+- 리뷰는 그 고정 SHA의 diff·호출자·계약·검사에 대한 ACCEPT 또는 REQUEST_CHANGES다. ACCEPT에는 검토한 SHA가 적힌다. 검토 문장은 원격 CI를 대신하지 않는다. SHA가 바뀌면 바뀐 범위를 다시 본다.
+- main 병합을 실행하는 역할은 `fvoci-role-integrator`다. #347 fast-forward는 그 역할이 아니다. 리뷰 수는 AGENTS.md다. push된 head는 그 수를 만족한 SHA와 같고, 부모는 직전 head다. 하나라도 다르면 push하지 않는다. push 후 head SHA와 tested merge SHA를 구분해서 알린다. 예전 SHA의 CI 성공을 새 head의 완료로 적지 않는다.
+- main 병합은 병합 검사가 통과하고 병합 SHA를 방에 먼저 게시한 뒤에 허용된다. 0.x(1.0.0 미만, 0.9.x 포함)에서 그 검사는 아래이고, 1.0.0 도달 또는 메인테이너 철회 전까지의 상시 조건이다. 1.0.0 병합은 메인테이너 말이 있을 때 허용된다.
+  - 독립 리뷰어 두 명의 ACCEPT. 두 사람이 ACCEPT한 최종 head SHA를, 게이트 5개가 그 SHA를 검사한 뒤에 팀 방에 먼저 게시한다.
+  - 그 head의 check run 전체(최신 attempt, `filter=latest`, 모든 페이지). `filter=all`은 쓰지 않는다. pull_request check run은 PR head에 붙는다.
+  - 게이트 5개(`rust-ci-gate`, `web-ci-gate`, `install-ci-gate`, `documents-ci-gate`, `collab-engine-ci-gate`)는 conclusion success만 PASS다. FAIL, CANCELLED, SKIPPED, NEUTRAL, TIMED_OUT, NOTRUN, MISSING은 병합을 막는다.
+  - 그 head의 다른 check run은 status `completed`이고 conclusion `success` 또는 `skipped`일 때만 통과다. neutral, stale, failure, cancelled, timed_out, startup_failure, action_required, 그리고 completed가 아닌 status는 막는다. 경로 미해당·Release·Turso처럼 check run이 없는 workflow는 제외한다. commit status(CodeRabbit, Renovate)는 병합 조건이 아니다.
+  - 게이트가 검사한 tested merge SHA는 `TESTED_SHA`, `--tested-sha` 로그, 또는 checkout 로그 `HEAD is now at <sha> Merge <head> into <base>`에서 읽는다. API `head_sha`로 이 값을 대체하지 않는다. 그 SHA의 첫 부모는 현재 main SHA이고, 그 SHA는 현재 `refs/pull/N/merge`다. 아니면 새 push나 새 run으로 새 tested merge에서 게이트를 다시 돌린다. `gh run rerun`은 원래 `github.sha`를 재사용한다.
+  - 머지 큐를 쓰면 큐 head를 게시하고, `merge_group` checkout SHA는 그 main 커밋 SHA와 같다.
+  - 순서: 조건 확인 → gh 계정 `fvoci`로 Ready 전환 → `gh pr merge` 직전에 base와 게시한 head 재확인 → `gh pr merge --merge --match-head-commit <게시한 SHA>`. squash·rebase는 쓰지 않는다. 만든 merge commit의 부모는 `[확인한 main, 게시한 head]`다. SHA가 아니라 부모로 본다. 이 병합의 Ready 전환과 그 `Closes #N` 이슈 종료는 이 조건에 포함된다.
+- Turso dispatch는 그 head의 나머지 필수 CI가 PASS한 뒤, 정확한 40자 SHA로 한 번이다. run의 `head_sha`가 요청 SHA와 다르면 결과는 MISSING이다.
+- 병합 담당자는 실제 main merge SHA와 그 SHA의 CI를 끝까지 확인하고 결과를 기록한다. main push에서만 실행되는 이미지 publication도 해당 실행 결과로 확인한다. 병합 전 PASS를 병합 후 PASS나 제품 릴리스 완료로 대신하지 않는다.
+- 브랜치 삭제는 각 브랜치가 적은 커밋을 여전히 가리키는지와 main 포함을 다시 확인한 뒤, 삭제한 목록을 남긴다. GitHub ruleset 변경은 AGENTS.md의 명시 승인과 검토 조건을 따르고 변경 전후 JSON을 기록한다. 기록이나 hash만으로 변경 권한을 대신하지 않는다.
+- 재개할 때 원격 브랜치, PR head, CI를 다시 조회한다. 로컬 작업 트리에만 있는 커밋은 수락 근거가 아니다.
 
-작성자는 별도 작업 브랜치에 커밋하고 다음을 한 번에 보고한다.
+## 기본 절차
 
-- base SHA, 커밋 SHA(여러 개면 순서대로), 작업 브랜치 이름.
-- 커밋마다 바뀐 파일.
-- 실행한 검사 명령, cwd, 실행 범위·개수, PASS/FAIL/NOTRUN과 exit code. 실행하지 않은 검사는 미실행으로 적는다.
-- 남은 위험과 범위 밖으로 남긴 것.
+작성자가 남긴 회귀 검사는, 리뷰어가 계약 근거와 실제 실패 포착(필요하면 변조)을 확인한다. 인가·저장 ACK·동시성은 거부·유실·경합과 실제 시스템 근거를 대조한다.
 
-전체 대화·시크릿·접속 정보는 보고나 커밋에 남기지 않는다.
+문서 커밋과 코드 커밋은 head를 나눠 CI를 따로 기록한다. 진행 중인 작업이 있으면 상태를 확인하고 같은 작업을 다시 시작하지 않는다. 한도·권한으로 멈춘 역할은 자동 반복·대기 프로세스·계정 우회 없이 리드에게 알린다. 정리할 때는 그 작업이 소유한 커밋·미추적 파일·프로세스만 다룬다. 수락 전에는 보존하고, 수락 후에도 커밋이 PR 브랜치에 있는지 확인한다.
 
-## 검토
+PR 수락·머지는 포팅 종료가 아니다. 의존성이 갖춰진 다음 기능은 최신 main의 후속 작업으로 잇는다. 전체 완료는 기능·UI 연결, 보안·데이터·복구, 지원 DB·플랫폼, 배포 산출물의 필수 검증과 독립 검토가 main에 수락됐을 때다.
 
-리뷰어는 보고된 고정 SHA의 실제 diff·호출자·계약·검사를 확인하고 ACCEPT 또는 REQUEST_CHANGES를 근거·최소 수정안과 함께 반환한다. ACCEPT에는 검토한 커밋 SHA를 적는다.
-구현자는 회귀 검사를 작성하되, 리뷰어는 기대값의 계약 근거와 검사가 실제 실패를 포착하는지도 확인한다(필요하면 변조해서 실패하는지 본다).
-인가·저장 ACK·동시성처럼 위험한 경계는 성공 결과만 읽지 않고 거부·유실·경합 시나리오와 실제 시스템 검증 근거를 대조한다. 검토 문구가 실제 검사 결과를 대신하지 않는다.
-검토 중 SHA가 바뀌면 바뀐 범위를 다시 본다.
+## 손대지 말 것
 
-## 통합
-
-통합 역할은 리뷰어가 ACCEPT한 커밋(AGENTS.md의 승인 대상 경로를 바꾸는 커밋은 사용자 승인까지 받은 커밋)을 다시 적용하지 않고 그대로 PR 브랜치에 일반 push(fast-forward)한다. push 직전에는 통합이, 직후에는 증거기록이 커밋 SHA·부모(직전 head)를 다시 확인해, 리뷰어 ACCEPT(와 필요한 경우 사용자 승인)가 가리키는 값과 모두 같을 때만 수락을 이어받는다. 다르면 push하지 않거나 리뷰 대기로 되돌리고 보고한다.
-push 후 새 head SHA·tested merge SHA·push한 주체를 알린다. 통합 후 필요한 CI는 새 head에서 확인하며 예전 SHA의 성공을 완료로 기록하지 않는다.
-문서 커밋과 코드 커밋은 head를 나눠 CI 결과를 따로 기록한다.
-
-## 재개
-
-AGENTS.md, PR 본문 체크포인트, #331 최신 보고, 실제 원격 브랜치·PR head·CI를 확인한다. 진행 중인 작업이 있으면 상태부터 확인하고 같은 작업을 다시 시작하지 않는다.
-한도·권한 문제로 멈춘 역할은 복구될 때까지 자동 반복 호출·대기 프로세스·모델/계정 우회로 이어가지 않고 리드에게 보고한다.
-로컬 작업 트리에만 있는 커밋은 수락 근거가 아니다. 보존이 필요한 변경은 원격 작업 브랜치로 남긴다.
-이 스킬에는 특정 PR/SHA·run·로컬 절대 경로·현재 목록을 복제하지 않는다.
-
-## 정리
-
-해당 작업의 커밋·미추적 파일·프로세스 소유권을 확인한 뒤 소유 자원만 정리한다. 원격 브랜치 강제 삭제, 광범위한 kill/prune을 하지 않는다. 수락 전에는 보존하고, 수락 후에도 커밋이 PR 브랜치에 남았는지 확인한다.
-
-## 지속 진행과 전체 포팅 종료
-
-PR 수락·머지는 전체 작업 종료가 아니다. 의존성이 충족된 다음 사용자 기능을 최신 main의 후속 작업으로 이어간다. 현재 Vue 흐름과 문서 권한·저장·Hocuspocus/Yrs 동시편집의 실제 수락 근거를 보존하고 남은 delta부터 진행한다. 수락 전에는 probe를 제품 협업 지원으로 표시하지 않는다.
-고정 원본 기준과 승인된 최종 지원 범위는 docs/rewrite.md의 기능 대응표로 추적한다. 전체 완료는 기능/UI 연결, 보안·데이터·복구, 지원 DB·플랫폼, 배포 산출물의 필수 검증과 독립 검토를 마치고 main에 수락됐을 때만 선언한다. 미구현·미연결·부분 검증·원본부터 미구현을 구분하며 opt-in이나 후속 분류로 범위를 제외하지 않는다.
+- 리뷰어는 검토 중인 커밋을 고치지 않는다. 통합은 cherry-pick·patch로 SHA를 바꾸지 않는다. 작성자와 리뷰어는 다른 주체다.
+- 작성자는 PR 브랜치를 push하지 않는다. 원본 GitHub는 읽기 전용이다. main 갱신은 완료 조건의 병합으로만 허용된다.
+- CI 재실행의 범위와 생산자·소비자 attempt 대조는 AGENTS.md를 따른다. force push·`reset --hard`는 AGENTS.md에 허용 조건이 없다. 브랜치 삭제는 완료 조건이다. 되돌림은 메인테이너 말이 있을 때 허용된다.
+- auto-merge는 허용 조건이 없다. 0.x 병합 순서 밖의 Ready 전환, 그 병합의 `Closes`가 아닌 이슈 종료, 배포, 시크릿, 패키지 공개 범위, 유료 사용, 권한 확대는 메인테이너 말이 있을 때 허용된다.
+- 사용자 승인 없이 계정·인증·결제, 상주 프로세스, scheduler, routine, MCP 서버를 새로 만들지 않는다. 멈춘 다른 작업 체인을 다시 켜지 않는다.
+- 시크릿·cookie·credential·접속 URL·host·전체 환경을 보고·커밋·artifact에 남기지 않는다.
+- 지정된 도구나 모델을 조용히 바꾸지 않는다. 대체는 알린 뒤 메인테이너 승인이 있을 때만 한다.
+- 한 경로에는 작성자 한 명이다. manifest, lockfile, toolchain, workflow, migration 순서, 공유 API, 에이전트 문서, `apps/web/src/vue/{main.ts,App.vue,router.ts}`, `packages/i18n/src/locales/`는 담당이 정해진 뒤에 고친다. 소유하지 않은 경로까지 formatter·generator를 돌리지 않는다.
+- 실행마다 DB·Redis prefix, 검색 index, 스토리지, 브라우저 profile, report를 나누고 port 0에 bind한 뒤 실제 포트를 전달한다. 작업 트리를 보안 격리라고 하지 않는다.
+- 수락 전 probe를 제품 협업 지원으로 적지 않는다. opt-in·후속 분류로 수락 범위에서 빼지 않는다.
+- 이 스킬에 특정 PR·SHA·run·로컬 절대 경로·현재 목록을 복제하지 않는다. 과거 승인·역할·모델은 현재 권한으로 승계하지 않는다.
