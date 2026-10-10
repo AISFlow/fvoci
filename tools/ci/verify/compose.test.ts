@@ -54,3 +54,22 @@ describe("composed verify-workflows", () => {
     expect(errors.filter((error) => error.includes(fastCache))).toEqual([]);
   });
 });
+
+test("a job id with a trailing newline is invalid for the registry and every gated check", () => {
+  const fastCache = "fast server cache must retain exact pinned restore/save";
+  const budget = "web: normal browser shard requires the measured 20 minute job budget";
+  const { ctx, rust } = rustContext();
+  const rustJobs = rust["jobs"] as Mapping;
+  const fast = rustJobs["fast"] as Mapping;
+  fast["steps"] = (fast["steps"] as Mapping[]).filter(
+    (step) => step["name"] !== "Restore server build outputs",
+  );
+  rustJobs["extra\n"] = { "runs-on": "ubuntu-26.04", steps: [] };
+  const webJobs = (ctx.workflows["web.yml"] as Mapping)["jobs"] as Mapping;
+  (webJobs["workspace-browser-shard"] as Mapping)["timeout-minutes"] = 21;
+  webJobs["extra\n"] = { "runs-on": "ubuntu-26.04", steps: [] };
+  const errors = verifyWorkflows(ctx);
+  expect(errors).toContain("rust: invalid job id");
+  expect(errors).toContain("web: invalid job id");
+  expect(errors.filter((error) => error.includes(fastCache) || error === budget)).toEqual([]);
+});

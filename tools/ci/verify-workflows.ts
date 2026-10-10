@@ -1,17 +1,17 @@
 import { resolve } from "node:path";
 import { loadContext, type VerifyContext, type WorkflowCheck } from "./verify/load.ts";
-import { verifyGateHardening, verifyWorkflowRegistry } from "./verify/registry.ts";
+import {
+  gatedWorkflowJobs,
+  verifyGateHardening,
+  verifyWorkflowRegistry,
+} from "./verify/registry.ts";
 import { verifyRustBinaryHandoff } from "./verify/rust-handoff.ts";
 import { verifySelectedLibraryExecution } from "./verify/rust-library.ts";
 import { verifyPostgresBudgetMatrix } from "./verify/rust-postgres.ts";
 import { verifyRustSuiteRegistry } from "./verify/rust-registry.ts";
 import { RUST_WORKFLOW_FILE } from "./verify/rust-shared.ts";
 import { verifyPermissionPins } from "./verify/scopes.ts";
-import {
-  gatedWorkflowJobs,
-  verifyWebBrowserBudget,
-  verifyWebBuildHandoff,
-} from "./verify/web-browser.ts";
+import { verifyWebBrowserBudget, verifyWebBuildHandoff } from "./verify/web-browser.ts";
 
 // Checks owned by this module, in report order.
 export const CHECKS: readonly WorkflowCheck[] = [

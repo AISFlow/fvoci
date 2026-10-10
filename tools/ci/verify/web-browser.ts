@@ -3,23 +3,10 @@
 import { get, has, isMapping, pyContains, pyEq, pySplitlines, type Mapping } from "./py.ts";
 import { join } from "node:path";
 import { rawBlockScalar } from "./raw-yaml.ts";
+import { gatedWorkflowJobs } from "./registry.ts";
 import { readUtf8, type VerifyContext } from "./rust-shared.ts";
 
 export const WEB_WORKFLOW_FILE = "web.yml";
-const JOB_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*\n?$/;
-
-// The original runs a gated workflow's own checks (the web checks here, the
-// rust binary handoff) only once the file parsed to a mapping with a
-// non-empty jobs mapping of valid job ids; otherwise the registry reports the
-// problem and these stay silent.
-export function gatedWorkflowJobs(ctx: VerifyContext, file: string): Mapping | null {
-  const data = has(ctx.workflows, file) ? ctx.workflows[file] : undefined;
-  if (!isMapping(data)) return null;
-  const jobs = get(data, "jobs");
-  if (!isMapping(jobs) || Object.keys(jobs).length === 0) return null;
-  return Object.keys(jobs).every((id) => JOB_ID_RE.test(id)) ? jobs : null;
-}
-
 export function webWorkflowJobs(ctx: VerifyContext): Mapping | null {
   return gatedWorkflowJobs(ctx, WEB_WORKFLOW_FILE);
 }
