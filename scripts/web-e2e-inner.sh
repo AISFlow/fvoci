@@ -265,86 +265,16 @@ net_event_count() {
 # detection moves addresses from tentative to preferred a second or two later,
 # which can land inside the first page load. Before the browser starts, wait
 # until no IPv6 address is tentative and no address/link event arrived for
-# QUIET_S. This is a bounded precondition, not a test timeout: after LIMIT_S
-# it warns and continues (the warning is repeated next to a Playwright failure),
-# and returns at once when the host is already quiet. A check that cannot run
-# fails the group before the browser starts.
+# QUIET_S (see tools/web-e2e/network-settle.ts). This is a bounded
+# precondition, not a test timeout: after LIMIT_S it warns and continues (the
+# warning is repeated next to a Playwright failure), and returns at once when
+# the host is already quiet. A check that cannot run fails the group before
+# the browser starts.
 SETTLE_WARNING=""
 settle_network_before_browser() {
   local settle_log="$RUN_DIR/network-settle.log" status=0
-  python3 - 2>"$settle_log" <<'PY' || status=$?
-import datetime, os, subprocess, sys, time
-
-LIMIT_S = 10.0
-QUIET_S = 1.0
-POLL_S = 0.1
-monitor_log = os.environ.get("NET_MONITOR_LOG", "")
-marks_log = os.environ.get("NET_MARKS_LOG", "")
-monitor_pid = os.environ.get("NET_MONITOR_PID", "")
-
-
-def say(message):
-    print(f"network settle: {message}", file=sys.stderr, flush=True)
-    if marks_log:
-        now = datetime.datetime.now(datetime.timezone.utc)
-        with open(marks_log, "a", encoding="utf-8") as marks:
-            marks.write(f"[{now:%Y-%m-%dT%H:%M:%S.%f}] # fvoci: network settle: {message}\n")
-
-
-def monitor_running():
-    if not (monitor_pid and monitor_log and os.path.isfile(monitor_log)):
-        return False
-    try:
-        os.kill(int(monitor_pid), 0)
-    except (ValueError, OSError):
-        return False
-    return True
-
-
-def tentative_interfaces():
-    # dadfailed addresses stay tentative forever; they never settle.
-    out = subprocess.run(
-        ["ip", "-6", "-o", "addr", "show", "tentative", "-dadfailed"],
-        check=True, capture_output=True, text=True, timeout=5,
-    ).stdout
-    return sorted({line.split()[1].rstrip(":") for line in out.splitlines() if len(line.split()) > 1})
-
-
-def event_count():
-    with open(monitor_log, "rb") as log:
-        return sum(1 for _ in log)
-
-
-start = time.monotonic()
-try:
-    tentative_interfaces()
-    check_tentative = True
-except (OSError, subprocess.SubprocessError) as error:
-    check_tentative = False
-    say(f"cannot list tentative addresses ({type(error).__name__})")
-watch_events = monitor_running()
-if not watch_events:
-    say("netlink monitor not running; not checking for recent events")
-if not (check_tentative or watch_events):
-    say("skipped")
-    sys.exit(0)
-
-while True:
-    elapsed = time.monotonic() - start
-    tentative = tentative_interfaces() if check_tentative else []
-    quiet = time.time() - os.stat(monitor_log).st_mtime if watch_events else None
-    events = f"; netlink events since the group started: {event_count()}" if watch_events else ""
-    if not tentative and (quiet is None or quiet >= QUIET_S):
-        say(f"settled after {elapsed:.2f} s{events}")
-        break
-    if elapsed >= LIMIT_S:
-        detail = f"tentative: {', '.join(tentative) or 'none'}"
-        if quiet is not None:
-            detail += f"; last netlink event {quiet:.2f} s ago"
-        say(f"warning: host network still changing after {LIMIT_S:.0f} s ({detail}{events}); continuing")
-        break
-    time.sleep(POLL_S)
-PY
+  # --no-env-file: a .env in the working directory never fills in its inputs.
+  bun --no-env-file "$ROOT/tools/web-e2e/network-settle.ts" 2>"$settle_log" || status=$?
   cat "$settle_log" >&2
   SETTLE_WARNING="$(grep -m1 '^network settle: warning: ' "$settle_log" || true)"
   return "$status"
@@ -392,21 +322,10 @@ ROLE_NAME="fvoci_app_${DB_NAME}"
 psql_admin -d postgres -c "CREATE DATABASE \"$DB_NAME\"" >/dev/null
 
 STEP=database-url
-mapfile -t _db_urls < <(python3 - <<PY
-import os, urllib.parse
-admin = urllib.parse.urlparse(os.environ["TEST_DATABASE_URL"])
-db_name = "${DB_NAME}"
-role = "${ROLE_NAME}"
-role_password = "${ROLE_PASSWORD}"
-admin_db = admin._replace(path=f"/{db_name}")
-print(urllib.parse.urlunparse(admin_db))
-host = admin.hostname or "127.0.0.1"
-port = admin.port or 5432
-user = urllib.parse.quote(role, safe="")
-password = urllib.parse.quote(role_password, safe="")
-print(f"postgres://{user}:{password}@{host}:{port}/{db_name}")
-PY
-)
+# The role password reaches the helper through its environment, never argv;
+# --no-env-file keeps a stray .env from supplying a missing TEST_DATABASE_URL.
+mapfile -t _db_urls < <(DB_NAME="$DB_NAME" ROLE_NAME="$ROLE_NAME" ROLE_PASSWORD="$ROLE_PASSWORD" \
+  bun --no-env-file "$ROOT/tools/web-e2e/database-urls.ts")
 wait "$!"
 ((${#_db_urls[@]} == 2))
 DATABASE_URL="${_db_urls[0]}"
