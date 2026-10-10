@@ -114,9 +114,9 @@ redact_server_log() {
     "$1"
 }
 
-# Digest of one retained trace.zip (see scripts/web-e2e-trace-summary.py).
+# Digest of one retained trace.zip (see tools/web-e2e/trace-summary.ts).
 summarize_trace() {
-  python3 "$ROOT/scripts/web-e2e-trace-summary.py" "$1"
+  bun "$ROOT/tools/web-e2e/trace-summary.ts" "$1"
 }
 
 retain_failure_artifacts() {
@@ -153,7 +153,7 @@ retain_failure_artifacts() {
   fi
   while IFS= read -r -d '' trace; do
     dest="$(dirname "$trace")/browser-summary.txt"
-    # Python's own error text is not redacted, so it never reaches the file.
+    # The summarizer's own error text is not redacted, so it never reaches the file.
     if ! summarize_trace "$trace" >"$dest" 2>/dev/null; then
       echo "trace summary failed; reproduce the group locally to inspect its trace.zip" >"$dest"
       echo "could not summarize $(basename "$(dirname "$trace")")/trace.zip" >&2

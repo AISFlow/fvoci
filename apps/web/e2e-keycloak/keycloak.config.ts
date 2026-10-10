@@ -1,7 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
 // Opt-in real-Keycloak OIDC check, run only by scripts/keycloak-oidc-e2e.sh.
-// It lives outside e2e/ so the CI group discovery (scripts/web-e2e-groups.py)
+// It lives outside e2e/ so the CI group discovery (tools/web-e2e/groups.ts)
 // never schedules it.
 const out = process.env.FVOCI_KC_E2E_OUT;
 const mode = process.env.FVOCI_KC_E2E_MODE ?? "unset";
