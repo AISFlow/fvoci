@@ -74,8 +74,12 @@ export function sha(path: string): string {
 }
 const numberTokens = new WeakMap<object, Map<string, string>>();
 export function read(path: string): unknown {
+  return parseJson(readFileSync(path, "utf8"));
+}
+// Standard JSON.parse; the reviver keeps each number's source token for jsonInteger.
+export function parseJson(text: string): unknown {
   const value: unknown = JSON.parse(
-    readFileSync(path, "utf8"),
+    text,
     function (this: object, key: string, item: unknown, context?: { source?: string }): unknown {
       if (typeof item === "number") {
         assert.ok(context?.source, "JSON number source is required");
@@ -180,7 +184,7 @@ export function observedExit(result: { exitCode: number; signalCode?: string }):
 }
 export function call(args: string[], cwd = root): string {
   const command =
-    args[0] === "git" ? ["git", "-c", "safe.directory=" + root, ...args.slice(1)] : args;
+    args[0] === "git" ? ["git", "-c", "safe.directory=" + cwd, ...args.slice(1)] : args;
   const result = spawnSync(command, { cwd, stdout: "pipe", stderr: "pipe" });
   assert.equal(observedExit(result), 0, "required command failed; output withheld");
   return result.stdout.toString().trim();

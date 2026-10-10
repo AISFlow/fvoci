@@ -123,7 +123,7 @@ export function assertRuntimeJob(): void {
   );
 }
 
-export function identity(mode = "handoff", output?: string): string {
+export function identity(mode = "handoff", output?: string, checkout = root): string {
   const execution = process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci";
   assert.ok(execution === "github-ci" || execution === "orca-local");
   if (execution === "orca-local") {
@@ -135,10 +135,12 @@ export function identity(mode = "handoff", output?: string): string {
     process.env.CI === "true" && process.env.GITHUB_ACTIONS === "true",
     "allocated GitHub CI job only",
   );
-  assert.equal(call(["git", "rev-parse", "HEAD"]), env("GITHUB_SHA"));
+  assert.equal(call(["git", "rev-parse", "HEAD"], checkout), env("GITHUB_SHA"));
   assert.equal(
     observedExit(
-      spawnSync(["git", "-c", "safe.directory=" + root, "diff", "--quiet", "HEAD"], { cwd: root }),
+      spawnSync(["git", "-c", "safe.directory=" + checkout, "diff", "--quiet", "HEAD"], {
+        cwd: checkout,
+      }),
     ),
     0,
     "current tracked source must equal tested SHA",
@@ -237,7 +239,16 @@ export function runtimeAccess(files: string[], browser: Browser): void {
   for (const path of [browser.bun.path, browser.chromium.path])
     assert.ok(accessible(path, constants.R_OK | constants.X_OK));
 }
-export function expectedFiles(bundle: Bundle, output: string): string[] {
+export const collaborationStages = ["main", "lib", "install", "engine"] as const;
+export const browserStages = ["fixture", "default", "engine"] as const;
+// The packet file list of a collaboration build, or of a browser build when its
+// web receipt is given (browser stages, served dist assets, no schema core).
+export function expectedFiles(
+  bundle: Bundle,
+  output: string,
+  web?: Web,
+  checkout = root,
+): string[] {
   const names = [
     "before.json",
     "after.json",
@@ -248,7 +259,7 @@ export function expectedFiles(bundle: Bundle, output: string): string[] {
     "web-receipt.json",
     "abi-receipt.json",
   ];
-  for (const name of ["main", "lib", "install", "engine"])
+  for (const name of web ? browserStages : collaborationStages)
     names.push(name + "-stage.json", name + "-compiler.jsonl");
   const core = new Set(
     bundle.compiler_artifacts
@@ -260,13 +271,18 @@ export function expectedFiles(bundle: Bundle, output: string): string[] {
       )
       .flatMap((a) => a.filenames.filter((p) => /\.(rlib|rmeta)$/.test(p))),
   );
-  assert.ok(
-    [...core].some((p) => p.endsWith(".rlib")),
-    "missing emitted core library",
-  );
+  if (web) assert.equal(core.size, 0, "browser packet must not contain schema-feature core");
+  else
+    assert.ok(
+      [...core].some((p) => p.endsWith(".rlib")),
+      "missing emitted core library",
+    );
   const result = [
     ...names.map((name) => join(output, name)),
     ...Object.keys(bundle.binaries).sort(),
+    ...(web
+      ? Object.keys(web.dist_files).map((name) => join(checkout, "apps/web/dist", name))
+      : []),
     ...[...core].sort(),
   ];
   assert.equal(result.length, new Set(result).size);

@@ -13,7 +13,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import process from "node:process";
-import { identity, localAllocation } from "./admission.ts";
+import { collaborationStages, identity, localAllocation } from "./admission.ts";
 import {
   below,
   call,
@@ -234,7 +234,7 @@ export function recordAfter(output: string): void {
   assert.ok(deepEquals(before, after), "compile inputs changed");
   const stages: Stage[] = [],
     artifacts: Artifact[] = [];
-  for (const name of ["main", "lib", "install", "engine"]) {
+  for (const name of collaborationStages) {
     const log = join(output, name + "-compiler.jsonl"),
       stage = read(join(output, name + "-stage.json")) as Stage;
     assert.ok(stage.exit_code === 0 && stage.source === before.head && stage.tree === before.tree);
@@ -299,11 +299,21 @@ export async function stage(
   command: string[],
 ): Promise<number> {
   identity("stage", output);
-  assert.ok(name && ["main", "lib", "install", "engine"].includes(name) && command.length);
+  assert.ok(name && (collaborationStages as readonly string[]).includes(name) && command.length);
   if (process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local")
     assert.ok(deepEquals(command, localAllocation("stage").stageCommands[name]));
   const before = read(join(output, "before.json")) as Inputs;
   assert.equal(call(["git", "rev-parse", "HEAD"]), before.head);
+  return await compilerStage(output, name, command, before);
+}
+// One compiler command with exclusive JSON/stderr logs and its stage receipt.
+// SIGINT kills and reaps the direct child and records exit 130.
+export async function compilerStage(
+  output: string,
+  name: string,
+  command: string[],
+  before: Inputs,
+): Promise<number> {
   const start = performance.now(),
     out = openSync(join(output, name + "-compiler.jsonl"), "wx"),
     err = openSync(join(output, name + "-stderr.log"), "wx");
