@@ -11,6 +11,7 @@ import {
   openSync,
   readFileSync,
   readSync,
+  readdirSync,
   statSync,
   writeFileSync,
   writeSync,
@@ -86,14 +87,86 @@ export interface CommandOptions {
   cwd?: string;
   input?: string;
   // The child is a fixture wrapper whose EXIT trap removes what it owns. On
-  // SIGINT it is not killed: it gets SIGINT (as from a process-group ^C) and
-  // is waited for, so its cleanup runs; the interrupt is then raised as for
-  // any other owned command (Python: KeyboardInterrupt out of subprocess.run).
+  // SIGINT it is not killed at once: it gets SIGINT (as from a process-group
+  // ^C) and is waited for, so its cleanup runs; the interrupt is then raised
+  // as for any other owned command (Python: KeyboardInterrupt out of
+  // subprocess.run). The wait is bounded by interruptGrace: a wrapper that
+  // ignores SIGINT, or whose INT trap waits for a foreground command that only
+  // a process-group ^C would interrupt (a SIGINT sent to this driver alone),
+  // is then SIGKILLed with every descendant. Its EXIT trap does not run, so
+  // the fixture-closure check reports what it left behind.
   waitOnInterrupt?: boolean;
+  // Milliseconds; defaults to wrapperInterruptGrace.
+  interruptGrace?: number;
+}
+// Long enough for a nested lane driver to finish its own cleanup and for the
+// wrapper's EXIT trap to docker rm its container. A group ^C starts every
+// nesting level's timer at once, so an outer wrapper is given a longer grace
+// than the wrappers nested inside it.
+export const wrapperInterruptGrace = 30_000;
+
+// ESRCH and ENOENT: the process or thread has already gone.
+const gone = (error: unknown) =>
+  ["ESRCH", "ENOENT"].includes(String((error as NodeJS.ErrnoException).code));
+const signalled = (pid: number, signal: NodeJS.Signals) => {
+  try {
+    process.kill(pid, signal);
+  } catch (error) {
+    if (!gone(error)) throw error;
+  }
+};
+const listed = <T>(read: () => T[]): T[] => {
+  try {
+    return read();
+  } catch (error) {
+    if (!gone(error)) throw error;
+    return [];
+  }
+};
+const childPids = (pid: number) =>
+  listed(() => readdirSync(`/proc/${String(pid)}/task`)).flatMap((task) =>
+    listed(() =>
+      readText(`/proc/${String(pid)}/task/${task}/children`)
+        .split(" ")
+        .filter(Boolean)
+        .map(integer),
+    ),
+  );
+// SIGKILL a process and all its descendants. Each process is stopped before
+// its children are read: once SIGSTOP is pending a fork cannot complete, and
+// a stopped parent cannot reap, so the list is whole and no listed pid can be
+// reused before the SIGKILL. A step that fails does not stop the others, so
+// every process that was stopped is also killed; the first failure is thrown
+// afterwards.
+export function killTree(pid: number): void {
+  const tree = [pid];
+  let failure: Error | undefined;
+  const attempt = (step: () => void) => {
+    try {
+      step();
+    } catch (error) {
+      failure ??= error instanceof Error ? error : new Error(String(error));
+    }
+  };
+  for (let index = 0; index < tree.length; index += 1) {
+    const current = tree[index] as number;
+    attempt(() => {
+      signalled(current, "SIGSTOP");
+      tree.push(...childPids(current));
+    });
+  }
+  for (const member of tree)
+    attempt(() => {
+      signalled(member, "SIGKILL");
+    });
+  if (failure) throw failure;
 }
 export type Command = (args: string[], options?: CommandOptions) => Promise<Completed>;
 // stdout and stderr go to one truncated log, or are captured as strict UTF-8.
 export const command: Command = async (args, options = {}) => {
+  // Descendants that outlive a waited wrapper are no longer its children; a
+  // pipe they inherited would hold the wait open, so its output goes to a file.
+  assert.ok(!options.waitOnInterrupt || options.log !== undefined, "waited wrapper log required");
   checkInterrupt();
   const controller = new AbortController();
   let forward = () => {
@@ -104,6 +177,7 @@ export const command: Command = async (args, options = {}) => {
   };
   inFlight.add(interrupt);
   const fd = options.log === undefined ? undefined : openSync(options.log, "w");
+  let deadline: ReturnType<typeof setTimeout> | undefined;
   try {
     const child = spawn(args, {
       cwd: options.cwd ?? process.cwd(),
@@ -117,6 +191,17 @@ export const command: Command = async (args, options = {}) => {
       forward = () => {
         controller.abort(interruptError());
         child.kill("SIGINT");
+        // The first SIGINT starts the bound; a later one does not extend it.
+        deadline ??= setTimeout(() => {
+          if (!running(child)) return;
+          try {
+            killTree(child.pid);
+          } catch (error) {
+            child.kill("SIGKILL");
+            const facts = errorFacts(error);
+            writeSync(2, `owned wrapper tree kill failed: ${facts.type}: ${facts.message}\n`);
+          }
+        }, options.interruptGrace ?? wrapperInterruptGrace);
       };
     const [stdout, stderr] = await Promise.all([
       child.stdout instanceof ReadableStream ? new Response(child.stdout).bytes() : null,
@@ -138,6 +223,7 @@ export const command: Command = async (args, options = {}) => {
       stderr: stderr ? decode(stderr) : "",
     };
   } finally {
+    clearTimeout(deadline);
     inFlight.delete(interrupt);
     if (fd !== undefined) closeSync(fd);
   }
