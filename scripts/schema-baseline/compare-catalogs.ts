@@ -129,14 +129,22 @@ function stderr(text: string) {
 
 const nonprintable = loadRanges(NONPRINTABLE_B64);
 
+// An indexed element the caller has already bounds-checked (an in-range index, a regex
+// group that always participates). Throws rather than letting undefined flow on.
+function present<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("indexed element is missing");
+  return value;
+}
+
 function loadRanges(encoded: string): Uint32Array {
   const raw = Uint8Array.from(atob(encoded), (ch) => ch.charCodeAt(0));
   const pairs = raw.length / 6;
   const ranges = new Uint32Array(pairs * 2);
+  const byte = (index: number) => present(raw[index]);
   for (let i = 0; i < pairs; i++) {
     const offset = i * 6;
-    ranges[i * 2] = (raw[offset] << 16) | (raw[offset + 1] << 8) | raw[offset + 2];
-    ranges[i * 2 + 1] = (raw[offset + 3] << 16) | (raw[offset + 4] << 8) | raw[offset + 5];
+    ranges[i * 2] = (byte(offset) << 16) | (byte(offset + 1) << 8) | byte(offset + 2);
+    ranges[i * 2 + 1] = (byte(offset + 3) << 16) | (byte(offset + 4) << 8) | byte(offset + 5);
   }
   return ranges;
 }
@@ -146,8 +154,8 @@ function isNonPrintable(codePoint: number): boolean {
   let hi = nonprintable.length / 2;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
-    const start = nonprintable[mid * 2];
-    const end = nonprintable[mid * 2 + 1];
+    const start = present(nonprintable[mid * 2]);
+    const end = present(nonprintable[mid * 2 + 1]);
     if (codePoint < start) hi = mid;
     else if (codePoint > end) lo = mid + 1;
     else return true;
@@ -220,13 +228,13 @@ const pow5: bigint[] = [1n];
 const pow10: bigint[] = [1n];
 
 function p5(n: number): bigint {
-  while (pow5.length <= n) pow5.push(pow5[pow5.length - 1] * 5n);
-  return pow5[n];
+  while (pow5.length <= n) pow5.push(present(pow5[pow5.length - 1]) * 5n);
+  return present(pow5[n]);
 }
 
 function p10(n: number): bigint {
-  while (pow10.length <= n) pow10.push(pow10[pow10.length - 1] * 10n);
-  return pow10[n];
+  while (pow10.length <= n) pow10.push(present(pow10[pow10.length - 1]) * 10n);
+  return present(pow10[n]);
 }
 
 function components(n: number): { mant: bigint; e: number } {
@@ -453,7 +461,7 @@ function pyEq(left: Value, right: Value): boolean {
       return (
         right.k === left.k &&
         left.v.length === right.v.length &&
-        left.v.every((item, i) => pyEq(item, right.v[i]))
+        left.v.every((item, i) => pyEq(item, present(right.v[i])))
       );
     case "obj": {
       if (right.k !== "obj" || left.v.length !== right.v.length) return false;
@@ -510,7 +518,7 @@ function cmpPy(left: Value, right: Value): number | null {
   if ((left.k === "arr" || left.k === "tuple") && left.k === right.k) {
     const count = Math.min(left.v.length, right.v.length);
     for (let i = 0; i < count; i++) {
-      const diff = cmpPy(left.v[i], right.v[i]);
+      const diff = cmpPy(present(left.v[i]), present(right.v[i]));
       if (diff === null) return null;
       if (diff) return diff;
     }
@@ -633,7 +641,7 @@ class JsonParser {
       this.i++;
       const item = this.parseValue();
       const at = entries.findIndex(([name]) => name === key);
-      if (at >= 0) entries[at][1] = item;
+      if (at >= 0) present(entries[at])[1] = item;
       else entries.push([key, item]);
       this.skip();
       if (this.s[this.i] === ",") {
@@ -832,7 +840,7 @@ function diffLists(
           `${label} ${pyStr(entry.name)}.${field}`,
           orArray(getOrNull(entry.item, field)),
           orArray(getOrNull(other.item, field)),
-          nested[field],
+          present(nested[field]),
           report,
         );
         continue;
@@ -868,20 +876,26 @@ function validateLedgerTransition(
   newRows: Value | undefined,
 ): string[] {
   const problems: string[] = [];
-  if (oldTables.length === 1 && !sameOrdered(columnNames(oldTables[0]), OLD_LEDGER_COLUMNS)) {
+  const [oldTable] = oldTables;
+  const [newTable] = newTables;
+  if (
+    oldTables.length === 1 &&
+    oldTable !== undefined &&
+    !sameOrdered(columnNames(oldTable), OLD_LEDGER_COLUMNS)
+  ) {
     problems.push(
-      `LEDGER old table columns ${stringList(columnNames(oldTables[0]))} are not the retired shape ${stringList(OLD_LEDGER_COLUMNS)}`,
+      `LEDGER old table columns ${stringList(columnNames(oldTable))} are not the retired shape ${stringList(OLD_LEDGER_COLUMNS)}`,
     );
   }
-  if (newTables.length === 1) {
-    const names = columnNames(newTables[0]);
+  if (newTables.length === 1 && newTable !== undefined) {
+    const names = columnNames(newTable);
     if (!sameOrdered(names, NEW_LEDGER_COLUMNS)) {
       problems.push(
         `LEDGER new table columns ${stringList(names)} are not ${stringList(NEW_LEDGER_COLUMNS)}`,
       );
     }
     const notnull = new Map<string, Value>();
-    for (const column of asArray(requireKey(newTables[0], "columns"))) {
+    for (const column of asArray(requireKey(newTable, "columns"))) {
       const name = requireKey(column, "name");
       if (name.k !== "str") throw new Fail(1, `TypeError: column name is ${typeName(name)}\n`);
       notnull.set(name.v, requireKey(column, "notnull"));
@@ -897,7 +911,7 @@ function validateLedgerTransition(
   }
   const versions = newRows.v.map((row) => getOrNull(row, "version"));
   const expected = Array.from({ length: newRows.v.length }, (_, index) => int(index + 1));
-  if (!versions.every((version, index) => pyEq(version, expected[index]))) {
+  if (!versions.every((version, index) => pyEq(version, present(expected[index])))) {
     problems.push(`LEDGER new receipts are not contiguous from 1: ${pyRepr(arr(versions))}`);
   }
   const lineages: Value[] = [];
@@ -906,7 +920,7 @@ function validateLedgerTransition(
     if (!lineages.some((item) => pyEq(item, lineage))) lineages.push(lineage);
   }
   const sorted = [...lineages].sort((left, right) => cmpOrThrow(left, right));
-  if (!(sorted.length === 1 && pyEq(sorted[0], str(NEW_LINEAGE)))) {
+  if (!(sorted.length === 1 && pyEq(present(sorted[0]), str(NEW_LINEAGE)))) {
     problems.push(
       `LEDGER new receipts carry lineage(s) ${pyRepr(arr(sorted))}, expected [${pyRepr(str(NEW_LINEAGE))}]`,
     );
@@ -982,7 +996,11 @@ function parseAcl(
     .filter((part) => part.length > 0)) {
     const match = /^([^=]*)=([arwdDxtmXUCTc*]*)\/(.+)$/.exec(item);
     if (!match) return { error: `unparsable acl entry ${pyStrRepr(item)} in ${pyRepr(acl)}` };
-    entries.push({ grantee: match[1], privs: match[2], grantor: match[3] });
+    entries.push({
+      grantee: present(match[1]),
+      privs: present(match[2]),
+      grantor: present(match[3]),
+    });
   }
   return { entries };
 }
@@ -1008,8 +1026,8 @@ function validateLedgerTableIdentity(
 ): string[] {
   if (oldLedger.length !== 1 || newLedger.length !== 1) return [];
   const problems: string[] = [];
-  const oldTable = oldLedger[0];
-  const newTable = newLedger[0];
+  const oldTable = present(oldLedger[0]);
+  const newTable = present(newLedger[0]);
   for (const field of ["kind", "rls", "force_rls", "acl", "triggers", "policies"]) {
     const oldValue = getOrNull(oldTable, field);
     const newValue = getOrNull(newTable, field);
@@ -1190,7 +1208,7 @@ function sortedPairs(rows: string[][]): string[][] {
   return [...rows].sort((left, right) => {
     const count = Math.min(left.length, right.length);
     for (let i = 0; i < count; i++) {
-      const diff = cmpStr(left[i], right[i]);
+      const diff = cmpStr(present(left[i]), present(right[i]));
       if (diff) return diff;
     }
     return left.length - right.length;
@@ -1200,17 +1218,18 @@ function sortedPairs(rows: string[][]): string[][] {
 function samePairs(left: string[][], right: string[][]): boolean {
   return (
     left.length === right.length &&
-    left.every(
-      (row, index) =>
-        row.length === right[index].length &&
-        row.every((cell, cellIndex) => cell === right[index][cellIndex]),
-    )
+    left.every((row, index) => {
+      const other = present(right[index]);
+      return (
+        row.length === other.length && row.every((cell, cellIndex) => cell === other[cellIndex])
+      );
+    })
   );
 }
 
 function validateLedgerPrivileges(oldRole: Value, newRole: Value): string[] {
   const problems: string[] = [];
-  const grantors: Record<string, string[]> = {};
+  const grantors: { old?: string[]; new?: string[] } = {};
   for (const [side, role, columns] of [
     ["old", oldRole, OLD_LEDGER_COLUMNS],
     ["new", newRole, NEW_LEDGER_COLUMNS],
@@ -1251,9 +1270,11 @@ function validateLedgerPrivileges(oldRole: Value, newRole: Value): string[] {
       );
     }
   }
-  if (grantors.old.join("\0") !== grantors.new.join("\0")) {
+  const oldGrantors = present(grantors.old);
+  const newGrantors = present(grantors.new);
+  if (oldGrantors.join("\0") !== newGrantors.join("\0")) {
     problems.push(
-      `LEDGER grantor differs across sides: old=${stringList(grantors.old)} new=${stringList(grantors.new)}`,
+      `LEDGER grantor differs across sides: old=${stringList(oldGrantors)} new=${stringList(newGrantors)}`,
     );
   }
   return problems;
@@ -1336,7 +1357,7 @@ function compare(
     const newOrder = columnNameValues(other.item);
     if (
       oldOrder.length !== newOrder.length ||
-      oldOrder.some((name, index) => !pyEq(name, newOrder[index]))
+      oldOrder.some((name, index) => !pyEq(name, present(newOrder[index])))
     ) {
       report.push(
         `COLUMN-ORDER table ${pyStr(entry.name)}: old=${pyRepr(arr(oldOrder))} new=${pyRepr(arr(newOrder))}`,
@@ -1446,7 +1467,9 @@ function loadCatalog(path: string): Value {
   }
   let text: string;
   try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    // ignoreBOM keeps a leading U+FEFF so parseDocument rejects it, as json.load does
+    // on a file opened with encoding="utf-8".
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
   } catch {
     throw new Fail(1, `UnicodeDecodeError: 'utf-8' codec can't decode ${pyStrRepr(path)}\n`);
   }
@@ -1504,7 +1527,7 @@ function parseArgs(argv: string[]): Args | "help" {
     throw new Fail(2, `${usageLine(prog)}${prog}: error: ${message}\n`);
   };
   for (let i = 0; i < rest.length; i++) {
-    const token = rest[i];
+    const token = present(rest[i]);
     if (token === "--") {
       positionals.push(...rest.slice(i + 1));
       break;
@@ -1527,7 +1550,11 @@ function parseArgs(argv: string[]): Args | "help" {
     fail(`the following arguments are required: ${positionals.length === 0 ? "old, new" : "new"}`);
   if (positionals.length > 2) unknown.push(...positionals.slice(2));
   if (unknown.length > 0) fail(`unrecognized arguments: ${unknown.join(" ")}`);
-  return { old: positionals[0], new: positionals[1], ...(sawReport ? { report } : {}) };
+  return {
+    old: present(positionals[0]),
+    new: present(positionals[1]),
+    ...(sawReport ? { report } : {}),
+  };
 }
 
 function main(): number {
