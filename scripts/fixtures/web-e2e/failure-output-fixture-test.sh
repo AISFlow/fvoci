@@ -34,12 +34,13 @@ FAKE_BIN="$WORK/bin"
 FIXTURE_PATH="$FAKE_BIN:$PATH"
 RUN_TMP="$WORK/tmp"
 NET_STATE="$WORK/net"
-mkdir -p "$FIXTURE_ROOT/scripts/perf" "$FIXTURE_ROOT/tools/web-e2e" "$FIXTURE_ROOT/apps/web/e2e" \
+mkdir -p "$FIXTURE_ROOT/scripts/perf" "$FIXTURE_ROOT/tools/perf" "$FIXTURE_ROOT/tools/web-e2e" "$FIXTURE_ROOT/apps/web/e2e" \
   "$FIXTURE_ROOT/apps/web/e2e-pending" "$FIXTURE_ROOT/apps/web/dist" \
   "$FIXTURE_ROOT/target/debug" "$FIXTURE_ROOT/tools/web-e2e" "$FAKE_BIN" "$RUN_TMP"
 cp "$ROOT/scripts/web-e2e-run-group.sh" "$ROOT/scripts/web-e2e-inner.sh" "$FIXTURE_ROOT/scripts/"
 cp "$ROOT/tools/web-e2e/trace-summary.ts" "$ROOT/tools/web-e2e/compat.ts" "$FIXTURE_ROOT/tools/web-e2e/"
 cp "$ROOT/scripts/perf/perf-inner.sh" "$FIXTURE_ROOT/scripts/perf/"
+cp "$ROOT/tools/perf/perf-inner.ts" "$FIXTURE_ROOT/tools/perf/"
 cp "$ROOT/tools/web-e2e/smtp-sink.ts" "$FIXTURE_ROOT/tools/web-e2e/"
 cp "$ROOT/apps/web/playwright.config.ts" "$FIXTURE_ROOT/apps/web/"
 cp "$ROOT/apps/web/e2e-pending/collab-playwright.config.ts" "$FIXTURE_ROOT/apps/web/e2e-pending/"
