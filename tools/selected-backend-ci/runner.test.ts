@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import process from "node:process";
 import { main, modes, parseCLI } from "../../scripts/run-selected-backend-e2e.ts";
 import {
@@ -1929,4 +1929,128 @@ test("resolved() keeps Python Path.resolve semantics for a missing tail", () => 
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+test("resolved() matches posixpath.realpath(strict=False) for dangling links and loops", () => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "fvoci-resolved-")));
+  try {
+    mkdirSync(join(base, "a"));
+    mkdirSync(join(base, "b/nested"), { recursive: true });
+    mkdirSync(join(base, "b/cargo"));
+    symlinkSync(join(base, "b/nested"), join(base, "a/link"));
+    symlinkSync("b/nested", join(base, "rel"));
+    symlinkSync("missing/dir", join(base, "dangling"));
+    symlinkSync("loop", join(base, "loop"));
+    symlinkSync("loopB", join(base, "loopA"));
+    symlinkSync("loopA", join(base, "loopB"));
+    writeFileSync(join(base, "file"), "fixture");
+    // Expected values captured once from CPython 3.14.4
+    // posixpath.realpath(p, strict=False) on this fixture in a throwaway
+    // directory; "<base>" is the fixture root, "" and "." are the cwd.
+    const cases: [string, string][] = [
+      ["", process.cwd()],
+      [".", process.cwd()],
+      ["/", "/"],
+      ["/../../", "/"],
+      [`${relative(process.cwd(), base)}/a/link/../cargo`, "<base>/b/cargo"],
+      ["<base>/a/link/../cargo", "<base>/b/cargo"],
+      ["<base>/rel/../cargo", "<base>/b/cargo"],
+      ["<base>/a/link/new/target/debug", "<base>/b/nested/new/target/debug"],
+      ["<base>/new/../b", "<base>/b"],
+      ["/new/missing/../../../../", "/"],
+      ["/<base>//missing/../", "<base>"],
+      ["<base>/dangling", "<base>/missing/dir"],
+      ["<base>/dangling/sub", "<base>/missing/dir/sub"],
+      ["<base>/dangling/../cargo", "<base>/missing/cargo"],
+      ["<base>/loop", "<base>/loop"],
+      ["<base>/loop/sub", "<base>/loop/sub"],
+      ["<base>/loop/../b", "<base>/b"],
+      ["<base>/loopA", "<base>/loopA"],
+      ["<base>/file/sub", "<base>/file/sub"],
+      ["<base>/file/../b", "<base>/b"],
+    ];
+    const at = (p: string) => p.replace("<base>", base);
+    expect(cases.map(([input]) => resolved(at(input)))).toEqual(
+      cases.map(([, expected]) => at(expected)),
+    );
+    // A fresh CARGO_HOME symlink whose target Cargo has not created yet.
+    symlinkSync("fresh-cargo", join(base, "fresh-link"));
+    const home = resolved(join(base, "fresh-link"));
+    expect(home).toBe(join(base, "fresh-cargo"));
+    expect(cargoInputs(home)).toEqual({});
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+test("inputs() admits a fresh CARGO_HOME link left untracked in the checkout", () => {
+  // The reviewer's fresh-home probe: CARGO_HOME=<repo>/fresh-link -> fresh-cargo
+  // (not created yet), the link itself untracked in the repo root. The Python
+  // original (Path.resolve, Path.is_file) and `cargo --list` exit 0 there.
+  const base = realpathSync(directory());
+  const repo = join(base, "repo");
+  const copied = join(repo, "tools/selected-backend-ci");
+  for (const d of ["bin", "sysroot", "compiler/include", "clang", "sqlite/lib"])
+    mkdirSync(join(base, d), { recursive: true });
+  mkdirSync(copied, { recursive: true });
+  mkdirSync(join(repo, "node_modules"));
+  for (const name of ["build.ts", "admission.ts", "io.ts", "types.ts"])
+    copyFileSync(join(import.meta.dir, name), join(copied, name));
+  writeFileSync(join(repo, "config.ts"), "tracked fixture");
+  const git = (...args: string[]) => {
+    expect(
+      spawnSync(["git", ...args], { cwd: repo, stdout: "pipe", stderr: "pipe" }).exitCode,
+    ).toBe(0);
+  };
+  git("init", "-q");
+  git("add", "config.ts");
+  git("-c", "user.name=fixture", "-c", "user.email=fixture@invalid", "commit", "-qm", "fixture");
+  symlinkSync("fresh-cargo", join(repo, "fresh-link"));
+  // A dangling link inside an input directory: Python add() rglob + is_file
+  // skips it; the regular file beside it stays an input.
+  writeFileSync(join(repo, ".git/info/exclude"), "node_modules/\n");
+  writeFileSync(join(repo, "node_modules/real.js"), "module");
+  symlinkSync("missing.js", join(repo, "node_modules/dangling.js"));
+  for (const name of ["cargo", "ar", "ld", "bun"])
+    symlinkSync("/usr/bin/true", join(base, "bin", name));
+  for (const [name, path] of [
+    ["rustc", join(base, "sysroot")],
+    ["cc", join(base, "compiler/include")],
+  ] as const) {
+    writeFileSync(join(base, "bin", name), `#!/bin/sh\nprintf "%s\\n" "${path}"\n`);
+    chmodSync(join(base, "bin", name), 0o755);
+  }
+  const output = join(base, "inputs.json");
+  const probe = join(base, "probe.ts");
+  writeFileSync(
+    probe,
+    `import { inputs } from ${JSON.stringify(join(copied, "build.ts"))};
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(output)}, JSON.stringify(inputs()));`,
+  );
+  const result = spawnSync([process.execPath, probe], {
+    cwd: repo,
+    env: {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([name]) => !/^(CARGO_|RUSTC|FVOCI_)/.test(name)),
+      ),
+      CARGO_HOME: join(repo, "fresh-link"),
+      PATH: `${join(base, "bin")}:/usr/bin:/bin`,
+      LIBCLANG_PATH: join(base, "clang"),
+      SQLITE3_LIB_DIR: join(base, "sqlite/lib"),
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+  const recorded = JSON.parse(readFileSync(output, "utf8")) as Record<
+    "tracked" | "untracked" | "external",
+    Record<string, string>
+  >;
+  // Python Path.is_file() is false for the dangling link: not an input.
+  expect(Object.keys(recorded.tracked)).toEqual(["config.ts"]);
+  expect(Object.keys(recorded.untracked).sort()).toEqual(
+    ["admission.ts", "build.ts", "io.ts", "types.ts"].map((n) => `tools/selected-backend-ci/${n}`),
+  );
+  expect(Object.keys(recorded.external).filter((p) => p.startsWith(repo))).toEqual([
+    join(repo, "node_modules/real.js"),
+  ]);
 });

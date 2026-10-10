@@ -11,6 +11,7 @@ import {
   readSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   lstatSync,
   statSync,
@@ -146,30 +147,76 @@ export function below(path: string, parent: string): boolean {
   const part = relative(parent, path);
   return part === "" || (part !== ".." && !part.startsWith(".." + sep) && !isAbsolute(part));
 }
-// Python Path.resolve() (posixpath.realpath, non-strict): components in
-// order, each existing one through its symlink, ".." from the resolved
-// location, and a missing component appended as is (CARGO_TARGET_DIR
-// before the first build).
+// Python Path.resolve() (posixpath.realpath, strict=False, CPython 3.14):
+// components in order; an existing symlink is replaced by its readlink
+// target (absolute resets to "/", relative continues from the link's
+// directory) and ".." applies to the resolved location. A missing component
+// is kept as is (CARGO_TARGET_DIR before the first build, CARGO_HOME -> a
+// not-yet-created directory), and a symlink loop keeps the looping link
+// path, as non-strict realpath does. Python ignores every OSError there;
+// this port ignores only absent() errors, so EACCES and the rest still fail
+// closed (intentionally stricter).
 export function resolved(path: string): string {
-  const absolute = isAbsolute(path) ? path : process.cwd() + sep + path;
-  let current: string = sep;
-  for (const part of absolute.split(sep)) {
-    if (part === "" || part === ".") continue;
-    if (part === "..") {
-      current = dirname(current);
+  const rest: (string | null)[] = path.split(sep).reverse();
+  let count = rest.length;
+  let current = path.startsWith(sep) ? sep : process.cwd();
+  // Link path -> fully resolved target; null while its target is resolving.
+  const seen = new Map<string, string | null>();
+  while (count > 0) {
+    const name = rest.pop() as string | null;
+    if (name === null) {
+      seen.set(rest.pop() as string, current);
       continue;
     }
-    const next = join(current, part);
-    let exists = true;
-    try {
-      lstatSync(next);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      exists = false;
+    count -= 1;
+    if (name === "" || name === ".") continue;
+    if (name === "..") {
+      current = current.slice(0, current.lastIndexOf(sep)) || sep;
+      continue;
     }
-    current = exists ? realpathSync(next) : next;
+    const next = current === sep ? sep + name : current + sep + name;
+    let target: string;
+    try {
+      if (!lstatSync(next).isSymbolicLink()) {
+        current = next;
+        continue;
+      }
+      if (seen.has(next)) {
+        const cached = seen.get(next);
+        // A cached target is reused; an unresolved one is a loop.
+        current = cached ?? next;
+        continue;
+      }
+      target = readlinkSync(next);
+    } catch (error) {
+      if (!absent(error)) throw error;
+      current = next;
+      continue;
+    }
+    if (target.startsWith(sep)) current = sep;
+    seen.set(next, null);
+    rest.push(next, null);
+    const parts = target.split(sep).reverse();
+    rest.push(...parts);
+    count += parts.length;
   }
   return current;
+}
+// The path (or its symlink target) does not exist as a file system object:
+// missing, a non-directory used as one, or a symlink loop.
+function absent(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP";
+}
+// Python Path.is_file(): false for a missing or dangling path. Python
+// ignores every OSError; EACCES and other errors still fail closed here.
+export function isFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch (error) {
+    if (absent(error)) return false;
+    throw error;
+  }
 }
 export function physical(path: string): string {
   assert.ok(isAbsolute(path) && realpathSync(path) === path, "nonphysical path");
@@ -188,12 +235,14 @@ export function tool(name: string): string {
   assert.ok(path, "missing required tool");
   return path;
 }
-export function files(directory: string): string[] {
+// skipDangling mirrors Python rglob('*') + is_file() (build inputs); the
+// default throws on a dangling link, as browser_inventory refuses one.
+export function files(directory: string, skipDangling = false): string[] {
   const result: string[] = [];
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
-    if (entry.isDirectory()) result.push(...files(path));
-    else if (statSync(path).isFile()) result.push(path);
+    if (entry.isDirectory()) result.push(...files(path, skipDangling));
+    else if (skipDangling ? isFile(path) : statSync(path).isFile()) result.push(path);
   }
   return result;
 }
