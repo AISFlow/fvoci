@@ -23,6 +23,8 @@ source "$WORK/parser.sh"
 COMPOSE=0
 if docker compose version >/dev/null 2>&1; then
   COMPOSE=1
+  # Bun reads the value out of Compose's JSON config.
+  command -v bun >/dev/null || { echo "bun is required to compare with docker compose" >&2; exit 1; }
   printf 'services:\n  probe:\n    image: scratch\n    environment:\n      V: ${KEY}\n' >"$WORK/compose.yml"
 fi
 
@@ -41,7 +43,7 @@ accept() { # name, env line, expected value
   if ((COMPOSE)); then
     local composed
     composed="$(cd "$WORK" && env -i PATH="$PATH" HOME="$WORK" docker compose -f compose.yml --env-file env config --format json |
-      python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["probe"]["environment"]["V"])')"
+      bun -e 'process.stdout.write(String(JSON.parse(await Bun.stdin.text()).services.probe.environment.V))')"
     if [[ "$composed" != "$3" ]]; then
       echo "FAIL compose $1: compose gives [$composed], restore.sh [$got]"
       failures=$((failures + 1))
