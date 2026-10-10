@@ -124,9 +124,11 @@ export function summary(receipt: Receipt, code: number, cleanupErrors: unknown[]
 
 // ---- owned I/O ------------------------------------------------------------
 
-// rglob('*process.json') without following directory links.
+// rglob('*process.json') without following directory links; a missing
+// retained copy has no receipts, so the count assertion reports it.
 export function processReceipts(directory: string): string[] {
   const result: string[] = [];
+  if (!existsSync(directory)) return result;
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
     if (entry.name.endsWith("process.json")) result.push(path);
@@ -137,7 +139,7 @@ export function processReceipts(directory: string): string[] {
 // shutil.disk_usage(path).free
 export function diskFree(path: string): number {
   const facts = statfsSync(path);
-  return facts.bavail * facts.bsize;
+  return facts.bavail * facts.frsize;
 }
 
 export async function body(state: State, seam: Seam): Promise<void> {

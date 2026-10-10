@@ -221,6 +221,8 @@ describe("selected install driver body", () => {
       const receipt = receiptOf(fixture.run);
       expect(receipt.failed_phase).toBe("install-body");
       expect(receipt.failure_code).toBe("SELECTED_DRIVER_EXCEPTION");
+      // A typed failure the runner can publish, also when nothing was copied back.
+      expect(receipt.original_driver_failure).toMatchObject({ type: "AssertionError" });
       expect(receipt.actual_owned_process_receipts).toBeUndefined();
     }
   });

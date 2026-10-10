@@ -302,9 +302,12 @@ export function summary(receipt: Receipt, code: number, cleanupErrors: unknown[]
 
 // ---- owned I/O ------------------------------------------------------------
 
+// Exact (st_dev, st_ino); restart.ts applies the same safe-integer guard.
 const inode = (path: string): [number, number] => {
-  const meta = statSync(path);
-  return [meta.dev, meta.ino];
+  const meta = statSync(path, { bigint: true });
+  const result: [number, number] = [Number(meta.dev), Number(meta.ino)];
+  assert.ok(result.every(Number.isSafeInteger) && BigInt(result[1]) === meta.ino);
+  return result;
 };
 // Exclusive mode 0600 text: the private server environment inputs.
 function privateText(path: string, text: string): void {
