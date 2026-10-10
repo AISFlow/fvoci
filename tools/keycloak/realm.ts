@@ -68,7 +68,11 @@ export function renderTemplate(text: string, values: Record<string, string>): st
       throw new HelperError("template references an unknown placeholder");
     }
   }
-  const rendered = text.replace(placeholder, (_whole, name: string) => values[name] as string);
+  // Every placeholder sits inside a JSON string: a value is written as string
+  // content, so a quote or backslash in a secret cannot end it or add members.
+  const rendered = text.replace(placeholder, (_whole, name: string) =>
+    JSON.stringify(values[name]).slice(1, -1),
+  );
   try {
     JSON.parse(rendered);
   } catch {

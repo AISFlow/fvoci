@@ -115,6 +115,11 @@ describe("realm files and configs", () => {
     );
   });
 
+  test("a value is written as JSON string content and cannot add members", () => {
+    const value = 'q","injected":"r\\';
+    expect(JSON.parse(renderTemplate('{"a": "@@X@@"}', { X: value }))).toEqual({ a: value });
+  });
+
   test("an invalid rendering never quotes the secret", () => {
     let message = "";
     try {
@@ -360,6 +365,22 @@ describe("CLI", () => {
     expect(rendered.code).toBe(0);
     expect(statSync(out).mode & 0o777 & ~0o644).toBe(0);
     expect(readFileSync(out, "utf8")).toContain(secret("KC_E2E_PASSWORD_TINA"));
+  });
+
+  test("render keeps a secret with quotes inside its own JSON string", async () => {
+    const out = join(dir, "quoted-realm.json");
+    const template = join(import.meta.dir, "../../scripts/keycloak/realm.template.json");
+    const password = 'x","enabled":false,"y":"z\\';
+    const result = await cli(["render", template, out], {
+      env: { ...ENV, KC_E2E_PASSWORD_ALICE: password },
+    });
+    expect(result.code).toBe(0);
+    const realm = JSON.parse(readFileSync(out, "utf8")) as {
+      users: { username: string; enabled: boolean; credentials: { value: string }[] }[];
+    };
+    const alice = realm.users.find((user) => user.username === "alice");
+    expect(alice?.enabled).toBe(true);
+    expect(alice?.credentials[0]?.value).toBe(password);
   });
 
   test("render and render-sso never echo a placeholder name", async () => {
