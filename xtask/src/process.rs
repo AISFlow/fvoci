@@ -1,9 +1,10 @@
 //! Bounded child execution with the observable behaviour of Python
-//! `subprocess.run(argv, timeout=..., capture_output=...)`: the direct child is
-//! killed and reaped when the timeout expires, and both pipes are drained
+//! `subprocess.run(argv, timeout=..., capture_output=...)`: the timeout covers
+//! the child's exit and EOF on both captured pipes, the direct child is killed
+//! and reaped when the timeout expires, and both pipes are drained
 //! concurrently so a chatty child cannot block on a full pipe.
 //! `run_owned` is the stricter variant for new callers: a process group per
-//! call and one deadline that also covers output collection.
+//! call, killed as a whole when the call ends.
 
 use serde_json::{json, Value};
 use std::io::{self, Read};
@@ -11,11 +12,10 @@ use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Once;
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant};
-
 /// Elapsed/timeout/exit record kept per step, like the former `TIMINGS` dicts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Timing {
@@ -82,7 +82,9 @@ pub enum RunError {
     Wait(io::Error),
     /// An output pipe could not be read to the end.
     Read(io::Error),
-    /// The child outlived its budget and was killed and reaped.
+    /// The child or its captured pipes outlived the budget. `run` killed and
+    /// reaped a direct child still running at the deadline; `run_owned` killed
+    /// its whole process group.
     Timeout(Duration),
 }
 
@@ -96,58 +98,141 @@ impl std::fmt::Display for RunError {
     }
 }
 
-fn drain(source: Option<impl Read + Send + 'static>) -> Option<JoinHandle<Vec<u8>>> {
-    source.map(|mut pipe| {
+type Output = [Option<Vec<u8>>; 2];
+
+/// Read each captured pipe of `child` to EOF on its own thread. A stream that
+/// was not captured is complete and empty; a captured stream without a pipe
+/// is a read error.
+fn read_pipes(
+    child: &mut Child,
+    capture: bool,
+) -> (Receiver<(usize, io::Result<Vec<u8>>)>, Output) {
+    let (sender, results) = mpsc::channel();
+    let pipes: [Option<Box<dyn Read + Send>>; 2] = [
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    ];
+    let mut output: Output = [None, None];
+    for (slot, pipe) in pipes.into_iter().enumerate() {
+        let Some(mut pipe) = pipe else {
+            if capture {
+                let _ = sender.send((slot, Err(io::Error::other("pipe was not created"))));
+            } else {
+                output[slot] = Some(Vec::new());
+            }
+            continue;
+        };
+        let sender = sender.clone();
         thread::spawn(move || {
             let mut buffer = Vec::new();
-            let _ = pipe.read_to_end(&mut buffer);
-            buffer
-        })
-    })
+            let result = pipe.read_to_end(&mut buffer).map(|_| buffer);
+            let _ = sender.send((slot, result));
+        });
+    }
+    (results, output)
 }
 
-fn wait_with_deadline(child: &mut Child, timeout: Duration) -> Result<ExitStatus, RunError> {
-    let deadline = Instant::now() + timeout;
+/// True once `pid` has exited, leaving it unreaped so its pid and process
+/// group id cannot be reused before the caller's cleanup.
+fn exited(pid: u32) -> io::Result<bool> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { info.si_pid() } != 0)
+}
+
+/// Wait until `pid` has exited and every captured pipe reached EOF, like
+/// `Popen.communicate(timeout=...)`: a descendant that keeps a pipe open past
+/// the deadline is a timeout even when `pid` already exited. A pipe read
+/// error or a lost reader is an error, never empty output. `pid` is left
+/// unreaped.
+fn settle(
+    pid: u32,
+    results: &Receiver<(usize, io::Result<Vec<u8>>)>,
+    output: &mut Output,
+    deadline: Instant,
+    timeout: Duration,
+) -> Result<(), RunError> {
+    let mut child_done = false;
     let mut pause = Duration::from_millis(1);
     loop {
-        if let Some(status) = child.try_wait().map_err(RunError::Wait)? {
-            return Ok(status);
+        if !child_done {
+            child_done = exited(pid).map_err(RunError::Wait)?;
+        }
+        if child_done && output.iter().all(Option::is_some) {
+            return Ok(());
         }
         let now = Instant::now();
         if now >= deadline {
-            // Only the direct child is signalled, as subprocess.run did.
-            let _ = child.kill();
-            child.wait().map_err(RunError::Wait)?;
             return Err(RunError::Timeout(timeout));
         }
-        thread::sleep(pause.min(deadline - now));
-        pause = (pause * 2).min(Duration::from_millis(50));
+        let wait = pause.min(deadline - now);
+        pause = (pause * 2).min(Duration::from_millis(10));
+        match results.recv_timeout(wait) {
+            Ok((slot, Ok(bytes))) => output[slot] = Some(bytes),
+            Ok((_, Err(error))) => return Err(RunError::Read(error)),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                if output.iter().any(Option::is_none) {
+                    return Err(RunError::Read(io::Error::other(
+                        "an output reader was lost",
+                    )));
+                }
+                // Every pipe is read (or none was captured) and the child
+                // still runs: poll its exit.
+                thread::sleep(wait);
+            }
+        }
     }
 }
 
+fn finished(reaped: io::Result<ExitStatus>, output: Output) -> Result<Finished, RunError> {
+    let status = reaped.map_err(RunError::Wait)?;
+    let [stdout, stderr] = output.map(Option::unwrap_or_default);
+    Ok(Finished {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 /// Run `command` to completion within `timeout`. With `capture`, stdout and
-/// stderr are collected; otherwise they are inherited. Stdin is inherited.
+/// stderr are collected and the budget covers EOF on both pipes; otherwise
+/// they are inherited and only the direct child's exit is waited for. Stdin is
+/// inherited. On timeout or error only the direct child is killed (a no-op
+/// once it exited) and reaped, as `subprocess.run` did; the reader threads are
+/// detached and finish when the last pipe writer closes.
 pub fn run(command: &mut Command, timeout: Duration, capture: bool) -> Result<Finished, RunError> {
     if capture {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
     }
+    let deadline = Instant::now() + timeout;
     let mut child = command.spawn().map_err(RunError::Spawn)?;
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
-    let status = wait_with_deadline(&mut child, timeout)?;
-    // A grandchild holding a pipe open delays EOF; the status is already final.
-    let collect = |handle: Option<JoinHandle<Vec<u8>>>| {
-        handle
-            .map(|h| h.join().unwrap_or_default())
-            .unwrap_or_default()
-    };
-    Ok(Finished {
-        status,
-        stdout: collect(stdout),
-        stderr: collect(stderr),
-    })
+    let (results, mut output) = read_pipes(&mut child, capture);
+    let outcome = settle(child.id(), &results, &mut output, deadline, timeout);
+    if outcome.is_err() {
+        // Still unreaped, so the pid cannot have been reused.
+        let _ = child.kill();
+    }
+    let reaped = child.wait();
+    outcome?;
+    finished(reaped, output)
 }
-
 /// Process group of the `run_owned` call in progress (0: none), for the
 /// interrupt handler.
 static OWNED_GROUP: AtomicI32 = AtomicI32::new(0);
@@ -209,30 +294,10 @@ fn release_interrupts(old: libc::sigset_t) {
     }
 }
 
-/// True once `pid` has exited, leaving it unreaped so its process group id
-/// cannot be reused before `killpg`.
-fn exited(pid: u32) -> io::Result<bool> {
-    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    let rc = unsafe {
-        libc::waitid(
-            libc::P_PID,
-            pid as libc::id_t,
-            &mut info,
-            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-        )
-    };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(unsafe { info.si_pid() } != 0)
-}
-
-/// Run `command` in its own process group and capture stdout and stderr; the
-/// budget covers the whole call, output collection included. A descendant
-/// that keeps a pipe open past the deadline is a timeout, not a success. When
-/// the call ends (exit, timeout or error) every process left in the group is
-/// killed and the direct child is reaped. A pipe read error or a lost reader
-/// is an error, never empty output.
+/// Run `command` in its own process group and capture stdout and stderr within
+/// `timeout`, with the deadline and output rules of `run`. When the call ends
+/// (exit, timeout or error) every process left in the group is killed and the
+/// direct child is reaped.
 pub fn run_owned(command: &mut Command, timeout: Duration) -> Result<Finished, RunError> {
     let deadline = Instant::now() + timeout;
     forward_interrupts();
@@ -258,62 +323,8 @@ pub fn run_owned(command: &mut Command, timeout: Duration) -> Result<Finished, R
     release_interrupts(held);
     let mut child = spawned.map_err(RunError::Spawn)?;
     let pid = child.id();
-    let (sender, results) = mpsc::channel::<(usize, io::Result<Vec<u8>>)>();
-    let pipes: [Option<Box<dyn Read + Send>>; 2] = [
-        child
-            .stdout
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-        child
-            .stderr
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    ];
-    for (slot, pipe) in pipes.into_iter().enumerate() {
-        let sender = sender.clone();
-        let Some(mut pipe) = pipe else {
-            let _ = sender.send((slot, Err(io::Error::other("pipe was not created"))));
-            continue;
-        };
-        thread::spawn(move || {
-            let mut buffer = Vec::new();
-            let result = pipe.read_to_end(&mut buffer).map(|_| buffer);
-            let _ = sender.send((slot, result));
-        });
-    }
-    drop(sender);
-
-    let mut output: [Option<Vec<u8>>; 2] = [None, None];
-    let mut child_done = false;
-    let outcome = loop {
-        if !child_done {
-            match exited(pid) {
-                Ok(done) => child_done = done,
-                Err(error) => break Err(RunError::Wait(error)),
-            }
-        }
-        if child_done && output.iter().all(Option::is_some) {
-            break Ok(());
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            break Err(RunError::Timeout(timeout));
-        }
-        match results.recv_timeout((deadline - now).min(Duration::from_millis(10))) {
-            Ok((slot, Ok(bytes))) => output[slot] = Some(bytes),
-            Ok((_, Err(error))) => break Err(RunError::Read(error)),
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => {
-                if output.iter().any(Option::is_none) {
-                    break Err(RunError::Read(io::Error::other(
-                        "an output reader was lost",
-                    )));
-                }
-                // Both pipes are read and the child still runs: poll its exit.
-                thread::sleep((deadline - now).min(Duration::from_millis(10)));
-            }
-        }
-    };
+    let (results, mut output) = read_pipes(&mut child, true);
+    let outcome = settle(pid, &results, &mut output, deadline, timeout);
     // The child is not reaped yet, so the group id is still ours; forget it
     // before reaping so the interrupt handler never signals a reused id.
     unsafe {
@@ -322,13 +333,7 @@ pub fn run_owned(command: &mut Command, timeout: Duration) -> Result<Finished, R
     OWNED_GROUP.store(0, Ordering::SeqCst);
     let reaped = child.wait();
     outcome?;
-    let status = reaped.map_err(RunError::Wait)?;
-    let [stdout, stderr] = output.map(Option::unwrap_or_default);
-    Ok(Finished {
-        status,
-        stdout,
-        stderr,
-    })
+    finished(reaped, output)
 }
 
 #[cfg(test)]
@@ -379,6 +384,34 @@ mod tests {
             !alive
         });
         assert!(gone, "background sleep {pid} survived the group kill");
+    }
+
+    #[test]
+    fn run_timeout_kills_only_the_direct_child() {
+        // subprocess.run never signalled the group; a descendant runs on.
+        let dir = std::env::temp_dir().join(format!("xtask-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("pid");
+        let script = format!("sleep 30 & echo $! > '{}'; wait", marker.display());
+        let error = run(
+            Command::new("sh").args(["-c", &script]),
+            Duration::from_millis(300),
+            true,
+        )
+        .unwrap_err();
+        assert!(matches!(error, RunError::Timeout(_)));
+        let pid: libc::pid_t = std::fs::read_to_string(&marker)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+        assert!(alive, "run signalled the descendant {pid}");
     }
 
     /// CPU time of the calling thread, where run_owned's wait loop runs.

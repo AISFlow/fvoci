@@ -688,15 +688,6 @@ class PrCheckoutBindingTest(unittest.TestCase):
         self.assertEqual(plan["reason_code"], "FULL_PR_CHECKOUT_NOT_MERGE")
 
 
-def expected_postgres_matrix(event_name: str) -> str:
-    """The plan's postgres_matrix output for this event from the real rust.yml catalog."""
-    jobs, err = SEL._rust_workflow_jobs(ROOT)
-    assert err is None and jobs is not None, err
-    rows, row_err = SEL._postgres_matrix_rows(jobs["postgres"])
-    assert row_err is None and rows is not None, row_err
-    return SEL.postgres_matrix_json(event_name, rows)
-
-
 class GateSchemaTest(unittest.TestCase):
     def test_postgres_budget_matrix_aggregate_is_required_by_gate(self) -> None:
         plan = self._plan("rust", {job: True for job in SEL.WORKFLOW_JOBS["rust"]})
@@ -752,7 +743,9 @@ class GateSchemaTest(unittest.TestCase):
             jobs = plan.get("jobs") if isinstance(plan, dict) else None
             postgres = jobs.get("postgres") if isinstance(jobs, dict) else None
             if workflow == "rust" and isinstance(postgres, dict) and postgres.get("selected") is True:
-                outputs["postgres_matrix"] = expected_postgres_matrix(matrix_event)
+                outputs["postgres_matrix"] = SEL.postgres_matrix_json(
+                    matrix_event, SEL._postgres_matrix_rows(SEL._rust_workflow_jobs(ROOT)[0]["postgres"])[0]
+                )
             needs["ci-plan"] = {"result": plan_result, "outputs": outputs}
         else:
             needs["ci-plan"] = {"result": plan_result, "outputs": plan_outputs}

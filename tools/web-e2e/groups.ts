@@ -1,6 +1,8 @@
 // Discover normal web Playwright groups, shard them, and verify CI coverage.
-// Callers: scripts/run-web-e2e.sh (verify, shard-jsonl) and
-// scripts/test-web-e2e-groups.sh (verify). Differences from the replaced
+// Callers: scripts/run-web-e2e.sh (shards, verify, shard-jsonl; run-web-e2e.ts
+// reuses the spec path check for plan lines) and
+// scripts/test-web-e2e-groups.sh (shards, verify); the shard fixture imports
+// the pair and timer constants. Differences from the replaced
 // Python CLI are listed in the migration commit message.
 import { lstatSync, readdirSync, realpathSync, statSync, type Dirent } from "node:fs";
 import { join, resolve } from "node:path";
@@ -13,7 +15,24 @@ export const ROOT = resolve(realpathSync(fileURLToPath(import.meta.url)), "..", 
 export const DEFAULT_E2E_DIR = join(ROOT, "apps", "web", "e2e");
 export const PAIR_FIRST = "workspace-flow.spec.ts";
 export const PAIR_SECOND = "workspace-wiki-flow.spec.ts";
+// The one CI browser shard count: run-web-e2e.sh, the shard fixture and the
+// web.yml matrix check read it through the `shards`/`matrix` queries below.
 export const DEFAULT_SHARD_COUNT = 8;
+// The timer spec runs as four fresh-runtime Playwright invocations (see the
+// cost note below). These are its --grep filters; scripts/web-e2e-run-group.sh
+// still carries its own copy, which the shard fixture compares to these.
+export const TIMER_FILTERS = {
+  new_control:
+    "ordinary research plan persists|task widget retires|a late task-widget R1|owner releases opaque legacy reservations|a late legacy release",
+  recovery:
+    "real browser offline start|a native committed pause|a planner A-B-A|an estimate A-B-A|a genuine new session retires|transient browser 429|one ordinary task restore",
+  restart: "native same-database restart",
+} as const;
+
+/** The workspace-browser-shard matrix: one row per shard index, no discovery. */
+export function shardMatrix(shardCount: number = DEFAULT_SHARD_COUNT): { shard: number[] } {
+  return { shard: Array.from({ length: shardCount }, (_, index) => index) };
+}
 // Scheduling estimates only: completed group wall time (fresh runtime through
 // cleanup), rounded up, from Web run 37194529902 at main 52129a1 (2026-10-04).
 // Attempts 1/2 supply shard 0; other shards were carried forward, not rerun.
@@ -90,7 +109,7 @@ function relSpec(name: string): string {
   return rel;
 }
 
-function validateSpecRelpath(rel: string): void {
+export function validateSpecRelpath(rel: string): void {
   if (!REL_SPEC_RE.test(rel)) fail(`invalid spec path in plan: ${JSON.stringify(rel)}`);
 }
 
@@ -296,7 +315,13 @@ export function shardPlanLines(
 }
 
 const USAGE =
-  "usage: groups.ts {list-groups | shard-jsonl --index N [--shards N] | verify [--shards N]}";
+  "usage: groups.ts {list-groups | shard-jsonl --index N [--shards N] | verify [--shards N] | shards | matrix}";
+
+/** Read-only policy queries: one compact line each, no e2e discovery. */
+const POLICY_QUERIES: Readonly<Record<string, () => string>> = {
+  shards: () => String(DEFAULT_SHARD_COUNT),
+  matrix: () => JSON.stringify(shardMatrix()),
+};
 
 class UsageError extends Error {}
 
@@ -316,6 +341,14 @@ function integerOption(name: string, value: string | undefined, fallback?: numbe
 
 function run(argv: string[]): string[] {
   const [command, ...rest] = argv;
+  const query =
+    command !== undefined && Object.hasOwn(POLICY_QUERIES, command)
+      ? POLICY_QUERIES[command]
+      : undefined;
+  if (query) {
+    if (rest.length > 0) throw new UsageError(`unrecognized arguments: ${rest.join(" ")}`);
+    return [query()];
+  }
   const options = {
     index: { type: "string" },
     shards: { type: "string" },

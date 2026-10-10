@@ -294,7 +294,7 @@ fn root_work_line(line: &str) -> bool {
         })
     });
     let selected = cargo
-        || line.contains("scripts/ci_selection.py rust-binaries build")
+        || line.contains(" rust-binaries build")
         || line.contains("bash scripts/run-web-e2e.sh");
     // Independent workspaces with their own lockfile and target dir and no
     // SQLite dependency: helper crates under crates/ and the xtask crate.

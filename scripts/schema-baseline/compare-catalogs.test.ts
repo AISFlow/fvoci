@@ -22,6 +22,12 @@ const APP = "fvoci_app_cmp";
 const NEW_COLS = ["version", "lineage", "sql_sha256", "applied_at"];
 const OLD_COLS = ["version", "applied_at"];
 
+// An indexed fixture element that the fixture itself guarantees; throws if it is missing.
+function must<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("fixture element is missing");
+  return value;
+}
+
 function acl(entries: string[]) {
   return `{${entries.join(",")}}`;
 }
@@ -103,7 +109,7 @@ function catalog(
   usersDefault = "now()",
 ): Catalog {
   const users = table("users", ["id", "email"], [], [], USERS_ACL);
-  users.columns[1].default = usersDefault;
+  must(users.columns[1]).default = usersDefault;
   return {
     server_version: "18.0",
     schemas: [{ name: "fvoci", acl: null }],
@@ -238,7 +244,7 @@ function caseKey(args: string[], files: Files) {
   hash.update(JSON.stringify(args));
   for (const name of Object.keys(files).sort()) {
     hash.update(`\0${name}\0`);
-    hash.update(files[name]);
+    hash.update(must(files[name]));
   }
   return hash.digest("hex");
 }
@@ -357,7 +363,7 @@ caseTest("ledger table and rows are the only declared exception", () => {
 
 caseTest("a product column default difference fails", () => {
   const fresh = structuredClone(NEW_LEDGER);
-  (fresh.tables[1].columns as Column[])[1].default = "'x'::text";
+  must((must(fresh.tables[1]).columns as Column[])[1]).default = "'x'::text";
   const { rc, out } = run(OLD_LEDGER, fresh);
   expect(rc).toBe(1);
   expect(out).toContain("DIFF table users");
@@ -390,7 +396,7 @@ caseTest("a missing product constraint or index fails", () => {
   ] as const;
   for (const [key, item] of cases) {
     const old = structuredClone(OLD_LEDGER);
-    (old.tables[1][key] as unknown[]).push(item);
+    (must(old.tables[1])[key] as unknown[]).push(item);
     const { rc, out } = run(old, NEW_LEDGER);
     expect(rc).toBe(1);
     expect(out).toContain(`MISSING table users.${key} ${item.name}`);
@@ -426,7 +432,7 @@ caseTest("malformed new ledger is a failure not an exception", () => {
     [
       "duplicate digest",
       (cat) => {
-        cat.ledger[2] = { ...cat.ledger[2], sql_sha256: cat.ledger[1].sql_sha256 };
+        cat.ledger[2] = { ...cat.ledger[2], sql_sha256: must(cat.ledger[1]).sql_sha256 };
       },
     ],
     [
@@ -448,7 +454,7 @@ caseTest("malformed new ledger is a failure not an exception", () => {
     [
       "nullable digest column",
       (cat) => {
-        (ledgerTable(cat).columns as Column[])[2].notnull = false;
+        must((ledgerTable(cat).columns as Column[])[2]).notnull = false;
       },
     ],
     [
@@ -488,8 +494,8 @@ caseTest("seed and column order differences fail", () => {
   expect(result.rc).toBe(1);
   expect(result.out).toContain("DIFF seed instance_settings_meta");
   const reordered = structuredClone(NEW_LEDGER);
-  (reordered.tables[1].columns as Column[]).reverse();
-  (reordered.tables[1].columns as Column[]).forEach((column, index) => {
+  (must(reordered.tables[1]).columns as Column[]).reverse();
+  (must(reordered.tables[1]).columns as Column[]).forEach((column, index) => {
     column.num = index + 1;
   });
   result = run(OLD_LEDGER, reordered);
@@ -573,7 +579,7 @@ caseTest("unauthorized or incomplete ledger privileges fail", () => {
       extraTable: [tp("schema_migrations", "SELECT", "other_admin")],
     }),
   };
-  const role = cases["new table SELECT missing"].app_role;
+  const role = must(cases["new table SELECT missing"]).app_role;
   if (!role) throw new Error("missing role");
   role.table_privileges = (role.table_privileges as Array<{ table: string }>).filter(
     (item) => item.table !== "schema_migrations",
@@ -624,7 +630,7 @@ caseTest("non ledger grant differences still fail", () => {
   expect(result.rc).toBe(1);
   expect(result.out).toContain('"grantable": "YES"');
   fresh = structuredClone(NEW_ROLE);
-  (fresh.app_role?.routine_privileges as Array<{ execute: boolean }>)[0].execute = false;
+  must((fresh.app_role?.routine_privileges as Array<{ execute: boolean }>)[0]).execute = false;
   result = run(OLD_ROLE, fresh);
   expect(result.rc).toBe(1);
   expect(result.out).toContain("app_role.routine_privileges");
@@ -685,7 +691,7 @@ caseTest("missing or unexpected metadata fails", () => {
   for (const field of ["grantable", "grantor", "schema"]) {
     fresh = structuredClone(NEW_ROLE);
     Reflect.deleteProperty(
-      (fresh.app_role?.column_privileges as Array<Record<string, unknown>>)[0],
+      must((fresh.app_role?.column_privileges as Array<Record<string, unknown>>)[0]),
       field,
     );
     result = run(OLD_ROLE, fresh);
@@ -693,12 +699,12 @@ caseTest("missing or unexpected metadata fails", () => {
     expect(result.out, field).toContain("metadata keys differ");
   }
   fresh = structuredClone(NEW_ROLE);
-  (fresh.app_role?.table_privileges as Array<Record<string, unknown>>)[0].extra = 1;
+  must((fresh.app_role?.table_privileges as Array<Record<string, unknown>>)[0]).extra = 1;
   result = run(OLD_ROLE, fresh);
   expect(result.rc).toBe(1);
   expect(result.out).toContain("metadata keys differ");
   fresh = structuredClone(NEW_ROLE);
-  (fresh.app_role?.table_privileges as Array<{ grantable: string }>)[1].grantable = "MAYBE";
+  must((fresh.app_role?.table_privileges as Array<{ grantable: string }>)[1]).grantable = "MAYBE";
   result = run(OLD_ROLE, fresh);
   expect(result.rc).toBe(1);
   expect(result.out).toContain("are not NO/YES");
@@ -774,12 +780,12 @@ caseTest("ledger acl authority is never discarded", () => {
   expect(result.rc).toBe(1);
   expect(result.out).toContain("LEDGER TABLE rls differs");
   fresh = structuredClone(NEW_ROLE);
-  (ledgerTable(fresh).columns as Column[])[1].acl = acl([`${APP}=r/${OWNER}`]);
+  must((ledgerTable(fresh).columns as Column[])[1]).acl = acl([`${APP}=r/${OWNER}`]);
   result = run(OLD_ROLE, fresh);
   expect(result.rc).toBe(1);
   expect(result.out).toContain("new column lineage carries a column acl");
   fresh = structuredClone(NEW_ROLE);
-  (ledgerTable(fresh).columns as Column[])[0].acl = acl([`${APP}=w/${OWNER}`]);
+  must((ledgerTable(fresh).columns as Column[])[0]).acl = acl([`${APP}=w/${OWNER}`]);
   result = run(OLD_ROLE, fresh);
   expect(result.rc).toBe(1);
   expect(result.out).toContain("LEDGER TABLE column version acl differs");
@@ -792,8 +798,8 @@ caseTest("ledger acl authority is never discarded", () => {
   ] as const) {
     const old = structuredClone(OLD_ROLE);
     fresh = structuredClone(NEW_ROLE);
-    (ledgerTable(old).columns as Column[])[0].acl = columnAcl;
-    (ledgerTable(fresh).columns as Column[])[0].acl = columnAcl;
+    must((ledgerTable(old).columns as Column[])[0]).acl = columnAcl;
+    must((ledgerTable(fresh).columns as Column[])[0]).acl = columnAcl;
     result = run(old, fresh);
     expect(result.rc, label).toBe(1);
     expect(result.out, label).toContain("old column version carries a column acl");
@@ -824,7 +830,7 @@ caseTest("product table, column type, and index or constraint definition differe
   expect(result.rc).toBe(1);
   expect(result.out).toContain("MISSING table users");
   const typed = structuredClone(NEW_LEDGER);
-  (typed.tables[1].columns as Column[])[0].type = "bigint";
+  must((must(typed.tables[1]).columns as Column[])[0]).type = "bigint";
   result = run(OLD_LEDGER, typed);
   expect(result.rc).toBe(1);
   expect(result.out).toContain("DIFF table users.columns id.type");
@@ -837,8 +843,8 @@ caseTest("product table, column type, and index or constraint definition differe
     primary: false,
     valid: true,
   };
-  (indexed.tables[1].indexes as unknown[]).push(index);
-  (changed.tables[1].indexes as unknown[]).push({
+  (must(indexed.tables[1]).indexes as unknown[]).push(index);
+  (must(changed.tables[1]).indexes as unknown[]).push({
     ...index,
     def: "CREATE INDEX users_email_idx ON fvoci.users USING hash (email)",
   });
@@ -855,8 +861,8 @@ caseTest("product table, column type, and index or constraint definition differe
     deferred: false,
     validated: true,
   };
-  (constrained.tables[1].constraints as unknown[]).push(constraint);
-  (constraintChanged.tables[1].constraints as unknown[]).push({
+  (must(constrained.tables[1]).constraints as unknown[]).push(constraint);
+  (must(constraintChanged.tables[1]).constraints as unknown[]).push({
     ...constraint,
     def: "UNIQUE (lower(email))",
   });
@@ -904,7 +910,7 @@ caseTest(
 
 caseTest("duplicate object names fail closed before a report", () => {
   const cat = structuredClone(OLD_LEDGER);
-  cat.tables.push(structuredClone(cat.tables[1]));
+  cat.tables.push(structuredClone(must(cat.tables[1])));
   const { ts, py } = invoke({ "a.json": JSON.stringify(cat) }, [
     "<DIR>/a.json",
     "<DIR>/a.json",
@@ -964,7 +970,7 @@ caseTest("missing file and malformed JSON fail closed with the same exit code", 
       expect(outcome.report, String(body)).toBeNull();
     }
     // compare-catalogs.md, "Input and usage failures": the short diagnosis keeps the exception class.
-    const pyClass = exceptionLine(py.stderr).split(":")[0];
+    const pyClass = must(exceptionLine(py.stderr).split(":")[0]);
     const tsClass = ts.stderr.split(":")[0];
     expect(pyClass.split(".").at(-1), String(body)).toBe(tsClass);
   }
@@ -984,6 +990,27 @@ caseTest("a ledger integer longer than 4300 digits fails closed", () => {
     expect(outcome.stdout).toBe("");
     expect(outcome.stderr).toContain("Exceeds the limit (4300 digits)");
     expect(outcome.stderr).toContain("value has 4301 digits");
+  }
+});
+
+caseTest("a UTF-8 BOM before either catalog fails closed like json.load", () => {
+  const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+  const plain = { old: JSON.stringify(OLD_LEDGER), new: JSON.stringify(NEW_LEDGER) };
+  for (const side of ["old", "new", "both"] as const) {
+    const body = (name: "old" | "new") =>
+      side === name || side === "both"
+        ? Buffer.concat([bom, Buffer.from(plain[name])])
+        : Buffer.from(plain[name]);
+    const { ts, py } = invoke({ "a.json": body("old"), "b.json": body("new") }, REPORTED);
+    for (const outcome of [py, ts]) {
+      expect(outcome.status, side).toBe(1);
+      expect(outcome.stdout, side).toBe("");
+      expect(outcome.report, side).toBeNull();
+    }
+    expect(exceptionLine(py.stderr), side).toContain("JSONDecodeError: Unexpected UTF-8 BOM");
+    expect(ts.stderr, side).toBe(
+      `JSONDecodeError: '<DIR>/${side === "new" ? "b" : "a"}.json': unexpected UTF-8 BOM\n`,
+    );
   }
 });
 

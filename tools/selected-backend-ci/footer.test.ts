@@ -85,6 +85,11 @@ function footerCase(
       join(root, "scripts/run-selected-backend-e2e.ts"),
       join(scripts, "selected-cli.ts"),
     );
+    // The footer's path, diagnostics and launcher checks run this helper.
+    const webE2e = join(repo, "tools/web-e2e");
+    mkdirSync(webE2e, { recursive: true });
+    for (const name of ["run-web-e2e.ts", "groups.ts", "compat.ts"])
+      copyFileSync(join(root, "tools/web-e2e", name), join(webE2e, name));
     const entry = join(scripts, "run-selected-backend-e2e.ts");
     writeFileSync(
       entry,

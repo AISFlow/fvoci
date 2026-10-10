@@ -72,7 +72,7 @@ async function envSymlinkLayer() {
 }
 async function saved(
   layers: Layer[],
-  config = {},
+  config: object | Uint8Array = {},
   metadata = info(),
   format: Format | Format[] = "tar",
   modify?: (manifest: any, legacy: any[]) => void,
@@ -85,7 +85,10 @@ async function saved(
     entries["blobs/sha256/" + digest.slice(7)] = bytes;
     return { mediaType, digest, size: bytes.length };
   }
-  const configDescriptor = blob(JSON.stringify(config), "application/vnd.oci.image.config.v1+json");
+  const configDescriptor = blob(
+    config instanceof Uint8Array ? config : JSON.stringify(config),
+    "application/vnd.oci.image.config.v1+json",
+  );
   const descriptors = [];
   for (const [index, layer] of layers.entries()) {
     const bytes = layer instanceof Uint8Array ? layer : await new Bun.Archive(layer).bytes();
@@ -350,6 +353,49 @@ test("malformed metadata diagnostics withhold private input", async () => {
   expect(error).toBeInstanceOf(Error);
   expect(error.message).toContain("invalid saved image metadata; content withheld");
   expect(error.message).not.toContain(secret);
+});
+const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
+test.each(["manifest.json", "oci-layout", "index.json"])(
+  "reject a leading BOM in saved %s",
+  async (name) => {
+    await expect(
+      saved([{ ok: "ok" }], {}, info(), "tar", undefined, (entries) => {
+        entries[name] = concat(bom, new TextEncoder().encode(entries[name] as string));
+      }),
+    ).rejects.toThrow("invalid saved image metadata; content withheld");
+  },
+);
+test.each([
+  ["a leading BOM", concat(bom, new TextEncoder().encode("{}"))],
+  ["invalid UTF-8", new Uint8Array([0x7b, 0xff, 0x7d])],
+  ["non-JSON text", new TextEncoder().encode("not json")],
+])("reject image config with %s", async (_name, config) => {
+  await expect(saved([{ ok: "ok" }], config)).rejects.toThrow(
+    "invalid saved image metadata; content withheld",
+  );
+});
+test.each([
+  [
+    "a leading BOM",
+    concat(bom, new TextEncoder().encode(JSON.stringify(info()))),
+    "input must be UTF-8 without a BOM",
+  ],
+  [
+    "invalid UTF-8",
+    (() => {
+      const [head, tail] = JSON.stringify({ ...info(), Comment: "@" }).split("@");
+      const encode = (text = "") => new TextEncoder().encode(text);
+      return concat(encode(head), new Uint8Array([0xff]), encode(tail));
+    })(),
+    "input must be UTF-8 without a BOM",
+  ],
+  ["non-JSON text", new TextEncoder().encode("not json"), "invalid JSON input; content withheld"],
+])("reject image inspection with %s", async (_name, bytes, message) => {
+  await saved([{ ok: "ok" }]);
+  await writeFile(join(root, "info.json"), bytes);
+  await expect(
+    scanImage(join(root, "image.tar"), join(root, "info.json"), "amd64"),
+  ).rejects.toThrow(message);
 });
 test.each(compressions)("reject truncated %s layer", async (format) => {
   const bytes = await compressed({ ok: "ok" }, format);

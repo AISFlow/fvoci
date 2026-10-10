@@ -11,6 +11,7 @@ Commands:
   help          Show this help
   install-image Build, verify, hand off the install image; smoke leftovers
                 (callers: scripts/{install,backup-restore}-smoke.sh, install.yml)
+  rust-binaries Rust workflow executable hand-off (build, pack, unpack, run)
   sqlite-build  Authenticated native SQLite static build
                 (entry point: scripts/prepare-sqlite-build.sh)
   sqlite-ci     Pinned SQLite prerequisite and root Cargo entry
@@ -24,6 +25,7 @@ Options:
 enum Command {
     Help,
     InstallImage(Vec<OsString>),
+    RustBinaries(Vec<OsString>),
     SqliteBuild(Vec<OsString>),
     SqliteCi(Vec<OsString>),
 }
@@ -53,6 +55,7 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, CliEr
         Some("help" | "-h" | "--help") => Command::Help,
         // Task commands own their remaining arguments.
         Some("install-image") => return Ok(Command::InstallImage(args.collect())),
+        Some("rust-binaries") => return Ok(Command::RustBinaries(args.collect())),
         Some("sqlite-build") => return Ok(Command::SqliteBuild(args.collect())),
         Some("sqlite-ci") => return Ok(Command::SqliteCi(args.collect())),
         _ => return Err(CliError::UnknownCommand(argument)),
@@ -76,6 +79,7 @@ fn run(command: Command) -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::InstallImage(args) => exit_status(xtask::install_image::main(args)),
+        Command::RustBinaries(args) => exit_status(xtask::rust_binaries::main(args)),
         Command::SqliteBuild(args) => exit_status(xtask::sqlite_build::main(args)),
         Command::SqliteCi(args) => exit_status(xtask::sqlite_ci::main(args)),
     }
@@ -141,6 +145,11 @@ mod tests {
         assert_eq!(
             parse_args(args.clone().into_iter()),
             Ok(Command::SqliteCi(args[1..].to_vec()))
+        );
+        let args = ["rust-binaries", "run", "--test", "a"].map(OsString::from);
+        assert_eq!(
+            parse_args(args.clone().into_iter()),
+            Ok(Command::RustBinaries(args[1..].to_vec()))
         );
         let args = ["sqlite-build", "--help"].map(OsString::from);
         assert_eq!(

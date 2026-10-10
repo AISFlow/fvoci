@@ -14,6 +14,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  DEFAULT_SHARD_COUNT,
   PAIR_FIRST,
   PAIR_SECOND,
   PlanError,
@@ -21,6 +22,7 @@ import {
   assignShards,
   discoverGroups,
   groupSeconds,
+  shardMatrix,
   shardPlanLines,
   verifyPlan,
   type Group,
@@ -332,7 +334,7 @@ describe("groups CLI", () => {
     Bun.spawnSync([process.execPath, cli, ...args], { stdout: "pipe", stderr: "pipe" });
 
   test("verify prints one compact JSON summary of the real tree", () => {
-    const result = run("verify", "--shards", "8");
+    const result = run("verify", "--shards", String(DEFAULT_SHARD_COUNT));
     expect(result.exitCode).toBe(0);
     const text = result.stdout.toString();
     expect(text.endsWith("}\n")).toBe(true);
@@ -343,13 +345,19 @@ describe("groups CLI", () => {
       "shard_count",
       "groups_per_shard",
     ]);
-    expect(summary.shard_count).toBe(8);
+    expect(summary.shard_count).toBe(DEFAULT_SHARD_COUNT);
     expect(text).not.toContain(" ");
   });
 
   test("shard-jsonl covers every real spec once across shards", () => {
-    const specs = Array.from({ length: 8 }, (_, index) => {
-      const result = run("shard-jsonl", "--index", String(index), "--shards", "8");
+    const specs = Array.from({ length: DEFAULT_SHARD_COUNT }, (_, index) => {
+      const result = run(
+        "shard-jsonl",
+        "--index",
+        String(index),
+        "--shards",
+        String(DEFAULT_SHARD_COUNT),
+      );
       expect(result.exitCode).toBe(0);
       return result.stdout
         .toString()
@@ -364,6 +372,36 @@ describe("groups CLI", () => {
     expect([...specs].sort()).toEqual(tree.sort());
   });
 
+  test("policy queries print one compact line from the module constants", () => {
+    const line = (query: string) => {
+      const result = run(query);
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr.toString()).toBe("");
+      const text = result.stdout.toString();
+      expect(text.endsWith("\n") && !text.slice(0, -1).includes("\n")).toBe(true);
+      return text.slice(0, -1);
+    };
+    expect(line("shards")).toBe(String(DEFAULT_SHARD_COUNT));
+    expect(JSON.parse(line("matrix"))).toEqual(shardMatrix());
+    expect(shardMatrix().shard).toEqual([...Array(DEFAULT_SHARD_COUNT).keys()]);
+    expect(line("matrix")).not.toContain(" ");
+  });
+
+  test("web.yml browser shard matrix follows the groups.ts shard count", () => {
+    // Bun owns YAML parsing, as in tools/ci/workflows.test.ts. Until the
+    // wiring request lands the matrix is a literal; afterwards it must be the
+    // ci-plan output produced by `groups.ts matrix`.
+    const workflow = Bun.YAML.parse(
+      readFileSync(join(ROOT, ".github", "workflows", "web.yml"), "utf8"),
+    ) as { jobs: Record<string, { strategy?: { matrix?: unknown } }> };
+    const matrix = workflow.jobs["workspace-browser-shard"]?.strategy?.matrix;
+    if (typeof matrix === "string") {
+      expect(matrix).toBe("${{ fromJSON(needs.ci-plan.outputs.browser_matrix) }}");
+    } else {
+      expect(matrix).toEqual(shardMatrix());
+    }
+  });
+
   test("refusals: plan errors exit 1, usage errors exit 2, nothing on stdout", () => {
     for (const [args, code] of [
       [["verify", "--shards", "0"], 1],
@@ -373,6 +411,9 @@ describe("groups CLI", () => {
       [["verify", "--shards", "8x"], 2],
       [["verify", "--sh", "8"], 2],
       [["list-groups", "--shards", "8"], 2],
+      [["shards", "--shards", "8"], 2],
+      [["matrix", "extra"], 2],
+      [["toString"], 2],
       [["bogus"], 2],
       [[], 2],
     ] as const) {

@@ -15,10 +15,9 @@ use fvoci_server::attachments::{
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::AuthService;
 use fvoci_server::db::attachment_extract::fetch_extract_state;
-use fvoci_server::db::{migrate, pool, Db};
+use fvoci_server::db::{pool, Db};
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::state::AppState;
-use rand::RngCore;
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
@@ -28,109 +27,19 @@ use uuid::Uuid;
 const PEPPER: &str =
     r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
 
-pub struct TestDb {
-    pub admin_url: String,
-    pub app_url: String,
-    db_name: String,
-    role_name: String,
-}
+#[path = "test_db.rs"]
+mod test_db;
+
+pub use test_db::TestDb;
 
 impl TestDb {
     pub async fn bootstrap() -> Self {
-        let admin_base = std::env::var("TEST_DATABASE_URL")
-            .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))
-            .expect("TEST_DATABASE_URL missing");
-
-        let db_name = format!("fvoci_ext_{}", Uuid::now_v7().simple());
-        let role_name = format!("fvoci_app_{}", db_name.replace('-', "_"));
-        let mut password_bytes = [0u8; 24];
-        rand::rng().fill_bytes(&mut password_bytes);
-        let role_password = hex::encode(password_bytes);
-        let server_url = server_db_url(&admin_base);
-
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&server_url)
-            .await
-            .expect("connect admin");
-        sqlx::query(&format!("CREATE DATABASE \"{}\"", db_name))
-            .execute(&admin_pool)
-            .await
-            .expect("create database");
-        admin_pool.close().await;
-
-        let admin_url = join_db_url(&server_url, &db_name);
-        migrate::run_migrations(&admin_url).await.expect("migrate");
-
-        let migration_pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&admin_url)
-            .await
-            .expect("connect migration db");
-        sqlx::query(&format!(
-            "CREATE ROLE \"{}\" LOGIN PASSWORD '{}' NOSUPERUSER NOBYPASSRLS",
-            role_name, role_password
-        ))
-        .execute(&migration_pool)
-        .await
-        .expect("create role");
-        apply_grants(&migration_pool, &role_name).await;
-        migration_pool.close().await;
-
-        let mut app = url::Url::parse(&admin_url).expect("database url");
-        app.set_username(&role_name).ok();
-        app.set_password(Some(&role_password)).ok();
-
-        Self {
-            admin_url,
-            app_url: app.to_string(),
-            db_name,
-            role_name,
-        }
+        Self::create("fvoci_ext_").await
     }
 
     pub async fn cleanup(self) {
-        let server_url = server_db_url(&self.admin_url);
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&server_url)
-            .await
-            .ok();
-        if let Some(pool) = pool {
-            let _ = sqlx::query(&format!(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}'",
-                self.db_name
-            ))
-            .execute(&pool)
-            .await;
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", self.db_name))
-                .execute(&pool)
-                .await;
-            let _ = sqlx::query(&format!("DROP ROLE IF EXISTS \"{}\"", self.role_name))
-                .execute(&pool)
-                .await;
-            pool.close().await;
-        }
+        let _ = self.drop_owned().await;
     }
-}
-
-fn server_db_url(url: &str) -> String {
-    let parsed = url::Url::parse(url).expect("database url");
-    let mut server = parsed;
-    server.set_path("");
-    server.to_string().trim_end_matches('/').to_string()
-}
-
-fn join_db_url(server_url: &str, db_name: &str) -> String {
-    let mut parsed = url::Url::parse(server_url).expect("server url");
-    parsed.set_path(&format!("/{}", db_name));
-    parsed.to_string()
-}
-
-async fn apply_grants(pool: &PgPool, role_name: &str) {
-    fvoci_server::db::migrate::apply_app_role_grants(pool, role_name)
-        .await
-        .expect("grant");
 }
 
 fn test_peer() -> std::net::SocketAddr {

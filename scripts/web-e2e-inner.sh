@@ -1,5 +1,23 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# One web e2e group's runtime inside its test services: the group's own
+# database and app role, Meilisearch index, SMTP sink and server, then
+# Playwright. Everything this script creates is retired by its EXIT trap, on
+# success, failure, SIGINT and SIGTERM; the services themselves belong to the
+# caller (web-e2e-run-group.sh or the scope that shares them).
+#
+# Exit status precedence: Playwright's own nonzero exit, else the first failing
+# setup step's exit (named on stderr as "web-e2e step <name> failed"), else 1
+# when the group's fixtures could not be retired, else 0.
+set -Eeuo pipefail
+# The reader of this script's output (a tee or CI log pipe) may die first, for
+# example with the same process-group SIGTERM. A shell killed by SIGPIPE never
+# runs its EXIT trap, so a write to that closed pipe ends the group through
+# cleanup instead (exit 141); cleanup itself then ignores SIGPIPE. A handler,
+# unlike an ignored signal, is not inherited by the group's child processes.
+trap 'exit 141' PIPE
+
+STEP=prepare
+trap 'echo "web-e2e step ${STEP} failed (exit $?)" >&2' ERR
 
 : "${ROOT:?ROOT is required}"
 : "${SERVER_LOG:?SERVER_LOG is required}"
@@ -20,19 +38,197 @@ esac
 SERVER_BIN="$CARGO_TARGET_DIR/$E2E_PROFILE/fvoci-server"
 MIGRATE_BIN="$CARGO_TARGET_DIR/$E2E_PROFILE/fvoci-migrate"
 
+command -v setsid >/dev/null 2>&1 || {
+  echo "setsid (util-linux) is required to run the group's server and SMTP sink in their own process groups" >&2
+  exit 1
+}
+
+# Set once the matching fixture may exist; cleanup retires only these.
 SERVER_PID=""
 SMTP_PID=""
-cleanup_server() {
-  if [[ -n "${SERVER_PID}" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    kill "$SERVER_PID" 2>/dev/null || true
-    wait "$SERVER_PID" 2>/dev/null || true
+PLAYWRIGHT_PID=""
+DB_NAME=""
+ROLE_NAME=""
+MEILI_INDEX=""
+MEILI_SERVER_KEY_FILE=""
+
+# The leader is still running (a zombie is not: `wait` reaps it). Without a
+# readable /proc entry, a pid bash has not yet reaped counts as running, so
+# the bounded loop below never blocks in `wait` on a live leader.
+leader_running() {
+  local stat
+  if ! stat="$(cat "/proc/$1/stat" 2>/dev/null)"; then
+    kill -0 "$1" 2>/dev/null
+    return
   fi
-  if [[ -n "${SMTP_PID}" ]] && kill -0 "$SMTP_PID" 2>/dev/null; then
-    kill "$SMTP_PID" 2>/dev/null || true
-    wait "$SMTP_PID" 2>/dev/null || true
+  stat="${stat##*) }"
+  [[ "${stat%% *}" != Z ]]
+}
+
+# group_gone <leader pid> <tenths of a second>: reap the leader and wait,
+# bounded, until no member of its process group is left.
+group_gone() {
+  local pid="$1" i
+  for ((i = 0; i < $2; i++)); do
+    leader_running "$pid" || wait "$pid" 2>/dev/null || true
+    kill -0 -- "-$pid" 2>/dev/null || return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+# leader_gone <leader pid> <tenths of a second>: bounded wait for the leader
+# alone to exit and be reaped.
+leader_gone() {
+  local pid="$1" i
+  for ((i = 0; i < $2; i++)); do
+    if ! leader_running "$pid"; then
+      wait "$pid" 2>/dev/null || true
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+# stop_process_group <name> <leader pid>: each long-running child runs as the
+# leader of its own process group (setsid without a fork keeps this shell as
+# its parent), so its own children are signalled with it. SIGTERM, a bounded
+# grace period, then SIGKILL; fails when any member survives.
+stop_process_group() {
+  local name="$1" pid="$2"
+  kill -TERM -- "-$pid" 2>/dev/null || true
+  group_gone "$pid" 100 && return 0
+  echo "web-e2e cleanup: ${name} process group ${pid} still running 10 s after SIGTERM; sending SIGKILL" >&2
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  group_gone "$pid" 50 && return 0
+  echo "web-e2e cleanup: ${name} process group ${pid} survived SIGKILL" >&2
+  return 1
+}
+
+# meili_request <method> <path>: the response body, then the HTTP status on
+# its own last line. Master key and URL reach curl through its stdin config,
+# never its argv (start-test-meili.sh generates a hex key, so no config
+# quoting is needed).
+meili_request() {
+  printf 'url = "%s%s"\nheader = "Authorization: Bearer %s"\n' \
+    "${FVOCI_MEILI_URL%/}" "$2" "$MEILI_MASTER_KEY" |
+    curl -sS --max-time 30 -X "$1" -w '\n%{http_code}' -K -
+}
+
+# Index deletion is an asynchronous Meilisearch task: HTTP 202 only enqueues
+# it. Wait for the task to end (a completion wait, as wait_meili_task in
+# src/search/meili.rs, not a retry; at most 60 s: 300 polls 0.2 s apart and
+# never past the deadline), require success, then require the index to be gone.
+# A group whose setup stopped before --ensure-meili-key created the index gets
+# a failed task with index_not_found, which the 404 then confirms.
+meili_delete_index() {
+  local response task="" status="" deadline=$((SECONDS + 60)) i
+  response="$(meili_request DELETE "/indexes/$MEILI_INDEX")" || return 1
+  if [[ "${response##*$'\n'}" == 202 && "$response" =~ \"taskUid\":[[:space:]]*([0-9]+) ]]; then
+    task="${BASH_REMATCH[1]}"
+  fi
+  if [[ -z "$task" ]]; then
+    echo "web-e2e cleanup: Meilisearch index delete answered HTTP ${response##*$'\n'} without a task" >&2
+    return 1
+  fi
+  for ((i = 0; i < 300 && SECONDS < deadline; i++)); do
+    response="$(meili_request GET "/tasks/$task")" || return 1
+    if [[ "${response##*$'\n'}" != 200 ]]; then
+      echo "web-e2e cleanup: Meilisearch task ${task} answered HTTP ${response##*$'\n'}" >&2
+      return 1
+    fi
+    status=""
+    if [[ "$response" =~ \"status\":[[:space:]]*\"([a-z]+)\" ]]; then
+      status="${BASH_REMATCH[1]}"
+    fi
+    case "$status" in
+      succeeded | failed | canceled) break ;;
+      *) sleep 0.2 ;;
+    esac
+  done
+  if [[ "$status" == failed && "$response" =~ \"code\":[[:space:]]*\"index_not_found\" ]]; then
+    status=succeeded
+  fi
+  if [[ "$status" != succeeded ]]; then
+    echo "web-e2e cleanup: Meilisearch index deletion task ${task} did not succeed (status ${status:-unknown})" >&2
+    return 1
+  fi
+  response="$(meili_request GET "/indexes/$MEILI_INDEX")" || return 1
+  if [[ "${response##*$'\n'}" != 404 ]]; then
+    echo "web-e2e cleanup: Meilisearch index still answers HTTP ${response##*$'\n'} after its deletion task succeeded" >&2
+    return 1
   fi
 }
-trap cleanup_server EXIT
+
+# Key deletion is synchronous (204 No Content).
+meili_delete_key() {
+  local response
+  response="$(meili_request DELETE "/keys/$1")" || return 1
+  [[ "${response##*$'\n'}" == 204 ]] || {
+    echo "web-e2e cleanup: Meilisearch key delete answered HTTP ${response##*$'\n'}" >&2
+    return 1
+  }
+}
+
+cleanup() {
+  local status=$? failed=()
+  trap - ERR
+  # Writes to a closed output pipe fail with EPIPE from here on: every
+  # retirement step below runs and is checked, whatever happens to its messages.
+  trap '' PIPE
+  # A second interrupt must not cut the retirement short; it is bounded.
+  trap '' HUP INT TERM
+  set +e
+  if [[ -n "$PLAYWRIGHT_PID" ]]; then
+    # After a forwarded interrupt Playwright finishes its own shutdown and
+    # reports first; anything a spec left in its group is stopped after that.
+    leader_gone "$PLAYWRIGHT_PID" 300 ||
+      echo "web-e2e cleanup: Playwright still running 30 s after the group ended" >&2
+    stop_process_group playwright "$PLAYWRIGHT_PID" || failed+=(stop-playwright)
+  fi
+  if [[ -n "$SERVER_PID" ]]; then
+    stop_process_group server "$SERVER_PID" || failed+=(stop-server)
+  fi
+  if [[ -n "$SMTP_PID" ]]; then
+    stop_process_group smtp-sink "$SMTP_PID" || failed+=(stop-smtp-sink)
+  fi
+  if [[ -n "$DB_NAME" ]]; then
+    # FORCE ends connections a spec-owned server may still hold.
+    timeout 60 docker exec -i "$PG_CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 -d postgres \
+      -c "DROP DATABASE IF EXISTS \"$DB_NAME\" WITH (FORCE)" >/dev/null || failed+=(drop-database)
+    timeout 60 docker exec -i "$PG_CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 -d postgres \
+      -c "DROP ROLE IF EXISTS \"$ROLE_NAME\"" >/dev/null || failed+=(drop-role)
+  fi
+  if [[ -n "$MEILI_INDEX" ]]; then
+    meili_delete_index || failed+=(delete-meili-index)
+    if [[ -s "$MEILI_SERVER_KEY_FILE" ]]; then
+      meili_delete_key "$(tr -d '[:space:]' <"$MEILI_SERVER_KEY_FILE")" || failed+=(delete-meili-key)
+    fi
+  fi
+  if ((${#failed[@]} > 0)); then
+    echo "web-e2e cleanup failed: ${failed[*]}" >&2
+    if ((status == 0)); then
+      status=1
+    else
+      echo "web-e2e: the group verdict stays exit ${status} (step ${STEP})" >&2
+    fi
+  fi
+  exit "$status"
+}
+# Playwright runs in its own process group, so a terminal interrupt or a
+# runner's TERM no longer reaches it directly: pass the signal on, then exit
+# through cleanup, which waits for its shutdown.
+forward_signal() {
+  if [[ -n "$PLAYWRIGHT_PID" ]]; then
+    kill "-$1" -- "-$PLAYWRIGHT_PID" 2>/dev/null || true
+  fi
+  exit "$2"
+}
+trap cleanup EXIT
+trap 'forward_signal HUP 129' HUP
+trap 'forward_signal INT 130' INT
+trap 'forward_signal TERM 143' TERM
 
 startup_failure() {
   echo "$1" >&2
@@ -70,9 +266,13 @@ net_event_count() {
 # which can land inside the first page load. Before the browser starts, wait
 # until no IPv6 address is tentative and no address/link event arrived for
 # QUIET_S. This is a bounded precondition, not a test timeout: after LIMIT_S
-# it warns and continues. It returns at once when the host is already quiet.
+# it warns and continues (the warning is repeated next to a Playwright failure),
+# and returns at once when the host is already quiet. A check that cannot run
+# fails the group before the browser starts.
+SETTLE_WARNING=""
 settle_network_before_browser() {
-  if ! python3 - <<'PY'
+  local settle_log="$RUN_DIR/network-settle.log" status=0
+  python3 - 2>"$settle_log" <<'PY' || status=$?
 import datetime, os, subprocess, sys, time
 
 LIMIT_S = 10.0
@@ -145,22 +345,33 @@ while True:
         break
     time.sleep(POLL_S)
 PY
-  then
-    echo "warning: network settle check failed; continuing" >&2
-  fi
+  cat "$settle_log" >&2
+  SETTLE_WARNING="$(grep -m1 '^network settle: warning: ' "$settle_log" || true)"
+  return "$status"
 }
 
 # run_playwright <args...>: mark the browser's lifetime in the netlink log and
 # report how many address/link events arrived while it ran.
 run_playwright() {
   local before status=0
+  STEP=network-settle
   settle_network_before_browser
+  STEP=playwright
   before="$(net_event_count)"
   net_mark "playwright start"
-  (cd "$ROOT/apps/web" && bun --bun x --no-install playwright test "$@") || status=$?
+  # Its own process group too: servers a spec starts without detaching stay
+  # in it and are reaped with it. Waiting in the background keeps this shell
+  # able to forward an interrupt (see forward_signal).
+  setsid bash -c 'cd "$1" && shift && exec bun --bun x --no-install playwright test "$@"' \
+    playwright "$ROOT/apps/web" "$@" &
+  PLAYWRIGHT_PID=$!
+  wait "$PLAYWRIGHT_PID" || status=$?
   net_mark "playwright exited with status ${status}"
   if [[ -n "${NET_MONITOR_PID:-}" ]] && kill -0 "$NET_MONITOR_PID" 2>/dev/null; then
     echo "network: netlink address/link events while Playwright ran: $(($(net_event_count) - before))" >&2
+  fi
+  if ((status != 0)) && [[ -n "$SETTLE_WARNING" ]]; then
+    echo "web-e2e: Playwright started before the host network settled (${SETTLE_WARNING#network settle: })" >&2
   fi
   return "$status"
 }
@@ -172,11 +383,15 @@ psql_admin() {
   docker exec -i "$PG_CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 "$@"
 }
 
-DB_NAME="fvoci_e2e_$(openssl rand -hex 8)"
-ROLE_NAME="fvoci_app_$(echo "$DB_NAME" | tr '-' '_')"
+STEP=create-database
+DB_SUFFIX="$(openssl rand -hex 8)"
 ROLE_PASSWORD="$(openssl rand -hex 16)"
+# Named before the attempt: cleanup drops them IF EXISTS.
+DB_NAME="fvoci_e2e_${DB_SUFFIX}"
+ROLE_NAME="fvoci_app_${DB_NAME}"
 psql_admin -d postgres -c "CREATE DATABASE \"$DB_NAME\"" >/dev/null
 
+STEP=database-url
 mapfile -t _db_urls < <(python3 - <<PY
 import os, urllib.parse
 admin = urllib.parse.urlparse(os.environ["TEST_DATABASE_URL"])
@@ -192,11 +407,16 @@ password = urllib.parse.quote(role_password, safe="")
 print(f"postgres://{user}:{password}@{host}:{port}/{db_name}")
 PY
 )
+wait "$!"
+((${#_db_urls[@]} == 2))
 DATABASE_URL="${_db_urls[0]}"
 DATABASE_APP_URL="${_db_urls[1]}"
 export DATABASE_URL DATABASE_APP_URL
+STEP=migrate
 "$MIGRATE_BIN" >/dev/null
+STEP=create-app-role
 psql_admin -d "$DB_NAME" -c "CREATE ROLE \"$ROLE_NAME\" LOGIN PASSWORD '$ROLE_PASSWORD' NOSUPERUSER NOBYPASSRLS" >/dev/null
+STEP=grant-app-role
 "$MIGRATE_BIN" --grant-app-role "$ROLE_NAME"
 
 export PASSWORD_PEPPER_KEYS="$PEPPER"
@@ -231,7 +451,8 @@ unset DATABASE_URL FVOCI_MIGRATION_URL
 SMTP_CAPTURE="$RUN_DIR/smtp.jsonl"
 SMTP_PORT_FILE="$RUN_DIR/smtp.port"
 : >"$SMTP_CAPTURE"
-bun "$ROOT/tools/web-e2e/smtp-sink.ts" --capture "$SMTP_CAPTURE" --port-file "$SMTP_PORT_FILE" &
+STEP=smtp-sink
+setsid bun "$ROOT/tools/web-e2e/smtp-sink.ts" --capture "$SMTP_CAPTURE" --port-file "$SMTP_PORT_FILE" &
 SMTP_PID=$!
 deadline=$((SECONDS + 10))
 until [[ -s "$SMTP_PORT_FILE" ]]; do
@@ -264,16 +485,22 @@ fi
 server_env=(env -u FVOCI_E2E_ADMIN_DATABASE_URL -u TEST_DATABASE_URL -u FVOCI_TEST_DATABASE_URL
   -u MEILI_MASTER_KEY -u FVOCI_MEILI_MASTER_KEY -u FVOCI_MEILI_KEY)
 if [[ -n "${FVOCI_MEILI_URL:-}" && -n "${MEILI_MASTER_KEY:-}" ]]; then
+  # The group's own index (and a key scoped to it), so groups sharing one
+  # Meilisearch never see each other's documents. Specs read the same name.
+  STEP=meili-key
   MEILI_SERVER_KEY_FILE="$RUN_DIR/meili-search.key"
+  MEILI_INDEX="fvoci_e2e_${DB_SUFFIX}"
+  export FVOCI_MEILI_INDEX="$MEILI_INDEX"
   "$MIGRATE_BIN" --ensure-meili-key "$MEILI_SERVER_KEY_FILE" >/dev/null
   server_env+=("FVOCI_MEILI_KEY_FILE=$MEILI_SERVER_KEY_FILE")
 fi
 # Launch proof, names only: the variables present under the exact server env
 # prefix (values are never written). Specs may read this file.
+STEP=server-start
 SERVER_ENV_NAMES="$RUN_DIR/server-env-names.txt"
 ( umask 077 && "${server_env[@]}" bash -c 'compgen -e' | LC_ALL=C sort >"$SERVER_ENV_NAMES" )
 export FVOCI_E2E_SERVER_ENV_NAMES="$SERVER_ENV_NAMES"
-"${server_env[@]}" "$SERVER_BIN" >"$SERVER_LOG" 2>&1 &
+setsid "${server_env[@]}" "$SERVER_BIN" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
 BASE_URL=""
