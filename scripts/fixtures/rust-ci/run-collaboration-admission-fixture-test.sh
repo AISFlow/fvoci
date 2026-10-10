@@ -9,14 +9,21 @@ FIXTURE_RUN="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-rust-ci-admission-fixture.XXXXXX
 FAKE_BIN="$FIXTURE_RUN/fake-bin"
 INVOCATIONS="$FIXTURE_RUN/cargo-invocations.log"
 DOCKER_CALLS="$FIXTURE_RUN/docker-calls.log"
+RUNNER_STDERR="$FIXTURE_RUN/runner-stderr.log"
+READY_FIFO="$FIXTURE_RUN/cargo-ready.fifo"
+HOLD_FIFO="$FIXTURE_RUN/cargo-hold.fifo"
+signal_pgid=""
 
 cleanup() {
+  if [[ -n "$signal_pgid" ]]; then
+    kill -KILL -- "-$signal_pgid" 2>/dev/null || true
+  fi
   rm -rf "$FIXTURE_RUN"
 }
 trap cleanup EXIT
 
 mkdir -p "$FAKE_BIN"
-export RUNNER_TEMP="$FIXTURE_RUN/logs"
+mkfifo "$READY_FIFO" "$HOLD_FIFO"
 
 # Fixed suite list from main collaboration job (ebca941e); order-independent guard.
 EXPECTED_SUITE_NAMES=(
@@ -103,16 +110,30 @@ admission=0
 case " \$* " in *" --test collab_product "*) admission=1 ;; esac
 second=0
 case " \$* " in *" --test task_collab_integration "*) second=1 ;; esac
+# cargo --no-fail-fast's stderr summary shape, naming this invocation's first target.
+args=" \$* "
+fail_summary() {
+  local target="\${args#* --test }"
+  echo "error: 1 target failed:" >&2
+  echo "    \\\`--test \${target%% *}\\\`" >&2
+}
 case "\$mode" in
+  hang)
+    # Signal readiness, then block (no writer ever opens the hold fifo) until
+    # the fixture's SIGINT to the process group ends this process.
+    echo "\$\$" >"$READY_FIFO"
+    read -r _ <"$HOLD_FIFO"
+    exit 0
+    ;;
   fail)
     [[ \$admission -eq 1 ]] && echo 'test collab_primary_huge_varint_memory_rejected_1008 ... ok'
-    echo "error: simulated cargo test failure" >&2
+    fail_summary
     exit 101
     ;;
   fail-first)
     [[ \$admission -eq 1 ]] && echo 'test collab_primary_huge_varint_memory_rejected_1008 ... ok'
     if [[ \$second -eq 0 ]]; then
-      echo "error: simulated cargo test failure" >&2
+      fail_summary
       exit 101
     fi
     exit 0
@@ -120,7 +141,7 @@ case "\$mode" in
   fail-second)
     [[ \$admission -eq 1 ]] && echo 'test collab_primary_huge_varint_memory_rejected_1008 ... ok'
     if [[ \$second -eq 1 ]]; then
-      echo "error: simulated cargo test failure" >&2
+      fail_summary
       exit 102
     fi
     exit 0
@@ -135,14 +156,14 @@ case "\$mode" in
   fail-second-no-admission)
     [[ \$admission -eq 1 ]] && echo 'test collab_delivery_admission_parity_with_locking_join ... ok'
     if [[ \$second -eq 1 ]]; then
-      echo "error: simulated cargo test failure" >&2
+      fail_summary
       exit 102
     fi
     exit 0
     ;;
   fail-both)
     [[ \$admission -eq 1 ]] && echo 'test collab_primary_huge_varint_memory_rejected_1008 ... ok'
-    echo "error: simulated cargo test failure" >&2
+    fail_summary
     [[ \$second -eq 1 ]] && exit 102
     exit 101
     ;;
@@ -205,16 +226,39 @@ chmod +x "$FAKE_BIN/docker" "$FAKE_BIN/openssl"
 
 export PATH="$FAKE_BIN:$PATH"
 
-run_runner() {
+# Each run gets its own RUNNER_TEMP, so no log carries over between modes.
+fresh_run() {
   : >"$INVOCATIONS"
   : >"$DOCKER_CALLS"
-  FVOCI_TEST_CARGO_MODE="$1" bash "$RUN"
+  RUNNER_TEMP="$(mktemp -d "$FIXTURE_RUN/runner-temp.XXXXXX")"
+  export RUNNER_TEMP
+}
+
+run_runner() {
+  fresh_run
+  FVOCI_TEST_CARGO_MODE="$1" bash "$RUN" 2>"$RUNNER_STDERR"
+}
+
+assert_meili_started_and_removed_once() {
+  if [[ "$(grep -c '^run ' "$DOCKER_CALLS")" -ne 1 ]] || [[ "$(grep -c '^rm ' "$DOCKER_CALLS")" -ne 1 ]]; then
+    echo "expected one isolated Meilisearch, started and removed once ($1)" >&2
+    cat "$DOCKER_CALLS" >&2
+    exit 1
+  fi
 }
 
 if ! run_runner pass >/dev/null; then
   echo "expected runner success with one admission ok line" >&2
+  cat "$RUNNER_STDERR" >&2
   exit 1
 fi
+for log in parallel-suites.stdout.log parallel-suites.stderr.log \
+  task_collab_integration.stdout.log task_collab_integration.stderr.log; do
+  if [[ ! -f "$RUNNER_TEMP/rust-collaboration-logs/$log" ]]; then
+    echo "expected collaboration log $log under RUNNER_TEMP/rust-collaboration-logs" >&2
+    exit 1
+  fi
+done
 invocation_count="$(wc -l <"$INVOCATIONS" | tr -d ' ')"
 if [[ "$invocation_count" -ne 2 ]]; then
   echo "expected exactly two cargo test invocations, got ${invocation_count}" >&2
@@ -223,11 +267,29 @@ if [[ "$invocation_count" -ne 2 ]]; then
 fi
 assert_expected_test_targets "$(<"$INVOCATIONS")"
 assert_invocation_shape
-if [[ "$(grep -c '^run ' "$DOCKER_CALLS")" -ne 1 ]] || [[ "$(grep -c '^rm ' "$DOCKER_CALLS")" -ne 1 ]]; then
-  echo "expected one isolated Meilisearch for both invocations, started and removed once" >&2
-  cat "$DOCKER_CALLS" >&2
-  exit 1
-fi
+assert_meili_started_and_removed_once "both invocations"
+
+# A failed invocation is named on stderr with its log, and cargo's error line is
+# repeated after cargo's own live copy (two copies); a passing one is not named.
+assert_failure_named() {
+  local mode="$1" label="$2" line="$3" log="$4" copies
+  copies="$(grep -cxF -- "$line" "$RUNNER_STDERR" || true)"
+  if ! grep -qF "collaboration: ${label} exited " "$RUNNER_STDERR" \
+    || [[ "$copies" -ne 2 ]] \
+    || ! grep -qxF -- "$line" "$RUNNER_TEMP/rust-collaboration-logs/${log}.stderr.log"; then
+    echo "expected ${mode} to name failing invocation '${label}' with: ${line}" >&2
+    cat "$RUNNER_STDERR" >&2
+    exit 1
+  fi
+}
+SERIAL_LABEL='task_collab_integration (--test-threads=1)'
+assert_failure_not_named() {
+  local mode="$1" label="$2"
+  if grep -qF "collaboration: ${label} exited " "$RUNNER_STDERR"; then
+    echo "${mode}: passing invocation '${label}' must not be reported as failed" >&2
+    exit 1
+  fi
+}
 
 # The first non-zero cargo status is returned as is (101 from the first
 # invocation, 102 from the second), never a substituted condition status.
@@ -247,6 +309,30 @@ for case_ in fail:101 fail-first:101 fail-second:102 fail-both:101 \
     echo "expected both cargo invocations to run in ${mode}" >&2
     exit 1
   fi
+  assert_meili_started_and_removed_once "$mode"
+  # shellcheck disable=SC2016 # literal backticks in cargo's summary
+  parallel_line='    `--test collab_product`'
+  # shellcheck disable=SC2016
+  serial_line='    `--test task_collab_integration`'
+  case "$mode" in
+    fail | fail-both)
+      assert_failure_named "$mode" "parallel suites" "$parallel_line" parallel-suites
+      assert_failure_named "$mode" "$SERIAL_LABEL" "$serial_line" task_collab_integration
+      ;;
+    fail-first)
+      assert_failure_named "$mode" "parallel suites" "$parallel_line" parallel-suites
+      assert_failure_not_named "$mode" "$SERIAL_LABEL"
+      ;;
+    fail-first-before-admission)
+      assert_failure_named "$mode" "parallel suites" \
+        'error: could not compile (simulated, before any test ran)' parallel-suites
+      assert_failure_not_named "$mode" "$SERIAL_LABEL"
+      ;;
+    fail-second | fail-second-no-admission)
+      assert_failure_not_named "$mode" "parallel suites"
+      assert_failure_named "$mode" "$SERIAL_LABEL" "$serial_line" task_collab_integration
+      ;;
+  esac
 done
 
 if run_runner duplicate >/dev/null 2>&1; then
@@ -272,5 +358,42 @@ if run_runner ignored >/dev/null 2>&1; then
   echo "expected runner failure when admission test is ignored in log" >&2
   exit 1
 fi
+
+# SIGINT to the runner's process group while cargo runs (Ctrl-C or runner
+# cancel shape): the runner exits 130 after the foreground cargo ends, never
+# starts the second invocation, and its EXIT trap removes the Meilisearch.
+# set -m gives the background runner its own group with INT not ignored.
+fresh_run
+exec 3<>"$READY_FIFO"
+set -m
+FVOCI_TEST_CARGO_MODE=hang bash "$RUN" >/dev/null 2>"$RUNNER_STDERR" 3<&- &
+signal_pgid=$!
+set +m
+cargo_pid=""
+if ! read -r -t 60 cargo_pid <&3; then
+  echo "hang-mode cargo stub never started" >&2
+  cat "$RUNNER_STDERR" >&2
+  exit 1
+fi
+exec 3<&-
+kill -INT -- "-$signal_pgid"
+status=0
+wait "$signal_pgid" || status=$?
+if [[ "$status" -ne 130 ]]; then
+  echo "expected runner exit 130 after SIGINT, got ${status}" >&2
+  cat "$RUNNER_STDERR" >&2
+  exit 1
+fi
+if kill -0 "$cargo_pid" 2>/dev/null; then
+  echo "cargo stub ${cargo_pid} still running after the runner exited" >&2
+  exit 1
+fi
+signal_pgid=""
+if [[ "$(wc -l <"$INVOCATIONS" | tr -d ' ')" -ne 1 ]]; then
+  echo "expected SIGINT to stop the runner before the second cargo invocation" >&2
+  cat "$INVOCATIONS" >&2
+  exit 1
+fi
+assert_meili_started_and_removed_once "SIGINT"
 
 echo "run-collaboration-admission-fixture-test: ok"
