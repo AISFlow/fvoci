@@ -1,7 +1,7 @@
 // The test realms, the configs handed to the spec and the Rust test, and the
 // checks on what Keycloak reports back. No I/O: callers pass the environment
 // and the admin API answers.
-import { HelperError, addSecret } from "./redact.ts";
+import { HelperError, addSecret, registerSecrets } from "./redact.ts";
 
 export const REALM = "fvoci-e2e";
 export const CLIENT_ID = "fvoci-e2e";
@@ -36,13 +36,37 @@ export function need(env: Env, name: string): string {
 
 const ssoSecret = (env: Env, key: string, what: string) => need(env, `KC_E2E_SSO_${key}_${what}`);
 
+/** Every per-run secret the runner passes in the environment. */
+export const SECRET_ENV: readonly string[] = [
+  "KC_BOOTSTRAP_ADMIN_PASSWORD",
+  "KC_E2E_CLIENT_SECRET",
+  "KC_E2E_WRONG_SECRET",
+  ...Object.keys(USERS).map((name) => `KC_E2E_PASSWORD_${name.toUpperCase()}`),
+  ...Object.keys(SSO_REALMS).flatMap((key) => [
+    `KC_E2E_SSO_${key}_CLIENT_SECRET`,
+    `KC_E2E_SSO_${key}_PASSWORD`,
+  ]),
+  "KC_E2E_FVOCI_OWNER_PASSWORD",
+  "KC_E2E_FVOCI_MEMBER_PASSWORD",
+];
+
+/**
+ * Registers each secret of SECRET_ENV that is set, including those the
+ * command does not use, so that no error path can echo one.
+ */
+export function registerEnvSecrets(env: Env): void {
+  registerSecrets(SECRET_ENV.map((name) => [`environment variable ${name}`, env[name]] as const));
+}
+
 /** The template with every `@@NAME@@` replaced; refuses unknown names and non-JSON output. */
 export function renderTemplate(text: string, values: Record<string, string>): string {
   const placeholder = /@@([A-Z_]+)@@/g;
-  const names = new Set([...text.matchAll(placeholder)].map((match) => match[1] as string));
-  const missing = [...names].filter((name) => !Object.hasOwn(values, name)).sort(compareCodePoints);
-  if (missing.length > 0) {
-    throw new HelperError(`template placeholders without a value: ${JSON.stringify(missing)}`);
+  // An unknown name is never quoted: the template is input, and a secret
+  // shaped like a name would be echoed.
+  for (const match of text.matchAll(placeholder)) {
+    if (!Object.hasOwn(values, match[1] as string)) {
+      throw new HelperError("template references an unknown placeholder");
+    }
   }
   const rendered = text.replace(placeholder, (_whole, name: string) => values[name] as string);
   try {

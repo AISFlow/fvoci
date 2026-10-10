@@ -265,8 +265,18 @@ export function registerConfigSecrets(config: unknown): void {
       value,
     ]),
   ];
-  // Every usable secret is registered before the first refusal is raised, so
-  // a later error path still scrubs them.
+  registerSecrets(listed, problems);
+}
+
+/**
+ * Registers each [what, value] secret that is set, after `problems` found by
+ * the caller. Every usable secret is registered before the first problem is
+ * raised, so a later error path still scrubs them.
+ */
+export function registerSecrets(
+  listed: readonly (readonly [string, unknown])[],
+  problems: string[] = [],
+): void {
   for (const [what, value] of listed) {
     if (value === undefined) continue;
     const refused = typeof value === "string" ? refusal(value, what) : `${what} is not a string`;

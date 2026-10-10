@@ -15,6 +15,7 @@ import {
   realmSummary,
   expectedUsers,
   renderTemplate,
+  SECRET_ENV,
   specConfig,
 } from "./realm.ts";
 import {
@@ -109,8 +110,8 @@ describe("redaction", () => {
 describe("realm files and configs", () => {
   test("placeholders are all filled or the template is refused", () => {
     expect(renderTemplate('{"a": "@@X@@"}', { X: "1" })).toBe('{"a": "1"}');
-    expect(() => renderTemplate('{"a": "@@Z@@", "b": "@@A@@"}', {})).toThrow(
-      'template placeholders without a value: ["A","Z"]',
+    expect(() => renderTemplate('{"a": "@@X@@", "b": "@@A@@"}', { X: "1" })).toThrow(
+      "template references an unknown placeholder",
     );
   });
 
@@ -131,6 +132,18 @@ describe("realm files and configs", () => {
     expect(() => specConfig("x", { ...ENV, KC_E2E_WRONG_SECRET: undefined })).toThrow(
       "missing environment variable KC_E2E_WRONG_SECRET",
     );
+  });
+
+  test("SECRET_ENV is every secret the runner passes in the environment", () => {
+    const script = readFileSync(
+      join(import.meta.dir, "../../scripts/keycloak-oidc-e2e.sh"),
+      "utf8",
+    );
+    const body = /\nwith_secrets\(\) \{\n([\s\S]*?)\n\}\n/.exec(script)?.[1] ?? "";
+    const passed = [...body.matchAll(/\b(KC_[A-Z0-9_]+)=/g)].map((match) => match[1] as string);
+    expect(passed.length).toBeGreaterThan(0);
+    expect([...SECRET_ENV].sort()).toEqual(passed.sort());
+    expect([...SECRET_ENV].sort()).toEqual(Object.keys(ENV).sort());
   });
 
   test("JSON is written as Python's json module writes it", () => {
@@ -349,6 +362,56 @@ describe("CLI", () => {
     expect(readFileSync(out, "utf8")).toContain(secret("KC_E2E_PASSWORD_TINA"));
   });
 
+  test("render and render-sso never echo a placeholder name", async () => {
+    // A secret the realm does not use, shaped like a placeholder name: the
+    // refusal must not quote it.
+    const template = join(dir, "placeholder.template.json");
+    const realmFile = join(dir, "placeholder-realm.json");
+    for (const name of [
+      "KC_BOOTSTRAP_ADMIN_PASSWORD",
+      "KC_E2E_WRONG_SECRET",
+      "KC_E2E_FVOCI_OWNER_PASSWORD",
+    ]) {
+      const canary = `${name.replaceAll("2", "_")}_CANARY`;
+      writeFileSync(template, `{"a": "@@${canary}@@"}`);
+      for (const [command, out] of [
+        ["render", realmFile],
+        ["render-sso", dir],
+      ] as const) {
+        const result = await cli([command, template, out], { env: { ...ENV, [name]: canary } });
+        expect(result.code).toBe(1);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toBe("keycloak e2e: template references an unknown placeholder\n");
+      }
+      expect(() => statSync(realmFile)).toThrow();
+      expect(() => statSync(join(dir, "fvoci-e2e-ws-a-realm.json"))).toThrow();
+    }
+  });
+
+  test("every per-run secret in the environment is registered, used or not", async () => {
+    // `redact` without a config reads none of them: only the registration
+    // made before any command runs can scrub them.
+    const input = `${Object.values(ENV).join(" ")}\n`;
+    const result = await cli(["redact"], { env: ENV, stdin: input });
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe(
+      `${Object.values(ENV)
+        .map(() => "<redacted-secret>")
+        .join(" ")}\n`,
+    );
+    // An unused secret that cannot be scrubbed is refused before anything is written.
+    const out = join(dir, "short-unused-realm.json");
+    const template = join(import.meta.dir, "../../scripts/keycloak/realm.template.json");
+    const refused = await cli(["render", template, out], {
+      env: { ...ENV, KC_E2E_WRONG_SECRET: "7chars!" },
+    });
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toBe(
+      "keycloak e2e: environment variable KC_E2E_WRONG_SECRET is shorter than 8 characters\n",
+    );
+    expect(() => statSync(out)).toThrow();
+  });
+
   test("redact streams stdin with the config's secrets", async () => {
     const config = join(dir, "redact.json");
     writeFileSync(config, pyDumps(specConfig("http://h/realms/fvoci-e2e", ENV)));
@@ -359,6 +422,19 @@ describe("CLI", () => {
       "a <redacted-secret> b\nGET /cb?code=<redacted>\ntail <redacted-secret>",
     );
     expect(readFileSync(config, "utf8")).toContain(secret("KC_E2E_CLIENT_SECRET"));
+  });
+
+  test("redact with a config that cannot be read stops before stdin", async () => {
+    // The runner reads exit 0 as "the config's secrets were applied".
+    const input = `a ${secret("KC_BOOTSTRAP_ADMIN_PASSWORD")} b\n`;
+    const result = await cli(["redact", join(dir, "no-such-config.json")], { stdin: input });
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("keycloak e2e: cannot read the config (ENOENT)\n");
+    // Without a path only the built-in rules apply.
+    const plain = await cli(["redact"], { stdin: "GET /cb?code=9f2c.aa-11\n" });
+    expect(plain.code).toBe(0);
+    expect(plain.stdout).toBe("GET /cb?code=<redacted>\n");
   });
 
   test("redact refuses a secret that a line break or control character would split", async () => {

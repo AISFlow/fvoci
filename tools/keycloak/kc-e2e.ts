@@ -2,7 +2,7 @@
 //
 // Secrets come from the environment or the mode-600 config file and are never
 // printed; `redact` replaces them and every code/state/token-shaped value.
-import { closeSync, existsSync, openSync, readFileSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, openSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import { machine, release, type } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
@@ -13,6 +13,7 @@ import {
   pyDumps,
   pyDumpsIndented,
   realmValues,
+  registerEnvSecrets,
   renderTemplate,
   specConfig,
   ssoConfig,
@@ -108,8 +109,13 @@ function err(text: string): void {
   process.stderr.write(scrubText(text));
 }
 
+/**
+ * Copies stdin to stdout, redacted. A given config must load before stdin is
+ * read: the runner takes exit 0 as "its secrets were applied". Without one,
+ * only the built-in rules apply.
+ */
 async function redactStdin(configPath: string | undefined): Promise<void> {
-  if (configPath && existsSync(configPath)) loadConfig(configPath);
+  if (configPath !== undefined) loadConfig(configPath);
   const secrets = knownSecrets();
   // Invalid UTF-8 becomes U+FFFD instead of ending the stream; a BOM is kept.
   const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
@@ -251,6 +257,9 @@ async function main(argv: string[]): Promise<void> {
   const [command, ...args] = argv;
   const env = process.env;
   const two = args.length === 2;
+  // Every per-run secret in the environment is registered first, used by
+  // the command or not.
+  registerEnvSecrets(env);
   if (command === "render" && two) {
     const values = realmValues(env);
     createFile(
