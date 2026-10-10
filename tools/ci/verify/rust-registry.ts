@@ -1,6 +1,6 @@
 // Every root db-tests integration target (explicit [[test]] or autodiscovered
 // tests/*.rs) maps to exactly one rust.yml execution bucket.
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   get,
@@ -29,6 +29,8 @@ import {
   RUST_INTEGRATION_MANUAL_TARGETS,
   RUST_WORKFLOW_FILE,
   isFile,
+  notUtf8,
+  readUtf8,
   postgresMatrixInventory,
   rustWorkflowJobs,
   rustWorkflowPresent,
@@ -43,7 +45,7 @@ export type RustRegistryHooks = {
   verifyPostgresBudgetMatrix?: (jobs: Mapping) => string[];
 };
 
-export type AutotestFile = { stem: string; text: string | null };
+export type AutotestFile = { stem: string; text: string | null; invalidUtf8?: boolean };
 
 function pyTruthy(value: unknown): boolean {
   if (Array.isArray(value)) return value.length > 0;
@@ -90,12 +92,13 @@ export function classifyDbIntegrationTargets(
   const autotestsEnabled =
     isMapping(pkg) && has(pkg, "autotests") ? pyTruthy(get(pkg, "autotests")) : true;
   if (autotestsEnabled && autotests !== null) {
-    for (const { stem, text } of autotests) {
+    for (const { stem, text, invalidUtf8 } of autotests) {
       const unregistered: Result<Set<string>> = [
         null,
         `rust: tests/${stem}.rs is not registered and has no crate ` +
           '#![cfg(feature = "db-tests")]; add CI inventory or an explicit fast/native exclusion',
       ];
+      if (invalidUtf8 === true) return [null, notUtf8(`tests/${stem}.rs`)];
       if (text === null) return unregistered;
       const attrs = crateAttributes(text);
       if (declaresDbTests(attrs)) {
@@ -125,7 +128,9 @@ function readAutotests(root: string): AutotestFile[] | null {
   return names.map((name) => {
     const path = join(dir, name);
     const stem = name === ".rs" ? name : name.slice(0, -3);
-    return { stem, text: isFile(path) ? readFileSync(path, "utf8") : null };
+    if (!isFile(path)) return { stem, text: null };
+    const text = readUtf8(path);
+    return text === null ? { stem, text, invalidUtf8: true } : { stem, text };
   });
 }
 
@@ -134,7 +139,9 @@ export function rootDbIntegrationRegistryTargets(root: string): Result<Set<strin
   if (!isFile(cargoPath)) return [null, "rust: missing root Cargo.toml"];
   let cargo: unknown;
   try {
-    cargo = Bun.TOML.parse(readFileSync(cargoPath, "utf8"));
+    const text = readUtf8(cargoPath);
+    if (text === null) return [null, notUtf8("Cargo.toml")];
+    cargo = Bun.TOML.parse(text);
   } catch (error) {
     return [
       null,

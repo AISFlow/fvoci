@@ -1,6 +1,5 @@
 // The collaboration job runs the maintained script on both architectures; the
 // script's literal `cargo test ... --test X \` lines are its target inventory.
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   get,
@@ -25,6 +24,8 @@ import {
   cargoTestFlagsInText,
   executionStepMasked,
   isFile,
+  notUtf8,
+  readUtf8,
   normalizeRunScript,
   uniqueNamedStep,
   type Result,
@@ -132,5 +133,7 @@ export function collaborationScriptInventory(root: string): Result<Set<string>> 
   const path = join(root, RUST_COLLAB_CI_SCRIPT);
   if (!isFile(path))
     return [null, `rust: missing collaboration CI script ${RUST_COLLAB_CI_SCRIPT}`];
-  return collaborationScriptInventoryFromText(readFileSync(path, "utf8"));
+  const text = readUtf8(path);
+  if (text === null) return [null, notUtf8(RUST_COLLAB_CI_SCRIPT)];
+  return collaborationScriptInventoryFromText(text);
 }

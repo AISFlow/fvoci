@@ -1,8 +1,8 @@
 // rust.yml registry vocabulary shared by the execution, collaboration,
 // install, schema and suite-registry checks. The constants and the matrix
 // catalog helpers are also used by the planner-side rust checks.
-import { statSync } from "node:fs";
-import { get, has, isMapping, pyRepr, pyStrip, pySplit, type Mapping } from "./py.ts";
+import { readFileSync, statSync } from "node:fs";
+import { PY_WS, get, has, isMapping, pyRepr, pyStrip, pySplit, type Mapping } from "./py.ts";
 
 export type VerifyContext = { root: string; workflows: Record<string, unknown> };
 export type Result<T> = [T, null] | [null, string];
@@ -63,6 +63,22 @@ export function isFile(path: string): boolean {
   }
 }
 
+const UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+// Strict UTF-8 like Python's read_text(encoding="utf-8"): invalid bytes are a
+// refusal (null), never U+FFFD that could pass as a harmless comment.
+export function readUtf8(path: string): string | null {
+  try {
+    return UTF8.decode(readFileSync(path));
+  } catch {
+    return null;
+  }
+}
+
+export function notUtf8(rel: string): string {
+  return `rust: ${rel} is not valid UTF-8`;
+}
+
 export function normalizeRunScript(text: string): string {
   return pyStrip(text.replaceAll("\r\n", "\n")) + "\n";
 }
@@ -80,7 +96,9 @@ export function runSteps(job: unknown): Mapping[] {
   );
 }
 
-const CARGO_TEST_FLAG_RE = /(?:^|\s)--test\s+([A-Za-z0-9_-]+)/g;
+// Python re `\s` is the str.isspace() set, not the JS one (U+0085, U+001C-U+001F
+// are whitespace; U+FEFF is not).
+const CARGO_TEST_FLAG_RE = new RegExp(`(?:^|[${PY_WS}])--test[${PY_WS}]+([A-Za-z0-9_-]+)`, "g");
 
 export function cargoTestFlagsInText(text: string): Set<string> {
   return new Set([...text.matchAll(CARGO_TEST_FLAG_RE)].map((match) => match[1] ?? ""));

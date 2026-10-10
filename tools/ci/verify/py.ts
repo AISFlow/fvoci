@@ -47,11 +47,11 @@ export function pyContains(container: unknown, item: string): boolean {
 }
 
 // str.isspace() code points used by strip()/split() without arguments.
-const WS =
+export const PY_WS =
   "\\t\\n\\v\\f\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
-const LEADING_WS = new RegExp(`^[${WS}]+`);
-const TRAILING_WS = new RegExp(`[${WS}]+$`);
-const WS_RUN = new RegExp(`[${WS}]+`);
+const LEADING_WS = new RegExp(`^[${PY_WS}]+`);
+const TRAILING_WS = new RegExp(`[${PY_WS}]+$`);
+const WS_RUN = new RegExp(`[${PY_WS}]+`);
 
 export function pyStrip(text: string): string {
   return text.replace(LEADING_WS, "").replace(TRAILING_WS, "");

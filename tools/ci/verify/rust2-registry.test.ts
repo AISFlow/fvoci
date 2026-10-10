@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { rmSync } from "node:fs";
+import { appendFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { pyRepr, pySplitlines, pyStrip, type Mapping } from "./py.ts";
 import {
@@ -18,6 +18,7 @@ import {
   RUST_POSTGRES_INTEGRATION_STEP,
   RUST_S3_INTEGRATION_STEP,
   RUST_SELECTED_INSTALL_STEP,
+  cargoTestFlagsInText,
   validateMatrixTestsFragment,
 } from "./rust-shared.ts";
 import {
@@ -494,5 +495,63 @@ test("postgres and S3 execution inventories on the real workflow", () => {
   );
   expect(validateMatrixTestsFragment("--test a; --test b")).toBe(
     "rust: postgres matrix tests must not contain shell operator ';'",
+  );
+});
+
+// A comment line holding one invalid UTF-8 byte: Python's strict read refuses
+// it, so it must never decode to U+FFFD and pass as a harmless comment.
+const INVALID_UTF8_LINE = Buffer.from([0x0a, 0x23, 0x20, 0xff, 0x0a]);
+
+test("invalid UTF-8 in read inputs is a refusal", () => {
+  for (const [rel, expected] of [
+    [RUST_COLLAB_CI_SCRIPT, "rust: scripts/run-rust-collaboration-ci-tests.sh is not valid UTF-8"],
+    ["Cargo.toml", "rust: Cargo.toml is not valid UTF-8"],
+  ] as const) {
+    using tree = new RegistryTree([]);
+    appendFileSync(join(tree.root, rel), INVALID_UTF8_LINE);
+    expect(verifyRustSuiteRegistry(tree.context()), rel).toEqual([expected]);
+  }
+  for (const stem of ["missing_db_target_probe", "static_api"]) {
+    using tree = new RegistryTree([]);
+    tree.write(`tests/${stem}.rs`, '#![cfg(feature = "db-tests")]\n');
+    appendFileSync(join(tree.root, `tests/${stem}.rs`), INVALID_UTF8_LINE);
+    expect(verifyRustSuiteRegistry(tree.context()), stem).toEqual([
+      `rust: tests/${stem}.rs is not valid UTF-8`,
+    ]);
+  }
+  using tree = new RegistryTree([]);
+  tree.write("tests/bom.rs", "\ufeff\n");
+  expect(joined(verifyRustSuiteRegistry(tree.context()))).toContain(
+    "tests/bom.rs is not registered",
+  );
+});
+
+const PYTHON_ONLY_WS = ["\u0085", "\u001c", "\u001d", "\u001e", "\u001f"];
+
+test("target extraction and validation share Python whitespace", () => {
+  for (const ws of PYTHON_ONLY_WS) {
+    const label = `U+${ws.charCodeAt(0).toString(16).padStart(4, "0")}`;
+    expect(cargoTestFlagsInText(`--test a${ws}--test${ws}b`), label).toEqual(new Set(["a", "b"]));
+    expect(validateMatrixTestsFragment(`--test a${ws}--test b`), label).toBeNull();
+    expect(validateMatrixTestsFragment(`--test a${ws}--test`), label).toBe(
+      "rust: postgres matrix tests must be --test NAME pairs only",
+    );
+    const errors = registryErrors([], (jobs) => {
+      const job = jobs["postgres"] as Mapping;
+      const rows = catalogRows(job);
+      for (const row of rows) {
+        if (row["shard"] === "a")
+          row["tests"] = `${row["tests"] as string}${ws}--test collab_product`;
+      }
+      storeCatalog(job, rows);
+    });
+    expect(errors, label).toEqual([
+      "rust: integration target assigned to multiple CI buckets: collab_product",
+    ]);
+  }
+  // U+FEFF is JS whitespace but not Python whitespace.
+  expect(cargoTestFlagsInText("x\ufeff--test a")).toEqual(new Set());
+  expect(validateMatrixTestsFragment("--test\ufeffa")).toBe(
+    "rust: postgres matrix tests must be --test NAME pairs only",
   );
 });
