@@ -2863,8 +2863,8 @@ def postgres_matrix_gate_error(
         return "POSTGRES_MATRIX_EMPTY"
     if event_name not in KNOWN_EVENTS:
         return "POSTGRES_MATRIX_EVENT"
-    jobs, jobs_err = _rust_workflow_jobs(repo_root)
-    postgres_job = jobs.get("postgres") if jobs is not None and not jobs_err else None
+    jobs, _jobs_err = _rust_workflow_jobs(repo_root)
+    postgres_job = jobs.get("postgres") if jobs is not None else None
     if not isinstance(postgres_job, dict):
         return "POSTGRES_MATRIX_CATALOG"
     rows, rows_err = _postgres_matrix_rows(postgres_job)

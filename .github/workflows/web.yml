@@ -149,10 +149,6 @@ jobs:
       - name: Check API schema
         run: |
           cargo test --locked --offline --lib --features api-schema api::openapi::tests
-      # tools/ci/planner.test.ts in the unit regressions runs the planner CLI,
-      # which parses workflow YAML with the pinned parser.
-      - name: Install the pinned planner YAML parser
-        run: python3 -m pip install --disable-pip-version-check --user --break-system-packages -r scripts/ci_selection_requirements.txt
       - name: Web and editor unit regressions
         run: |
           (cd apps/web && bun run test)
@@ -161,7 +157,11 @@ jobs:
           python3 scripts/selected-backend-ci/test_off_registration.py
       - name: Verify normal web e2e shard plan
         run: |
+          python3 -m pip install --disable-pip-version-check --user --break-system-packages -r scripts/ci_selection_requirements.txt
           bash scripts/test-web-e2e-groups.sh
+      # The planner CLI parses workflow YAML with the pinned parser installed above.
+      - name: Planner and gate CLI contract
+        run: bun test --timeout=60000 tools/ci/planner.test.ts
 
   web-native-checks:
     needs: ci-plan

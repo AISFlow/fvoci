@@ -7,7 +7,7 @@
     "build": "tsc -b && vue-tsc -b tsconfig.vue.json && vite build",
     "typecheck": "tsc -b && vue-tsc -b tsconfig.vue.json && bun run typecheck:selected-backend-ci",
     "typecheck:selected-backend-ci": "tsc -p ../../tools/selected-backend-ci/tsconfig.json",
-    "test": "bun test --parallel --timeout=60000 ./src ../../tools/ci/workflows.test.ts ../../tools/ci/planner.test.ts ../../tools/selected-backend-ci",
+    "test": "bun test --parallel --timeout=60000 ./src ../../tools/ci/workflows.test.ts ../../tools/selected-backend-ci",
     "test:e2e": "playwright test"
   },
   "dependencies": {

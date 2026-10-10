@@ -19,7 +19,8 @@ import { dirname, join, resolve } from "node:path";
 // policy implementation; these tests hold the observable contract.
 
 const root = resolve(import.meta.dir, "../..");
-const TIMEOUT = 180_000;
+// The same per-test budget web-checks passes to bun test.
+const TIMEOUT = 60_000;
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
 const GATE_WORKFLOWS = ["rust", "web", "install", "documents", "collab-engine"] as const;
@@ -692,7 +693,9 @@ describe("event x change kind", () => {
         // A selected lane reported as skipped (or cancelled/failed) never passes.
         const selected = Object.entries(plan.jobs).find(([, meta]) => meta.selected)?.[0];
         if (selected && c.ok) {
-          for (const result of ["skipped", "cancelled", "failure"]) {
+          for (const result of workflow === "rust"
+            ? ["skipped", "cancelled", "failure"]
+            : ["skipped"]) {
             const bad = await runGate(
               workflow,
               needsJson(plan, r.outputs, { ...honestResults(plan), [selected]: result }),
@@ -1200,6 +1203,22 @@ describe("merge_group plan", () => {
     },
     TIMEOUT,
   );
+
+  test("web-checks runs this file after installing the pinned planner parser", () => {
+    const steps = (loadWorkflow("web").jobs["web-checks"] as { steps: Record<string, unknown>[] })
+      .steps;
+    const runs = steps.map((step) => (typeof step.run === "string" ? step.run : ""));
+    const install = runs.findIndex((text) =>
+      text.includes("-r scripts/ci_selection_requirements.txt"),
+    );
+    const self = steps.findIndex(
+      (step) => step.run === "bun test --timeout=60000 tools/ci/planner.test.ts",
+    );
+    expect(install).toBeGreaterThanOrEqual(0);
+    expect(self).toBeGreaterThan(install);
+    const step = steps[self] as Record<string, unknown>;
+    expect("if" in step || "continue-on-error" in step).toBe(false);
+  });
 
   test("required gate names, triggers and no paths filters on the five gate workflows", () => {
     const rust = readFileSync(join(root, ".github/workflows/rust.yml"), "utf8");

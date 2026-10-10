@@ -833,6 +833,7 @@ class GateSchemaTest(unittest.TestCase):
         extra: dict | None = None,
         omit_jobs: frozenset[str] | None = None,
         job_entries: dict[str, object] | None = None,
+        matrix_event: str = "pull_request",
     ) -> str:
         needs: dict[str, object] = {}
         if plan_outputs is None:
@@ -840,7 +841,7 @@ class GateSchemaTest(unittest.TestCase):
             jobs = plan.get("jobs") if isinstance(plan, dict) else None
             postgres = jobs.get("postgres") if isinstance(jobs, dict) else None
             if workflow == "rust" and isinstance(postgres, dict) and postgres.get("selected") is True:
-                outputs["postgres_matrix"] = expected_postgres_matrix("pull_request")
+                outputs["postgres_matrix"] = expected_postgres_matrix(matrix_event)
             needs["ci-plan"] = {"result": plan_result, "outputs": outputs}
         else:
             needs["ci-plan"] = {"result": plan_result, "outputs": plan_outputs}
@@ -867,9 +868,6 @@ class GateSchemaTest(unittest.TestCase):
         event: object = None,
         **needs_kwargs: object,
     ) -> int:
-        payload = needs_json if needs_json is not None else self._needs(
-            plan, workflow, results, **needs_kwargs
-        )
         if event_name is None:
             # Default: the event that legitimately produced this plan's opt-ins.
             chosen = {
@@ -880,6 +878,10 @@ class GateSchemaTest(unittest.TestCase):
                 and (plan["jobs"].get(job) or {}).get("selected") is True
             }
             event_name, event = ("workflow_dispatch", {"inputs": chosen}) if chosen else ("pull_request", {})
+        # The default matrix output is the one the plan emits for this event.
+        payload = needs_json if needs_json is not None else self._needs(
+            plan, workflow, results, matrix_event=event_name, **needs_kwargs
+        )
         with tempfile.TemporaryDirectory() as tmp:
             event_path = Path(tmp) / "event.json"
             event_path.write_text(
