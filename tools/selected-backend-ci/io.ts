@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import process from "node:process";
 
 export type Environment = Record<string, string | undefined>;
@@ -144,6 +144,21 @@ export function write(path: string, value: unknown): void {
 export function below(path: string, parent: string): boolean {
   const part = relative(parent, path);
   return part === "" || (part !== ".." && !part.startsWith(".." + sep) && !isAbsolute(part));
+}
+// Python Path.resolve(): symlinks of the existing prefix resolve, a missing
+// tail (CARGO_TARGET_DIR before the first build) is appended unchanged.
+export function resolved(path: string): string {
+  const absolute = resolve(path);
+  for (let prefix = absolute, rest = ""; ;) {
+    try {
+      return join(realpathSync(prefix), rest);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || prefix === dirname(prefix))
+        throw error;
+      rest = join(basename(prefix), rest);
+      prefix = dirname(prefix);
+    }
+  }
 }
 export function physical(path: string): string {
   assert.ok(isAbsolute(path) && realpathSync(path) === path, "nonphysical path");

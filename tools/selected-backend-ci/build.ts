@@ -28,6 +28,7 @@ import {
   spawnSelectedCommand,
   tool,
   write,
+  resolved,
 } from "./io.ts";
 import type { Artifact, Binary, Bundle, Inputs, Stage } from "./types.ts";
 
@@ -110,7 +111,7 @@ export function inputs(): Inputs {
   };
   Object.assign(
     external,
-    cargoInputs(realpathSync(process.env.CARGO_HOME ?? join(homedir(), ".cargo"))),
+    cargoInputs(resolved(process.env.CARGO_HOME ?? join(homedir(), ".cargo"))),
   );
   const compilerInputs = join(
     process.env.FVOCI_SELECTED_CI_OUTPUT ?? "/nonexistent",
@@ -182,7 +183,7 @@ export function recordBefore(output: string): void {
     cargo: call(["cargo", "-V"]),
     bun: call(["bun", "-v"]),
     os_release: release,
-    target: realpathSync(env("CARGO_TARGET_DIR")),
+    target: resolved(env("CARGO_TARGET_DIR")),
     features: ["api-schema", "db-tests"],
     nativeFeatures: ["worker"],
     profile: "debug",

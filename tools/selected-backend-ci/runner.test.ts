@@ -40,6 +40,7 @@ import {
   jsonInteger,
   observedExit,
   read,
+  resolved,
   root,
   sha,
   sourceInputText,
@@ -1902,4 +1903,17 @@ describe.serial("task4 counterexamples and real child cancellation", () => {
       await child.exited;
     }
   });
+});
+test("resolved() keeps Python Path.resolve semantics for a missing tail", () => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "fvoci-resolved-")));
+  try {
+    mkdirSync(join(base, "real"));
+    symlinkSync(join(base, "real"), join(base, "link"));
+    // CARGO_TARGET_DIR before the first build: the link resolves, the tail stays.
+    expect(resolved(join(base, "link/target/debug"))).toBe(join(base, "real/target/debug"));
+    expect(resolved(join(base, "link"))).toBe(join(base, "real"));
+    expect(resolved(join(base, "missing"))).toBe(join(base, "missing"));
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });

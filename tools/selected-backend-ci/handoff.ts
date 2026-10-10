@@ -37,6 +37,7 @@ import {
   root,
   sha,
   write,
+  resolved,
 } from "./io.ts";
 import type { Artifact, Binary, Bundle, Inputs, Web } from "./types.ts";
 
@@ -442,7 +443,7 @@ export function qualify(output: string, h: HostFacts = host): Bundle {
       environment.devDebug === "0" &&
       environment.testDebug === "0",
   );
-  assert.equal(environment.target, realpathSync(env("CARGO_TARGET_DIR")));
+  assert.equal(environment.target, resolved(env("CARGO_TARGET_DIR")));
   assert.ok(
     deepEquals(environment.sqlite, Object.fromEntries(sqliteKeys.map((key) => [key, env(key)]))),
   );
@@ -800,7 +801,7 @@ export function browserBefore(h: HostFacts = host): void {
     cargo: h.toolchain().cargo,
     bun: h.toolchain().bun,
     os_release: readFileSync("/etc/os-release", "utf8"),
-    target: realpathSync(env("CARGO_TARGET_DIR")),
+    target: resolved(env("CARGO_TARGET_DIR")),
     features: [],
     nativeFeatures: ["worker"],
     profile: "debug",
