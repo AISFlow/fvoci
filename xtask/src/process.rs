@@ -16,6 +16,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Once;
 use std::thread;
 use std::time::{Duration, Instant};
+
 /// Elapsed/timeout/exit record kept per step, like the former `TIMINGS` dicts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Timing {
@@ -99,14 +100,13 @@ impl std::fmt::Display for RunError {
 }
 
 type Output = [Option<Vec<u8>>; 2];
+/// Each reader sends its slot (0 stdout, 1 stderr) and the bytes or the read error.
+type Results = Receiver<(usize, io::Result<Vec<u8>>)>;
 
 /// Read each captured pipe of `child` to EOF on its own thread. A stream that
 /// was not captured is complete and empty; a captured stream without a pipe
 /// is a read error.
-fn read_pipes(
-    child: &mut Child,
-    capture: bool,
-) -> (Receiver<(usize, io::Result<Vec<u8>>)>, Output) {
+fn read_pipes(child: &mut Child, capture: bool) -> (Results, Output) {
     let (sender, results) = mpsc::channel();
     let pipes: [Option<Box<dyn Read + Send>>; 2] = [
         child
@@ -130,6 +130,9 @@ fn read_pipes(
         };
         let sender = sender.clone();
         thread::spawn(move || {
+            // A reader `run` detached on timeout outlives the call; it must
+            // not take a forwarded signal that `run_owned` holds at spawn.
+            hold_interrupts();
             let mut buffer = Vec::new();
             let result = pipe.read_to_end(&mut buffer).map(|_| buffer);
             let _ = sender.send((slot, result));
@@ -163,7 +166,7 @@ fn exited(pid: u32) -> io::Result<bool> {
 /// unreaped.
 fn settle(
     pid: u32,
-    results: &Receiver<(usize, io::Result<Vec<u8>>)>,
+    results: &Results,
     output: &mut Output,
     deadline: Instant,
     timeout: Duration,
@@ -182,7 +185,7 @@ fn settle(
             return Err(RunError::Timeout(timeout));
         }
         let wait = pause.min(deadline - now);
-        pause = (pause * 2).min(Duration::from_millis(10));
+        pause = (pause * 2).min(Duration::from_millis(50));
         match results.recv_timeout(wait) {
             Ok((slot, Ok(bytes))) => output[slot] = Some(bytes),
             Ok((_, Err(error))) => return Err(RunError::Read(error)),
@@ -233,6 +236,7 @@ pub fn run(command: &mut Command, timeout: Duration, capture: bool) -> Result<Fi
     outcome?;
     finished(reaped, output)
 }
+
 /// Process group of the `run_owned` call in progress (0: none), for the
 /// interrupt handler.
 static OWNED_GROUP: AtomicI32 = AtomicI32::new(0);
@@ -396,7 +400,7 @@ mod tests {
         let script = format!("sleep 30 & echo $! > '{}'; wait", marker.display());
         let error = run(
             Command::new("sh").args(["-c", &script]),
-            Duration::from_millis(300),
+            Duration::from_secs(2),
             true,
         )
         .unwrap_err();
@@ -407,11 +411,17 @@ mod tests {
             .parse()
             .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-        let alive = unsafe { libc::kill(pid, 0) } == 0;
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
+        // A killed descendant is a zombie or gone; kill(pid, 0) accepts both.
+        let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let running = state
+            .rsplit_once(") ")
+            .is_some_and(|(_, rest)| !rest.starts_with('Z'));
+        if running {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
         }
-        assert!(alive, "run signalled the descendant {pid}");
+        assert!(running, "run signalled the descendant {pid}");
     }
 
     /// CPU time of the calling thread, where run_owned's wait loop runs.
