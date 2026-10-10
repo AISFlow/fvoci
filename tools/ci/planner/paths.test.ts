@@ -138,7 +138,7 @@ describe("classifyPath", () => {
       expect(classifyPath(path), path).toBe("docs");
     }
     expect(classifyPath("scripts/WEB_LINT.md")).toBe("frontend_web_install");
-    // format-web.sh passes 'scripts/schema-baseline/*.{ts,md}'; prettier expands the braces.
+    // format-web.sh passes 'scripts/schema-baseline/*.ts' and 'scripts/schema-baseline/*.md'.
     expect(classifyPath("scripts/schema-baseline/compare-catalogs.md")).toBe(
       "frontend_web_install",
     );
@@ -155,7 +155,8 @@ describe("prettier inputs", () => {
     const targets = loadMarkdownInputs().targets;
     expect(targets).toContain("scripts/WEB_LINT.md");
     expect(targets).toContain("tools/web-e2e/**/*.ts");
-    expect(targets).toContain("scripts/schema-baseline/*.{ts,md}");
+    expect(targets).toContain("scripts/schema-baseline/*.ts");
+    expect(targets).toContain("scripts/schema-baseline/*.md");
     expect(targets).not.toContain('"$@"');
     expect(() => formatWebDefaultTargets("echo none")).toThrow("no default prettier target list");
     expect(() => formatWebDefaultTargets("set -- a b")).toThrow("not closed");
