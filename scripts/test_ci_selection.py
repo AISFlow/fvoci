@@ -3547,9 +3547,12 @@ class AgentDocsSelectionTest(unittest.TestCase):
         for path in ("AGENTS.MD", "AGENTS.md.orig"):
             self.assertEqual(SEL.classify_path(path), "unknown", path)
         self.assertEqual(SEL.classify_path(".agents/"), "unknown")
+        self.assertEqual(SEL.classify_path(".agents/skills/fvoci-fast-verify/SKILL.md"), "broaden")
+        self.assertEqual(
+            SEL.classify_path(".agents/skills/fvoci-standard-implementations/references/candidates.md"),
+            "broaden",
+        )
         for path in (
-            ".agents/skills/fvoci-fast-verify/SKILL.md",
-            ".agents/skills/fvoci-standard-implementations/references/candidates.md",
             ".agents/other.md",
             ".agents/sub/environment.md",
             "agents/environment.md",
@@ -3584,9 +3587,9 @@ class AgentDocsSelectionTest(unittest.TestCase):
             "scripts/test_ci_selection.py",
             "scripts/test-ci-selection.sh",
             "scripts/ci_selection_requirements.txt",
+            ".agents/skills/fvoci-fast-verify/SKILL.md",
         ):
             self.assert_full([*AGENT_DOCS, extra], "FULL_PATH_BROADEN")
-        self.assert_docs_only([*AGENT_DOCS, ".agents/skills/fvoci-fast-verify/SKILL.md"])
 
     def test_agent_docs_with_executable_config_is_full(self) -> None:
         for extra in (
@@ -4054,6 +4057,93 @@ class MarkdownOnlyLaneTest(unittest.TestCase):
         self.assertEqual(SEL.classify_path("scripts/run-web-e2e.sh"), "broaden")
         self.assertEqual(SEL.classify_path("vendor/markdown/src/parser.rs"), "broaden")
         self.assertEqual(SEL.classify_path("crates/collab-engine/src/lib.rs"), "broaden")
+
+    def test_prettier_markdown_selects_web_format_check(self) -> None:
+        script = (ROOT / "scripts" / "format-web.sh").read_text(encoding="utf-8")
+        ignore = (ROOT / ".prettierignore").read_text(encoding="utf-8")
+        targets = SEL.format_web_default_targets(script)
+        patterns = SEL.prettier_ignore_patterns(ignore)
+        samples = {
+            "apps/web": "apps/web/src/format-lane.md",
+            "packages/editor": "packages/editor/src/format-lane.md",
+            "packages/i18n": "packages/i18n/NOTICE.md",
+            "scripts/document-convert": "scripts/document-convert/format-lane.md",
+            "scripts/WEB_LINT.md": "scripts/WEB_LINT.md",
+        }
+        self.assertEqual(set(samples), {target for target in targets if not any(char in target for char in "*?[") and ("." not in target.rsplit("/", 1)[-1] or target.endswith(".md"))})
+        for target, path in samples.items():
+            self.assertIn(target, targets, target)
+            self.assertTrue(SEL.prettier_checks_markdown(path, targets=targets, patterns=patterns), path)
+            self.assertFalse(SEL.path_matches_prettier_ignore(path, patterns), path)
+            reduced = tuple(item for item in targets if item != target)
+            self.assertFalse(
+                SEL.prettier_checks_markdown(path, targets=reduced, patterns=patterns),
+                target,
+            )
+            self.assertEqual(SEL.classify_path(path), "frontend_web_install", path)
+            for workflow, plan in plan_all_workflows([path]).items():
+                self.assertEqual(plan["mode"], "narrow", (path, workflow))
+                self.assertEqual(plan["reason_code"], "NARROW_FRONTEND_WEB_INSTALL", (path, workflow))
+                for job, meta in plan["jobs"].items():
+                    selected = workflow in {"web", "install"} and not is_opt_in(workflow, job)
+                    self.assertIs(meta["selected"], selected, (path, workflow, job))
+                if workflow == "web":
+                    self.assertTrue(plan["jobs"]["web-static"]["selected"], path)
+        self.assertTrue(SEL.path_matches_prettier_ignore("apps/web/NOTICE.md", patterns))
+        self.assertTrue(SEL.path_matches_prettier_ignore("packages/editor/NOTICE.md", patterns))
+        self.assertEqual(SEL.classify_path("packages/editor/NOTICE.md"), "docs")
+        self.assertFalse(
+            SEL.prettier_checks_markdown(
+                "tools/selected-backend-ci/note.md", targets=targets, patterns=patterns
+            )
+        )
+
+    def test_removing_markdown_lane_entries_drops_their_lane(self) -> None:
+        source = inspect.getsource(SEL._markdown_lane)
+        namespace = {
+            "NarrowFamily": SEL.NarrowFamily,
+            "Literal": __import__("typing").Literal,
+            "_is_fixture_markdown": SEL._is_fixture_markdown,
+            "_CONTENT_READ_MARKDOWN": SEL._CONTENT_READ_MARKDOWN,
+            "_is_prettier_checked_markdown": SEL._is_prettier_checked_markdown,
+            "_PLANNER_CONTRACT_MARKDOWN": SEL._PLANNER_CONTRACT_MARKDOWN,
+            "_PARENT_BROADEN_MARKDOWN": SEL._PARENT_BROADEN_MARKDOWN,
+        }
+        cases = (
+            (
+                '    if path.startswith(".github/"):\n        return "broaden"\n',
+                ".github/workflows/note.md",
+                "broaden",
+            ),
+            (
+                "_PLANNER_CONTRACT_MARKDOWN, ",
+                ".agents/skills/fvoci-fast-verify/SKILL.md",
+                "broaden",
+            ),
+            (
+                ", _PARENT_BROADEN_MARKDOWN",
+                ".agents/skills/fvoci-standard-implementations/references/candidates.md",
+                "broaden",
+            ),
+            (
+                '    if _is_prettier_checked_markdown(path):\n        return "frontend_web_install"\n',
+                "scripts/WEB_LINT.md",
+                "frontend_web_install",
+            ),
+            (
+                '    if _is_prettier_checked_markdown(path):\n        return "frontend_web_install"\n',
+                "packages/i18n/NOTICE.md",
+                "frontend_web_install",
+            ),
+        )
+        for needle, path, expected in cases:
+            self.assertEqual(SEL.classify_path(path), expected, path)
+            self.assertIn(needle, source, path)
+            mutated = source.replace(needle, "", 1)
+            self.assertNotEqual(source, mutated, path)
+            local = dict(namespace)
+            exec(mutated, local)
+            self.assertEqual(local["_markdown_lane"](path), "docs", path)
 
 
 class AgentDocsGateTest(unittest.TestCase):
