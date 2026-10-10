@@ -778,6 +778,29 @@ test.each(mutations)("reject workflow mutation: %s", (_name, mutate) => {
   mutate(data);
   expect(() => verifyWorkflow(data)).toThrow();
 });
+// A scalar is not a list: substring matches on a string and per-character
+// iteration over a step string must not satisfy the list policies.
+const scalarMutations: [string, (data: any) => void, string][] = [
+  [
+    "trigger paths as one string",
+    (d) => {
+      d.on.push.paths = "docker/ci-base/** .github/workflows/ci-base-image.yml tools/ci/**";
+    },
+    "image edits must trigger builds",
+  ],
+  [
+    "job steps as one string",
+    (d) => {
+      d.jobs.build.steps = "run: python3 -c 'print(1)'";
+    },
+    "image job steps must be a list",
+  ],
+];
+test.each(scalarMutations)("reject scalar workflow list: %s", (_name, mutate, message) => {
+  const data = structuredClone(workflow);
+  mutate(data);
+  expect(() => verifyWorkflow(data)).toThrow(message);
+});
 const digest = "sha256:" + "a".repeat(64),
   second = "sha256:" + "b".repeat(64);
 const index = () => ({

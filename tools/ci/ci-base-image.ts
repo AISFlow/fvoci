@@ -102,7 +102,8 @@ export function verifyWorkflow(data: any) {
   check(Bun.deepEquals(data.on.push.branches, ["main"]), "push must target main");
   for (const event of [data.on.push, data.on.pull_request]) {
     check(
-      event.paths.includes("docker/ci-base/**") &&
+      Array.isArray(event.paths) &&
+        event.paths.includes("docker/ci-base/**") &&
         event.paths.includes(".github/workflows/ci-base-image.yml") &&
         event.paths.includes("tools/ci/**"),
       "image edits must trigger builds",
@@ -157,6 +158,7 @@ export function verifyWorkflow(data: any) {
         "manifest must follow successful pushes",
       );
     }
+    check(Array.isArray(job.steps), "image job steps must be a list");
     for (const step of job.steps) {
       check(!step["continue-on-error"], "steps must fail closed");
       if (step.uses)
