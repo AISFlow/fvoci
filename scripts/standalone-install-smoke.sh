@@ -14,7 +14,7 @@
 # The image stands in for the release reference exactly as release files do:
 # the `${FVOCI_IMAGE:-...}` default is replaced, nothing else changes. The file
 # publishes 127.0.0.1:8080, which must be free. Host tools: docker, curl, jq,
-# python3. Secret values are compared in memory and never printed.
+# bun. Secret values are compared in memory and never printed.
 # Each `step` is a phase (scripts/lib/smoke-phases.sh). The trap removes every
 # project the run created on success, failure and INT/TERM and fails a passing
 # run if a container, volume or network of one remains. Two runs on one host
@@ -64,7 +64,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-for cmd in docker curl jq python3; do
+for cmd in docker curl jq bun; do
   command -v "$cmd" >/dev/null || fail "missing host command: $cmd"
 done
 docker image inspect "$IMAGE" >/dev/null || fail "image not found: $IMAGE"
@@ -80,34 +80,41 @@ cd "$WORK"
 # format its comment shows (openssl rand -hex 32; *_KEYS keyring under its
 # *_ACTIVE_KEY_ID).
 fill_env() {
-  python3 - env.example .env <<'PY'
-import re, secrets, sys
-text = open(sys.argv[1], encoding="utf-8").read()
-values = dict(re.findall(r"^([A-Z][A-Z0-9_]*)=(.*)$", text, re.MULTILINE))
-out = []
-for line in text.splitlines():
-    empty = re.fullmatch(r"([A-Z][A-Z0-9_]*)=", line)
-    if empty:
-        key = empty.group(1)
-        if key.endswith("_KEYS"):
-            line = f'{key}={{"{values[key[:-5] + "_ACTIVE_KEY_ID"]}":"{secrets.token_hex(32)}"}}'
-        else:
-            line = f"{key}={secrets.token_hex(32)}"
-    out.append(line)
-open(sys.argv[2], "w", encoding="utf-8").write("\n".join(out) + "\n")
-PY
+  local line key active out=() values=()
+  local -A value_of=()
+  mapfile -t values <env.example
+  for line in "${values[@]}"; do
+    [[ "$line" =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]] && value_of["${BASH_REMATCH[1]}"]="${BASH_REMATCH[2]}"
+  done
+  for line in "${values[@]}"; do
+    if [[ "$line" =~ ^([A-Z][A-Z0-9_]*)=$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      if [[ "$key" == *_KEYS ]]; then
+        active="${key%_KEYS}_ACTIVE_KEY_ID"
+        [[ -v "value_of[$active]" ]] || fail "env.example has $key but no $active"
+        line="${key}={\"${value_of[$active]}\":\"$(random_hex)\"}"
+      else
+        line="${key}=$(random_hex)"
+      fi
+    fi
+    out+=("$line")
+  done
+  printf '%s\n' "${out[@]}" >.env
   chmod 600 .env
 }
+random_hex() { od -An -tx1 -N32 /dev/urandom | tr -d ' \n'; }
 env_value() { sed -n "s/^$1=//p" .env; }
-set_env() { # KEY VALUE
-  python3 - .env "$1" "$2" <<'PY'
-import re, sys
-path, key, value = sys.argv[1:]
-text = open(path, encoding="utf-8").read()
-text, n = re.subn(rf"^{key}=.*$", lambda _: f"{key}={value}", text, flags=re.MULTILINE)
-assert n == 1, key
-open(path, "w", encoding="utf-8").write(text)
-PY
+set_env() { # KEY VALUE: replace the one KEY= line
+  local line n=0 out=()
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "$1="* ]]; then
+      line="$1=$2"
+      n=$((n + 1))
+    fi
+    out+=("$line")
+  done <.env
+  (( n == 1 )) || fail "set_env: $n lines for $1 in .env"
+  printf '%s\n' "${out[@]}" >.env
 }
 logs() { docker compose logs --no-color "$1" 2>&1; }
 state() {
@@ -344,7 +351,7 @@ curl -fsS -c "$JAR" -b "$JAR" -H 'content-type: application/json' -H "origin: $O
   -d '{"email":"owner@install.test","password":"installpass1","givenName":"Owner","workspaceSlug":"install","workspaceName":"Install"}' >/dev/null
 login
 WS="$(curl -fsS -b "$JAR" "$BASE/api/v1/me/workspaces" | jq -er '.items[0].id')"
-DOC_COMMAND_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+DOC_COMMAND_ID="$(smoke_ts uuid)"
 DOC_CREATE_BODY="{\"commandId\":\"${DOC_COMMAND_ID}\",\"parentId\":null,\"title\":\"Install doc\"}"
 DOC="$(curl -fsS -b "$JAR" -H 'content-type: application/json' -H "origin: $ORIGIN" \
   -X POST "$BASE/api/v1/workspaces/${WS}/documents" -d "$DOC_CREATE_BODY" | jq -er .id)"

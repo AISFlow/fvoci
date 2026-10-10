@@ -22,9 +22,24 @@ SMOKE_PHASE=""
 SMOKE_LAST_ERR=""
 SMOKE_FAIL_FILE=""
 SMOKE_QUOTE_TOKEN=""
+# JSON reads and assertions (tools/install-smoke/smoke.ts; JSON arg `-` = stdin).
+SMOKE_TS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/install-smoke/smoke.ts"
 SMOKE_REPORT=""
 # When set, fail also appends `FAIL: MESSAGE` to this assertion log.
 SMOKE_ASSERT_LOG="${SMOKE_ASSERT_LOG:-}"
+
+smoke_ts() {
+  bun "$SMOKE_TS" "$@"
+}
+
+# json_field JSON KEY...: value at the path (digit KEY = array index).
+json_field() {
+  smoke_ts field "$@"
+}
+
+smoke_check() {
+  smoke_ts check "$@"
+}
 
 smoke_actions() {
   [[ "${GITHUB_ACTIONS:-}" == true ]]

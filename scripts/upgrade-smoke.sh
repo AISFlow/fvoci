@@ -79,7 +79,7 @@ require_cmd() {
     command -v "$cmd" >/dev/null 2>&1 || fail "missing required command: $cmd"
   done
 }
-require_cmd git docker openssl curl bun python3 sha256sum tar awk diff
+require_cmd git docker openssl curl bun sha256sum tar awk diff
 
 RUN_ID="$(openssl rand -hex 8)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-upgrade.${RUN_ID}.XXXXXX")"
@@ -119,14 +119,7 @@ SMOKE_ASSERT_LOG="$ASSERT_LOG"
 # Replace every generated secret with a marker before a log reaches the evidence dir.
 # The secrets go through the environment, not argv, so ps does not list them.
 redact() {
-  FVOCI_REDACT="$(printf '%s\n' "${SECRETS[@]}")" python3 -c '
-import os, sys
-data = sys.stdin.read()
-for secret in os.environ["FVOCI_REDACT"].split("\n"):
-    if secret:
-        data = data.replace(secret, "[redacted]")
-sys.stdout.write(data)
-'
+  FVOCI_REDACT="$(printf '%s\n' "${SECRETS[@]}")" smoke_ts redact
 }
 
 project_compose() {
@@ -321,7 +314,7 @@ log_assert "images distinct: old=${OLD_IMAGE_ID} new=${NEW_IMAGE_ID}"
 
 # --- Helpers ---------------------------------------------------------------
 pick_port() {
-  python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+  smoke_ts port
 }
 
 wait_http() {
@@ -348,13 +341,13 @@ login() {
   : >"$COOKIE_JAR"
   curl -fsS -c "$COOKIE_JAR" -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $base" \
     -X POST "$base/api/v1/auth/login" -d "{\"email\":\"${OWNER_EMAIL}\",\"password\":\"${OWNER_LOGIN_PASSWORD}\"}" \
-    | python3 -c 'import json,sys; assert json.load(sys.stdin).get("userId")'
+    | smoke_check user-id -
 }
 
 check_seeded_data() {
   local base="$1" label="$2"
   curl -fsS -b "$COOKIE_JAR" "$base/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/body" \
-    | python3 -c 'import json,sys; body=json.load(sys.stdin); assert body["contentJson"]==json.loads(sys.argv[1])["contentJson"], body' "$BODY_BEFORE" \
+    | smoke_check same-body - "$BODY_BEFORE" \
     || fail "$label: document body differs"
   local id
   for id in "${ATTACHMENT_IDS[@]}"; do
@@ -362,12 +355,7 @@ check_seeded_data() {
     [[ "$(sha256sum "$DOWNLOAD_PATH" | awk '{print $1}')" == "$FIXTURE_SHA" ]] || fail "$label: attachment $id bytes differ"
   done
   curl -fsS -b "$COOKIE_JAR" "$base/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/comments" \
-    | python3 -c '
-import json, sys
-body = json.load(sys.stdin)
-items = body.get("items", body if isinstance(body, list) else [])
-assert any(c.get("id") == sys.argv[1] and c.get("body") == "업그레이드 댓글 🙂" for c in items), body
-' "$COMMENT_ID" || fail "$label: comment missing"
+    | smoke_check comment - "$COMMENT_ID" "업그레이드 댓글 🙂" || fail "$label: comment missing"
   log_assert "${label}: login, document body, ${#ATTACHMENT_IDS[@]} attachment(s) sha256 ${FIXTURE_SHA:0:12}, comment: ok"
 }
 
@@ -433,16 +421,7 @@ storage_key() {
 # The pinned mcli emits no isLatest; the latest version is the one with the
 # highest versionOrdinal (newest first numbering), which must be unique.
 object_versions() {
-  bucket_mc ls --versions "b/${S3_BUCKET_NAME}/$1" | python3 -c '
-import json, sys
-rows = [json.loads(line) for line in sys.stdin if line.strip()]
-assert rows and all(v.get("status") == "success" for v in rows), rows
-ordinals = [v["versionOrdinal"] for v in rows]
-assert all(isinstance(o, int) for o in ordinals) and len(set(ordinals)) == len(ordinals), rows
-for v in rows:
-    print(v["versionId"], v.get("size", 0), str(bool(v.get("isDeleteMarker"))).lower(),
-          str(v["versionOrdinal"] == max(ordinals)).lower(), v.get("etag") or "-")
-'
+  bucket_mc ls --versions "b/${S3_BUCKET_NAME}/$1" | smoke_ts object-versions
 }
 
 # Field of the latest version line (1 id, 2 size, 3 marker, 5 etag).
@@ -466,16 +445,7 @@ verify_storage() {
 
 # Asserts the single JSON report of the last verify_storage call.
 expect_storage_report() {
-  python3 -c '
-import json, sys
-reports = [l for l in sys.stdin.read().splitlines() if l.startswith("{")]
-assert len(reports) == 1, reports
-r = json.loads(reports[0])
-want = {"checked": int(sys.argv[1]), "missing": sorted(filter(None, sys.argv[2].split(","))),
-        "sizeMismatch": sorted(filter(None, sys.argv[3].split(",")))}
-got = {"checked": r["checked"], "missing": sorted(r["missing"]), "sizeMismatch": sorted(r["sizeMismatch"])}
-assert got == want and not r["previewMissing"] and not r["previewSizeMismatch"], (got, want, r)
-' "$@" <<<"$VS_OUT"
+  smoke_check storage-report "$VS_OUT" "$@"
 }
 
 phase old-install
@@ -499,19 +469,15 @@ SESSION="$(awk '$6 == "fvoci_session" { print $7; exit }' "$COOKIE_JAR")"
 login "$BASE"
 SESSION="$(awk '$6 == "fvoci_session" { print $7; exit }' "$COOKIE_JAR")"
 SECRETS+=("$SESSION")
-WORKSPACE_ID="$(curl -fsS -b "$COOKIE_JAR" "$BASE/api/v1/me/workspaces" | python3 -c 'import json,sys; print(json.load(sys.stdin)["items"][0]["id"])')"
+WORKSPACE_ID="$(curl -fsS -b "$COOKIE_JAR" "$BASE/api/v1/me/workspaces" | json_field - items 0 id)"
 DOCUMENT_ID="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
   -X POST "$BASE/api/v1/workspaces/${WORKSPACE_ID}/documents" -d '{"parentId":null,"title":"Upgrade doc"}' \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+  | json_field - id)"
 if [[ "$STORAGE" == s3 ]]; then
   # RUNNING.md "S3 storage backup", item 1: the operator enables versioning
   # before relying on it. The server wrote no object yet (fresh install).
   bucket_mc version enable "b/${S3_BUCKET_NAME}" >/dev/null
-  bucket_mc version info "b/${S3_BUCKET_NAME}" | python3 -c '
-import json, sys
-info = json.load(sys.stdin)
-assert info.get("versioning", {}).get("status") == "Enabled", info
-' || fail "bucket versioning is not enabled"
+  bucket_mc version info "b/${S3_BUCKET_NAME}" | smoke_check versioning-enabled - || fail "bucket versioning is not enabled"
   [[ "$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(running_ids "$UPGRADE_PROJECT" server)" \
     | grep -c '^STORAGE_DRIVER=s3$')" == 1 ]] || fail "old server does not run with STORAGE_DRIVER=s3"
   log_assert "old server on STORAGE_DRIVER=s3, run-owned silo bucket ${S3_BUCKET_NAME} versioning Enabled: ok"
@@ -527,8 +493,8 @@ upload_fixture() {
   init="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
     -X POST "$BASE/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/uploads" \
     -d "{\"name\":\"${name}\",\"sizeBytes\":$(wc -c <"$FIXTURE_HWPX"),\"declaredMime\":\"application/x-hwp\"}")"
-  id="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["attachmentId"])' "$init")"
-  part_url="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["parts"][0]["url"])' "$init")"
+  id="$(json_field "$init" attachmentId)"
+  part_url="$(json_field "$init" parts 0 url)"
   etag="$(curl -fsS -b "$COOKIE_JAR" -H "origin: $BASE" -X PUT "$BASE${part_url}" \
     --data-binary @"$FIXTURE_HWPX" -D - -o /dev/null | awk '/^[Ee]tag:/ { print $2; exit }' | tr -d '\r')"
   curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
@@ -551,7 +517,7 @@ if [[ "$STORAGE" == s3 ]]; then
 fi
 COMMENT_ID="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
   -X POST "$BASE/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/comments" \
-  -d '{"body":"업그레이드 댓글 🙂"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+  -d '{"body":"업그레이드 댓글 🙂"}' | json_field - id)"
 # A TOTP secret sealed with ENCRYPTION_KEYS k1 (setup only; login stays single-factor).
 curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
   -X POST "$BASE/api/v1/auth/mfa/setup" -d "{\"currentPassword\":\"${OWNER_LOGIN_PASSWORD}\"}" >/dev/null
@@ -669,7 +635,7 @@ phase verify-upgrade
 # --- 5. Upgraded data -------------------------------------------------------
 DOCTOR="$(project_compose "${UP[@]}" "$NEW_TREE" exec -T server /opt/fvoci/bin/fvoci-migrate --doctor)" \
   || { redact <<<"$DOCTOR" >&2; fail "doctor failed on upgraded install"; }
-python3 -c 'import json,sys; assert json.load(sys.stdin)["ok"] is True' <<<"$DOCTOR" || fail "doctor not ok"
+smoke_check doctor-ok "$DOCTOR" || fail "doctor not ok"
 login "$BASE"
 check_seeded_data "$BASE" "upgraded"
 [[ "$(sql "${UP[@]}" "$NEW_TREE" "SELECT extract_status FROM fvoci.attachments WHERE id='${ATTACHMENT_ID}'")" == ok ]] \
@@ -690,20 +656,14 @@ else
 fi
 redact <<<"$WRONG_VERIFY" >"$EVIDENCE_DIR/verify-secrets-wrong-key.log"
 (( WRONG_STATUS != 0 )) || fail "verify-secrets accepted a different k1"
-python3 -c '
-import json, sys
-reports = [line for line in sys.stdin.read().splitlines() if line.startswith("{")]
-assert len(reports) == 1, reports
-mfa = json.loads(reports[0])["userMfa"]
-assert mfa["checked"] == 1 and len(mfa["invalid"]) == 1 and mfa["keyUnavailable"] == [], mfa
-' <"$EVIDENCE_DIR/verify-secrets-wrong-key.log" || fail "wrong-key verify-secrets did not report the MFA secret invalid"
+smoke_check mfa-invalid - <"$EVIDENCE_DIR/verify-secrets-wrong-key.log" || fail "wrong-key verify-secrets did not report the MFA secret invalid"
 grep -q 'do not open with the configured ENCRYPTION_KEYS' "$EVIDENCE_DIR/verify-secrets-wrong-key.log" \
   || fail "wrong-key verify-secrets failed for another reason (exit ${WRONG_STATUS})"
-POST_DOC_COMMAND_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+POST_DOC_COMMAND_ID="$(smoke_ts uuid)"
 POST_DOC_CREATE_BODY="{\"commandId\":\"${POST_DOC_COMMAND_ID}\",\"parentId\":null,\"title\":\"After upgrade\"}"
 POST_DOC="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
   -X POST "$BASE/api/v1/workspaces/${WORKSPACE_ID}/documents" -d "$POST_DOC_CREATE_BODY" \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+  | json_field - id)"
 if [[ "$STORAGE" == s3 ]]; then
   verify_storage upgraded "${UP[@]}" "$NEW_TREE"
   (( VS_STATUS == 0 )) || fail "verify-storage failed on the upgraded install"
@@ -866,7 +826,7 @@ if [[ "$STORAGE" == local ]]; then
   RESTORE_OUT="$(bash "$OLD_TREE/scripts/restore.sh" --project "$ROLLBACK_PROJECT" --env-file "$ROLLBACK_ENV" --input "$BACKUP_DIR" 2>&1)" \
     || { redact <<<"$RESTORE_OUT" >"$EVIDENCE_DIR/restore.log"; fail "old restore.sh failed"; }
   redact <<<"$RESTORE_OUT" >"$EVIDENCE_DIR/restore.log"
-  python3 -c 'import json,sys; assert json.loads(sys.argv[1].strip().splitlines()[-1]).get("secretsVerified") is True' "$RESTORE_OUT" \
+  smoke_check secrets-verified "$RESTORE_OUT" \
     || fail "restore did not verify secrets"
 else
   s3_rollback

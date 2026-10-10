@@ -91,7 +91,7 @@ IMAGE_TAG="$(sed -n 's/^FVOCI_INSTALL_IMAGE=//p' <<<"$IMAGE_ENV")"
 IMAGE_ID="$(sed -n 's/^FVOCI_INSTALL_IMAGE_ID=//p' <<<"$IMAGE_ENV")"
 [[ -n "$IMAGE_TAG" && -n "$IMAGE_ID" ]] || fail "install-image.sh printed no image reference"
 log_assert "image ${IMAGE_TAG} (${IMAGE_ID}) built from this checkout: ok"
-HOST_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+HOST_PORT="$(smoke_ts port)"
 BASE_URL="http://127.0.0.1:${HOST_PORT}"
 ORIGIN="$BASE_URL"
 
@@ -177,7 +177,7 @@ phase test
 if ! DOCTOR_REPORT="$("${COMPOSE[@]}" exec -T server /opt/fvoci/bin/fvoci-migrate --doctor)"; then
   fail "installed doctor failed: $DOCTOR_REPORT"
 fi
-python3 -c 'import json,sys; report=json.load(sys.stdin); assert report["ok"] is True; assert any(c["name"]=="document_convert" and c["ok"] is True for c in report["checks"]), report' <<<"$DOCTOR_REPORT"
+smoke_check doctor-convert "$DOCTOR_REPORT"
 log_assert "installed doctor executes Rust document conversion with shipped assets: ok"
 
 SETUP_BODY='{"email":"owner@install.test","password":"installpass1","givenName":"Owner","workspaceSlug":"install","workspaceName":"Install"}'
@@ -194,18 +194,18 @@ LOGIN_RESPONSE="$(curl -fsS -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
   -H "content-type: application/json" -H "origin: $ORIGIN" \
   -X POST "$BASE_URL/api/v1/auth/login" \
   -d '{"email":"owner@install.test","password":"installpass1"}')"
-python3 -c 'import json,sys; body=json.loads(sys.argv[1]); assert body.get("userId")' "$LOGIN_RESPONSE"
+smoke_check user-id "$LOGIN_RESPONSE"
 log_assert "password login: ok"
 
 WORKSPACES="$(curl -fsS -b "$COOKIE_JAR" "$BASE_URL/api/v1/me/workspaces")"
-WORKSPACE_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["items"][0]["id"])' "$WORKSPACES")"
+WORKSPACE_ID="$(json_field "$WORKSPACES" items 0 id)"
 # Choose the command/body once, preserving its identity on any replay.
-DOC_COMMAND_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+DOC_COMMAND_ID="$(smoke_ts uuid)"
 DOC_CREATE_BODY="{\"commandId\":\"${DOC_COMMAND_ID}\",\"parentId\":null,\"title\":\"Install doc\"}"
 DOC_CREATE="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $ORIGIN" \
   -X POST "$BASE_URL/api/v1/workspaces/${WORKSPACE_ID}/documents" \
   -d "$DOC_CREATE_BODY")"
-DOCUMENT_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$DOC_CREATE")"
+DOCUMENT_ID="$(json_field "$DOC_CREATE" id)"
 log_assert "workspace document create: ok (${DOCUMENT_ID})"
 
 BODY_BEFORE="$(bun "$ROOT/scripts/install-smoke-collab.mjs" \
@@ -234,8 +234,8 @@ FIXTURE_SHA="$(sha256sum "$FIXTURE_HWPX" | awk '{print $1}')"
 UPLOAD_INIT="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $ORIGIN" \
   -X POST "$BASE_URL/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/uploads" \
   -d "{\"name\":\"sample.hwpx\",\"sizeBytes\":$(wc -c <"$FIXTURE_HWPX"),\"declaredMime\":\"application/x-hwp\"}")"
-ATTACHMENT_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["attachmentId"])' "$UPLOAD_INIT")"
-PART_URL="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["parts"][0]["url"])' "$UPLOAD_INIT")"
+ATTACHMENT_ID="$(json_field "$UPLOAD_INIT" attachmentId)"
+PART_URL="$(json_field "$UPLOAD_INIT" parts 0 url)"
 PART_HEADERS="$(curl -fsS -b "$COOKIE_JAR" -H "origin: $ORIGIN" -X PUT "$BASE_URL${PART_URL}" \
   --data-binary @"$FIXTURE_HWPX" -D - -o /dev/null)"
 ETAG="$(awk '/^[Ee]tag:/ { print $2; exit }' <<<"$PART_HEADERS" | tr -d '\r')"
@@ -302,7 +302,7 @@ log_assert "server holds Meili URL and key file, not the master key: ok"
 SETTINGS_JSON="$(docker exec "$SERVER_CID" sh -c 'curl -fsS -H "Authorization: Bearer $(cat /run/fvoci/meili/api_key)" http://meilisearch:7700/indexes/fvoci/settings')"
 # Literal current index settings (src/search/meili.rs index_settings): seven
 # searchable attributes and identifier-only displayed attributes.
-python3 -c 'import json,sys; s=json.load(sys.stdin); assert s.get("searchableAttributes")==["title","body","chosung","stem","bibliographyBody","bibliographyChosung","bibliographyStem"], s; assert s.get("displayedAttributes")==["id","kind","workspaceId","projectId","documentId","taskId","commentId","attachmentId","chunkNo","updatedAt"], s; assert "resourceKey" in s.get("filterableAttributes",[]), s' <<<"$SETTINGS_JSON"
+smoke_check meili-settings "$SETTINGS_JSON"
 log_assert "meili index settings ensured: ok"
 
 STORAGE_SAMPLE="$(docker exec "$SERVER_CID" sh -c 'find /data/storage -type f | head -1')"
@@ -336,7 +336,7 @@ log_assert "server SIGTERM clean exit 0 + new container on the same volumes: ok"
 
 curl -fsS -b "$COOKIE_JAR" -H "origin: $ORIGIN" \
   "$BASE_URL/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/body" \
-  | python3 -c 'import json,sys; body=json.load(sys.stdin); expected=json.loads(sys.argv[1]); assert body["contentJson"]==expected["contentJson"], body' "$BODY_JSON"
+  | smoke_check same-body - "$BODY_JSON"
 
 curl -fsS -b "$COOKIE_JAR" -H "origin: $ORIGIN" \
   "$BASE_URL/api/v1/workspaces/${WORKSPACE_ID}/attachments/${ATTACHMENT_ID}/download" \
