@@ -25,7 +25,7 @@ JS deps are dev-only (`compat/js`). `node_modules/` and `target/` are gitignored
 
 ```bash
 # Use the checked-in fixtures. Optional synthetic specimens go elsewhere:
-# python3 fixtures/gen.py --output-dir /tmp/fvoci-synthetic-fixtures
+# bun fixtures/gen.ts --output-dir /tmp/fvoci-synthetic-fixtures
 npm --prefix js ci --ignore-scripts
 export CARGO_HOME=/home/kinesis/orca/toolchains/fvoci-rust/cargo
 export RUSTUP_HOME=/home/kinesis/orca/toolchains/fvoci-rust/rustup
