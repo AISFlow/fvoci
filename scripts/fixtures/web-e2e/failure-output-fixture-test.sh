@@ -60,7 +60,8 @@ mkdir -p "$FIXTURE_ROOT/scripts/perf" "$FIXTURE_ROOT/tools/web-e2e" "$FIXTURE_RO
 cp "$ROOT/scripts/web-e2e-run-group.sh" "$ROOT/scripts/web-e2e-inner.sh" "$FIXTURE_ROOT/scripts/"
 cp "$ROOT/tools/web-e2e/trace-summary.ts" "$ROOT/tools/web-e2e/compat.ts" "$FIXTURE_ROOT/tools/web-e2e/"
 cp "$ROOT/scripts/perf/perf-inner.sh" "$FIXTURE_ROOT/scripts/perf/"
-cp "$ROOT/tools/web-e2e/smtp-sink.ts" "$FIXTURE_ROOT/tools/web-e2e/"
+cp "$ROOT/tools/web-e2e/smtp-sink.ts" "$ROOT/tools/web-e2e/network-settle.ts" \
+  "$ROOT/tools/web-e2e/database-urls.ts" "$FIXTURE_ROOT/tools/web-e2e/"
 cp "$ROOT/apps/web/playwright.config.ts" "$FIXTURE_ROOT/apps/web/"
 cp "$ROOT/apps/web/e2e-pending/collab-playwright.config.ts" "$FIXTURE_ROOT/apps/web/e2e-pending/"
 ln -s "$WORKSPACE_MODULES" "$FIXTURE_ROOT/node_modules"
@@ -645,7 +646,8 @@ status=0
 ) || status=$?
 ((status != 0)) || fail "settle crash: group passed" "$log"
 grep -qx "web-e2e step network-settle failed (exit $status)" "$log" || fail "settle crash: failing step not named" "$log"
-grep -q 'CalledProcessError' "$log" || fail "settle crash: the check's own error is missing" "$log"
+grep -qx 'network settle: error: ip -6 -o addr show tentative -dadfailed exited with status 1: fixture: netlink query failed' "$log" \
+  || fail "settle crash: the check's own error is missing" "$log"
 [[ ! -f "$NET_STATE.playwright-launches" ]] || fail "settle crash: Playwright entered" "$log"
 check_retired settle-crash "$log"
 rm -rf "$(retained_of "$gh_output")"
