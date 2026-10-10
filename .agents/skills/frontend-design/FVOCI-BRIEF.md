@@ -1,6 +1,6 @@
 # FVOCI visual, usability and CJK typography brief
 
-Use this for visual design, usability, CJK typography, scaling and accessibility work in the existing Vue UI. Functional frontend changes alone do not trigger this design skill; use AGENTS.md to select contract, verification and changed-boundary skills instead.
+Use this for visual design, usability, CJK typography, scaling and accessibility work in the existing Vue UI. Functional frontend changes alone do not trigger this design skill; those use `fvoci-vue-implementation`, and verification uses `fvoci-fast-verify`.
 
 Read this together with the unmodified `SKILL.md` and `LICENSE.txt`. User instructions override upstream stylistic novelty. This is a Korean collaboration work tool with existing production UI, not a new marketing page. Preserve chosen Nuxt UI Dashboard / Editor / Calendar references, current fonts, tokens and components. Do not add a hero, gradients, giant cards, a new design system, model/tool setup, or a wholesale redesign.
 
@@ -8,7 +8,7 @@ Use one calm, dense, readable direction grounded in the actual UI: existing whit
 
 Inspect existing acceptance evidence first. Assess the actual production build served by Rust with private real test data: shell/list navigation, document editor and settings at desktop and narrow widths. Review real screenshots and exercise real mouse/keyboard actions. Include long Korean titles/body, many items, empty/error/readonly states, keyboard focus and dialog restoration, action discoverability, hierarchy, wrapping/overflow/scroll, save/loading layout stability, contrast, reduced motion, and unobscured editor toolbars. DOM measurements support screenshots but cannot alone establish visual acceptance. Reuse existing tested runners and verified native bundles; keep source SHA, features and executable/served-asset hashes explicit. Earlier screenshots retain their original SHA provenance.
 
-Propose only specific observed must-fix issues, their exact files and related regression tests. Request ownership from the lead before product edits; avoid the separate mechanical formatting owner's paths. Preserve schema, Yjs/Yrs, ACK, auth, dates and attachment contracts. Skill installation is a separate small change. A later independent reviewer must read these same exact upstream files and this brief, plus actual screenshots and flows, before accepting any design implementation. Follow AGENTS.md for ownership, resource and remote-write rules.
+Propose only specific observed must-fix issues, their exact files and related regression tests. One author owns the paths and leaves another author's formatter-only paths alone. A later independent reviewer accepts or rejects the fixed SHA and does not edit that commit. Preserve schema, Yjs/Yrs, ACK, auth, dates and attachment contracts. Skill installation is a separate small change. The reviewer reads this brief plus actual screenshots and flows. Remote CI remains a separate acceptance from the review verdict.
 
 ## CJK typography and scaling
 

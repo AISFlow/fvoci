@@ -637,7 +637,7 @@ export FVOCI_COLLAB_ENGINE=/path/to/collab-engine
 cargo test --features db-tests --test collab_product
 ```
 
-## Web UI (React and Vue)
+## Web UI (Vue)
 
 Generate the OpenAPI contract and TypeScript client from Rust DTOs:
 
@@ -666,15 +666,15 @@ cd apps/web
 API_PROXY_TARGET=http://127.0.0.1:8080 bun --bun run dev
 ```
 
-The React app and the Vue app (`src/vue`, Nuxt UI) share one `index.html`;
-`src/boot.ts` loads the Vue app for the paths in `src/app-boundary.ts` (the
-project Gantt, `/w/:slug/:ref/gantt`, and wiki documents, `/w/:slug/WIKI-<n>`)
-and the React app for every other path.
+`apps/web/index.html` loads the Vue app at `/src/vue/entry.ts` (Vue 3, Vue
+Router, Nuxt UI). Local paths stay in that router (`isLocalAppPath` in
+`apps/web/src/vue/route-paths.ts`). There is no second app, and `src/boot.ts`
+and `src/app-boundary.ts` are not in the tree.
 
 Type checking runs both checkers under Bun (`build` runs them before `vite build`):
 
 ```sh
-cd apps/web && bun --bun run typecheck   # tsc -b (React) and vue-tsc -b tsconfig.vue.json (Vue)
+cd apps/web && bun --bun run typecheck   # tsc -b (non-Vue TS) and vue-tsc -b tsconfig.vue.json
 cd packages/editor && bun --bun run typecheck   # tsc, and vue-tsc for the Vue editor host (src/vue)
 ```
 
@@ -1557,8 +1557,7 @@ Local check against a real Keycloak (opt-in, not in CI): the official image
 in `start-dev` with one imported test realm (`scripts/keycloak/`), published on
 `127.0.0.1` only, as the instance `generic` provider of the release server built
 from the checkout, driven by Playwright Chromium through the web UI
-(`apps/web/e2e-keycloak/`; its pages, sign-in included, are React pages, since
-the Vue app only renders the paths in `src/app-boundary.ts`). Secrets are
+(`apps/web/e2e-keycloak/`; sign-in and the other pages are the Vue app). Secrets are
 generated per run; the Keycloak compose project is removed on exit. It does not cover external providers, HTTPS or a
 reverse proxy, or the container deployment path. Workspace SSO needs a
 `workspaceSso` license, which published builds cannot load; `--workspace-sso`

@@ -1,41 +1,34 @@
 ---
 name: fvoci-db-security
-description: 프론트/백엔드의 인증·인가·세션·DB 쿼리·트랜잭션·migration 및 검색·공유·첨부 권한 변경/검토에 사용한다. 실제 앱 역할과 DB 불변식을 다루며 순수 시각 조정에는 사용하지 않는다.
+description: "인증, 인가, 세션, DB 쿼리, 트랜잭션, migration, 검색·공유·첨부 권한을 바꾸거나 검토할 때 쓴다. 실제 앱 역할과 DB 불변식을 완료 조건으로 두며, 순수 시각 조정에는 쓰지 않는다."
 ---
 
-# 인증·인가·DB·migration 보안 계약
+# 인가와 DB
 
-공통 운영·권한은 AGENTS.md를 따른다. 운영 DB가 아니라 소유권이 분리된 실제 테스트 DB를 사용한다.
+## 완료 조건
 
-## 입력
+- 바꾼 인가·저장이 실제 앱 DB 역할에서 성공과 거부·유실·경합을 모두 보여 주고, 그 검사가 exit 0이다. `TEST_DATABASE_URL`이 없으면 그 검사는 실패로 남긴다.
+- 보고에 불변식별 성공·실패·미검증, DB 버전, 역할, 명령, SHA가 있다. 시크릿은 가린다.
+- migration이 바뀌면 새 schema 설치와 기존 데이터 upgrade를 각각 검사한다. 쿼리·인덱스 성능이 목표면 `fvoci-postgres-performance`의 완료 조건도 맞다.
 
-원본/새 구현의 접근 주체와 자원, 관련 SQL·transaction/migration, 실제 앱 DB 역할, 보존할 이벤트·감사 계약.
+## 기본 절차
 
-OIDC/JWT·TOTP 등 표준 인증 처리를 구현·교체하면
-[standard-implementations](../fvoci-standard-implementations/SKILL.md)를 함께 적용한다.
-SDK의 토큰 검증은 아래 현재 세션·identity 연결·RLS·replay/원자성 검사를 대신하지 않는다.
+기본값이다. 완료 조건을 지키면 더 나은 경로로 벗어나도 된다.
 
-## 절차
+운영 DB가 아니라 소유권이 분리된 테스트 DB를 쓴다. 사용자 활성, 실제 멤버십, 리소스 권한, PAT 범위가 어디서 강제되는지 적는다. tenant id와 인증된 사용자 타입만으로 현재 권한을 증명하지 않는다.
 
-1. 사용자 활성 상태, 실제 멤버십, 리소스 권한과 PAT 범위가 어디에서 강제되는지 명시한다. tenant/workspace ID 입력과 인증된 사용자 타입만으로 현재 권한을 증명하지 않는다.
-2. 권한 확인 후 정지·탈퇴·철회가 먼저 끝나는 순서를 명시적 barrier 또는 DB 상태 관찰로 재현한다. 필요한 행 잠금/UPDATE 조건/같은 tx 안 재확인을 검사한다. Rust 메모리 안전을 DB 인가 경합 해결로 해석하지 않는다.
-3. 본문·이벤트·감사의 동시 commit/rollback을 실제 실패 주입으로 검사한다. 강제 실패 경로를 비보호 제품 endpoint로 노출하지 않는다. 멱등성·응답 유실 후 재시도 의미를 확인한다.
-4. RLS는 superuser가 아닌 실제 앱 역할에서 검사한다. tenant/사용자 컨텍스트를 연결 풀 재사용 전후에 확인한다. 서로 다른 사용자/테넌트의 순차·동시 요청이 서로의 컨텍스트를 쓰지 않아야 한다.
-5. 마지막 관리자/소유자, 첫 설치, 세션 만료·폐기, 로그아웃/동의처럼 원본에 있는 특수 계약을 해당 변경 범위에서 확인한다.
-6. 검색·캐시·worker·공유·export·collab에도 같은 인가가 연결되는지 본다. 필요한 commit/복수 연결 검사를 단일 rollback fixture나 mock으로 대체하지 않는다.
+권한 확인 뒤에 정지·탈퇴·철회가 먼저 끝나는 순서를 barrier 또는 DB 상태로 재현한다. 필요한 행 잠금, UPDATE 조건, 같은 트랜잭션 안 재확인을 검사한다. 본문·이벤트·감사의 commit과 rollback을 실패 주입으로 본다. 멱등성과 응답 유실 후 재시도의 의미를 확인한다.
 
-## 결과
+RLS는 superuser가 아닌 앱 역할에서 본다. 연결 풀 재사용 전후에 tenant 컨텍스트가 남아 있지 않은지, 서로 다른 사용자·테넌트의 순차·동시 요청이 서로의 컨텍스트를 쓰지 않는지 본다. 마지막 관리자, 첫 설치, 세션 만료·폐기, 로그아웃·동의는 그 변경 범위에서 확인한다. 검색·캐시·worker·공유·export·collab에 같은 인가가 연결되는지도 본다.
 
-불변식별 성공·실패·미검증과 실제 DB 버전/역할·명령·SHA를 반환한다. 시크릿은 가린다. 심각한 인가·데이터 결함은 해당 기능 수락의 차단 요인으로 표시한다. 상관없는 전체 앱 검증을 했다고 확대하지 않는다.
+OIDC/JWT·TOTP를 구현·교체하면 `fvoci-standard-implementations`를 함께 쓴다. SDK의 토큰 검증은 세션·identity·RLS·replay·원자성을 대신하지 않는다.
 
-## 스키마·migration 변경
+스키마는 `migrations`와 실제 query·caller의 PK·FK·UNIQUE·CHECK·NULL, 삭제·cascade, tenant 경계를 먼저 본다. 기존 데이터의 충돌·결측·backfill과 실행 중 잠금·실패 재개를 검토한다. 현재 runner의 트랜잭션·순서와 설치·업그레이드 제약을 따른다.
 
-[기존 migrations](../../../migrations)와 실제 query/caller에서 PK·FK·UNIQUE·CHECK·NULL,
-삭제/cascade·보존 정책, tenant 경계를 먼저 확인한다. 앱 검증만으로 대체하지 않는다.
-변경은 기존 데이터의 충돌·결측·backfill과 실행 중 잠금·시간·실패 재개를 검토한다.
-현재 runner의 transaction/순서와 설치·업그레이드 제약을 따르며 이미 적용된 migration의
-덮어쓰기나 자동 destructive reset으로 통과시키지 않는다. 새 schema와 기존 데이터 upgrade를
-각각 검사하고, 되돌릴 수 없는 변환은 복구 근거 없이 rollback 가능하다고 쓰지 않는다.
-쿼리/인덱스 성능이 목적이면 [postgres-performance](../fvoci-postgres-performance/SKILL.md)를 추가한다.
-현재 지원과 향후 SQLite·원격 libSQL 목표를 구분하며 PostgreSQL RLS·잠금·SQL이 다른 엔진에서도
-동일하다고 가정하지 않는다. 엔진별 구현/수락 계획은 별도 작업이며 이 문서가 지원을 선언하지 않는다.
+## 손대지 말 것
+
+- mock, 단일 rollback fixture, 메모리 안전만으로 commit·복수 연결·RLS 경합을 통과시키지 않는다.
+- 강제 실패 경로를 비보호 제품 endpoint로 열지 않는다.
+- 이미 적용된 migration을 덮어쓰거나 자동 destructive reset으로 통과시키지 않는다. 되돌릴 수 없는 변환을 rollback 가능하다고 적지 않는다.
+- PostgreSQL RLS·잠금·SQL이 SQLite·원격 libSQL에서도 같다고 가정하지 않는다. 엔진별 수락은 별도이고, 이 스킬이 지원 완료를 선언하지 않는다.
+- 심각한 인가·데이터 결함은 그 기능 수락을 막는다. 상관없는 전체 앱 검증을 했다고 넓히지 않는다.
