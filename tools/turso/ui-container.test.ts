@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
@@ -24,6 +24,7 @@ import {
   docker,
   finishedOneShot,
   goOpenFlags,
+  lease,
   localFixture,
   localServerStart,
   nativeFailureCode,
@@ -296,6 +297,49 @@ describe("container shape", () => {
 });
 
 describe("local grant and publish", () => {
+  test("repeated local fixtures of one mode each get their own allocation directory", async () => {
+    // A consumer calls owner, observe and baseline more than once per run.
+    const proof = join(directory, "shell-proof.json");
+    writeFileSync(
+      proof,
+      JSON.stringify({ Config: { Image: QUALIFIED_CANONICAL_IMAGE, Cmd: ["/bin/sh"], Env: [] } }),
+    );
+    const binary = join(directory, "fvoci-e2e-fixture");
+    writeFileSync(binary, "");
+    process.env.FVOCI_SELECTED_EXECUTION_MODE = "orca-local";
+    lease.load = () =>
+      ({
+        canonicalRuntime: {
+          imageId: QUALIFIED_CANONICAL_IMAGE,
+          networkAuthorized: true,
+          shellProof: { path: proof, sha256: sha(proof) },
+        },
+      }) as never;
+    const created: string[][] = [];
+    docker.client = (_scope, args) => {
+      created.push([...args]);
+      return Promise.reject(new UiError("UI_DOCKER_CLIENT_FAILED"));
+    };
+    const root = join(directory, "root");
+    mkdirSync(root, 0o700);
+    const { scope } = fakeScope({ root: () => root });
+    const environment = {
+      FVOCI_LIBSQL_URL: "libsql://invented.invalid",
+      FVOCI_LIBSQL_AUTH_TOKEN: "invented",
+      FVOCI_STORAGE_DIR: "/work/storage",
+    };
+    const manifest = { binaries: { "fvoci-e2e-fixture": { path: binary } } } as never;
+    try {
+      for (let i = 0; i < 2; i++)
+        expect(await failureOf(localFixture(scope, manifest, "owner", environment))).toBe(
+          "UI_DOCKER_CLIENT_FAILED",
+        );
+      expect(created.map((args) => args[1])).toEqual(["create", "create"]);
+    } finally {
+      lease.load = undefined;
+    }
+  });
+
   test("opening the grant keeps the local guard and does not borrow run", () => {
     const calls: string[] = [];
     const load = (mode: string) => {

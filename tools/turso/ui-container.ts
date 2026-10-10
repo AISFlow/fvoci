@@ -1024,7 +1024,8 @@ export async function localFixture(
   input?: Record_,
   proc: DaemonProc = linuxProc,
 ): Promise<Record_> {
-  const directory = join(scope.io.root(), "local-fixture-" + mode);
+  // One directory per call: a consumer runs the same mode more than once.
+  const directory = join(scope.io.root(), "local-fixture-" + mode + "-" + token(6));
   mkdirSync(directory, 0o700);
   const [containerId, creation, grant] = await publishContainer(
     scope,
