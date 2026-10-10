@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Run one isolated web e2e group (fresh DB/app/server/storage per invocation).
+# Run one isolated web e2e group (fresh DB/role/search index/server/storage
+# per invocation, in its own or in caller-shared test services).
 set -euo pipefail
 
 : "${ROOT:?ROOT is required}"
@@ -110,7 +111,7 @@ redact_server_log() {
     -e 's#postgres(ql)?://[^[:space:]]+#postgres://redacted#g' \
     -e 's#libsql://[^[:space:]]+#libsql://redacted#g' \
     -e 's#https://[^[:space:]]*\.turso\.io[^[:space:]]*#https://redacted#g' \
-    -e 's#(DATABASE_URL|DATABASE_APP_URL|FVOCI_E2E_ADMIN_DATABASE_URL|TEST_DATABASE_URL|FVOCI_LIBSQL_URL|FVOCI_LIBSQL_AUTH_TOKEN|FVOCI_TEST_TURSO_[A-Z0-9_]*URL|FVOCI_TEST_TURSO_AUTH_TOKEN)=[^[:space:]]+#\1=redacted#g' \
+    -e 's#(DATABASE_URL|DATABASE_APP_URL|FVOCI_E2E_ADMIN_DATABASE_URL|TEST_DATABASE_URL|FVOCI_LIBSQL_URL|FVOCI_LIBSQL_AUTH_TOKEN|FVOCI_TEST_TURSO_[A-Z0-9_]*URL|FVOCI_TEST_TURSO_AUTH_TOKEN|MEILI[A-Z_]*KEY|PASSWORD[A-Z_]*|ENCRYPTION_KEYS)=[^[:space:]]+#\1=redacted#g' \
     "$1"
 }
 
@@ -119,62 +120,99 @@ summarize_trace() {
   bun "$ROOT/tools/web-e2e/trace-summary.ts" "$1"
 }
 
+# Runs only after a failed group. Every step is attempted; a step that fails
+# is named on stderr and makes this return 1, but never replaces a retained
+# file with placeholder text. Self-contained: CI fixtures source it alone.
 retain_failure_artifacts() {
-  local retain_dir log dest trace
-  retain_dir="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-collab-e2e-fail.XXXXXX")" || return 1
-  chmod 700 "$retain_dir"
+  local retain_dir log dest trace err status errors=0
+  local -a logs=() traces=() net_logs=()
+  retention_error() {
+    echo "web-e2e group ${GROUP_LABEL}: failure-artifact retention step $1 failed${2:+: $2}" >&2
+    errors=$((errors + 1))
+  }
+  retain_dir="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-collab-e2e-fail.XXXXXX")" || {
+    retention_error create-directory
+    return 1
+  }
+  chmod 700 "$retain_dir" || retention_error chmod-directory
   # Named first, so a caller finds the directory even if this is cut short.
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-    printf 'failure-artifacts=%s\n' "$retain_dir" >>"$GITHUB_OUTPUT"
-    printf 'failure-group=%s\n' "$GROUP_LABEL" >>"$GITHUB_OUTPUT"
+    printf 'failure-artifacts=%s\nfailure-group=%s\n' "$retain_dir" "$GROUP_LABEL" >>"$GITHUB_OUTPUT" ||
+      retention_error github-output
   fi
-  if [[ -d "$RUN_DIR/playwright-output" ]] && [[ -n "$(ls -A "$RUN_DIR/playwright-output" 2>/dev/null || true)" ]]; then
-    cp -a "$RUN_DIR/playwright-output" "$retain_dir/playwright-output"
+  if [[ -d "$RUN_DIR/playwright-output" ]] && [[ -n "$(ls -A "$RUN_DIR/playwright-output")" ]]; then
+    cp -a "$RUN_DIR/playwright-output" "$retain_dir/playwright-output" || retention_error copy-playwright-output
   fi
   # The group's own server (ordinary runs); pending runs start servers per spec.
   if [[ -f "$SERVER_LOG" ]]; then
-    redact_server_log "$SERVER_LOG" >"$retain_dir/server.log"
+    redact_server_log "$SERVER_LOG" >"$retain_dir/server.log" || retention_error redact-server-log
   fi
-  mkdir -p "$retain_dir/owned-server"
-  while IFS= read -r -d '' log; do
+  mkdir -p "$retain_dir/owned-server" || retention_error create-owned-server-directory
+  mapfile -d '' -t logs < <(find "$RUN_DIR" -mindepth 2 -name server.log -type f -print0)
+  wait "$!" || retention_error find-owned-server-logs
+  for log in "${logs[@]}"; do
     dest="$retain_dir/owned-server/$(basename "$(dirname "$log")").log"
-    redact_server_log "$log" >"$dest"
-  done < <(find "$RUN_DIR" -mindepth 2 -name server.log -type f -print0 2>/dev/null || true)
+    redact_server_log "$log" >"$dest" || retention_error "redact-owned-server-log ($log)"
+  done
   # Interface names, link flags and addresses only; redacted like the rest.
-  local -a net_logs=()
   for log in "$NET_MONITOR_LOG" "$NET_MARKS_LOG"; do
-    [[ -f "$log" ]] && net_logs+=("$log")
+    if [[ -f "$log" ]]; then net_logs+=("$log"); fi
   done
   if ((${#net_logs[@]} > 0)); then
-    redact_server_log <(
+    {
       echo "# host netlink address/link events (ip -o -tshort monitor address link, UTC) and group markers"
-      LC_ALL=C sort -s -k1,1 "${net_logs[@]}" || true
-    ) >"$retain_dir/net-events.log"
+      LC_ALL=C sort -s -k1,1 "${net_logs[@]}"
+    } | redact_server_log /dev/stdin >"$retain_dir/net-events.log" || retention_error merge-net-events
   fi
-  while IFS= read -r -d '' trace; do
+  mapfile -d '' -t traces < <(find "$retain_dir" -name trace.zip -type f -print0)
+  wait "$!" || retention_error find-traces
+  for trace in "${traces[@]}"; do
     dest="$(dirname "$trace")/browser-summary.txt"
-    # The summarizer's own error text is not redacted, so it never reaches the file.
-    if ! summarize_trace "$trace" >"$dest" 2>/dev/null; then
-      echo "trace summary failed; reproduce the group locally to inspect its trace.zip" >"$dest"
-      echo "could not summarize $(basename "$(dirname "$trace")")/trace.zip" >&2
+    err="$(dirname "$trace")/browser-summary.err"
+    status=0
+    summarize_trace "$trace" >"$dest" 2>"$err" || status=$?
+    if ((status != 0)); then
+      # No partial or placeholder summary; the summarizer's own error text is
+      # shown redacted, and the trace.zip itself stays retained.
+      rm -f "$dest"
+      retention_error "trace-summary ($(basename "$(dirname "$trace")")/trace.zip, exit ${status})" \
+        "$(redact_server_log "$err" | tail -n 5 | tr '\n' ' ')"
     fi
-  done < <(find "$retain_dir" -name trace.zip -type f -print0 2>/dev/null || true)
+    rm -f "$err"
+  done
+  if ((errors > 0)); then
+    echo "retained incomplete failure artifacts for group ${GROUP_LABEL} in $retain_dir (${errors} retention steps failed)" >&2
+    return 1
+  fi
   echo "retained failure artifacts for group ${GROUP_LABEL} in $retain_dir" >&2
 }
 
+# The group's verdict is its runtime's exit status. Artifact retention after a
+# failure never changes it; a run directory that cannot be removed fails an
+# otherwise passing group.
 cleanup() {
   local status=$?
   # After an interrupt the reader of stderr may be gone: a write must not
   # end this cleanup (SIGPIPE) before the retention and the removal below.
   trap '' PIPE
+  # Each step below is checked; a failed write to stderr must not end it.
+  set +e
   stop_net_monitor
   net_mark "group exiting with status ${status}" 2>/dev/null || true
   if (( status != 0 )); then
-    retain_failure_artifacts || true
+    retain_failure_artifacts ||
+      echo "web-e2e group ${GROUP_LABEL}: failure artifacts are incomplete; the group verdict stays exit ${status}" >&2
   fi
-  rm -rf "$RUN_DIR"
+  if ! rm -rf "$RUN_DIR"; then
+    echo "web-e2e group ${GROUP_LABEL}: could not remove its run directory $RUN_DIR" >&2
+    if (( status == 0 )); then status=1; fi
+  fi
+  exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [[ ! -d "$ROOT/apps/web/dist" ]]; then
   echo "missing apps/web/dist; build web assets before running groups" >&2
@@ -184,10 +222,30 @@ fi
 cp -a "$ROOT/apps/web/dist" "$RUN_DIR/static"
 
 echo "=== web e2e group: ${GROUP_LABEL} ===" >&2
+# The test services belong to whoever started them. A scope that runs groups
+# one after another may start PostgreSQL and Meilisearch once and set
+# FVOCI_E2E_SHARED_SERVICES=1; each group still creates and retires its own
+# database, app role and Meilisearch index (web-e2e-inner.sh). Otherwise this
+# group starts and removes its own containers.
+service_wrappers=()
+if [[ "${FVOCI_E2E_SHARED_SERVICES:-}" == 1 ]]; then
+  # The exports of start-test-postgres.sh and start-test-meili.sh.
+  for name in TEST_DATABASE_URL FVOCI_TEST_PG_CONTAINER FVOCI_MEILI_URL FVOCI_MEILI_KEY MEILI_MASTER_KEY FVOCI_TEST_MEILI_CONTAINER; do
+    if [[ -z "${!name:-}" ]]; then
+      echo "FVOCI_E2E_SHARED_SERVICES=1 requires ${name} from the scope that started the services" >&2
+      exit 1
+    fi
+  done
+else
+  service_wrappers=(bash "$ROOT/scripts/start-test-postgres.sh" bash "$ROOT/scripts/start-test-meili.sh")
+fi
 start_net_monitor
-net_mark "starting test containers (postgres, meilisearch)"
-bash "$ROOT/scripts/start-test-postgres.sh" \
-  bash "$ROOT/scripts/start-test-meili.sh" \
+if ((${#service_wrappers[@]} > 0)); then
+  net_mark "starting test containers (postgres, meilisearch)"
+else
+  net_mark "using shared test containers (postgres, meilisearch)"
+fi
+"${service_wrappers[@]}" \
   env RUN_DIR="$RUN_DIR" SERVER_LOG="$SERVER_LOG" PEPPER="$PEPPER" ROOT="$ROOT" \
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" FVOCI_STATIC_DIR="$RUN_DIR/static" \
     NET_MONITOR_LOG="$NET_MONITOR_LOG" NET_MARKS_LOG="$NET_MARKS_LOG" \
