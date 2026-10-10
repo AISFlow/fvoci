@@ -29,6 +29,7 @@ import {
   browserArgs,
   canonicalUuid,
   finalize,
+  meiliWrapper,
   parent,
   postgresDriverCommand,
   qualifyPlaywright,
@@ -160,6 +161,24 @@ describe("wrapper environment and identifiers", () => {
       "--no-env-file",
       join(import.meta.dir, "postgres.ts"),
     ]);
+  });
+  test("--pg-ready runs the Meili wrapper as a waited fixture wrapper", async () => {
+    const run = join(root, "root-current-postgres-0123456789ab");
+    const result = await meiliWrapper(run, (args, options = {}) => {
+      expect(args).toEqual([
+        "bash",
+        join(import.meta.dir, "../../../scripts/start-test-meili.sh"),
+        ...postgresDriverCommand(),
+        "--inside",
+        run,
+      ]);
+      expect(options.log).toBe(join(run, "owned-meili-and-tracer.log"));
+      expect(options.required).toBe(false);
+      // The wrapper owns the Meilisearch container; an interrupt never SIGKILLs it.
+      expect(options.waitOnInterrupt).toBe(true);
+      return Promise.resolve({ returncode: 3, stdout: "", stderr: "" });
+    });
+    expect(result.returncode).toBe(3);
   });
   test("only canonical lowercase UUID text reaches owned SQL", () => {
     const id = "0f1e2d3c-4b5a-4968-8776-655443322110";
