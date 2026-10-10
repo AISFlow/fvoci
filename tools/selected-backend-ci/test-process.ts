@@ -3,9 +3,14 @@ import { closeSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// Test children write stdout/stderr to files, not pipes. Under
-// `bun test --parallel` with the src suite, Bun 1.4.2 spawnSync with piped
-// output intermittently never reaps an exited sudo child and spins.
+// spawnSync for the sudo/setpriv test children, output captured in files.
+// Known: when these suites shared one Bun 1.4.2 `bun test --parallel` run
+// with ./src, a test worker intermittently spun in userspace (voluntary
+// context switches flat) inside spawnSync while its direct sudo child stayed
+// a zombie. The capture files were the open stdout/stderr, so pipes are not
+// the cause. The pidfd was registered EPOLLIN in the spawnSync epoll and its
+// fdinfo named the zombie. Unknown: the Bun code path. apps/web `test` runs
+// these suites in their own `bun test` invocation, where it did not recur.
 export function run(
   command: string[],
   cwd?: string,
