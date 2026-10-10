@@ -1,0 +1,23 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Keep development tasks independent of the product package and its lockfile.
+[workspace]
+
+# Exact pins: this crate authenticates the pinned SQLite source archive.
+# zip 8.6.0 is the newest stable release at least two weeks old (2026-04-25);
+# only raw DEFLATE decoding is enabled (no encryption, writers or other codecs).
+[dependencies]
+libc = "=0.2.189"
+serde_json = "=1.0.151"
+sha2 = "=0.11.0"
+sha3 = "=0.11.0"
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+# SHA3-256 of the 9 MiB amalgamation and DEFLATE decoding stay fast in the
+# debug build that the scripts/prepare-sqlite-*.sh entry points use.
+[profile.dev.package."*"]
+opt-level = 2
