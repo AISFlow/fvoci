@@ -43,7 +43,7 @@ struct Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = fs::set_permissions(&self.root.join("bin"), fs::Permissions::from_mode(0o755));
+        let _ = fs::set_permissions(self.root.join("bin"), fs::Permissions::from_mode(0o755));
         let _ = fs::remove_dir_all(&self.parent);
     }
 }
@@ -838,4 +838,74 @@ fn component_open_never_blocks_on_a_swapped_in_fifo() {
     assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o644) }, 0);
     let opened = open_component(&fixture.component, false).unwrap();
     assert!(opened.metadata().unwrap().file_type().is_fifo());
+}
+
+/// Replaces the receipt directory at `point` by a symlink to, or a fresh
+/// directory at, another location; receipts only ever land in the directory
+/// that was created, and preparation refuses.
+#[test]
+fn receipt_directory_replacement_refuses() {
+    let cases: [(Point, bool, &[&str]); 5] = [
+        (Point::Receipt("original-components.txt"), false, &[]),
+        (
+            Point::Receipt("before.json"),
+            false,
+            &["original-components.txt"],
+        ),
+        (
+            Point::ReceiptWritten("before.json"),
+            false,
+            &["before.json", "original-components.txt"],
+        ),
+        (
+            Point::Receipt("after.json"),
+            true,
+            &["before.json", "original-components.txt"],
+        ),
+        (
+            Point::ReceiptWritten("after.json"),
+            true,
+            &["after.json", "before.json", "original-components.txt"],
+        ),
+    ];
+    for (point, written, kept) in cases {
+        for link in [true, false] {
+            let fixture = Fixture::new();
+            fs::write(&fixture.component, reversed()).unwrap();
+            let retained = fixture.parent.join("retained");
+            let outside = fixture.parent.join("outside");
+            let mut inspect = fake(
+                |_| Ok(PUBLIC_INSTALLED.to_owned()),
+                |at| {
+                    if at == point {
+                        fs::rename(&fixture.output, &retained).unwrap();
+                        if link {
+                            fs::create_dir(&outside).unwrap();
+                            symlink(&outside, &fixture.output).unwrap();
+                        } else {
+                            fs::create_dir(&fixture.output).unwrap();
+                        }
+                    }
+                    Ok(())
+                },
+            );
+            let (result, _) = fixture.run(&mut inspect);
+            let case = format!("{point:?} link={link}");
+            assert_eq!(
+                result.map(|_| ()).unwrap_err().to_string(),
+                "receipt-directory-race",
+                "{case}"
+            );
+            let expected = if written { canonical() } else { reversed() };
+            assert_eq!(fs::read(&fixture.component).unwrap(), expected, "{case}");
+            let replaced = if link { &outside } else { &fixture.output };
+            assert_eq!(fs::read_dir(replaced).unwrap().count(), 0, "{case}");
+            let mut names: Vec<String> = fs::read_dir(&retained)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            assert_eq!(names, kept, "{case}");
+        }
+    }
 }

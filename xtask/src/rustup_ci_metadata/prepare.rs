@@ -10,9 +10,12 @@ use crate::host::sha256_hex;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::ffi::{CStr, CString};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 const TOOLCHAIN_BYTE_BOUND: u64 = 4 * 1024 * 1024 * 1024;
@@ -201,29 +204,120 @@ pub fn closure(root: &Path) -> Result<Closure, Refusal> {
     })
 }
 
-fn receipt_file(directory: &Path, name: &str, raw: &[u8]) -> Result<(), Refusal> {
-    let mut stream = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(directory.join(name))?;
-    require(stream.metadata()?.mode() & 0o7777 == 0o600, "receipt-mode")?;
-    stream.write_all(raw)?;
-    stream.flush()?;
-    stream.sync_all()?;
-    Ok(())
+/// `openat(2)` with `O_CLOEXEC` added.
+fn open_at(directory: &File, name: &CStr, flags: libc::c_int, mode: u32) -> io::Result<File> {
+    // SAFETY: `directory` is an open descriptor and `name` is NUL-terminated.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            flags | libc::O_CLOEXEC,
+            mode as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is a freshly opened descriptor owned by nobody else.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+/// The receipt directory, opened without following symlinks right after
+/// `mkdirat` under the held parent descriptor. Receipts are created
+/// relative to that descriptor, and the directory must still be the inode at
+/// the physical `output` path before every receipt, before the components
+/// write and before success, so a replaced directory refuses instead of
+/// redirecting receipts.
+struct Receipts<'a> {
+    output: &'a Path,
+    directory: File,
+    identity: Identity,
+}
+
+impl<'a> Receipts<'a> {
+    fn create(output: &'a Path, owner: Owner) -> Result<Self, Refusal> {
+        let parent_path = guard::owned_directory(output.parent().unwrap_or(Path::new("")), owner)?;
+        let name = output
+            .file_name()
+            .map(|name| CString::new(name.as_bytes()))
+            .and_then(Result::ok)
+            .ok_or(Refusal::Reason("nonphysical-path"))?;
+        let parent = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&parent_path)?;
+        // The link count is left out: other entries in a shared parent may
+        // come and go.
+        require(
+            identity(&parent.metadata()?)[..5]
+                == identity(&fs::symlink_metadata(&parent_path)?)[..5],
+            "receipt-directory-race",
+        )?;
+        // A plain mkdir refuses every existing destination, including
+        // symlinks and files.
+        // SAFETY: `parent` is an open descriptor and `name` is NUL-terminated.
+        if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let directory = open_at(
+            &parent,
+            &name,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            0,
+        )?;
+        let info = directory.metadata()?;
+        require(
+            (info.uid(), info.gid()) == (owner.uid, owner.gid),
+            "unowned-directory",
+        )?;
+        require(info.mode() & 0o7777 == 0o700, "receipt-directory-mode")?;
+        let receipts = Self {
+            output,
+            directory,
+            identity: identity(&info),
+        };
+        receipts.verify()?;
+        Ok(receipts)
+    }
+
+    /// The full identity, link count included, so a subdirectory appearing
+    /// in the receipt directory refuses as well.
+    fn verify(&self) -> Result<(), Refusal> {
+        let bound = guard::physical(self.output).is_ok()
+            && fs::symlink_metadata(self.output).is_ok_and(|info| identity(&info) == self.identity)
+            && identity(&self.directory.metadata()?) == self.identity;
+        require(bound, "receipt-directory-race")
+    }
+
+    fn write(&self, name: &'static str, raw: &[u8]) -> Result<(), Refusal> {
+        self.verify()?;
+        let leaf = CString::new(name).expect("receipt names have no NUL");
+        let mut stream = open_at(
+            &self.directory,
+            &leaf,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW,
+            0o600,
+        )?;
+        require(stream.metadata()?.mode() & 0o7777 == 0o600, "receipt-mode")?;
+        stream.write_all(raw)?;
+        stream.flush()?;
+        stream.sync_all()?;
+        self.directory.sync_all()?;
+        Ok(())
+    }
 }
 
 fn receipt(
     inspect: &mut dyn Inspect,
-    directory: &Path,
+    receipts: &Receipts,
     name: &'static str,
     raw: &[u8],
 ) -> Result<(), Refusal> {
     inspect.checkpoint(Point::Receipt(name))?;
-    receipt_file(directory, name, raw)?;
-    inspect.checkpoint(Point::ReceiptWritten(name))
+    receipts.write(name, raw)?;
+    inspect.checkpoint(Point::ReceiptWritten(name))?;
+    // Also the last check before the components write and before success.
+    receipts.verify()
 }
 
 fn read_upto(stream: &mut File, limit: u64) -> io::Result<Vec<u8>> {
@@ -295,7 +389,7 @@ pub fn prepare(
     guard::owned_directory(output.parent().unwrap_or(Path::new("")), owner)?;
     let canonical = canonical();
     inspect.checkpoint(Point::ComponentOpen)?;
-    let raw = {
+    let (raw, receipts) = {
         let mut current = open_component(&component, true)?;
         require(
             identity(&current.metadata()?) == original,
@@ -303,15 +397,8 @@ pub fn prepare(
         )?;
         let raw = read_upto(&mut current, 4096)?;
         let order = exact_rows(&raw)?;
-        // A plain mkdir refuses every existing destination, including
-        // symlinks and files.
-        DirBuilder::new().mode(0o700).create(output)?;
-        let receipts = guard::owned_directory(output, owner)?;
-        require(
-            fs::symlink_metadata(&receipts)?.mode() & 0o7777 == 0o700,
-            "receipt-directory-mode",
-        )?;
-        receipt(inspect, output, "original-components.txt", &raw)?;
+        let receipts = Receipts::create(output, owner)?;
+        receipt(inspect, &receipts, "original-components.txt", &raw)?;
         let mut before = context.fields();
         before.extend(object(json!({
             "toolchain": TOOLCHAIN,
@@ -323,7 +410,7 @@ pub fn prepare(
             "other_toolchain_inputs": before_closure.to_json(),
         })));
         let before = json::indented(&Value::Object(before));
-        receipt(inspect, output, "before.json", before.as_bytes())?;
+        receipt(inspect, &receipts, "before.json", before.as_bytes())?;
         require(
             identity(&fs::symlink_metadata(&component)?) == original,
             "components-path-race",
@@ -344,7 +431,7 @@ pub fn prepare(
                 && identity(&fs::symlink_metadata(&component)?) == original,
             "components-identity-drift",
         )?;
-        raw
+        (raw, receipts)
     };
     require(
         installed(inspect, out)? == before_set,
@@ -383,7 +470,7 @@ pub fn prepare(
     })));
     receipt(
         inspect,
-        output,
+        &receipts,
         "after.json",
         json::indented(&Value::Object(after.clone())).as_bytes(),
     )?;
