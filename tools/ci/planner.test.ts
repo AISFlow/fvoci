@@ -597,7 +597,7 @@ describe("event x change kind", () => {
         payload: unknown;
         work: string;
         tested: string;
-        mode: string;
+        mode: Plan["mode"];
         reason: string;
         ok: boolean;
         selection: "none" | "full";
@@ -961,7 +961,12 @@ describe("gate", () => {
       const tested = plan.tested_sha as string;
       const withPlan = (extra: Record<string, string>) =>
         needsJson(plan, { plan_json: r.outputs.plan_json ?? "", ...extra }, results);
-      for (const extra of [{}, { postgres_matrix: "[]" }, { postgres_matrix: PR_MATRIX }]) {
+      const extras: Record<string, string>[] = [
+        {},
+        { postgres_matrix: "[]" },
+        { postgres_matrix: PR_MATRIX },
+      ];
+      for (const extra of extras) {
         const gate = await runGate("rust", withPlan(extra), tested, "pull_request");
         expect(gate.code, `${JSON.stringify(extra)} ${gate.stderr}`).toBe(0);
       }
@@ -1365,10 +1370,31 @@ function derivedPrettierMarkdown(
       return path === pattern || path.startsWith(`${pattern.replace(/\/$/, "")}/`);
     });
   const candidates: string[] = [];
+  let trackedMarkdown: string[] | undefined;
   for (const target of targets) {
+    // Prettier brace-expands `{a,b}` but the planner matches braces literally,
+    // so a brace target would hide its files from the web lane.
+    if (/[{}]/.test(target)) throw new Error(`format-web.sh brace target ${target}`);
     if (/[*?[]/.test(target)) {
-      if (target.endsWith(".md"))
+      if (target.endsWith(".md")) {
         candidates.push(target.replace(/\*\*\//g, "nested/").replace(/\*/g, "file"));
+        const glob = new RegExp(
+          `^${target
+            .split(/(\*\*\/|\*|\?)/)
+            .map((part) =>
+              part === "**/"
+                ? "(?:.*/)?"
+                : part === "*"
+                  ? "[^/]*"
+                  : part === "?"
+                    ? "[^/]"
+                    : part.replace(/[.+^${}()|[\]\\]/g, "\\$&"),
+            )
+            .join("")}$`,
+        );
+        trackedMarkdown ??= git(root, "ls-files", "--", "*.md").split("\n").filter(Boolean);
+        candidates.push(...trackedMarkdown.filter((path) => glob.test(path)));
+      }
       continue;
     }
     const name = target.split("/").pop() ?? "";
@@ -1405,6 +1431,26 @@ describe("markdown-only lane", () => {
     },
     TIMEOUT,
   );
+
+  // Exact-set part of MarkdownOnlyLaneTest.test_fixture_and_content_read_markdown_stay_full:
+  // the planner's content-read Markdown set is exactly CONTENT_READ_MD, defined once.
+  test("content-read markdown set is exactly the probed paths", () => {
+    const source = readFileSync(planner(root), "utf8");
+    expect(source.match(/^\s*_CONTENT_READ_MARKDOWN\b\s*(?::[^=\n]*)?[|&^-]?=/gm)).toHaveLength(1);
+    const head = "\n_CONTENT_READ_MARKDOWN: frozenset[str] = frozenset(\n    {\n";
+    const start = source.indexOf(head);
+    expect(start).toBeGreaterThan(0);
+    const end = source.indexOf("\n    }\n)\n", start + head.length);
+    expect(end).toBeGreaterThan(start);
+    const lines = source.slice(start + head.length, end).split("\n");
+    const members = lines.map((line) => {
+      const m = /^ {8}"([^"\\]+)",$/.exec(line);
+      expect(m, line).not.toBeNull();
+      return (m as RegExpExecArray)[1] as string;
+    });
+    expect([...members].sort()).toEqual([...CONTENT_READ_MD].sort());
+    expect(new Set(members).size).toBe(members.length);
+  });
 
   // MarkdownOnlyLaneTest.test_ordinary_markdown_is_docs_narrow_on_every_gate
   test(
@@ -1486,6 +1532,30 @@ describe("markdown-only lane", () => {
         }
         expect(runs[path]?.web?.plan?.jobs["web-static"]?.selected, path).toBe(true);
       }
+    },
+    TIMEOUT,
+  );
+
+  // format-web.sh checks scripts/schema-baseline/*.md; a pull request that only
+  // touches one of them must still run web-static.
+  test(
+    "schema-baseline markdown selects the web format check",
+    async () => {
+      const paths = [
+        "scripts/schema-baseline/README.md",
+        "scripts/schema-baseline/compare-catalogs.md",
+      ];
+      const runs = await planPaths(paths, ["web"]);
+      for (const path of paths) {
+        const plan = expectPlan(runs[path]?.web as PlanRun, path);
+        expect(plan.jobs["web-static"]?.selected, path).toBe(true);
+        expect(plan.reason_code, path).not.toBe("NARROW_DOCS");
+      }
+      const derived = derivedPrettierMarkdown(
+        readFileSync(join(root, "scripts/format-web.sh"), "utf8"),
+        readFileSync(join(root, ".prettierignore"), "utf8"),
+      );
+      for (const path of paths) expect(derived.paths, path).toContain(path);
     },
     TIMEOUT,
   );
