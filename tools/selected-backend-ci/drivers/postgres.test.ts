@@ -22,6 +22,7 @@ import {
   failureCheckpoint,
   browserPacketKeys,
   knownOnBrowserTest,
+  wrapperInterruptGrace,
   type Command,
 } from "./common.ts";
 import {
@@ -514,6 +515,8 @@ describe("parent finalization", () => {
             expect(options.env?.FVOCI_ROOT_RUN_OWNER).toBe(OWNER);
             // The wrapper owns the PostgreSQL container; an interrupt never SIGKILLs it.
             expect(options.waitOnInterrupt).toBe(true);
+            // A group ^C starts both levels' timers; the outer one must outlast the Meili one.
+            expect(options.interruptGrace).toBeGreaterThan(wrapperInterruptGrace);
             writeFileSync(options.log as string, "synthetic wrapper log");
             writeFileSync(join(run, "receipt.json"), JSON.stringify({ final_exit_code: 7 }));
             if (fault === "write") writeFileSync(join(run, "parent-receipt.json"), "occupied");

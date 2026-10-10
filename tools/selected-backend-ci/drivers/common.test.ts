@@ -260,28 +260,58 @@ describe("owned commands", () => {
   });
 });
 
-for (const target of ["group", "direct"] as const)
-  test(`a ${target} SIGINT lets an owned fixture wrapper run its EXIT cleanup`, async () => {
+// A process is alive unless /proc no longer lists it or lists it as dead.
+function alive(pid: number): boolean {
+  let stat: string;
+  try {
+    stat = readFileSync(`/proc/${String(pid)}/stat`, "latin1");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  return !["Z", "X"].includes(stat.charAt(stat.lastIndexOf(")") + 2));
+}
+for (const [shape, target, grace, cleaned] of [
+  ["ignore", "group", 1000, false],
+  ["trap", "direct", 1000, false],
+  ["trap", "group", 3000, true],
+] as const)
+  test(`a ${target} SIGINT to a ${shape === "trap" ? "trapping" : "SIGINT-ignoring"} fixture wrapper ends within its grace`, async () => {
     const directory = temporary();
+    // Its own process group: a group interrupt reaches the wrapper and its
+    // foreground command like a terminal ^C; a direct one reaches the driver
+    // alone, which forwards it to the wrapper shell only.
+    const fixture = join(import.meta.dir, "wrapper-interrupt.fixture.ts");
+    const child = Bun.spawn([process.execPath, fixture, directory, shape, String(grace)], {
+      stdout: "pipe",
+      stderr: "inherit",
+      detached: true,
+    });
     try {
-      const fixture = join(import.meta.dir, "wrapper-interrupt.fixture.ts");
-      // Its own process group: a group interrupt reaches the wrapper like a
-      // terminal ^C; a direct one reaches the driver alone and is forwarded.
-      const child = Bun.spawn([process.execPath, fixture, directory, target], {
-        stdout: "pipe",
-        stderr: "inherit",
-        detached: true,
-      });
       const log = join(directory, "wrapper.log");
       while (!(existsSync(log) && readFileSync(log, "utf8").includes("ready"))) await Bun.sleep(20);
+      const foreground = Number(readFileSync(join(directory, "foreground.pid"), "utf8"));
+      const started = performance.now();
       process.kill(target === "group" ? -child.pid : child.pid, "SIGINT");
       const output = await new Response(child.stdout).text();
       expect(await child.exited).toBe(0);
+      const elapsed = performance.now() - started;
       expect(JSON.parse(output.split("\n").filter(Boolean).at(-1) ?? "{}")).toEqual({
         error: "KeyboardInterrupt",
       });
-      expect(existsSync(join(directory, "cleaned"))).toBe(true);
+      // A cooperative wrapper is waited for, not killed; any other is
+      // SIGKILLed with its foreground command once the grace has passed.
+      expect(existsSync(join(directory, "cleaned"))).toBe(cleaned);
+      if (cleaned) expect(elapsed).toBeLessThan(grace);
+      else expect(elapsed).toBeGreaterThanOrEqual(grace);
+      expect(elapsed).toBeLessThan(grace + 2000);
+      expect(alive(foreground)).toBe(false);
     } finally {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // The fixture group has already exited.
+      }
       rmSync(directory, { recursive: true });
     }
   });

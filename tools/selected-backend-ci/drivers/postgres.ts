@@ -64,6 +64,7 @@ import {
   trapInterrupts,
   treeHashes,
   waitFor,
+  wrapperInterruptGrace,
   writeJson,
 } from "./common.ts";
 import type { Child, Command, Json, Receipt, Row } from "./common.ts";
@@ -384,6 +385,8 @@ export async function parent(run: string, facts: ParentFacts, seam: ParentSeam):
         required: false,
         env: environment,
         waitOnInterrupt: true,
+        // Outlasts the Meili wrapper nested inside it, whose own grace is the default.
+        interruptGrace: 2 * wrapperInterruptGrace,
       },
     );
     code = result.returncode;
