@@ -44,7 +44,7 @@ BROWSER_SPECS=(
   attachment-hwp-edit-flow.spec.ts        # HWPX edit, draft download, save-copy
 )
 
-for cmd in docker curl python3 bun openssl sha256sum; do
+for cmd in docker curl bun openssl sha256sum; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "missing required command: $cmd" >&2; exit 1; }
 done
 
@@ -94,14 +94,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 (cd "$DIST" && sha256sum --strict -c SHA256SUMS >/dev/null) || fail "SHA256SUMS does not match $DIST"
+checks() { bun "$ROOT/tools/release/smoke-checks.ts" "$@"; }
 # json_get JSON KEY... prints the value at that path (numeric keys index lists).
-json_get() {
-  python3 -c 'import json, sys
-value = json.loads(sys.argv[1])
-for key in sys.argv[2:]:
-    value = value[int(key) if key.isdigit() else key]
-print(value)' "$@"
-}
+json_get() { checks json-get "$@"; }
 RECORD="$(cat "$DIST/release.json")"
 VERSION="$(json_get "$RECORD" version)"
 SOURCE_SHA="$(json_get "$RECORD" sourceSha)"
@@ -119,7 +114,7 @@ log_assert "== release ${VERSION} (${SOURCE_SHA}) on linux/${ARCH}: ${IMAGE_REF}
 # checkout supplies the smoke tooling and may be a later commit (the workflow
 # ref, docs/RELEASING.md).
 TOOLING_SHA="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
-log_assert "smoke tooling ${TOOLING_SHA}; record names tooling $(python3 -c 'import json, sys; print(json.loads(sys.argv[1]).get("toolingSha", "none"))' "$RECORD")"
+log_assert "smoke tooling ${TOOLING_SHA}; record names tooling $(checks json-get --default none "$RECORD" toolingSha)"
 
 if docker image inspect "$IMAGE_REF" >/dev/null 2>&1 || docker image inspect "$REPO@$ARCH_DIGEST" >/dev/null 2>&1; then
   fail "the daemon already holds $REPO; the smoke must pull the published digest onto a clean daemon"
@@ -130,17 +125,7 @@ if ! INDEX_JSON="$(docker manifest inspect "$REPO@$INDEX_DIGEST" 2>"$WORK/manife
   echo "::error::Anonymous 'docker manifest inspect $REPO@$INDEX_DIGEST' failed. GHCR packages of an organization start private: make the package public (docs/RELEASING.md) and re-run the failed smoke jobs." >&2
   exit 1
 fi
-python3 - "$INDEX_JSON" "$DIST/release.json" <<'PY'
-import json, sys
-index = json.loads(sys.argv[1])
-record = json.load(open(sys.argv[2]))
-found = {
-    f"{m['platform']['os']}/{m['platform']['architecture']}": m["digest"]
-    for m in index.get("manifests", [])
-    if m.get("platform", {}).get("os") != "unknown"
-}
-assert found == record["platforms"], (found, record["platforms"])
-PY
+checks index-platforms "$INDEX_JSON" "$DIST/release.json"
 log_assert "anonymous manifest inspect of the published index; per-arch digests match the release record: ok"
 
 # By digest only: the version tag is applied after this smoke passes.
@@ -148,12 +133,7 @@ DIGEST_REF="$REPO@$INDEX_DIGEST"
 docker pull --quiet "$DIGEST_REF" >/dev/null
 LABELS="$(docker image inspect -f '{{json .Config.Labels}}' "$DIGEST_REF")"
 PULLED="$(docker image inspect -f '{{json .RepoDigests}} {{.Os}}/{{.Architecture}}' "$DIGEST_REF")"
-python3 - "$LABELS" "$VERSION" "$SOURCE_SHA" <<'PY'
-import json, sys
-labels, version, sha = json.loads(sys.argv[1]) or {}, sys.argv[2], sys.argv[3]
-assert labels.get("org.opencontainers.image.version") == version, labels
-assert labels.get("org.opencontainers.image.revision") == sha, labels
-PY
+checks labels "$LABELS" "$VERSION" "$SOURCE_SHA"
 [[ "$PULLED" == *"$REPO@$INDEX_DIGEST"* && "$PULLED" == *" linux/$ARCH" ]] || fail "pulled image does not match: $PULLED"
 log_assert "pulled by digest; OCI version/revision labels match ${VERSION}/${SOURCE_SHA}: ok"
 # The release build passes FVOCI_BUILD_SHA; the Dockerfile must forward it
@@ -176,23 +156,7 @@ log_assert "product executables present, no JavaScript runtime in the image: ok"
 # comment shows (openssl rand -hex 32; a *_KEYS keyring under its
 # *_ACTIVE_KEY_ID). Filled entries are kept.
 fill_env() {
-  python3 - "$1" "$2" <<'PY'
-import re, secrets, sys
-text = open(sys.argv[1], encoding="utf-8").read()
-values = dict(re.findall(r"^([A-Z][A-Z0-9_]*)=(.*)$", text, re.MULTILINE))
-out = []
-for line in text.splitlines():
-    empty = re.fullmatch(r"([A-Z][A-Z0-9_]*)=", line)
-    if empty:
-        key = empty.group(1)
-        if key.endswith("_KEYS"):
-            active = values.get(key[: -len("_KEYS")] + "_ACTIVE_KEY_ID") or sys.exit(f"no active key id for {key}")
-            line = f'{key}={{"{active}":"{secrets.token_hex(32)}"}}'
-        else:
-            line = f"{key}={secrets.token_hex(32)}"
-    out.append(line)
-open(sys.argv[2], "w", encoding="utf-8").write("\n".join(out) + "\n")
-PY
+  checks fill-env "$1" "$2"
   chmod 600 "$2"
 }
 
@@ -209,14 +173,7 @@ new_stack() { # name [unfilled] -> sets STACK_DIR STACK_PROJECT
   PROJECTS+=("$STACK_DIR|$STACK_PROJECT")
 }
 set_env() { # KEY VALUE in the current stack's .env
-  python3 - "$STACK_DIR/.env" "$1" "$2" <<'PY'
-import re, sys
-path, key, value = sys.argv[1:]
-text = open(path, encoding="utf-8").read()
-text, n = re.subn(rf"^{key}=.*$", lambda _: f"{key}={value}", text, flags=re.MULTILINE)
-assert n == 1, key
-open(path, "w", encoding="utf-8").write(text)
-PY
+  checks set-env "$STACK_DIR/.env" "$1" "$2"
 }
 dc() { compose_in "$STACK_DIR" "$STACK_PROJECT" "$@"; }
 
@@ -231,13 +188,7 @@ wait_http() {
 
 # The app service: the one publishing container port 8080.
 app_service() {
-  dc config --format json | python3 -c '
-import json, sys
-services = json.load(sys.stdin)["services"]
-apps = [n for n, s in services.items() if any(p.get("target") == 8080 for p in s.get("ports") or [])]
-if len(apps) != 1:
-    sys.exit(f"expected one service publishing 8080, found {apps}")
-print(apps[0])'
+  dc config --format json | checks app-service
 }
 
 # The address a user opens: the server's configured public origin when set,
@@ -270,13 +221,7 @@ db_query() {
 new_stack install
 [[ "$(find "$STACK_DIR" -mindepth 1 -printf '%f\n' | sort | tr '\n' ' ')" == ".env compose.yml " ]] || fail "the install directory holds more than compose.yml and .env"
 APP="$(app_service)" || fail "no single app service"
-dc config --format json | python3 -c '
-import json, sys
-services = json.load(sys.stdin)["services"]
-product = sorted(n for n, s in services.items() if s.get("image") == sys.argv[1])
-assert sys.argv[2] in product, (sys.argv[2], product)
-assert not any(s.get("env_file") for s in services.values())
-print("product image services:", " ".join(product), "app:", sys.argv[2])' "$IMAGE_REF" "$APP" | tee -a "$ASSERT_LOG"
+dc config --format json | checks product-services "$IMAGE_REF" "$APP" | tee -a "$ASSERT_LOG"
 log_assert "== docker compose up -d --wait with compose.yml and the filled env.example"
 UP_START=$SECONDS
 start_stack
@@ -291,7 +236,7 @@ if ! DOCTOR_REPORT="$(dc exec -T "$APP" /opt/fvoci/bin/fvoci-migrate --doctor)";
   printf '%s\n' "$DOCTOR_REPORT" >&2
   fail "doctor failed"
 fi
-python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["ok"] is True, r' <<<"$DOCTOR_REPORT"
+checks doctor-ok <<<"$DOCTOR_REPORT"
 log_assert "installed doctor: ok"
 
 [[ "$(docker exec --user 1000:1000 "$SERVER_CID" sh -c 'tr "\0" "\n" </proc/1/cmdline | head -n 1')" == /opt/fvoci/bin/fvoci-server ]] \
@@ -429,7 +374,7 @@ log_assert "password login: ok"
 
 WORKSPACE_ID="$(json_get "$(api "$BASE_URL/api/v1/me/workspaces")" items 0 id)"
 DOC_TITLE="Release smoke ${RUN_ID}"
-DOC_COMMAND_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+DOC_COMMAND_ID="$(checks uuid)"
 DOC_CREATE_BODY="{\"commandId\":\"${DOC_COMMAND_ID}\",\"parentId\":null,\"title\":\"$DOC_TITLE\"}"
 DOCUMENT_ID="$(json_get "$(api -H "content-type: application/json" -X POST \
   "$BASE_URL/api/v1/workspaces/${WORKSPACE_ID}/documents" -d "$DOC_CREATE_BODY")" id)"
@@ -438,7 +383,7 @@ BODY_JSON="$(bun "$ROOT/scripts/install-smoke-collab.mjs" --base-url "$BASE_URL"
 grep -q '"contentJson"' <<<"$BODY_JSON" || fail "collab body projection failed: $BODY_JSON"
 log_assert "workspace document create + collab save and projection: ok"
 
-python3 "$ROOT/scripts/install-smoke-documents.py" "$BASE_URL" "$WORKSPACE_ID" "$COOKIE_JAR" "$DOCUMENT_STATE" create
+bun "$ROOT/tools/release/smoke-documents.ts" "$BASE_URL" "$WORKSPACE_ID" "$COOKIE_JAR" "$DOCUMENT_STATE" create
 log_assert "document import/edit/exports/public PDF: ok"
 
 FIXTURE_SHA="$(sha256sum "$FIXTURE_HWPX" | awk '{print $1}')"
@@ -471,10 +416,10 @@ log_assert "attachment upload, extraction and byte-exact download: ok"
 
 check_search() {
   local deadline=$((SECONDS + 60)) query
-  query="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$DOC_TITLE")"
+  query="$(checks url-quote "$DOC_TITLE")"
   while (( SECONDS < deadline )); do
     if api "$BASE_URL/api/v1/workspaces/${WORKSPACE_ID}/search?q=${query}" \
-      | python3 -c 'import json,sys; items=json.load(sys.stdin)["items"]; sys.exit(0 if any(sys.argv[1] in (i.get("documentId"), i.get("id")) for i in items) else 1)' "$DOCUMENT_ID"; then
+      | checks search-has "$DOCUMENT_ID"; then
       return 0
     fi
     sleep 1
@@ -503,10 +448,10 @@ dc down
 start_stack
 key_check "down/up"
 curl -fsS -b "$COOKIE_JAR" "$BASE_URL/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/body" \
-  | python3 -c 'import json,sys; b=json.load(sys.stdin); assert b["contentJson"]==json.loads(sys.argv[1])["contentJson"], b' "$BODY_JSON"
+  | checks body-equal "$BODY_JSON"
 check_attachment
 check_search
-python3 "$ROOT/scripts/install-smoke-documents.py" "$BASE_URL" "$WORKSPACE_ID" "$COOKIE_JAR" "$DOCUMENT_STATE" restart
+bun "$ROOT/tools/release/smoke-documents.ts" "$BASE_URL" "$WORKSPACE_ID" "$COOKIE_JAR" "$DOCUMENT_STATE" restart
 log_assert "after down/up: generated secrets kept (session, password login, sealed secrets), body, attachment, extraction, search, imports: ok"
 dc down -v --remove-orphans >/dev/null
 
