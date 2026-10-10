@@ -176,7 +176,7 @@ build_current_artifacts() {
   cd "$ROOT"
   if [[ "$CI_COMMITTED_API" == true ]]; then verify_committed_api; fi
   if [[ "$SELECTED_PHASE" == consume ]]; then
-    run_stage selected-handoff-consume python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" consume
+    run_stage selected-handoff-consume bun "$ROOT/tools/selected-backend-ci/handoff.ts" consume
   elif [[ "$SELECTED_BACKENDS" == true ]]; then
     run_stage selected-input-before bun "$ROOT/scripts/run-selected-backend-e2e.ts" record-before --output "$FVOCI_SELECTED_CI_OUTPUT"
     run_stage selected-main bun "$ROOT/scripts/run-selected-backend-e2e.ts" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name main -- \
@@ -228,7 +228,7 @@ run_ci_shard() {
 
   echo "=== web e2e shard ${shard_index}/${CI_SHARD_COUNT}: qualify artifacts ===" >&2
   if [[ "$BROWSER_PHASE" == consume ]]; then
-    run_stage browser-handoff-consume python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" consume
+    run_stage browser-handoff-consume bun "$ROOT/tools/selected-backend-ci/handoff.ts" consume
   else
     build_current_artifacts
   fi
@@ -315,20 +315,20 @@ fi
 
 if [[ "$CI_COMMITTED_API" == true ]]; then verify_committed_api; fi
 if [[ "$SELECTED_PHASE" == consume ]]; then
-  run_stage selected-handoff-admit python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" admit
+  run_stage selected-handoff-admit bun "$ROOT/tools/selected-backend-ci/handoff.ts" admit
 fi
 require_prepared
 
 if [[ "$BROWSER_PHASE" == prepare ]]; then
   [[ ! -e "$ROOT/apps/web/dist" ]] || { echo "browser producer requires absent dist" >&2; exit 1; }
-  run_stage browser-input-before python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" browser-before
+  run_stage browser-input-before bun "$ROOT/tools/selected-backend-ci/handoff.ts" browser-before
   (cd "$ROOT/apps/web" && run_stage web-build bun --bun run build)
   verify_committed_api
-  run_stage fixture-build python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" browser-stage fixture
-  run_stage default-server-build python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" browser-stage default
-  CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" run_stage worker-build python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" browser-stage engine
-  run_stage browser-input-after python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" browser-after
-  run_stage browser-handoff-export python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" export
+  run_stage fixture-build bun "$ROOT/tools/selected-backend-ci/handoff.ts" browser-stage fixture
+  run_stage default-server-build bun "$ROOT/tools/selected-backend-ci/handoff.ts" browser-stage default
+  CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" run_stage worker-build bun "$ROOT/tools/selected-backend-ci/handoff.ts" browser-stage engine
+  run_stage browser-input-after bun "$ROOT/tools/selected-backend-ci/handoff.ts" browser-after
+  run_stage browser-handoff-export bun "$ROOT/tools/selected-backend-ci/handoff.ts" export
   exit 0
 fi
 
@@ -343,7 +343,7 @@ fi
 
 build_current_artifacts
 if [[ "$SELECTED_PHASE" == prepare ]]; then
-  run_stage selected-handoff-export python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" export
+  run_stage selected-handoff-export bun "$ROOT/tools/selected-backend-ci/handoff.ts" export
   exit 0
 fi
 pending_status=0

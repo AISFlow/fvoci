@@ -55,9 +55,18 @@ if [[ "$*" == "--bun run build" ]]; then
   fi
   exit "${FVOCI_TEST_BUN_BUILD_EXIT:-0}"
 fi
+# Test-only handoff leaf: checks invocation/propagates refusal, without build.
+if [[ $# == 2 && "$1" == @HANDOFF@ && "$2" == consume ]]; then
+  [[ "${FVOCI_WEB_BUILD_PHASE:-}" == consume ]] || exit 99
+  echo "fvoci-web-e2e-fake-handoff-consume"
+  exit "${FVOCI_TEST_HANDOFF_EXIT:-0}"
+fi
 echo "unexpected bun invocation: $*" >&2
 exit 1
 STUB
+# The fixture checkout's own handoff path; quoted so it matches only itself.
+handoff="$FIXTURE_ROOT/tools/selected-backend-ci/handoff.ts"
+sed -i "s|@HANDOFF@|\"${handoff//|/\\|}\"|" "$FAKE_BIN/bun"
 chmod +x "$FAKE_BIN/bun"
 
 cat >"$FAKE_BIN/cargo" <<'STUB'
@@ -190,15 +199,6 @@ if (
   exit 1
 fi
 
-# Test-only handoff leaf: checks invocation/propagates refusal, without build.
-mkdir -p "$FIXTURE_ROOT/scripts/selected-backend-ci"
-cat >"$FIXTURE_ROOT/scripts/selected-backend-ci/web-build-handoff.py" <<'STUB'
-import os, sys
-assert sys.argv[1:] == ['consume']
-assert os.environ['FVOCI_WEB_BUILD_PHASE'] == 'consume'
-print('fvoci-web-e2e-fake-handoff-consume')
-sys.exit(int(os.environ.get('FVOCI_TEST_HANDOFF_EXIT', '0')))
-STUB
 
 # Explicit CI consumption must use physical tracked outputs from its tested
 # checkout, with no generator fallback. All runtime/builds remain stubbed here.

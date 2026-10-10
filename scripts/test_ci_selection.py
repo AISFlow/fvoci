@@ -1218,7 +1218,6 @@ class WorkflowRegistryTest(unittest.TestCase):
                 "(cd apps/web && bun test e2e-pending/collab-playwright.config.test.ts --timeout 60000)",
                 "python3 scripts/selected-backend-ci/test_off_registration.py",
                 "bash scripts/test-web-e2e-groups.sh",
-                "python3 scripts/fixtures/web-e2e/test-build-handoff.py",
             ],
             "web-native-checks": [
                 "cargo clippy --locked --offline --all-targets --features db-tests,api-schema -- -D warnings",

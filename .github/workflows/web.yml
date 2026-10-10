@@ -158,7 +158,6 @@ jobs:
         run: |
           python3 -m pip install --disable-pip-version-check --user --break-system-packages -r scripts/ci_selection_requirements.txt
           bash scripts/test-web-e2e-groups.sh
-          python3 scripts/fixtures/web-e2e/test-build-handoff.py
 
   web-native-checks:
     needs: ci-plan

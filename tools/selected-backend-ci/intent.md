@@ -3,9 +3,11 @@
 원본은 변경하지 않은 `scripts/run-selected-backend-e2e.py`와
 `scripts/selected-backend-ci/current_binding.py`다. 원본이 거부하는 입력을 새 runner가
 허용하지 않는다. 아래는 언어 또는 실행 API 변경에 따른 동작 차이의 전체 의도다.
-`scripts/run-web-e2e.sh`의 runner 호출 10곳은 이 Bun CLI를 쓴다. Python runner 파일은
-`web-build-handoff.py`·`turso-ui.py`·Python 검사가 아직 라이브러리로 import하므로 남아 있으며,
-그 importer를 옮긴 뒤 제거한다. lane driver(`current-*-driver.py`)는 별도 이전 대상이다.
+`scripts/run-web-e2e.sh`의 runner 호출 10곳과 web build handoff 호출 10곳은 이 Bun CLI와
+`handoff.ts`를 쓰며, `web-build-handoff.py`와 그 검사는 제거했다(`handoff-intent.md`). Python
+runner 파일은 `turso-ui.py`·Python 검사가 아직 라이브러리로 import하므로 남아 있으며, 그 importer를
+옮긴 뒤 제거한다. 남은 Python runner의 config-list 모드는 호출자가 없고, 제거된 handoff 파일을
+열다 실패하므로 fail-closed다. lane driver(`current-*-driver.py`)는 별도 이전 대상이다.
 Python 원본과의 패리티는 리뷰에서 한 번 확인했고, 상시 테스트로 두지 않는다.
 
 | 항목                        | 원래 동작                                                                                                     | 새 동작                                                                                                                                                                                     | 이유                                                                                                     |
