@@ -16,6 +16,9 @@
 #   io.fvoci.install-image.toolchain          rust-toolchain.toml channel + .bun-version
 # Recorded only: source-commit (HEAD) and builder (Docker engine/buildx), which
 # are not image inputs. A mismatch is refused; nothing here rebuilds on refusal.
+# Limit: git-ignored files that .dockerignore does not exclude also reach the
+# build context but not the source-tree hash; CI builds from a fresh checkout,
+# which has none.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -32,45 +35,44 @@ usage() {
   exit 2
 }
 
+# Prints the tree id; every step returns its failure (no errexit in $(...)).
 source_tree() {
-  if [[ -z "$(git -C "$ROOT" status --porcelain --untracked-files=normal)" ]]; then
+  local status index tree
+  status="$(git -C "$ROOT" status --porcelain --untracked-files=normal)" || return 1
+  if [[ -z "$status" ]]; then
     git -C "$ROOT" rev-parse 'HEAD^{tree}'
     return
   fi
   # Dirty tree: hash it through a throwaway index so the real index is untouched.
-  local index
-  index="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-image-index.XXXXXX")"
-  cp "$(git -C "$ROOT" rev-parse --path-format=absolute --git-path index)" "$index"
-  GIT_INDEX_FILE="$index" git -C "$ROOT" add -A
-  GIT_INDEX_FILE="$index" git -C "$ROOT" write-tree
+  index="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-image-index.XXXXXX")" || return 1
+  cp "$(git -C "$ROOT" rev-parse --path-format=absolute --git-path index)" "$index" \
+    && GIT_INDEX_FILE="$index" git -C "$ROOT" add -A \
+    && tree="$(GIT_INDEX_FILE="$index" git -C "$ROOT" write-tree)"
+  local rc=$?
   rm -f "$index"
+  (( rc == 0 )) || return "$rc"
+  printf '%s\n' "$tree"
 }
 
-daemon_arch() {
-  docker version -f '{{.Server.Arch}}'
-}
-
-dockerfile_sha256() {
-  cat "$ROOT/infra/rust/Dockerfile" "$ROOT/.dockerignore" | sha256sum | cut -d' ' -f1
-}
-
-toolchain() {
-  local channel
+# EXPECTED[key]: the identity labels of this checkout, computed once in this
+# shell so any failure stops the script (and an empty value is never compared).
+declare -A EXPECTED=()
+LABEL_KEYS=(source-tree arch dockerfile-sha256 toolchain)
+compute_expected() {
+  local value channel bun
+  value="$(source_tree)" || die "cannot hash the source tree of $ROOT"
+  [[ "$value" =~ ^[0-9a-f]{40,64}$ ]] || die "unexpected source tree id: $value"
+  EXPECTED[source-tree]="$value"
+  value="$(docker version -f '{{.Server.Arch}}')" || die "cannot read the Docker daemon architecture"
+  [[ -n "$value" ]] || die "empty Docker daemon architecture"
+  EXPECTED[arch]="$value"
+  value="$(cat "$ROOT/infra/rust/Dockerfile" "$ROOT/.dockerignore" | sha256sum | cut -d' ' -f1)"
+  [[ "$value" =~ ^[0-9a-f]{64}$ ]] || die "cannot hash infra/rust/Dockerfile and .dockerignore"
+  EXPECTED[dockerfile-sha256]="$value"
   channel="$(sed -nE 's/^channel = "([^"]+)"$/\1/p' "$ROOT/rust-toolchain.toml")"
-  [[ -n "$channel" ]] || die "no channel in rust-toolchain.toml"
-  printf 'rust=%s;bun=%s\n' "$channel" "$(tr -d '[:space:]' <"$ROOT/.bun-version")"
-}
-
-# Expected labels for this checkout, one `key=value` per line.
-expected_labels() {
-  printf 'source-tree=%s\n' "$(source_tree)"
-  printf 'arch=%s\n' "$(daemon_arch)"
-  printf 'dockerfile-sha256=%s\n' "$(dockerfile_sha256)"
-  printf 'toolchain=%s\n' "$(toolchain)"
-}
-
-image_label() {
-  docker image inspect -f "{{index .Config.Labels \"$LABEL.$2\"}}" "$1"
+  bun="$(tr -d '[:space:]' <"$ROOT/.bun-version")"
+  [[ -n "$channel" && -n "$bun" ]] || die "no channel in rust-toolchain.toml or no .bun-version"
+  EXPECTED[toolchain]="rust=${channel};bun=${bun}"
 }
 
 emit() {
@@ -78,44 +80,53 @@ emit() {
 }
 
 verify() {
-  local ref="$1" want_id="${2:-}" id arch key want got refused=0
-  id="$(docker image inspect -f '{{.Id}}' "$ref" 2>/dev/null)" || die "image not found: $ref (build it: bash scripts/install-image.sh build)"
+  local ref="$1" want_id="${2:-}" fields key refused=0 template='{{.Id}}{{"\n"}}{{.Architecture}}'
+  (( ${#EXPECTED[@]} )) || compute_expected
+  for key in "${LABEL_KEYS[@]}" source-commit builder; do
+    template+="{{\"\\n\"}}{{index .Config.Labels \"$LABEL.$key\"}}"
+  done
+  fields="$(docker image inspect -f "$template" "$ref" 2>/dev/null)" \
+    || die "image not found: $ref (build it: bash scripts/install-image.sh build)"
+  local -a got
+  mapfile -t got <<<"$fields"
+  local id="${got[0]}" arch="${got[1]}" i=2
   if [[ -n "$want_id" && "$id" != "$want_id" ]]; then
     die "refusing $ref: image ID $id, expected $want_id"
   fi
-  arch="$(docker image inspect -f '{{.Architecture}}' "$ref")"
-  while IFS='=' read -r key want; do
-    got="$(image_label "$ref" "$key")"
-    if [[ "$got" != "$want" ]]; then
-      printf 'install-image: refusing %s: label %s.%s=%q, this checkout has %q\n' "$ref" "$LABEL" "$key" "$got" "$want" >&2
+  for key in "${LABEL_KEYS[@]}"; do
+    if [[ "${got[i]:-}" != "${EXPECTED[$key]}" ]]; then
+      printf 'install-image: refusing %s: label %s.%s=%q, this checkout has %q\n' \
+        "$ref" "$LABEL" "$key" "${got[i]:-}" "${EXPECTED[$key]}" >&2
       refused=1
     fi
-  done < <(expected_labels)
-  if [[ "$arch" != "$(daemon_arch)" ]]; then
-    printf 'install-image: refusing %s: image architecture %s, daemon %s\n' "$ref" "$arch" "$(daemon_arch)" >&2
+    i=$((i + 1))
+  done
+  if [[ "$arch" != "${EXPECTED[arch]}" ]]; then
+    printf 'install-image: refusing %s: image architecture %s, daemon %s\n' "$ref" "$arch" "${EXPECTED[arch]}" >&2
     refused=1
   fi
   (( refused == 0 )) || die "refusing $ref; rebuild it from this checkout: bash scripts/install-image.sh build --tag $ref"
-  printf 'install-image: verified %s id=%s commit=%s builder=%s\n' "$ref" "$id" \
-    "$(image_label "$ref" source-commit)" "$(image_label "$ref" builder)" >&2
+  printf 'install-image: verified %s id=%s commit=%s builder=%s\n' "$ref" "$id" "${got[i]:-}" "${got[i + 1]:-}" >&2
   emit "$ref" "$id"
 }
 
 build() {
-  local tag="$DEFAULT_TAG" labels=() key value started=$SECONDS
+  local tag="$DEFAULT_TAG" labels=() key commit engine buildx started=$SECONDS
   while (($#)); do
     case "$1" in
       --tag) tag="${2:?}"; shift 2 ;;
       *) usage ;;
     esac
   done
-  while IFS='=' read -r key value; do
-    labels+=(--label "$LABEL.$key=$value")
-  done < <(expected_labels)
-  local commit
-  commit="$(git -C "$ROOT" rev-parse HEAD)"
+  compute_expected
+  for key in "${LABEL_KEYS[@]}"; do
+    labels+=(--label "$LABEL.$key=${EXPECTED[$key]}")
+  done
+  commit="$(git -C "$ROOT" rev-parse HEAD)" || die "cannot read HEAD"
+  engine="$(docker version -f '{{.Server.Version}}')" || die "cannot read the Docker engine version"
+  buildx="$(docker buildx version | cut -d' ' -f1-2)" || die "cannot read the buildx version"
   labels+=(--label "$LABEL.source-commit=$commit" --label "org.opencontainers.image.revision=$commit")
-  labels+=(--label "$LABEL.builder=docker $(docker version -f '{{.Server.Version}}'); $(docker buildx version 2>/dev/null | cut -d' ' -f1-2)")
+  labels+=(--label "$LABEL.builder=docker ${engine}; ${buildx}")
   printf 'install-image: building %s from %s\n' "$tag" "$ROOT" >&2
   docker build -f "$ROOT/infra/rust/Dockerfile" "${labels[@]}" -t "$tag" "$ROOT" >&2
   printf 'install-image: built %s in %ss\n' "$tag" "$((SECONDS - started))" >&2

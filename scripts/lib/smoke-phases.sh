@@ -45,6 +45,26 @@ smoke_actions() {
   [[ "${GITHUB_ACTIONS:-}" == true ]]
 }
 
+# smoke_acquire_image ROOT: sets IMAGE_TAG and IMAGE_ID. FVOCI_INSTALL_IMAGE
+# (and FVOCI_INSTALL_IMAGE_ID if set) must pass install-image.sh verify; a
+# mismatch is refused, never rebuilt. Unset: a local run builds it with
+# install-image.sh, CI refuses (the image is built once per arch there).
+smoke_acquire_image() {
+  local root="$1" out
+  if [[ -n "${FVOCI_INSTALL_IMAGE:-}" ]]; then
+    out="$(bash "$root/scripts/install-image.sh" verify "$FVOCI_INSTALL_IMAGE" ${FVOCI_INSTALL_IMAGE_ID:+"$FVOCI_INSTALL_IMAGE_ID"})" \
+      || fail "install image ${FVOCI_INSTALL_IMAGE} refused (see install-image above)"
+  elif smoke_actions; then
+    fail "FVOCI_INSTALL_IMAGE is required in CI: the image is built once per arch by scripts/install-image.sh; this smoke does not build it"
+  else
+    echo "FVOCI_INSTALL_IMAGE unset: building the image for this checkout (scripts/install-image.sh build)"
+    out="$(bash "$root/scripts/install-image.sh" build)" || fail "install image build failed"
+  fi
+  IMAGE_TAG="$(sed -n 's/^FVOCI_INSTALL_IMAGE=//p' <<<"$out")"
+  IMAGE_ID="$(sed -n 's/^FVOCI_INSTALL_IMAGE_ID=//p' <<<"$out")"
+  [[ -n "$IMAGE_TAG" && -n "$IMAGE_ID" ]] || fail "install-image.sh printed no image reference"
+}
+
 # Record the command that failed in the main shell. Never exits: set -e
 # carries the status, so `cleanup`'s $? and `|| fail` sites keep their meaning.
 smoke_on_err() {
@@ -106,6 +126,7 @@ smoke_report() {
   if smoke_actions; then
     # Annotation text is data, not a workflow command.
     message="${message//'%'/%25}"
+    message="${message//$'\r'/%0D}"
     echo "::error title=${SMOKE_NAME}::${message//$'\n'/%0A}"
   fi
 }

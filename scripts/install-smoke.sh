@@ -79,17 +79,7 @@ phase image
 require_cmd docker openssl curl bun python3 sha256sum
 [[ -f "$FIXTURE_HWPX" ]] || fail "missing HWPX fixture: $FIXTURE_HWPX"
 
-if [[ -n "${FVOCI_INSTALL_IMAGE:-}" ]]; then
-  IMAGE_ENV="$(bash "$ROOT/scripts/install-image.sh" verify "$FVOCI_INSTALL_IMAGE" ${FVOCI_INSTALL_IMAGE_ID:+"$FVOCI_INSTALL_IMAGE_ID"})"
-elif smoke_actions; then
-  fail "FVOCI_INSTALL_IMAGE is required in CI: the image is built once per arch by scripts/install-image.sh; this smoke does not build it"
-else
-  log_assert "FVOCI_INSTALL_IMAGE unset: building the image for this checkout (scripts/install-image.sh build)"
-  IMAGE_ENV="$(bash "$ROOT/scripts/install-image.sh" build)"
-fi
-IMAGE_TAG="$(sed -n 's/^FVOCI_INSTALL_IMAGE=//p' <<<"$IMAGE_ENV")"
-IMAGE_ID="$(sed -n 's/^FVOCI_INSTALL_IMAGE_ID=//p' <<<"$IMAGE_ENV")"
-[[ -n "$IMAGE_TAG" && -n "$IMAGE_ID" ]] || fail "install-image.sh printed no image reference"
+smoke_acquire_image "$ROOT"
 log_assert "image ${IMAGE_TAG} (${IMAGE_ID}) built from this checkout: ok"
 HOST_PORT="$(smoke_ts port)"
 BASE_URL="http://127.0.0.1:${HOST_PORT}"

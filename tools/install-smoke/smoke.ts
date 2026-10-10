@@ -6,7 +6,7 @@
 //   smoke.ts port                     free 127.0.0.1 TCP port
 //   smoke.ts uuid                     random UUID v4
 //   smoke.ts field JSON KEY...        value at the path (a digit KEY indexes an array)
-//   smoke.ts has-item JSON ID         exit 0 when items[] holds an item with that id
+//   smoke.ts has-item JSON ID         exit 0 present, 1 absent, 2 unreadable reply
 //   smoke.ts check NAME ARG...        exit 1 with the failed condition
 //   smoke.ts build NAME ARG...        prints a request body
 //   smoke.ts oracle ARG...            canonical per-user read projection
@@ -802,6 +802,7 @@ if (import.meta.main) {
     process.stderr.write(
       `smoke.ts ${label} failed: ${error instanceof Error ? error.message : String(error)}\n`,
     );
-    process.exitCode = 1;
+    // has-item keeps 1 for "absent"; a reply it cannot read is 2.
+    process.exitCode = process.argv[2] === "has-item" ? 2 : 1;
   }
 }

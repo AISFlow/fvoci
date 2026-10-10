@@ -345,17 +345,7 @@ native_counts() {
   poll_count "$1" "$2" "SELECT 'document_states='||(SELECT count(*) FROM fvoci.document_states)||';document_collab_updates='||(SELECT count(*) FROM fvoci.document_collab_updates)||';document_collab_op_receipts='||(SELECT count(*) FROM fvoci.document_collab_op_receipts)||';task_states='||(SELECT count(*) FROM fvoci.task_states)||';task_collab_updates='||(SELECT count(*) FROM fvoci.task_collab_updates)||';task_collab_op_receipts='||(SELECT count(*) FROM fvoci.task_collab_op_receipts)"
 }
 
-if [[ -n "${FVOCI_INSTALL_IMAGE:-}" ]]; then
-  IMAGE_ENV="$(bash "$ROOT/scripts/install-image.sh" verify "$FVOCI_INSTALL_IMAGE" ${FVOCI_INSTALL_IMAGE_ID:+"$FVOCI_INSTALL_IMAGE_ID"})"
-elif smoke_actions; then
-  fail "FVOCI_INSTALL_IMAGE is required in CI: the image is built once per arch by scripts/install-image.sh; this smoke does not build it"
-else
-  log_assert "FVOCI_INSTALL_IMAGE unset: building the image for this checkout (scripts/install-image.sh build)"
-  IMAGE_ENV="$(bash "$ROOT/scripts/install-image.sh" build)"
-fi
-IMAGE_TAG="$(sed -n 's/^FVOCI_INSTALL_IMAGE=//p' <<<"$IMAGE_ENV")"
-IMAGE_ID="$(sed -n 's/^FVOCI_INSTALL_IMAGE_ID=//p' <<<"$IMAGE_ENV")"
-[[ -n "$IMAGE_TAG" && -n "$IMAGE_ID" ]] || fail "install-image.sh printed no image reference"
+smoke_acquire_image "$ROOT"
 log_assert "image ${IMAGE_TAG} (${IMAGE_ID}) built from this checkout: ok"
 if [[ -n "$ZOTERO_FIXTURE_RECIPE" ]]; then
   log_assert "build isolated Zotero fixture image on ${IMAGE_TAG}"
@@ -943,10 +933,12 @@ log_assert "restored search index finds the task: ok"
 
 # Rebuilt search keeps per-person visibility: the member finds the PRV task
 # and never the owner's HID task, which the owner finds.
+# search_has JAR QUERY ID: 0 found, 1 absent, 2 the search request or its
+# reply failed (never read as absent).
 search_has() {
-  local jar="$1" query="$2" id="$3"
-  smoke_ts has-item \
-    "$(curl -fsS -b "$jar" "$RESTORE_BASE/api/v1/workspaces/${WORKSPACE_ID}/search?q=${query}")" "$id"
+  local jar="$1" query="$2" id="$3" body
+  body="$(curl -fsS -b "$jar" "$RESTORE_BASE/api/v1/workspaces/${WORKSPACE_ID}/search?q=${query}")" || return 2
+  smoke_ts has-item "$body" "$id"
 }
 SEARCH_FOUND=""
 for _ in $(seq 1 60); do
@@ -959,9 +951,13 @@ done
 if [[ -z "$SEARCH_FOUND" ]]; then
   fail "restored team tasks are not searchable after rebuild"
 fi
-if search_has "$MEMBER_JAR" "Hidden%20owner%20task" "$HID_TASK_ID"; then
-  fail "restored search shows the owner's hidden task to the member"
-fi
+HIDDEN_STATUS=0
+search_has "$MEMBER_JAR" "Hidden%20owner%20task" "$HID_TASK_ID" || HIDDEN_STATUS=$?
+case "$HIDDEN_STATUS" in
+  0) fail "restored search shows the owner's hidden task to the member" ;;
+  1) ;;
+  *) fail "member search for the hidden task failed (exit ${HIDDEN_STATUS})" ;;
+esac
 log_assert "restored search is per-person (member PRV yes, HID no; owner HID yes): ok"
 
 RESTORE_CID="$("${RESTORE_COMPOSE[@]}" ps -q server)"
