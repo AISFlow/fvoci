@@ -9,6 +9,7 @@
 # The image must come from `cargo xtask install-image` (build or load) for this
 # checkout; a mismatched image is refused, never rebuilt. Without
 # FVOCI_INSTALL_IMAGE a local run first builds it with that command; CI refuses.
+# Compose (and any derived fixture) runs the verified image ID, never the tag.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -73,6 +74,9 @@ SOURCE_ENCRYPTION_KEYS="{\"${ENC_ID}\":\"${ENC_K1}\"}"
 RESTORE_ENCRYPTION_KEYS="{\"${ENC_ID}\":\"${ENC_K1}\",\"k2\":\"$(openssl rand -hex 32)\"}"
 ZF_NAME="fvoci-br-zf-${RUN_ID}"
 ZF_IMAGE="fvoci-br-zotero-fixture:${RUN_ID}"
+# Per-run tag of the verified image ID: BuildKit resolves a bare ID as a
+# registry name, and only this run creates this tag.
+ZF_BASE="fvoci-br-zotero-base:${RUN_ID}"
 ZF_ENV="$(mktemp "${TMPDIR:-/tmp}/fvoci-br-zf-env.${RUN_ID}.XXXXXX")"
 ZF_STDERR="$(mktemp "${TMPDIR:-/tmp}/fvoci-br-zf-stderr.${RUN_ID}.XXXXXX")"
 MOVE_FILE="$(mktemp "${TMPDIR:-/tmp}/fvoci-br-move-file.${RUN_ID}.XXXXXX")"
@@ -130,7 +134,7 @@ cleanup() {
   fi
   smoke_ts group "cleanup: ${SOURCE_PROJECT} ${RESTORE_PROJECT}"
   docker rm -f "$ZF_NAME" >/dev/null 2>&1
-  (( ZF_BUILT )) && docker image rm "$ZF_IMAGE" >/dev/null 2>&1
+  (( ZF_BUILT )) && docker image rm "$ZF_IMAGE" "$ZF_BASE" >/dev/null 2>&1
   if (( SOURCE_STARTED )); then
     teardown "$SOURCE_PROJECT" "${SOURCE_COMPOSE[@]}" || torn=1
     for project in "${WRONG_PROJECTS[@]}"; do
@@ -175,7 +179,7 @@ write_env() {
   local encryption_keys="$7"
   local encryption_active="$8"
   cat >"$dest" <<EOF
-FVOCI_IMAGE=${IMAGE_TAG}
+FVOCI_IMAGE=${IMAGE_ID}
 POSTGRES_DB=fvoci
 POSTGRES_USER=fvoci_owner
 POSTGRES_PASSWORD=${owner_pw}
@@ -374,10 +378,12 @@ IMAGE_ID="$(sed -n 's/^FVOCI_INSTALL_IMAGE_ID=//p' <<<"$IMAGE_ENV")"
 [[ -n "$IMAGE_TAG" && -n "$IMAGE_ID" ]] || fail "install-image printed no image reference"
 log_assert "image ${IMAGE_TAG} (${IMAGE_ID}) built from this checkout: ok"
 if [[ -n "$ZOTERO_FIXTURE_RECIPE" ]]; then
-  log_assert "build isolated Zotero fixture image on ${IMAGE_TAG}"
+  log_assert "build isolated Zotero fixture image on ${IMAGE_ID}"
   BUILD_START=$SECONDS
   ZF_BUILT=1
-  docker build -f "$ZOTERO_FIXTURE_RECIPE" --build-arg "FVOCI_IMAGE=${IMAGE_TAG}" -t "$ZF_IMAGE" "$ROOT"
+  docker tag "$IMAGE_ID" "$ZF_BASE"
+  [[ "$(docker image inspect -f '{{.Id}}' "$ZF_BASE")" == "$IMAGE_ID" ]] || fail "fixture base ${ZF_BASE} is not ${IMAGE_ID}"
+  docker build --pull=false -f "$ZOTERO_FIXTURE_RECIPE" --build-arg "FVOCI_IMAGE=${ZF_BASE}" -t "$ZF_IMAGE" "$ROOT"
   # Exactly the image under test plus one layer (the fixture binary).
   smoke_check layers-plus-one "$(docker image inspect -f '{{json .RootFS.Layers}}' "$IMAGE_ID")" \
     "$(docker image inspect -f '{{json .RootFS.Layers}}' "$ZF_IMAGE")"

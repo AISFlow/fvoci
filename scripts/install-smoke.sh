@@ -6,6 +6,7 @@
 # The image must come from `cargo xtask install-image` (build or load) for this
 # checkout; a mismatched image is refused, never rebuilt. Without
 # FVOCI_INSTALL_IMAGE a local run first builds it with that command; CI refuses.
+# Compose (and any derived fixture) runs the verified image ID, never the tag.
 # The run owns one Compose project with a unique name; its containers, volumes
 # and network are removed on success, failure and INT/TERM.
 set -euo pipefail
@@ -110,7 +111,7 @@ BASE_URL="http://127.0.0.1:${HOST_PORT}"
 ORIGIN="$BASE_URL"
 
 cat >"$ENV_FILE" <<EOF
-FVOCI_IMAGE=${IMAGE_TAG}
+FVOCI_IMAGE=${IMAGE_ID}
 POSTGRES_DB=fvoci
 POSTGRES_USER=fvoci_owner
 POSTGRES_PASSWORD=${OWNER_PASSWORD}
