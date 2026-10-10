@@ -1,5 +1,6 @@
 // Discover normal web Playwright groups, shard them, and verify CI coverage.
-// Callers: scripts/run-web-e2e.sh (shards, verify, shard-jsonl) and
+// Callers: scripts/run-web-e2e.sh (shards, verify, shard-jsonl; run-web-e2e.ts
+// reuses the spec path check for plan lines) and
 // scripts/test-web-e2e-groups.sh (shards, verify); the shard fixture imports
 // the pair and timer constants. Differences from the replaced
 // Python CLI are listed in the migration commit message.
@@ -108,7 +109,7 @@ function relSpec(name: string): string {
   return rel;
 }
 
-function validateSpecRelpath(rel: string): void {
+export function validateSpecRelpath(rel: string): void {
   if (!REL_SPEC_RE.test(rel)) fail(`invalid spec path in plan: ${JSON.stringify(rel)}`);
 }
 
