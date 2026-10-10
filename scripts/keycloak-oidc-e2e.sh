@@ -16,10 +16,11 @@
 #
 # Usage: scripts/keycloak-oidc-e2e.sh [--skip-build] [--workspace-sso]
 #   FVOCI_KC_E2E_EVIDENCE_DIR=<dir>  also keep redacted evidence there
-# Needs docker (compose), openssl, python3, git, cargo, bun, setsid
-# (util-linux) and scripts/prepare-web-e2e.sh; the first run pulls the
-# Keycloak image. The web build and Playwright run under Bun (bun --bun), as
-# in the web e2e harness; node and npm are not used.
+# Needs docker (compose), openssl, git, cargo, bun, setsid (util-linux),
+# realpath (coreutils) and scripts/prepare-web-e2e.sh; the first run pulls the
+# Keycloak image. The web build, Playwright and the helper
+# tools/keycloak/kc-e2e.ts run under Bun, as in the web e2e harness; node,
+# npm and python are not used.
 # Exits non-zero when a group fails or when its compose project could not be
 # removed completely.
 set -euo pipefail
@@ -31,15 +32,13 @@ if [[ $- == *x* ]]; then
   exit 2
 fi
 unset BASH_XTRACEFD BASH_ENV ENV
-# No bytecode caches next to the helper.
-export PYTHONDONTWRITEBYTECODE=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KC_DIR="$ROOT/scripts/keycloak"
 COMPOSE_FILE="$KC_DIR/compose.yml"
-HELPER="$KC_DIR/kc_e2e.py"
+HELPER="$ROOT/tools/keycloak/kc-e2e.ts"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
-CARGO_TARGET_DIR="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "$CARGO_TARGET_DIR")"
+CARGO_TARGET_DIR="$(realpath -m -- "$CARGO_TARGET_DIR")"
 export ROOT CARGO_TARGET_DIR
 REALM="fvoci-e2e"
 CLIENT_ID="fvoci-e2e"
@@ -66,7 +65,7 @@ for arg in "$@"; do
   esac
 done
 
-for dependency in docker openssl python3 git cargo bun setsid; do
+for dependency in docker openssl git cargo bun setsid realpath; do
   command -v "$dependency" >/dev/null 2>&1 || {
     echo "$dependency is required" >&2
     exit 1
@@ -87,8 +86,14 @@ const playwright = require.resolve("playwright/package.json", { paths: [path.dir
 const core = require.resolve("playwright-core/package.json", { paths: [path.dirname(playwright)] });
 console.log(JSON.stringify({ test, browsers: path.join(path.dirname(core), "browsers.json") }));
 ')"
+# The helper reads per-run secrets from its environment: it loads no .env
+# file and no bunfig.toml from the caller's directory, only the repository's.
+KC=(bun --no-env-file --config="$ROOT/bunfig.toml" "$HELPER")
+kc() {
+  "${KC[@]}" "$@"
+}
 # The redaction every log and evidence file goes through, on its known cases.
-python3 "$HELPER" selftest >&2
+kc selftest >&2
 # The groups run with TMPDIR=$TMPDIR/fvoci-kc-e2e.XXXXXX/tmp (removed on
 # exit); Chromium keeps sockets there and aborts on a long path.
 TMP_BASE="${TMPDIR:-/tmp}"
@@ -180,14 +185,14 @@ compose_detached() {
 }
 
 redact() {
-  python3 "$HELPER" redact "$CONFIG"
+  kc redact "$CONFIG"
 }
 
-# Readers of a group's output. They ignore INT, TERM and HUP (Python keeps an
+# Readers of a group's output. They ignore INT, TERM and HUP (Bun keeps an
 # inherited ignore), so after Ctrl-C they read on until the group's own
 # cleanup (retained artifacts, run directory) has finished writing.
 redact_stream() {
-  (trap '' INT TERM HUP; exec python3 "$HELPER" redact "$CONFIG")
+  (trap '' INT TERM HUP; exec "${KC[@]}" redact "$CONFIG")
 }
 log_stream() {
   (trap '' INT TERM HUP; exec tee -a "$@")
@@ -285,9 +290,9 @@ trap 'trap "" INT TERM HUP PIPE; exit 129' HUP
 trap 'trap "" INT TERM HUP PIPE; exit 141' PIPE
 
 echo "=== keycloak: compose project ${PROJECT} ===" >&2
-with_secrets python3 "$HELPER" render "$KC_DIR/realm.template.json" "$REALM_DIR/fvoci-e2e-realm.json"
+with_secrets kc render "$KC_DIR/realm.template.json" "$REALM_DIR/fvoci-e2e-realm.json"
 if [[ "$WORKSPACE_SSO" == 1 ]]; then
-  with_secrets python3 "$HELPER" render-sso "$KC_DIR/workspace-sso-realm.template.json" "$REALM_DIR"
+  with_secrets kc render-sso "$KC_DIR/workspace-sso-realm.template.json" "$REALM_DIR"
 fi
 KC_IMAGE="$(compose config --images)"
 compose up -d --quiet-pull >&2
@@ -298,10 +303,10 @@ if [[ "$HOST_PORT" != 127.0.0.1:* ]]; then
 fi
 KEYCLOAK_ORIGIN="http://${HOST_PORT}"
 ISSUER="${KEYCLOAK_ORIGIN}/realms/${REALM}"
-with_secrets python3 "$HELPER" config "$ISSUER" "$CONFIG"
+with_secrets kc config "$ISSUER" "$CONFIG"
 READY_ISSUERS=("$ISSUER")
 if [[ "$WORKSPACE_SSO" == 1 ]]; then
-  with_secrets python3 "$HELPER" sso-config "$KEYCLOAK_ORIGIN" "$SSO_CONFIG"
+  with_secrets kc sso-config "$KEYCLOAK_ORIGIN" "$SSO_CONFIG"
   READY_ISSUERS+=("${KEYCLOAK_ORIGIN}/realms/fvoci-e2e-ws-a" "${KEYCLOAK_ORIGIN}/realms/fvoci-e2e-ws-b")
 fi
 
@@ -309,7 +314,7 @@ fi
 # and its JWKS has a signing key (polled from this host, bounded).
 started=$SECONDS
 last_reason=""
-until last_reason="$(python3 "$HELPER" ready "${READY_ISSUERS[@]}" 2>&1)"; do
+until last_reason="$(kc ready "${READY_ISSUERS[@]}" 2>&1)"; do
   if [[ -z "$(compose ps --status running --quiet keycloak)" ]]; then
     echo "keycloak exited before it was ready" >&2
     compose logs --no-color --tail 40 keycloak 2>&1 | redact >&2
@@ -327,48 +332,14 @@ VERIFY_ARGS=("$CONFIG")
 if [[ "$WORKSPACE_SSO" == 1 ]]; then
   VERIFY_ARGS+=("$SSO_CONFIG")
 fi
-python3 "$HELPER" verify "${VERIFY_ARGS[@]}" >"$WORK/keycloak-setup.json"
+kc verify "${VERIFY_ARGS[@]}" >"$WORK/keycloak-setup.json"
 keep keycloak-setup.json <"$WORK/keycloak-setup.json"
 
 KC_REPO_DIGESTS="$(docker image inspect --format '{{json .RepoDigests}}' "$KC_IMAGE")"
-python3 - "$EVIDENCE" "$PLAYWRIGHT_FILES" <<PY
-import json, os, platform, subprocess, sys
-evidence = sys.argv[1]
-playwright_files = json.loads(sys.argv[2])
-def run(*cmd):
-    try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout.strip()
-    except OSError:
-        return None
-browsers = json.load(open(playwright_files["browsers"]))
-# Headless runs use Playwright's chromium-headless-shell build.
-shell = next(b for b in browsers["browsers"] if b["name"] == "chromium-headless-shell")
-info = {
-    "sourceSha": "$SOURCE_SHA",
-    "sourceTreeClean": run("git", "-C", "$ROOT", "status", "--porcelain", "--untracked-files=no") == "",
-    "fvociServer": run("$CARGO_TARGET_DIR/release/fvoci-server", "--version"),
-    "fvociServerBinary": "$CARGO_TARGET_DIR/release/fvoci-server (cargo build --release from source)",
-    "rustc": run("rustc", "-V"),
-    "bun": run("bun", "--version"),
-    "playwrightRuntime": "bun --bun x --no-install playwright test",
-    "playwright": json.load(open(playwright_files["test"]))["version"],
-    "browser": {"name": "chromium-headless-shell", "revision": shell["revision"],
-                "version": shell["browserVersion"], "headless": True},
-    "keycloakImage": "$KC_IMAGE",
-    "keycloakRepoDigests": json.loads('$KC_REPO_DIGESTS'),
-    "keycloakMode": "start-dev --import-realm (dev-file database inside the container)",
-    "docker": run("docker", "version", "--format", "{{.Server.Version}}"),
-    "compose": run("docker", "compose", "version", "--short"),
-    "os": platform.platform(),
-    "composeProject": "$PROJECT",
-    "keycloakPublished": "$HOST_PORT",
-    "issuer": "$ISSUER",
-}
-print(json.dumps(info, indent=2))
-if evidence:
-    with open(os.path.join(evidence, "versions.json"), "w") as out:
-        json.dump(info, out, indent=2)
-PY
+kc versions --evidence="$EVIDENCE" --playwright-files="$PLAYWRIGHT_FILES" --source-sha="$SOURCE_SHA" \
+  --root="$ROOT" --target-dir="$CARGO_TARGET_DIR" --keycloak-image="$KC_IMAGE" \
+  --repo-digests="$KC_REPO_DIGESTS" --compose-project="$PROJECT" --published="$HOST_PORT" \
+  --issuer="$ISSUER"
 
 declare -A GROUP_STATUS=()
 for mode in "${MODES[@]}"; do
@@ -407,7 +378,7 @@ EVENT_REALMS=("$REALM")
 if [[ "$WORKSPACE_SSO" == 1 ]]; then
   EVENT_REALMS+=(fvoci-e2e-ws-a fvoci-e2e-ws-b)
 fi
-python3 "$HELPER" events "$CONFIG" "${EVENT_REALMS[@]}" | keep keycloak-events.json
+kc events "$CONFIG" "${EVENT_REALMS[@]}" | keep keycloak-events.json
 if [[ -n "$EVIDENCE" ]]; then
   redact <"$WORK/run.log" >"$EVIDENCE/run.log"
   for file in "$WORK"/out/*; do
@@ -420,22 +391,7 @@ fi
 echo "=== summary (Keycloak ${KC_IMAGE}, issuer ${ISSUER}) ===" >&2
 failed=0
 for mode in "${MODES[@]}"; do
-  summary="$(python3 - "$WORK/out/playwright-${mode}.json" "$WORK/out/${mode}.log" <<'PY'
-import json, sys
-try:
-    report = json.load(open(sys.argv[1]))
-except OSError:
-    try:
-        results = [l.strip() for l in open(sys.argv[2]) if l.startswith("test result:")]
-        print(results[-1] if results else "no report")
-    except OSError:
-        print("no report")
-    sys.exit(0)
-stats = report.get("stats", {})
-print(f"passed {stats.get('expected', 0)}, failed {stats.get('unexpected', 0)}, "
-      f"flaky {stats.get('flaky', 0)}, skipped {stats.get('skipped', 0)}")
-PY
-)"
+  summary="$(kc summary "$WORK/out/playwright-${mode}.json" "$WORK/out/${mode}.log")"
   echo "group ${mode}: exit ${GROUP_STATUS[$mode]} (${summary})" >&2
   if [[ "${GROUP_STATUS[$mode]}" != 0 ]]; then
     failed=1
