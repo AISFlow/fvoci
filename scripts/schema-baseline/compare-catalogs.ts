@@ -1446,7 +1446,9 @@ function loadCatalog(path: string): Value {
   }
   let text: string;
   try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    // ignoreBOM keeps a leading U+FEFF so parseDocument rejects it, as json.load does
+    // on a file opened with encoding="utf-8".
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
   } catch {
     throw new Fail(1, `UnicodeDecodeError: 'utf-8' codec can't decode ${pyStrRepr(path)}\n`);
   }

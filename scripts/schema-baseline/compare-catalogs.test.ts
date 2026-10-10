@@ -987,6 +987,27 @@ caseTest("a ledger integer longer than 4300 digits fails closed", () => {
   }
 });
 
+caseTest("a UTF-8 BOM before either catalog fails closed like json.load", () => {
+  const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+  const plain = { old: JSON.stringify(OLD_LEDGER), new: JSON.stringify(NEW_LEDGER) };
+  for (const side of ["old", "new", "both"] as const) {
+    const body = (name: "old" | "new") =>
+      side === name || side === "both"
+        ? Buffer.concat([bom, Buffer.from(plain[name])])
+        : Buffer.from(plain[name]);
+    const { ts, py } = invoke({ "a.json": body("old"), "b.json": body("new") }, REPORTED);
+    for (const outcome of [py, ts]) {
+      expect(outcome.status, side).toBe(1);
+      expect(outcome.stdout, side).toBe("");
+      expect(outcome.report, side).toBeNull();
+    }
+    expect(exceptionLine(py.stderr), side).toContain("JSONDecodeError: Unexpected UTF-8 BOM");
+    expect(ts.stderr, side).toBe(
+      `JSONDecodeError: '<DIR>/${side === "new" ? "b" : "a"}.json': unexpected UTF-8 BOM\n`,
+    );
+  }
+});
+
 caseTest("a BOM before a ledger acl is unparsable", () => {
   const old = structuredClone(OLD_LEDGER);
   const fresh = structuredClone(NEW_LEDGER);
