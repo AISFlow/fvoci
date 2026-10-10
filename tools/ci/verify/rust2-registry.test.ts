@@ -573,6 +573,6 @@ test("a rust.yml the CLI loader refused is reported as its load error", () => {
     const ctx = contextFromTexts(ROOT, { "rust.yml": text });
     const loadError = ctx.loadErrors["rust.yml"];
     expect(loadError).toStartWith("rust.yml: ");
-    expect(verifyRustSuiteRegistry(ctx)).toEqual([`rust: ${loadError}`]);
+    expect(verifyRustSuiteRegistry(ctx)).toEqual([`rust: ${loadError ?? ""}`]);
   }
 });

@@ -287,7 +287,9 @@ describe("selected library", () => {
       for (const body of [undefined, text.slice(0, -1), new Uint8Array([0x61, 0xff, 0x0a])]) {
         expect(check(body)).toEqual([unreadable, registry]);
       }
-      const renamed = text.replace(`${RUST_SELECTED_LIBRARY_FILTERS[20]}\n`, "db::renamed::test\n");
+      const filter = RUST_SELECTED_LIBRARY_FILTERS[20] ?? "";
+      expect(filter).not.toBe("");
+      const renamed = text.replace(`${filter}\n`, "db::renamed::test\n");
       for (const body of [
         renamed,
         "\ufeff" + text,
