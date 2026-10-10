@@ -2,6 +2,7 @@ name: Web
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   push:
     branches: [main]
   merge_group:
@@ -44,13 +45,15 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
       - id: plan
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          python3 -m pip install --disable-pip-version-check --user --break-system-packages -r scripts/ci_selection_requirements.txt
-          python3 scripts/ci_selection.py plan \
+          bun tools/ci/plan.ts \
             --workflow web \
             --event-json "$GITHUB_EVENT_PATH" \
             --output-plan "$RUNNER_TEMP/ci-selection-plan.json" \
@@ -157,11 +160,7 @@ jobs:
           python3 scripts/selected-backend-ci/test_off_registration.py
       - name: Verify normal web e2e shard plan
         run: |
-          python3 -m pip install --disable-pip-version-check --user --break-system-packages -r scripts/ci_selection_requirements.txt
           bash scripts/test-web-e2e-groups.sh
-      # The planner CLI parses workflow YAML with the pinned parser installed above.
-      - name: Planner and gate CLI contract
-        run: bun test --timeout=60000 tools/ci/planner.test.ts
 
   web-native-checks:
     needs: ci-plan
@@ -1386,10 +1385,13 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
       - name: Fail closed on selection results
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
           TESTED_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          python3 scripts/ci_selection.py gate --workflow web --needs-json "$NEEDS_JSON" --tested-sha "$TESTED_SHA"
+          bun tools/ci/gate.ts --workflow web --needs-json "$NEEDS_JSON" --tested-sha "$TESTED_SHA"

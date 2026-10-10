@@ -12,7 +12,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { dispatchOptIns, EventShapeError, resolveSelectionInputs } from "./planner/events.ts";
 import { repoGit } from "./planner/git.ts";
-import { catalogRunners, postgresMatrixJson, rustCatalogRows } from "./planner/matrix.ts";
+import { postgresMatrixJson, rustCatalogRows } from "./planner/matrix.ts";
 import { renderGithubOutput, renderPlanFile, renderSummary } from "./planner/output.ts";
 import { PLANNER_ROOT } from "./planner/paths.ts";
 import { buildPlan } from "./planner/plan.ts";
@@ -20,11 +20,11 @@ import { pyLoads } from "./planner/pyjson.ts";
 import {
   isWorkflow,
   loadRegistryContext,
-  verifyPlanRegistry,
   WORKFLOWS,
   type RegistryVerifier,
   type Workflow,
 } from "./planner/registry.ts";
+import { verifyRepository } from "./verify-workflows.ts";
 
 export type PlanArgs = {
   workflow: Workflow;
@@ -126,9 +126,14 @@ export type Io = {
   stderr: (text: string) => void;
 };
 
-/** The registry step is injected so the complete verify-workflows registry can take this slot. */
+/**
+ * The complete verify-workflows check: a plan is only emitted for a checkout
+ * whose whole workflow registry (gate and plan scripts, toolchain pins, every
+ * suite slot) is valid, so no workflow can pass its gate with wiring the
+ * verifier refuses.
+ */
 export function verifyRegistryDefault(...[ctx]: Parameters<RegistryVerifier>): string[] {
-  return verifyPlanRegistry(ctx, catalogRunners);
+  return verifyRepository(ctx.root);
 }
 
 export function runPlan(

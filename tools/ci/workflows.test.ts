@@ -107,8 +107,21 @@ function oneStep(value: Job, predicate: (step: Step) => boolean): Step {
 }
 
 function caller(value: Job, operation: "plan" | "gate", workflow: string): Step {
-  const command = new RegExp(`^python3\\s+scripts/ci_selection\\.py\\s+${operation}\\b`, "m");
+  const command = new RegExp(`^bun\\s+tools/ci/${operation}\\.ts\\b`, "m");
   const step = oneStep(value, (candidate) => command.test(candidate.run ?? ""));
+  const setup = oneStep(
+    value,
+    (candidate) => candidate.uses?.startsWith("oven-sh/setup-bun@") ?? false,
+  );
+  assert.deepEqual(
+    setup.with,
+    { "bun-version-file": ".bun-version" },
+    "selector runs on the pinned Bun",
+  );
+  assert.ok(
+    value.steps.indexOf(setup) < value.steps.indexOf(step),
+    "Bun is set up before the selector",
+  );
   required(step);
   assert.equal(step.if, undefined, "selector caller must be unconditional");
   const script = (step.run ?? "").replace(/\\\n\s*/g, " ");
@@ -130,7 +143,11 @@ function selectionPolicy(workflow: Workflow, name: SelectedWorkflow): void {
   );
   assert.ok(typeof workflow.on === "object" && !Array.isArray(workflow.on));
   assert.ok(Object.hasOwn(workflow.on, "pull_request"));
-  assert.equal(workflow.on.pull_request, null, "required gate cannot have path/branch filters");
+  assert.deepEqual(
+    workflow.on.pull_request,
+    { types: ["opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft"] },
+    "required gate runs on ready_for_review and has no path/branch filters",
+  );
   assert.ok(Object.hasOwn(workflow.on, "merge_group"), "merge_group trigger is required");
   assert.deepEqual(
     workflow.on.merge_group,
@@ -168,7 +185,7 @@ function selectionPolicy(workflow: Workflow, name: SelectedWorkflow): void {
     ["ci-plan", ...Object.keys(products)].sort(),
     "gate needs must include plan and every producer/consumer",
   );
-  // Result semantics remain in ci_selection.py + test-ci-selection.sh: plan must
+  // Result semantics remain in tools/ci/gate.ts and its tests: plan must
   // succeed; selected jobs must succeed; only unselected jobs may be skipped.
   // TS checks the real caller and inputs, never evaluates Actions or copies that gate.
   const check = caller(gate, "gate", name);
@@ -403,6 +420,40 @@ type Mutation = {
 };
 const selectionMutations: Mutation[] = [
   {
+    name: "Python planner restored",
+    mutate: (w) => {
+      const s = caller(job(w, "ci-plan"), "plan", "web");
+      s.run = (s.run ?? "").replace("bun tools/ci/plan.ts", "python3 scripts/ci_selection.py plan");
+    },
+    error: "exactly once",
+  },
+  {
+    name: "gate without pinned Bun",
+    mutate: (w) => {
+      const gate = job(w, "web-ci-gate");
+      gate.steps = gate.steps.filter((s) => !(s.uses?.startsWith("oven-sh/setup-bun@") ?? false));
+    },
+    error: "exactly once",
+  },
+  {
+    name: "plan Bun from an unpinned version",
+    mutate: (w) => {
+      const plan = job(w, "ci-plan");
+      const setup = plan.steps.find((s) => s.uses?.startsWith("oven-sh/setup-bun@") ?? false);
+      if (setup) setup.with = { "bun-version": "latest" };
+    },
+    error: "pinned Bun",
+  },
+  {
+    name: "gate Bun set up after the gate",
+    mutate: (w) => {
+      const gate = job(w, "web-ci-gate");
+      const setup = gate.steps.filter((s) => s.uses?.startsWith("oven-sh/setup-bun@") ?? false);
+      gate.steps = [...gate.steps.filter((s) => !setup.includes(s)), ...setup];
+    },
+    error: "before the selector",
+  },
+  {
     name: "gate needs omission",
     mutate: (w) => {
       job(w, "web-ci-gate").needs = ["ci-plan"];
@@ -514,7 +565,7 @@ const selectionMutations: Mutation[] = [
     name: "echo instead of gate execution",
     mutate: (w) => {
       const s = caller(job(w, "web-ci-gate"), "gate", "web");
-      s.run = 'echo "python3 scripts/ci_selection.py gate --workflow web"';
+      s.run = 'echo "bun tools/ci/gate.ts --workflow web"';
     },
     error: "exactly once",
   },
