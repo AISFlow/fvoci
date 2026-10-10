@@ -402,7 +402,9 @@ export function runtimePermissions(
         facts.gid === runnerGid &&
         ((facts.mode >> 3) & required) === required
       ) {
-        assert.ok(runnerGid !== 0, "root group is never granted to the runtime actor");
+        // A group-grant boundary, not an ownership check: never hand a system or
+        // privileged group (root, adm, sudo, ... below GID 1000) to the actor.
+        assert.ok(runnerGid >= 1000, "privileged preparation group is never granted");
         allowedGroups.add(runnerGid);
         needed[entry] = {
           path_sha256: digest(entry),

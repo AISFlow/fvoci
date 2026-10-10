@@ -71,6 +71,7 @@ function footerCase(
   fault = "",
   exit = 0,
   pending = 0,
+  preparationGroup = 1001,
 ): { status: number; stderr: string; facts: Facts } {
   expect(spawnSync(["sudo", "-n", "true"]).exitCode).toBe(0);
   const temp = mkdtempSync(join(tmpdir(), "fvoci-permission-fixture-"));
@@ -149,7 +150,7 @@ function footerCase(
       mkdirSync(destination, { mode: 0o700 });
       if (fault === "destination-mode") chmodSync(destination, 0o755);
     }
-    sudo("chown", "-h", "-R", "0:1001", temp);
+    sudo("chown", "-h", "-R", "0:" + String(preparationGroup), temp);
     if (fault === "destination-foreign") sudo("chown", "1001:1001", destination);
     sudo("chmod", "750", temp, repo);
     if (fault === "unreadable") sudo("chmod", "600", header);
@@ -180,7 +181,7 @@ function footerCase(
         "-n",
         "setpriv",
         "--reuid=0",
-        "--regid=1001",
+        "--regid=" + String(preparationGroup),
         "--clear-groups",
         "env",
         "-i",
@@ -252,6 +253,14 @@ describe.skipIf(!linux).serial("selected footer with the Bun runner under real s
     expect(facts.stage?.required_group_path_count as number).toBeGreaterThan(0);
     expect(facts.output).toEqual(transferred);
     expect([facts.sqlite?.uid, facts.sqlite?.gid]).toEqual([0, 1001]);
+  });
+  test("a privileged preparation group is refused before any transfer", () => {
+    // GID 27 is sudo on Ubuntu runners; the actor must never receive it.
+    const { status, facts } = footerCase("", 0, 0, 27);
+    expect(status).not.toBe(0);
+    expect(facts.marker).toBeNull();
+    expect(facts.stage).toBeNull();
+    expect(facts.output).toEqual({ uid: 0, gid: 27, mode: 0o700 });
   });
   test("failed child keeps its first status after settlement and round trip", () => {
     const { status, stderr, facts } = footerCase("", 7);
