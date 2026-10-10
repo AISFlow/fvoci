@@ -9,6 +9,29 @@ import { git, PrCheckout, Repo, SHA_A, SHA_B, writeFile } from "./test-support.t
 const TIMEOUT = 60_000;
 const bytes = (text: string) => new TextEncoder().encode(text);
 
+/** resolveSelectionInputs for a pull_request event in a real checkout. */
+const resolve = (
+  work: string,
+  base: unknown,
+  head: unknown,
+  tested: string,
+  override: Partial<Git> = {},
+) =>
+  resolveSelectionInputs(
+    { ...repoGit(work), ...override },
+    new Map([
+      [
+        "pull_request",
+        new Map([
+          ["base", new Map([["sha", base as string]])],
+          ["head", new Map([["sha", head as string]])],
+        ]),
+      ],
+    ]),
+    "pull_request",
+    tested,
+  );
+
 describe("parseNameStatusZ", () => {
   test("rename, delete, copy and type changes", () => {
     const raw = bytes(
@@ -39,6 +62,53 @@ describe("parseNameStatusZ", () => {
   test("a path that is not UTF-8 is refused", () => {
     expect(() => parseNameStatusZ(new Uint8Array([0x4d, 0, 0xff, 0]))).toThrow();
   });
+
+  test("a leading U+FEFF is part of the path", () => {
+    expect(parseNameStatusZ(bytes("A\0﻿apps/web/src/x.vue\0R100\0﻿a\0﻿b\0"))).toEqual({
+      value: ["﻿apps/web/src/x.vue", "﻿a", "﻿b"],
+      error: null,
+    });
+  });
+});
+
+describe("U+FEFF file names through real git", () => {
+  const BOM_VUE = "﻿apps/web/src/x.vue";
+  test(
+    "an added BOM-prefixed path stays unknown and plans full",
+    () => {
+      const fx = new PrCheckout();
+      const head = fx.branch({ [BOM_VUE]: "<template />\n" });
+      const m = fx.merge(fx.base, head);
+      const inputs = resolve(m.work, fx.base, head, m.tested);
+      expect(inputs.paths).toEqual([BOM_VUE]);
+      expect(decideFromPaths(inputs.paths ?? []).reasonCode).toBe("FULL_UNKNOWN_PATH");
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "a rename to or from a BOM-prefixed path keeps both names and plans full",
+    () => {
+      const body = "<template>same</template>\n".repeat(20);
+      for (const [from, to] of [
+        ["apps/web/src/x.vue", BOM_VUE],
+        [BOM_VUE, "apps/web/src/y.vue"],
+      ] as const) {
+        const fx = new PrCheckout();
+        const base = fx.advance({ [from]: body });
+        git(fx.origin.dir, "checkout", "-q", "-B", "rename", "main");
+        const head = fx.origin.rename(from, to);
+        git(fx.origin.dir, "checkout", "-q", "main");
+        const m = fx.merge(base, head);
+        const inputs = resolve(m.work, base, head, m.tested);
+        expect(inputs.paths?.sort()).toEqual([from, to].sort());
+        expect(decideFromPaths(inputs.paths ?? []).reasonCode, `${from} -> ${to}`).toBe(
+          "FULL_UNKNOWN_PATH",
+        );
+      }
+    },
+    TIMEOUT,
+  );
 });
 
 describe("git reads", () => {
@@ -105,28 +175,6 @@ describe("git reads", () => {
 });
 
 describe("pull request checkout binding", () => {
-  const resolve = (
-    work: string,
-    base: unknown,
-    head: unknown,
-    tested: string,
-    override: Partial<Git> = {},
-  ) =>
-    resolveSelectionInputs(
-      { ...repoGit(work), ...override },
-      new Map([
-        [
-          "pull_request",
-          new Map([
-            ["base", new Map([["sha", base as string]])],
-            ["head", new Map([["sha", head as string]])],
-          ]),
-        ],
-      ]),
-      "pull_request",
-      tested,
-    );
-
   test(
     "the exact merge narrows docs and frontend",
     () => {

@@ -12,7 +12,8 @@ type Result<T> = { value: T; error: null } | { value: null; error: string };
 const ok = <T>(value: T): Result<T> => ({ value, error: null });
 const err = <T>(error: string): Result<T> => ({ value: null, error });
 
-const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true });
+// ignoreBOM keeps a leading U+FEFF: in a path it is a real character, not a header.
+const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /** Strict `git diff --name-status -z` parser; rejects truncated records. */
 export function parseNameStatusZ(data: Uint8Array): Result<string[]> {
