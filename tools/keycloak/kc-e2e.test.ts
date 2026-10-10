@@ -74,9 +74,23 @@ describe("redaction", () => {
     expect(() => {
       registerConfigSecrets({ secrets: ["7chars!"], users: {} });
     }).toThrow("config secrets.0 is shorter than 8 characters");
+    // Named by position, and every usable secret is registered first.
     expect(() => {
-      registerConfigSecrets({ secrets: [], users: { a: { password: 3 } } });
-    }).toThrow("config users.a.password is not a string");
+      registerConfigSecrets({
+        secrets: [],
+        users: { "user-key-0123": { password: 3 } },
+        admin: { password: "admin-pass-0" },
+      });
+    }).toThrow("config users.0.password is not a string");
+    expect(knownSecrets()).toEqual(["admin-pass-0"]);
+    expect(() => {
+      registerConfigSecrets({ secrets: "abcdefgh", users: {} });
+    }).toThrow("config secrets is not a list");
+    forgetSecrets();
+    expect(() => {
+      registerConfigSecrets({ users: {}, fvoci: "abcdefgh", admin: { password: "admin-pass-1" } });
+    }).toThrow("config fvoci is not an object");
+    expect(knownSecrets()).toEqual(["admin-pass-1"]);
     expect(() => {
       registerConfigSecrets({ secrets: [] });
     }).toThrow("config has no users");
@@ -314,7 +328,8 @@ describe("CLI", () => {
     expect(statSync(out).mode & 0o777).toBe(0o600);
     const again = await cli(["config", "http://127.0.0.1:1/realms/fvoci-e2e", out], { env: ENV });
     expect(again.code).toBe(1);
-    expect(again.stderr).toStartWith("keycloak e2e: ");
+    // Named by a fixed label and the code: the fs message would quote the path.
+    expect(again.stderr).toBe("keycloak e2e: cannot create the config (EEXIST)\n");
   });
 
   test("render refuses a missing secret and writes nothing", async () => {
@@ -344,6 +359,22 @@ describe("CLI", () => {
       "a <redacted-secret> b\nGET /cb?code=<redacted>\ntail <redacted-secret>",
     );
     expect(readFileSync(config, "utf8")).toContain(secret("KC_E2E_CLIENT_SECRET"));
+  });
+
+  test("redact refuses a secret that a line break or control character would split", async () => {
+    // A redacted line is written as soon as it ends: a secret spanning two
+    // lines would leave both halves in the output.
+    const halves = ["0123abcd4567", "89ef0123abcd"];
+    const config = join(dir, "redact-multiline.json");
+    for (const separator of ["\n", "\r", "\x1b", "\u2028"]) {
+      writeFileSync(config, JSON.stringify({ secrets: [halves.join(separator)], users: {} }));
+      const result = await cli(["redact", config], { stdin: `${halves.join("\n")}\n` });
+      expect(result.code).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe(
+        "keycloak e2e: config secrets.0 contains a line break or control character\n",
+      );
+    }
   });
 
   test("unknown commands and arities exit 1", async () => {

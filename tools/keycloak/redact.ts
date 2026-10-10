@@ -119,8 +119,10 @@ function failClosed(line: string): string {
 
 /** One line (with its newline, if any) without secrets or OAuth values. */
 export function redactLine(input: string, secrets: readonly string[]): string {
-  let line = input.replace(ANSI, "");
-  for (const secret of secrets) line = line.replaceAll(secret, "<redacted-secret>");
+  // Known secrets go first (raw or JSON-escaped), before any rule can change
+  // part of one, and again once colour codes are gone.
+  let line = replaceSecrets(input, secrets).replace(ANSI, "");
+  line = replaceSecrets(line, secrets);
   line = line.replace(QUOTED, (whole: string, ...rest: unknown[]) => {
     const groups = rest.at(-1) as Groups;
     if (keeps(groups.k1 ?? groups.k3, groups.ev ?? groups.pv)) return whole;
@@ -148,20 +150,48 @@ export function redactLine(input: string, secrets: readonly string[]): string {
 //
 // Every per-run secret the helper reads (environment, configs) or obtains
 // (the admin access token) is registered here, and every byte the helper
-// writes to stdout or stderr goes through `scrubText`. A secret shorter than
-// MIN_SECRET_LENGTH is refused instead of being left out: a short value would
-// also match ordinary text.
+// writes to stdout or stderr goes through `scrubText`. A value that cannot be
+// scrubbed reliably is refused instead of being left out: one shorter than
+// MIN_SECRET_LENGTH would also match ordinary text, and one with a line break
+// or control character would be split across separately written lines (or
+// changed by the colour-code removal) and escape the per-line scrub.
+//
+// A refusal names the secret by a fixed field name and numeric index only,
+// never by a value or key taken from the input: nothing may reach the output
+// that the registry has not seen.
+
+/** An error whose message is written out (scrubbed): fixed text, numeric indexes and registered values only. */
+export class HelperError extends Error {}
+
+/**
+ * The error's code (ENOENT, ConnectionRefused, ...) when it is an identifier,
+ * else its name (TimeoutError, ...); never its message, which may quote input.
+ */
+export function errorName(error: unknown): string {
+  if (!(error instanceof Error)) return typeof error;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(code) ? code : error.name;
+}
 
 export const MIN_SECRET_LENGTH = 8;
 const known = new Set<string>();
 
 const length = (text: string) => Array.from(text).length;
 
-/** Registers a secret; `what` names it in the refusal, never the value. */
+const UNSPLITTABLE = /[\p{Cc}\u2028\u2029]/u;
+
+/** Why a secret cannot be registered, or undefined when it can. */
+function refusal(value: string, what: string): string | undefined {
+  if (length(value) < MIN_SECRET_LENGTH)
+    return `${what} is shorter than ${String(MIN_SECRET_LENGTH)} characters`;
+  if (UNSPLITTABLE.test(value)) return `${what} contains a line break or control character`;
+  return undefined;
+}
+
+/** Registers a secret; `what` (fixed text) names it in the refusal, never the value. */
 export function addSecret(value: string, what: string): void {
-  if (length(value) < MIN_SECRET_LENGTH) {
-    throw new Error(`${what} is shorter than ${String(MIN_SECRET_LENGTH)} characters`);
-  }
+  const refused = refusal(value, what);
+  if (refused !== undefined) throw new HelperError(refused);
   known.add(value);
 }
 
@@ -182,15 +212,20 @@ const asciiEscaped = (text: string) =>
     (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
   );
 
-/** The text with every registered secret, raw or JSON-escaped, replaced. */
-export function scrubText(text: string): string {
+/** The text with each of `secrets` (longest first), raw or JSON-escaped, replaced. */
+function replaceSecrets(text: string, secrets: readonly string[]): string {
   let out = text;
-  for (const secret of knownSecrets()) {
+  for (const secret of secrets) {
     for (const form of new Set([secret, jsonEscaped(secret), asciiEscaped(secret)])) {
       out = out.replaceAll(form, "<redacted-secret>");
     }
   }
   return out;
+}
+
+/** The text with every registered secret, raw or JSON-escaped, replaced. */
+export function scrubText(text: string): string {
+  return replaceSecrets(text, knownSecrets());
 }
 
 /** Registers every secret of a spec config: client secrets, passwords, the admin password. */
@@ -201,25 +236,44 @@ export function registerConfigSecrets(config: unknown): void {
     admin?: unknown;
     fvoci?: unknown;
   };
-  const users = record.users;
-  if (users === null || typeof users !== "object") throw new Error("config has no users");
+  const problems: string[] = [];
+  const object = (value: unknown, problem: string): object => {
+    if (value !== null && typeof value === "object") return value;
+    problems.push(problem);
+    return {};
+  };
+  const users = object(record.users, "config has no users");
+  const given = record.secrets ?? [];
+  if (!Array.isArray(given)) problems.push("config secrets is not a list");
+  const secrets: unknown[] = Array.isArray(given) ? given : [];
+  const fvoci = object(record.fvoci ?? {}, "config fvoci is not an object");
+  const member = (value: unknown, key: string): unknown =>
+    value !== null && typeof value === "object"
+      ? (value as Record<string, unknown>)[key]
+      : undefined;
+  // Users and FVOCI members are named by position (JavaScript key order),
+  // never by key: their keys are input.
   const listed: [string, unknown][] = [
-    ...(Array.isArray(record.secrets) ? (record.secrets as unknown[]) : []).map(
-      (value, index): [string, unknown] => [`config secrets.${String(index)}`, value],
-    ),
-    ...Object.entries(users as Record<string, { password?: unknown }>).map(
-      ([name, user]): [string, unknown] => [`config users.${name}.password`, user.password],
-    ),
-    ["config admin.password", (record.admin as { password?: unknown } | undefined)?.password],
-    ...Object.entries((record.fvoci ?? {}) as Record<string, unknown>).map(
-      ([name, value]): [string, unknown] => [`config fvoci.${name}`, value],
-    ),
+    ...secrets.map((value, index): [string, unknown] => [`config secrets.${String(index)}`, value]),
+    ...Object.values(users).map((user, index): [string, unknown] => [
+      `config users.${String(index)}.password`,
+      member(user, "password"),
+    ]),
+    ["config admin.password", member(record.admin, "password")],
+    ...Object.values(fvoci).map((value, index): [string, unknown] => [
+      `config fvoci.${String(index)}`,
+      value,
+    ]),
   ];
+  // Every usable secret is registered before the first refusal is raised, so
+  // a later error path still scrubs them.
   for (const [what, value] of listed) {
     if (value === undefined) continue;
-    if (typeof value !== "string") throw new Error(`${what} is not a string`);
-    addSecret(value, what);
+    const refused = typeof value === "string" ? refusal(value, what) : `${what} is not a string`;
+    if (refused === undefined) known.add(value as string);
+    else problems.push(refused);
   }
+  if (problems.length > 0) throw new HelperError(problems[0]);
 }
 
 /**

@@ -1,7 +1,7 @@
 // The test realms, the configs handed to the spec and the Rust test, and the
 // checks on what Keycloak reports back. No I/O: callers pass the environment
 // and the admin API answers.
-import { addSecret } from "./redact.ts";
+import { HelperError, addSecret } from "./redact.ts";
 
 export const REALM = "fvoci-e2e";
 export const CLIENT_ID = "fvoci-e2e";
@@ -25,8 +25,6 @@ export const SSO_CLIENT_ID = "fvoci-ws";
 
 export type Env = Record<string, string | undefined>;
 export type Json = Record<string, unknown>;
-
-export class HelperError extends Error {}
 
 /** A per-run secret from the environment (never echoed). */
 export function need(env: Env, name: string): string {

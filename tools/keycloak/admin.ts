@@ -1,7 +1,6 @@
 // Keycloak over HTTP: readiness, the admin API read-back and the event log.
 import {
   CLIENT_ID,
-  HelperError,
   REALM,
   clientSummary,
   eventReport,
@@ -14,7 +13,13 @@ import {
   scrubSecrets,
   type Json,
 } from "./realm.ts";
-import { addSecret, knownSecrets, registerConfigSecrets } from "./redact.ts";
+import {
+  HelperError,
+  addSecret,
+  errorName,
+  knownSecrets,
+  registerConfigSecrets,
+} from "./redact.ts";
 
 type Answer = { status: number; body: string };
 
@@ -54,13 +59,6 @@ function text(value: unknown, ...path: string[]): string {
   for (const key of path) member = get(member, key);
   if (typeof member !== "string") throw new HelperError(`config lacks ${path.join(".")}`);
   return member;
-}
-
-/** The system error code (ECONNREFUSED, ...) or the error's name (TimeoutError, ...). */
-function errorName(error: unknown): string {
-  if (!(error instanceof Error)) return typeof error;
-  const code = (error as { code?: unknown }).code;
-  return typeof code === "string" ? code : error.name;
 }
 
 /** Discovery answers 200 with exactly this issuer and its JWKS has an RS256 signing key. */

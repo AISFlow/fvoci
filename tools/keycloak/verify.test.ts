@@ -214,4 +214,41 @@ describe("verify against a correct fake Keycloak", () => {
     expect(result.stderr.includes(canary)).toBe(false);
     expect(result.stdout.includes(canary)).toBe(false);
   });
+
+  test("a second config that fails to load never names its path", async () => {
+    // The first config's admin password as the second file's name.
+    const canary = secret("KC_BOOTSTRAP_ADMIN_PASSWORD");
+    const invalid = join(dir, `${canary}-invalid.json`);
+    writeFileSync(invalid, "{");
+    for (const [path, message] of [
+      [join(dir, `${canary}-missing.json`), "cannot read the SSO config (ENOENT)"],
+      [invalid, "the SSO config is not JSON"],
+    ] as const) {
+      const result = await cli(["verify", configPath(), path]);
+      expect(result.code).toBe(1);
+      expect(result.stderr).toBe(`keycloak e2e: ${message}\n`);
+      expect(result.stdout).toBe("");
+    }
+  });
+
+  test("a refused config member is named by index, never by its key", async () => {
+    const config = JSON.parse(readFileSync(configPath(), "utf8")) as Record<string, unknown>;
+    const admin = secret("KC_BOOTSTRAP_ADMIN_PASSWORD");
+    const other = "fvoci-canary-0123456789";
+    const cases: [Record<string, unknown>, string, string][] = [
+      // A user named like the admin password, which comes later.
+      [{ users: { [admin]: { password: 3 } } }, admin, "config users.0.password is not a string"],
+      // An FVOCI member named like a later member's value.
+      [{ fvoci: { [other]: 3, later: other } }, other, "config fvoci.0 is not a string"],
+    ];
+    for (const [change, canary, message] of cases) {
+      const path = join(dir, "verify-key-canary.json");
+      writeFileSync(path, pyDumps({ ...config, secrets: [], ...change }));
+      const result = await cli(["verify", path]);
+      expect(result.code).toBe(1);
+      expect(result.stderr).toBe(`keycloak e2e: ${message}\n`);
+      expect(result.stderr.includes(canary)).toBe(false);
+      expect(result.stdout).toBe("");
+    }
+  });
 });

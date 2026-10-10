@@ -9,7 +9,6 @@ import process from "node:process";
 import { parseArgs } from "node:util";
 import { events, ready, verify } from "./admin.ts";
 import {
-  HelperError,
   groupSummary,
   pyDumps,
   pyDumpsIndented,
@@ -21,7 +20,9 @@ import {
   type Json,
 } from "./realm.ts";
 import {
+  HelperError,
   LineSplitter,
+  errorName,
   REDACTION_CASES,
   redactLine,
   knownSecrets,
@@ -48,9 +49,14 @@ const USAGE = `usage: kc-e2e.ts <command> [<args>]
            --issuer=<url>               toolchain and image versions (JSON)
   summary <playwright.json> <log>       one group's result line`;
 
-/** Creates `path` (never overwrites) with `mode` and writes `text`. */
-function createFile(path: string, text: string, mode: number): void {
-  const fd = openSync(path, "wx", mode);
+/** Creates `path` (never overwrites) with `mode` and writes `text`; errors name it by `label`. */
+function createFile(path: string, text: string, mode: number, label: string): void {
+  let fd: number;
+  try {
+    fd = openSync(path, "wx", mode);
+  } catch (error) {
+    throw new HelperError(`cannot create ${label} (${errorName(error)})`);
+  }
   try {
     writeSync(fd, text);
   } finally {
@@ -58,19 +64,39 @@ function createFile(path: string, text: string, mode: number): void {
   }
 }
 
-function loadJson(path: string): Json {
-  let text: string;
+/** A text file; errors name it by `label` only (paths are input). */
+function readText(path: string, label: string): string {
   try {
-    text = readFileSync(path, "utf8");
+    return readFileSync(path, "utf8");
   } catch (error) {
-    throw new HelperError(`cannot read ${path} (${(error as { code?: string }).code ?? "error"})`);
+    throw new HelperError(`cannot read ${label} (${errorName(error)})`);
   }
+}
+
+/** A JSON value; errors name it by `label` only (the content may hold secrets). */
+function parseJson(text: string, label: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new HelperError(`${label} is not JSON`);
+  }
+}
+
+/** A JSON file; errors name it by `label` only (paths are input, the content holds secrets). */
+function loadJson(path: string, label: string): Json {
+  const text = readText(path, label);
   try {
     return JSON.parse(text) as Json;
   } catch {
-    // Never quote the content: the configs hold the per-run secrets.
-    throw new HelperError(`${path} is not JSON`);
+    throw new HelperError(`${label} is not JSON`);
   }
+}
+
+/** A spec config, its secrets registered before anything else is read or written. */
+function loadConfig(path: string): Json {
+  const config = loadJson(path, "the config");
+  registerConfigSecrets(config);
+  return config;
 }
 
 // The output boundary: every byte this helper writes to stdout or stderr,
@@ -83,7 +109,7 @@ function err(text: string): void {
 }
 
 async function redactStdin(configPath: string | undefined): Promise<void> {
-  if (configPath && existsSync(configPath)) registerConfigSecrets(loadJson(configPath));
+  if (configPath && existsSync(configPath)) loadConfig(configPath);
   const secrets = knownSecrets();
   // Invalid UTF-8 becomes U+FFFD instead of ending the stream; a BOM is kept.
   const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
@@ -129,8 +155,8 @@ function osName(): string {
 }
 
 /** A member the evidence must carry; a missing one fails instead of vanishing from the JSON. */
-function required(record: Json, key: string, source: string): unknown {
-  if (!Object.hasOwn(record, key)) throw new HelperError(`${source} has no ${key}`);
+function required(record: Json, key: string, label: string): unknown {
+  if (!Object.hasOwn(record, key)) throw new HelperError(`${label} has no ${key}`);
   return record[key];
 }
 
@@ -158,8 +184,11 @@ function versions(argv: string[]): void {
     if (typeof given !== "string") throw new HelperError(`versions: --${name} is required`);
     return given;
   };
-  const files = JSON.parse(value("playwright-files")) as { test: string; browsers: string };
-  const browsers = loadJson(files.browsers).browsers as Json[];
+  const files = parseJson(value("playwright-files"), "--playwright-files") as {
+    test: string;
+    browsers: string;
+  };
+  const browsers = loadJson(files.browsers, "browsers.json").browsers as Json[];
   // Headless runs use Playwright's chromium-headless-shell build.
   const shell = browsers.find((browser) => browser.name === "chromium-headless-shell");
   if (shell === undefined) throw new HelperError("browsers.json has no chromium-headless-shell");
@@ -173,15 +202,19 @@ function versions(argv: string[]): void {
     rustc: run("rustc", "-V"),
     bun: run("bun", "--version"),
     playwrightRuntime: "bun --bun x --no-install playwright test",
-    playwright: required(loadJson(files.test), "version", files.test),
+    playwright: required(
+      loadJson(files.test, "the Playwright package.json"),
+      "version",
+      "the Playwright package.json",
+    ),
     browser: {
       name: "chromium-headless-shell",
-      revision: required(shell, "revision", files.browsers),
-      version: required(shell, "browserVersion", files.browsers),
+      revision: required(shell, "revision", "browsers.json"),
+      version: required(shell, "browserVersion", "browsers.json"),
       headless: true,
     },
     keycloakImage: value("keycloak-image"),
-    keycloakRepoDigests: JSON.parse(value("repo-digests")) as unknown,
+    keycloakRepoDigests: parseJson(value("repo-digests"), "--repo-digests"),
     keycloakMode: "start-dev --import-realm (dev-file database inside the container)",
     docker: run("docker", "version", "--format", "{{.Server.Version}}"),
     compose: run("docker", "compose", "version", "--short"),
@@ -202,7 +235,7 @@ function summary(reportPath: string, logPath: string): string {
     report = JSON.parse(readFileSync(reportPath, "utf8"));
   } catch (error) {
     if (!(error instanceof Error && "code" in error))
-      throw new HelperError(`${reportPath} is not JSON`);
+      throw new HelperError("the Playwright report is not JSON");
     let log: string | undefined;
     try {
       log = readFileSync(logPath, "utf8");
@@ -222,32 +255,43 @@ async function main(argv: string[]): Promise<void> {
     const values = realmValues(env);
     createFile(
       args[1] as string,
-      renderTemplate(readFileSync(args[0] as string, "utf8"), values),
+      renderTemplate(readText(args[0] as string, "the template"), values),
       0o644,
+      "the realm file",
     );
   } else if (command === "render-sso" && two) {
     const realms = ssoRealmValues(env);
-    const template = readFileSync(args[0] as string, "utf8");
+    const template = readText(args[0] as string, "the template");
     // Readable by the container's keycloak user; the run directory is 0700.
     for (const [name, values] of realms) {
-      createFile(join(args[1] as string, name), renderTemplate(template, values), 0o644);
+      createFile(
+        join(args[1] as string, name),
+        renderTemplate(template, values),
+        0o644,
+        "an SSO realm file",
+      );
     }
   } else if (command === "config" && two) {
-    createFile(args[1] as string, pyDumps(specConfig(args[0] as string, env)), 0o600);
+    createFile(args[1] as string, pyDumps(specConfig(args[0] as string, env)), 0o600, "the config");
   } else if (command === "sso-config" && two) {
-    createFile(args[1] as string, pyDumps(ssoConfig(args[0] as string, env)), 0o600);
+    createFile(
+      args[1] as string,
+      pyDumps(ssoConfig(args[0] as string, env)),
+      0o600,
+      "the SSO config",
+    );
   } else if (command === "ready" && args.length > 0) {
     for (const issuer of args) await ready(issuer);
   } else if (command === "verify" && (args.length === 1 || two)) {
-    const { report, problems } = await verify(
-      loadJson(args[0] as string),
-      two ? loadJson(args[1] as string) : undefined,
-    );
+    // The first config's secrets are registered before the second is read.
+    const config = loadConfig(args[0] as string);
+    const sso = two ? loadJson(args[1] as string, "the SSO config") : undefined;
+    const { report, problems } = await verify(config, sso);
     out(`${pyDumpsIndented(report)}\n`);
     if (problems.length > 0)
       throw new HelperError(`imported settings differ:\n  ${problems.join("\n  ")}`);
   } else if (command === "events" && args.length > 0) {
-    const report = await events(loadJson(args[0] as string), args.slice(1));
+    const report = await events(loadConfig(args[0] as string), args.slice(1));
     out(`${pyDumpsIndented(report)}\n`);
   } else if (command === "selftest" && args.length === 0) {
     const failed = selftestFailures();
@@ -270,15 +314,20 @@ async function main(argv: string[]): Promise<void> {
   } else if (command === "summary" && two) {
     out(`${summary(args[0] as string, args[1] as string)}\n`);
   } else {
-    throw new HelperError(
-      command === undefined ? USAGE : `unknown command or arguments: ${command}`,
-    );
+    throw new HelperError(command === undefined ? USAGE : "unknown command or arguments");
   }
 }
 
-/** Reports an error through the output boundary: messages may hold config-derived text. */
+/**
+ * Reports an error through the output boundary. Only a HelperError's message
+ * is written: any other error (fs, fetch, JSON.parse) may quote a path, URL or
+ * input that holds a secret not yet registered, so it is named by its code or
+ * type alone; stack and cause are never written.
+ */
 function fail(error: unknown): void {
-  err(`keycloak e2e: ${error instanceof Error ? error.message : String(error)}\n`);
+  const message =
+    error instanceof HelperError ? error.message : `unexpected error (${errorName(error)})`;
+  err(`keycloak e2e: ${message}\n`);
   process.exitCode = 1;
 }
 
