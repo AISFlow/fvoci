@@ -15,6 +15,11 @@ libc = "=0.2.189"
 serde_json = "=1.0.151"
 sha2 = "=0.11.0"
 sha3 = "=0.11.0"
+# rust-binaries: tar 0.4.46 is the root lockfile's pin (headers, PAX and GNU
+# long names; no xattr). yaml-rust2 0.13.0 reads rust.yml's PostgreSQL matrix
+# catalog; the encoding feature is off because workflow files are UTF-8.
+tar = { version = "=0.4.46", default-features = false }
+yaml-rust2 = { version = "=0.13.0", default-features = false }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # SHA3-256 of the 9 MiB amalgamation and DEFLATE decoding stay fast in the
