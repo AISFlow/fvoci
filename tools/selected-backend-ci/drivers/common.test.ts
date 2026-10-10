@@ -12,12 +12,13 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
-import { parseJson } from "../io.ts";
+import { parseJson, sha } from "../io.ts";
 import {
   attachmentJson,
   command,
   decode,
   failureCheckpoint,
+  fileSha,
   field,
   frameLine,
   identityGone,
@@ -350,6 +351,20 @@ describe("encodings", () => {
     expect(attachmentJson(Buffer.from('{"a":1}').toString("base64"))).toEqual({ a: 1 });
     for (const body of ["eyJhIjoxfQ", "eyJhIjo xfQ==", 7, "eyJh\nIjoxfQ=="])
       expect(() => attachmentJson(body)).toThrow();
+  });
+  test("fileSha is io.ts sha across the reused buffer boundary", () => {
+    const directory = temporary();
+    try {
+      for (const size of [0, 1, 1048575, 1048576, 1048577, 3 * 1048576 + 7]) {
+        const path = join(directory, String(size));
+        writeFileSync(path, Buffer.alloc(size, size % 251));
+        expect(fileSha(path)).toBe(sha(path));
+      }
+      // A short file after a long one must not hash the long one's tail.
+      expect(fileSha(join(directory, "1"))).toBe(sha(join(directory, "1")));
+    } finally {
+      rmSync(directory, { recursive: true });
+    }
   });
   test("a required JSON member refuses when absent, even as undefined", () => {
     expect(field({ a: null }, "a")).toBeNull();

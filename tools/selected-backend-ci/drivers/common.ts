@@ -10,10 +10,12 @@ import {
   lstatSync,
   openSync,
   readFileSync,
+  readSync,
   statSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { get } from "node:http";
 import { connect } from "node:net";
 import { join, relative } from "node:path";
@@ -244,8 +246,28 @@ export function failureDigest(value: unknown): string {
 }
 
 // rglob('*') + is_file(): symlinked files count, dangling links do not.
+// The same SHA-256 hex as io.ts sha, through one reused buffer: io.ts allocates
+// 1 MiB per file, and an input closure is ~130k mostly small files (25 s per
+// pass against 3 s here; the Python driver took 6 s).
+const hashBuffer = new Uint8Array(1048576);
+export function fileSha(path: string): string {
+  const fd = openSync(path, "r"),
+    hash = createHash("sha256");
+  try {
+    for (;;) {
+      const n = readSync(fd, hashBuffer);
+      if (!n) break;
+      hash.update(hashBuffer.subarray(0, n));
+    }
+  } finally {
+    closeSync(fd);
+  }
+  return hash.digest("hex");
+}
 export const treeHashes = (directory: string) =>
-  Object.fromEntries(files(directory, true).map((path) => [relative(directory, path), sha(path)]));
+  Object.fromEntries(
+    files(directory, true).map((path) => [relative(directory, path), fileSha(path)]),
+  );
 
 export async function inputCheck(
   before: Inputs,
@@ -263,7 +285,9 @@ export async function inputCheck(
   const listed = (await git("ls-files", "-z")).stdout.split("\0").slice(0, -1);
   assert.ok(deepEquals(new Set(listed), new Set(Object.keys(before.tracked))));
   const hashes = (names: string[], base: string | null) =>
-    Object.fromEntries(names.map((name) => [name, sha(base === null ? name : join(base, name))]));
+    Object.fromEntries(
+      names.map((name) => [name, fileSha(base === null ? name : join(base, name))]),
+    );
   const tracked = hashes(Object.keys(before.tracked), root),
     external = hashes(Object.keys(before.external), null),
     untracked = hashes(Object.keys(before.untracked), root);
