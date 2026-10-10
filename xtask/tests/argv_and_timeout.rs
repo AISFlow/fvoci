@@ -75,6 +75,13 @@ fn option_like_tokens_are_missing_values() {
         "-x",
         "--unknown",
         "-hx",
+        // Not Unicode Nd after `-` / `-.`: argparse classifies these as options.
+        "-..5",
+        "-²",
+        "-½",
+        "-Ⅻ",
+        "-٫5",
+        "-x1",
     ] {
         assert_eq!(
             usage(
@@ -104,7 +111,24 @@ fn option_like_tokens_are_missing_values() {
 
 #[test]
 fn argument_like_values_and_inline_values_are_kept() {
-    for value in ["-", "-5", "-1.5", "-.5", "-x y", "--not an option", ""] {
+    // argparse `-\.?\d` is a prefix match over Unicode decimal digits (Nd).
+    for value in [
+        "-",
+        "-5",
+        "-1.5",
+        "-.5",
+        "-x y",
+        "--not an option",
+        "",
+        "-1.zip",
+        "-1tool",
+        "-2.",
+        "-５",
+        "-١",
+        "-1.５",
+        "-.٥x",
+        "-𝟎",
+    ] {
         let Outcome::Parsed(parsed) = args::parse(
             os(&["--archive", "a", "--prefix", "p", T, "--cc", value]),
             BUILD,
@@ -125,7 +149,7 @@ fn argument_like_values_and_inline_values_are_kept() {
 
 #[test]
 fn trailing_command_starts_at_argument_like_tokens() {
-    for first in ["-5", "-", "-x y", "consumer"] {
+    for first in ["-5", "-", "-x y", "consumer", "-1.zip", "-５", "-2."] {
         let Outcome::Parsed(parsed) = args::parse(os(&["--parent", "p", first, "-h"]), CI, true)
         else {
             panic!("{first:?}")
