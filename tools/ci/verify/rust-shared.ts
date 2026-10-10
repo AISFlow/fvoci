@@ -4,7 +4,12 @@
 import { readFileSync, statSync } from "node:fs";
 import { PY_WS, get, has, isMapping, pyRepr, pyStrip, pySplit, type Mapping } from "./py.ts";
 
-export type VerifyContext = { root: string; workflows: Record<string, unknown> };
+export type VerifyContext = {
+  root: string;
+  workflows: Record<string, unknown>;
+  /** The CLI loader's error for a discovered file it left out of workflows. */
+  loadErrors?: Readonly<Record<string, string>>;
+};
 export type Result<T> = [T, null] | [null, string];
 
 export const RUST_WORKFLOW_FILE = "rust.yml";
@@ -105,13 +110,23 @@ export function cargoTestFlagsInText(text: string): Set<string> {
 }
 
 // ctx.workflows maps a workflow filename to its parsed YAML (or the loader's
-// parse Error); an absent key means the file does not exist.
+// parse Error); the CLI loader instead records a refused file in loadErrors.
+// A file in neither does not exist.
 export function rustWorkflowPresent(ctx: VerifyContext): boolean {
-  return has(ctx.workflows, RUST_WORKFLOW_FILE);
+  return has(ctx.workflows, RUST_WORKFLOW_FILE) || rustLoadError(ctx) !== undefined;
+}
+
+function rustLoadError(ctx: VerifyContext): string | undefined {
+  const errors = ctx.loadErrors;
+  return errors !== undefined && Object.hasOwn(errors, RUST_WORKFLOW_FILE)
+    ? errors[RUST_WORKFLOW_FILE]
+    : undefined;
 }
 
 export function rustWorkflowJobs(ctx: VerifyContext): Result<Mapping> {
   if (!rustWorkflowPresent(ctx)) return [null, `rust: missing workflow file ${RUST_WORKFLOW_FILE}`];
+  const loadError = rustLoadError(ctx);
+  if (loadError !== undefined) return [null, `rust: ${loadError}`];
   const data = ctx.workflows[RUST_WORKFLOW_FILE];
   if (data instanceof Error)
     return [null, `rust: ${RUST_WORKFLOW_FILE}: YAML parse failed: ${data.message}`];
