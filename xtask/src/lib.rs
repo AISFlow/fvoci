@@ -3,6 +3,7 @@
 pub mod args;
 pub mod host;
 pub mod process;
+pub mod rustup_ci_metadata;
 pub mod shell;
 pub mod sqlite;
 pub mod sqlite_build;

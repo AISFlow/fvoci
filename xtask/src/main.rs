@@ -9,6 +9,8 @@ Usage: cargo xtask <command> [arguments...]
 
 Commands:
   help          Show this help
+  prepare-rustup-ci-metadata
+                Canonical Rustup component order before CI input capture
   sqlite-build  Authenticated native SQLite static build
                 (entry point: scripts/prepare-sqlite-build.sh)
   sqlite-ci     Pinned SQLite prerequisite and root Cargo entry
@@ -21,6 +23,7 @@ Options:
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Help,
+    PrepareRustupCiMetadata(Vec<OsString>),
     SqliteBuild(Vec<OsString>),
     SqliteCi(Vec<OsString>),
 }
@@ -49,6 +52,9 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, CliEr
     let command = match argument.to_str() {
         Some("help" | "-h" | "--help") => Command::Help,
         // Task commands own their remaining arguments.
+        Some("prepare-rustup-ci-metadata") => {
+            return Ok(Command::PrepareRustupCiMetadata(args.collect()))
+        }
         Some("sqlite-build") => return Ok(Command::SqliteBuild(args.collect())),
         Some("sqlite-ci") => return Ok(Command::SqliteCi(args.collect())),
         _ => return Err(CliError::UnknownCommand(argument)),
@@ -70,6 +76,9 @@ fn run(command: Command) -> ExitCode {
         Command::Help => {
             print!("{HELP}");
             ExitCode::SUCCESS
+        }
+        Command::PrepareRustupCiMetadata(args) => {
+            exit_status(xtask::rustup_ci_metadata::main(args))
         }
         Command::SqliteBuild(args) => exit_status(xtask::sqlite_build::main(args)),
         Command::SqliteCi(args) => exit_status(xtask::sqlite_ci::main(args)),
@@ -171,6 +180,21 @@ mod tests {
         assert_eq!(
             parse_args([argument.clone()].into_iter()),
             Err(CliError::UnknownCommand(argument))
+        );
+    }
+}
+
+#[cfg(test)]
+mod rustup_ci_metadata_dispatch {
+    use super::{parse_args, Command};
+    use std::ffi::OsString;
+
+    #[test]
+    fn keeps_its_arguments() {
+        let args = ["prepare-rustup-ci-metadata", "--output", "o", "--help"].map(OsString::from);
+        assert_eq!(
+            parse_args(args.clone().into_iter()),
+            Ok(Command::PrepareRustupCiMetadata(args[1..].to_vec()))
         );
     }
 }
